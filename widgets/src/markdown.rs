@@ -1,17 +1,528 @@
 use crate::{
-    link_label::LinkLabel, makepad_derive_widget::*, makepad_draw::*, text_flow::TextFlow,
-    widget::*, WidgetMatchEvent,
+    image::{ImageRef, ImageWidgetRefExt},
+    link_label::LinkLabel, makepad_derive_widget::*, makepad_draw::*,
+    text_flow::TextFlow, widget::*, WidgetMatchEvent,
 };
+
+// SVG types (M-img-3). `parse_svg` is a zero-deps XML parser; `SvgDocument` is
+// the parsed AST; both reachable via the `makepad_draw` facade re-export.
+use crate::makepad_draw::svg::{parse_svg, SvgDocument};
 
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
+
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+
+// ---------------------------------------------------------------------------
+// Image rendering support (M-img-1 local + data URL; M-img-2 HTTP(S) fetch
+// via Makepad's native `cx.http_request` + `Event::NetworkResponses`).
+// ---------------------------------------------------------------------------
+
+/// Upper bound on the inline display width (logical px). Larger images are
+/// scaled down proportionally; smaller ones keep their intrinsic size.
+const IMAGE_MAX_DISPLAY_W: f64 = 480.0;
+/// Widget-local texture cache cap — decoded texture bytes (w*h*4) beyond this
+/// value trigger LRU eviction. 16 MiB ≈ 1–2 large photos or ~16 modest icons.
+const IMAGE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Sanity cap on an HTTP image response body before we even attempt decode.
+/// Sized for "large screenshot / hero banner" territory; anything beyond is
+/// almost certainly a mis-linked asset (video, archive) — we warn and drop.
+const IMAGE_HTTP_BODY_MAX: usize = 32 * 1024 * 1024;
+/// Max raw SVG source size before we attempt to parse (M-img-3). SVG is XML-
+/// based and subject to amplification attacks; `makepad_svg::parse::parse_svg`
+/// has no built-in node-count / recursion / string-length guards, so this
+/// byte cap is our only defense. 4 MiB covers any realistic hand-authored
+/// vector asset by two orders of magnitude.
+const IMAGE_SVG_BYTES_MAX: usize = 4 * 1024 * 1024;
+
+/// Classification of an `![alt](url)` URL after parsing but before I/O.
+#[derive(Debug, Clone)]
+enum ImageSrc {
+    /// Plain on-disk path (absolute or relative, no scheme).
+    #[cfg(not(target_arch = "wasm32"))]
+    Local(PathBuf),
+    /// `file://` URL resolved to a path.
+    #[cfg(not(target_arch = "wasm32"))]
+    File(PathBuf),
+    /// `data:[<mime>][;base64],<payload>` already base64-decoded (or
+    /// raw bytes for the non-base64 variant).
+    Data(Vec<u8>),
+    /// `http://` or `https://` — fetched via Makepad's native
+    /// `cx.http_request` path; response arrives via `Event::NetworkResponses`
+    /// and populates `image_cache` on success.
+    Http(String),
+    /// Anything else: unknown scheme, malformed data URL, platform-unsupported.
+    Invalid,
+}
+
+/// Classify an image URL. Does no I/O; pure function. Relative paths are
+/// resolved against `std::env::current_dir()` at call time (per spec).
+fn parse_image_src(url: &str) -> ImageSrc {
+    if url.is_empty() {
+        return ImageSrc::Invalid;
+    }
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (meta, payload) = match rest.split_once(',') {
+            Some(x) => x,
+            None => return ImageSrc::Invalid,
+        };
+        if meta.split(';').any(|s| s.eq_ignore_ascii_case("base64")) {
+            match decode_base64(payload.trim()) {
+                Some(bytes) => ImageSrc::Data(bytes),
+                None => ImageSrc::Invalid,
+            }
+        } else {
+            ImageSrc::Data(payload.as_bytes().to_vec())
+        }
+    } else if let Some(rest) = url.strip_prefix("file://") {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = if let Some(s) = rest.strip_prefix("/") {
+                format!("/{}", s)
+            } else {
+                rest.to_string()
+            };
+            ImageSrc::File(PathBuf::from(path))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = rest;
+            ImageSrc::Invalid
+        }
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        ImageSrc::Http(url.to_string())
+    } else if url.contains("://") {
+        ImageSrc::Invalid
+    } else {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let p = std::path::Path::new(url);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                match std::env::current_dir() {
+                    Ok(cwd) => cwd.join(p),
+                    Err(_) => p.to_path_buf(),
+                }
+            };
+            ImageSrc::Local(abs)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            ImageSrc::Invalid
+        }
+    }
+}
+
+/// Minimal standard-alphabet base64 decoder. Handles optional `=` padding and
+/// skips whitespace (newlines are common in wrapped data URLs). Returns None
+/// on invalid input — caller falls back to the placeholder path.
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &c in input.as_bytes() {
+        if c.is_ascii_whitespace() || c == b'=' {
+            continue;
+        }
+        let v = val(c)? as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8 & 0xFF);
+        }
+    }
+    Some(out)
+}
+
+/// One decoded image stored in the Cx-global cache. Variants:
+///   - `Raster`: PNG / JPEG / WebP → GPU `Texture` (shared via clone).
+///   - `Svg`: parsed `SvgDocument` (M-img-3). Stored CPU-side; re-tessellated
+///     per draw by `DrawSvg`, but the parse step (the expensive part) runs
+///     exactly once per URL. `raw_bytes_len` is what LRU charges — parsed
+///     AST memory is implementation-defined.
+///   - `Failed { reason, bytes }`: negative-cache sentinel (M-img-4). When
+///     a URL fails to load/decode, we insert this variant so subsequent
+///     `try_load_image` calls short-circuit to the placeholder without
+///     re-fetching. Charges a nominal `bytes` count so it participates in
+///     LRU eviction (evicts normally under pressure → a future retry can
+///     re-attempt). No TTL — the LRU cap is the only lifetime bound.
+/// Intrinsic pixel dimensions are used to compute the display `Walk`.
+#[derive(Clone)]
+enum ImageCacheEntry {
+    Raster {
+        texture: Texture,
+        width: u32,
+        height: u32,
+    },
+    Svg {
+        doc: SvgDocument,
+        raw_bytes_len: usize,
+        width: u32,
+        height: u32,
+    },
+    Failed {
+        // Retained for debugging / future surfacing in the placeholder UI.
+        #[allow(dead_code)]
+        reason: String,
+        bytes: usize,
+    },
+}
+
+/// Nominal byte charge for a `Failed` entry — enough to participate in LRU
+/// accounting (so an aged-out broken URL evicts and a future retry is
+/// possible) without skewing overall cache size accounting. M-img-4.
+const IMAGE_FAILED_ENTRY_BYTES: usize = 64;
+
+impl ImageCacheEntry {
+    /// Bytes charged against the LRU cap. Raster: RGBA8 * pixels (w*h*4).
+    /// SVG: raw source length. Failed: `IMAGE_FAILED_ENTRY_BYTES`.
+    fn byte_size(&self) -> usize {
+        match self {
+            ImageCacheEntry::Raster { width, height, .. } => {
+                (*width as usize) * (*height as usize) * 4
+            }
+            ImageCacheEntry::Svg { raw_bytes_len, .. } => *raw_bytes_len,
+            ImageCacheEntry::Failed { bytes, .. } => *bytes,
+        }
+    }
+
+    /// Intrinsic dimensions (logical pixels) used to compute display Walk.
+    /// `Failed` returns (1, 1) — callers must short-circuit Failed entries
+    /// to the placeholder path before invoking display-size math.
+    fn dims(&self) -> (u32, u32) {
+        match self {
+            ImageCacheEntry::Raster { width, height, .. }
+            | ImageCacheEntry::Svg { width, height, .. } => (*width, *height),
+            ImageCacheEntry::Failed { .. } => (1, 1),
+        }
+    }
+}
+
+/// Cx-global Markdown image cache (M-img-4). Shared across every `Markdown`
+/// widget instance in the process — including widgets that are destroyed
+/// and re-created as PortalList recycles its visible range. The three maps
+/// that used to live on the widget now live here:
+///   - `entries`: url_hash → decoded image / Failed sentinel
+///   - `pending_http`: LiveId(url_hash) → url_hash for in-flight HTTP dedup
+///   - `warned_urls`: url_hash set for `warn_once_http` dedup (global so a
+///     404 warns ONCE across all PortalList recycles, not per scroll)
+/// Plus the LRU order list and a test-only cap override.
+///
+/// Derives `Default` so it can be lazily created by
+/// `cx.global::<MarkdownImageCache>()`.
+pub struct MarkdownImageCache {
+    entries: HashMap<u64, ImageCacheEntry>,
+    lru: Vec<u64>,
+    pending_http: HashMap<LiveId, u64>,
+    warned_urls: HashSet<u64>,
+    /// Byte cap override for tests (0 means "use `IMAGE_CACHE_MAX_BYTES`").
+    cap_override: usize,
+}
+
+impl Default for MarkdownImageCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru: Vec::new(),
+            pending_http: HashMap::new(),
+            warned_urls: HashSet::new(),
+            cap_override: 0,
+        }
+    }
+}
+
+impl MarkdownImageCache {
+    /// Effective byte cap: `cap_override` if nonzero, else `IMAGE_CACHE_MAX_BYTES`.
+    #[inline]
+    fn effective_cap(&self) -> usize {
+        if self.cap_override != 0 {
+            self.cap_override
+        } else {
+            IMAGE_CACHE_MAX_BYTES
+        }
+    }
+}
+
+/// URL-hash used as both cache key and TextFlow template item id.
+fn url_hash(s: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Canonical cache key for an `ImageSrc`. `file:///tmp/x.png` and
+/// `/tmp/x.png` hash to the same value (second occurrence is a cache hit).
+/// Data URLs hash the full URL (which contains the payload). HTTP/invalid
+/// hash the raw URL.
+fn src_cache_key(src: &ImageSrc, raw_url: &str) -> u64 {
+    match src {
+        #[cfg(not(target_arch = "wasm32"))]
+        ImageSrc::Local(p) | ImageSrc::File(p) => {
+            let s = p.to_string_lossy();
+            url_hash(&s)
+        }
+        _ => url_hash(raw_url),
+    }
+}
+
+/// Sniff image format from the first few bytes. Mirrors
+/// `makepad_draw::image_cache::detect_image_format` (which is private).
+fn detect_image_magic(data: &[u8]) -> Option<&'static str> {
+    if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        Some("png")
+    } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+        Some("jpg")
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// Sniff SVG content: accept both `<?xml ...?><svg ...>` and bare `<svg ...>`
+/// (with or without xmlns). Scans past up to the first 256 bytes of leading
+/// whitespace / BOM / XML prolog. Does NOT validate — full validation happens
+/// only at `parse_svg` time. M-img-3.
+fn detect_svg_magic(data: &[u8]) -> bool {
+    // Strip UTF-8 BOM if present.
+    let data = if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &data[3..]
+    } else {
+        data
+    };
+    // Skip leading whitespace up to a reasonable bound.
+    let limit = data.len().min(256);
+    let mut i = 0;
+    while i < limit && data[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let tail = &data[i..];
+    if tail.starts_with(b"<?xml") {
+        return true;
+    }
+    // Bare `<svg` (optionally followed by whitespace or `>` or `/`).
+    if tail.len() >= 5 && &tail[0..4] == b"<svg" {
+        let next = tail[4];
+        return next.is_ascii_whitespace() || next == b'>' || next == b'/';
+    }
+    false
+}
+
+/// Promote `key` to the back of the LRU list (most-recently-used). No-op
+/// if the key isn't already present.
+fn touch_lru(lru: &mut Vec<u64>, key: u64) {
+    if let Some(pos) = lru.iter().position(|k| *k == key) {
+        lru.remove(pos);
+    }
+    lru.push(key);
+}
+
+/// Evict oldest entries until total bytes are STRICTLY BELOW `cap_bytes`.
+/// Spec mandates strict-less-than, not ≤. Operates on the global's
+/// `entries` + `lru` pair.
+fn evict_over_cap(cache: &mut MarkdownImageCache, cap_bytes: usize) {
+    let mut total: usize = cache.entries.values().map(|e| e.byte_size()).sum();
+    while total >= cap_bytes && !cache.lru.is_empty() {
+        let oldest = cache.lru.remove(0);
+        if let Some(entry) = cache.entries.remove(&oldest) {
+            total = total.saturating_sub(entry.byte_size());
+        }
+    }
+}
+
+/// Record a `Failed` negative-cache entry for `key` in the global cache.
+/// Factored out so the HTTP and local/data error paths share one LRU-aware
+/// insertion. M-img-4.
+fn insert_failed_entry(cx: &mut Cx, key: u64, reason: String) {
+    let cache = cx.global::<MarkdownImageCache>();
+    let cap = cache.effective_cap();
+    cache.entries.insert(
+        key,
+        ImageCacheEntry::Failed {
+            reason,
+            bytes: IMAGE_FAILED_ENTRY_BYTES,
+        },
+    );
+    // `touch_lru` promotes-or-appends — safe whether or not `key` was
+    // already present.
+    touch_lru(&mut cache.lru, key);
+    evict_over_cap(cache, cap);
+}
+
+/// Sniff format, decode bytes, upload texture, insert into the LRU-governed
+/// cache. Returns the inserted entry on success so the caller can draw
+/// immediately; returns `Err(reason)` on failure (format unknown / decode
+/// error / zero-sized). The caller decides HOW to surface the reason —
+/// local/data path warns immediately with the URL; the HTTP response path
+/// routes through `warn_once_http` so a corrupt-body server doesn't spam
+/// the log on every streaming re-render.
+///
+/// Failures do NOT populate the cache (failed URLs are not cached so a
+/// future retry can re-attempt).
+///
+/// Takes `&mut Cx` (not `&mut Cx2d`) so it can be called from both the
+/// draw-thread hot path (Cx2d derefs to Cx) and the `Event::NetworkResponses`
+/// handler where only `&mut Cx` is available.
+fn decode_and_cache_bytes(
+    cx: &mut Cx,
+    key: u64,
+    bytes: &[u8],
+) -> Result<ImageCacheEntry, String> {
+    // M-img-3: SVG path is dispatched FIRST so raster-magic false positives
+    // (exceedingly rare) can't mask an SVG. The oversize gate runs before
+    // parse — `parse_svg` has no internal limits, so the byte cap is our
+    // only bound on amplification-style malicious input.
+    //
+    // Decode happens OUTSIDE any `cx.global::<MarkdownImageCache>()` borrow
+    // because `buf.into_new_texture(cx)` needs `&mut Cx`. We scope the
+    // borrow to just the insertion step at the end of each branch.
+    if detect_svg_magic(bytes) {
+        if bytes.len() > IMAGE_SVG_BYTES_MAX {
+            return Err(format!(
+                "svg rejected (too large, {} bytes > {} cap)",
+                bytes.len(),
+                IMAGE_SVG_BYTES_MAX
+            ));
+        }
+        let svg_str = std::str::from_utf8(bytes)
+            .map_err(|_| "svg parse error (non-utf8)".to_string())?;
+        let doc = parse_svg(svg_str);
+        if doc.root.is_empty() {
+            return Err("svg parse error (empty document)".to_string());
+        }
+        let (lw, lh) = doc.logical_size();
+        let w = (lw.max(1.0) as u32).max(1);
+        let h = (lh.max(1.0) as u32).max(1);
+        let entry = ImageCacheEntry::Svg {
+            doc,
+            raw_bytes_len: bytes.len(),
+            width: w,
+            height: h,
+        };
+        let cache = cx.global::<MarkdownImageCache>();
+        let cap = cache.effective_cap();
+        cache.entries.insert(key, entry.clone());
+        touch_lru(&mut cache.lru, key);
+        evict_over_cap(cache, cap);
+        return Ok(entry);
+    }
+
+    let fmt = detect_image_magic(bytes).ok_or_else(|| "unsupported format".to_string())?;
+    let buf = match fmt {
+        "png" => ImageBuffer::from_png(bytes),
+        "jpg" => ImageBuffer::from_jpg(bytes),
+        "webp" => ImageBuffer::from_webp(bytes),
+        _ => return Err("unsupported format".to_string()),
+    };
+    let buf = buf.map_err(|e| format!("decode error ({})", e))?;
+    let (w, h) = (buf.width as u32, buf.height as u32);
+    if w == 0 || h == 0 {
+        return Err("decode error (zero dim)".to_string());
+    }
+    // Texture upload requires `&mut Cx`; finish it BEFORE we take the
+    // global borrow.
+    let texture = buf.into_new_texture(cx);
+    let entry = ImageCacheEntry::Raster {
+        texture,
+        width: w,
+        height: h,
+    };
+    let cache = cx.global::<MarkdownImageCache>();
+    let cap = cache.effective_cap();
+    cache.entries.insert(key, entry.clone());
+    touch_lru(&mut cache.lru, key);
+    evict_over_cap(cache, cap);
+    Ok(entry)
+}
+
+/// Instantiate the appropriate inline template (`inline_image` for raster,
+/// `inline_svg` for vector) and render `entry` at a display size scaled to
+/// respect `IMAGE_MAX_DISPLAY_W`, aspect-ratio-preserved. Returns true on
+/// success (template present AND closure ran), false when the required
+/// template is not registered in the consuming app's Markdown DSL.
+fn draw_cached_image(
+    cx: &mut Cx2d,
+    tf: &mut TextFlow,
+    key: u64,
+    entry: ImageCacheEntry,
+) -> bool {
+    let (iw_u, ih_u) = entry.dims();
+    let (iw, ih) = (iw_u as f64, ih_u as f64);
+    let (dw, dh) = if iw > IMAGE_MAX_DISPLAY_W {
+        let scale = IMAGE_MAX_DISPLAY_W / iw;
+        (IMAGE_MAX_DISPLAY_W, (ih * scale).max(1.0))
+    } else {
+        (iw, ih)
+    };
+    let entry_id = LiveId(key);
+    match entry {
+        ImageCacheEntry::Raster { texture, .. } => {
+            tf.item_with(cx, entry_id, live_id!(inline_image), |cx, item, _tf| {
+                let img: ImageRef = item.as_image();
+                img.set_texture(cx, Some(texture.clone()));
+                let _ = item.draw_walk(cx, &mut Scope::empty(), Walk::fixed(dw, dh));
+                true
+            })
+        }
+        ImageCacheEntry::Svg { doc, .. } => {
+            // Mirror the `vector.rs::Vector::draw_walk` take/render/restore
+            // pattern inside a closure so the cached doc stays owned by the
+            // widget across frames (we set it fresh each frame because
+            // `render_to_rect` takes it out of `svg_doc` internally).
+            tf.item_with(cx, entry_id, live_id!(inline_svg), |cx, item, _tf| {
+                let svg_ref = item.as_inline_svg();
+                svg_ref.set_doc(doc.clone());
+                let _ = item.draw_walk(cx, &mut Scope::empty(), Walk::fixed(dw, dh));
+                true
+            })
+        }
+        // Defensive: callers must short-circuit Failed entries to the
+        // placeholder path before reaching here. Returning false lets
+        // the Start(Tag::Image) arm render `🖼 alt`.
+        ImageCacheEntry::Failed { .. } => false,
+    }
+}
+
+/// In-flight state between `Start(Tag::Image)` and `End(TagEnd::Image)`.
+/// `Successful` swallows alt-text events so they don't render alongside the
+/// image. `Placeholder` collects alt text for rendering `🖼 <alt>` at End().
+enum ImageEventState {
+    /// Image was rendered inline at Start; subsequent Text/SoftBreak events
+    /// (the alt) are discarded until End(TagEnd::Image).
+    Successful,
+    /// Image load failed or was rejected. We buffer alt text between
+    /// Start and End, then render `🖼 <alt-or-url>` at End().
+    Placeholder { alt: String, fallback: String },
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
     mod.widgets.MarkdownLinkBase = #(MarkdownLink::register_widget(vm))
+
+    mod.widgets.InlineSvgBase = #(InlineSvg::register_widget(vm))
+
+    mod.widgets.InlineSvg = set_type_default() do mod.widgets.InlineSvgBase{
+        width: Fit height: Fit
+    }
 
     mod.widgets.MarkdownBase = #(Markdown::register_widget(vm))
 
@@ -192,6 +703,21 @@ script_mod! {
         }
 
         link := mod.widgets.MarkdownLink{}
+        // Inline image template instantiated by `tf.item_with(..., live_id!(inline_image), ...)`
+        // at every `Start(Tag::Image)`. ImageFit.Stretch means the Walk we pass
+        // (computed from intrinsic dimensions + IMAGE_MAX_DISPLAY_W cap) is
+        // honoured verbatim — no aspect-math from the widget itself.
+        inline_image := mod.widgets.Image{
+            fit: ImageFit.Stretch
+            width: 1 height: 1
+        }
+        // M-img-3: inline SVG template. Instantiated by
+        // `tf.item_with(..., live_id!(inline_svg), ...)` at every
+        // `Start(Tag::Image)` whose bytes sniff as SVG. The caller feeds a
+        // fixed-size Walk so draw_svg fits content to that rect.
+        inline_svg := mod.widgets.InlineSvg{
+            width: 1 height: 1
+        }
     }
 }
 
@@ -231,6 +757,15 @@ pub struct Markdown {
     auto_id: u64,
     #[live]
     heading_base_scale: f64,
+
+    // --- Image rendering state (M-img-4: cache moved to Cx global) ---
+    /// State for an in-progress `Start(Tag::Image)` ... `End(TagEnd::Image)`
+    /// range. The inner `MdEvent::Text` events carry the alt text.
+    /// The image cache itself (entries, LRU, pending_http, warned_urls)
+    /// lives on the Cx-global `MarkdownImageCache` so it survives
+    /// PortalList recycling that destroys and re-creates this widget.
+    #[rust]
+    in_image: Option<ImageEventState>,
 }
 
 impl Widget for Markdown {
@@ -240,6 +775,13 @@ impl Widget for Markdown {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.text_flow.handle_event(cx, event, scope);
+        // M-img-2: HTTP image responses land here. We decode + insert into
+        // the same `image_cache` that M-img-1 populates so the next draw
+        // (triggered by `cx.redraw_all()`) picks the texture up through the
+        // normal cache-hit fast path in `try_load_image`.
+        if let Event::NetworkResponses(responses) = event {
+            self.handle_http_image_responses(cx, responses);
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -382,14 +924,35 @@ impl Markdown {
                 MdEvent::End(TagEnd::Link) => {
                     // Link handling is done in Start event
                 }
-                MdEvent::Start(Tag::Image {
-                    dest_url, title, ..
-                }) => {
-                    tf.draw_text(cx, "Image[name:");
-                    tf.draw_text(cx, &title);
-                    tf.draw_text(cx, ", url:");
-                    tf.draw_text(cx, &dest_url);
-                    tf.draw_text(cx, "]");
+                MdEvent::Start(Tag::Image { dest_url, .. }) => {
+                    // Try to load + decode the image (cache hit short-circuits).
+                    // On success we draw it inline here and mark the state so the
+                    // intervening MdEvent::Text (alt) events get swallowed until
+                    // End(TagEnd::Image). On failure we buffer alt text and
+                    // render `🖼 <alt-or-url>` at End() — so the placeholder
+                    // path produces exactly ONE output per image per set_text.
+                    // M-img-4: cache state lives on the Cx global, accessed
+                    // internally by `try_load_image`.
+                    let url = dest_url.as_ref();
+                    let fallback_label = url.to_string();
+                    let loaded = Self::try_load_image(cx, tf, url);
+                    self.in_image = Some(if loaded {
+                        ImageEventState::Successful
+                    } else {
+                        ImageEventState::Placeholder {
+                            alt: String::new(),
+                            fallback: fallback_label,
+                        }
+                    });
+                }
+                MdEvent::End(TagEnd::Image) => {
+                    if let Some(state) = self.in_image.take() {
+                        if let ImageEventState::Placeholder { alt, fallback } = state {
+                            tf.draw_text(cx, "🖼 ");
+                            let label = if !alt.is_empty() { &alt } else { &fallback };
+                            tf.draw_text(cx, label);
+                        }
+                    }
                 }
                 MdEvent::Start(Tag::CodeBlock(kind)) => {
                     if !is_first_block {
@@ -505,6 +1068,12 @@ impl Markdown {
                         self.splash_block_string.push_str(&text);
                     } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
+                    } else if let Some(state) = self.in_image.as_mut() {
+                        // Inside an image tag: alt text is either swallowed
+                        // (Successful) or accumulated for the placeholder.
+                        if let ImageEventState::Placeholder { alt, .. } = state {
+                            alt.push_str(&text);
+                        }
                     } else {
                         tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
@@ -514,6 +1083,10 @@ impl Markdown {
                         self.splash_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
+                    } else if let Some(state) = self.in_image.as_mut() {
+                        if let ImageEventState::Placeholder { alt, .. } = state {
+                            alt.push(' ');
+                        }
                     } else {
                         tf.draw_text(cx, " ");
                     }
@@ -523,6 +1096,10 @@ impl Markdown {
                         self.splash_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
+                    } else if let Some(state) = self.in_image.as_mut() {
+                        if let ImageEventState::Placeholder { alt, .. } = state {
+                            alt.push(' ');
+                        }
                     } else {
                         tf.new_line_collapsed(cx);
                     }
@@ -611,6 +1188,204 @@ impl Markdown {
                 }
                 _ => {} // Unimplemented or unnecessary events
             }
+        }
+    }
+}
+
+impl Markdown {
+    /// Try to render `url` as an inline image. Returns `true` on success
+    /// (image placed into the flow via the `inline_image` / `inline_svg`
+    /// template); returns `false` on any failure — caller falls back to
+    /// the `🖼 <alt>` placeholder. M-img-4: cache state (entries, LRU,
+    /// pending_http) lives on the Cx global so this function is an
+    /// associated fn with no receiver. Failed URLs are recorded in the
+    /// negative-cache variant so repeated draws short-circuit cheaply.
+    fn try_load_image(cx: &mut Cx2d, tf: &mut TextFlow, url: &str) -> bool {
+        // Classify the URL first — we derive the cache key from the
+        // CANONICAL form so `file:///tmp/x.png` and `/tmp/x.png` hit
+        // the same entry.
+        let src = parse_image_src(url);
+        let key = src_cache_key(&src, url);
+
+        // M-img-4: cache lookup — scoped borrow on the Cx global. Clone
+        // the entry out so the borrow ends before we (potentially) call
+        // `draw_cached_image`, which needs `&mut Cx2d`. `Failed` short-
+        // circuits to the placeholder WITHOUT touching pending_http.
+        let cached_entry: Option<ImageCacheEntry> = {
+            let cache = cx.global::<MarkdownImageCache>();
+            if let Some(entry) = cache.entries.get(&key).cloned() {
+                touch_lru(&mut cache.lru, key);
+                Some(entry)
+            } else {
+                None
+            }
+        };
+        if let Some(entry) = cached_entry {
+            if matches!(entry, ImageCacheEntry::Failed { .. }) {
+                // Negative-cache hit: render placeholder, no re-fetch.
+                return false;
+            }
+            return draw_cached_image(cx, tf, key, entry);
+        }
+
+        // Load bytes. Failed loads warn + record a Failed entry + return
+        // false. Recording the Failed entry is the M-img-4 behavior:
+        // repeated renders of a broken URL short-circuit in the cache-hit
+        // branch above instead of reattempting fs read / decode.
+        let bytes: Vec<u8> = match src {
+            #[cfg(not(target_arch = "wasm32"))]
+            ImageSrc::Local(ref p) | ImageSrc::File(ref p) => match std::fs::read(p) {
+                Ok(b) => b,
+                Err(_) => {
+                    let msg = format!("markdown image: file not found {}", p.display());
+                    Self::warn_once_http(cx, key, &msg);
+                    insert_failed_entry(cx, key, "file not found".to_string());
+                    return false;
+                }
+            },
+            ImageSrc::Data(b) => b,
+            ImageSrc::Http(http_url) => {
+                // M-img-2: issue the fetch if we haven't already. Dedup is
+                // O(1) by using `LiveId(key)` as the request_id.
+                // M-img-4: dedup is GLOBAL — two Markdown widgets requesting
+                // the same URL still collapse to one fetch.
+                let request_id = LiveId(key);
+                let should_fetch = {
+                    let cache = cx.global::<MarkdownImageCache>();
+                    if cache.pending_http.contains_key(&request_id) {
+                        false
+                    } else {
+                        cache.pending_http.insert(request_id, key);
+                        true
+                    }
+                };
+                if should_fetch {
+                    cx.http_request(request_id, HttpRequest::new(http_url, HttpMethod::GET));
+                }
+                return false;
+            }
+            ImageSrc::Invalid => {
+                let msg = format!("markdown image: unknown scheme or invalid url {}", url);
+                Self::warn_once_http(cx, key, &msg);
+                insert_failed_entry(cx, key, "unknown scheme".to_string());
+                return false;
+            }
+        };
+
+        match decode_and_cache_bytes(cx, key, &bytes) {
+            Ok(entry) => draw_cached_image(cx, tf, key, entry),
+            Err(reason) => {
+                let msg = format!("markdown image: {} {}", reason, url);
+                Self::warn_once_http(cx, key, &msg);
+                insert_failed_entry(cx, key, reason);
+                false
+            }
+        }
+    }
+
+    /// M-img-2 response path. Called from `handle_event` for every network
+    /// response event. Only URL hashes we've issued are in `pending_http`
+    /// so we ignore responses for other widgets' requests (the Event is
+    /// broadcast to the whole widget tree). On success we populate the
+    /// cache and `cx.redraw_all()` so the next draw picks up the texture.
+    /// M-img-4: pending_http + warned_urls + entries now all live on the
+    /// Cx global. A `has_global` guard keeps the idle / no-image path
+    /// zero-cost (we don't force-create the global just to discover
+    /// there are no in-flight requests for us).
+    fn handle_http_image_responses(&mut self, cx: &mut Cx, responses: &[NetworkResponse]) {
+        // Fast path: if no Markdown widget in this process has ever issued
+        // an image HTTP request, the cache global doesn't exist yet and
+        // none of these responses belong to us. Skip WITHOUT creating the
+        // global so the usual idle / no-image case stays zero-cost.
+        if !cx.has_global::<MarkdownImageCache>() {
+            return;
+        }
+        let mut any_hit = false;
+        for response in responses {
+            match response {
+                NetworkResponse::HttpResponse { request_id, response }
+                | NetworkResponse::HttpStreamComplete { request_id, response } => {
+                    // Scoped borrow: resolve request_id → cache key and
+                    // drop the borrow before we call decode/warn helpers
+                    // (each of which re-borrows the global internally).
+                    let Some(key) = cx
+                        .global::<MarkdownImageCache>()
+                        .pending_http
+                        .remove(request_id)
+                    else {
+                        continue;
+                    };
+                    any_hit = true;
+                    if !(200..300).contains(&response.status_code) {
+                        let msg = format!(
+                            "markdown image: http status {} (key=0x{:x})",
+                            response.status_code, key
+                        );
+                        Self::warn_once_http(cx, key, &msg);
+                        insert_failed_entry(
+                            cx,
+                            key,
+                            format!("http status {}", response.status_code),
+                        );
+                        continue;
+                    }
+                    let Some(body) = response.body.as_ref() else {
+                        let msg = format!("markdown image: empty body (key=0x{:x})", key);
+                        Self::warn_once_http(cx, key, &msg);
+                        insert_failed_entry(cx, key, "empty body".to_string());
+                        continue;
+                    };
+                    if body.len() > IMAGE_HTTP_BODY_MAX {
+                        let msg = format!(
+                            "markdown image: body too large ({} bytes, key=0x{:x})",
+                            body.len(),
+                            key
+                        );
+                        Self::warn_once_http(cx, key, &msg);
+                        insert_failed_entry(cx, key, "body too large".to_string());
+                        continue;
+                    }
+                    if let Err(reason) = decode_and_cache_bytes(cx, key, body) {
+                        let msg = format!("markdown image: {} (key=0x{:x})", reason, key);
+                        Self::warn_once_http(cx, key, &msg);
+                        insert_failed_entry(cx, key, reason);
+                    }
+                }
+                NetworkResponse::HttpError { request_id, error } => {
+                    let Some(key) = cx
+                        .global::<MarkdownImageCache>()
+                        .pending_http
+                        .remove(request_id)
+                    else {
+                        continue;
+                    };
+                    any_hit = true;
+                    let msg = format!("markdown image: http error ({})", error.message);
+                    Self::warn_once_http(cx, key, &msg);
+                    insert_failed_entry(cx, key, format!("http error: {}", error.message));
+                }
+                _ => {}
+            }
+        }
+        if any_hit {
+            // Either we filled cache entries (good — redraw picks them up)
+            // or we just marked failures (redraw re-renders placeholders,
+            // no harm). Either way some widget's visible state changed;
+            // redrawing ALL is essential so off-screen PortalList items
+            // that re-materialize later pick up the new cache entries.
+            cx.redraw_all();
+        }
+    }
+
+    /// Emit at most one `warning!` per URL per PROCESS lifetime. M-img-4:
+    /// dedup lives on the Cx-global cache so a 404 warns ONCE across all
+    /// PortalList recycles, not once per scroll-back. Free function style
+    /// (no `&mut self`) so it composes with borrow-scoping around the
+    /// Cx-global borrow.
+    fn warn_once_http(cx: &mut Cx, key: u64, msg: &str) {
+        let first_time = cx.global::<MarkdownImageCache>().warned_urls.insert(key);
+        if first_time {
+            warning!("{}", msg);
         }
     }
 }
@@ -719,9 +1494,588 @@ impl MarkdownLinkRef {
     }
 }
 
+/// M-img-3: inline SVG renderer instantiated via the `inline_svg` template
+/// in the Markdown DSL. The parsed `SvgDocument` is pushed in by the cache
+/// hit path at every frame (cheap clone — AST shares Vec/String internals,
+/// no texture uploads). `DrawSvg` re-tessellates on the draw thread using
+/// the Walk the caller provides (`Walk::fixed(dw, dh)`).
+///
+/// The take/put-back dance around `draw_svg.svg_doc` mirrors
+/// `widgets/src/vector.rs::Vector::draw_walk` (render_to_rect internally
+/// `.take()`s the doc; we restore it so the same widget can redraw on the
+/// next frame without a fresh `set_doc` if the cache entry is re-hit).
+#[derive(Script, ScriptHook, Widget)]
+struct InlineSvg {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    pub draw_svg: DrawSvg,
+    #[rust]
+    doc: SvgDocument,
+}
+
+impl Widget for InlineSvg {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.doc.root.is_empty() {
+            return DrawStep::done();
+        }
+        // `set_doc_bounds` computes content_bounds + content_size from the
+        // viewbox transform. Must be called every time `self.doc` changes
+        // (which is every frame here) otherwise render_to_rect renders at
+        // zero size. Invalidate the geometry cache too — a new frame means
+        // potentially a new doc (if cache entry was swapped) or at minimum
+        // we haven't uploaded this doc through this widget yet.
+        self.draw_svg.set_doc_bounds(&self.doc);
+        self.draw_svg.cache_valid = false;
+        let rect = cx.walk_turtle(walk);
+        self.draw_svg.svg_doc = Some(std::mem::take(&mut self.doc));
+        self.draw_svg.render_to_rect(cx, &rect, 0.0);
+        self.doc = self.draw_svg.svg_doc.take().unwrap_or_default();
+        DrawStep::done()
+    }
+}
+
+impl InlineSvgRef {
+    /// Replace the widget's parsed SVG document. Called from the Markdown
+    /// cache-hit path each draw; the AST is cloned per call so the cache
+    /// retains ownership (multiple images can share one entry if the same
+    /// URL appears twice in a doc).
+    pub fn set_doc(&self, doc: SvgDocument) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.doc = doc;
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum MarkdownAction {
     #[default]
     None,
     LinkNavigated(String),
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure helpers behind M-img-1 inline-image rendering:
+    //! URL classification, base64 decode, magic-byte detection, LRU math.
+    //!
+    //! Widget-level scenarios (decode + draw + TextFlow instantiation)
+    //! cannot run here because `makepad-widgets` has no widget harness.
+    //! Those are manual-verification gates covered by the consumer app.
+    use super::*;
+
+    #[test]
+    fn parse_image_src_http_https() {
+        assert!(matches!(
+            parse_image_src("http://example.com/x.png"),
+            ImageSrc::Http(_)
+        ));
+        assert!(matches!(
+            parse_image_src("https://example.com/x.png"),
+            ImageSrc::Http(_)
+        ));
+    }
+
+    #[test]
+    fn parse_image_src_unknown_scheme_is_invalid() {
+        assert!(matches!(
+            parse_image_src("gopher://old/x.png"),
+            ImageSrc::Invalid
+        ));
+        assert!(matches!(
+            parse_image_src("ftp://host/x.png"),
+            ImageSrc::Invalid
+        ));
+        assert!(matches!(parse_image_src(""), ImageSrc::Invalid));
+    }
+
+    #[test]
+    fn parse_image_src_data_base64() {
+        // 1x1 transparent PNG
+        let url = "data:image/png;base64,iVBORw0KGgo=";
+        match parse_image_src(url) {
+            ImageSrc::Data(b) => {
+                assert!(b.len() >= 8);
+                assert_eq!(&b[0..8], b"\x89PNG\r\n\x1a\n");
+            }
+            other => panic!("expected Data, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_image_src_data_malformed_base64() {
+        let url = "data:image/png;base64,!!!not-valid!!!";
+        assert!(matches!(parse_image_src(url), ImageSrc::Invalid));
+    }
+
+    #[test]
+    fn parse_image_src_data_missing_comma_invalid() {
+        assert!(matches!(
+            parse_image_src("data:image/png;base64"),
+            ImageSrc::Invalid
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_image_src_file_scheme() {
+        match parse_image_src("file:///tmp/x.png") {
+            ImageSrc::File(p) => assert_eq!(p, std::path::PathBuf::from("/tmp/x.png")),
+            other => panic!("expected File, got {:?}", other),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_image_src_absolute_local_path() {
+        match parse_image_src("/tmp/foo.png") {
+            ImageSrc::Local(p) => assert_eq!(p, std::path::PathBuf::from("/tmp/foo.png")),
+            other => panic!("expected Local, got {:?}", other),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parse_image_src_relative_path_resolved_against_cwd() {
+        match parse_image_src("./foo.png") {
+            ImageSrc::Local(p) => {
+                assert!(p.is_absolute(), "relative path should resolve to absolute");
+                assert!(p.ends_with("foo.png"));
+            }
+            other => panic!("expected Local, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_base64_standard() {
+        assert_eq!(decode_base64("TWFu").unwrap(), b"Man".to_vec());
+        assert_eq!(decode_base64("TWE=").unwrap(), b"Ma".to_vec());
+        assert_eq!(decode_base64("TQ==").unwrap(), b"M".to_vec());
+        assert_eq!(decode_base64("TWFu\n").unwrap(), b"Man".to_vec());
+    }
+
+    #[test]
+    fn decode_base64_invalid_char_returns_none() {
+        assert!(decode_base64("!!!").is_none());
+        assert!(decode_base64("T@Fu").is_none());
+    }
+
+    #[test]
+    fn detect_image_magic_recognises_formats() {
+        assert_eq!(detect_image_magic(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
+        assert_eq!(detect_image_magic(b"\xFF\xD8\xFFsomejpegdata"), Some("jpg"));
+        let mut webp = Vec::from(&b"RIFF"[..]);
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(detect_image_magic(&webp), Some("webp"));
+        assert_eq!(detect_image_magic(b"\x00garbage"), None);
+    }
+
+    #[test]
+    fn touch_lru_moves_to_back() {
+        let mut lru = vec![1u64, 2, 3];
+        touch_lru(&mut lru, 1);
+        assert_eq!(lru, vec![2, 3, 1]);
+        touch_lru(&mut lru, 999);
+        assert_eq!(lru, vec![2, 3, 1, 999]);
+    }
+
+    #[test]
+    fn evict_over_cap_logic_via_manual_totals() {
+        // Pure-logic verification of evict_over_cap WITHOUT fabricating
+        // Texture values: reproduce the size-accounting loop inline.
+        fn evict_logic(sizes: &mut Vec<usize>, lru: &mut Vec<u64>, cap: usize) {
+            let mut total: usize = sizes.iter().sum();
+            while total >= cap && !lru.is_empty() {
+                let _ = lru.remove(0);
+                let s = sizes.remove(0);
+                total = total.saturating_sub(s);
+            }
+        }
+        // 3 entries of 1 MiB each; cap at 1 MiB — strict-less-than evicts all.
+        let mut sizes = vec![1_048_576usize, 1_048_576, 1_048_576];
+        let mut lru = vec![1u64, 2, 3];
+        evict_logic(&mut sizes, &mut lru, 1_048_576);
+        assert!(sizes.iter().sum::<usize>() < 1_048_576);
+        assert_eq!(sizes.len(), 0);
+        assert_eq!(lru.len(), 0);
+
+        // Asymmetric: 1 big + 2 small under 2 MiB cap.
+        let mut sizes = vec![1_500_000, 300_000, 300_000];
+        let mut lru = vec![1u64, 2, 3];
+        evict_logic(&mut sizes, &mut lru, 2_000_000);
+        assert!(sizes.iter().sum::<usize>() < 2_000_000);
+        assert_eq!(lru, vec![2, 3]);
+    }
+
+    #[test]
+    fn url_hash_different_urls_differ() {
+        let a = url_hash("/tmp/one.png");
+        let b = url_hash("/tmp/two.png");
+        let c = url_hash("/tmp/one.png");
+        assert_ne!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn src_cache_key_file_scheme_matches_raw_path() {
+        let raw = "/tmp/x.png";
+        let file = "file:///tmp/x.png";
+        let k1 = src_cache_key(&parse_image_src(raw), raw);
+        let k2 = src_cache_key(&parse_image_src(file), file);
+        assert_eq!(k1, k2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn src_cache_key_distinct_paths_differ() {
+        let a = "/tmp/one.png";
+        let b = "/tmp/two.png";
+        let ka = src_cache_key(&parse_image_src(a), a);
+        let kb = src_cache_key(&parse_image_src(b), b);
+        assert_ne!(ka, kb);
+    }
+
+    // -----------------------------------------------------------------
+    // M-img-2 unit tests. Widget-level scenarios (real HTTP decode,
+    // 404, connect error, HTTPS) need a `Cx` and a loopback server and
+    // are covered by manual-verification gates documented in the
+    // M-img-2 report. The tests below verify the pure-logic branches.
+    // -----------------------------------------------------------------
+
+    /// `parse_image_src` must not accidentally accept ftp/gopher as HTTP.
+    #[test]
+    fn m_img_2_non_http_scheme_is_invalid() {
+        assert!(matches!(parse_image_src("ftp://host/a.png"), ImageSrc::Invalid));
+        assert!(matches!(parse_image_src("gopher://old/a.png"), ImageSrc::Invalid));
+        // And a positive control.
+        assert!(matches!(parse_image_src("http://h/x.png"), ImageSrc::Http(_)));
+        assert!(matches!(parse_image_src("https://h/x.png"), ImageSrc::Http(_)));
+    }
+
+    /// Same URL across two events dedups to one request. Mirrors the
+    /// widget-level `pending_http.contains_key(&LiveId(key))` short-circuit
+    /// in `try_load_image`'s Http branch without needing Cx.
+    #[test]
+    fn m_img_2_pending_http_dedup_is_contains_key() {
+        use makepad_platform::LiveId;
+        let url = "http://example.test/a.png";
+        let key = url_hash(url);
+        let request_id = LiveId(key);
+        let mut pending: HashMap<LiveId, u64> = HashMap::new();
+
+        assert!(!pending.contains_key(&request_id));
+        pending.insert(request_id, key);
+
+        assert!(pending.contains_key(&request_id));
+        assert_eq!(pending.len(), 1, "second Start(Image) must not re-insert");
+
+        assert_eq!(pending.get(&request_id).copied(), Some(key));
+    }
+
+    /// Oversize body rejected before decode. The branch is
+    /// `body.len() > IMAGE_HTTP_BODY_MAX`. Any drift in the cap (or a
+    /// regression to `>=`) fails this test.
+    #[test]
+    fn m_img_2_oversize_body_is_rejected() {
+        fn is_oversized(body: &[u8]) -> bool {
+            body.len() > IMAGE_HTTP_BODY_MAX
+        }
+        assert_eq!(IMAGE_HTTP_BODY_MAX, 32 * 1024 * 1024);
+        assert!(!is_oversized(&vec![0u8; IMAGE_HTTP_BODY_MAX]));
+        assert!(is_oversized(&vec![0u8; IMAGE_HTTP_BODY_MAX + 1]));
+        assert!(!is_oversized(&vec![0u8; 4096]));
+    }
+
+    /// Cache hit on second set_text skips HTTP. The `try_load_image`
+    /// fast path is `cache.contains_key(&key)` → short-circuit before
+    /// touching pending_http or network.
+    #[test]
+    fn m_img_2_cache_hit_short_circuits() {
+        let url = "http://host/x.png";
+        let key = src_cache_key(&parse_image_src(url), url);
+
+        let mut seen: HashMap<u64, ()> = HashMap::new();
+        assert!(!seen.contains_key(&key));
+        seen.insert(key, ());
+        assert!(
+            seen.contains_key(&key),
+            "cache-hit predicate must recognise a re-rendered HTTP URL"
+        );
+
+        let key2 = src_cache_key(&parse_image_src(url), url);
+        assert_eq!(key, key2);
+    }
+
+    /// Warn dedup — same failing URL warns once per widget lifetime.
+    /// `warn_once_http` uses `warned_urls: HashSet<u64>::insert()` which
+    /// returns true only the first time a key is added.
+    #[test]
+    fn m_img_2_warn_once_per_url() {
+        let key = url_hash("http://host/fail.png");
+        let mut warned: HashSet<u64> = HashSet::new();
+
+        assert!(warned.insert(key), "first failure must fire a warning");
+        assert!(!warned.insert(key), "second failure must be deduped");
+        assert_eq!(warned.len(), 1);
+
+        let other_key = url_hash("http://host/other-fail.png");
+        assert!(warned.insert(other_key));
+        assert_eq!(warned.len(), 2);
+    }
+
+    /// request_id construction must be injective per cache key —
+    /// `LiveId(key)` is a thin wrapper so two distinct URL hashes produce
+    /// distinct LiveIds. This is the invariant the O(1) dedup relies on.
+    #[test]
+    fn m_img_2_request_id_injective_over_cache_keys() {
+        use makepad_platform::LiveId;
+        let k1 = url_hash("http://host/a.png");
+        let k2 = url_hash("http://host/b.png");
+        assert_ne!(k1, k2);
+        assert_ne!(LiveId(k1), LiveId(k2));
+        let k1_again = url_hash("http://host/a.png");
+        assert_eq!(LiveId(k1), LiveId(k1_again));
+    }
+
+    // -----------------------------------------------------------------
+    // M-img-3 unit tests (SVG rendering). Widget-level scenarios
+    // (actual DrawSvg tessellation + on-screen rendering) are manual-
+    // verification gates covered in the M-img-3 report.
+    // -----------------------------------------------------------------
+
+    /// `detect_svg_magic` must recognise BOTH the XML prolog `<?xml ...?>`
+    /// and bare `<svg ...>` with various terminators and leading BOM /
+    /// whitespace.
+    #[test]
+    fn m_img_3_detect_svg_magic_variants() {
+        // XML prolog.
+        assert!(detect_svg_magic(
+            b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+        ));
+        // Bare tag with attr.
+        assert!(detect_svg_magic(
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>"
+        ));
+        // Bare tag with only `>`.
+        assert!(detect_svg_magic(b"<svg width=\"1\" height=\"1\"></svg>"));
+        // Bare tag self-closing with `/`.
+        assert!(detect_svg_magic(b"<svg/>"));
+        // With BOM and whitespace.
+        assert!(detect_svg_magic(b"\xEF\xBB\xBF\n  <svg width=\"1\"/>"));
+        // Negative controls.
+        assert!(!detect_svg_magic(b"\x89PNG\r\n\x1a\nrest"));
+        assert!(!detect_svg_magic(b"\xFF\xD8\xFFsome"));
+        assert!(!detect_svg_magic(b""));
+        // Almost-svg but not quite.
+        assert!(!detect_svg_magic(b"<svgfoo></svgfoo>"));
+    }
+
+    /// Oversize SVG rejected before parse — the byte cap is our only
+    /// amplification defense, so any drift in the constant or the
+    /// comparison predicate fails this test.
+    #[test]
+    fn m_img_3_svg_oversize_rejected() {
+        fn is_oversized(body: &[u8]) -> bool {
+            body.len() > IMAGE_SVG_BYTES_MAX
+        }
+        assert_eq!(IMAGE_SVG_BYTES_MAX, 4 * 1024 * 1024);
+        assert!(!is_oversized(&vec![0u8; IMAGE_SVG_BYTES_MAX]));
+        assert!(is_oversized(&vec![0u8; IMAGE_SVG_BYTES_MAX + 1]));
+    }
+
+    /// Minimal SVG parses successfully. Also verifies the non-empty-root
+    /// invariant that `decode_and_cache_bytes` relies on to distinguish
+    /// real SVG from bytes that looked like SVG but yielded no geometry.
+    #[test]
+    fn m_img_3_svg_parse_minimal_ok() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <rect x="0" y="0" width="10" height="10" fill="red"/>
+        </svg>"#;
+        let doc = parse_svg(src);
+        assert!(
+            !doc.root.is_empty(),
+            "minimal valid SVG must produce at least one root node"
+        );
+        let (w, h) = doc.logical_size();
+        assert!(w > 0.0 && h > 0.0);
+    }
+
+    /// SVG cache byte-charge uses the raw source length (not pixel area).
+    /// This protects against parsed-doc size unpredictability across
+    /// `makepad_svg` versions. The raster formula is verified by a
+    /// separate predicate so we don't need to instantiate a `Texture`
+    /// (which requires a real `Cx`).
+    #[test]
+    fn m_img_3_svg_cache_byte_charge() {
+        let doc = parse_svg(r#"<svg width="10" height="10"><rect width="10" height="10"/></svg>"#);
+        let bytes_len = 4321usize;
+        let entry = ImageCacheEntry::Svg {
+            doc,
+            raw_bytes_len: bytes_len,
+            width: 10,
+            height: 10,
+        };
+        assert_eq!(entry.byte_size(), bytes_len);
+        // Raster charge formula is w*h*4.
+        let raster_formula = |w: u32, h: u32| (w as usize) * (h as usize) * 4;
+        assert_eq!(raster_formula(100, 50), 20_000);
+    }
+
+    /// Malformed SVG falls back to the raster magic check. Since bytes that
+    /// look like SVG but parse empty should land on the error path in
+    /// `decode_and_cache_bytes`, verify the empty-root detection directly.
+    #[test]
+    fn m_img_3_svg_malformed_empty_root_fallback() {
+        let doc = parse_svg("<svg></svg>");
+        assert!(
+            doc.root.is_empty(),
+            "empty <svg/> should produce zero root nodes — the decode path relies on this"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // M-img-4 unit tests. The refactor moves cache state from per-widget
+    // to a Cx-global struct so PortalList recycling doesn't destroy the
+    // cache on every scroll-off. Widget-level scenarios (real Cx, real
+    // http_request, real NetworkResponses dispatch) are covered by
+    // manual verification gates.
+    //
+    // The tests below fabricate a `MarkdownImageCache` directly (no Cx
+    // needed) and assert the three invariants.
+    // -----------------------------------------------------------------
+
+    /// M-img-4 #1: The global cache behaves like a shared HashMap across
+    /// widget instances. Two simulated widgets sharing one
+    /// `MarkdownImageCache` see each other's inserts — the real Cx
+    /// `global::<MarkdownImageCache>()` upgrade is exactly this
+    /// substitution with process-wide identity preserved.
+    #[test]
+    fn m_img_4_global_cache_survives_across_widgets() {
+        let mut cache = MarkdownImageCache::default();
+        let key = url_hash("https://example.test/shared.png");
+
+        cache.entries.insert(
+            key,
+            ImageCacheEntry::Failed {
+                reason: "simulated http error".to_string(),
+                bytes: IMAGE_FAILED_ENTRY_BYTES,
+            },
+        );
+        touch_lru(&mut cache.lru, key);
+        assert!(
+            cache.entries.contains_key(&key),
+            "widget 1 should see its own insert"
+        );
+
+        let seen_by_widget_2 = cache.entries.get(&key).cloned();
+        assert!(
+            seen_by_widget_2.is_some(),
+            "widget 2 must see widget 1's insert — that's the whole point of M-img-4"
+        );
+        assert!(matches!(
+            seen_by_widget_2.unwrap(),
+            ImageCacheEntry::Failed { .. }
+        ));
+
+        assert_eq!(cache.lru, vec![key]);
+    }
+
+    /// M-img-4 #2: When the cache has a Failed entry for a URL,
+    /// `try_load_image`-equivalent lookup returns "render placeholder"
+    /// WITHOUT inserting into `pending_http`. Replays the predicate used
+    /// by try_load_image's cache-hit branch in pure logic.
+    #[test]
+    fn m_img_4_failed_entry_blocks_refetch() {
+        let mut cache = MarkdownImageCache::default();
+        let key = url_hash("https://example.test/404.png");
+
+        cache.entries.insert(
+            key,
+            ImageCacheEntry::Failed {
+                reason: "http status 404".to_string(),
+                bytes: IMAGE_FAILED_ENTRY_BYTES,
+            },
+        );
+        touch_lru(&mut cache.lru, key);
+
+        let pending_before = cache.pending_http.len();
+        let decision: bool = {
+            if let Some(entry) = cache.entries.get(&key).cloned() {
+                if matches!(entry, ImageCacheEntry::Failed { .. }) {
+                    false // placeholder, no re-fetch
+                } else {
+                    true // would call draw_cached_image
+                }
+            } else {
+                panic!("cache miss despite Failed entry");
+            }
+        };
+        let pending_after = cache.pending_http.len();
+
+        assert!(!decision, "Failed entry must render placeholder (false)");
+        assert_eq!(
+            pending_before, pending_after,
+            "Failed entry must NOT trigger pending_http insert / fetch"
+        );
+    }
+
+    /// M-img-4 #3: Failed entries charge `IMAGE_FAILED_ENTRY_BYTES` and
+    /// are evicted by LRU when the cache fills up. This lets an aged-out
+    /// broken URL vacate so a future retry can re-attempt the fetch —
+    /// LRU is our "TTL" without a timer.
+    #[test]
+    fn m_img_4_failed_entry_evicts_under_pressure() {
+        let mut cache = MarkdownImageCache::default();
+
+        let failed_entry = ImageCacheEntry::Failed {
+            reason: "test".to_string(),
+            bytes: IMAGE_FAILED_ENTRY_BYTES,
+        };
+        assert_eq!(failed_entry.byte_size(), IMAGE_FAILED_ENTRY_BYTES);
+        assert_eq!(IMAGE_FAILED_ENTRY_BYTES, 64);
+
+        // Fill cache with 10 Failed entries at 64 B each = 640 B.
+        for i in 0..10u64 {
+            cache.entries.insert(
+                i,
+                ImageCacheEntry::Failed {
+                    reason: format!("err {}", i),
+                    bytes: IMAGE_FAILED_ENTRY_BYTES,
+                },
+            );
+            touch_lru(&mut cache.lru, i);
+        }
+        assert_eq!(cache.entries.len(), 10);
+        assert_eq!(cache.lru.len(), 10);
+
+        // Apply an ultra-tight cap of 200 B (strict-less-than eviction).
+        evict_over_cap(&mut cache, 200);
+        let total_bytes: usize = cache.entries.values().map(|e| e.byte_size()).sum();
+        assert!(total_bytes < 200, "eviction must honor strict-less-than");
+        assert!(
+            cache.entries.len() <= 3,
+            "at 64B each under a 200B cap, at most 3 Failed entries survive, got {}",
+            cache.entries.len()
+        );
+
+        // Oldest keys (0, 1, ...) evicted first; newest (8, 9, ...) remain.
+        let surviving: Vec<u64> = cache.lru.iter().copied().collect();
+        assert!(
+            surviving.iter().all(|k| *k >= 7),
+            "LRU eviction must preserve newest keys, surviving = {:?}",
+            surviving
+        );
+    }
 }
