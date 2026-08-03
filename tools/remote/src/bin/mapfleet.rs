@@ -70,6 +70,9 @@ struct Config {
     pbf: PathBuf,
     out: PathBuf,
     mkmap: PathBuf,
+    /// Rebake mode: cell inputs come from a previous run's baked cells in
+    /// this directory (same grid) instead of slicing a spool store.
+    rebake_from: Option<PathBuf>,
     /// Number of concurrent local bake workers (0 disables; --local-worker
     /// is shorthand for 1). Raise so this box can finish a run solo after
     /// the LAN decouples.
@@ -223,6 +226,7 @@ fn parse_args() -> Result<Config, String> {
         pbf: "local/maps/pbf/planet-latest.osm.pbf".into(),
         out: "local/maps/world-cells".into(),
         mkmap: "local/maps/world.mkmap".into(),
+        rebake_from: None,
         local_workers: 0,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -264,6 +268,10 @@ fn parse_args() -> Result<Config, String> {
             }
             "--mkmap" => {
                 config.mkmap = take(index)?.into();
+                index += 2;
+            }
+            "--rebake-from" => {
+                config.rebake_from = Some(take(index)?.into());
                 index += 2;
             }
             "--local-worker" => {
@@ -326,6 +334,9 @@ fn project_lon_lat(lon: f64, lat: f64) -> (f64, f64) {
 /// streaming frontier strictly clears the distance from the NL anchor to
 /// the cell's FARTHEST corner: no unfinished relation can touch it.
 fn cell_ready(config: &Config, bbox: &str) -> bool {
+    if config.rebake_from.is_some() {
+        return true;
+    }
     if config.store.join("SPOOL_COMPLETE").exists()
         || config.store.join("spool.complete.json").exists()
     {
@@ -357,9 +368,21 @@ fn cell_ready(config: &Config, bbox: &str) -> bool {
 
 fn cell_paths(config: &Config, index: usize) -> (String, PathBuf, PathBuf) {
     let name = format!("cell-{:03}", index + 1);
-    let base = config.out.join(format!("{name}-base.mbtiles"));
+    let base = match &config.rebake_from {
+        // Rebake input: the previous run's baked cell. NEVER deleted.
+        Some(dir) => dir.join(format!("{name}-baked.mbtiles")),
+        None => config.out.join(format!("{name}-base.mbtiles")),
+    };
     let baked = config.out.join(format!("{name}-baked.mbtiles"));
     (name, base, baked)
+}
+
+fn bake_args(config: &Config) -> Vec<&'static str> {
+    let mut args = BAKE_ARGS.to_vec();
+    if config.rebake_from.is_some() {
+        args.retain(|a| *a != "--recompress");
+    }
+    args
 }
 
 fn claim_cell(shared: &Shared, config: &Config, remote: bool) -> Option<(usize, String)> {
@@ -415,6 +438,16 @@ fn intersects_nl(bbox: &str) -> bool {
 /// Ok(false) = cell is empty ocean — mark done with an empty ledger file.
 fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io::Result<bool> {
     let (name, base, _) = cell_paths(config, index);
+    if config.rebake_from.is_some() {
+        let len = std::fs::metadata(&base).map(|m| m.len()).unwrap_or(0);
+        if !base.exists() {
+            return Err(io::Error::other(format!(
+                "rebake input missing: {}",
+                base.display()
+            )));
+        }
+        return Ok(len > 0); // empty ledger placeholder = ocean
+    }
     if base.exists() {
         return Ok(true);
     }
@@ -499,13 +532,15 @@ fn local_worker(shared: &Shared, config: &Config) {
         let baked_tmp = baked.with_extension("mbtiles.local-tmp");
         let _ = std::fs::remove_file(&baked_tmp);
         let mut cmd = Command::new("./target/release/mpbake-run");
-        cmd.arg(&base).arg(&baked_tmp).args(BAKE_ARGS);
+        cmd.arg(&base).arg(&baked_tmp).args(bake_args(config));
         if intersects_nl(&bbox) {
             cmd.args(["--bridge-dz", BRIDGE_DZ]);
         }
         match cmd.status() {
             Ok(status) if status.success() && std::fs::rename(&baked_tmp, &baked).is_ok() => {
-                let _ = std::fs::remove_file(&base);
+                if config.rebake_from.is_none() {
+                    let _ = std::fs::remove_file(&base);
+                }
                 shared.weave_dirty.store(true, Ordering::SeqCst);
                 println!("mapfleet: {name} baked (local)");
             }
@@ -630,7 +665,7 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
             remote_in.clone(),
             remote_out.clone(),
         ];
-        run.extend(BAKE_ARGS.iter().map(|s| s.to_string()));
+        run.extend(bake_args(config).iter().map(|s| s.to_string()));
         if needs_dz {
             run.extend(["--bridge-dz".into(), "fleet/nl-bridge-dz.mbtiles".into()]);
         }
@@ -643,7 +678,9 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
                 }
                 match remote_pull(host, &remote_out, &baked) {
                     Ok(()) => {
-                        let _ = std::fs::remove_file(&base);
+                        if config.rebake_from.is_none() {
+                            let _ = std::fs::remove_file(&base);
+                        }
                         shared.weave_dirty.store(true, Ordering::SeqCst);
                         println!("mapfleet: {name} baked on {host}");
                     }

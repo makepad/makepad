@@ -26,6 +26,54 @@ use std::path::Path;
 /// the 14..=16 consumption window, reusing nothing).
 const DEFAULT_BUCKETS: [u32; 3] = [14, 15, 16];
 
+/// Remove any existing baked-faces field (field 101, LEN) from a decoded
+/// tile payload: rebake runs feed previously-baked cells, and the stale
+/// field must not shadow the fresh one (first-field-wins on parse).
+fn strip_baked_field(pbf: Vec<u8>) -> Vec<u8> {
+    const BAKED_FACES_FIELD: u64 = 101;
+    let read_varint = |bytes: &[u8], i: &mut usize| -> Option<u64> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let byte = *bytes.get(*i)?;
+            *i += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+            shift += 7;
+            if shift > 63 {
+                return None;
+            }
+        }
+    };
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0usize;
+    while i < pbf.len() {
+        let start = i;
+        let Some(key) = read_varint(&pbf, &mut i) else { break };
+        if key & 0x7 != 2 {
+            break; // unexpected wire type at top level: keep rest as-is
+        }
+        let Some(len) = read_varint(&pbf, &mut i) else { break };
+        let end = i + len as usize;
+        if end > pbf.len() {
+            break;
+        }
+        if key >> 3 == BAKED_FACES_FIELD {
+            if out.is_none() {
+                let mut fresh = Vec::with_capacity(pbf.len());
+                fresh.extend_from_slice(&pbf[..start]);
+                out = Some(fresh);
+            }
+        } else if let Some(out) = out.as_mut() {
+            out.extend_from_slice(&pbf[start..end]);
+        }
+        i = end;
+    }
+    out.unwrap_or(pbf)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -123,6 +171,7 @@ fn main() {
                         bake_tile_paint_faces(key, &pbf, Some(&pbf), None, false, &theme, bucket)
                     {
                         fingerprint ^= baked.signature.rotate_left(bucket);
+                        fingerprint ^= baked.shadow_signature.rotate_right(bucket);
                     }
                 }
             })
@@ -272,6 +321,9 @@ fn main() {
                 }
                 let raw = codec.decode(&blob).expect("codec decode");
                 let pbf = decode_vector_tile_payload(&raw).expect("payload");
+                let pre_strip = pbf.len();
+                let pbf = strip_baked_field(pbf);
+                let had_stale_field = pbf.len() != pre_strip;
                 let y = (1u32 << zoom) - 1 - row;
                 let key = TileKey { z: zoom as u32, x: col as i32, y: y as i32 };
                 if std::env::var("MAPBAKE_TRACE").is_ok() {
@@ -305,11 +357,10 @@ fn main() {
                     baked_buckets.clear();
                 }
                 if baked_buckets.is_empty() {
-                    if recompress {
-                        // Fleet mode: cells arrive sliced at a throwaway
-                        // quality; the worker re-encodes EVERY tile at the
-                        // target quality so compression parallelizes over
-                        // the whole fleet and the final archive is uniform.
+                    if recompress || had_stale_field {
+                        // Re-encode when fleet-recompressing, or when a
+                        // stale baked field was stripped (verbatim would
+                        // resurrect it).
                         let compressed = compress_tile(
                             &TileCompression::Brotli { quality },
                             None,
