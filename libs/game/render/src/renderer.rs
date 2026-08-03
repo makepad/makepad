@@ -107,7 +107,8 @@ pub struct GameRenderer {
 }
 
 /// One CPU-skinned mesh instance for [`GameRenderer::draw_scene_full`].
-/// `vertices` is the PbrVertex float layout `SkinnedModel::skin_to_pbr` emits.
+/// `vertices` is the packed GameMeshVertex layout `SkinnedModel::skin_to_packed`
+/// emits (6 floats/vertex).
 pub struct SkinnedDraw {
     pub key: u64,
     pub vertices: Vec<f32>,

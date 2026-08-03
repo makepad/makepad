@@ -119,7 +119,7 @@ script_mod! {
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+        geom: vertex_buffer(geom.GameMeshVertex, geom.GameMeshGeom)
         tex: texture_2d(float)
         v_ambient: varying(vec3f)
         v_direct: varying(vec3f)
@@ -127,9 +127,23 @@ script_mod! {
         world: varying(vec4f)
         v_fog: varying(float)
 
+        // Octahedral decode: the inverse of skin.rs's oct_encode. Two f16
+        // lanes carry a unit normal that would otherwise cost three floats.
+        // sign is inlined rather than shared: the builtin sign() returns 0 at
+        // 0, which would collapse the fold on an axis-aligned normal.
+        oct_decode: fn(e: vec2f) -> vec3f {
+            let nz = 1.0 - abs(e.x) - abs(e.y)
+            let t = max(0.0 - nz, 0.0)
+            // step(0,v)*2-1 is +1 for v>=0 and -1 for v<0, branchless and
+            // without the sign() builtin's zero case.
+            let sx = step(0.0, e.x) * 2.0 - 1.0
+            let sy = step(0.0, e.y) * 2.0 - 1.0
+            return normalize(vec3(e.x - t * sx, e.y - t * sy, nz))
+        }
+
         vertex: fn() {
-            let pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z)
-            let normal_in = vec3(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y)
+            let pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            let normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
             let model_view = self.draw_list.view_transform * self.transform
             let world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
@@ -138,7 +152,7 @@ script_mod! {
             let hemi = clamp(world_normal.y * 0.5 + 0.5, 0.0, 1.0)
             self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
             self.v_direct = self.sun_color * dp
-            self.v_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w)
+            self.v_uv = unpack2f16(self.geom.uv)
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
@@ -174,14 +188,16 @@ script_mod! {
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+        geom: vertex_buffer(geom.GameMeshVertex, geom.GameMeshGeom)
         v_alpha: varying(float)
         world: varying(vec4f)
 
         vertex: fn() {
-            let pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z)
+            // Packed layout: 6 f32 slots instead of PbrVertex's 16. A shadow
+            // needs a position and a coverage value, nothing else.
+            let pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
             self.world = self.draw_list.view_transform * vec4(pos.x, pos.y, pos.z, 1.0)
-            self.v_alpha = self.geom.color.w
+            self.v_alpha = unpack4u8(self.geom.color).w
             let view_pos = self.draw_pass.camera_view * self.world
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }

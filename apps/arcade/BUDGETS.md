@@ -25,7 +25,13 @@ matters most on device.
 | stream | before | after | note |
 |---|---|---|---|
 | cube instance | 44 floats / **176 B** | 32 floats / **128 B** | **−27 %**, measured from the compiled shader (`RenderStats::instance_floats`), not counted by hand |
-| mesh vertex (PbrVertex) | 16 floats / 64 B | unchanged | see "not yet landed" below |
+| skinned character vertex | 16 floats / 64 B | 6 floats / **24 B** | **−62 %**, and this one is re-uploaded *every frame* |
+| shadow mesh vertex | 16 floats / 64 B | 6 floats / **24 B** | **−62 %** |
+| terrain vertex | 16 floats / 64 B | unchanged | uploaded once per terrain revision, so the win is small; see below |
+
+The Knight is the prize: 3716 verts × 64 B = **238 KB every frame** (skinning
+is CPU-side, so the whole buffer is re-uploaded) → **89 KB**. On a
+bandwidth-bound tiler that is the single biggest saving available.
 
 The instance saving came from moving `sun_color`, `sun_sky`, `sun_ground` and
 `fog_color` **off the instance stream into shader uniforms**. They are
@@ -34,35 +40,35 @@ floats of pure duplication per cube. `fog_density` stays per-instance because
 shadows switch it off individually. At the demo's instance counts that is
 48 B × every cube in the frame, every frame.
 
-### Packed vertices — designed, not yet landed
+### How the packing works
 
-The constraint found while investigating: **vertex attributes in this engine
-are f32-only**. There is no u8/u16/i16 attribute type, so "compress the
-vertex" means bit-packing into f32 lanes and unpacking in the shader. The
-engine already provides `unpack2f16` and `unpack4u8` as builtins on every
-backend (Metal/GLSL/HLSL/WGSL), and `geom.VectorVertexPacked` is the house
-precedent — `uv: f32` holding two f16s, `color: f32` holding four unorm8s.
+**Vertex attributes in this engine are f32-only** — there is no u8/u16/i16
+attribute type. Compression therefore means bit-packing into f32 lanes and
+unpacking in the shader, which the engine already supports: `unpack2f16` and
+`unpack4u8` are builtins on every backend (Metal/GLSL/HLSL/WGSL), and
+`geom.VectorVertexPacked` is the house precedent.
 
-A packed skinned/terrain vertex would therefore be:
+`geom.GameMeshVertex` (`draw/geometry_gen.rs`) is the shared packed layout:
 
 | field | packing | floats |
 |---|---|---|
-| position | 3 × f32 (kept exact) | 3 |
+| position | 3 × f32, kept exact | 3 |
 | normal | octahedral, 2 × f16 in one lane | 1 |
 | uv | 2 × f16 in one lane | 1 |
 | colour | 4 × unorm8 in one lane | 1 |
-| **total** | | **6 floats / 24 B** vs 16 floats / 64 B — **−62 %** |
+| **total** | | **6 floats / 24 B** |
 
-The Knight is the biggest single vertex load in the app: 3716 verts, and
-because skinning is CPU-side it is **re-uploaded every frame** — 238 KB/frame
-today, 89 KB/frame packed. Joint indices/weights are not in the uploaded
-stream at all (skinning happens before upload), so they cost nothing here.
+Two gotchas worth keeping: the pod struct must use **flat `f32` fields, not
+`Vec3f`** — std140 pads a vec3 to 16 bytes and the Rust repr(C) size then
+fails the POD size assertion. And in the shader language `let` bindings are
+immutable and helper fns cannot be forward-referenced, so the octahedral
+decode uses a branchless `step(0,v)*2-1` for its sign rather than reassignment
+or a shared helper (the `sign()` builtin returns 0 at 0, which would collapse
+the fold on an axis-aligned normal).
 
-Blocker for a later session: the packed layout needs a new pod vertex type
-registered as `geom.*`, which also needs a placeholder `GeometryGen` — and
-`GeometryGen::from_triangle_*` plus its `shared()` helper live inside `draw/`
-and are not reachable from `libs/game/render`. Either export them or register
-the type from `draw/geometry_gen.rs` alongside `PbrVertex`.
+Terrain still uses PbrVertex: it uploads once per terrain revision rather than
+per frame, so the saving does not justify re-verifying gamemaker's 257×257
+fixture. It is a mechanical follow-up if wanted.
 
 ## Rendering
 
