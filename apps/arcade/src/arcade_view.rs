@@ -106,10 +106,13 @@ pub struct ArcadeView {
     pass: DrawPass,
     #[new]
     draw_list: DrawList,
+    /// The rigged characters in play, each loaded once. Villagers reference
+    /// one by index, so a street of twelve people of six kinds parses six
+    /// meshes rather than twelve.
     #[rust]
-    knight: Option<Knight>,
+    cast: Vec<CharacterModel>,
     /// Animation state per villager, parallel to `blocks.npcs`. The rig lives
-    /// once in `knight`; only the pose is per-villager.
+    /// in `cast`; only the pose is per-villager.
     #[rust]
     villagers: Vec<Villager>,
     /// Engine-side blocks: the drivable car and the patrolling character.
@@ -118,8 +121,6 @@ pub struct ArcadeView {
     /// Held keys for the local player (arrow keys / WASD drive the car).
     #[rust]
     keys: KeySet,
-    #[rust]
-    knight_texture: Option<Texture>,
     #[new]
     color_texture: Texture,
     #[new]
@@ -188,6 +189,8 @@ pub struct ArcadeView {
     /// Render/bake numbers are logged once, not per frame.
     #[rust]
     logged_render_stats: bool,
+    #[rust]
+    logged_skin_cost: bool,
     /// How this device presents the world (game.md §Presentation modes).
     /// `ARCADE_XR=mr|vr` picks a headset stage; unset stays flat. The
     /// simulation is identical in all three — only the projection differs.
@@ -288,17 +291,27 @@ struct PropCollider {
 /// The stock skinned character (KayKit Knight, CC0) + its animation state.
 /// Assets are fetched by apps/arcade/download_assets.sh — everything here
 /// degrades gracefully when they're absent.
-/// The one rigged model we have, loaded once and shared by every villager.
+/// One rigged character kind, loaded once and shared by everyone playing it.
 ///
-/// A village of twelve costs one parse and one texture: the rig, its clips and
-/// its atlas are identical for everyone. What differs per villager is the POSE
-/// (each is at a different point in its own walk cycle) and the tint, so those
-/// live in [`Villager`] and this holds only what is genuinely shared.
-struct Knight {
+/// A villager holds only its POSE (each is at a different point in its own
+/// walk cycle) and its build; the mesh, clips and atlas are shared, so twelve
+/// people of six kinds cost six parses rather than twelve.
+///
+/// Clip indices are resolved BY NAME per model, never borrowed across rigs.
+/// The two rigs in the village name their locomotion differently — Kenney's
+/// 7-joint civilians use `idle`/`walk`, KayKit's 41-joint heroes use
+/// `Idle`/`Walking_A` — so an index that means "walk" for one is a spellcast
+/// or a death pose for the other.
+struct CharacterModel {
     model: SkinnedModel,
     texture_png: Vec<u8>,
     idle: usize,
     walk: usize,
+    /// Uploaded lazily on the first frame that has a `Cx`.
+    texture: Option<Texture>,
+    /// Index into the batch's texture palette, assigned at upload.
+    texture_slot: usize,
+    label: String,
 }
 
 /// One animated villager: the sim entity it follows, plus the pose state that
@@ -327,6 +340,9 @@ struct Villager {
     pos: Vec3f,
     tint: Vec4f,
     scale: f32,
+    /// Which [`CharacterModel`] this villager wears. Set when the cast is
+    /// loaded; the pose buffers below size themselves to that rig's joints.
+    kind: usize,
 }
 
 impl Villager {
@@ -356,6 +372,7 @@ impl Villager {
             pos: vec3f(0.0, 0.0, 0.0),
             tint: vec4(warm, mid, cool, 1.0),
             scale: 0.92 + draw() * 0.22,
+            kind: 0,
         }
     }
 
@@ -379,42 +396,128 @@ impl Villager {
     }
 }
 
-impl Knight {
-    fn load() -> Option<Knight> {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/characters");
-        let glb = match std::fs::read(format!("{dir}/knight.glb")) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                log!("arcade: no skinned character — run apps/arcade/download_assets.sh");
-                return None;
-            }
-        };
-        let texture_png = std::fs::read(format!("{dir}/knight_texture.png")).ok()?;
+impl CharacterModel {
+    /// Load one character from a GLB plus the atlas its materials reference.
+    ///
+    /// `skin.rs` deliberately ignores glTF materials — the caller binds the
+    /// texture — so the caller is the one that has to bind the RIGHT one. The
+    /// two packs differ: KayKit embeds its atlas in the GLB and ships a
+    /// sidecar PNG beside it, while Kenney's characters reference a shared
+    /// `Textures/colormap.png` that every model in the pack samples. Both
+    /// arrive here as bytes and the distinction stops mattering.
+    fn load(glb_path: &str, texture_path: &str, label: &str) -> Option<CharacterModel> {
+        let glb = std::fs::read(glb_path).ok()?;
+        let texture_png = std::fs::read(texture_path).ok()?;
         let model = match SkinnedModel::parse_glb(&glb) {
             Ok(model) => model,
             Err(err) => {
-                log!("arcade: knight.glb failed to parse: {err}");
+                log!("arcade: {label} failed to parse: {err}");
                 return None;
             }
         };
-        let idle = model.clip_index("idle")?;
-        let walk = model
-            .clip_index("walking_a")
-            .or_else(|| model.clip_index("walk"))?;
-        log!(
-            "arcade: knight loaded — {} joints, {} verts, {} clips",
-            model.joint_count(),
-            model.vertex_count(),
-            model.clips.len()
-        );
-        Some(Knight {
-            model,
+        // BY NAME, per rig. Kenney: idle/walk. KayKit: Idle/Walking_A.
+        // clip_index is case-insensitive, so one ordered list covers both;
+        // borrowing an index from another rig would animate a spellcast.
+        let idle = ["idle", "unarmed_idle", "static"]
+            .iter()
+            .find_map(|n| model.clip_index(n))?;
+        let walk = ["walk", "walking_a", "walking_b", "run", "running_a"]
+            .iter()
+            .find_map(|n| model.clip_index(n))?;
+        Some(CharacterModel {
             texture_png,
             idle,
             walk,
+            texture: None,
+            texture_slot: 0,
+            label: label.to_string(),
+            model,
         })
     }
 
+    /// Normalise the two rigs to the 1.8-unit mover they inhabit.
+    ///
+    /// KayKit's heroes are modelled at roughly human height; Kenney's "mini"
+    /// civilians are about a unit tall, so drawn raw they read as children
+    /// beside their own front doors. Keyed off joint count rather than
+    /// measured bounds because `SkinnedModel` exposes no rest-pose extents —
+    /// crude, but the two rigs in play are far enough apart to be
+    /// unambiguous, and a third rig would want real bounds instead.
+    fn height_scale(&self) -> f32 {
+        if self.model.joint_count() >= 41 {
+            1.0
+        } else {
+            1.7
+        }
+    }
+
+    /// The village cast, chosen THROUGH THE INDEX rather than by hardcoded
+    /// paths, so this exercises the path a generated game takes.
+    ///
+    /// Townsfolk come from the 7-joint Kenney civilian rig — a village wants
+    /// people, not nine fantasy heroes — with the KayKit knight kept as a
+    /// single standout because he is the one the player already knows.
+    fn load_cast() -> Vec<CharacterModel> {
+        let models_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/models");
+        let chars_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/characters");
+        let mut cast = Vec::new();
+
+        {
+            let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
+            let idx = makepad_game_assets::AssetIndex::build(&root);
+            // Take the rig with the MOST members — asking by that property
+            // rather than by joint count means a library that later grows a
+            // better-populated rig is picked up without editing this.
+            let civilians = idx
+                .casts()
+                .into_iter()
+                .max_by_key(|c| c.members.len())
+                .map(|c| c.members)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| id.contains("mini-characters"))
+                .take(8)
+                .collect::<Vec<_>>();
+            for id in civilians {
+                // id is `kenney/<pack>/<stem>`; the atlas is the pack's own.
+                let mut parts = id.splitn(3, '/');
+                let (_src, pack, stem) = match (parts.next(), parts.next(), parts.next()) {
+                    (Some(a), Some(b), Some(c)) => (a, b, c),
+                    _ => continue,
+                };
+                let glb = format!("{models_dir}/kenney/{pack}/{stem}.glb");
+                let tex = format!("{models_dir}/kenney/{pack}/Textures/colormap.png");
+                if let Some(c) = CharacterModel::load(&glb, &tex, stem) {
+                    cast.push(c);
+                }
+            }
+        }
+
+        // One hero among the townsfolk, on the other rig entirely — which is
+        // what makes the multi-rig path real rather than theoretical.
+        if let Some(c) = CharacterModel::load(
+            &format!("{chars_dir}/knight.glb"),
+            &format!("{chars_dir}/knight_texture.png"),
+            "knight",
+        ) {
+            cast.push(c);
+        }
+
+        if cast.is_empty() {
+            log!("arcade: no skinned characters — run apps/arcade/download_assets.sh");
+        } else {
+            for c in &cast {
+                log!(
+                    "arcade: character {} — {} joints, {} verts, {} clips",
+                    c.label,
+                    c.model.joint_count(),
+                    c.model.vertex_count(),
+                    c.model.clips.len()
+                );
+            }
+        }
+        cast
+    }
 }
 
 impl ArcadeView {
@@ -715,7 +818,14 @@ impl ArcadeView {
             }
             self.villagers.push(Villager::new(id, 0x5eed_1701 ^ i as u64));
         }
-        self.knight = Knight::load();
+        self.cast = CharacterModel::load_cast();
+        // Deal the cast round-robin so neighbours differ, then let the
+        // per-villager seed vary build and tint WITHIN a kind — two people of
+        // the same kind should still not be the same person.
+        let kinds = self.cast.len().max(1);
+        for (i, v) in self.villagers.iter_mut().enumerate() {
+            v.kind = i % kinds;
+        }
         self.world_built = true;
     }
 
@@ -1666,14 +1776,24 @@ impl Widget for ArcadeView {
                     );
                 }
             }
-            // Knight texture is created before Cx3d mutably borrows cx.
-            if let Some(knight) = &self.knight {
-                if self.knight_texture.is_none() {
-                    match ImageBuffer::from_png(&knight.texture_png) {
-                        Ok(image) => {
-                            self.knight_texture = Some(image.into_new_texture(cx.cx))
+            // Character atlases are created before Cx3d mutably borrows cx.
+            // One per distinct pack; the slot each character samples is
+            // recorded on it, because binding the wrong atlas does not fail —
+            // it renders, wrongly, and reads as a shading bug.
+            {
+                let mut slot = 0usize;
+                for c in self.cast.iter_mut() {
+                    if c.texture.is_none() {
+                        match ImageBuffer::from_png(&c.texture_png) {
+                            Ok(image) => c.texture = Some(image.into_new_texture(cx.cx)),
+                            Err(err) => {
+                                log!("arcade: {} texture failed: {:?}", c.label, err)
+                            }
                         }
-                        Err(err) => log!("arcade: knight texture failed: {:?}", err),
+                    }
+                    if c.texture.is_some() {
+                        c.texture_slot = slot;
+                        slot += 1;
                     }
                 }
             }
@@ -1681,69 +1801,85 @@ impl Widget for ArcadeView {
             // Items are prepared before the draw so the batch borrows stay
             // disjoint from GameDraws.
             let mut skinned_items = Vec::new();
-            if let Some(knight) = &self.knight {
-                if self.knight_texture.is_some() {
-                    // One rig, many poses: each villager samples the SHARED
-                    // clips at its own phase and skins into its own buffer.
-                    // The geometry key is per villager for exactly that reason
-                    // — they are the same mesh holding different poses, so
-                    // they cannot share a GPU buffer.
-                    //
-                    // COST, because this is the one thing here that does not
-                    // scale: skinning is on the CPU, so a crowd costs
-                    // villagers x 3716 verts EVERY FRAME — eleven of them is
-                    // ~41k verts and ~958 KB of upload per frame. Fine for a
-                    // village on a desktop; a town, or a Quest, wants GPU
-                    // skinning (the bone palette is already computed here, so
-                    // the swap is this loop plus a shader) or impostors for
-                    // the distant ones. Worth measuring before raising the
-                    // count.
-                    for (i, v) in self.villagers.iter_mut().enumerate() {
-                        knight
-                            .model
-                            .sample_clip(knight.idle, v.clock, &mut v.pose_idle);
-                        knight
-                            .model
-                            .sample_clip(knight.walk, v.clock, &mut v.pose_walk);
-                        SkinnedModel::blend_pose(
-                            &v.pose_idle,
-                            &v.pose_walk,
-                            v.blend,
-                            &mut v.blended,
-                        );
-                        knight.model.palette(&v.blended, &mut v.palette);
-                        let mut vertices = Vec::new();
-                        knight.model.skin_to_packed(&v.palette, &mut vertices);
-                        let mut transform = Mat4f::rotation(vec3f(0.0, v.yaw, 0.0));
-                        // Build varies a little per villager; the rig is the
-                        // same height for everyone otherwise.
-                        for k in [0usize, 1, 2, 4, 5, 6, 8, 9, 10] {
-                            transform.v[k] *= v.scale;
-                        }
-                        transform.v[12] = v.pos.x;
-                        transform.v[13] = v.pos.y;
-                        transform.v[14] = v.pos.z;
-                        skinned_items.push(
-                            SkinnedDraw::new(
-                                i as u64 + 1,
-                                vertices,
-                                knight.model.indices().to_vec(),
-                                transform,
-                            )
-                            .with_tint(v.tint),
-                        );
+            let mut skinned_verts = 0usize;
+            if !self.cast.is_empty() {
+                // Many rigs, many poses. Each villager samples ITS OWN model's
+                // clips at its own phase and skins into its own buffer: the
+                // geometry key is per villager because they hold different
+                // poses, and the clip indices are per MODEL because the rigs
+                // name their locomotion differently.
+                //
+                // COST, because this is the one thing here that does not
+                // scale: skinning is on the CPU, so a crowd costs the sum of
+                // its characters' vertex counts EVERY FRAME. The mixed cast is
+                // cheaper than the all-knight village it replaces — a Kenney
+                // civilian is 1,259 verts against the knight's 3,716 — but the
+                // shape of the cost is unchanged. A town, or a Quest, wants
+                // GPU skinning (the bone palette is already computed here, so
+                // the swap is this loop plus a shader) or impostors for the
+                // distant ones.
+                let cast = &self.cast;
+                for (i, v) in self.villagers.iter_mut().enumerate() {
+                    let Some(c) = cast.get(v.kind).filter(|c| c.texture.is_some()) else {
+                        continue;
+                    };
+                    c.model.sample_clip(c.idle, v.clock, &mut v.pose_idle);
+                    c.model.sample_clip(c.walk, v.clock, &mut v.pose_walk);
+                    SkinnedModel::blend_pose(
+                        &v.pose_idle,
+                        &v.pose_walk,
+                        v.blend,
+                        &mut v.blended,
+                    );
+                    c.model.palette(&v.blended, &mut v.palette);
+                    let mut vertices = Vec::new();
+                    c.model.skin_to_packed(&v.palette, &mut vertices);
+                    skinned_verts += c.model.vertex_count();
+                    let mut transform = Mat4f::rotation(vec3f(0.0, v.yaw, 0.0));
+                    // Build varies a little per villager. The two rigs are
+                    // modelled at different heights, so normalise first or the
+                    // knight towers over the townsfolk.
+                    let s = v.scale * c.height_scale();
+                    for k in [0usize, 1, 2, 4, 5, 6, 8, 9, 10] {
+                        transform.v[k] *= s;
                     }
+                    transform.v[12] = v.pos.x;
+                    transform.v[13] = v.pos.y;
+                    transform.v[14] = v.pos.z;
+                    skinned_items.push(
+                        SkinnedDraw::new(
+                            i as u64 + 1,
+                            vertices,
+                            c.model.indices().to_vec(),
+                            transform,
+                        )
+                        .with_tint(v.tint)
+                        .with_texture(c.texture_slot),
+                    );
                 }
+            }
+            if !self.logged_skin_cost && !skinned_items.is_empty() {
+                self.logged_skin_cost = true;
+                log!(
+                    "arcade: {} villagers of {} kinds — {} verts skinned/frame ({} KB)",
+                    skinned_items.len(),
+                    self.cast.len(),
+                    skinned_verts,
+                    skinned_verts * 6 * 4 / 1024,
+                );
             }
             // Built before `batch` borrows self mutably.
             let prop_instances = self.village.clone();
-            let batch = match (&mut self.draw_skinned, &self.knight_texture) {
-                (skinned, Some(texture)) if !skinned_items.is_empty() => Some(SkinnedBatch {
-                    skinned,
-                    texture,
+            let textures: Vec<&Texture> =
+                self.cast.iter().filter_map(|c| c.texture.as_ref()).collect();
+            let batch = if skinned_items.is_empty() || textures.is_empty() {
+                None
+            } else {
+                Some(SkinnedBatch {
+                    skinned: &mut self.draw_skinned,
+                    textures,
                     items: skinned_items,
-                }),
-                _ => None,
+                })
             };
 
             self.renderer.set_particles(self.particles.instances());

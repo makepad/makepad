@@ -136,6 +136,10 @@ pub struct SkinnedDraw {
     /// Per-character wash over the model's own colours, so one rig can furnish
     /// a village without every villager being the same figure.
     pub tint: Vec4f,
+    /// Index into [`SkinnedBatch::textures`]. Characters from different packs
+    /// carry different atlases, and binding one character's atlas to another
+    /// does not fail — it renders, wrongly, looking like a shading bug.
+    pub texture: usize,
 }
 
 impl SkinnedDraw {
@@ -147,11 +151,18 @@ impl SkinnedDraw {
             indices,
             transform,
             tint: vec4(1.0, 1.0, 1.0, 1.0),
+            texture: 0,
         }
     }
 
     pub fn with_tint(mut self, tint: Vec4f) -> Self {
         self.tint = tint;
+        self
+    }
+
+    /// Which atlas this character samples.
+    pub fn with_texture(mut self, texture: usize) -> Self {
+        self.texture = texture;
         self
     }
 }
@@ -160,7 +171,10 @@ impl SkinnedDraw {
 /// passes (so blob shadows and sensor ghosts blend over them correctly).
 pub struct SkinnedBatch<'a> {
     pub skinned: &'a mut DrawGameSkinned,
-    pub texture: &'a Texture,
+    /// One atlas per distinct character pack; items index into it. A village
+    /// of Kenney civilians shares a single entry (one `colormap.png` per
+    /// pack), so the common case stays one texture and one bind.
+    pub textures: Vec<&'a Texture>,
     pub items: Vec<SkinnedDraw>,
 }
 
@@ -947,7 +961,16 @@ impl GameRenderer {
             batch.skinned.depth_clip = 1.0;
             batch.skinned.fog_color = fog.0;
             batch.skinned.fog_density = fog.1;
-            batch.skinned.draw_vars.set_texture(0, batch.texture);
+            // Clamp rather than index blindly: a bad texture index would
+            // otherwise panic mid-frame, and a character wearing the wrong
+            // atlas is a visible bug worth surviving to see.
+            if let Some(tex) = batch
+                .textures
+                .get(item.texture)
+                .or_else(|| batch.textures.first())
+            {
+                batch.skinned.draw_vars.set_texture(0, tex);
+            }
             if batch.skinned.draw_vars.can_instance() {
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);
                 batch.skinned.draw_vars.area =
