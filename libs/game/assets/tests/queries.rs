@@ -243,16 +243,24 @@ fn agent_results_are_compact_and_hide_index_internals() {
 }
 
 #[test]
-fn undecodable_audio_is_flagged_rather_than_silently_broken() {
+fn every_shipped_sound_is_playable_and_the_agent_is_told_so() {
     let Some(idx) = index() else { return };
+    // The in-house Vorbis decoder reached sample-exact on all 556 Kenney
+    // sounds, so nothing we ship is indexed-but-unplayable any more. The
+    // `undecodable` reporting path stays for a future format we might index
+    // before we can play it — this asserts the CURRENT catalogue is clean.
     let stuck = idx.undecodable();
-    // Kenney audio is ogg and this tree has no vorbis decoder — the index must
-    // say so rather than let a game fire a sound that never plays.
-    assert!(!stuck.is_empty());
-    assert!(stuck.iter().all(|e| e.format == "ogg"));
+    assert!(
+        stuck.is_empty(),
+        "unplayable entries: {:?}",
+        stuck.iter().map(|e| &e.id).collect::<Vec<_>>()
+    );
+    // A game must never be able to fire a sound that produces silence, so the
+    // agent is only ever told playable:false — never left to guess.
     let results = agent::execute(&idx, &agent::FindParams::new("laser").with_kind_str("sound"));
+    assert!(!results.is_empty(), "no laser sounds found");
     let json = agent::results_to_json(&results);
-    assert!(json.contains("\"playable\":false"), "agent not told: {json}");
+    assert!(!json.contains("\"playable\":false"), "still gated: {json}");
 }
 
 #[test]
