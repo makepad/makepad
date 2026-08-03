@@ -269,8 +269,14 @@ fn index_build_and_query_stay_fast_at_full_catalogue_scale() {
     let t = Instant::now();
     let Some(idx) = index() else { return };
     let build_ms = t.elapsed().as_millis();
-    // Whole-catalogue build happens once at startup; a second would be felt.
-    assert!(build_ms < 3000, "index build took {build_ms} ms");
+    // Whole-catalogue build happens once at startup. This was ~120 ms when
+    // the GLB probe silently rejected every file (wrong magic constant), so
+    // that figure measured a no-op. With the probe actually reading 5300
+    // models it is ~1.8 s alone, and more under parallel test contention.
+    // The bound is generous on purpose: it exists to catch an order-of-
+    // magnitude regression, not to pin a number this test cannot control.
+    // The real fix is caching probe results by path+mtime — see the report.
+    assert!(build_ms < 12_000, "index build took {build_ms} ms");
 
     // Search sits in a chat loop, so it must be imperceptible. A naive
     // all-entries scan measured 73 ms here before the inverted index.
@@ -329,4 +335,77 @@ fn pack_themes_never_outrank_the_item_that_is_actually_named() {
         "theme weighting regressed: {} outranked the real boats",
         first.entry.id
     );
+}
+
+// ---- modular kits -------------------------------------------------------
+
+/// A kit must expose a grid pitch and a role vocabulary, or a layout planner
+/// has nothing to place tiles against.
+#[test]
+fn kits_report_a_tile_size_and_their_roles() {
+    let Some(idx) = index() else { return };
+    let kits = idx.kits();
+    assert!(kits.len() >= 15, "expected the kit packs, got {}", kits.len());
+
+    let roads = kits
+        .iter()
+        .find(|k| k.pack == "city-kit-roads")
+        .expect("city-kit-roads is a kit");
+    // Kenney road tiles are a 1-unit grid; the median must land ON a real
+    // pitch, not between two of them (which is why it is a median, not a mean).
+    let size = roads.tile_size.expect("road kit must have a measured size");
+    assert!((size - 1.0).abs() < 0.2, "road tile size {size} is not a grid pitch");
+    for want in ["straight", "corner", "junction"] {
+        assert!(
+            roads.roles.iter().any(|(r, n)| r == want && *n > 0),
+            "road kit missing {want}: {:?}",
+            roads.roles
+        );
+    }
+}
+
+/// Tiles must be reachable BY KIT, because visual coherence within one level
+/// is exactly what a naive per-model search destroys.
+#[test]
+fn kit_tiles_come_back_grouped_and_role_filtered() {
+    let Some(idx) = index() else { return };
+    let all = idx.kit_tiles("city-kit-roads", None);
+    let corners = idx.kit_tiles("city-kit-roads", Some("corner"));
+    assert!(!corners.is_empty() && corners.len() < all.len());
+    assert!(corners.iter().all(|e| e.pack == "city-kit-roads"));
+    assert!(corners
+        .iter()
+        .all(|e| e.role.is_some_and(|r| r.starts_with("corner"))));
+}
+
+/// The composition words people use when BUILDING ("junction", "ramp") must
+/// reach tiles, not just the nouns a model is named after.
+#[test]
+fn composition_words_find_tiles() {
+    let Some(idx) = index() else { return };
+    for (q, role) in [("junction", "junction"), ("ramp", "ramp"), ("corner", "corner")] {
+        let hits = idx.find(q);
+        assert!(
+            hits.iter().take(10).any(|h| h.entry.role == Some(role)),
+            "'{q}' returned no {role} tile in its top 10"
+        );
+    }
+}
+
+/// The agent gets kit-level results compactly: enough to plan a layout,
+/// without paying tokens for every tile id.
+#[test]
+fn find_kit_returns_compact_planning_data() {
+    let Some(idx) = index() else { return };
+    let kits = agent::execute_kit(&idx, Some("road"), None);
+    assert!(!kits.is_empty(), "no road kits");
+    let json = agent::kits_to_json(&kits);
+    assert!(json.contains("tile_size"), "no grid pitch: {json}");
+    assert!(json.contains("junction"), "no roles: {json}");
+    assert!(json.len() < 2000, "kit listing too fat for a prompt: {}", json.len());
+
+    // Filtering by role must actually narrow it.
+    let with_ramps = agent::execute_kit(&idx, None, Some("ramp"));
+    assert!(with_ramps.iter().all(|k| k.roles.iter().any(|(r, _)| r == "ramp")));
+    assert!(with_ramps.len() < idx.kits().len());
 }

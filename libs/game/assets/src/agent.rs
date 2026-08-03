@@ -257,3 +257,96 @@ pub fn credits(index: &AssetIndex) -> Vec<&'static str> {
     }
     out
 }
+
+// ---------------------------------------------------------------- kit lookup
+
+/// A kit is a coherent, visually-matching SET of tiles. A level assembled from
+/// one tile of each of five kits looks like a junk drawer; a level built from
+/// one kit looks designed. So the AI needs to discover that a set exists —
+/// and its grid pitch — before it can lay anything out.
+pub const FIND_KIT: ToolDescriptor = ToolDescriptor {
+    name: "find_kit",
+    description: "List modular building kits — sets of tiles designed to snap together on a \
+                  grid (roads, dungeons, caves, buildings, race tracks, platformer blocks). \
+                  Returns each kit's id, its tile size (the grid pitch to place tiles on) and \
+                  which roles it provides (straight, corner, junction, end, ramp, wall, floor, \
+                  door, ...). Build a level from ONE kit so the pieces match visually, then \
+                  call find_model with that kit's name to get specific tile ids.",
+    params: &[
+        ToolParam {
+            name: "query",
+            ty: "string",
+            description: "Optional: what kind of level, e.g. \"road\", \"dungeon\", \"city\", \
+                          \"race track\", \"cave\", \"platformer\".",
+            required: false,
+        },
+        ToolParam {
+            name: "role",
+            ty: "string",
+            description: "Optional: only kits providing this piece, e.g. \"junction\".",
+            required: false,
+        },
+    ],
+};
+
+/// Execute `find_kit`. Compact by design: kit id, tile size, and role counts —
+/// enough to plan a layout, without spending tokens on individual tile ids
+/// (those come from a follow-up `find_model` scoped to the kit).
+pub fn execute_kit(index: &AssetIndex, query: Option<&str>, role: Option<&str>) -> Vec<KitResult> {
+    let q = query.unwrap_or("").to_ascii_lowercase();
+    let mut out: Vec<KitResult> = index
+        .kits()
+        .into_iter()
+        .filter(|k| {
+            role.is_none_or(|r| k.roles.iter().any(|(kr, _)| kr == r || kr.starts_with(r)))
+        })
+        .filter(|k| {
+            q.is_empty()
+                || q.split_whitespace().any(|w| {
+                    k.pack.contains(w) || k.name.to_ascii_lowercase().contains(w)
+                })
+        })
+        .map(|k| KitResult {
+            id: k.pack,
+            name: k.name,
+            tiles: k.tiles,
+            tile_size: k.tile_size,
+            roles: k.roles,
+        })
+        .collect();
+    // Most roles first: a kit with junctions and ramps composes into more
+    // interesting levels than one with a single straight piece.
+    out.sort_by(|a, b| b.roles.len().cmp(&a.roles.len()).then(a.id.cmp(&b.id)));
+    out
+}
+
+pub struct KitResult {
+    pub id: String,
+    pub name: String,
+    pub tiles: u32,
+    pub tile_size: Option<f32>,
+    pub roles: Vec<(String, u32)>,
+}
+
+pub fn kits_to_json(kits: &[KitResult]) -> String {
+    let mut s = String::from("[");
+    for (i, k) in kits.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{{\"id\":\"{}\",\"tiles\":{}", k.id, k.tiles));
+        if let Some(t) = k.tile_size {
+            s.push_str(&format!(",\"tile_size\":{t:.2}"));
+        }
+        s.push_str(",\"roles\":{");
+        for (j, (r, n)) in k.roles.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("\"{r}\":{n}"));
+        }
+        s.push_str("}}");
+    }
+    s.push(']');
+    s
+}

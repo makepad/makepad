@@ -21,6 +21,7 @@ pub mod aliases;
 pub mod audio_aliases;
 mod glb;
 pub mod packs;
+pub mod states;
 
 use std::path::{Path, PathBuf};
 
@@ -53,6 +54,7 @@ impl AssetKind {
 pub enum Source {
     Kenney,
     KayKit,
+    Quaternius,
 }
 
 impl Source {
@@ -60,24 +62,28 @@ impl Source {
         match self {
             Source::Kenney => "kenney",
             Source::KayKit => "kaykit",
+            Source::Quaternius => "quaternius",
         }
     }
     pub fn credit(self) -> &'static str {
         match self {
             Source::Kenney => "Kenney (kenney.nl) — CC0",
             Source::KayKit => "KayKit / Kay Lousberg (kaylousberg.com) — CC0",
+            Source::Quaternius => "Quaternius (quaternius.com) — CC0",
         }
     }
     pub fn url(self) -> &'static str {
         match self {
             Source::Kenney => "https://kenney.nl/assets",
             Source::KayKit => "https://kaylousberg.itch.io/",
+            Source::Quaternius => "https://quaternius.com/",
         }
     }
     fn from_dir(name: &str) -> Option<Source> {
         match name {
             "kenney" => Some(Source::Kenney),
             "kaykit" | "characters" => Some(Source::KayKit),
+            "quaternius" => Some(Source::Quaternius),
             _ => None,
         }
     }
@@ -108,6 +114,17 @@ pub struct AssetEntry {
     /// Has a skin/skeleton — safe to drive with animation clips. Models only.
     pub rigged: bool,
     pub animated: bool,
+    /// Animation clip names, when the model carries any. The AI cannot play a
+    /// clip it does not know exists, so these are surfaced, not just counted.
+    pub clips: Vec<String>,
+    /// Skeleton joint count when rigged. Equal counts across models usually
+    /// mean a shared rig, so one animation set drives all of them.
+    pub joints: u32,
+    /// Modular-tile role parsed from the filename (`corner`, `junction`,
+    /// `straight`, ...) for models in a kit. `None` for standalone props.
+    pub role: Option<&'static str>,
+    /// True when this model belongs to a pack designed to tile on a grid.
+    pub kit: bool,
     /// Approximate bounding size in model units, when the GLB exposed it.
     pub size: Option<[f32; 3]>,
     /// Container format, e.g. "glb" or "ogg".
@@ -129,6 +146,35 @@ impl AssetEntry {
     pub fn max_extent(&self) -> Option<f32> {
         self.size.map(|s| s[0].max(s[1]).max(s[2]))
     }
+}
+
+/// A modular kit: a coherent set of tiles meant to snap together.
+#[derive(Clone, Debug)]
+pub struct KitInfo {
+    pub pack: String,
+    pub name: String,
+    pub tiles: u32,
+    /// Grid pitch in model units, taken as the MEDIAN horizontal extent across
+    /// the kit. Median rather than mean because kits ship the odd double-width
+    /// or decorative piece, and an average would land between grid sizes —
+    /// a value no tile actually uses.
+    pub tile_size: Option<f32>,
+    /// Role → how many tiles provide it.
+    pub roles: Vec<(String, u32)>,
+}
+
+fn tile_size_of(items: &[&AssetEntry]) -> Option<f32> {
+    let mut widths: Vec<f32> = items
+        .iter()
+        .filter_map(|e| e.size)
+        .map(|s| s[0].max(s[2]))
+        .filter(|w| *w > 0.01)
+        .collect();
+    if widths.is_empty() {
+        return None;
+    }
+    widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(widths[widths.len() / 2])
 }
 
 /// A ranked search hit.
@@ -230,20 +276,71 @@ impl AssetIndex {
                 vec![(file_name(&dir), dir.clone())]
             };
             for (pack, pack_dir) in packs {
+                let mut models: Vec<PathBuf> = Vec::new();
                 for file in read_dir_sorted(&pack_dir) {
                     match file.extension().and_then(|e| e.to_str()) {
-                        Some("glb") => index.entries.push(build_entry(source, &pack, &file)),
+                        // A plain .gltf is the JSON document itself; .glb wraps
+                        // it in a binary chunk. Both are models.
+                        Some("glb") | Some("gltf") => models.push(file),
                         Some("ogg") | Some("wav") => {
                             index.entries.push(build_audio_entry(source, &pack, &file))
                         }
                         _ => {}
                     }
                 }
+                // Every model is opened and probed, so a 5000-model catalogue
+                // is thousands of independent file reads — the one place in
+                // this crate where threads pay. Chunked rather than one job
+                // per file to keep the spawn count flat, and results are
+                // reassembled in order so the index stays deterministic.
+                index.entries.extend(probe_models_parallel(source, &pack, &models));
             }
         }
         index.entries.sort_by(|a, b| a.id.cmp(&b.id));
         index.build_postings();
         index
+    }
+
+    /// Every modular kit in the library, with its measured tile size and the
+    /// roles it actually provides.
+    ///
+    /// Grouped BY KIT on purpose: a level built from one tile of each of five
+    /// packs looks assembled from a junk drawer, while a level built from one
+    /// kit looks designed. The AI has to be able to see that a coherent set
+    /// exists before it can compose with it.
+    pub fn kits(&self) -> Vec<KitInfo> {
+        use std::collections::BTreeMap;
+        let mut by_pack: BTreeMap<&str, Vec<&AssetEntry>> = BTreeMap::new();
+        for e in self.entries.iter().filter(|e| e.kit) {
+            by_pack.entry(e.pack.as_str()).or_default().push(e);
+        }
+        by_pack
+            .into_iter()
+            .map(|(pack, items)| {
+                let mut roles: BTreeMap<&'static str, u32> = BTreeMap::new();
+                for e in &items {
+                    if let Some(r) = e.role {
+                        *roles.entry(r).or_insert(0) += 1;
+                    }
+                }
+                KitInfo {
+                    pack: pack.to_string(),
+                    name: packs::theme_of(pack).map(|t| t.name.to_string()).unwrap_or_else(|| pack.replace('-', " ")),
+                    tiles: items.len() as u32,
+                    tile_size: tile_size_of(&items),
+                    roles: roles.into_iter().map(|(r, n)| (r.to_string(), n)).collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// Tiles of one kit filtered to a role, e.g. every corner in `city-kit-roads`.
+    pub fn kit_tiles(&self, pack: &str, role: Option<&str>) -> Vec<&AssetEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.kit && e.pack == pack)
+            .filter(|e| role.is_none_or(|r| e.role == Some(r) || e.role.is_some_and(|er| er.starts_with(r))))
+            .collect()
     }
 
     /// Build the inverted index. Every keyword contributes under its exact
@@ -630,6 +727,30 @@ fn whole_query_bonus(entry: &AssetEntry, query: &str) -> u32 {
     bonus
 }
 
+/// Probe a pack's models across a small thread pool, preserving input order.
+fn probe_models_parallel(source: Source, pack: &str, files: &[PathBuf]) -> Vec<AssetEntry> {
+    if files.len() < 16 {
+        return files.iter().map(|f| build_entry(source, pack, f)).collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(4);
+    let chunk = files.len().div_ceil(threads);
+    let mut parts: Vec<Vec<AssetEntry>> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for slice in files.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                slice.iter().map(|f| build_entry(source, pack, f)).collect::<Vec<_>>()
+            }));
+        }
+        for h in handles {
+            parts.push(h.join().unwrap_or_default());
+        }
+    });
+    parts.into_iter().flatten().collect()
+}
+
 // ------------------------------------------------------------ entry building
 
 fn build_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
@@ -675,6 +796,28 @@ fn build_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
     let probe = glb::probe(file);
     let bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
 
+    // A tile's usefulness is its ROLE, which the filename states and no
+    // keyword otherwise captures: "corner" must find corner pieces across
+    // every kit, and "road" must reach `road-bend` as well as `road-straight`.
+    let kit = states::is_kit(pack);
+    let role = if kit { states::role_of(&stem) } else { None };
+    let mut keywords = keywords;
+    if let Some(r) = role {
+        push_unique(&mut keywords, r.to_string());
+        // "corner-inner" should also answer a plain "corner" query.
+        if let Some((base, _)) = r.split_once('-') {
+            push_unique(&mut keywords, base.to_string());
+        }
+    }
+    if kit {
+        push_unique(&mut keywords, "tile".to_string());
+        push_unique(&mut keywords, "modular".to_string());
+    }
+    // Animation states, when present, are searchable the same way.
+    for st in states::states_from_clips(&probe.clips) {
+        push_unique(&mut keywords, st);
+    }
+
     AssetEntry {
         id: format!("{}/{}/{}", source.as_str(), pack, stem),
         name,
@@ -689,8 +832,16 @@ fn build_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
         themes,
         rigged: probe.rigged,
         animated: probe.animated,
+        clips: probe.clips,
+        joints: probe.joints,
+        role,
+        kit,
         size: probe.size,
-        format: "glb".to_string(),
+        format: file
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("glb")
+            .to_string(),
         duration: None,
         loops: false,
         decodable: true,
@@ -754,6 +905,10 @@ fn build_audio_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
         themes,
         rigged: false,
         animated: false,
+        clips: Vec::new(),
+        joints: 0,
+        role: None,
+        kit: false,
         size: None,
         duration: None,
         loops,
