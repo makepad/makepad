@@ -1735,7 +1735,9 @@ impl GameRenderer {
                 for f in &self.firework_instances {
                     fw.origin_age = vec4(f.origin.x, f.origin.y, f.origin.z, f.age);
                     fw.launch_life = vec4(f.launch.x, f.launch.y, f.launch.z, f.life);
-                    fw.params = vec4(f.speed, f.seed, 0.35, 0.0);
+                    // Roomy quad; the sprite core occupies only its middle fifth
+                    // (see spark_pixel), so this is streak headroom, not dot size.
+                    fw.params = vec4(f.speed, f.seed, 1.1, 0.0);
                     fw.color = f.color;
                     fw.color_tail = f.color_tail;
                     if fw.draw_vars.can_instance() {
