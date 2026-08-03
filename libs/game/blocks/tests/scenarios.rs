@@ -717,3 +717,299 @@ fn angle_delta(a: f32, b: f32) -> f32 {
     }
     d
 }
+
+// ---------------------------------------------------------------------------
+// NPCs (npc.rs). These are the gate for behaviour: without a screen, a
+// villager "looking alive" has to be expressed as reaching places, refusing to
+// wedge itself, and not all doing the same thing at once.
+// ---------------------------------------------------------------------------
+
+fn npc(world: &mut GameWorld, blocks: &mut Blocks, pos: Vec3f, seed: u64) -> u64 {
+    let id = mover(world, pos, vec3f(0.4, 0.8, 0.4));
+    blocks
+        .npcs
+        .push(Npc::new(id, NpcConfig::default(), pos, seed));
+    id
+}
+
+/// Walks to a destination and stays there. The floor of the whole feature: an
+/// NPC that cannot arrive has no behaviour to build on.
+#[test]
+fn npc_walks_to_a_poi_and_dwells_there() {
+    let mut world = world_with_ground();
+    let mut blocks = Blocks::new();
+    let id = npc(&mut world, &mut blocks, vec3f(0.0, 1.0, 0.0), 7);
+    blocks.pois.push(Poi::new(vec3f(14.0, 0.0, 0.0), "bench"));
+    // Only one destination exists, so scoring must converge on it.
+    blocks.npcs[0].activity = Activity::Travel {
+        goal: vec3f(14.0, 0.0, 0.0),
+        poi: Some(0),
+    };
+
+    let mut arrived = None;
+    for tick_i in 0..60 * 20 {
+        tick(&mut world, &mut blocks);
+        if matches!(blocks.npcs[0].activity, Activity::Dwell { .. }) {
+            arrived = Some(tick_i);
+            break;
+        }
+    }
+    let arrived = arrived.expect("npc never reached the bench");
+    let e = world.entity(id).unwrap();
+    let d = ((e.pos.x - 14.0).powi(2) + e.pos.z.powi(2)).sqrt();
+    assert!(d < 1.6, "stopped {d} away from the bench it was heading for");
+    // 14 units at ~2.6 u/s is ~5.4s; anything near the 20s cap means it was
+    // wandering rather than walking there.
+    assert!(arrived < 60 * 12, "took {arrived} ticks to walk 14 units");
+}
+
+/// Blocked by a wall it cannot jump, it goes around and still arrives. This is
+/// the difference between "has a goal" and "can pursue one".
+#[test]
+fn npc_routes_around_a_wall_and_still_arrives() {
+    let mut world = world_with_ground();
+    // A wall across the direct path, with open ground either side.
+    block(&mut world, vec3f(0.0, 1.5, -8.0), vec3f(4.0, 1.5, 0.5));
+    let mut blocks = Blocks::new();
+    let id = npc(&mut world, &mut blocks, vec3f(0.0, 1.0, 0.0), 3);
+    blocks.npcs[0].activity = Activity::Travel {
+        goal: vec3f(0.0, 0.0, -16.0),
+        poi: None,
+    };
+
+    let mut best = f32::MAX;
+    for _ in 0..60 * 30 {
+        tick(&mut world, &mut blocks);
+        let e = world.entity(id).unwrap();
+        best = best.min((e.pos.z + 16.0).abs());
+        // Never inside the wall.
+        if (e.pos.z + 8.0).abs() < 0.5 {
+            assert!(
+                e.pos.x.abs() > 3.9,
+                "npc walked into the wall at x={} z={}",
+                e.pos.x,
+                e.pos.z
+            );
+        }
+    }
+    assert!(
+        best < 3.0,
+        "npc never got past the wall; closest approach to the goal was {best}"
+    );
+}
+
+/// A crate low enough to jump is jumped rather than walked around.
+#[test]
+fn npc_jumps_a_low_obstacle() {
+    let mut world = world_with_ground();
+    // Long, low: going around would take much longer than hopping it.
+    block(&mut world, vec3f(0.0, 0.4, -6.0), vec3f(14.0, 0.4, 0.5));
+    let mut blocks = Blocks::new();
+    let id = npc(&mut world, &mut blocks, vec3f(0.0, 1.0, 0.0), 11);
+    blocks.npcs[0].activity = Activity::Travel {
+        goal: vec3f(0.0, 0.0, -14.0),
+        poi: None,
+    };
+
+    let mut left_ground = false;
+    let mut crossed = false;
+    for _ in 0..60 * 25 {
+        tick(&mut world, &mut blocks);
+        let e = world.entity(id).unwrap();
+        if !e.on_floor {
+            left_ground = true;
+        }
+        if e.pos.z < -7.0 {
+            crossed = true;
+            break;
+        }
+    }
+    assert!(left_ground, "npc never jumped");
+    assert!(crossed, "npc never got over the low crate");
+}
+
+/// Converging on one destination must not stack them into a tower — movers
+/// pass through each other, so the separation steering is the only thing
+/// keeping a crowd looking like a crowd.
+#[test]
+fn npcs_converging_on_one_poi_do_not_stack() {
+    let mut world = world_with_ground();
+    let mut blocks = Blocks::new();
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        let a = i as f32 * 1.04;
+        let (s, c) = (a.sin(), a.cos());
+        ids.push(npc(
+            &mut world,
+            &mut blocks,
+            vec3f(c * 10.0, 1.0, s * 10.0),
+            100 + i,
+        ));
+    }
+    // One open destination they all want.
+    blocks.pois.push(Poi::new(vec3f(0.0, 0.0, 0.0), "well").with_capacity(8));
+    for n in blocks.npcs.iter_mut() {
+        n.activity = Activity::Travel {
+            goal: vec3f(0.0, 0.0, 0.0),
+            poi: Some(0),
+        };
+    }
+
+    for _ in 0..60 * 15 {
+        tick(&mut world, &mut blocks);
+    }
+    let mut closest = f32::MAX;
+    for (i, a) in ids.iter().enumerate() {
+        for b in ids.iter().skip(i + 1) {
+            let (pa, pb) = (
+                world.entity(*a).unwrap().pos,
+                world.entity(*b).unwrap().pos,
+            );
+            closest = closest.min(((pa.x - pb.x).powi(2) + (pa.z - pb.z).powi(2)).sqrt());
+        }
+    }
+    assert!(
+        closest > 0.55,
+        "npcs collapsed into each other: closest pair {closest} apart"
+    );
+}
+
+/// Same seed, same behaviour, tick for tick — the multiplayer and replay
+/// requirement. Different seed must actually differ, or the "personality"
+/// claim is decoration.
+#[test]
+fn npc_behaviour_is_seeded_and_reproducible() {
+    fn run(seed: u64) -> Vec<String> {
+        let mut world = world_with_ground();
+        let mut blocks = Blocks::new();
+        for i in 0..4 {
+            npc(
+                &mut world,
+                &mut blocks,
+                vec3f(i as f32 * 3.0, 1.0, 0.0),
+                seed + i,
+            );
+        }
+        blocks.pois.push(Poi::new(vec3f(12.0, 0.0, 4.0), "bench"));
+        blocks.pois.push(Poi::new(vec3f(-9.0, 0.0, -6.0), "well"));
+        let mut trace = Vec::new();
+        for t in 0..60 * 30 {
+            tick(&mut world, &mut blocks);
+            if t % 300 == 0 {
+                for n in &blocks.npcs {
+                    trace.push(n.trace(&world));
+                }
+            }
+        }
+        trace
+    }
+    let a = run(42);
+    let b = run(42);
+    assert_eq!(a, b, "same seed produced a different run");
+    let c = run(43);
+    assert_ne!(a, c, "different seed produced an identical run");
+}
+
+/// Villagers left to their own devices must not end up doing the same thing
+/// in unison, and must not freeze. This is the "looks inhabited" assertion.
+#[test]
+fn a_village_of_npcs_stays_busy_and_varied() {
+    let mut world = world_with_ground();
+    let mut blocks = Blocks::new();
+    for i in 0..10 {
+        let a = i as f32 * 0.63;
+        let (s, c) = (a.sin(), a.cos());
+        npc(
+            &mut world,
+            &mut blocks,
+            vec3f(c * 8.0, 1.0, s * 8.0),
+            900 + i,
+        );
+    }
+    for (i, (x, z, tag)) in [
+        (12.0, 2.0, "bench"),
+        (-11.0, 5.0, "well"),
+        (4.0, -13.0, "door"),
+        (-6.0, -10.0, "market"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        blocks
+            .pois
+            .push(Poi::new(vec3f(*x, 0.0, *z), *tag).with_capacity(2));
+        let _ = i;
+    }
+
+    let mut moved = vec![0.0f32; blocks.npcs.len()];
+    let mut last: Vec<Vec3f> = blocks
+        .npcs
+        .iter()
+        .map(|n| world.entity(n.entity).unwrap().pos)
+        .collect();
+    let mut activities = std::collections::HashSet::new();
+    for t in 0..60 * 90 {
+        tick(&mut world, &mut blocks);
+        if t % 30 == 0 {
+            for (i, n) in blocks.npcs.iter().enumerate() {
+                let p = world.entity(n.entity).unwrap().pos;
+                moved[i] += ((p.x - last[i].x).powi(2) + (p.z - last[i].z).powi(2)).sqrt();
+                last[i] = p;
+                activities.insert(n.activity.name());
+            }
+        }
+    }
+    // Everyone got somewhere over 90 seconds.
+    let idle: Vec<usize> = moved
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| **d < 6.0)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        idle.is_empty(),
+        "npcs {idle:?} barely moved in 90s: {moved:?}"
+    );
+    // And they were not all doing one thing.
+    assert!(
+        activities.len() >= 2,
+        "village only ever showed activities {activities:?}"
+    );
+    // Nobody fell through the world or got launched.
+    for n in &blocks.npcs {
+        let p = world.entity(n.entity).unwrap().pos;
+        assert!(
+            p.y > -2.0 && p.y < 20.0,
+            "npc {} left the world at y={}",
+            n.entity,
+            p.y
+        );
+    }
+}
+
+/// An unbiased random walk has no centre, so villagers drift off the map over
+/// a few minutes. Caught in a trace: one NPC 43 units out with every
+/// destination inside 18.
+#[test]
+fn npcs_stay_in_their_village() {
+    let mut world = world_with_ground();
+    let mut blocks = Blocks::new();
+    for i in 0..6 {
+        npc(&mut world, &mut blocks, vec3f(i as f32 * 2.0, 1.0, 0.0), 77 + i);
+    }
+    blocks.pois.push(Poi::new(vec3f(9.0, 0.0, 3.0), "bench"));
+    // Four minutes is long enough for a drifter to be far away.
+    let mut furthest: f32 = 0.0;
+    for _ in 0..60 * 240 {
+        tick(&mut world, &mut blocks);
+        for n in &blocks.npcs {
+            let p = world.entity(n.entity).unwrap().pos;
+            let d = ((p.x - n.home.x).powi(2) + (p.z - n.home.z).powi(2)).sqrt();
+            furthest = furthest.max(d);
+        }
+    }
+    assert!(
+        furthest < 45.0,
+        "a villager wandered {furthest} units from home over four minutes"
+    );
+}

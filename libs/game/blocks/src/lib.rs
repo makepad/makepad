@@ -31,12 +31,14 @@ pub mod audio_emit;
 pub mod brain;
 pub mod car;
 pub mod character;
+pub mod npc;
 pub mod plane;
 pub mod race;
 
 pub use brain::{Brain, BrainKind};
 pub use car::{Car, CarConfig};
 pub use character::{Character, CharacterConfig, CharacterPose};
+pub use npc::{Activity, Npc, NpcConfig, Personality, Poi, PoiSet};
 pub use plane::{Plane, PlaneConfig};
 pub use race::{Checkpoint, RaceKit, SpawnPoint, Standing};
 
@@ -83,6 +85,10 @@ pub struct Blocks {
     pub characters: Vec<Character>,
     pub planes: Vec<Plane>,
     pub brains: Vec<Brain>,
+    pub npcs: Vec<Npc>,
+    /// Destinations NPCs choose between. Lives beside them so eval rollback
+    /// restores villagers and the places they were heading for together.
+    pub pois: PoiSet,
     pub race: RaceKit,
     /// This device's input, refreshed by the host before `pre_step`.
     pub player_input: DriveInput,
@@ -118,6 +124,7 @@ impl Blocks {
             && self.characters.is_empty()
             && self.planes.is_empty()
             && self.brains.is_empty()
+            && self.npcs.is_empty()
             && self.race.is_empty()
     }
 
@@ -130,6 +137,8 @@ impl Blocks {
         self.characters.retain(|c| alive(c.entity));
         self.planes.retain(|p| alive(p.entity));
         self.brains.retain(|b| alive(b.entity));
+        self.npcs.retain(|n| alive(n.entity));
+        self.pois.reconcile(world);
         self.race.reconcile(world);
     }
 
@@ -145,6 +154,11 @@ impl Blocks {
         };
         for brain in self.brains.iter_mut() {
             brain.tick(world);
+        }
+        // NPCs share one POI set, so they must be ticked in a fixed order for
+        // slot claims (who gets the last seat on the bench) to be deterministic.
+        for npc in self.npcs.iter_mut() {
+            npc.tick(world, &mut self.pois);
         }
         for car in self.cars.iter_mut() {
             let input = intent(car.owner);
@@ -237,6 +251,20 @@ impl Blocks {
             mix(brain.entity);
             mix(brain.timer.to_bits() as u64);
             mix(brain.waypoint as u64);
+        }
+        for npc in &self.npcs {
+            mix(npc.entity);
+            // The activity discriminant plus its goal is what a divergence
+            // would show up in first — two runs that agree on position but
+            // disagree on intent are about to diverge on position too.
+            mix(npc.activity.name().len() as u64);
+            if let Activity::Travel { goal, .. } = npc.activity {
+                mix(goal.x.to_bits() as u64);
+                mix(goal.z.to_bits() as u64);
+            }
+        }
+        for poi in &self.pois.list {
+            mix(poi.taken as u64);
         }
         mix(self.race.hash());
         h

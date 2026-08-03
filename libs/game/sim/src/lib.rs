@@ -20,6 +20,7 @@ pub mod entity;
 pub mod particles;
 pub mod player;
 pub mod queries;
+pub mod sense;
 pub mod step;
 pub mod terrain;
 pub mod world;
