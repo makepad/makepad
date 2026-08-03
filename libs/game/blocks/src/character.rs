@@ -64,6 +64,11 @@ pub struct CharacterPose {
 
 #[derive(Clone, Debug)]
 pub struct Character {
+    /// Audio-only state: stride phase and the fall we were in last tick.
+    /// Kept here rather than in the sim because sound is Local tier.
+    pub step: crate::audio_emit::StepTimer,
+    pub audio_airborne: bool,
+    pub audio_fall_speed: f32,
     pub entity: u64,
     /// Which player drives this when `control` is `Player`. Defaults to the
     /// local device (player 0), so single-player games never mention it.
@@ -92,6 +97,9 @@ impl Character {
             input: DriveInput::default(),
             pose: CharacterPose::default(),
             model,
+            step: crate::audio_emit::StepTimer::default(),
+            audio_airborne: false,
+            audio_fall_speed: 0.0,
         }
     }
 
@@ -146,5 +154,37 @@ impl Character {
         if self.pose.clip_time > 1000.0 {
             self.pose.clip_time -= 1000.0;
         }
+    }
+}
+
+impl Character {
+    /// Footsteps, jumps and landings, driven by the walk cycle rather than a
+    /// timer so feet and sound stay together when the character slows down.
+    pub fn emit_audio(&mut self, world: &GameWorld, out: &mut crate::audio_emit::AudioEmitter) {
+        use makepad_game_audio::director::Category;
+        let Some(entity) = world.entity(self.entity) else {
+            return;
+        };
+        let planar = (entity.vel.x * entity.vel.x + entity.vel.z * entity.vel.z).sqrt();
+        let grounded = entity.on_floor;
+
+        // Landing: airborne last tick, on the floor now. Louder the harder
+        // the fall, which is the cue a player actually reads.
+        if grounded && self.audio_airborne {
+            let impact = (-self.audio_fall_speed / 12.0).clamp(0.15, 1.0);
+            out.cue("land", Category::Movement, entity.pos, impact, 1.0);
+            self.step.advance(0.0, 0.0, 1.0); // resync the stride
+        }
+        // Jump: left the floor with upward velocity.
+        if !grounded && !self.audio_airborne && entity.vel.y > 0.5 {
+            out.cue("jump", Category::Movement, entity.pos, 0.7, 1.0);
+        }
+        if grounded && self.step.advance(TICK_DT, planar, self.config.speed.max(0.5) * 0.75) {
+            // Running steps land harder than walking ones.
+            let effort = (planar / self.config.speed.max(0.001)).clamp(0.3, 1.4);
+            out.cue("footstep", Category::Movement, entity.pos, effort * 0.6, 1.0);
+        }
+        self.audio_airborne = !grounded;
+        self.audio_fall_speed = entity.vel.y;
     }
 }

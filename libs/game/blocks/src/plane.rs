@@ -64,6 +64,8 @@ pub struct Plane {
     pub throttle: f32,
     /// Current airspeed along the nose (diagnostics, HUD).
     pub airspeed: f32,
+    /// Audio-only retrigger clock (Local tier).
+    pub audio_t: f32,
 }
 
 impl Plane {
@@ -78,6 +80,7 @@ impl Plane {
             // throttle just falls out of the sky.
             throttle: 0.6,
             airspeed: 0.0,
+            audio_t: 0.0,
         }
     }
 
@@ -168,5 +171,28 @@ impl Plane {
             let level = level * (self.config.auto_level * inertia * authority);
             body_apply_torque(w, body, b3vec3(level.x, level.y, level.z), true);
         }
+    }
+}
+
+impl Plane {
+    /// Engine note by throttle. Planes carry further than cars, so the host
+    /// places these with a wider range.
+    pub fn emit_audio(&mut self, world: &GameWorld, out: &mut crate::audio_emit::AudioEmitter) {
+        use makepad_game_audio::director::Category;
+        let Some(entity) = world.entity(self.entity) else {
+            return;
+        };
+        self.audio_t += makepad_game_sim::TICK_DT;
+        if self.audio_t < 0.15 {
+            return;
+        }
+        self.audio_t = 0.0;
+        let speed = (entity.vel.x * entity.vel.x
+            + entity.vel.y * entity.vel.y
+            + entity.vel.z * entity.vel.z)
+            .sqrt();
+        let (gain, pitch) =
+            crate::audio_emit::engine_note(speed, self.config.top_speed, self.throttle);
+        out.cue("engine-air", Category::Movement, entity.pos, gain * 0.5, pitch);
     }
 }

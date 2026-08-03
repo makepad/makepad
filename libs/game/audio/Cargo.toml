@@ -1,0 +1,11 @@
+[package]
+name = "makepad-game-audio"
+version = "0.1.0"
+edition = "2021"
+description = "Sampled audio for Makepad Arcade: WAV/Vorbis decode, sample bank, mixer, and gameplay-driven emission (see game.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[dev-dependencies]
+makepad-game-sim = { path = "../sim" }
