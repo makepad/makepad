@@ -1,0 +1,14 @@
+[package]
+name = "makepad-game-script"
+version = "0.1.0"
+edition = "2021"
+description = "The game.* script binding layer for Makepad Arcade (see game.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../../widgets", version = "2.0.0" }
+makepad-game-sim = { path = "../sim" }
+makepad-game-blocks = { path = "../blocks" }
+
+[dev-dependencies]
+makepad-test = { path = "../../makepad_test", version = "0.1.0" }

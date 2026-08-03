@@ -7,6 +7,7 @@ workspace.members = [
     "libs/game/render",
     "libs/game/sim",
     "libs/game/blocks",
+    "libs/game/script",
     "libs/game/net",
     "libs/game/session",
     # === examples ===

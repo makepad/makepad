@@ -17,6 +17,9 @@ use makepad_game_render::{
 use makepad_game_session::{Session, SessionEvent};
 use makepad_game_sim::{BodyKind, Entity, GameWorld, Shape, SkyConfig, TICK_DT};
 use makepad_widgets::*;
+use makepad_game_script::ScriptHost;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -75,8 +78,8 @@ pub struct ArcadeView {
     #[rust]
     knight: Option<Knight>,
     /// Engine-side blocks: the drivable car and the patrolling character.
-    #[rust]
-    blocks: Blocks,
+    #[rust(Rc::new(RefCell::new(Blocks::new())))]
+    blocks: Rc<RefCell<Blocks>>,
     /// Held keys for the local player (arrow keys / WASD drive the car).
     #[rust]
     keys: KeySet,
@@ -90,8 +93,21 @@ pub struct ArcadeView {
     area: Area,
     #[rust]
     renderer: GameRenderer,
+    /// Shared with `script` when a game.splash is loaded, so both modes read
+    /// and write one world.
+    #[rust(Rc::new(RefCell::new(GameWorld::new())))]
+    world: Rc<RefCell<GameWorld>>,
+    /// Script-driven mode: a game.splash owns the world (game.md M4). None =
+    /// the built-in Rust demo world.
     #[rust]
-    world: GameWorld,
+    script: Option<ScriptHost>,
+    /// Where the loaded game lives, for the mtime watch.
+    #[rust]
+    game_path: Option<std::path::PathBuf>,
+    #[rust]
+    game_mtime: Option<std::time::SystemTime>,
+    #[rust(0.0f64)]
+    watch_accum: f64,
     /// Multiplayer role for this device. `ARCADE_HOST=1` hosts a room;
     /// `ARCADE_JOIN=<tcp_addr>` joins one. Unset means single-player, which is
     /// the same code path with a `Session::Local`.
@@ -101,6 +117,10 @@ pub struct ArcadeView {
     session_status: String,
     #[rust(false)]
     world_built: bool,
+    /// Offscreen pass targets are created once, independent of which mode
+    /// supplied the world (`#[new]` textures have no format and panic on use).
+    #[rust(false)]
+    pass_ready: bool,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -274,8 +294,58 @@ impl Knight {
 }
 
 impl ArcadeView {
+    /// Switch to script-driven mode: a `game.splash` owns the world.
+    /// Returns the eval error, if the first eval failed.
+    pub fn load_game(&mut self, cx: &mut Cx, path: &std::path::Path) -> Option<String> {
+        let source = std::fs::read_to_string(path).ok()?;
+        let mut host = ScriptHost::new();
+        // Share the host's world/blocks so render and input keep working
+        // through exactly the same fields as the demo path.
+        self.world = host.world.clone();
+        self.blocks = host.blocks.clone();
+        let report = {
+            let r = host.set_source(cx, &source);
+            r.map(|r| (r.ok, r.error, r.entities))
+        };
+        self.game_path = Some(path.to_path_buf());
+        self.game_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        self.script = Some(host);
+        self.world_built = true;
+        match report {
+            Some((false, error, _)) => error,
+            Some((true, _, entities)) => {
+                log!("arcade: eval ok, {entities} entities");
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Poll the game file; a changed mtime re-evals with last-good rollback.
+    /// Returns the new error text when an edit fails to compile.
+    fn watch_game_file(&mut self, cx: &mut Cx, dt: f64) -> Option<String> {
+        const WATCH_PERIOD: f64 = 0.25;
+        self.watch_accum += dt;
+        if self.watch_accum < WATCH_PERIOD {
+            return None;
+        }
+        self.watch_accum = 0.0;
+        let path = self.game_path.clone()?;
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if mtime == self.game_mtime {
+            return None;
+        }
+        self.game_mtime = mtime;
+        let source = std::fs::read_to_string(&path).ok()?;
+        let host = self.script.as_mut()?;
+        // A failed eval rolls the world back inside the host, so the player
+        // keeps the last world that worked.
+        host.set_source(cx, &source).and_then(|r| r.error)
+    }
+
     fn build_world(&mut self) {
-        let w = &mut self.world;
+        let mut world = self.world.borrow_mut();
+        let w = &mut *world;
         w.reset_content();
         w.sky = Some(SkyConfig::default());
         w.cam_target = vec3f(0.0, 3.0, 0.0);
@@ -410,8 +480,10 @@ impl ArcadeView {
     /// Spawn the driveable car and the patrolling Knight, proving blocks work
     /// outside gamemaker: no script VM anywhere in this app.
     fn spawn_blocks(&mut self) {
-        self.blocks.clear();
-        let w = &mut self.world;
+        let mut blocks = self.blocks.borrow_mut();
+        blocks.clear();
+        let mut world = self.world.borrow_mut();
+        let w = &mut *world;
         w.next_id += 1;
         let car = w.next_id;
         w.push_entity(Entity {
@@ -431,7 +503,7 @@ impl ArcadeView {
             ..Default::default()
         });
         w.mark_render_dirty();
-        self.blocks.cars.push(Car::new(
+        blocks.cars.push(Car::new(
             car,
             CarConfig::default(),
             ControlSource::Player,
@@ -445,7 +517,7 @@ impl ArcadeView {
             .find(|e| e.tag == "knight")
             .map(|e| e.id);
         if let Some(id) = knight_entity {
-            self.blocks.characters.push(Character::new(
+            blocks.characters.push(Character::new(
                 id,
                 CharacterConfig::default(),
                 ControlSource::Script,
@@ -470,7 +542,8 @@ impl ArcadeView {
     }
 
     fn run_tick(&mut self) {
-        let w = &mut self.world;
+        let mut world = self.world.borrow_mut();
+        let w = &mut *world;
         let t = w.time as f32;
         for e in w.entities.iter_mut() {
             match e.tag.as_str() {
@@ -507,13 +580,14 @@ impl ArcadeView {
             }
         }
         let _ = w;
-        self.blocks.player_input = self.player_input();
+        let player_input = self.player_input();
+        self.blocks.borrow_mut().player_input = player_input;
         // One tick, whichever role this device holds: Local and Host simulate,
         // a Client applies host truth and derives the rest.
-        let now = self.world.tick as f64 * TICK_DT as f64;
+        let now = self.world.borrow().tick as f64 * TICK_DT as f64;
         for event in self
             .session
-            .tick(&mut self.world, &mut self.blocks, now)
+            .tick(&mut self.world.borrow_mut(), &mut self.blocks.borrow_mut(), now)
         {
             self.session_status = match event {
                 SessionEvent::Joined { name, .. } => format!("{name} joined"),
@@ -573,7 +647,7 @@ impl ArcadeView {
 
     fn scene(&self, rect: Rect, time: f64) -> Option<SceneState3D> {
         render_scene_state(
-            &self.world,
+            &self.world.borrow(),
             rect,
             time,
             &CameraRig {
@@ -620,14 +694,27 @@ impl Widget for ArcadeView {
             let mut ticked = false;
             while self.time_accum >= TICK_DT as f64 {
                 self.time_accum -= TICK_DT as f64;
-                self.run_tick();
+                if self.script.is_some() {
+                    // Script mode: the host owns on_tick, timers and physics.
+                    let input = self.player_input();
+                    if let Some(host) = &mut self.script {
+                        host.blocks.borrow_mut().player_input = input;
+                        host.tick(cx, TICK_DT);
+                    }
+                } else {
+                    self.run_tick();
+                }
                 ticked = true;
+            }
+            if let Some(err) = self.watch_game_file(cx, (time - last).min(0.25)) {
+                // Push-back channel: the agent that made the edit needs this.
+                log!("arcade: eval failed, keeping last good world:\n{err}");
             }
             // Test hook: ARCADE_CAPTURE=<path.png> grabs a GPU frame once the
             // world has settled (~2s), then the harness kills the app.
             // `>=` + take-once: the accumulator can step several ticks per
             // frame, so an exact tick compare would skip silently.
-            if self.world.tick >= 120 && !self.captured_1 {
+            if self.world.borrow().tick >= 120 && !self.captured_1 {
                 self.captured_1 = true;
                 if let Some(path) = std::env::var_os("ARCADE_CAPTURE") {
                     cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
@@ -635,7 +722,7 @@ impl Widget for ArcadeView {
             }
             // Second capture much later in the anim cycle: a different pose
             // proves the animation actually advances.
-            if self.world.tick >= 300 && !self.captured_2 {
+            if self.world.borrow().tick >= 300 && !self.captured_2 {
                 self.captured_2 = true;
                 if let Some(path) = std::env::var_os("ARCADE_CAPTURE2") {
                     cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
@@ -677,8 +764,8 @@ impl Widget for ArcadeView {
                 };
                 if scroll_axis.abs() > f64::EPSILON {
                     let factor = if scroll_axis > 0.0 { 1.0 / 0.92 } else { 0.92 };
-                    self.world.cam_distance =
-                        (self.world.cam_distance * factor).clamp(2.0, 120.0);
+                    let mut w = self.world.borrow_mut();
+                    w.cam_distance = (w.cam_distance * factor).clamp(2.0, 120.0);
                     self.area.redraw(cx);
                 }
             }
@@ -692,6 +779,17 @@ impl Widget for ArcadeView {
             return DrawStep::done();
         }
         if !self.world_built {
+            log!("{}", crate::capability::Capabilities::detect().report());
+            if let Some(path) = std::env::var_os("ARCADE_GAME") {
+                let path = std::path::PathBuf::from(path);
+                match self.load_game(cx, &path) {
+                    Some(err) => log!("arcade: {} failed to eval:\n{err}", path.display()),
+                    None => log!("arcade: loaded {}", path.display()),
+                }
+            }
+        }
+        if !self.pass_ready {
+            self.pass_ready = true;
             // Offscreen pass targets (same formats GameView uses).
             self.color_texture = Texture::new_with_format(
                 cx.cx,
@@ -720,8 +818,9 @@ impl Widget for ArcadeView {
             cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
             self.start_session();
             // A client's world arrives from the host; building a local one
-            // would only be overwritten on the first state batch.
-            if self.session.simulates() {
+            // would only be overwritten on the first state batch. Script mode
+            // already built its world from game.splash.
+            if self.session.simulates() && !self.world_built {
                 self.build_world();
                 self.spawn_blocks();
             }
@@ -805,7 +904,7 @@ impl Widget for ArcadeView {
                 cx3d,
                 &mut self.draw_list,
                 &mut draws,
-                &self.world,
+                &self.world.borrow(),
                 scene_state,
                 batch,
             );
