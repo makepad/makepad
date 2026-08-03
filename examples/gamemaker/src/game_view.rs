@@ -1104,6 +1104,13 @@ impl GameView {
             jump_pressed: world.action_pressed(live_id!(jump)),
             pitch: -axis_z,
             roll: axis_x,
+            // Gamemaker has its own camera and no mount verb, so the look
+            // deltas and the seat toggle stay unused here; the controller
+            // prefab in libs/game/blocks is what consumes them.
+            look_dx: 0.0,
+            look_dy: 0.0,
+            run: false,
+            use_pressed: false,
         }
     }
 
