@@ -11,6 +11,8 @@
 
 pub mod cache;
 pub mod implicit;
+pub mod kit;
+pub mod levelgen;
 pub mod lsystem;
 pub mod mesh;
 pub mod rng;
@@ -21,6 +23,8 @@ pub mod tree;
 
 pub use cache::*;
 pub use implicit::*;
+pub use kit::*;
+pub use levelgen::*;
 pub use lsystem::*;
 pub use mesh::*;
 pub use rng::*;
