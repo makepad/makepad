@@ -58,3 +58,25 @@ tesla_credentials.json
 # local scratch, it churns every session, and it had grown to ~30 MB of chat
 # JSON and terminal buffers carrying developer email addresses and home paths.
 .makepad/
+
+# Working notes, plans and handoff docs. These are scratch for whoever is
+# mid-task — they go stale the moment the work lands, and a repo root full of
+# them buries the three docs that are actually reference material. Kept on
+# disk, out of the repo. The reference docs (README, splash.md, splashgame.md)
+# and the Studio runbook (AGENTS.md) stay tracked.
+/aigame*.md
+/blur.md
+/bridge.md
+/datasources.md
+/game.md
+/glass.md
+/gps.md
+/handoff.md
+/isolate.md
+/layers.md
+/map.md
+/map2.md
+/profiler.md
+/route.md
+/shiny.md
+/status.md
