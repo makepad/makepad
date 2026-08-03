@@ -17,7 +17,7 @@ use makepad_draw::makepad_math::{Mat4f, Quat, Vec3f};
 
 /// Minimal owned JSON value — glTF headers are small (a few hundred KB max),
 /// clarity beats speed here.
-enum Val {
+pub(crate) enum Val {
     Null,
     Bool(bool),
     Num(f64),
@@ -27,34 +27,34 @@ enum Val {
 }
 
 impl Val {
-    fn get(&self, key: &str) -> Option<&Val> {
+    pub(crate) fn get(&self, key: &str) -> Option<&Val> {
         match self {
             Val::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
-    fn idx(&self, i: usize) -> Option<&Val> {
+    pub(crate) fn idx(&self, i: usize) -> Option<&Val> {
         match self {
             Val::Arr(items) => items.get(i),
             _ => None,
         }
     }
-    fn arr(&self) -> &[Val] {
+    pub(crate) fn arr(&self) -> &[Val] {
         match self {
             Val::Arr(items) => items,
             _ => &[],
         }
     }
-    fn f64(&self) -> Option<f64> {
+    pub(crate) fn f64(&self) -> Option<f64> {
         match self {
             Val::Num(n) => Some(*n),
             _ => None,
         }
     }
-    fn usize(&self) -> Option<usize> {
+    pub(crate) fn usize(&self) -> Option<usize> {
         self.f64().map(|n| n as usize)
     }
-    fn str(&self) -> Option<&str> {
+    pub(crate) fn str(&self) -> Option<&str> {
         match self {
             Val::Str(s) => Some(s),
             _ => None,
@@ -62,13 +62,13 @@ impl Val {
     }
 }
 
-struct JsonParser<'a> {
+pub(crate) struct JsonParser<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> JsonParser<'a> {
-    fn parse(bytes: &'a [u8]) -> Result<Val, String> {
+    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Val, String> {
         let mut p = JsonParser { bytes, pos: 0 };
         let v = p.value()?;
         Ok(v)
@@ -294,7 +294,7 @@ pub struct SkinnedModel {
     pub skipped_unskinned: usize,
 }
 
-fn trs_to_mat4(trs: &NodeTrs) -> Mat4f {
+pub(crate) fn trs_to_mat4(trs: &NodeTrs) -> Mat4f {
     let q = trs.r;
     let (x2, y2, z2) = (q.x + q.x, q.y + q.y, q.z + q.z);
     let (xx, yy, zz) = (q.x * x2, q.y * y2, q.z * z2);
@@ -324,7 +324,7 @@ fn trs_to_mat4(trs: &NodeTrs) -> Mat4f {
     }
 }
 
-fn mat4_mul_point(m: &Mat4f, p: Vec3f) -> Vec3f {
+pub(crate) fn mat4_mul_point(m: &Mat4f, p: Vec3f) -> Vec3f {
     Vec3f {
         x: m.v[0] * p.x + m.v[4] * p.y + m.v[8] * p.z + m.v[12],
         y: m.v[1] * p.x + m.v[5] * p.y + m.v[9] * p.z + m.v[13],
@@ -332,7 +332,7 @@ fn mat4_mul_point(m: &Mat4f, p: Vec3f) -> Vec3f {
     }
 }
 
-fn mat4_mul_dir(m: &Mat4f, p: Vec3f) -> Vec3f {
+pub(crate) fn mat4_mul_dir(m: &Mat4f, p: Vec3f) -> Vec3f {
     Vec3f {
         x: m.v[0] * p.x + m.v[4] * p.y + m.v[8] * p.z,
         y: m.v[1] * p.x + m.v[5] * p.y + m.v[9] * p.z,
@@ -342,9 +342,9 @@ fn mat4_mul_dir(m: &Mat4f, p: Vec3f) -> Vec3f {
 
 // -------------------------------------------------------------- accessors
 
-struct Accessors<'a> {
-    json: &'a Val,
-    bin: &'a [u8],
+pub(crate) struct Accessors<'a> {
+    pub(crate) json: &'a Val,
+    pub(crate) bin: &'a [u8],
 }
 
 impl<'a> Accessors<'a> {
@@ -369,7 +369,7 @@ impl<'a> Accessors<'a> {
 
     /// Read accessor `index` as f32 lanes (integers are normalized when the
     /// accessor says so, else converted — the glTF rules for weights/joints).
-    fn read_f32(&self, index: usize) -> Result<(Vec<f32>, usize), String> {
+    pub(crate) fn read_f32(&self, index: usize) -> Result<(Vec<f32>, usize), String> {
         let acc = self
             .json
             .get("accessors")
@@ -877,7 +877,7 @@ pub const SKIN_VERTEX_FLOATS: usize = 6;
 /// Octahedral normal encoding: a unit vector into two components in [-1, 1].
 /// Standard sphere->octahedron->square unfolding; ~1 degree of error at f16,
 /// far below what flat-shaded game geometry can show.
-fn oct_encode(n: Vec3f) -> (f32, f32) {
+pub(crate) fn oct_encode(n: Vec3f) -> (f32, f32) {
     let l1 = n.x.abs() + n.y.abs() + n.z.abs();
     if l1 < 1.0e-8 {
         return (0.0, 0.0);

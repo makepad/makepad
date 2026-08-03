@@ -14,6 +14,7 @@
 pub mod bake;
 pub mod geometry;
 pub mod hud;
+pub mod model;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;
@@ -27,6 +28,7 @@ pub mod sun;
 pub use bake::*;
 pub use geometry::*;
 pub use hud::*;
+pub use model::*;
 pub use renderer::*;
 pub use scene::*;
 pub use shaders::*;

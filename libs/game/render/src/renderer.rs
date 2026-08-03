@@ -12,6 +12,7 @@ use crate::shaders::{
     DrawGameAlpha, DrawGameCube, DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain,
 };
 use crate::shadow_mesh::{caster_points, skinned_proxy_points, Receiver, ShadowMeshBuilder};
+use crate::model::StaticModel;
 use crate::stage::Stage;
 use crate::particles::ParticleInstance;
 use crate::sun::GameSun;
@@ -48,6 +49,12 @@ pub struct RenderStats {
     pub projected_shadows: u64,
     /// Device-local particles drawn this frame.
     pub particles: u64,
+    /// Stock props placed this frame, and how many draw items they cost.
+    /// `model_draws` < `model_instances` is the batching working: copies of
+    /// one prop share a draw item.
+    pub model_instances: u64,
+    pub model_draws: u64,
+    pub model_triangles: usize,
     /// What the CPU light bake cost (bake.rs). Zero on frames it skipped.
     pub bake: BakeStats,
     /// Floats per cube instance, read from the compiled shader rather than
@@ -76,6 +83,13 @@ pub struct GameRenderer {
     /// GPU meshes for CPU-skinned characters, keyed by caller id, re-uploaded
     /// every frame (the skinning happens CPU-side; see skin.rs).
     skinned_geometries: Vec<(u64, Geometry)>,
+    /// Static stock props, uploaded ONCE and keyed by asset id — the opposite
+    /// of `skinned_geometries` above, which re-uploads per frame because CPU
+    /// skinning changes the vertices. A prop's vertices never change, so its
+    /// per-frame cost is one instance. See model.rs.
+    static_models: Vec<(String, LoadedModel)>,
+    /// Stock props placed for this frame, set by the host before drawing.
+    placed_models: Vec<ModelInstance>,
     /// How this device projects the world (flat / VR 1:1 / MR diorama).
     /// Applied as the scene draw list's view transform, so it costs one
     /// uniform and never invalidates the static slabs. See stage.rs.
@@ -122,6 +136,23 @@ pub struct SkinnedBatch<'a> {
     pub skinned: &'a mut DrawGameSkinned,
     pub texture: &'a Texture,
     pub items: Vec<SkinnedDraw>,
+}
+
+/// A stock prop resident on the GPU: geometry uploaded once, plus the pack
+/// atlas it samples. Thousands of models share a few dozen atlases, which is
+/// what keeps a whole pack's worth of props cheap to draw.
+struct LoadedModel {
+    geometry: Geometry,
+    texture: Texture,
+    triangles: usize,
+}
+
+/// One placed stock prop. `model` is the asset id it was loaded under, e.g.
+/// `kenney/car-kit/ambulance`.
+#[derive(Clone)]
+pub struct ModelInstance {
+    pub model: String,
+    pub transform: Mat4f,
 }
 
 fn perf_us(t0: std::time::Instant) -> u64 {
@@ -186,6 +217,8 @@ impl Default for GameRenderer {
             terrain_geometry: None,
             terrain_revision: 0,
             skinned_geometries: Vec::new(),
+            static_models: Vec::new(),
+            placed_models: Vec::new(),
             stage: Stage::default(),
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             particle_instances: Vec::new(),
@@ -226,6 +259,12 @@ impl GameRenderer {
     /// batch, so any number of them still costs zero extra draw calls.
     pub fn set_particles(&mut self, instances: Vec<ParticleInstance>) {
         self.particle_instances = instances;
+    }
+
+    /// Hand this frame's stock props to the renderer. Order does not matter —
+    /// `draw_models_inner` sorts by model so copies batch together.
+    pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
+        self.placed_models = instances;
     }
 
     /// How much CPU the light bake may spend (bake.rs). Lower `ao_rays` and
@@ -596,6 +635,112 @@ impl GameRenderer {
         }
     }
 
+    /// Load a stock prop onto the GPU under `id`, idempotent. `png` is the
+    /// pack atlas, shared by every model in that pack.
+    pub fn load_model(
+        &mut self,
+        cx: &mut Cx,
+        id: &str,
+        glb: &[u8],
+        png: Option<&[u8]>,
+    ) -> Result<usize, String> {
+        if let Some(at) = self.static_models.iter().position(|(k, _)| k == id) {
+            return Ok(self.static_models[at].1.triangles);
+        }
+        let model = StaticModel::parse_glb(glb)?;
+        let triangles = model.triangle_count();
+        let geometry = Geometry::new(cx);
+        geometry.update(cx, model.indices, model.vertices);
+        // Two Kenney conventions, one path. A pack that UV-maps into an atlas
+        // needs that atlas — missing it would render white, which reads as a
+        // broken model, so it is an error. A pack that carries no texture at
+        // all (nature-kit: flat per-material colours) is correct with a white
+        // 1x1, because model.rs baked those colours into the vertex tint and
+        // the shader multiplies the two.
+        let texture = match (png, model.texture_uri.as_deref()) {
+            (Some(bytes), _) => ImageBuffer::from_png(bytes)
+                .map_err(|e| format!("{id}: atlas decode failed: {e:?}"))?
+                .into_new_texture(cx),
+            (None, None) => {
+                let mut white = ImageBuffer::default();
+                white.width = 1;
+                white.height = 1;
+                white.data = vec![0xFFFF_FFFF];
+                white.into_new_texture(cx)
+            }
+            (None, Some(uri)) => {
+                return Err(format!(
+                    "{id}: atlas {uri} missing — run apps/arcade/download_assets.sh"
+                ))
+            }
+        };
+        self.static_models.push((
+            id.to_string(),
+            LoadedModel {
+                geometry,
+                texture,
+                triangles,
+            },
+        ));
+        Ok(triangles)
+    }
+
+    pub fn model_is_loaded(&self, id: &str) -> bool {
+        self.static_models.iter().any(|(k, _)| k == id)
+    }
+
+    /// Draw the placed stock props. Instances are grouped by model, so N
+    /// copies of one prop cost ONE draw item with N instances rather than N
+    /// draws — which is what makes a scene full of stock trees affordable.
+    fn draw_models_inner(
+        &mut self,
+        cx: &mut Cx3d,
+        draw: &mut DrawGameSkinned,
+        instances: &[ModelInstance],
+        fog: (Vec3f, f32),
+        sun: &GameSun,
+        stats: &mut RenderStats,
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        sun.write_into(
+            &mut draw.light_dir,
+            &mut draw.sun_color,
+            &mut draw.sun_sky,
+            &mut draw.sun_ground,
+        );
+        draw.fog_color = fog.0;
+        draw.fog_density = fog.1;
+        draw.depth_clip = 1.0;
+        // Sort by model so equal geometry+texture land adjacent: consecutive
+        // add_instance calls with unchanged geometry and texture accumulate
+        // into a single draw item.
+        let mut order: Vec<usize> = (0..instances.len()).collect();
+        order.sort_by(|a, b| instances[*a].model.cmp(&instances[*b].model));
+        let mut last: Option<String> = None;
+        for i in order {
+            let inst = &instances[i];
+            let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model) else {
+                continue;
+            };
+            let loaded = &self.static_models[at];
+            draw.draw_vars.geometry_id = Some(loaded.1.geometry.geometry_id());
+            draw.draw_vars.set_texture(0, &loaded.1.texture);
+            draw.transform = inst.transform;
+            if last.as_deref() != Some(inst.model.as_str()) {
+                stats.model_draws += 1;
+                last = Some(inst.model.clone());
+            }
+            stats.model_instances += 1;
+            stats.model_triangles += loaded.1.triangles;
+            if draw.draw_vars.can_instance() {
+                let new_area = cx.add_instance(&draw.draw_vars);
+                draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
+            }
+        }
+    }
+
     /// Upload + draw the skinned batch inside the already-open scene pass.
     fn draw_skinned_inner(
         &mut self,
@@ -653,7 +798,7 @@ impl GameRenderer {
         world: &GameWorld,
         scene_state: SceneState3D,
     ) -> RenderStats {
-        self.draw_scene_full(cx, draw_list, draws, world, scene_state, None)
+        self.draw_scene_full(cx, draw_list, draws, world, scene_state, None, None)
     }
 
     /// [`draw_scene`] plus an optional skinned-character batch.
@@ -665,6 +810,7 @@ impl GameRenderer {
         world: &GameWorld,
         scene_state: SceneState3D,
         skinned: Option<SkinnedBatch>,
+        models_draw: Option<&mut DrawGameSkinned>,
     ) -> RenderStats {
         let mut stats = RenderStats::default();
         let camera_pos = scene_state.camera_pos;
@@ -967,6 +1113,14 @@ impl GameRenderer {
                 }
             }
             self.draw_skinned_inner(cx, batch, (fog_color, fog_density), &sun);
+        }
+
+        // Stock props: the same shader as the skinned path (both are textured
+        // packed meshes), but with geometry uploaded once instead of per frame.
+        if let Some(draw) = models_draw {
+            let instances = std::mem::take(&mut self.placed_models);
+            self.draw_models_inner(cx, draw, &instances, (fog_color, fog_density), &sun, &mut stats);
+            self.placed_models = instances;
         }
 
         // 4. Alpha pass, one batch per shape: static sensors from the slab,
