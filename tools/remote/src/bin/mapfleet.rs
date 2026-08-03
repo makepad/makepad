@@ -39,6 +39,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Version-handshake fixture: one real AMS z14 tile. Boxes bake it and
+/// must reproduce the dispatcher's cascade signatures exactly; a stale
+/// checkout is refused before it can bake mismatched cells (run #1 shipped
+/// a whole planet of signature-dead bakes this guard would have caught).
+const FINGERPRINT_FIXTURE: &str = "local/maps/fleet-fingerprint.mbtiles";
+
 const BAKE_ARGS: &[&str] = &[
     "--zooms",
     "10,11,12,13,14",
@@ -72,6 +78,8 @@ struct Config {
 
 struct Shared {
     cells: Vec<String>, // "w,s,e,n" per line, spiral order
+    /// Local cascade fingerprint remote workers must reproduce.
+    fingerprint: Option<String>,
     next: AtomicUsize,
     /// Cells a worker is actively slicing/baking. The final weave waits
     /// for this to drain so late arrivals are never left out of the shard.
@@ -90,6 +98,20 @@ struct Shared {
     /// slicing is safe; ten workers need a fresh cell every couple of
     /// minutes and the NVMe sustains three readers without thrash.
     slice_gate: Mutex<usize>,
+}
+
+fn local_fingerprint() -> Option<String> {
+    let output = Command::new("./target/release/mpbake-run")
+        .args([FINGERPRINT_FIXTURE, "unused", "--fingerprint"])
+        .output()
+        .ok()?;
+    parse_fingerprint(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_fingerprint(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("MAPBAKE-FINGERPRINT "))
+        .map(|v| v.trim().to_string())
 }
 
 fn main() {
@@ -112,8 +134,14 @@ fn main() {
     std::fs::create_dir_all(&config.out).ok();
     sweep_stale_sort_chunks(&config);
 
+    let fingerprint = local_fingerprint();
+    match &fingerprint {
+        Some(fp) => println!("mapfleet: local bake fingerprint {fp}"),
+        None => eprintln!("mapfleet: WARNING no local fingerprint — remote version handshake disabled"),
+    }
     let shared = Arc::new(Shared {
         cells,
+        fingerprint,
         next: AtomicUsize::new(0),
         active: AtomicUsize::new(0),
         weave_dirty: AtomicBool::new(false),
@@ -492,18 +520,54 @@ fn local_worker(shared: &Shared, config: &Config) {
 }
 
 fn remote_worker(host: &str, shared: &Shared, config: &Config) {
-    // Bootstrap: build the bake tool on the box (no-op when cached).
+    // Bootstrap: build the bake tool on the box (no-op when cached),
+    // then the version handshake — the box must reproduce the local
+    // cascade fingerprint on the pushed fixture tile or it is refused.
     println!("mapfleet: {host} bootstrap build");
     loop {
         match remote_run(host, &["build", "-p", "makepad-map-bake", "--release"], &[]) {
-            Ok(0) => {
-                println!("mapfleet: {host} bootstrap ready");
-                break;
-            }
+            Ok(0) => {}
             other => {
                 // Box may be mid-fix (toolchain, link.exe, git pull) —
                 // keep retrying so it joins the moment it is healthy.
                 eprintln!("mapfleet: {host} bootstrap failed ({other:?}) — retry in 5min");
+                thread::sleep(Duration::from_secs(300));
+                continue;
+            }
+        }
+        let Some(expected) = shared.fingerprint.clone() else {
+            println!("mapfleet: {host} bootstrap ready (handshake disabled)");
+            break;
+        };
+        let fixture = vec![(
+            "fleet/fingerprint.mbtiles".to_string(),
+            PathBuf::from(FINGERPRINT_FIXTURE),
+        )];
+        let run = [
+            "run", "-p", "makepad-map-bake", "--release", "--",
+            "fleet/fingerprint.mbtiles", "unused", "--fingerprint",
+        ];
+        match remote_run_capture(host, &run, &fixture) {
+            Ok((0, output)) => match parse_fingerprint(&output) {
+                Some(fp) if fp == expected => {
+                    println!("mapfleet: {host} bootstrap ready (fingerprint {fp})");
+                    break;
+                }
+                Some(fp) => {
+                    eprintln!(
+                        "mapfleet: {host} REFUSED — bake fingerprint {fp} != local {expected} (stale checkout?) — retry in 10min"
+                    );
+                    thread::sleep(Duration::from_secs(600));
+                }
+                None => {
+                    eprintln!(
+                        "mapfleet: {host} REFUSED — no fingerprint in output (old bake tool) — retry in 10min"
+                    );
+                    thread::sleep(Duration::from_secs(600));
+                }
+            },
+            other => {
+                eprintln!("mapfleet: {host} fingerprint run failed ({other:?}) — retry in 5min");
                 thread::sleep(Duration::from_secs(300));
             }
         }
@@ -647,6 +711,42 @@ fn remote_connect(host: &str) -> io::Result<TcpStream> {
     let stream = TcpStream::connect(host)?;
     stream.set_nodelay(true).ok();
     Ok(stream)
+}
+
+fn remote_run_capture(
+    host: &str,
+    cargo_args: &[&str],
+    files: &[(String, PathBuf)],
+) -> io::Result<(i32, String)> {
+    let mut stream = remote_connect(host)?;
+    for (remote_path, local_path) in files {
+        let data = std::fs::read(local_path)?;
+        let payload = encode_file_data(remote_path, &data);
+        write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
+    }
+    write_msg(&mut stream, TAG_CARGO_RUN, cargo_args.join("\n").as_bytes())?;
+    let mut exit_code = 1;
+    let mut output = String::new();
+    loop {
+        let (tag, payload) = read_msg(&mut stream)?;
+        match tag {
+            TAG_OUTPUT => {
+                if payload.len() > 1 {
+                    output.push_str(&String::from_utf8_lossy(&payload[1..]));
+                }
+            }
+            TAG_EXIT_CODE => {
+                if payload.len() >= 4 {
+                    exit_code =
+                        i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    stream.shutdown(std::net::Shutdown::Both).ok();
+    Ok((exit_code, output))
 }
 
 fn remote_run(host: &str, cargo_args: &[&str], files: &[(String, PathBuf)]) -> io::Result<i32> {
