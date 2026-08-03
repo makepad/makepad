@@ -5,6 +5,14 @@ edition = "2021"
 description = "Makepad Arcade — networked AI game sandbox (see game.md)"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "makepad_arcade"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-arcade"
+path = "src/main.rs"
+
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-game-math = { path = "../../libs/game/math" }
@@ -17,13 +25,16 @@ makepad-game-net = { path = "../../libs/game/net" }
 makepad-game-coedit = { path = "../../libs/game/coedit" }
 makepad-game-pkg = { path = "../../libs/game/pkg" }
 makepad-ai = { path = "../../libs/makepad_ai" }
-makepad-converse = { path = "../../libs/converse" }
+# default-features off drops speech synthesis (~10 MB of binary, ~327 MB
+# resident). Re-enabled by `voice` below: a device that can capture speech is
+# the one that has any use for producing it.
+makepad-converse = { path = "../../libs/converse", default-features = false }
 
 [features]
 # Mic capture + Whisper, via the widgets VoiceWave. Separate from `local-llm`
 # because transcription and the local judge are different models: a device can
 # have one without the other.
-voice = ["makepad-widgets/voice"]
+voice = ["makepad-widgets/voice", "makepad-converse/tts"]
 # Local model compute (Whisper/Silero/Qwen). Off by default so Quest/mobile
 # builds — which have no backend — never try to link it. Implies `voice`:
 # the judge only has something to judge once there is a mic.
