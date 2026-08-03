@@ -72,6 +72,7 @@ impl Splash {
             column: 0,
             code: String::new(),
             values: vec![],
+            cfg_fragments: Vec::new(),
         };
 
         let vm_id = self.vm_id;

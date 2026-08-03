@@ -790,6 +790,7 @@ fn run_script_build(
         column: 1,
         code,
         values: Vec::new(),
+        cfg_fragments: Vec::new(),
     };
 
     let result = with_vm_and_async(&mut host, &mut std, &mut script_vm, |vm| {

@@ -1,0 +1,15 @@
+[package]
+name = "makepad-example-script-mod-cfg-gating"
+version = "1.0.0"
+edition = "2021"
+
+[features]
+default = []
+# When enabled, the `script_mod!` block includes a "PRO" tab with extra widgets.
+# Build/run with: `cargo run -p makepad-example-script-mod-cfg-gating --features=pro`
+pro = []
+# When enabled, the `script_mod!` block includes a debug-stats panel.
+debug_panel = []
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }

@@ -10,6 +10,25 @@ use crate::traits::ScriptTypeObject;
 use crate::value::*;
 use std::fmt::Write;
 
+/// Truncate `s` to at most `max_chars` characters, appending `"..."` when
+/// content was dropped. Char-boundary safe — never slices a multibyte char in
+/// half (previously this used byte indexing and panicked on strings like
+/// "PRO build — extra controls").
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+    let mut iter = s.char_indices();
+    let mut count = 0;
+    for (_, _) in iter.by_ref() {
+        count += 1;
+        if count == max_chars {
+            break;
+        }
+    }
+    match iter.next() {
+        Some((boundary, _)) => format!("{}...", &s[..boundary]),
+        None => s.to_string(),
+    }
+}
+
 /// Compute Levenshtein distance between two strings
 pub fn levenshtein(a: &str, b: &str) -> usize {
     let a_len = a.len();
@@ -86,24 +105,13 @@ pub fn format_value_brief(heap: &ScriptHeap, value: ScriptValue) -> String {
 
     // Handle inline strings
     if let Some(s) = value.as_inline_string(|s| s.to_string()) {
-        let truncated = if s.len() > 12 {
-            format!("{}...", &s[..12])
-        } else {
-            s
-        };
-        return format!("\"{}\"", truncated);
+        return format!("\"{}\"", truncate_to_chars(&s, 12));
     }
 
     // Handle heap strings
     if let Some(s) = value.as_string() {
         if let Some(str_data) = &heap.strings[s] {
-            let s = &str_data.string.0;
-            let truncated = if s.len() > 12 {
-                format!("{}...", &s[..12])
-            } else {
-                s.to_string()
-            };
-            return format!("\"{}\"", truncated);
+            return format!("\"{}\"", truncate_to_chars(&str_data.string.0, 12));
         }
         return "\"\"".to_string();
     }
@@ -680,3 +688,36 @@ pub fn suggest_pod_field(heap: &ScriptHeap, pod_ty: ScriptPodType, field: LiveId
         _ => String::new(),
     }
 }
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_to_chars;
+
+    #[test]
+    fn ascii_short_passes_through() {
+        assert_eq!(truncate_to_chars("hi", 12), "hi");
+    }
+
+    #[test]
+    fn ascii_long_truncates_with_ellipsis() {
+        assert_eq!(truncate_to_chars("hello world goodbye", 12), "hello world ...");
+    }
+
+    #[test]
+    fn multibyte_em_dash_does_not_panic() {
+        // The string that triggered the original panic — em-dash at byte 10..13.
+        let s = "PRO build — extra controls below";
+        let out = truncate_to_chars(s, 12);
+        // Must produce a valid UTF-8 string without panicking; truncation
+        // happens on a char boundary.
+        assert!(out.ends_with("..."));
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn multibyte_short_passes_through_intact() {
+        let s = "café";
+        assert_eq!(truncate_to_chars(s, 12), "café");
+    }
+}
+

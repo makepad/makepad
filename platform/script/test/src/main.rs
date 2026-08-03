@@ -4854,6 +4854,7 @@ View{
                     column: 0,
                     code: String::new(),
                     values: vec![],
+                    cfg_fragments: Vec::new(),
                 };
                 // Execute incrementally — errors are expected for incomplete code,
                 // but panics/crashes would indicate bad opcode generation.
@@ -4881,6 +4882,7 @@ View{
                     column: 0,
                     code: String::new(),
                     values: vec![],
+                    cfg_fragments: Vec::new(),
                 };
                 let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
                 pos = end;
