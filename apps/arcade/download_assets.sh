@@ -31,6 +31,30 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resources"
 MODELS="$ROOT/models/kenney"
 CHARS="$ROOT/characters"
 AUDIO="$ROOT/audio/kenney"
+MANIFEST="$ROOT/MIRROR.toml"
+
+# ---------------------------------------------------------------------------
+# 3D model packs (the full Kenney 3D catalogue) are described by
+# resources/MIRROR.toml rather than inlined here: 50 packs is too many to keep
+# readable in shell, and that file is also what makes an independent mirror
+# reproducible.
+#
+# Source selection:
+#   ARCADE_ASSET_MIRROR=https://our.host/path   or  --mirror=<base>
+# A mirror is expected to serve <base>/<slug>.zip. Whichever host serves the
+# bytes, the sha256 from MIRROR.toml is verified identically — a mirror is
+# never trusted more than upstream.
+#
+# Selection:
+#   (default)        the "core" packs — ~1900 models, ~60 MB
+#   --packs=all      every usable pack — 4669 models, ~166 MB
+#   --packs=a,b,c    named packs
+# ---------------------------------------------------------------------------
+MIRROR="${ARCADE_ASSET_MIRROR:-}"
+PACKSEL="core"
+fetched=0
+cached=0
+
 
 # Kenney audio packs, pinned by content-hashed download URL.
 # Each entry: <pack>|<url-hash-segment>|<sha256 of zip>|<sound count>
@@ -155,6 +179,29 @@ pack_files() {
 
 pack_count() { pack_files "$1" | wc -l | tr -d ' '; }
 
+# Read MIRROR.toml into parallel arrays: slug, url, sha, models, core, usable.
+manifest_rows() {
+	awk '
+		/^\[\[pack\]\]/ { slug=url=sha=""; models=0; core="false"; usable="false"; next }
+		/^slug =/    { gsub(/.*= "|"/, ""); slug=$0; next }
+		/^url =/     { gsub(/.*= "|"/, ""); url=$0; next }
+		/^sha256 =/  { gsub(/.*= "|"/, ""); sha=$0; next }
+		/^models =/  { gsub(/[^0-9]/, ""); models=$0; next }
+		/^core =/    { gsub(/.*= /, ""); core=$0; next }
+		/^usable =/  { gsub(/.*= /, ""); usable=$0
+		               if (slug != "") print slug "|" url "|" sha "|" models "|" core "|" usable
+		               next }
+	' "$MANIFEST"
+}
+
+want_pack() { # <slug> <core>
+	case "$PACKSEL" in
+	all) return 0 ;;
+	core) [[ "$2" == "true" ]] ;;
+	*) [[ ",$PACKSEL," == *",$1,"* ]] ;;
+	esac
+}
+
 if [[ "${1:-}" == "--list" ]]; then
 	echo "Makepad Arcade stock asset library"
 	echo
@@ -164,10 +211,25 @@ if [[ "${1:-}" == "--list" ]]; then
 		printf '%-12s %-6s %-10s %s\n' "$pack" "$(pack_count "$pack")" "CC0-1.0" "kenney.nl (KenneyNL/$repo)"
 	done
 	printf '%-12s %-6s %-10s %s\n' "characters" "1" "CC0-1.0" "kaylousberg.com (KayKit Adventurers)"
-	for entry in "${KENNEY_AUDIO[@]}"; do
+
+for entry in "${KENNEY_AUDIO[@]}"; do
 		IFS='|' read -r pack _hash _sha count <<<"$entry"
 		printf '%-12s %-6s %-10s %s\n' "$pack" "$count" "CC0-1.0" "kenney.nl (ogg)"
 	done
+	if [[ -f "$MANIFEST" ]]; then
+		echo
+		echo "3D packs (from MIRROR.toml; * = in the default core set):"
+		tm=0; tp=0
+		while IFS='|' read -r slug _url _sha models core usable; do
+			[[ -z "$slug" ]] && continue
+			mark=" "; [[ "$core" == "true" ]] && mark="*"
+			note=""; [[ "$usable" == "true" ]] || note="  (FBX only — not fetched)"
+			printf '%s %-34s %5s models%s\n' "$mark" "$slug" "$models" "$note"
+			[[ "$usable" == "true" ]] || continue
+			tm=$((tm + models)); tp=$((tp + 1))
+		done < <(manifest_rows)
+		echo "  ${tp} usable packs, ${tm} models total"
+	fi
 	echo
 	echo "Run without --list to download. Files land in resources/models/kenney/<pack>/,"
 	echo "resources/audio/kenney/<pack>/ and resources/characters/ — all gitignored."
@@ -179,10 +241,17 @@ if [[ "${1:-}" == "--list" ]]; then
 fi
 
 TRANSCODE=0
-[[ "${1:-}" == "--transcode" ]] && TRANSCODE=1
+for arg in "$@"; do
+	case "$arg" in
+	--transcode) TRANSCODE=1 ;;
+	--packs=*) PACKSEL="${arg#--packs=}" ;;
+	--mirror=*) MIRROR="${arg#--mirror=}" ;;
+	--list) : ;;
+	*) echo "unknown option: $arg" >&2; exit 1 ;;
+	esac
+done
 
-fetched=0
-cached=0
+
 
 fetch() { # <url> <dest> <sha256> <label>
 	local url="$1" dest="$2" sha="$3" label="$4"
@@ -228,6 +297,40 @@ fetch "$KAYKIT_BASE/$KAYKIT_DIR/Knight.glb" "$CHARS/knight.glb" \
 	60428e3abc09ba83e595d256e3af8c5c976b46cdae599f0802fc82b4a3445168 "kaykit/knight.glb"
 fetch "$KAYKIT_BASE/$KAYKIT_DIR/knight_texture.png" "$CHARS/knight_texture.png" \
 	5d250ccc5da020e6126bfa3839f83bd9a465a951ed223e4d13c08b1925e154d4 "kaykit/knight_texture.png"
+
+# ---- 3D model packs (manifest-driven) -------------------------------------
+if [[ -f "$MANIFEST" ]]; then
+	while IFS='|' read -r slug url sha models core usable; do
+		[[ -z "$slug" ]] && continue
+		[[ "$usable" == "true" ]] || continue
+		want_pack "$slug" "$core" || continue
+		dest="$MODELS/$slug"
+		if [[ -d "$dest" ]] && [[ $(find "$dest" -iname '*.glb' -o -iname '*.gltf' | wc -l | tr -d ' ') -ge "$models" ]]; then
+			cached=$((cached + 1))
+			continue
+		fi
+		# A mirror serves <base>/<slug>.zip; upstream keeps its own layout.
+		src="$url"
+		[[ -n "$MIRROR" ]] && src="$MIRROR/$slug.zip"
+		echo "kenney/$slug ($models models)"
+		zip="$MODELS/.$slug.zip"
+		mkdir -p "$MODELS"
+		fetch "$src" "$zip" "$sha" "models/$slug"
+		mkdir -p "$dest"
+		unzip -qo "$zip" -d "$zip.d" 2>/dev/null
+		chmod -R u+w "$zip.d" 2>/dev/null
+		# GLB is self-contained, so prefer it and skip the OBJ/FBX/DAE copies
+		# entirely — they are most of the archive and we cannot load them.
+		if [[ $(find "$zip.d" -iname '*.glb' | wc -l | tr -d ' ') -gt 0 ]]; then
+			find "$zip.d" -iname '*.glb' -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
+		else
+			find "$zip.d" \( -iname '*.gltf' -o -iname '*.bin' \) -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
+		fi
+		rm -rf "$zip.d" "$zip"
+		# Be a good guest: pace requests so a full run is a trickle, not a flood.
+		sleep 1
+	done < <(manifest_rows)
+fi
 
 for entry in "${KENNEY_AUDIO[@]}"; do
 	IFS='|' read -r pack hash sha count <<<"$entry"

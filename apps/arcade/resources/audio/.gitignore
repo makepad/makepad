@@ -1,4 +1,6 @@
 # Downloaded by download_assets.sh — never committed (see repo policy in game.md).
-*.ogg
-*.wav
-*.zip
+#
+# Allow-list rather than deny-list, so a pack shipping an unlisted format
+# cannot slip hundreds of asset files into a commit.
+*
+!.gitignore
