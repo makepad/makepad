@@ -83,6 +83,7 @@ pub struct FireworkInstance {
 /// and never snapshotted — this is Local tier, exactly like the particles.
 pub struct FireworkSystem {
     shells: Vec<Shell>,
+    bursts: Vec<Vec3f>,
     rng: u64,
     /// Seconds until the next launch.
     next_in: f32,
@@ -108,6 +109,7 @@ impl FireworkSystem {
     pub fn new(cap: usize) -> Self {
         Self {
             shells: Vec::new(),
+            bursts: Vec::new(),
             rng: 0x5EED_F19E_u64.rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15,
             next_in: 0.6,
             cap,
@@ -124,8 +126,8 @@ impl FireworkSystem {
             // high and close (the obvious choice) puts every shell above the
             // top of the screen where nobody sees it. Further out and lower
             // keeps them in the visible band of sky.
-            area: 68.0,
-            height: (20.0, 33.0),
+            area: 46.0,
+            height: (17.0, 28.0),
             interval: (0.22, 0.62),
         }
     }
@@ -194,8 +196,8 @@ impl FireworkSystem {
         let z = sa * radius;
         let y = self.range(self.height.0, self.height.1);
         let (color, color_tail) = self.pick_color();
-        let speed = self.range(11.0, 19.0);
-        let life = self.range(1.5, 2.4);
+        let speed = self.range(17.0, 27.0);
+        let life = self.range(3.2, 4.6);
         let seed = self.next_f32() * 1024.0;
         // Every random drawn BEFORE the push: `self.range` borrows self
         // mutably, and so does `self.shells.push`.
@@ -216,11 +218,22 @@ impl FireworkSystem {
         });
     }
 
+    /// Burst points from this step, for the host to play a sound at. Drained
+    /// by [`Self::take_bursts`]; a shell reports exactly once, when its age
+    /// crosses zero and it opens.
+    pub fn take_bursts(&mut self) -> Vec<Vec3f> {
+        std::mem::take(&mut self.bursts)
+    }
+
     /// Advance the launcher. The only per-frame CPU work: age each shell,
     /// drop the dead, occasionally start a new one.
     pub fn step(&mut self, dt: f32) {
         for s in self.shells.iter_mut() {
+            let was = s.age;
             s.age += dt;
+            if was < 0.0 && s.age >= 0.0 {
+                self.bursts.push(s.origin);
+            }
         }
         self.shells.retain(|s| !s.expired());
         if !self.enabled {

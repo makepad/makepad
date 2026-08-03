@@ -255,6 +255,9 @@ pub fn play_named_at(name: &str, pitch: f32, gain_scale: f32, pan: f32) -> bool 
         "calm" => b(390.0 * p, 520.0 * p, 0.20, Wave::Sine, 0.20, 0.0),
         "rescue" => j("E5 G5", 0.09, Wave::Triangle, 0.22),
         "shove" => b(200.0, 200.0, 0.06, Wave::Noise, 0.30, 0.0),
+        // Firework: a noise burst sweeping down into a long tail. Noise
+        // because a shell is broadband — a tone reads as a laser, not a bang.
+        "firework" => b(900.0 * p, 70.0 * p, 0.85, Wave::Noise, 0.34, 0.0),
         "board" => b(220.0 * p, 330.0 * p, 0.11, Wave::Sine, 0.22, 0.0),
         "coin" => j("B5 E6", 0.07, Wave::Triangle, 0.20),
         "hurt" => b(300.0 * p, 120.0 * p, 0.15, Wave::Saw, 0.22, 0.0),
