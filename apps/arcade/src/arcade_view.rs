@@ -1848,6 +1848,26 @@ impl ArcadeView {
     /// gamemaker's precedent, and it has the same known limitation — the
     /// runners-up are DISCARDED, so two pads cannot be two local players yet.
     ///
+    /// Convert a right-stick deflection into the mouse-pixel look units the
+    /// rig consumes.
+    ///
+    /// The negation is the whole function. A stick reports UP as +y. Screen
+    /// space grows DOWNWARD, and `look_dy` is in screen units — `+look_dy`
+    /// raises the camera and looks down (see `controller.rs`, "`+pitch` lifts
+    /// the camera and looks down"). Feed the stick straight through and
+    /// pushing it up looks DOWN, while pushing the mouse up looks UP: two
+    /// devices disagreeing about which way is up, on the same camera.
+    ///
+    /// `inverted` restores that for players who want it — which is a
+    /// preference, not the default it used to be by accident.
+    fn pad_look_units(lx: f32, ly: f32, dt: f32, inverted: bool) -> (f32, f32) {
+        let sign = if inverted { 1.0 } else { -1.0 };
+        (
+            lx * Self::PAD_LOOK_SPEED * dt,
+            ly * Self::PAD_LOOK_SPEED * dt * sign,
+        )
+    }
+
     /// The headless backend has no game input at all, so this is stubbed
     /// there — without the split, arcade stops building headless and the
     /// whole render-to-PNG test path goes with it.
@@ -2004,9 +2024,9 @@ impl ArcadeView {
                 pad.right_stick.y as f32,
                 Self::PAD_LOOK_DEADZONE,
             );
-            let invert = if std::env::var("ARCADE_INVERT_Y").is_ok() { -1.0 } else { 1.0 };
-            raw.look_dx += lx * Self::PAD_LOOK_SPEED * dt;
-            raw.look_dy += ly * Self::PAD_LOOK_SPEED * dt * invert;
+            let (dx, dy) = Self::pad_look_units(lx, ly, dt, std::env::var("ARCADE_INVERT_Y").is_ok());
+            raw.look_dx += dx;
+            raw.look_dy += dy;
             // Cross jumps; Square always interacts. Cross ALSO interacts when
             // something is in reach, because "Press ✕ to drive" is the hint a
             // player expects — the prompt is on screen at that moment, so the
@@ -2906,5 +2926,50 @@ impl Widget for ArcadeView {
             }
         }
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::*;
+
+    /// Reported as "the camera joystick feels y inverted", and it was.
+    ///
+    /// Stated as agreement between the two devices rather than as a raw sign,
+    /// because a sign test can be satisfied by flipping whichever end of the
+    /// chain you happened to be looking at. What must hold is that pushing
+    /// the stick away from you and pushing the mouse away from you do the
+    /// same thing to the same camera.
+    #[test]
+    fn the_stick_and_the_mouse_agree_which_way_is_up() {
+        // Mouse moved AWAY from the player: screen y grows downward, so the
+        // delta this produces is negative.
+        let mouse_up_dy = -12.0f32;
+        // Stick pushed AWAY from the player: a pad reports up as +y.
+        let (_, stick_up_dy) = ArcadeView::pad_look_units(0.0, 1.0, 1.0 / 60.0, false);
+        assert!(
+            mouse_up_dy.signum() == stick_up_dy.signum(),
+            "mouse-up gives {mouse_up_dy} and stick-up gives {stick_up_dy} — the two devices \
+             disagree about which way is up"
+        );
+    }
+
+    /// `+look_dy` raises the camera and looks down (controller.rs), so
+    /// stick-up must arrive negative for the default to be non-inverted.
+    #[test]
+    fn stick_up_looks_up_by_default_and_down_when_inverted() {
+        let (_, normal) = ArcadeView::pad_look_units(0.0, 1.0, 1.0 / 60.0, false);
+        let (_, inverted) = ArcadeView::pad_look_units(0.0, 1.0, 1.0 / 60.0, true);
+        assert!(normal < 0.0, "stick-up should look up by default, got {normal}");
+        assert!(inverted > 0.0, "inverted stick-up should look down, got {inverted}");
+        assert_eq!(normal, -inverted, "inversion should only change the sign");
+    }
+
+    /// Horizontal is NOT inverted — only y was wrong. A fix that flipped both
+    /// would trade one complaint for another.
+    #[test]
+    fn stick_right_still_turns_the_view_right() {
+        let (dx, _) = ArcadeView::pad_look_units(1.0, 0.0, 1.0 / 60.0, false);
+        assert!(dx > 0.0, "stick-right should turn right, got {dx}");
     }
 }
