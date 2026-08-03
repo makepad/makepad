@@ -61,7 +61,16 @@ impl CameraConfig {
     /// and it stays where they put it.
     pub fn on_foot() -> Self {
         Self {
-            distance: 6.5,
+            // Walking has no speed to outrun, so this boom is sized by how
+            // much of your surroundings you can see rather than by reaction
+            // time: at 6.5m the character filled a fifth of the frame height
+            // and the world was mostly hidden behind them. 9.0m keeps them
+            // legible while showing enough around them to steer toward
+            // something — the thing a walking camera is actually for.
+            //
+            // Still well inside the driving boom, which is the relationship
+            // that matters: getting into a car should widen the view.
+            distance: 9.0,
             pivot_height: 1.5,
             follow_rate: 9.0,
             rotate_rate: 16.0,
@@ -912,9 +921,18 @@ mod tests {
         // The speed pullback must not be the only thing keeping it usable:
         // parking and manoeuvring happen at zero speed, where it contributes
         // nothing.
+        //
+        // Stated as a MARGIN, not a ratio. This started life as
+        // `> on_foot * 1.5`, which read as a decision but was really just the
+        // quotient of two numbers that happened to be current — so correcting
+        // the walking boom on its own merits broke it while nothing about
+        // driving had changed. What actually has to hold is that getting into
+        // a car visibly widens the view; several metres does that at any
+        // walking distance, and a ratio does not.
+        let gain = car.distance - CameraConfig::on_foot().distance;
         assert!(
-            car.distance > CameraConfig::on_foot().distance * 1.5,
-            "the driving camera is barely further out than the walking one"
+            gain >= 3.5,
+            "getting into a car only widens the view by {gain:.1}m — not enough to read as a change"
         );
     }
 

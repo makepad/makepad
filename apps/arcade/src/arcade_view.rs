@@ -15,7 +15,8 @@ use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_game_render::particles::ParticleSystem;
 use makepad_game_render::stage::{Stage, StageMode};
 use makepad_game_render::{
-    scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
+    draw_billboard_labels, draw_hud_overlay, scene_state as render_scene_state, set_pass_camera,
+    CameraRig, DrawGameAlpha, DrawGameCube,
     DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws,
     GameRenderer, ModelInstance, SkinnedBatch, SkinnedDraw,
 };
@@ -55,6 +56,17 @@ script_mod! {
         draw_models +: {
             light_dir: vec3(0.35, 0.8, 0.45)
         }
+        draw_hud +: {
+            text_style: theme.font_bold{font_size: 22}
+            color: #xffffffee
+        }
+        draw_label +: {
+            text_style: theme.font_bold{font_size: 11}
+            color: #xffffffdd
+        }
+        draw_dot +: {
+            color: #xffffffb8
+        }
     }
 }
 
@@ -73,6 +85,14 @@ pub struct ArcadeView {
     layout: Layout,
     #[live]
     draw_bg: DrawGameTexture,
+    /// 2D overlay, drawn after the 3D pass is blitted: HUD text slots and
+    /// gauges, billboard nametags, and the filled rects both lean on.
+    #[live]
+    draw_hud: DrawText,
+    #[live]
+    draw_label: DrawText,
+    #[live]
+    draw_dot: DrawColor,
     #[live]
     draw_cube: DrawGameCube,
     #[live]
@@ -217,6 +237,11 @@ pub struct ArcadeView {
     /// affordance glyph — the intent itself is merged, never switched.
     #[rust]
     pad_is_active: bool,
+    /// Was a pad connected last frame? Logged on change only, so "the pad does
+    /// nothing" is answerable from the log without a debug build: either the
+    /// app never saw the device, or it saw it and the mapping is at fault.
+    #[rust]
+    pad_present_prev: bool,
     /// Mouse look accumulated since the last tick, in pixels. Drained by
     /// `raw_input` so a 120Hz mouse and a 60Hz tick agree on total rotation.
     #[rust]
@@ -449,11 +474,18 @@ impl Villager {
             // camera, so a third-person player spawns looking at their own
             // face until they take a step.
             //
-            // The half-turn is not a fudge: the render yaw runs a half-turn
-            // off the sim heading because the rigs are modelled facing +Z
-            // while the engine's forward is -Z. The atan2(x, z) above bakes in
-            // the same offset (atan2 of a heading's forward vector gives
-            // heading + PI), which is why the two paths agree once moving.
+            // The half-turn is an ASSET offset, not an engine convention:
+            // these Kenney rigs are authored facing +Z while the engine's
+            // forward is -Z. The engine itself applies no correction — step.rs
+            // sets e.yaw in the heading convention and renderer.rs draws every
+            // model at `Mat4f::rotation(vec3f(0, e.yaw, 0))` with no offset,
+            // so a correctly-authored -Z model needs none of this. The
+            // atan2(x, z) above happens to bake in the same half turn (atan2
+            // of a heading's forward vector gives heading + PI), which is why
+            // the two branches agree once moving.
+            //
+            // Belongs in the pack's own metadata so it travels with the art
+            // that needs it, rather than being re-applied by whoever draws.
             self.yaw = e.yaw + std::f32::consts::PI;
         }
         let target = if speed > 0.35 { 1.0 } else { 0.0 };
@@ -1744,6 +1776,11 @@ impl ArcadeView {
     /// and a pad connected should follow whichever the player is holding.
     /// gamemaker's precedent, and it has the same known limitation — the
     /// runners-up are DISCARDED, so two pads cannot be two local players yet.
+    ///
+    /// The headless backend has no game input at all, so this is stubbed
+    /// there — without the split, arcade stops building headless and the
+    /// whole render-to-PNG test path goes with it.
+    #[cfg(not(headless))]
     fn poll_gamepad(&mut self, cx: &mut Cx) {
         let mut best: Option<GamepadState> = None;
         let mut best_score = 0.0f32;
@@ -1790,8 +1827,16 @@ impl ArcadeView {
                 log!("pad: none connected");
             }
         }
+        let present = best.is_some();
+        if present != self.pad_present_prev {
+            self.pad_present_prev = present;
+            log!("arcade: gamepad {}", if present { "connected" } else { "disconnected" });
+        }
         self.pad = best;
     }
+
+    #[cfg(headless)]
+    fn poll_gamepad(&mut self, _cx: &mut Cx) {}
 
     /// **One normalised intent, three devices.**
     ///
@@ -1951,9 +1996,7 @@ impl ArcadeView {
             .map(|f| format!("Press {} to {}", self.activity_glyph(), f.prompt));
         // Publish on the engine's own HUD channel rather than a private field,
         // so the affordance appears wherever a HUD is drawn instead of only in
-        // whichever host happened to build it. Arcade has no HUD renderer yet,
-        // which is why the mechanic is currently discoverable only by pressing
-        // the button — the single biggest gap left in this binding.
+        // whichever host happened to build it.
         world.hud_slots.retain(|(name, _)| name != "interact");
         if let Some(text) = &self.prompt {
             world.hud_slots.push((
@@ -1961,11 +2004,34 @@ impl ArcadeView {
                 makepad_game_sim::HudSlot {
                     text: text.clone(),
                     color: vec4(1.0, 1.0, 1.0, 0.9),
-                    size: 1.0,
+                    // An absolute point size, NOT a scale — the renderer takes
+                    // any value above zero literally, so a "1.0" meant as
+                    // 100% draws a one-point speck. Bigger than the 12.0
+                    // default on purpose: this is the one line of text a
+                    // player has to notice without being told to look.
+                    size: 17.0,
                     anchor: makepad_game_sim::HudAnchor::Bottom,
                 },
             ));
         }
+
+        // Standing controls hint. Nobody sits a child down with a manual, and
+        // the affordance prompt only appears once you are already next to
+        // something — this is what tells you how to get there.
+        world.hud_slots.retain(|(name, _)| name != "hint");
+        world.hud_slots.push((
+            "hint".to_string(),
+            makepad_game_sim::HudSlot {
+                text: if self.pad_is_active {
+                    "Left stick move · Right stick look · ✕ jump".to_string()
+                } else {
+                    "WASD move · mouse look · space jump".to_string()
+                },
+                color: vec4(1.0, 1.0, 1.0, 0.55),
+                size: 11.0,
+                anchor: makepad_game_sim::HudAnchor::TopLeft,
+            },
+        ));
 
         if raw.use_pressed {
             match found.map(|f| f.action(self.player)) {
@@ -2717,6 +2783,57 @@ impl Widget for ArcadeView {
         self.draw_bg.draw_abs(cx, rect);
         self.area = self.draw_bg.area();
         cx.set_pass_area(&self.pass, self.area);
+
+        // HUD slots + gauges + crosshair. Without this the interact prompt
+        // ("press E to drive") is computed every tick and never seen, so the
+        // mount mechanic is only discoverable by guessing the key.
+        let (slots, bars, crosshair) = {
+            let world = self.world.borrow();
+            (
+                world.hud_slots.clone(),
+                world.hud_bars.clone(),
+                world.crosshair,
+            )
+        };
+        draw_hud_overlay(
+            cx,
+            rect,
+            &mut self.draw_hud,
+            &mut self.draw_dot,
+            &slots,
+            &bars,
+            crosshair,
+        );
+
+        // Billboard nametags: projected into the 2D overlay so they always
+        // face the camera and are never occluded by geometry.
+        let labels: Vec<(Vec3f, String, Vec4f, f32)> = {
+            let world = self.world.borrow();
+            world
+                .labels
+                .iter()
+                .filter_map(|label| {
+                    world.entity(label.owner).map(|e| {
+                        let height = if label.height.is_nan() {
+                            e.half.y + 0.7
+                        } else {
+                            label.height
+                        };
+                        (
+                            e.pos + vec3f(0.0, height, 0.0),
+                            label.text.clone(),
+                            label.color,
+                            label.size,
+                        )
+                    })
+                })
+                .collect()
+        };
+        if !labels.is_empty() {
+            if let Some(scene) = self.scene(rect, cx.time()) {
+                draw_billboard_labels(cx, rect, &scene, &mut self.draw_label, &labels);
+            }
+        }
         DrawStep::done()
     }
 }
