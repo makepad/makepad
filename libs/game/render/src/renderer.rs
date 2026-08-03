@@ -744,6 +744,17 @@ impl GameRenderer {
             ) {
                 self.static_shadow_count += 1;
             }
+            // Sun-INDEPENDENT contact darkening hugging the footprint. The
+            // cast shadow above swings and shortens as the day turns; this
+            // stays put, which is what reads as "resting on the ground"
+            // rather than pasted onto it. Same geometry, same draw.
+            crate::shadow_mesh::build_contact_ao(
+                vec3f(e.pos.x, e.pos.y - half.y, e.pos.z),
+                half.x,
+                half.z,
+                &receiver,
+                &mut self.static_shadow_mesh,
+            );
         }
 
         // Stock props are drawn as meshes, not entities, so they never reach
@@ -796,6 +807,27 @@ impl GameRenderer {
                 &mut self.static_shadow_mesh,
             ) {
                 self.static_shadow_count += 1;
+            }
+            // Contact darkening sized from the COLLIDER footprint, never the
+            // model bounds: a tree's bounds are its canopy, so a skirt drawn
+            // from those would ring the ground at branch radius, metres from
+            // the trunk that actually touches it. The lowest collider part is
+            // the piece in contact.
+            let foot = m
+                .collider_parts
+                .iter()
+                .copied()
+                .min_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some((lo, hi)) = foot {
+                let sx = (t.v[0] * t.v[0] + t.v[1] * t.v[1] + t.v[2] * t.v[2]).sqrt();
+                let sz = (t.v[8] * t.v[8] + t.v[9] * t.v[9] + t.v[10] * t.v[10]).sqrt();
+                crate::shadow_mesh::build_contact_ao(
+                    vec3f(t.v[12], receiver.base_y, t.v[14]),
+                    ((hi.x - lo.x) * 0.5 * sx).max(0.05),
+                    ((hi.z - lo.z) * 0.5 * sz).max(0.05),
+                    &receiver,
+                    &mut self.static_shadow_mesh,
+                );
             }
         }
     }

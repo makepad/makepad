@@ -35,6 +35,10 @@ use makepad_game_sim::sense;
 use makepad_game_sim::{BodyKind, GameWorld, TICK_DT};
 use makepad_math::*;
 
+/// How close `Follow` parks to its target: near enough to read as company,
+/// far enough not to stand inside them. Scoring uses it too — see `decide`.
+const FOLLOW_NEAR: f32 = 2.2;
+
 /// Seconds of simulated time in one day/night cycle of NPC preference. Not a
 /// lighting cycle — just the clock that stops every villager wanting the same
 /// thing at once.
@@ -51,6 +55,12 @@ pub struct Poi {
     /// Entity it belongs to, 0 for a bare point. Used to drop POIs whose prop
     /// was removed.
     pub entity: u64,
+    /// Where this place leads, if it is a door. An interior is a pocket
+    /// elsewhere in the same world (see `makepad_game_gen::interior`), so
+    /// "going inside" is a position write — which this block does NOT do
+    /// itself. It emits a [`DoorUse`] and the host moves the entity, keeping
+    /// the invariant that an NPC only ever writes `vel`.
+    pub leads_to: Option<Vec3f>,
     /// How many NPCs may use it at once. A bench seats two; a plaza is open.
     pub capacity: u8,
     /// Currently claimed slots — the reason a third villager walks past a full
@@ -64,9 +74,16 @@ impl Poi {
             pos,
             tag: tag.into(),
             entity: 0,
+            leads_to: None,
             capacity: 2,
             taken: 0,
         }
+    }
+
+    /// Mark this place as a door into `entrance`.
+    pub fn with_interior(mut self, entrance: Vec3f) -> Self {
+        self.leads_to = Some(entrance);
+        self
     }
 
     pub fn with_capacity(mut self, capacity: u8) -> Self {
@@ -180,6 +197,39 @@ impl Activity {
     }
 }
 
+/// A request to move an NPC through a door. Emitted by [`Npc::tick`] and
+/// drained by the host, which performs the position write.
+///
+/// The block deliberately does NOT teleport the entity itself. An NPC that only
+/// ever writes `vel` behaves identically to the player through props, terrain
+/// and the step-up; one that repositions itself would be the single exception,
+/// and exceptions to that rule are where perception and physics start
+/// disagreeing. Same queue-and-drain shape as the audio emitter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DoorUse {
+    pub entity: u64,
+    /// Index into the [`PoiSet`] whose door was used.
+    pub poi: usize,
+    /// Where the host should place the entity.
+    pub to: Vec3f,
+    /// True going in, false coming back out.
+    pub entering: bool,
+}
+
+/// State while an NPC is behind a door.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Indoors {
+    poi: usize,
+    /// Outside the door it came in by — where it reappears.
+    ret: Vec3f,
+    /// Seconds left of the visit.
+    left: f32,
+    /// Its real home, restored on the way out. While inside, `home` is moved
+    /// to the room so the wander leash keeps it in there instead of hauling it
+    /// at a wall in the direction of a house it is already in.
+    home_outside: Vec3f,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NpcConfig {
     /// Base walk speed before personality haste.
@@ -196,6 +246,8 @@ pub struct NpcConfig {
     /// How far it looks ahead for obstacles.
     pub look_ahead: f32,
     pub turn_rate: f32,
+    /// Seconds spent inside after going through a door, before it comes out.
+    pub visit: f32,
 }
 
 impl Default for NpcConfig {
@@ -209,6 +261,7 @@ impl Default for NpcConfig {
             spacing: 1.4,
             look_ahead: 1.6,
             turn_rate: 7.0,
+            visit: 12.0,
         }
     }
 }
@@ -243,6 +296,8 @@ pub struct Npc {
     /// the game. Caught by the village scenario test, where one NPC moved
     /// exactly 0.0 units in ninety seconds.
     social_cooldown: f32,
+    /// Set while behind a door.
+    inside: Option<Indoors>,
 }
 
 impl Npc {
@@ -278,7 +333,13 @@ impl Npc {
             recent_at: 0,
             away: 0.0,
             social_cooldown: 0.0,
+            inside: None,
         }
+    }
+
+    /// Whether this NPC is currently behind a door.
+    pub fn is_inside(&self) -> bool {
+        self.inside.is_some()
     }
 
     fn unit(&mut self) -> f32 {
@@ -307,6 +368,44 @@ impl Npc {
         }
     }
 
+    /// If the just-finished dwell was at a door with somewhere behind it, go
+    /// through. Returns `Some(poi)` when a transition was requested.
+    ///
+    /// The POI claim is deliberately KEPT for the duration of the visit rather
+    /// than released on entry: a door with capacity 1 should not admit a queue
+    /// of villagers into the same room, and holding the slot is what makes the
+    /// next one walk past instead.
+    fn try_enter(&mut self, pois: &mut PoiSet, doors: &mut Vec<DoorUse>) -> Option<usize> {
+        if self.inside.is_some() {
+            return None;
+        }
+        let Activity::Dwell { poi: Some(i), .. } = self.activity else {
+            return None;
+        };
+        let poi = pois.list.get(i)?;
+        let entrance = poi.leads_to?;
+        let ret = poi.pos;
+        self.inside = Some(Indoors {
+            poi: i,
+            ret,
+            // Vary the visit so a street does not breathe in unison.
+            left: self.config.visit * (0.7 + self.personality.patience * 0.5),
+            home_outside: self.home,
+        });
+        // Inside, "home" is the room: the wander leash pulls toward it, and
+        // pointing it at a house the NPC is standing in would walk it into a
+        // wall for the whole visit.
+        self.home = entrance;
+        self.activity = Activity::Idle { left: 0.5 };
+        doors.push(DoorUse {
+            entity: self.entity,
+            poi: i,
+            to: entrance,
+            entering: true,
+        });
+        Some(i)
+    }
+
     /// Score candidate actions and commit to the best. The scores are
     /// deliberately simple and additive — legibility comes from POIs and
     /// personality, not from an elaborate planner.
@@ -318,6 +417,22 @@ impl Npc {
         let mut best_score = 0.0f32;
         let mut best: Option<(Vec3f, Option<usize>)> = None;
 
+        // Behind a door, the only sensible move is to potter about the room.
+        // Every POI, every other villager and home itself are outside, so
+        // scoring them would aim this NPC at an interior wall until its visit
+        // ran out. `home` was moved to the room on entry, so the wander leash
+        // keeps it in here.
+        if self.inside.is_some() {
+            let angle = self.unit() * std::f32::consts::TAU;
+            let radius = 1.0 + self.unit() * 2.0;
+            let (s, c) = gm::sincos(angle);
+            self.activity = Activity::Travel {
+                goal: vec3f(self.home.x + c * radius, self.home.y, self.home.z + s * radius),
+                poi: None,
+            };
+            return;
+        }
+
         for (i, poi) in pois.list.iter().enumerate() {
             if poi.full() {
                 continue;
@@ -328,8 +443,14 @@ impl Npc {
             let near = 1.0 / (1.0 + d * 0.08);
             let novelty = if self.visited_recently(i) { 0.25 } else { 1.0 };
             let taste = tag_appeal(&poi.tag, clock, &p);
+            // A door you can actually walk through is a destination; a door
+            // that is only scenery is a landmark. Without this the two score
+            // identically, and since the wander fallback sits around 0.5 a
+            // lone doorway only ever tempted homebody personalities — most of
+            // a village would walk past a house it could have gone into.
+            let real = if poi.leads_to.is_some() { 2.2 } else { 1.0 };
             let jitter = 0.85 + self.unit() * 0.3;
-            let score = taste * near * novelty * jitter;
+            let score = taste * real * near * novelty * jitter;
             if score > best_score {
                 best_score = score;
                 best = Some((poi.pos, Some(i)));
@@ -341,8 +462,16 @@ impl Npc {
         if p.sociability > 0.35 && self.social_cooldown <= 0.0 {
             if let Some((who, wpos)) = nearest_other_npc(world, self.entity, pos, 22.0) {
                 let d = planar_distance(pos, wpos);
+                // Already standing with them? Then following is a no-op that
+                // burns the next several seconds doing nothing — the steering
+                // below stops at `FOLLOW_NEAR`, so there is nowhere to walk.
+                // The score peaks at d=0, which outdoors is harmless and
+                // indoors is fatal: in a room everyone is permanently within
+                // arm's reach of everyone, so a roomful of villagers would
+                // pick "go stand next to them" forever and freeze solid.
+                let worth_walking = d > FOLLOW_NEAR * 1.5;
                 let score = p.sociability * (1.0 / (1.0 + d * 0.1)) * (0.8 + self.unit() * 0.4);
-                if score > best_score {
+                if worth_walking && score > best_score {
                     self.activity = Activity::Follow {
                         who,
                         left: 3.0 + p.patience * 5.0,
@@ -413,7 +542,10 @@ impl Npc {
     }
 
     /// Drive phase: decide if it is time to, then steer. Runs before the sweep.
-    pub fn tick(&mut self, world: &mut GameWorld, pois: &mut PoiSet) {
+    ///
+    /// `doors` collects [`DoorUse`] requests for the host to act on; a caller
+    /// with no interiors can pass a scratch vec and ignore it.
+    pub fn tick(&mut self, world: &mut GameWorld, pois: &mut PoiSet, doors: &mut Vec<DoorUse>) {
         let Some(me) = world.entity(self.entity) else {
             return;
         };
@@ -423,6 +555,32 @@ impl Npc {
         let (pos, half, on_floor, blocked_by, speed_mult) =
             (me.pos, me.half, me.on_floor, me.hit_wall, me.speed_mult);
         let day = (world.tick as f32 * TICK_DT / DAY_SECONDS).fract();
+
+        // Visit countdown. Leaving is unconditional: whatever it is doing in
+        // there, the visit ends, so an NPC can never be lost behind a door
+        // because its indoor errand went wrong.
+        if let Some(ind) = &mut self.inside {
+            ind.left -= TICK_DT;
+            if ind.left <= 0.0 {
+                let ind = self.inside.take().expect("checked");
+                self.home = ind.home_outside;
+                if let Some(slot) = pois.list.get_mut(ind.poi) {
+                    slot.taken = slot.taken.saturating_sub(1);
+                }
+                doors.push(DoorUse {
+                    entity: self.entity,
+                    poi: ind.poi,
+                    to: ind.ret,
+                    entering: false,
+                });
+                // Step out with nothing claimed and a clean slate, so the next
+                // decision is made from where it actually is.
+                self.activity = Activity::Idle { left: 0.4 };
+                self.stuck = 0.0;
+                self.avoid_left = 0.0;
+                return;
+            }
+        }
 
         self.decide_in -= TICK_DT;
         self.social_cooldown = (self.social_cooldown - TICK_DT).max(0.0);
@@ -445,7 +603,13 @@ impl Npc {
                 Activity::Travel { .. } => false,
             };
             if idle_or_done {
-                self.decide(world, pois, pos, day);
+                // Finished waiting at a door? Then go through it, rather than
+                // picking somewhere new to be — the dwell WAS the knock.
+                if let Some(entered) = self.try_enter(pois, doors) {
+                    let _ = entered;
+                } else {
+                    self.decide(world, pois, pos, day);
+                }
             }
         }
 
@@ -483,7 +647,7 @@ impl Npc {
                 Some(target) => {
                     let to = vec3f(target.pos.x - pos.x, 0.0, target.pos.z - pos.z);
                     // Stand *near* them, not on them.
-                    if to.length() < 2.2 {
+                    if to.length() < FOLLOW_NEAR {
                         (vec3f(0.0, 0.0, 0.0), 0.0)
                     } else {
                         (to, self.config.speed * self.personality.haste * 0.9)

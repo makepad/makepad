@@ -31,6 +31,7 @@ pub mod audio_emit;
 pub mod brain;
 pub mod car;
 pub mod character;
+pub mod controller;
 pub mod npc;
 pub mod plane;
 pub mod race;
@@ -38,7 +39,8 @@ pub mod race;
 pub use brain::{Brain, BrainKind};
 pub use car::{Car, CarConfig};
 pub use character::{Character, CharacterConfig, CharacterPose};
-pub use npc::{Activity, Npc, NpcConfig, Personality, Poi, PoiSet};
+pub use controller::{CameraConfig, FollowCamera, Mount, Seat, movement_intent};
+pub use npc::{Activity, DoorUse, Npc, NpcConfig, Personality, Poi, PoiSet, DAY_SECONDS};
 pub use plane::{Plane, PlaneConfig};
 pub use race::{Checkpoint, RaceKit, SpawnPoint, Standing};
 
@@ -64,6 +66,16 @@ pub struct DriveInput {
     pub pitch: f32,
     /// Aircraft: -1 roll left … +1 roll right.
     pub roll: f32,
+    /// Mouse/stick look delta THIS TICK, radians. Yaw then pitch. The camera
+    /// consumes it; nothing in the sim reads it, because where a player is
+    /// looking is presentation (Local tier) and must never reach the world.
+    pub look_dx: f32,
+    pub look_dy: f32,
+    /// Sprint held. Separate from throttle so a keyboard and a stick produce
+    /// the same intent.
+    pub run: bool,
+    /// Mount/dismount pressed this tick (get in or out of the nearest vehicle).
+    pub use_pressed: bool,
 }
 
 /// Where a block's [`DriveInput`] comes from each tick.
@@ -100,6 +112,11 @@ pub struct Blocks {
     /// Sounds produced this tick. The host drains these after `post_step` and
     /// hands them to its mixer; blocks never touch an audio device.
     pub audio: audio_emit::AudioEmitter,
+    /// Doors NPCs want to go through this tick. The host drains these and
+    /// performs the position write — an interior is a pocket elsewhere in the
+    /// same world, so entering one is a teleport. Blocks never reposition an
+    /// entity themselves; see [`npc::DoorUse`].
+    pub door_uses: Vec<npc::DoorUse>,
 }
 
 impl Blocks {
@@ -158,7 +175,7 @@ impl Blocks {
         // NPCs share one POI set, so they must be ticked in a fixed order for
         // slot claims (who gets the last seat on the bench) to be deterministic.
         for npc in self.npcs.iter_mut() {
-            npc.tick(world, &mut self.pois);
+            npc.tick(world, &mut self.pois, &mut self.door_uses);
         }
         for car in self.cars.iter_mut() {
             let input = intent(car.owner);

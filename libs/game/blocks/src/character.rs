@@ -35,6 +35,38 @@ pub struct CharacterConfig {
     pub view: ViewMode,
     /// Turn rate toward the movement direction (radians/second).
     pub turn_rate: f32,
+
+    // ---- feel ----
+    //
+    // These are the difference between a character that works and one that
+    // feels good. Every generated game inherits them, so the DEFAULTS are the
+    // product: `game.player_character({})` must feel right with nothing passed.
+    /// Ground acceleration, u/s². Instant velocity reads as sliding on ice.
+    pub accel: f32,
+    /// Ground deceleration when the stick is released. Higher than accel so a
+    /// stop is crisp while a start still ramps.
+    pub decel: f32,
+    /// Fraction of ground acceleration available in the air. Zero air control
+    /// feels broken; full air control feels like flying.
+    pub air_control: f32,
+    /// Jump still fires this long after walking off a ledge. Without it
+    /// players are certain the jump "didn't register" — they pressed it two
+    /// frames late and the game was right, which is no comfort.
+    pub coyote_time: f32,
+    /// A jump pressed this long BEFORE landing fires on touchdown. Same
+    /// complaint from the other side.
+    pub jump_buffer: f32,
+    /// Upward velocity is multiplied by this when the button is released while
+    /// still rising, giving a short hop for a tap and full height for a hold.
+    pub jump_cut: f32,
+    /// Gravity multiplier while falling. Symmetric gravity reads as floaty:
+    /// the rise is the part the player controls, the fall should be brisk.
+    pub fall_gravity: f32,
+    /// Horizontal speed is damped by this on touchdown for `land_recovery`
+    /// seconds, so landing has weight instead of continuing as if nothing
+    /// happened.
+    pub land_damp: f32,
+    pub land_recovery: f32,
 }
 
 impl Default for CharacterConfig {
@@ -46,6 +78,16 @@ impl Default for CharacterConfig {
             step_up: 0.55,
             view: ViewMode::Third,
             turn_rate: 9.0,
+            // Tuned by feel, then pinned by the shape tests in this module.
+            accel: 55.0,
+            decel: 75.0,
+            air_control: 0.45,
+            coyote_time: 0.12,
+            jump_buffer: 0.14,
+            jump_cut: 0.45,
+            fall_gravity: 1.7,
+            land_damp: 0.72,
+            land_recovery: 0.09,
         }
     }
 }
@@ -80,6 +122,19 @@ pub struct Character {
     /// Optional skinned model name/path the host resolves (stock rig or a
     /// downloaded glTF); None renders the primitive body.
     pub model: Option<String>,
+
+    // ---- jump craft state ----
+    /// Seconds of ledge grace remaining (coyote time).
+    coyote: f32,
+    /// Seconds an unserviced jump press stays queued (jump buffer).
+    buffered: f32,
+    /// True between takeoff and apex — the window where releasing the button
+    /// still shortens the jump.
+    rising: bool,
+    /// Seconds of post-landing horizontal damping remaining.
+    landing: f32,
+    /// `on_floor` last tick, to detect the takeoff and touchdown edges.
+    was_grounded: bool,
 }
 
 impl Character {
@@ -100,6 +155,11 @@ impl Character {
             step: crate::audio_emit::StepTimer::default(),
             audio_airborne: false,
             audio_fall_speed: 0.0,
+            coyote: 0.0,
+            buffered: 0.0,
+            rising: false,
+            landing: 0.0,
+            was_grounded: false,
         }
     }
 
@@ -120,15 +180,86 @@ impl Character {
         if entity.attached_to != 0 {
             return;
         }
-        let speed = config.speed;
-        // speed_mult is the engine-side debuff the walking code never sees —
-        // same contract game.walk honours.
-        entity.vel.x = input.move_x * speed * entity.speed_mult;
-        entity.vel.z = input.move_z * speed * entity.speed_mult;
-        entity.turn_rate = config.turn_rate;
-        if input.jump_pressed && entity.on_floor {
-            entity.vel.y = config.jump;
+        let grounded = entity.on_floor;
+
+        // ---- timers -------------------------------------------------------
+        // Coyote runs from the moment the ground is lost, NOT from the jump;
+        // buffering runs from the press. Both are decremented before use so a
+        // press and a landing on the same tick still connect.
+        if grounded {
+            self.coyote = config.coyote_time;
+        } else {
+            self.coyote = (self.coyote - TICK_DT).max(0.0);
         }
+        if input.jump_pressed {
+            self.buffered = config.jump_buffer;
+        } else {
+            self.buffered = (self.buffered - TICK_DT).max(0.0);
+        }
+        // Touchdown: brief horizontal damping so landing has weight.
+        if grounded && !self.was_grounded {
+            self.landing = config.land_recovery;
+        }
+        self.landing = (self.landing - TICK_DT).max(0.0);
+        self.was_grounded = grounded;
+
+        // ---- horizontal: ramp toward intent, never snap -------------------
+        // Diagonals are normalised by the caller, so `intent` is already a
+        // unit-or-less vector: a diagonal must not outrun a cardinal.
+        let speed = if input.run {
+            config.speed * config.run_multiplier
+        } else {
+            config.speed
+        } * entity.speed_mult;
+        let want_x = input.move_x * speed;
+        let want_z = input.move_z * speed;
+        let moving = input.move_x != 0.0 || input.move_z != 0.0;
+        // Accelerating and stopping are different gestures: a start should
+        // ramp, a stop should be crisp. In the air the player keeps SOME
+        // authority — none feels broken, all feels like flying.
+        let rate = if moving { config.accel } else { config.decel }
+            * if grounded { 1.0 } else { config.air_control }
+            * if self.landing > 0.0 { config.land_damp } else { 1.0 };
+        let step = rate * TICK_DT;
+        entity.vel.x += (want_x - entity.vel.x).clamp(-step, step);
+        entity.vel.z += (want_z - entity.vel.z).clamp(-step, step);
+        entity.turn_rate = config.turn_rate;
+
+        // ---- jump ---------------------------------------------------------
+        // Fires on the BUFFERED press against the COYOTE window, which is what
+        // makes both grace periods work in the same expression. Consuming both
+        // stops one press producing two jumps.
+        if self.buffered > 0.0 && self.coyote > 0.0 {
+            entity.vel.y = config.jump;
+            self.buffered = 0.0;
+            self.coyote = 0.0;
+            // Variable height only applies to callers who actually report the
+            // button being HELD. A caller that sends `jump_pressed` alone —
+            // the older single-flag convention, and what a generated game will
+            // most likely write — would otherwise get its jump cut on the very
+            // next tick and never understand why. Opting in on evidence keeps
+            // the expressive control for those who wire it and full height for
+            // everyone else.
+            self.rising = input.jump;
+        }
+        // Variable height: releasing while still rising cuts the ascent. Once
+        // past the apex there is nothing left to cut.
+        if self.rising {
+            if entity.vel.y <= 0.0 {
+                self.rising = false;
+            } else if !input.jump {
+                entity.vel.y *= config.jump_cut;
+                self.rising = false;
+            }
+        }
+        // Asymmetric gravity: the rise is the part the player steers, the fall
+        // should be brisk. gravity_scale is the sim's own knob, so this needs
+        // no second integrator that could disagree with the sweep.
+        entity.gravity_scale = if entity.vel.y < 0.0 && !grounded {
+            config.fall_gravity
+        } else {
+            1.0
+        };
     }
 
     /// Observe phase: the sweep has run, so velocity and `on_floor` are final.

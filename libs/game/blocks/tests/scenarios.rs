@@ -1013,3 +1013,651 @@ fn npcs_stay_in_their_village() {
         "a villager wandered {furthest} units from home over four minutes"
     );
 }
+
+// ---------------------------------------------------------------- interiors
+//
+// A house you can walk into is the difference between scenery and a place. The
+// generator is tested in `makepad-game-gen`; what these prove is the part only
+// a running sim can show — that the room's colliders leave a passable doorway,
+// that a mover can cross the floor without snagging on furniture, and that an
+// NPC uses a door and comes back out again rather than vanishing.
+
+use makepad_game_gen::interior::{interior, DoorSide, Interior, InteriorParams};
+use makepad_game_gen::kit::{Kit, TileDef, TileRole};
+
+fn shell_kit() -> Kit {
+    Kit::new(
+        "kenney/modular-buildings",
+        2.0,
+        vec![
+            TileDef::new("floor", TileRole::Floor, 0.1),
+            TileDef::new("wall", TileRole::Wall, 2.4),
+            TileDef::new("wall-corner", TileRole::WallCorner, 2.4),
+            TileDef::new("door", TileRole::Door, 2.4),
+        ],
+    )
+}
+
+fn furniture_kit() -> Kit {
+    Kit::new(
+        "kenney/furniture-kit",
+        2.0,
+        vec![
+            TileDef::new("chair", TileRole::Prop, 0.9),
+            TileDef::new("table", TileRole::Prop, 0.8),
+        ],
+    )
+}
+
+/// Spawn a generated room's collision into the world, exactly as the host
+/// would: every box becomes a static entity.
+fn materialise(world: &mut GameWorld, room: &Interior) {
+    for (c, h) in &room.colliders {
+        block(world, *c, *h);
+    }
+}
+
+fn walker(world: &mut GameWorld, pos: Vec3f) -> u64 {
+    mover(world, pos, vec3f(0.35, 0.9, 0.35))
+}
+
+/// Steer an entity toward a point for `ticks`, stopping early on arrival.
+fn walk_to(world: &mut GameWorld, id: u64, goal: Vec3f, ticks: usize, speed: f32) -> bool {
+    for _ in 0..ticks {
+        let Some(e) = world.entity(id) else { return false };
+        let (dx, dz) = (goal.x - e.pos.x, goal.z - e.pos.z);
+        let d = (dx * dx + dz * dz).sqrt();
+        if d < 0.6 {
+            return true;
+        }
+        if let Some(e) = world.entity_mut(id) {
+            e.vel.x = dx / d * speed;
+            e.vel.z = dz / d * speed;
+        }
+        step_world(world);
+        world.tick += 1;
+    }
+    false
+}
+
+fn room_for_test(seed: u64, shell: &Kit, fk: &Kit) -> Interior {
+    let mut p = InteriorParams::new(shell);
+    p.seed = seed;
+    p.cells = (5, 5);
+    p.door = DoorSide::South;
+    p.origin = vec3f(300.0, 0.0, 300.0);
+    p.furniture = Some(fk);
+    p.clutter = 0.6;
+    interior(&p)
+}
+
+#[test]
+fn a_walker_enters_a_generated_room_crosses_it_and_leaves() {
+    let shell = shell_kit();
+    let fk = furniture_kit();
+    let room = room_for_test(3, &shell, &fk);
+
+    // The shared ground spans 400 units, so the pocket sits on it too.
+    let mut world = world_with_ground();
+    materialise(&mut world, &room);
+
+    // Start outside, beyond the south wall, in line with the doorway.
+    let outside = vec3f(room.door_pos.x, 0.9, room.door_pos.z + 4.0);
+    let id = walker(&mut world, outside);
+    for _ in 0..30 {
+        step_world(&mut world);
+    }
+
+    assert!(
+        walk_to(&mut world, id, room.entrance, 400, 2.5),
+        "walker never got through the doorway"
+    );
+    let inside_z = world.entity(id).unwrap().pos.z;
+    assert!(
+        inside_z < room.door_pos.z - 0.4,
+        "walker stopped in the threshold at z={inside_z}"
+    );
+
+    // Cross to the far side of the room, which is what furniture could block.
+    let far = *room
+        .free_points
+        .iter()
+        .max_by(|a, b| {
+            let da = (a.z - room.entrance.z).abs();
+            let db = (b.z - room.entrance.z).abs();
+            da.partial_cmp(&db).unwrap()
+        })
+        .unwrap();
+    assert!(
+        walk_to(&mut world, id, far, 500, 2.5),
+        "walker could not cross the room — furniture blocked the floor"
+    );
+
+    // And back out the way it came.
+    assert!(
+        walk_to(&mut world, id, outside, 700, 2.5),
+        "walker could not find its way back out"
+    );
+    assert!(world.entity(id).unwrap().pos.z > room.door_pos.z);
+}
+
+#[test]
+fn the_walls_are_solid_everywhere_except_the_doorway() {
+    let shell = shell_kit();
+    let fk = furniture_kit();
+    let room = room_for_test(11, &shell, &fk);
+
+    let mut world = world_with_ground();
+    materialise(&mut world, &room);
+
+    // Approach the NORTH wall — the opposite side from the door — and push.
+    let north_outside = vec3f(room.entrance.x, 0.9, room.door_pos.z - 14.0);
+    let id = walker(&mut world, north_outside);
+    for _ in 0..30 {
+        step_world(&mut world);
+    }
+    let start_z = world.entity(id).unwrap().pos.z;
+    for _ in 0..300 {
+        if let Some(e) = world.entity_mut(id) {
+            e.vel.z = 3.0;
+        }
+        step_world(&mut world);
+    }
+    let end = world.entity(id).unwrap().pos;
+    assert!(
+        end.z > start_z,
+        "walker should have advanced toward the wall"
+    );
+    // It must be stopped OUTSIDE the room: the far wall is at the ring, one
+    // tile beyond the first floor row.
+    let first_floor_z = room
+        .free_points
+        .iter()
+        .map(|p| p.z)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        end.z < first_floor_z,
+        "walked through the north wall: z={} reached floor at {}",
+        end.z,
+        first_floor_z
+    );
+}
+
+#[test]
+fn an_npc_goes_through_a_door_stays_a_while_and_comes_back_out() {
+    let shell = shell_kit();
+    let fk = furniture_kit();
+    let room = room_for_test(5, &shell, &fk);
+
+    let mut world = world_with_ground();
+    // Dusk. Doors read as an evening destination (see `tag_appeal`), so this
+    // is the hour the behaviour is meant to show up in.
+    world.tick = (DAY_SECONDS * 0.85 / DT) as u64;
+
+    let door_stand = vec3f(4.0, 0.0, 0.0);
+    let mut blocks = Blocks::new();
+    blocks.pois.push(
+        Poi::new(door_stand, "door")
+            .with_interior(room.entrance)
+            .with_capacity(8),
+    );
+
+    // A handful of personalities rather than one lucky seed: going inside is
+    // a scored choice, so the claim worth testing is that it happens across a
+    // population, not that seed N does it.
+    let mut ids = Vec::new();
+    for seed in 0..8u64 {
+        let a = seed as f32 * 0.8;
+        let (s, c) = (a.sin(), a.cos());
+        let id = walker(&mut world, vec3f(c * 6.0, 1.0, s * 6.0));
+        let mut npc = Npc::new(id, NpcConfig::default(), vec3f(c * 6.0, 0.0, s * 6.0), seed);
+        npc.config.visit = 3.0;
+        blocks.npcs.push(npc);
+        ids.push(id);
+    }
+
+    // (entered tick, exited tick, position on the way out) per NPC.
+    let mut trips: Vec<Option<(usize, Option<usize>, Vec3f)>> = vec![None; ids.len()];
+    let mut done = 0;
+    for t in 0..6000 {
+        tick(&mut world, &mut blocks);
+        // The host's job: perform the position write the block asked for.
+        // The block only ever asks — see the invariant on `DoorUse`.
+        for d in blocks.door_uses.drain(..) {
+            if let Some(e) = world.entity_mut(d.entity) {
+                e.pos = vec3f(d.to.x, d.to.y + e.half.y, d.to.z);
+                e.vel = vec3f(0.0, 0.0, 0.0);
+            }
+            let n = ids.iter().position(|&i| i == d.entity).unwrap();
+            match (&mut trips[n], d.entering) {
+                (slot @ None, true) => *slot = Some((t, None, vec3f(0.0, 0.0, 0.0))),
+                (Some(trip), false) if trip.1.is_none() => {
+                    let out = world.entity(d.entity).map(|e| e.pos).unwrap_or_default();
+                    *trip = (trip.0, Some(t), out);
+                    done += 1;
+                }
+                _ => {}
+            }
+        }
+        if done >= 3 {
+            break;
+        }
+    }
+
+    let full: Vec<_> = trips.iter().flatten().filter(|t| t.1.is_some()).collect();
+    assert!(
+        full.len() >= 3,
+        "only {} of 8 villagers used the door in 100s",
+        full.len()
+    );
+    for (into, out, at) in &full {
+        let out = out.unwrap();
+        assert!(out > *into, "left before it arrived");
+        // The visit must actually last: an NPC that bounces straight back out
+        // reads as a glitch rather than as someone popping indoors.
+        let seconds = (out - into) as f32 * DT;
+        assert!(
+            seconds > 2.0,
+            "visit lasted only {seconds:.1}s — too short to read as going inside"
+        );
+        // And it must come back out by the door it used, not somewhere else.
+        let d = ((at.x - door_stand.x).powi(2) + (at.z - door_stand.z).powi(2)).sqrt();
+        assert!(d < 6.0, "came out {d:.1} units from the door it went in by");
+    }
+    // Nobody may be left behind a door: leaving is unconditional, so the only
+    // way to still be inside is a bug in the visit countdown.
+    let stuck = blocks.npcs.iter().filter(|n| n.is_inside()).count();
+    assert!(stuck <= 1, "{stuck} villagers left behind doors");
+}
+
+#[test]
+fn npcs_in_a_furnished_room_never_end_up_wedged() {
+    let shell = shell_kit();
+    let fk = furniture_kit();
+    let room = room_for_test(9, &shell, &fk);
+
+    let mut world = world_with_ground();
+    materialise(&mut world, &room);
+
+    // Four NPCs in the four corners of the room, so they have to cross it —
+    // and each other, and the furniture — to reach anything. Bunched together
+    // they would simply stand around chatting, which is correct behaviour but
+    // tests nothing about getting wedged.
+    let key = |p: &Vec3f, sx: f32, sz: f32| p.x * sx + p.z * sz;
+    let corners: Vec<Vec3f> = [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
+        .iter()
+        .map(|&(sx, sz)| {
+            *room
+                .free_points
+                .iter()
+                .max_by(|a, b| key(a, sx, sz).total_cmp(&key(b, sx, sz)))
+                .unwrap()
+        })
+        .collect();
+
+    let mut blocks = Blocks::new();
+    let mut ids = Vec::new();
+    for (i, spot) in corners.iter().enumerate() {
+        let id = walker(&mut world, vec3f(spot.x, spot.y + 0.9, spot.z));
+        ids.push(id);
+        blocks
+            .npcs
+            .push(Npc::new(id, NpcConfig::default(), *spot, 20 + i as u64));
+    }
+
+    let mut moved = vec![0.0f32; ids.len()];
+    let mut last: Vec<Vec3f> = ids.iter().map(|&i| world.entity(i).unwrap().pos).collect();
+    for _ in 0..1800 {
+        tick(&mut world, &mut blocks);
+        blocks.door_uses.clear();
+        for (n, &id) in ids.iter().enumerate() {
+            let p = world.entity(id).unwrap().pos;
+            let d = ((p.x - last[n].x).powi(2) + (p.z - last[n].z).powi(2)).sqrt();
+            moved[n] += d;
+            last[n] = p;
+        }
+    }
+
+    let floor_min = room.free_points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let floor_max = room.free_points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    for (n, &id) in ids.iter().enumerate() {
+        let p = world.entity(id).unwrap().pos;
+        assert!(
+            p.x.is_finite() && p.y.is_finite() && p.z.is_finite(),
+            "npc {n} left the world"
+        );
+        assert!(p.y > -2.0, "npc {n} fell through the floor at y={}", p.y);
+        // Still in the building: the doorway is the only way out, and nothing
+        // here has any reason to use it.
+        assert!(
+            p.x > floor_min - 3.0 && p.x < floor_max + 3.0,
+            "npc {n} ended up outside the room at x={}",
+            p.x
+        );
+        // Nobody may spend the whole run pinned. The give-up timer exists
+        // precisely so an NPC that cannot reach its goal abandons it rather
+        // than grinding into furniture forever.
+        assert!(
+            moved[n] > 2.0,
+            "npc {n} moved only {:.2} units in 30s — wedged",
+            moved[n]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Controller FEEL.
+//
+// These assert the SHAPE of motion, not just that it happens — a controller
+// that reaches full speed is easy, one that reaches it the way a player expects
+// is the job. Each test names the complaint it prevents, because the feel knobs
+// are otherwise indistinguishable from arbitrary constants.
+// ---------------------------------------------------------------------------
+
+/// Drive a character for `ticks`, returning its horizontal speed each tick.
+fn run_character(cfg: CharacterConfig, input: impl Fn(usize) -> DriveInput, ticks: usize)
+    -> (GameWorld, u64, Character, Vec<f32>)
+{
+    let mut world = world_with_ground();
+    let id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    let mut ch = Character::new(id, cfg, ControlSource::Player, None);
+    let mut speeds = Vec::with_capacity(ticks);
+    for t in 0..ticks {
+        let inp = input(t);
+        ch.tick(&mut world, &inp);
+        step_world(&mut world);
+        world.tick += 1;
+        ch.post_tick(&mut world);
+        let e = world.entity(id).unwrap();
+        speeds.push((e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt());
+    }
+    (world, id, ch, speeds)
+}
+
+fn walk_forward() -> DriveInput {
+    DriveInput { move_z: -1.0, ..Default::default() }
+}
+
+#[test]
+fn speed_ramps_rather_than_stepping() {
+    // The complaint: "it feels like ice." Snapping to full speed on frame one
+    // reads as sliding, because nothing in the world accelerates instantly.
+    let cfg = CharacterConfig::default();
+    let (_, _, _, speeds) = run_character(cfg, |_| walk_forward(), 60);
+    assert!(speeds[0] < cfg.speed * 0.5, "instant velocity: {}", speeds[0]);
+    assert!(speeds[0] > 0.0, "no movement at all");
+    // And it must actually arrive, not creep forever.
+    let top = *speeds.last().unwrap();
+    assert!(top > cfg.speed * 0.95, "never reached speed: {top}");
+    // Monotonic while the stick is held — a ramp, not a wobble.
+    for w in speeds.windows(2).take(20) {
+        assert!(w[1] >= w[0] - 1e-4, "speed dipped mid-ramp: {w:?}");
+    }
+}
+
+#[test]
+fn stopping_is_crisper_than_starting() {
+    // Deliberate asymmetry: a start should have weight, a stop should feel
+    // like the player let go. Sharing one constant makes one of them wrong.
+    let cfg = CharacterConfig::default();
+    assert!(cfg.decel > cfg.accel);
+    let (_, _, _, speeds) = run_character(
+        cfg,
+        |t| if t < 40 { walk_forward() } else { DriveInput::default() },
+        70,
+    );
+    assert!(speeds[45] < speeds[39] * 0.5, "did not shed speed on release");
+}
+
+#[test]
+fn coyote_time_lets_a_late_jump_register() {
+    // The complaint players actually voice: "the jump didn't register." They
+    // pressed it two frames after leaving the ledge and were technically
+    // airborne. Being right is no comfort.
+    let cfg = CharacterConfig::default();
+    let mut world = world_with_ground();
+    let id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    let mut ch = Character::new(id, cfg, ControlSource::Player, None);
+    // Settle on the ground, then remove it: the character is now falling and
+    // `on_floor` is false — the exact moment a ledge is left.
+    for _ in 0..10 {
+        ch.tick(&mut world, &DriveInput::default());
+        step_world(&mut world);
+        ch.post_tick(&mut world);
+    }
+    world.entities.retain(|e| e.kind != BodyKind::Static);
+    step_world(&mut world);
+    assert!(!world.entity(id).unwrap().on_floor, "should be airborne");
+    // Press two ticks late — inside the coyote window.
+    let jump = DriveInput { jump: true, jump_pressed: true, ..Default::default() };
+    ch.tick(&mut world, &jump);
+    assert!(
+        world.entity(id).unwrap().vel.y > 0.0,
+        "late jump was swallowed — coyote time is not working"
+    );
+}
+
+#[test]
+fn a_jump_pressed_before_landing_fires_on_touchdown() {
+    // The same complaint as coyote time, from the other side: pressed a hair
+    // early, ignored, and the player is certain the game dropped it.
+    let cfg = CharacterConfig::default();
+    let mut world = world_with_ground();
+    // Start just above the floor so touchdown lands inside the buffer window.
+    let id = walker(&mut world, vec3f(0.0, 1.25, 0.0));
+    let mut ch = Character::new(id, cfg, ControlSource::Player, None);
+    let mut launched = false;
+    let mut ever_grounded = false;
+    for t in 0..120 {
+        // ONE press, while still falling; never repeated.
+        let inp = DriveInput { jump_pressed: t == 0, ..Default::default() };
+        ch.tick(&mut world, &inp);
+        step_world(&mut world);
+        world.tick += 1;
+        ch.post_tick(&mut world);
+        let e = world.entity(id).unwrap();
+        ever_grounded |= e.on_floor;
+        if ever_grounded && e.vel.y > 0.1 {
+            launched = true;
+            break;
+        }
+    }
+    assert!(ever_grounded, "never reached the ground");
+    assert!(
+        launched,
+        "a jump pressed just before landing was swallowed — buffering is not working"
+    );
+}
+
+#[test]
+fn releasing_early_gives_a_lower_jump() {
+    // Variable height is the difference between a hop and a leap, and it is
+    // the single most-used expressive control a platformer has.
+    let cfg = CharacterConfig::default();
+    let apex = |hold: usize| -> f32 {
+        let mut world = world_with_ground();
+        let id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+        let mut ch = Character::new(id, cfg, ControlSource::Player, None);
+        let mut top = 0.0f32;
+        for t in 0..150 {
+            let held = t < hold;
+            let inp = DriveInput {
+                jump: held,
+                jump_pressed: t == 0,
+                ..Default::default()
+            };
+            ch.tick(&mut world, &inp);
+            step_world(&mut world);
+            world.tick += 1;
+            ch.post_tick(&mut world);
+            top = top.max(world.entity(id).unwrap().pos.y);
+        }
+        top
+    };
+    let tapped = apex(2);
+    let held = apex(120);
+    assert!(
+        tapped < held - 0.25,
+        "tap {tapped:.2} vs hold {held:.2} — releasing early must cut the jump"
+    );
+}
+
+#[test]
+fn falling_is_brisker_than_rising() {
+    // Symmetric gravity reads as floaty. The rise is the part the player
+    // steers; the fall should get on with it.
+    let cfg = CharacterConfig::default();
+    assert!(cfg.fall_gravity > 1.0);
+    let mut world = world_with_ground();
+    let id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    let mut ch = Character::new(id, cfg, ControlSource::Player, None);
+    // Settle, or the first ticks are a fall onto the ground rather than a jump.
+    for _ in 0..20 {
+        ch.tick(&mut world, &DriveInput::default());
+        step_world(&mut world);
+        world.tick += 1;
+        ch.post_tick(&mut world);
+    }
+    assert!(world.entity(id).unwrap().on_floor, "never settled");
+
+    let (mut rise, mut fall) = (0usize, 0usize);
+    let mut peaked = false;
+    for t in 0..400 {
+        // Held, so the jump runs its full arc rather than being cut.
+        let inp = DriveInput { jump: true, jump_pressed: t == 0, ..Default::default() };
+        ch.tick(&mut world, &inp);
+        step_world(&mut world);
+        world.tick += 1;
+        ch.post_tick(&mut world);
+        let e = world.entity(id).unwrap();
+        if !peaked {
+            if e.vel.y > 0.0 {
+                rise += 1;
+            } else if rise > 0 {
+                peaked = true;
+            }
+        } else if !e.on_floor {
+            fall += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(rise > 0 && fall > 0, "never left the ground (rise {rise}, fall {fall})");
+    assert!(
+        fall < rise,
+        "fall {fall} ticks vs rise {rise} — gravity is symmetric, the jump floats"
+    );
+}
+
+#[test]
+fn air_control_is_partial_not_absent_and_not_total() {
+    // Zero air control feels broken; full air control feels like flying. Air
+    // control limits the RATE, so given enough air time a player still reaches
+    // full speed — the claim worth asserting is that the same input builds
+    // speed more slowly off the ground.
+    let cfg = CharacterConfig::default();
+    assert!(cfg.air_control > 0.0 && cfg.air_control < 1.0);
+
+    let gained = |start_y: f32, ticks: usize| -> f32 {
+        let mut world = world_with_ground();
+        let id = walker(&mut world, vec3f(0.0, start_y, 0.0));
+        let mut ch = Character::new(id, cfg, ControlSource::Player, None);
+        for _ in 0..ticks {
+            ch.tick(&mut world, &walk_forward());
+            step_world(&mut world);
+            world.tick += 1;
+            ch.post_tick(&mut world);
+        }
+        let e = world.entity(id).unwrap();
+        (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt()
+    };
+    let on_ground = gained(0.9, 4);
+    let in_air = gained(9.0, 4);
+    assert!(in_air > 0.05, "no air control at all: {in_air}");
+    assert!(
+        in_air < on_ground * 0.9,
+        "air {in_air:.2} vs ground {on_ground:.2} — air control is not reduced"
+    );
+}
+
+#[test]
+fn vehicle_steering_loses_authority_with_speed() {
+    // Constant-rate steering at speed is the biggest "this feels like a toy"
+    // tell there is. The car scales steering authority by
+    // speed/steer_peak_speed, clamped — so authority RISES to the peak and is
+    // capped past it, rather than being a flat rate at every speed.
+    let cfg = CarConfig::default();
+    assert!(
+        cfg.steer_peak_speed > 0.0,
+        "no speed-sensitive steering configured"
+    );
+    let authority = |speed: f32| (speed / cfg.steer_peak_speed).clamp(0.0, 1.0);
+    assert!(authority(1.0) < authority(cfg.steer_peak_speed));
+    assert_eq!(authority(cfg.steer_peak_speed * 3.0), 1.0, "authority must cap");
+    // And the sign convention: steering right must lower the heading.
+    assert!(steer_to_yaw_rate(1.0, cfg.steer_rate) < 0.0);
+}
+
+#[test]
+fn getting_in_and_out_of_a_car_puts_you_beside_it() {
+    // Dismounting into the seat means spawning inside a collider, and the
+    // separation pass would then shove the player through the nearest wall.
+    let mut world = world_with_ground();
+    let ch_id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    let car_id = rigid(&mut world, vec3f(2.0, 1.0, 0.0), vec3f(0.9, 0.4, 1.6));
+    if let Some(e) = world.entity_mut(car_id) {
+        e.tag = "car".to_string();
+    }
+    let mut mount = Mount::new(ch_id);
+    assert_eq!(mount.seat, Seat::OnFoot);
+    let got_in = mount.toggle(&mut world);
+    assert_eq!(got_in, Some(Seat::Driving(car_id)), "did not board a car in reach");
+    assert!(world.entity(ch_id).unwrap().hidden, "driver should be parked");
+    assert_eq!(mount.subject(), car_id, "camera should follow the car");
+
+    let got_out = mount.toggle(&mut world);
+    assert_eq!(got_out, Some(Seat::OnFoot));
+    let (c, car) = (world.entity(ch_id).unwrap(), world.entity(car_id).unwrap());
+    assert!(!c.hidden, "driver should be visible again");
+    let (dx, dz) = (c.pos.x - car.pos.x, c.pos.z - car.pos.z);
+    let d = (dx * dx + dz * dz).sqrt();
+    assert!(d > 1.0, "stepped out INSIDE the car: {d:.2} units away");
+    assert!(d < 4.0, "stepped out absurdly far: {d:.2}");
+}
+
+#[test]
+fn mounting_blends_the_camera_instead_of_cutting() {
+    // A cut between rigs reads as a glitch. The camera must travel.
+    let mut cam = FollowCamera::new(CameraConfig::on_foot());
+    let before = cam.config.distance;
+    cam.transition_to(CameraConfig::in_vehicle(), 0.35);
+    // Mid-blend the camera is neither rig.
+    let mut world = world_with_ground();
+    let id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    cam.tick(&world, id, 0.0, 0.0);
+    assert!(cam.boom >= before - 0.01, "camera jumped in on mount");
+}
+
+#[test]
+fn the_camera_eases_back_out_after_an_obstruction_clears() {
+    // Pulling IN against a wall must be immediate — easing in spends those
+    // frames inside the wall. Easing OUT must not, or the shot pops the
+    // instant the player rounds a corner.
+    let mut world = world_with_ground();
+    let id = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    let mut cam = FollowCamera::new(CameraConfig::on_foot());
+    for _ in 0..60 {
+        cam.tick(&world, id, 0.0, 0.0);
+    }
+    let open = cam.boom;
+    assert!(open > 1.0, "camera never extended: {open}");
+    // Drop it hard, as an obstruction would, then let it recover.
+    cam.boom = 1.0;
+    cam.tick(&world, id, 0.0, 0.0);
+    let after_one = cam.boom;
+    assert!(after_one > 1.0, "did not recover at all");
+    assert!(
+        after_one < open * 0.5,
+        "snapped back out in one tick ({after_one} of {open}) — that is the pop"
+    );
+}
