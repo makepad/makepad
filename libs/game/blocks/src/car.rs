@@ -205,6 +205,40 @@ impl Car {
         sum / self.wheels.len() as f32 + self.config.wheel_radius
     }
 
+    /// Move the simulated wheels to where the DRAWN wheels actually are.
+    ///
+    /// The config's track and wheelbase are authored for a generic chassis;
+    /// the mesh on top of it is scaled from whatever the art pack shipped.
+    /// For the stock truck the drawn wheels sit 1.30x wider and 1.39x further
+    /// apart than the simulated ones. On flat ground that is invisible — the
+    /// model's lowest point still lands on the road — which is exactly why it
+    /// survived a flat-ground test measuring a 3e-6 residual. On a slope it
+    /// is not: the body pitches and rolls about the SIMULATED contact points,
+    /// and a drawn wheel further out swings through a bigger arc, so it lifts
+    /// off the ground or sinks into it. Reported as "not really following the
+    /// landscape, wheels not really touching".
+    ///
+    /// Same discipline as sitting the mesh on measured bounds rather than on
+    /// the collision box: read the model, do not assume it.
+    ///
+    /// `half_x`/`half_z` are the model's horizontal half-extents and `radius`
+    /// its wheel radius, all already scaled into world units. The suspension
+    /// probe length changes with the radius, so `last_length` is left alone —
+    /// the next tick re-measures it.
+    pub fn fit_wheels_to_model(&mut self, half_x: f32, half_z: f32, radius: f32) {
+        self.config.half_track = half_x.max(0.05);
+        self.config.half_wheelbase = half_z.max(0.05);
+        self.config.wheel_radius = radius.max(0.01);
+        let corners = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)];
+        for (wheel, (sx, sz)) in self.wheels.iter_mut().zip(corners) {
+            wheel.mount = vec3f(
+                sx * self.config.half_track,
+                0.0,
+                sz * self.config.half_wheelbase,
+            );
+        }
+    }
+
     pub fn tick(&mut self, world: &mut GameWorld, player: &DriveInput) {
         if self.control == ControlSource::Player {
             self.input = *player;

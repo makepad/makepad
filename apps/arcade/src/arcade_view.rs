@@ -620,14 +620,20 @@ impl CharacterModel {
             }
         }
 
-        // One hero among the townsfolk, on the other rig entirely — which is
-        // what makes the multi-rig path real rather than theoretical.
-        if let Some(c) = CharacterModel::load(
-            &format!("{chars_dir}/knight.glb"),
-            &format!("{chars_dir}/knight_texture.png"),
-            "knight",
-        ) {
-            cast.push(c);
+        // Two heroes among the townsfolk, on the other rig entirely — which
+        // is what makes the multi-rig path real rather than theoretical. The
+        // barbarian is the one the player wears (see `PLAYER_CHARACTER`).
+        for (stem, tex) in [
+            ("barbarian", "barbarian_texture.png"),
+            ("knight", "knight_texture.png"),
+        ] {
+            if let Some(c) = CharacterModel::load(
+                &format!("{chars_dir}/{stem}.glb"),
+                &format!("{chars_dir}/{tex}"),
+                stem,
+            ) {
+                cast.push(c);
+            }
         }
 
         if cast.is_empty() {
@@ -903,6 +909,23 @@ impl ArcadeView {
         w.cam_distance = 44.0;
         w.orbit_yaw = 0.62;
         w.orbit_pitch = -0.34;
+
+        // Sun: set ONCE, as an explicit direction rather than a time of day.
+        //
+        // 38° elevation is the whole choice. The engine default sits at 54°,
+        // which is nearly overhead — objects get a bright top and shadows
+        // barely clear their own footprint, so nothing reads as standing on
+        // anything. At 38° a shadow runs about 1.3x the caster's height:
+        // long enough to describe the shape that cast it and to show the
+        // ground's slope, short enough that the village does not disappear
+        // into its own shade.
+        //
+        // Given as `dir` because the solar model's answer depends on
+        // latitude and season, and this is a look, not a date.
+        w.sun = SunConfig {
+            dir: Some(vec3f(0.55, 0.62, 0.56).normalize()),
+            ..Default::default()
+        };
 
         // The ground is a heightfield, not a slab.
         //
@@ -1328,6 +1351,45 @@ impl ArcadeView {
             let Ok(glb) = std::fs::read(&path) else { continue };
             if self.renderer.load_model(cx, &id, &glb, png.as_deref()).is_ok() {
                 log!("arcade: vehicle model = {id}");
+                // Put the simulated wheels under the drawn ones. Until this
+                // runs, the car pitches about contact points that are not
+                // where its visible wheels are, and on a slope the wheels
+                // leave the ground.
+                if let Some(bounds) = self.renderer.model_bounds(&id) {
+                    let (min, max) = bounds;
+                    let native_len = (max.z - min.z).max(max.x - min.x).max(0.001);
+                    let car_half_z = {
+                        let world = self.world.borrow();
+                        world
+                            .entities
+                            .iter()
+                            .find(|e| e.tag == "car")
+                            .map(|e| e.half.z)
+                    };
+                    if let Some(car_half_z) = car_half_z {
+                        let s = (car_half_z * 2.0) / native_len;
+                        // Wheels sit at the model's horizontal extremes; its
+                        // wheel radius is half the ground clearance it was
+                        // authored with, which for an origin-at-the-contact-
+                        // patch vehicle is half the lowest axle height. Taking
+                        // it as a fraction of the body height is the robust
+                        // reading across kits that vary wildly in proportion.
+                        let half_x = (max.x - min.x) * 0.5 * s;
+                        let half_z = (max.z - min.z) * 0.5 * s;
+                        let radius = (max.y - min.y) * 0.25 * s;
+                        let mut blocks = self.blocks.borrow_mut();
+                        for c in blocks.cars.iter_mut() {
+                            c.fit_wheels_to_model(half_x * 0.92, half_z * 0.92, radius);
+                        }
+                        log!(
+                            "arcade: wheels fitted to model — half_track {:.2}, \
+                             half_wheelbase {:.2}, radius {:.2}",
+                            half_x * 0.92,
+                            half_z * 0.92,
+                            radius
+                        );
+                    }
+                }
                 self.vehicle_model = Some(id);
                 // The chassis box is now only the physics body; leaving it
                 // visible would draw a coloured slab inside the car.
@@ -1794,7 +1856,21 @@ impl ArcadeView {
         // camera behind it reads as a debug view; the whole point of the
         // third-person controller is that you can see yourself walk.
         let me = self.player;
-        self.villagers.push(Villager::new(me, 0x91ae_5eed));
+        let mut mine = Villager::new(me, 0x91ae_5eed);
+        // Pinned BY NAME, not by index. The cast is assembled from whatever
+        // the asset library happens to contain, so an index would silently
+        // become a different person the moment a pack is added or the civilian
+        // filter changes — and the failure looks like a cosmetic surprise
+        // rather than a bug. If the named model is missing (no asset packs
+        // downloaded) the player just keeps the default kind.
+        if let Some(kind) = self
+            .cast
+            .iter()
+            .position(|c| c.label == Self::PLAYER_CHARACTER)
+        {
+            mine.kind = kind;
+        }
+        self.villagers.push(mine);
     }
 
     /// Points of interest derived from the composed street.
@@ -1829,6 +1905,11 @@ impl ArcadeView {
     /// How fast the right stick turns the camera, in mouse-pixel equivalents
     /// per second. The rig's own `sensitivity` converts to radians, so stick
     /// and mouse share one tuning constant instead of drifting apart.
+    /// Who the player is. The barbarian: bearded, and on the full 41-joint
+    /// hero rig rather than the 7-joint civilian one, so the character you
+    /// spend the whole game looking at is the best-animated thing on screen.
+    const PLAYER_CHARACTER: &'static str = "barbarian";
+
     const PAD_LOOK_SPEED: f32 = 520.0;
     /// Right-stick deadzone. Sticks drift; without this the camera creeps.
     const PAD_LOOK_DEADZONE: f32 = 0.18;
@@ -2212,14 +2293,24 @@ impl ArcadeView {
                 }
             }
         }
-        // Cycle the sun across the day so the unified lighting and the
-        // projected shadows are visibly doing something: a full 24h in 40s.
-        let hours = 6.0 + (t * 0.45) % 12.0;
-        w.sun = SunConfig {
-            time_of_day: Some(hours),
-            latitude: 52.0,
-            ..Default::default()
-        };
+        // The sun is FIXED. It used to sweep a full day every 40 seconds,
+        // which looked lively for about ten seconds and then simply cost
+        // money: AO and cast shadows are baked, and the baker rebakes
+        // whenever the sun moves past `sun_rebake_angle`, so a sun crossing
+        // the sky at that rate re-bakes the whole world continuously and
+        // nothing on screen ever settles.
+        //
+        // A day cycle is still a feature worth having — it just has to be a
+        // choice rather than the default, and it wants incremental rebaking
+        // before it earns its place.
+        if std::env::var("ARCADE_DAYCYCLE").is_ok() {
+            let hours = 6.0 + (t * 0.45) % 12.0;
+            w.sun = SunConfig {
+                time_of_day: Some(hours),
+                latitude: 52.0,
+                ..Default::default()
+            };
+        }
 
         // Hard landings throw sparks. Compared against last frame's speed so
         // a resting crate does not spark forever.
