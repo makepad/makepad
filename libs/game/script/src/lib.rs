@@ -10,7 +10,7 @@ pub mod dispatch;
 pub mod host;
 pub mod value;
 
-pub use dispatch::{AudioRequest, Ctx, VerbFn, VERBS};
+pub use dispatch::{AudioRequest, Ctx, ToneWave, VerbFn, VERBS};
 pub use host::{EvalReport, ScriptHost};
 
 /// `game.api()` text — also what splashgame.md documents.

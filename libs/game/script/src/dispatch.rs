@@ -20,13 +20,45 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Oscillator shape for `tone`/`beep`. Mirrors gamemaker's `synth::Wave`
+/// including its parse fallbacks — a host maps this onto its own synth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToneWave {
+    Sine,
+    Square,
+    Saw,
+    Triangle,
+    Noise,
+}
+
+impl ToneWave {
+    pub fn parse(name: &str) -> ToneWave {
+        match name {
+            "sine" => ToneWave::Sine,
+            "saw" => ToneWave::Saw,
+            "triangle" | "tri" => ToneWave::Triangle,
+            "noise" => ToneWave::Noise,
+            _ => ToneWave::Square,
+        }
+    }
+}
+
 /// Audio is not a sim concern (M0 moved the synth host-side), so audio verbs
 /// queue requests the host drains each tick.
+///
+/// Sustained tones need an id back *synchronously*, which a drained queue
+/// cannot provide, so the ids are minted here and the host keeps the mapping
+/// to its own voices. Script only ever treats the value as an opaque handle,
+/// so this is observationally identical to gamemaker returning a synth id.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AudioRequest {
     Sfx { name: String, pitch: f32 },
     Beep { freq: f32, to: f32, ms: f32, gain: f32 },
     Jingle { notes: String, ms: f32 },
+    Tone { id: u64, freq: f32, wave: ToneWave, gain: f32 },
+    ToneSet { id: u64, freq: Option<f32>, gain: Option<f32> },
+    ToneStop { id: u64 },
+    StopAllTones,
 }
 
 /// Everything a verb may touch. Cloned handles, so verbs can borrow narrowly
@@ -38,6 +70,9 @@ pub struct Ctx {
     pub callbacks: Rc<RefCell<CallbackTable>>,
     pub audio: Rc<RefCell<Vec<AudioRequest>>>,
     pub eval_gen: Rc<Cell<u64>>,
+    /// Next sustained-tone handle. Host-owned state expressed as a hook, so
+    /// the crate never reaches for a synth it cannot depend on.
+    pub next_tone: Rc<Cell<u64>>,
 }
 
 pub type VerbFn = fn(&mut ScriptVm, &Ctx, ScriptObject) -> ScriptValue;
@@ -1078,6 +1113,539 @@ fn v_bot(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
     num(id.0 as f64)
 }
 
+// ── decoration: parts, beams ────────────────────────────────────────────
+
+fn v_part(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let owner = arg_id(vm, args, 0);
+    let Some(opts) = opts_of(vm, args, 1) else {
+        return nil();
+    };
+    warn_unknown_keys(
+        vm,
+        &ctx.world,
+        "part",
+        opts,
+        &[id!(pos), id!(size), id!(color), id!(glow), id!(rot_x), id!(rot_y), id!(rot_z), id!(shape)],
+    );
+    let offset = opt_vec3(vm, opts, id!(pos), vec3f(0.0, 0.0, 0.0));
+    let size = opt_vec3(vm, opts, id!(size), vec3f(0.2, 0.2, 0.2));
+    let color = opt_color(vm, opts, id!(color), vec4(0.1, 0.1, 0.12, 1.0));
+    let glow = opt_f32(vm, opts, id!(glow), 0.0);
+    let rot = vec3f(
+        opt_f32(vm, opts, id!(rot_x), 0.0),
+        opt_f32(vm, opts, id!(rot_y), 0.0),
+        opt_f32(vm, opts, id!(rot_z), 0.0),
+    );
+    let half = vec3f(
+        (size.x * 0.5).max(0.005),
+        (size.y * 0.5).max(0.005),
+        (size.z * 0.5).max(0.005),
+    );
+    let shape = match opt_string(vm, opts, id!(shape)) {
+        Some(name) => Shape::parse(&name),
+        None => Shape::Box,
+    };
+    let mut world = ctx.world.borrow_mut();
+    if world.entity(owner).is_none() {
+        return nil();
+    }
+    world.mark_render_dirty();
+    world.next_id += 1;
+    let id = world.next_id;
+    world.parts.push(Part {
+        id,
+        owner,
+        offset,
+        rot,
+        half,
+        target_offset: offset,
+        target_rot: rot,
+        target_half: half,
+        rate: 9.0,
+        color,
+        glow,
+        shape,
+        anim_active: false,
+    });
+    num(id as f64)
+}
+
+/// Animate a part: set lerp targets; the engine eases toward them at
+/// `rate`/second. Only given keys move.
+fn v_move_part(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let pid = arg_id(vm, args, 0);
+    let Some(opts) = opts_of(vm, args, 1) else {
+        return nil();
+    };
+    let pos_v = opts_value(vm, opts, id!(pos));
+    let size_v = opts_value(vm, opts, id!(size));
+    let rx_v = opts_value(vm, opts, id!(rot_x));
+    let ry_v = opts_value(vm, opts, id!(rot_y));
+    let rz_v = opts_value(vm, opts, id!(rot_z));
+    let rate_v = opts_value(vm, opts, id!(rate));
+    let pos = if pos_v.is_nil() { None } else { Some(value_vec3(vm, pos_v)) };
+    let size = if size_v.is_nil() { None } else { Some(value_vec3(vm, size_v)) };
+    let rx = if rx_v.is_nil() { None } else { Some(value_f32(vm, rx_v)) };
+    let ry = if ry_v.is_nil() { None } else { Some(value_f32(vm, ry_v)) };
+    let rz = if rz_v.is_nil() { None } else { Some(value_f32(vm, rz_v)) };
+    let rate = if rate_v.is_nil() { None } else { Some(value_f32(vm, rate_v)) };
+    let mut world = ctx.world.borrow_mut();
+    if let Some(part) = world.parts.iter_mut().find(|p| p.id == pid) {
+        if let Some(pos) = pos {
+            part.target_offset = pos;
+        }
+        if let Some(size) = size {
+            part.target_half = vec3f(
+                (size.x * 0.5).max(0.005),
+                (size.y * 0.5).max(0.005),
+                (size.z * 0.5).max(0.005),
+            );
+        }
+        if let Some(rx) = rx {
+            part.target_rot.x = rx;
+        }
+        if let Some(ry) = ry {
+            part.target_rot.y = ry;
+        }
+        if let Some(rz) = rz {
+            part.target_rot.z = rz;
+        }
+        if let Some(rate) = rate {
+            part.rate = rate.max(0.1);
+        }
+        part.anim_active = true;
+    }
+    // The part leaves the static slab while it animates.
+    let owner = world.parts.iter().find(|p| p.id == pid).map(|p| p.owner);
+    if let Some(owner) = owner {
+        if world.is_static_visual(owner) {
+            world.mark_render_dirty();
+        }
+    }
+    nil()
+}
+
+fn v_beam(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let from_v = arg(vm, args, 0);
+    let from = value_vec3(vm, from_v);
+    let to_v = arg(vm, args, 1);
+    let to = value_vec3(vm, to_v);
+    let opts_v = arg(vm, args, 2);
+    let mut size = 0.12f32;
+    let mut color = vec4(0.9, 0.9, 0.95, 1.0);
+    let mut glow = 0.0f32;
+    if let Some(opts) = opts_v.as_object() {
+        let size_v = opts_value(vm, opts, id!(size));
+        let color_v = opts_value(vm, opts, id!(color));
+        let glow_v = opts_value(vm, opts, id!(glow));
+        if !size_v.is_nil() {
+            size = value_f32(vm, size_v);
+        }
+        if !color_v.is_nil() {
+            color = value_color(vm, color_v);
+        }
+        if !glow_v.is_nil() {
+            glow = value_f32(vm, glow_v);
+        }
+    }
+    ctx.world.borrow_mut().beams.push(Beam {
+        from,
+        to,
+        size: size.clamp(0.01, 4.0),
+        color,
+        glow,
+    });
+    nil()
+}
+
+// ── attach / ride ───────────────────────────────────────────────────────
+
+fn v_attach(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let rider = arg_id(vm, args, 0);
+    let owner = arg_id(vm, args, 1);
+    let extra = arg(vm, args, 2);
+    // Third arg is either the legacy vec3 offset, or an options object
+    // {pos, mode: "ride", spin}. A vec3 parses as a vec3 first.
+    let ip = vm.bx.threads.cur_ref().trap.ip;
+    let (offset, ride, spin) = match NumericValue::from_script_value_heap(&vm.bx.heap, extra, ip) {
+        NumericValue::Vec3(v) => (v, false, 0.0),
+        _ => {
+            if let Some(opts) = extra.as_object() {
+                let offset = opt_vec3(vm, opts, id!(pos), vec3f(0.0, 1.0, 0.0));
+                let ride = match opt_string(vm, opts, id!(mode)) {
+                    Some(mode) => mode == "ride",
+                    None => false,
+                };
+                let spin = opt_f32(vm, opts, id!(spin), 0.0);
+                (offset, ride, spin)
+            } else {
+                (vec3f(0.0, 1.0, 0.0), false, 0.0)
+            }
+        }
+    };
+    if let Some(e) = ctx.world.borrow_mut().entity_mut(rider) {
+        e.attached_to = owner;
+        e.attach_offset = offset;
+        e.attach_ride = ride;
+        e.attach_spin = spin;
+        e.vel = vec3f(0.0, 0.0, 0.0);
+    }
+    nil()
+}
+
+fn v_detach(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let rider = arg_id(vm, args, 0);
+    if let Some(e) = ctx.world.borrow_mut().entity_mut(rider) {
+        e.attached_to = 0;
+        e.attach_ride = false;
+        e.attach_spin = 0.0;
+    }
+    nil()
+}
+
+fn v_speed_mult(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let id = arg_id(vm, args, 0);
+    let f = arg_f32(vm, args, 1);
+    if let Some(e) = ctx.world.borrow_mut().entity_mut(id) {
+        e.speed_mult = f.clamp(0.0, 10.0);
+    }
+    nil()
+}
+
+// ── spatial queries ─────────────────────────────────────────────────────
+
+fn v_raycast(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let from_v = arg(vm, args, 0);
+    let from = value_vec3(vm, from_v);
+    let dir_v = arg(vm, args, 1);
+    let dir = value_vec3(vm, dir_v);
+    let max = arg_f32(vm, args, 2).max(0.0);
+    let hit = world_raycast(&ctx.world.borrow(), from, dir, max);
+    match hit {
+        Some((id, pos, normal, dist)) => {
+            let obj = vm.bx.heap.new_object();
+            vm.bx.heap.set_object_storage_auto(obj);
+            // Terrain reports as hit: -1 (u64::MAX doesn't survive f64).
+            let hit_id = if id == TERRAIN_ID { -1.0 } else { id as f64 };
+            let pos_v = vec3_value(vm, pos);
+            let normal_v = vec3_value(vm, normal);
+            let heap = &mut vm.bx.heap;
+            heap.set_value(obj, id!(hit).into(), ScriptValue::from_f64(hit_id), NoTrap);
+            heap.set_value(obj, id!(pos).into(), pos_v, NoTrap);
+            heap.set_value(obj, id!(normal).into(), normal_v, NoTrap);
+            heap.set_value(obj, id!(dist).into(), ScriptValue::from_f64(dist as f64), NoTrap);
+            obj.into()
+        }
+        None => nil(),
+    }
+}
+
+fn v_overlap_sphere(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let center_v = arg(vm, args, 0);
+    let center = value_vec3(vm, center_v);
+    let r = arg_f32(vm, args, 1).max(0.0);
+    let ids: Vec<u64> = ctx
+        .world
+        .borrow()
+        .entities
+        .iter()
+        .filter(|e| {
+            // Distance from sphere center to the entity's AABB.
+            let dx = ((center.x - e.pos.x).abs() - e.half.x).max(0.0);
+            let dy = ((center.y - e.pos.y).abs() - e.half.y).max(0.0);
+            let dz = ((center.z - e.pos.z).abs() - e.half.z).max(0.0);
+            dx * dx + dy * dy + dz * dz <= r * r
+        })
+        .map(|e| e.id)
+        .collect();
+    let array = vm.bx.heap.new_array();
+    let trap = vm.bx.threads.cur().trap.pass();
+    for id in ids {
+        vm.bx.heap.array_push(array, ScriptValue::from_f64(id as f64), trap);
+    }
+    array.into()
+}
+
+fn v_ground_peak(vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    // Highest terrain vertex, as vec3 — where the corpus puts the goal.
+    let world = ctx.world.borrow();
+    let Some(t) = world.terrain.as_ref() else {
+        return nil();
+    };
+    let mut best = (0usize, f32::MIN);
+    for (index, h) in t.heights.iter().enumerate() {
+        if *h > best.1 {
+            best = (index, *h);
+        }
+    }
+    let ix = (best.0 % t.cells) as f32;
+    let iz = (best.0 / t.cells) as f32;
+    let pos = vec3f(
+        t.origin + ix * t.cell_size,
+        best.1,
+        t.origin + iz * t.cell_size,
+    );
+    drop(world);
+    vec3_value(vm, pos)
+}
+
+// ── raw input reads ─────────────────────────────────────────────────────
+
+fn v_held(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let action = arg_string(vm, args, 0);
+    let held = ctx.world.borrow().action_held(LiveId::from_str(&action));
+    ScriptValue::from_bool(held)
+}
+
+fn v_pressed(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let action = arg_string(vm, args, 0);
+    let pressed = ctx.world.borrow().action_pressed(LiveId::from_str(&action));
+    ScriptValue::from_bool(pressed)
+}
+
+fn v_axis(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let neg = arg_string(vm, args, 0);
+    let pos = arg_string(vm, args, 1);
+    let world = ctx.world.borrow();
+    let v = world.action_held(LiveId::from_str(&pos)) as i8 as f64
+        - world.action_held(LiveId::from_str(&neg)) as i8 as f64;
+    num(v)
+}
+
+fn v_player_input(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let id = PlayerId(arg_f32(vm, args, 0) as u32);
+    let w = ctx.world.borrow();
+    let (move_x, move_z) = w.player_move(id);
+    let (axis_x, axis_z) = match w.players.get(id) {
+        Some(p) if !id.is_local_slot() => p.input.axes(),
+        _ => {
+            let key = |name: LiveId| w.held.contains(&name);
+            (
+                ((key(live_id!(right)) as i8 - key(live_id!(left)) as i8) as f64 + w.pad.axis_x)
+                    .clamp(-1.0, 1.0),
+                ((key(live_id!(down)) as i8 - key(live_id!(up)) as i8) as f64 + w.pad.axis_z)
+                    .clamp(-1.0, 1.0),
+            )
+        }
+    };
+    let actions = [
+        (live_id!(left), id!(left_pressed)),
+        (live_id!(right), id!(right_pressed)),
+        (live_id!(up), id!(up_pressed)),
+        (live_id!(down), id!(down_pressed)),
+        (live_id!(jump), id!(jump_pressed)),
+        (live_id!(shoot), id!(shoot_pressed)),
+        (live_id!(grab), id!(grab_pressed)),
+        (live_id!(reset), id!(reset_pressed)),
+    ];
+    let states: Vec<(LiveId, LiveId, bool, bool)> = actions
+        .iter()
+        .map(|(a, p)| (*a, *p, w.action_held_for(id, *a), w.action_pressed_for(id, *a)))
+        .collect();
+    drop(w);
+    let obj = vm.bx.heap.new_object();
+    vm.bx.heap.set_object_storage_auto(obj);
+    let heap = &mut vm.bx.heap;
+    for (action, pressed_key, is_held, was_pressed) in states {
+        heap.set_value(obj, action.into(), ScriptValue::from_bool(is_held), NoTrap);
+        heap.set_value(obj, pressed_key.into(), ScriptValue::from_bool(was_pressed), NoTrap);
+    }
+    heap.set_value(obj, id!(axis_x).into(), ScriptValue::from_f64(axis_x), NoTrap);
+    heap.set_value(obj, id!(axis_z).into(), ScriptValue::from_f64(axis_z), NoTrap);
+    heap.set_value(obj, id!(move_x).into(), ScriptValue::from_f64(move_x), NoTrap);
+    heap.set_value(obj, id!(move_z).into(), ScriptValue::from_f64(move_z), NoTrap);
+    obj.into()
+}
+
+// ── camera reads / writes ───────────────────────────────────────────────
+
+fn v_cam_yaw(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    num(ctx.world.borrow().cam_yaw as f64)
+}
+
+fn v_cam_pitch(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    num(ctx.world.borrow().cam_pitch as f64)
+}
+
+fn v_cam_dist(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    let world = ctx.world.borrow();
+    let d = if world.cam_third != 0 { world.cam_boom } else { world.cam_distance };
+    num(d as f64)
+}
+
+fn v_cam_fov(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    num(ctx.world.borrow().cam_fov as f64)
+}
+
+fn v_cam_dragging(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    ScriptValue::from_bool(ctx.world.borrow().cam_dragging)
+}
+
+fn v_cam_shake(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let amount = arg_f32(vm, args, 0).max(0.0);
+    let mut world = ctx.world.borrow_mut();
+    world.cam_shake = (world.cam_shake + amount).clamp(0.0, 1.5);
+    nil()
+}
+
+fn v_set_cam_yaw(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let yaw = arg_f32(vm, args, 0);
+    ctx.world.borrow_mut().cam_yaw_request = Some(yaw);
+    nil()
+}
+
+fn v_set_cam_pitch(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let pitch = arg_f32(vm, args, 0).clamp(-1.2, 0.25);
+    ctx.world.borrow_mut().cam_pitch_request = Some(pitch);
+    nil()
+}
+
+fn v_set_cam_dist(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let d = arg_f32(vm, args, 0);
+    let mut world = ctx.world.borrow_mut();
+    if world.cam_third != 0 {
+        world.cam_boom = d.clamp(1.0, 60.0);
+    } else {
+        world.cam_distance = d.clamp(0.5, 120.0);
+    }
+    nil()
+}
+
+fn v_set_cam_fov(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let fov = arg_f32(vm, args, 0).clamp(20.0, 120.0);
+    ctx.world.borrow_mut().cam_fov = fov;
+    nil()
+}
+
+// ── persistence ─────────────────────────────────────────────────────────
+
+fn v_save(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let key = arg_string(vm, args, 0);
+    let v = arg(vm, args, 1);
+    // Strings first: the numeric cast coerces strings to NaN.
+    let val = if let Some(text) = vm.bx.heap.string_with(v, |_, s| s.to_string()) {
+        SaveVal::Str(text)
+    } else {
+        SaveVal::Num(value_f32(vm, v) as f64)
+    };
+    let mut world = ctx.world.borrow_mut();
+    world.save_data.insert(key, val);
+    world.save_dirty = true;
+    nil()
+}
+
+fn v_load(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let key = arg_string(vm, args, 0);
+    let world_ref = ctx.world.borrow();
+    match world_ref.save_data.get(&key) {
+        Some(SaveVal::Num(n)) => num(*n),
+        Some(SaveVal::Str(text)) => {
+            let text = text.clone();
+            drop(world_ref);
+            vm.bx.heap.new_string_from_str(&text)
+        }
+        None => {
+            drop(world_ref);
+            arg(vm, args, 1) // the default, or NIL
+        }
+    }
+}
+
+// ── sustained tones ─────────────────────────────────────────────────────
+
+fn v_tone(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let mut freq = 220.0f32;
+    let mut gain = 0.15f32;
+    let mut wave = ToneWave::Saw;
+    if let Some(opts) = opts_of(vm, args, 0) {
+        warn_unknown_keys(vm, &ctx.world, "tone", opts, &[id!(freq), id!(gain), id!(wave)]);
+        freq = opt_f32(vm, opts, id!(freq), freq);
+        gain = opt_f32(vm, opts, id!(gain), gain);
+        if let Some(name) = opt_string(vm, opts, id!(wave)) {
+            wave = ToneWave::parse(&name);
+        }
+    }
+    let id = ctx.next_tone.get().wrapping_add(1);
+    ctx.next_tone.set(id);
+    ctx.audio
+        .borrow_mut()
+        .push(AudioRequest::Tone { id, freq, wave, gain });
+    num(id as f64)
+}
+
+fn v_tone_set(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let id = arg_id(vm, args, 0);
+    let mut freq = None;
+    let mut gain = None;
+    if let Some(opts) = opts_of(vm, args, 1) {
+        warn_unknown_keys(vm, &ctx.world, "tone_set", opts, &[id!(freq), id!(gain)]);
+        let freq_v = opts_value(vm, opts, id!(freq));
+        let gain_v = opts_value(vm, opts, id!(gain));
+        if !freq_v.is_nil() {
+            freq = Some(value_f32(vm, freq_v));
+        }
+        if !gain_v.is_nil() {
+            gain = Some(value_f32(vm, gain_v));
+        }
+    }
+    ctx.audio
+        .borrow_mut()
+        .push(AudioRequest::ToneSet { id, freq, gain });
+    nil()
+}
+
+fn v_tone_stop(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let id = arg_id(vm, args, 0);
+    ctx.audio.borrow_mut().push(AudioRequest::ToneStop { id });
+    nil()
+}
+
+// ── HUD extras / introspection / lifecycle ──────────────────────────────
+
+fn v_format(vm: &mut ScriptVm, _ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let value = arg_f32(vm, args, 0) as f64;
+    let decimals = arg(vm, args, 1);
+    let decimals = if decimals.is_nil() {
+        1
+    } else {
+        (value_f32(vm, decimals) as usize).min(6)
+    };
+    let text = format!("{:.*}", decimals, value);
+    vm.bx.heap.new_string_from_str(&text)
+}
+
+fn v_api(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    // Introspection: dump the whole verb surface so the agent can lint
+    // itself without six test cycles.
+    let mut world = ctx.world.borrow_mut();
+    world.log("game.* API:".to_string());
+    for (verb, _, sig) in VERBS {
+        world.log(format!("  game.{verb}{sig}"));
+    }
+    nil()
+}
+
+fn v_reset(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    // Release this world's callback slots, then wipe.
+    {
+        let mut world = ctx.world.borrow_mut();
+        let mut callbacks = ctx.callbacks.borrow_mut();
+        if let Some(slot) = world.on_tick.take() {
+            callbacks.free(slot);
+        }
+        if let Some(slot) = world.on_touch.take() {
+            callbacks.free(slot);
+        }
+        for timer in world.timers.drain(..) {
+            callbacks.free(timer.func);
+        }
+        world.reset_content();
+    }
+    ctx.blocks.borrow_mut().clear();
+    ctx.audio.borrow_mut().push(AudioRequest::StopAllTones);
+    nil()
+}
+
 // ── the table ───────────────────────────────────────────────────────────
 
 /// `(name, fn, signature)` — the signature strings are what `game.api()`
@@ -1153,7 +1721,38 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("players", v_players, "() -> [player ids]"),
     ("player_name", v_player_name, "(player) -> name"),
     ("player_entity", v_player_entity, "(player) -> entity id"),
+    ("player_input", v_player_input, "(player) -> {left..back, *_pressed, axis_x, axis_z, move_x, move_z}"),
     ("bot", v_bot, "(name) -> player id"),
+    ("part", v_part, "(owner, {pos, size, color, glow, rot_x, rot_y, rot_z, shape}) -> part id"),
+    ("move_part", v_move_part, "(part, {pos, size, rot_x, rot_y, rot_z, rate}) — eases to targets"),
+    ("beam", v_beam, "(from, to, {size, color, glow}) — immediate mode, re-issue each tick"),
+    ("attach", v_attach, "(rider, owner, vec3 | {pos, mode: \"ride\", spin})"),
+    ("detach", v_detach, "(rider)"),
+    ("speed_mult", v_speed_mult, "(id, factor) — 0..10"),
+    ("raycast", v_raycast, "(from, dir, max) -> {hit, pos, normal, dist} (hit -1 = terrain)"),
+    ("overlap_sphere", v_overlap_sphere, "(center, radius) -> [ids]"),
+    ("ground_peak", v_ground_peak, "() -> vec3 of the highest terrain vertex"),
+    ("held", v_held, "(action) -> bool"),
+    ("pressed", v_pressed, "(action) -> bool (this tick)"),
+    ("axis", v_axis, "(neg_action, pos_action) -> -1..1"),
+    ("cam_yaw", v_cam_yaw, "() -> yaw"),
+    ("cam_pitch", v_cam_pitch, "() -> pitch"),
+    ("cam_dist", v_cam_dist, "() -> boom in third person, else distance"),
+    ("cam_fov", v_cam_fov, "() -> fov"),
+    ("cam_dragging", v_cam_dragging, "() -> bool"),
+    ("cam_shake", v_cam_shake, "(amount) — accumulates, clamped 0..1.5"),
+    ("set_cam_yaw", v_set_cam_yaw, "(yaw)"),
+    ("set_cam_pitch", v_set_cam_pitch, "(pitch) — clamped -1.2..0.25"),
+    ("set_cam_dist", v_set_cam_dist, "(d) — boom 1..60 in third person, else distance 0.5..120"),
+    ("set_cam_fov", v_set_cam_fov, "(fov) — clamped 20..120"),
+    ("save", v_save, "(key, value) — numbers and strings"),
+    ("load", v_load, "(key, default) -> value"),
+    ("tone", v_tone, "({freq, gain, wave}) -> tone id — sustained"),
+    ("tone_set", v_tone_set, "(tone id, {freq, gain})"),
+    ("tone_stop", v_tone_stop, "(tone id)"),
+    ("format", v_format, "(value, decimals) -> string"),
+    ("api", v_api, "() — log every verb and signature"),
+    ("reset", v_reset, "() — wipe world content, timers, callbacks, blocks, tones"),
 ];
 
 /// Built once per isolate: LiveId -> verb. Replaces gamemaker's linear chain.
@@ -1196,6 +1795,520 @@ fn edit_distance(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
 
+    /// A VM with no Cx — enough to build args objects and call verbs
+    /// directly, which is how every verb test below drives dispatch.
+    struct Harness {
+        std: usize,
+        host: usize,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self { std: 0, host: 0 }
+        }
+
+        fn vm(&mut self) -> ScriptVm<'_> {
+            ScriptVm {
+                host: &mut self.host,
+                std: &mut self.std,
+                bx: Box::new(makepad_widgets::makepad_script::ScriptVmBase::new()),
+            }
+        }
+    }
+
+    fn ctx_with(world: GameWorld) -> Ctx {
+        Ctx {
+            world: Rc::new(RefCell::new(world)),
+            blocks: Rc::new(RefCell::new(Blocks::new())),
+            callbacks: Rc::new(RefCell::new(CallbackTable::default())),
+            audio: Rc::new(RefCell::new(Vec::new())),
+            eval_gen: Rc::new(Cell::new(1)),
+            next_tone: Rc::new(Cell::new(0)),
+        }
+    }
+
+    /// Build a positional args object, the shape a `game.verb(a, b, ...)`
+    /// call hands the dispatcher.
+    fn args_of(vm: &mut ScriptVm, values: &[ScriptValue]) -> ScriptObject {
+        let obj = vm.bx.heap.new_object();
+        vm.bx.heap.set_object_storage_vec2(obj);
+        for v in values {
+            vm.bx.heap.vec_push_unchecked(obj, NIL, *v);
+        }
+        obj
+    }
+
+    fn opts_of_pairs(vm: &mut ScriptVm, pairs: &[(LiveId, ScriptValue)]) -> ScriptValue {
+        let obj = vm.bx.heap.new_object();
+        vm.bx.heap.set_object_storage_auto(obj);
+        for (k, v) in pairs {
+            vm.bx.heap.set_value(obj, (*k).into(), *v, NoTrap);
+        }
+        obj.into()
+    }
+
+    fn call(
+        verb: &str,
+        vm: &mut ScriptVm,
+        ctx: &Ctx,
+        values: &[ScriptValue],
+    ) -> ScriptValue {
+        let f = verb_table()[&LiveId::from_str(verb)];
+        let args = args_of(vm, values);
+        f(vm, ctx, args)
+    }
+
+    /// A world with one static box at the origin, id returned.
+    fn world_with_box() -> (GameWorld, u64) {
+        let mut world = GameWorld::new();
+        world.next_id += 1;
+        let id = world.next_id;
+        let mut e = Entity::default();
+        e.id = id;
+        e.kind = BodyKind::Static;
+        e.half = vec3f(0.5, 0.5, 0.5);
+        world.push_entity(e);
+        (world, id)
+    }
+
+    #[test]
+    fn part_appends_and_move_part_sets_targets() {
+        let (world, owner) = world_with_box();
+        let ctx = ctx_with(world);
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        let opts = opts_of_pairs(
+            &mut vm,
+            &[
+                (id!(size), ScriptValue::from_f64(1.0)),
+                (id!(glow), ScriptValue::from_f64(0.5)),
+                (id!(rot_y), ScriptValue::from_f64(0.25)),
+            ],
+        );
+        let pid = call("part", &mut vm, &ctx, &[ScriptValue::from_f64(owner as f64), opts]);
+        let pid = pid.as_f64().unwrap() as u64;
+        {
+            let w = ctx.world.borrow();
+            assert_eq!(w.parts.len(), 1);
+            let p = &w.parts[0];
+            assert_eq!(p.owner, owner);
+            assert_eq!(p.half, vec3f(0.5, 0.5, 0.5)); // size 1.0 -> half 0.5
+            assert_eq!(p.glow, 0.5);
+            assert_eq!(p.rot.y, 0.25);
+            // Targets start equal to the pose: nothing animates yet.
+            assert_eq!(p.target_offset, p.offset);
+            assert!(!p.anim_active);
+            assert_eq!(p.rate, 9.0);
+        }
+
+        // Ordering: a second part appends after the first.
+        let opts2 = opts_of_pairs(&mut vm, &[(id!(glow), ScriptValue::from_f64(1.0))]);
+        let pid2 = call("part", &mut vm, &ctx, &[ScriptValue::from_f64(owner as f64), opts2]);
+        let pid2 = pid2.as_f64().unwrap() as u64;
+        assert!(pid2 > pid);
+        assert_eq!(ctx.world.borrow().parts[1].id, pid2);
+
+        // move_part touches only the given keys, and arms the animation.
+        let mopts = opts_of_pairs(
+            &mut vm,
+            &[
+                (id!(rot_x), ScriptValue::from_f64(2.0)),
+                (id!(rate), ScriptValue::from_f64(3.0)),
+            ],
+        );
+        call("move_part", &mut vm, &ctx, &[ScriptValue::from_f64(pid as f64), mopts]);
+        let w = ctx.world.borrow();
+        let p = &w.parts[0];
+        assert_eq!(p.target_rot.x, 2.0);
+        assert_eq!(p.target_rot.y, 0.25); // untouched key keeps its value
+        assert_eq!(p.rate, 3.0);
+        assert!(p.anim_active);
+    }
+
+    #[test]
+    fn part_on_a_missing_owner_is_a_no_op() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let opts = opts_of_pairs(&mut vm, &[]);
+        let r = call("part", &mut vm, &ctx, &[ScriptValue::from_f64(999.0), opts]);
+        assert!(r.is_nil());
+        assert!(ctx.world.borrow().parts.is_empty());
+    }
+
+    #[test]
+    fn attach_takes_a_vec3_or_a_ride_options_object_and_detach_clears() {
+        let (mut world, owner) = world_with_box();
+        world.next_id += 1;
+        let rider = world.next_id;
+        let mut e = Entity::default();
+        e.id = rider;
+        e.kind = BodyKind::Mover;
+        e.vel = vec3f(1.0, 2.0, 3.0);
+        world.push_entity(e);
+        let ctx = ctx_with(world);
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        // Legacy vec3 form: plain offset, not a ride.
+        let off = vec3_value(&mut vm, vec3f(0.0, 2.0, 0.0));
+        call(
+            "attach",
+            &mut vm,
+            &ctx,
+            &[ScriptValue::from_f64(rider as f64), ScriptValue::from_f64(owner as f64), off],
+        );
+        {
+            let w = ctx.world.borrow();
+            let e = w.entity(rider).unwrap();
+            assert_eq!(e.attached_to, owner);
+            assert_eq!(e.attach_offset, vec3f(0.0, 2.0, 0.0));
+            assert!(!e.attach_ride);
+            // Attaching zeroes velocity so the rider stops fighting the pin.
+            assert_eq!(e.vel, vec3f(0.0, 0.0, 0.0));
+        }
+
+        // Options form with ride + spin.
+        let mode = vm.bx.heap.new_string_from_str("ride");
+        let opts = opts_of_pairs(
+            &mut vm,
+            &[(id!(mode), mode), (id!(spin), ScriptValue::from_f64(4.0))],
+        );
+        call(
+            "attach",
+            &mut vm,
+            &ctx,
+            &[ScriptValue::from_f64(rider as f64), ScriptValue::from_f64(owner as f64), opts],
+        );
+        {
+            let w = ctx.world.borrow();
+            let e = w.entity(rider).unwrap();
+            assert!(e.attach_ride);
+            assert_eq!(e.attach_spin, 4.0);
+            // No pos key -> the documented default, not the previous offset.
+            assert_eq!(e.attach_offset, vec3f(0.0, 1.0, 0.0));
+        }
+
+        call("detach", &mut vm, &ctx, &[ScriptValue::from_f64(rider as f64)]);
+        let w = ctx.world.borrow();
+        let e = w.entity(rider).unwrap();
+        assert_eq!(e.attached_to, 0);
+        assert!(!e.attach_ride);
+        assert_eq!(e.attach_spin, 0.0);
+    }
+
+    #[test]
+    fn beam_pushes_an_immediate_mode_segment_with_clamped_size() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let from = vec3_value(&mut vm, vec3f(0.0, 0.0, 0.0));
+        let to = vec3_value(&mut vm, vec3f(0.0, 5.0, 0.0));
+        let opts = opts_of_pairs(&mut vm, &[(id!(size), ScriptValue::from_f64(99.0))]);
+        call("beam", &mut vm, &ctx, &[from, to, opts]);
+        let w = ctx.world.borrow();
+        assert_eq!(w.beams.len(), 1);
+        assert_eq!(w.beams[0].to, vec3f(0.0, 5.0, 0.0));
+        assert_eq!(w.beams[0].size, 4.0); // clamped 0.01..4.0
+    }
+
+    #[test]
+    fn speed_mult_clamps_to_the_documented_range() {
+        let (world, id) = world_with_box();
+        let ctx = ctx_with(world);
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        call(
+            "speed_mult",
+            &mut vm,
+            &ctx,
+            &[ScriptValue::from_f64(id as f64), ScriptValue::from_f64(50.0)],
+        );
+        assert_eq!(ctx.world.borrow().entity(id).unwrap().speed_mult, 10.0);
+        call(
+            "speed_mult",
+            &mut vm,
+            &ctx,
+            &[ScriptValue::from_f64(id as f64), ScriptValue::from_f64(-3.0)],
+        );
+        assert_eq!(ctx.world.borrow().entity(id).unwrap().speed_mult, 0.0);
+    }
+
+    #[test]
+    fn raycast_hits_known_geometry_and_misses_past_it() {
+        let (mut world, id) = world_with_box();
+        world.entity_mut(id).unwrap().pos = vec3f(0.0, 0.0, 10.0);
+        let ctx = ctx_with(world);
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        let from = vec3_value(&mut vm, vec3f(0.0, 0.0, 0.0));
+        let dir = vec3_value(&mut vm, vec3f(0.0, 0.0, 1.0));
+        let hit = call("raycast", &mut vm, &ctx, &[from, dir, ScriptValue::from_f64(50.0)]);
+        let obj = hit.as_object().expect("ray should hit the box");
+        let hit_id = vm.bx.heap.value(obj, id!(hit).into(), NoTrap);
+        let dist = vm.bx.heap.value(obj, id!(dist).into(), NoTrap);
+        assert_eq!(hit_id.as_f64().unwrap() as u64, id);
+        // Box spans z 9.5..10.5. world_raycast marches in 0.15 steps and
+        // reports the marched t, so the hit lands within one step past the
+        // face — assert that contract rather than an analytic 9.5.
+        let dist = dist.as_f64().unwrap();
+        assert!(dist >= 9.5 && dist < 9.5 + 0.15, "hit at {dist}, want 9.5..9.65");
+
+        // Too short to reach: a miss is NIL, not a zero-distance hit.
+        let from = vec3_value(&mut vm, vec3f(0.0, 0.0, 0.0));
+        let dir = vec3_value(&mut vm, vec3f(0.0, 0.0, 1.0));
+        let miss = call("raycast", &mut vm, &ctx, &[from, dir, ScriptValue::from_f64(2.0)]);
+        assert!(miss.is_nil());
+    }
+
+    #[test]
+    fn overlap_sphere_selects_by_aabb_distance() {
+        let (mut world, near) = world_with_box();
+        world.next_id += 1;
+        let far = world.next_id;
+        let mut e = Entity::default();
+        e.id = far;
+        e.kind = BodyKind::Static;
+        e.pos = vec3f(100.0, 0.0, 0.0);
+        e.half = vec3f(0.5, 0.5, 0.5);
+        world.push_entity(e);
+        let ctx = ctx_with(world);
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        let center = vec3_value(&mut vm, vec3f(0.0, 0.0, 0.0));
+        let r = call("overlap_sphere", &mut vm, &ctx, &[center, ScriptValue::from_f64(2.0)]);
+        let arr = r.as_array().expect("overlap_sphere returns an array");
+        assert_eq!(vm.bx.heap.array_len(arr), 1);
+        let first = vm.bx.heap.array_index(arr, 0, NoTrap);
+        assert_eq!(first.as_f64().unwrap() as u64, near);
+        assert_ne!(first.as_f64().unwrap() as u64, far);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_numbers_strings_and_defaults() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        let key = vm.bx.heap.new_string_from_str("best_lap");
+        call("save", &mut vm, &ctx, &[key, ScriptValue::from_f64(12.5)]);
+        assert!(ctx.world.borrow().save_dirty);
+
+        let key = vm.bx.heap.new_string_from_str("best_lap");
+        let got = call("load", &mut vm, &ctx, &[key]);
+        assert_eq!(got.as_f64().unwrap(), 12.5);
+
+        // Strings survive as strings — the numeric cast would NaN them.
+        let key = vm.bx.heap.new_string_from_str("name");
+        let val = vm.bx.heap.new_string_from_str("ada");
+        call("save", &mut vm, &ctx, &[key, val]);
+        let key = vm.bx.heap.new_string_from_str("name");
+        let got = call("load", &mut vm, &ctx, &[key]);
+        let text = vm.bx.heap.string_with(got, |_, s| s.to_string());
+        assert_eq!(text.as_deref(), Some("ada"));
+
+        // Missing key returns the supplied default.
+        let key = vm.bx.heap.new_string_from_str("absent");
+        let got = call("load", &mut vm, &ctx, &[key, ScriptValue::from_f64(7.0)]);
+        assert_eq!(got.as_f64().unwrap(), 7.0);
+    }
+
+    #[test]
+    fn camera_reads_and_writes_pair_up() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        // Writes land in the request mailbox, not the live value: the tick
+        // drains them, so a read right after a write still sees the old pose.
+        call("set_cam_yaw", &mut vm, &ctx, &[ScriptValue::from_f64(1.5)]);
+        assert_eq!(ctx.world.borrow().cam_yaw_request, Some(1.5));
+
+        call("set_cam_pitch", &mut vm, &ctx, &[ScriptValue::from_f64(-9.0)]);
+        assert_eq!(ctx.world.borrow().cam_pitch_request, Some(-1.2)); // clamped
+
+        call("set_cam_fov", &mut vm, &ctx, &[ScriptValue::from_f64(500.0)]);
+        assert_eq!(ctx.world.borrow().cam_fov, 120.0); // clamped
+        let fov = call("cam_fov", &mut vm, &ctx, &[]);
+        assert_eq!(fov.as_f64().unwrap(), 120.0);
+
+        // dist writes boom in third person, distance otherwise.
+        call("set_cam_dist", &mut vm, &ctx, &[ScriptValue::from_f64(9.0)]);
+        assert_eq!(ctx.world.borrow().cam_distance, 9.0);
+        let d = call("cam_dist", &mut vm, &ctx, &[]);
+        assert_eq!(d.as_f64().unwrap(), 9.0);
+        ctx.world.borrow_mut().cam_third = 42;
+        call("set_cam_dist", &mut vm, &ctx, &[ScriptValue::from_f64(1000.0)]);
+        assert_eq!(ctx.world.borrow().cam_boom, 60.0); // clamped 1..60
+        let d = call("cam_dist", &mut vm, &ctx, &[]);
+        assert_eq!(d.as_f64().unwrap(), 60.0);
+
+        // shake accumulates and clamps; dragging reads through.
+        call("cam_shake", &mut vm, &ctx, &[ScriptValue::from_f64(1.0)]);
+        call("cam_shake", &mut vm, &ctx, &[ScriptValue::from_f64(1.0)]);
+        assert_eq!(ctx.world.borrow().cam_shake, 1.5);
+        ctx.world.borrow_mut().cam_dragging = true;
+        assert_eq!(call("cam_dragging", &mut vm, &ctx, &[]).as_bool(), Some(true));
+
+        ctx.world.borrow_mut().cam_yaw = 0.75;
+        assert_eq!(call("cam_yaw", &mut vm, &ctx, &[]).as_f64().unwrap(), 0.75);
+    }
+
+    #[test]
+    fn tone_lifecycle_queues_requests_with_stable_handles() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+
+        let wave = vm.bx.heap.new_string_from_str("sine");
+        let opts = opts_of_pairs(
+            &mut vm,
+            &[(id!(freq), ScriptValue::from_f64(440.0)), (id!(wave), wave)],
+        );
+        let id_a = call("tone", &mut vm, &ctx, &[opts]).as_f64().unwrap() as u64;
+        let opts = opts_of_pairs(&mut vm, &[]);
+        let id_b = call("tone", &mut vm, &ctx, &[opts]).as_f64().unwrap() as u64;
+        assert_ne!(id_a, id_b, "each tone gets its own handle");
+
+        let opts = opts_of_pairs(&mut vm, &[(id!(gain), ScriptValue::from_f64(0.5))]);
+        call("tone_set", &mut vm, &ctx, &[ScriptValue::from_f64(id_a as f64), opts]);
+        call("tone_stop", &mut vm, &ctx, &[ScriptValue::from_f64(id_a as f64)]);
+
+        let audio = ctx.audio.borrow();
+        assert_eq!(
+            audio[0],
+            AudioRequest::Tone { id: id_a, freq: 440.0, wave: ToneWave::Sine, gain: 0.15 }
+        );
+        // No opts -> documented defaults, saw at 220.
+        assert_eq!(
+            audio[1],
+            AudioRequest::Tone { id: id_b, freq: 220.0, wave: ToneWave::Saw, gain: 0.15 }
+        );
+        assert_eq!(
+            audio[2],
+            AudioRequest::ToneSet { id: id_a, freq: None, gain: Some(0.5) }
+        );
+        assert_eq!(audio[3], AudioRequest::ToneStop { id: id_a });
+    }
+
+    #[test]
+    fn unknown_wave_names_fall_back_to_square() {
+        assert_eq!(ToneWave::parse("sine"), ToneWave::Sine);
+        assert_eq!(ToneWave::parse("tri"), ToneWave::Triangle);
+        assert_eq!(ToneWave::parse("triangle"), ToneWave::Triangle);
+        assert_eq!(ToneWave::parse("noise"), ToneWave::Noise);
+        assert_eq!(ToneWave::parse("saw"), ToneWave::Saw);
+        assert_eq!(ToneWave::parse("wobble"), ToneWave::Square);
+    }
+
+    #[test]
+    fn format_rounds_and_defaults_to_one_decimal() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let r = call("format", &mut vm, &ctx, &[ScriptValue::from_f64(3.14159)]);
+        assert_eq!(vm.bx.heap.string_with(r, |_, s| s.to_string()).as_deref(), Some("3.1"));
+        let r = call(
+            "format",
+            &mut vm,
+            &ctx,
+            &[ScriptValue::from_f64(3.14159), ScriptValue::from_f64(3.0)],
+        );
+        assert_eq!(vm.bx.heap.string_with(r, |_, s| s.to_string()).as_deref(), Some("3.142"));
+        // Decimals cap at 6 rather than panicking on a silly precision.
+        let r = call(
+            "format",
+            &mut vm,
+            &ctx,
+            &[ScriptValue::from_f64(1.0), ScriptValue::from_f64(99.0)],
+        );
+        assert_eq!(
+            vm.bx.heap.string_with(r, |_, s| s.to_string()).as_deref(),
+            Some("1.000000")
+        );
+    }
+
+    #[test]
+    fn api_logs_every_verb_exactly_once() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        call("api", &mut vm, &ctx, &[]);
+        let world = ctx.world.borrow();
+        // Header line plus one row per verb.
+        assert_eq!(world.log_pending.len(), VERBS.len() + 1);
+        // Alias rows document as "alias of box" rather than a signature, so
+        // match the verb name itself, not a following paren.
+        for (verb, _, _) in VERBS {
+            let needle = format!("  game.{verb}");
+            assert!(
+                world.log_pending.iter().any(|l| l.starts_with(&needle)),
+                "api() never mentioned game.{verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_wipes_content_timers_and_tones() {
+        let (mut world, _) = world_with_box();
+        world.timers.push(GameTimer {
+            id: 1,
+            at_tick: 60,
+            interval_ticks: 0,
+            func: CallbackSlot(0),
+        });
+        let ctx = ctx_with(world);
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        assert_eq!(ctx.world.borrow().entities.len(), 1);
+
+        call("reset", &mut vm, &ctx, &[]);
+
+        let w = ctx.world.borrow();
+        assert!(w.entities.is_empty());
+        assert!(w.timers.is_empty());
+        assert!(w.on_tick.is_none());
+        drop(w);
+        assert_eq!(ctx.audio.borrow().last(), Some(&AudioRequest::StopAllTones));
+    }
+
+    #[test]
+    fn ground_peak_and_input_reads_degrade_without_terrain_or_input() {
+        let ctx = ctx_with(GameWorld::new());
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        // No terrain: NIL rather than a bogus origin vec3.
+        assert!(call("ground_peak", &mut vm, &ctx, &[]).is_nil());
+
+        let a = vm.bx.heap.new_string_from_str("jump");
+        assert_eq!(call("held", &mut vm, &ctx, &[a]).as_bool(), Some(false));
+        let a = vm.bx.heap.new_string_from_str("jump");
+        assert_eq!(call("pressed", &mut vm, &ctx, &[a]).as_bool(), Some(false));
+
+        ctx.world.borrow_mut().held.insert(live_id!(right));
+        let neg = vm.bx.heap.new_string_from_str("left");
+        let pos = vm.bx.heap.new_string_from_str("right");
+        assert_eq!(call("axis", &mut vm, &ctx, &[neg, pos]).as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn player_input_reports_the_local_players_state() {
+        let ctx = ctx_with(GameWorld::new());
+        ctx.world.borrow_mut().held.insert(live_id!(jump));
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let r = call("player_input", &mut vm, &ctx, &[ScriptValue::from_f64(0.0)]);
+        let obj = r.as_object().expect("player_input returns an object");
+        let jump = vm.bx.heap.value(obj, id!(jump).into(), NoTrap);
+        assert_eq!(jump.as_bool(), Some(true));
+        // The camera-relative pair is always present, even at rest.
+        assert!(!vm.bx.heap.value(obj, id!(move_x).into(), NoTrap).is_nil());
+        assert!(!vm.bx.heap.value(obj, id!(move_z).into(), NoTrap).is_nil());
+    }
+
     #[test]
     fn every_verb_is_uniquely_named_and_documented() {
         let mut seen = std::collections::HashSet::new();
@@ -1205,6 +2318,19 @@ mod tests {
         }
         // The table is the dispatch: a LiveId collision would silently shadow.
         assert_eq!(verb_table().len(), VERBS.len());
+    }
+
+    /// Parity with gamemaker's binding layer, which this crate is meant to
+    /// replace. gamemaker documents 102 rows (98 dispatch arms + 4 names that
+    /// share an arm: block/box, teleport/set_pos, on_leave/on_join). If that
+    /// count moves, the two implementations have drifted again.
+    #[test]
+    fn the_verb_surface_matches_gamemakers() {
+        assert_eq!(
+            VERBS.len(),
+            102,
+            "verb count changed — sync with examples/gamemaker GAME_API and splashgame.md"
+        );
     }
 
     #[test]
