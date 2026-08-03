@@ -189,9 +189,15 @@ fn main() {
         work.into_iter().enumerate().rev().collect::<Vec<_>>(),
     );
     let (tx, rx) = std::sync::mpsc::channel::<(usize, Baked, usize)>();
+    // Reorder window: one slow monster tile must not let the other
+    // workers run the whole cell ahead of the writer — the out-of-order
+    // results buffer unboundedly (observed: 185GB on a Chongqing cell).
+    let written_next = std::sync::atomic::AtomicUsize::new(0);
+    const REORDER_WINDOW: usize = 768;
     std::thread::scope(|scope| {
         let buckets = &buckets;
         let zooms = &zooms;
+        let written_next = &written_next;
         for _ in 0..threads {
             let queue = &queue;
             let codec = codec.clone();
@@ -202,6 +208,13 @@ fn main() {
                 let Some((seq, (zoom, col, row, blob, dz_raw, dz_covered))) = item else {
                     break;
                 };
+                while seq
+                    >= written_next
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .saturating_add(REORDER_WINDOW)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
                 if !zooms.contains(&(zoom as u32)) || seq >= limit {
                     if recompress {
                         // Fleet mode: cells arrive sliced at a throwaway
@@ -225,6 +238,9 @@ fn main() {
                 let pbf = decode_vector_tile_payload(&raw).expect("payload");
                 let y = (1u32 << zoom) - 1 - row;
                 let key = TileKey { z: zoom as u32, x: col as i32, y: y as i32 };
+                if std::env::var("MAPBAKE_TRACE").is_ok() {
+                    eprintln!("trace: bake z{}/{}/{} ({} bytes)", zoom, col, y, raw.len());
+                }
                 let native_bucket = [zoom as u32];
                 let tile_buckets: &[u32] =
                     if zoom == 14 { buckets } else { &native_bucket };
@@ -310,6 +326,7 @@ fn main() {
                     }
                 }
                 next += 1;
+                written_next.store(next, std::sync::atomic::Ordering::Relaxed);
                 if next % 2000 == 0 {
                     eprintln!(
                         "bake: {next}/{total} tiles, {baked_tiles} baked, {:.1} MiB field data, {:.0}s",

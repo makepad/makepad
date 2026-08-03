@@ -529,6 +529,7 @@ impl RoadSurfaceKey {
         let raw_layer = tags
             .get("osm_layer")
             .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
             .map(|value| value.round() as i32);
         // Mirror the importer/baker's normalization so renderer-side sheet
         // identity cannot disagree with the profile solver.
@@ -2300,6 +2301,7 @@ fn merge_detail_features(
         let osm_layer = tags
             .get("osm_layer")
             .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
             .unwrap_or(0.0);
         let deck_m = if osm_layer >= 1.0 {
             5.5 * osm_layer.min(3.0)
@@ -2318,6 +2320,7 @@ fn merge_detail_features(
         let half_width = tags
             .get("width")
             .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
             .map(|w| (w * 0.75).clamp(4.0, 14.0))
             .unwrap_or(7.0)
             * units_per_m;
@@ -2728,7 +2731,11 @@ fn building_height_m(tags: &HashMap<String, String>) -> f32 {
     }
     if let Some(levels) = tags.get("building:levels") {
         if let Ok(n) = levels.trim().parse::<f32>() {
-            return (n * 3.0 + 2.0).clamp(3.0, 220.0);
+            // "nan"/"inf" parse as valid f32s; three buildings on the
+            // planet carry such tags and a NaN height panics the bake.
+            if n.is_finite() {
+                return (n * 3.0 + 2.0).clamp(3.0, 220.0);
+            }
         }
     }
     8.0
@@ -2749,7 +2756,9 @@ fn building_min_height_m(tags: &HashMap<String, String>) -> f32 {
     }
     if let Some(levels) = tags.get("building:min_level") {
         if let Ok(n) = levels.trim().parse::<f32>() {
-            return (n * 3.0).clamp(0.0, 220.0);
+            if n.is_finite() {
+                return (n * 3.0).clamp(0.0, 220.0);
+            }
         }
     }
     0.0
@@ -4362,10 +4371,20 @@ fn build_tile_buffers_from_features_profiled(
                         found
                     })
                 };
+                let height_m = if group.height_m.is_finite() {
+                    group.height_m.max(0.0)
+                } else {
+                    8.0
+                };
+                let base_m = if group.min_height_m.is_finite() {
+                    group.min_height_m.clamp(0.0, height_m)
+                } else {
+                    0.0
+                };
                 building_jobs.push(BuildingJob {
                     polygon,
-                    height_m: group.height_m,
-                    base_m: group.min_height_m.clamp(0.0, group.height_m),
+                    height_m,
+                    base_m,
                     tint,
                     min_y,
                 });
