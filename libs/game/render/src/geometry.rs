@@ -187,4 +187,45 @@ mod shape_tests {
             }
         }
     }
+
+    /// Culling is only safe where winding is consistent, so the two facts are
+    /// asserted together: every shader that culls draws geometry whose winding
+    /// this crate controls and has verified.
+    ///
+    /// `DrawGameCube` culls (it draws solid slabs, crates, ground and rigid
+    /// bodies, all from `shape_geometry_data`, which the test above proves
+    /// winds outward). Turning it on was worth doing — the platform default is
+    /// OFF (`draw_shader.rs:41`) and `DrawCube` does not override it, so every
+    /// one of those surfaces was rasterising its hidden back face too. A tiler
+    /// pays per fragment and a headset pays for two eyes.
+    ///
+    /// The shaders that do NOT cull each have a reason recorded at their
+    /// declaration in `shaders.rs`; this test exists so that a future audit
+    /// changing one has to change the stated intent as well.
+    #[test]
+    fn culling_choices_match_the_geometry_they_draw() {
+        let src = include_str!("shaders.rs");
+        let setting = |shader: &str| -> Option<bool> {
+            let at = src.find(&format!("mod.draw.{shader} = "))?;
+            let tail = &src[at..];
+            let end = tail.find("\n    mod.draw.").unwrap_or(tail.len());
+            let decl = &tail[..end];
+            decl.rfind("backface_culling:").map(|i| decl[i..].contains("true"))
+        };
+
+        // Culls: closed solids whose winding this crate generates and asserts.
+        assert_eq!(setting("DrawGameCube"), Some(true), "solid slabs must cull");
+        assert_eq!(setting("DrawGameTerrain"), Some(true), "terrain must cull");
+        assert_eq!(setting("DrawGameSkinned"), Some(true), "props/characters must cull");
+
+        // Does not cull, deliberately — each documented at its declaration.
+        // The sky is a cube seen from INSIDE, so every visible face is a back
+        // face and culling erases it. Foliage is two-sided cards. The alpha
+        // batch carries flat single-sided blobs and water where culling changes
+        // the composite rather than hiding a hidden face.
+        assert_eq!(setting("DrawGameSky"), Some(false), "sky is viewed from inside");
+        assert_eq!(setting("DrawGameFoliage"), Some(false), "foliage is two-sided");
+        assert_eq!(setting("DrawGameAlpha"), Some(false), "alpha is flat/one-sided");
+    }
 }
+

@@ -28,6 +28,14 @@ script_mod! {
     // per-instance because shadows switch it off individually.
     mod.draw.DrawGameCube = mod.std.set_type_default() do #(DrawGameCube::script_shader(vm)){
         ..mod.draw.DrawCube
+        // The platform default is OFF (draw_shader.rs:41) and DrawCube does not
+        // override it, so every slab, crate, ground plane and rigid body was
+        // rasterising its BACK faces too — invisible, and double the fill. A
+        // tiler pays per fragment and a headset pays twice again for stereo,
+        // so this is the single cheapest win available on the geometry that
+        // covers most of the screen. Safe because shape_geometry_data winds
+        // every primitive outward and `shape_windings_face_outward` asserts it.
+        backface_culling: true
         v_fog: varying(float)
         fog_color: uniform(vec3(0.75, 0.87, 0.96))
         sun_color: uniform(vec3(0.72, 0.72, 0.72))
@@ -71,10 +79,16 @@ script_mod! {
         }
     }
 
-    // Same shading, alpha-blended: water, sensor ghosts, blob shadows.
+    // Same shading, alpha-blended: water, sensor ghosts, blob shadows, and the
+    // particle batch.
     mod.draw.DrawGameAlpha = mod.std.set_type_default() do #(DrawGameAlpha::script_shader(vm)){
         ..mod.draw.DrawGameCube
         alpha_blend: true
+        // DELIBERATE, do not "fix": this batch carries flat single-sided
+        // geometry — blob shadows and water surfaces — whose winding is not
+        // guaranteed to face the viewer, and culling a blended surface changes
+        // the composite rather than merely hiding a hidden face. Overriding the
+        // `true` now inherited from DrawGameCube.
         backface_culling: false
     }
 
@@ -82,6 +96,8 @@ script_mod! {
     // (the Godot ProceduralSkyMaterial look).
     mod.draw.DrawGameSky = mod.std.set_type_default() do #(DrawGameSky::script_shader(vm)){
         ..mod.draw.DrawCube
+        // DELIBERATE: the sky is a cube the camera sits INSIDE, so every
+        // visible face is a back face. Culling erases the sky completely.
         backface_culling: false
         v_dir: varying(vec3f)
 
@@ -281,6 +297,7 @@ script_mod! {
     //   * depth TEST stays on, so a shadow is still hidden by geometry in
     //     front of it.
     // Per-vertex alpha (colour.w) gives the soft rim for free.
+    // Shadow + contact-AO geometry, draped on whatever it lands on.
     mod.draw.DrawGameShadow = mod.std.set_type_default() do #(DrawGameShadow::script_shader(vm)){
         alpha_blend: true
         depth_write: false

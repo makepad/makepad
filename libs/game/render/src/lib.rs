@@ -25,6 +25,7 @@ pub mod particles;
 pub mod shadow;
 pub mod shadow_mesh;
 pub mod sun;
+pub mod thermometer;
 
 pub use bake::*;
 pub use geometry::*;

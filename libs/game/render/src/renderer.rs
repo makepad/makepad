@@ -16,6 +16,7 @@ use crate::model::StaticModel;
 use crate::stage::Stage;
 use crate::particles::ParticleInstance;
 use crate::sun::GameSun;
+use crate::thermometer::{Quality, Thermometer};
 
 /// The host widget's themed draw structs, lent to the renderer per frame.
 /// They stay `#[live]` fields on the widget so script-side styling applies.
@@ -121,6 +122,11 @@ pub struct GameRenderer {
     /// state by construction: the sim has no field for it, so a device may
     /// bake at a different quality than its peers without diverging.
     bake: LightBake,
+    /// Adaptive quality (thermometer.rs). Renderer state for the same reason
+    /// the bake is: a Quest can run three levels leaner than the PC beside it
+    /// and the two stay in lockstep, because nothing it dials is simulated.
+    /// Dormant until the host calls [`GameRenderer::report_frame_ms`].
+    thermometer: Thermometer,
 }
 
 /// One CPU-skinned mesh instance for [`GameRenderer::draw_scene_full`].
@@ -315,6 +321,9 @@ impl Default for GameRenderer {
             stage: Stage::default(),
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             particle_instances: Vec::new(),
+            // 60Hz until the host says otherwise, and dormant regardless
+            // until someone reports a frame time.
+            thermometer: Thermometer::new(60.0),
             shadow_mesh: ShadowMeshBuilder::default(),
             shadow_geometry: None,
             shadow_points: Vec::new(),
@@ -347,6 +356,59 @@ impl GameRenderer {
 
     pub fn set_shadow_budget(&mut self, casters: usize) {
         self.shadow_budget = casters;
+    }
+
+    /// Feed the governor one frame's cost, in milliseconds. Returns true on
+    /// the frames where the quality level actually moved, so a host can log
+    /// or surface it without polling.
+    ///
+    /// This is OPT-IN: a host that never calls it never gets cut, which is
+    /// the right default for a tool that removes scenery. Pass the platform's
+    /// real frame time — an XR runtime hands you one, and it is the number
+    /// that matters because the Quest is fill-bound, not CPU-bound.
+    ///
+    /// One trap worth naming: do not pass a vsync-locked frame-to-frame
+    /// interval. That signal is quantised to the refresh rate, so it reads
+    /// ~16.6ms whether the frame took 3ms or 16ms of real work, and a
+    /// governor targeting 80% of budget would cut forever without ever
+    /// seeing an improvement. If a real measurement is unavailable, leave
+    /// this uncalled rather than feeding it a quantised one.
+    pub fn report_frame_ms(&mut self, ms: f32) -> bool {
+        self.thermometer.frame(ms)
+    }
+
+    /// Tell the governor what this device's display budget is. Call on
+    /// startup and whenever the refresh changes — a Quest at 72Hz and the
+    /// same Quest at 120Hz want budgets nearly twice apart.
+    pub fn set_refresh_hz(&mut self, hz: f32) {
+        self.thermometer.set_refresh_hz(hz);
+    }
+
+    /// The current cuts. The renderer applies `particle_scale`,
+    /// `shadow_caster_scale` and `projected_shadows` itself; the remaining
+    /// dials (`decor_distance_scale`, `foliage_scale`, `draw_distance_scale`)
+    /// describe scenery only the world builder can identify, so a host that
+    /// places decoration should read them when deciding what to emit.
+    pub fn quality(&self) -> Quality {
+        self.thermometer.quality()
+    }
+
+    /// 0 = everything on. Higher = leaner. Pair with [`Self::quality_reason`]
+    /// when showing this to a player, so a suddenly emptier world reads as a
+    /// deliberate trade rather than a bug.
+    pub fn quality_level(&self) -> usize {
+        self.thermometer.level()
+    }
+
+    /// One line describing what the current level gave up.
+    pub fn quality_reason(&self) -> &'static str {
+        self.thermometer.reason()
+    }
+
+    /// Measured p90 frame time, once enough frames have been seen. `None`
+    /// while the window is still filling.
+    pub fn frame_p90_ms(&self) -> Option<f32> {
+        self.thermometer.p90_ms()
     }
 
     /// Hand this frame's particles to the renderer. They join the alpha
@@ -1159,7 +1221,22 @@ impl GameRenderer {
         // Silhouette shadows accumulate into one mesh across the alpha loop
         // below and are drawn once at the end. A host that has not adopted
         // the shadow shader keeps the old blob-only behaviour.
-        let shadow_mesh_enabled = draws.shadow.is_some();
+        // Adaptive quality, resolved once per frame so every consumer below
+        // sees the same level even if the governor moves mid-frame.
+        let quality = self.thermometer.quality();
+        // The silhouette tier is the expensive half of the shadow layer: it
+        // re-projects a hull per caster per frame on the CPU. Dropping to
+        // blobs keeps every object grounded — the thing that would actually
+        // look broken if it vanished — at a fraction of the cost.
+        let shadow_mesh_enabled = draws.shadow.is_some() && quality.projected_shadows;
+        let shadow_budget =
+            ((self.shadow_budget as f32 * quality.shadow_caster_scale).round() as usize).max(1);
+        // Particles are pure decoration and the first thing to go, so this
+        // keeps a prefix rather than sampling: an emitter's earliest
+        // particles are its oldest, and thinning from the tail makes a plume
+        // shorten instead of flickering into holes.
+        let particle_count =
+            (self.particle_instances.len() as f32 * quality.particle_scale).round() as usize;
         self.shadow_mesh.clear();
         if shadow_mesh_enabled {
             // Static casters: a pillar's shadow is the same every frame until
@@ -1382,7 +1459,7 @@ impl GameRenderer {
                         && !e.hidden
                         && e.attached_to == 0
                 });
-            let has_particles = shape == Shape::Box && !self.particle_instances.is_empty();
+            let has_particles = shape == Shape::Box && particle_count > 0;
             if !has_static && !has_dynamic_sensor && !has_shadows && !has_particles {
                 continue;
             }
@@ -1403,7 +1480,7 @@ impl GameRenderer {
                 // blob quad in this batch. So the budget buys fidelity, and
                 // the whole shadow layer is at most two draw calls.
                 for (e, ground, projected) in
-                    Self::shadow_casters(world, camera_pos, self.shadow_budget)
+                    Self::shadow_casters(world, camera_pos, shadow_budget)
                 {
                     let half = vec3f(
                         e.half.x * e.scale.x,
@@ -1466,7 +1543,7 @@ impl GameRenderer {
                 // Small unlit-ish cubes: cheap, and they read fine at the
                 // sizes particles live at. Emission carries the colour so a
                 // spark stays bright regardless of where the sun is.
-                for p in self.particle_instances.iter() {
+                for p in self.particle_instances.iter().take(particle_count) {
                     let mut transform = Mat4f::identity();
                     transform.v[12] = p.pos.x;
                     transform.v[13] = p.pos.y;
