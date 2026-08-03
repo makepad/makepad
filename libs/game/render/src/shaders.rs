@@ -92,6 +92,170 @@ script_mod! {
         backface_culling: false
     }
 
+    // Fireworks: ONE instance per shell, expanded on the GPU into
+    // `SPARKS_PER_SHELL` sparks whose positions are a closed form of
+    // (spark index, seed, age). Nothing is stepped and nothing is uploaded
+    // per frame — see firework.rs for why that is the whole point.
+    mod.draw.DrawGameFirework = mod.std.set_type_default() do #(DrawGameFirework::script_shader(vm)){
+        ..mod.draw.DrawCube
+        // Additive: overlapping sparks should brighten toward white the way
+        // real ones do, not composite over each other and go muddy.
+        alpha_blend: true
+        // DELIBERATE: a billboarded quad is built facing the camera in view
+        // space, so its winding depends on nothing we control here, and half
+        // the sky would vanish if this culled.
+        backface_culling: false
+        // DELIBERATE: sparks are transparent and unordered among themselves.
+        // Writing depth would make whichever drew first punch a hole in the
+        // ones behind it.
+        depth_write: false
+
+        v_color: varying(vec4f)
+        v_uv: varying(vec2f)
+
+        // The one function a style overrides. Rust owns structure; this owns
+        // the look. Kept deliberately small and total — no geometry, no time
+        // base, no trajectory — so an override cannot break the simulation,
+        // only restyle it.
+        //
+        //   life_t  0..1 through this spark's life
+        //   heat    1 at birth, 0 within a quarter second — the burst flash
+        //   rnd     stable per-spark random, 0..1
+        //   speed_t 0..1, slow core .. fast outer shell
+        //
+        // Returns rgb + an alpha multiplier, so a style controls its own fade.
+        // Extra displacement on top of the ballistic arc, in world units.
+        // This is where swirl, fizzle, drift and wobble live. Additive, so a
+        // style can never move a spark somewhere the burst could not reach —
+        // it can only decorate the path.
+        //
+        //   dir     this spark's unit launch direction
+        //   t       seconds since the burst
+        //   rnd     stable per-spark random
+        spark_motion: fn(dir: vec3, t: float, rnd: float) -> vec3 {
+            return vec3(0.0, 0.0, 0.0)
+        }
+
+        // Size multiplier, 1.0 = the engine's default taper. Lets a style
+        // pulse, shrink or bloom individual sparks.
+        spark_size: fn(life_t: float, rnd: float, speed_t: float) -> float {
+            return 1.0
+        }
+
+        spark_color: fn(life_t: float, heat: float, rnd: float, speed_t: float) -> vec4 {
+            let twinkle = 0.7 + 0.3 * sin(rnd * 63.0 + life_t * 40.0)
+            let tint = mix(self.color, self.color_tail, life_t * life_t)
+            let rgb = mix(tint.xyz, vec3(1.0, 1.0, 1.0), heat)
+            let fade = (1.0 - life_t) * (1.0 - life_t)
+            return vec4(rgb.x * twinkle, rgb.y * twinkle, rgb.z * twinkle, fade)
+        }
+
+        vertex: fn() {
+            let idx = self.geom.geom_id
+            // Three decorrelated randoms per spark from one cheap hash. The
+            // seed shifts the whole stream, so two shells never open alike.
+            let seed = self.params.y
+            let h = idx * 0.6180339887 + seed * 0.7548776662
+            let r1 = fract(sin(h * 12.9898) * 43758.5453)
+            let r2 = fract(sin(h * 78.2330) * 24634.6345)
+            let r3 = fract(sin(h * 39.4257) * 15731.7433)
+
+            // Even distribution over the sphere. Using acos on a uniform z is
+            // what keeps sparks off the poles — sampling two angles uniformly
+            // bunches them at the top and bottom and reads as a bow tie.
+            let cz = r1 * 2.0 - 1.0
+            let sz = sqrt(max(1.0 - cz * cz, 0.0))
+            let phi = r2 * 6.28318530718
+            let dir = vec3(sz * cos(phi), cz, sz * sin(phi))
+
+            // A shell is not a uniform ball: the burst charge throws sparks at
+            // a spread of speeds, and that spread is most of what makes the
+            // front edge read as a shockwave rather than a balloon.
+            let speed = self.params.x * (0.55 + 0.45 * r3)
+
+            let age = self.origin_age.w
+            let t = max(age, 0.0)
+            // Drag: v(t) = v0*exp(-k t), so displacement is v0/k*(1-exp(-k t)).
+            // Sparks decelerate hard and then hang, which is the shape of a
+            // real burst; ballistic-only looks like a thrown handful.
+            let k = 1.9
+            let drag = (1.0 - exp(0.0 - k * t)) / k
+            let fall = 0.5 * 7.5 * t * t
+            let origin = self.origin_age.xyz
+            let burst = origin + dir * speed * drag - vec3(0.0, fall, 0.0)
+                + self.spark_motion(dir, t, r1)
+
+            // Before age 0 the shell is still climbing: draw every spark
+            // stacked at the rising point so it reads as one streak.
+            let rise = clamp(1.0 + age / 0.85, 0.0, 1.0)
+            let launch = self.launch_life.xyz
+            let climb = launch + (origin - launch) * rise
+            let center = mix(climb, burst, step(0.0, age))
+
+            // Billboard in VIEW space: offsetting after the view transform is
+            // camera-facing by construction, so no camera axes are needed.
+            // Through the draw list's world transform FIRST, exactly like the
+            // cube path (`draw_list.view_transform * transform`). Skipping it
+            // and going straight to camera_view puts every spark wherever the
+            // scene's world transform is not identity — which on an XR stage
+            // is always, and cost an afternoon here.
+            let world4 = self.draw_list.view_transform * vec4(center.x, center.y, center.z, 1.0)
+            let view_pos = self.draw_pass.camera_view * world4
+            let life_t = clamp(t / self.launch_life.w, 0.0, 1.0)
+            // Sparks shrink as they burn out; the rising shell is a small dot.
+            let size = self.params.z * (1.0 - life_t * 0.75)
+                * mix(0.35, 1.0, step(0.0, age))
+                * self.spark_size(life_t, r1, r3)
+            let corner = self.geom.geom_pos
+            let billboard = vec4(
+                view_pos.x + corner.x * size,
+                view_pos.y + corner.y * size,
+                view_pos.z,
+                view_pos.w
+            )
+
+            // STYLE HOOK. Everything above is structure — where a spark is,
+            // how big, how long it lives. Everything about how it LOOKS goes
+            // through `spark_color`, which a splash script overrides without
+            // touching (or needing to understand) the trajectory.
+            //
+            // `heat` is the birth flash, 1 at t=0 and gone within ~0.25s;
+            // `rnd` is stable per spark; `speed_t` says whether this spark is
+            // on the fast outer shell or the slow core, which is what lets a
+            // style colour the leading edge differently from the middle.
+            let heat = clamp(1.0 - t * 4.0, 0.0, 1.0)
+            let speed_t = r3
+            let styled = self.spark_color(life_t, heat, r1, speed_t)
+            self.v_color = vec4(
+                styled.x,
+                styled.y,
+                styled.z,
+                styled.w * step(0.0, age + 0.85)
+            )
+            // Geometry attributes do not exist in the fragment stage, so the
+            // quad's uv has to travel as a varying.
+            self.v_uv = self.geom.geom_uv
+            self.vertex_pos = self.draw_pass.camera_projection * billboard
+            return self.vertex_pos
+        }
+
+        // The spark's sprite program. `uv` is 0..1 across the billboard and
+        // `tint` is whatever `spark_color` returned, so a style can draw a
+        // streak, a ring, a star or a soft dot without knowing anything about
+        // where the spark is.
+        spark_pixel: fn(uv: vec2, tint: vec4) -> vec4 {
+            let d = length(uv - vec2(0.5, 0.5)) * 2.0
+            let glow = clamp(1.0 - d, 0.0, 1.0)
+            let core = glow * glow
+            return vec4(tint.x * core, tint.y * core, tint.z * core, tint.w * core)
+        }
+
+        pixel: fn() {
+            return self.spark_pixel(self.v_uv, self.v_color)
+        }
+
+    }
+
     // Sky dome: a big cube around the camera, gradient by view direction
     // (the Godot ProceduralSkyMaterial look).
     mod.draw.DrawGameSky = mod.std.set_type_default() do #(DrawGameSky::script_shader(vm)){
@@ -405,6 +569,38 @@ pub struct DrawGameCube {
 pub struct DrawGameAlpha {
     #[deref]
     pub cube: DrawGameCube,
+}
+
+/// One firework shell. Every field is an instance: the GPU derives all
+/// `SPARKS_PER_SHELL` sparks from these numbers alone.
+///
+/// Packed into `vec4`s ON PURPOSE. A `Vec3f` instance is tightly packed on the
+/// Rust side but a `vec3` obeys 16-byte alignment in the shader ABI, so the
+/// three floats are read back misaligned and every field after them shifts —
+/// which presents as the whole burst rendering at the world origin, on the
+/// ground, instead of where it was placed. The other shaders here get away
+/// with `Vec3f` because theirs are declared `uniform`, not instance.
+///
+/// Four floats at a time is the shape the hardware wants anyway; the packing
+/// costs nothing and removes the class of bug entirely.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGameFirework {
+    #[deref]
+    pub draw_super: DrawCube,
+    /// xyz = burst point, w = seconds since the burst (negative = climbing).
+    #[live(vec4(0.0, 30.0, 0.0, 0.0))]
+    pub origin_age: Vec4f,
+    /// xyz = launch point, w = spark lifetime.
+    #[live(vec4(0.0, 0.0, 0.0, 2.0))]
+    pub launch_life: Vec4f,
+    /// x = spark speed, y = seed, z = spark size, w unused.
+    #[live(vec4(12.0, 0.0, 0.6, 0.0))]
+    pub params: Vec4f,
+    #[live(vec4(1.0, 0.8, 0.4, 1.0))]
+    pub color: Vec4f,
+    #[live(vec4(1.0, 0.3, 0.1, 1.0))]
+    pub color_tail: Vec4f,
 }
 
 /// Sky dome gradient (colors are instances so Rust sets them per frame).

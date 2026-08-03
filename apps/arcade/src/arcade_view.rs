@@ -12,12 +12,13 @@ use makepad_game_blocks::{
 };
 use makepad_game_script::interact::{self, InteractAction, InteractSet};
 use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
+use makepad_game_render::firework::FireworkSystem;
 use makepad_game_render::particles::ParticleSystem;
 use makepad_game_render::stage::{Stage, StageMode};
 use makepad_game_render::{
     draw_billboard_labels, draw_hud_overlay, scene_state as render_scene_state, set_pass_camera,
     CameraRig, DrawGameAlpha, DrawGameCube,
-    DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws,
+    DrawGameFirework, DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws,
     GameRenderer, ModelInstance, SkinnedBatch, SkinnedDraw,
 };
 use makepad_game_session::{Session, SessionEvent};
@@ -55,6 +56,96 @@ script_mod! {
         }
         draw_models +: {
             light_dir: vec3(0.35, 0.8, 0.45)
+        }
+        // Firework styling lives HERE, in splash, not in Rust. The engine
+        // shader owns the structure — where each spark is, how long it lives —
+        // and exposes one function for the look. This overrides it by
+        // inheritance, which is the whole point of the seam: a generated game
+        // can restyle the sky without being able to break the simulation.
+        draw_firework +: {
+            // Swirl and fizzle. The engine gives a clean ballistic arc; this
+            // adds the wobble that makes sparks look like burning matter
+            // rather than points on a sphere.
+            spark_motion: fn(dir: vec3, t: float, rnd: float) -> vec3 {
+                // A slow curl around the burst axis, growing with time so the
+                // shell shears as it expands.
+                let a = rnd * 6.28318530718 + t * (1.6 + rnd * 2.2)
+                let curl = t * t * (0.5 + rnd * 1.1)
+                // Fizzle: a fast, small jitter that dies away, so the first
+                // moments crackle and the tail drifts smoothly.
+                let fizz = exp(0.0 - t * 2.5) * 0.35
+                let j = sin(t * (40.0 + rnd * 55.0) + rnd * 20.0)
+                return vec3(
+                    cos(a) * curl + j * fizz,
+                    j * fizz * 0.6 - t * t * 0.15,
+                    sin(a) * curl + cos(t * 37.0 + rnd * 11.0) * fizz
+                )
+            }
+
+            // Glitter sparks bloom briefly as they strobe; the rest taper.
+            spark_size: fn(life_t: float, rnd: float, speed_t: float) -> float {
+                let is_glitter = step(0.80, rnd)
+                let pulse = 1.0 + 0.9 * is_glitter
+                    * clamp(sin(rnd * 137.0 + life_t * 190.0), 0.0, 1.0)
+                return pulse * mix(0.75, 1.25, speed_t)
+            }
+
+            // A hot core with a soft halo and a faint cross-flare, which is
+            // what makes a point of light read as bright rather than big.
+            spark_pixel: fn(uv: vec2, tint: vec4) -> vec4 {
+                let p = uv - vec2(0.5, 0.5)
+                let d = length(p) * 2.0
+                let glow = clamp(1.0 - d, 0.0, 1.0)
+                let core = glow * glow * glow
+                let halo = glow * 0.35
+                let flare = clamp(1.0 - abs(p.x) * 14.0, 0.0, 1.0)
+                    * clamp(1.0 - abs(p.y) * 14.0, 0.0, 1.0) * 0.5
+                let a = clamp(core + halo + flare, 0.0, 1.0) * tint.w
+                // ADDITIVE, via premultiplied alpha: the pipeline composites
+                // `src.rgb + dst * (1 - src.a)`, so emitting colour with a
+                // ZERO alpha adds light without ever occluding what is behind
+                // it. Premultiplying normally (alpha = a) makes each spark a
+                // little opaque sticker, and a few thousand of them stack into
+                // the white-out this had.
+                return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
+            }
+
+            spark_color: fn(life_t: float, heat: float, rnd: float, speed_t: float) -> vec4 {
+                // Three-stage burn, the way a real star behaves: a white-hot
+                // flash, then the shell's own metal-salt colour, then a cooling
+                // ember. Colour is TEMPERATURE, not a gradient between two
+                // arbitrary tints, which is what stops it looking like tinted
+                // dots.
+                let core = mix(self.color.xyz, self.color_tail.xyz, life_t * life_t)
+                let hot = mix(core, vec3(1.0, 0.97, 0.90), heat * heat)
+
+                // The fast outer shell runs hotter and holds its colour; the
+                // slow core cools first. That difference is what gives a burst
+                // a bright leading edge instead of a uniform ball.
+                let edge = mix(0.72, 1.35, speed_t)
+                let lit = hot * edge
+
+                // Glitter: about a fifth of the sparks strobe hard, the rest
+                // shimmer gently. Fireworks that twinkle uniformly read as
+                // noise; a sparse strobe reads as crackle.
+                let is_glitter = step(0.80, rnd)
+                let fast = 0.5 + 0.5 * sin(rnd * 137.0 + life_t * 190.0)
+                let slow = 0.80 + 0.20 * sin(rnd * 51.0 + life_t * 26.0)
+                let flicker = mix(slow, fast * fast, is_glitter)
+
+                // Flash in over the first instant, then a long quadratic decay
+                // with a late lift so the tail lingers as embers.
+                let rise = clamp(life_t * 26.0, 0.0, 1.0)
+                let decay = (1.0 - life_t) * (1.0 - life_t)
+                let alpha = rise * decay * mix(0.85, 1.25, is_glitter)
+
+                return vec4(
+                    lit.x * flicker,
+                    lit.y * flicker,
+                    lit.z * flicker,
+                    clamp(alpha, 0.0, 1.0)
+                )
+            }
         }
         draw_hud +: {
             text_style: theme.font_bold{font_size: 22}
@@ -103,6 +194,8 @@ pub struct ArcadeView {
     draw_terrain: DrawGameTerrain,
     #[live]
     draw_shadow: DrawGameShadow,
+    #[live]
+    draw_firework: DrawGameFirework,
     #[live]
     draw_skinned: DrawGameSkinned,
     /// Stock props share the skinned shader (both are textured packed
@@ -167,6 +260,11 @@ pub struct ArcadeView {
     /// state, never replicated — a peer may draw a different number.
     #[rust]
     particles: ParticleSystem,
+    /// Fireworks. CPU launches shells; the GPU animates every spark from a
+    /// closed form, so this costs one instance per shell and nothing per
+    /// spark (libs/game/render/src/firework.rs).
+    #[rust]
+    fireworks: FireworkSystem,
     /// Last frame's rigid speeds, to notice a hard landing worth a spark.
     #[rust]
     impact_speed: Vec<(u64, f32)>,
@@ -2493,6 +2591,11 @@ impl ArcadeView {
             };
             self.particles.step(TICK_DT, &lookup);
         }
+        // Fireworks: the whole per-frame CPU cost is ageing a dozen shells and
+        // occasionally starting one.
+        self.fireworks.step(TICK_DT);
+        {
+        }
 
         let raw = self.raw_input(TICK_DT);
         self.tick_player(raw);
@@ -2989,6 +3092,7 @@ impl Widget for ArcadeView {
             };
 
             self.renderer.set_particles(self.particles.instances());
+            self.renderer.set_fireworks(self.fireworks.instances());
             self.renderer.set_models(prop_instances);
             let cx3d = &mut Cx3d::new(cx.cx);
             let mut draws = GameDraws {
@@ -2997,7 +3101,9 @@ impl Widget for ArcadeView {
                 sky: &mut self.draw_sky,
                 terrain: &mut self.draw_terrain,
                 shadow: Some(&mut self.draw_shadow),
+                firework: Some(&mut self.draw_firework),
             };
+            let fw_count = self.fireworks.live_shells();
             let stats = self.renderer.draw_scene_full(
                 cx3d,
                 &mut self.draw_list,
@@ -3009,6 +3115,9 @@ impl Widget for ArcadeView {
             );
             // One line, once: the numbers BUDGETS.md quotes come from here
             // rather than from counting struct fields by hand.
+            if std::env::var("ARCADE_FW_DEBUG").is_ok() && fw_count > 0 {
+                log!("firework draw: {} live shells, {} drawn", fw_count, stats.firework_shells);
+            }
             if !self.logged_render_stats {
                 self.logged_render_stats = true;
                 log!(

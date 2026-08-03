@@ -27,6 +27,34 @@ pub enum ShaderIoPrefix {
     FullOwned(String),
 }
 
+/// Why a shader IO declaration could not be lowered.
+///
+/// Previously eight bare `panic!()`s. A shader that trips one is usually not
+/// exotic — the commonest by far is reading a geometry attribute from the
+/// fragment stage, which every GPU forbids and which the message now says
+/// outright instead of aborting with no text at all.
+#[cold]
+fn unsupported_shader_io(backend: &ShaderBackend, mode: ShaderMode, io_type: ShaderIoType) -> ! {
+    if io_type == SHADER_IO_VERTEX_BUFFER && matches!(mode, ShaderMode::Fragment) {
+        panic!(
+            "shader: a geometry attribute (self.geom.*) was read in `pixel:`, but vertex \
+             attributes only exist in the vertex stage.\n\
+             Pass it through a varying instead:\n\
+             \n\
+             \x20   v_uv: varying(vec2f)\n\
+             \x20   vertex: fn() {{ self.v_uv = self.geom.geom_uv  ... }}\n\
+             \x20   pixel:  fn() {{ ... self.v_uv ... }}\n\
+             \n\
+             (backend {backend:?})"
+        )
+    }
+    panic!(
+        "shader backend {backend:?}: no lowering for io type {io_type:?} in {mode:?} stage.\n\
+         This is a gap in the shader compiler, not in the shader that hit it — a declaration the \
+         language accepts must lower on every backend, or fail with a message that names it."
+    )
+}
+
 impl ShaderBackend {
     pub fn get_shader_io_kind_and_prefix(
         &self,
@@ -118,7 +146,7 @@ impl ShaderBackend {
                             ShaderIoPrefix::Prefix("_io.su->"),
                         ),
 
-                        _ => panic!(),
+                        _ => unsupported_shader_io(self, mode, io_type),
                     },
                     ShaderMode::Fragment => {
                         // Check for fragment output range first
@@ -205,10 +233,10 @@ impl ShaderBackend {
                                 ShaderIoKind::ScopeUniform,
                                 ShaderIoPrefix::Prefix("_io.su->"),
                             ),
-                            _ => panic!(),
+                            _ => unsupported_shader_io(self, mode, io_type),
                         }
                     }
-                    _ => panic!(),
+                    _ => unsupported_shader_io(self, mode, io_type),
                 }
             }
             Self::Hlsl => {
@@ -301,7 +329,7 @@ impl ShaderBackend {
                             SHADER_IO_SCOPE_UNIFORM => {
                                 (ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("su_"))
                             }
-                            _ => panic!(),
+                            _ => unsupported_shader_io(self, mode, io_type),
                         }
                     }
                     ShaderMode::Fragment => {
@@ -388,10 +416,10 @@ impl ShaderBackend {
                             SHADER_IO_SCOPE_UNIFORM => {
                                 (ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("su_"))
                             }
-                            _ => panic!(),
+                            _ => unsupported_shader_io(self, mode, io_type),
                         }
                     }
-                    _ => panic!(),
+                    _ => unsupported_shader_io(self, mode, io_type),
                 }
             }
             Self::Rust => {
@@ -484,7 +512,7 @@ impl ShaderBackend {
                         ShaderIoKind::ScopeUniform,
                         ShaderIoPrefix::Prefix("rcx.su_"),
                     ),
-                    _ => panic!(),
+                    _ => unsupported_shader_io(self, mode, io_type),
                 }
             }
             Self::Glsl | Self::Wgsl => {
@@ -573,7 +601,7 @@ impl ShaderBackend {
                     SHADER_IO_SCOPE_UNIFORM => {
                         (ShaderIoKind::ScopeUniform, ShaderIoPrefix::Prefix("su_"))
                     }
-                    _ => panic!(),
+                    _ => unsupported_shader_io(self, mode, io_type),
                 }
             }
         }
