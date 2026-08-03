@@ -37,13 +37,18 @@ fn f16_bits(value: f32) -> u32 {
     sign | (half + round as u32)
 }
 
+/// Two floats into one f32 slot as an f16 pair; unpacked in-shader with
+/// `unpack2f16`. Public so other packed vertex layouts reuse this rounding
+/// rather than growing a second, subtly different implementation.
 #[inline]
-fn pack_pair_f16(a: f32, b: f32) -> f32 {
+pub fn pack_pair_f16(a: f32, b: f32) -> f32 {
     f32::from_bits(f16_bits(a) | (f16_bits(b) << 16))
 }
 
+/// Four 0..1 channels into one f32 slot as unorm8x4; unpacked in-shader
+/// with `unpack4u8`.
 #[inline]
-fn pack_unorm8x4(r: f32, g: f32, b: f32, a: f32) -> f32 {
+pub fn pack_unorm8x4(r: f32, g: f32, b: f32, a: f32) -> f32 {
     let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
     f32::from_bits(q(r) | (q(g) << 8) | (q(b) << 16) | (q(a) << 24))
 }

@@ -101,6 +101,37 @@ pub struct PbrVertex {
     pub tangent: Vec4f, // tangent xyz + handedness
 }
 
+/// Packed mesh vertex: 6 f32 slots instead of PbrVertex's 16, for streams
+/// where fetch bandwidth matters more than the last bit of precision —
+/// CPU-skinned characters (re-uploaded every frame), terrain, shadow meshes.
+///
+/// Same idea as [`VectorVertexPacked`]: position stays f32 because it is
+/// precision-critical, everything else is an f16 pair or a unorm8 quad
+/// bitcast into one slot and unpacked in the vertex shader
+/// (`unpack2f16` / `unpack4u8`). Normals are octahedral-encoded, which is
+/// what lets a 3-component unit vector fit in two f16 lanes.
+#[derive(Clone, Script, ScriptHook)]
+pub struct GameMeshVertex {
+    // Flat f32 fields, not a Vec3f: std140 pads a vec3 to 16 bytes, which
+    // would not match the Rust repr(C) size. VectorVertexPacked does the
+    // same for the same reason.
+    #[live]
+    pub px: f32,
+    #[live]
+    pub py: f32,
+    #[live]
+    pub pz: f32,
+    /// f16(oct.x) | f16(oct.y) — octahedral unit normal.
+    #[live]
+    pub nrm: f32,
+    /// f16(u) | f16(v)
+    #[live]
+    pub uv: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct CubeVertex {
     #[live]
@@ -164,6 +195,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.PbrVertex);
     let pgen = shared(vm, id!(PbrGeom), GeometryGen::from_triangle_pbr);
     set_script_value!(vm, geom.PbrGeom = pgen);
+    // Packed game mesh geometry: 6-slot vertex for bandwidth-bound streams.
+    set_script_value_to_pod!(vm, geom.GameMeshVertex);
+    let gmgen = shared(vm, id!(GameMeshGeom), GeometryGen::from_triangle_game_mesh);
+    set_script_value!(vm, geom.GameMeshGeom = gmgen);
     // Cube geometry: unit cube in the old geom_pos/geom_normal/geom_uv layout.
     set_script_value_to_pod!(vm, geom.CubeVertex);
     let cgen = shared(vm, id!(CubeGeom), || {
@@ -257,6 +292,18 @@ impl GeometryGen {
                 1.0, 1.0, 1.0, 1.0, // color r, g, b, a
                 1.0, 0.0, 0.0, 1.0, // tx, ty, tz, tw
             ]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single triangle in the packed GameMeshVertex stride.
+    pub fn from_triangle_game_mesh() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            // pos, nrm(oct 0,0 = +y), uv, color(white)
+            g.vertices
+                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(u32::MAX)]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
