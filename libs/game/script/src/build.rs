@@ -180,6 +180,7 @@ fn spawn_entity_inner(
     let id = world.next_id;
     world.push_entity(Entity {
         id,
+        push_mass: 1.0,
         kind,
         shape,
         pos,
@@ -426,6 +427,7 @@ pub(crate) fn spawn_terrain(
             // One translucent sensor slab: gameplay touch + the water look.
             world.push_entity(Entity {
                 id,
+                push_mass: 1.0,
                 kind: BodyKind::Static,
                 pos: vec3f(0.0, level - 0.05, 0.0),
                 vel: vec3f(0.0, 0.0, 0.0),
@@ -476,6 +478,7 @@ pub(crate) fn spawn_terrain(
             let id = world.next_id;
             world.push_entity(Entity {
                 id,
+                push_mass: 1.0,
                 kind: BodyKind::Static,
                 pos: vec3f(x, (base + top) * 0.5, z),
                 vel: vec3f(0.0, 0.0, 0.0),

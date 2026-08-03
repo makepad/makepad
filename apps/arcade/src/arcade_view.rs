@@ -263,6 +263,8 @@ fn spawn(
         density: 1.0,
         friction: 0.6,
         restitution: 0.0,
+        // 0.0 reads as 1.0 (see Entity::push_mass): normal shove resistance.
+        push_mass: 0.0,
     });
     id
 }

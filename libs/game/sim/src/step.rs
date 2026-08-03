@@ -158,6 +158,11 @@ pub fn step_world(world: &mut GameWorld) {
         }
     }
 
+    // Movers shove each other apart. After the whole integration loop, so the
+    // outcome doesn't depend on who was stepped first, and before rider
+    // pinning, which is authoritative over anything this could do to a rider.
+    separate_movers(world_entities, &statics);
+
     // Pin riders to their owners (vehicle seats, latched headcrabs). One pass
     // after integration, same frame the owner moved — the Godot mount pattern.
     // Most worlds attach nothing, and this pose table used to be built over

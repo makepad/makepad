@@ -211,9 +211,66 @@ fn soak(minutes: usize) {
     );
 }
 
+/// Movers packed tightly enough that the separation pass actually engages,
+/// all walking at a common point — the bench-crowd case. A scene with the same
+/// mover count spread out costs far less, so this is the honest worst case.
+fn crowd(name: &'static str, movers: usize, statics: usize) -> Scene {
+    let mut w = GameWorld::new();
+    w.reset_content();
+    let mut id = 0u64;
+    id += 1;
+    w.push_entity(ent(id, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(60.0, 0.5, 60.0)));
+    for i in 0..statics {
+        id += 1;
+        let a = i as f32 * 0.7;
+        w.push_entity(ent(
+            id,
+            BodyKind::Static,
+            vec3f(a.cos() * (14.0 + i as f32 * 0.2), 1.0, a.sin() * (14.0 + i as f32 * 0.2)),
+            vec3f(0.5, 1.0, 0.5),
+        ));
+    }
+    // A disc of bodies half a metre apart: everyone overlaps a neighbour.
+    let per_row = (movers as f32).sqrt().ceil() as usize;
+    for i in 0..movers {
+        id += 1;
+        let (gx, gz) = (i % per_row, i / per_row);
+        let mut e = ent(
+            id,
+            BodyKind::Mover,
+            vec3f(
+                gx as f32 * 0.5 - per_row as f32 * 0.25,
+                0.8,
+                gz as f32 * 0.5 - per_row as f32 * 0.25,
+            ),
+            vec3f(0.4, 0.8, 0.4),
+        );
+        e.vel = vec3f(0.0, 0.0, 0.0);
+        e.auto_face = true;
+        e.turn_rate = 6.0;
+        w.push_entity(e);
+    }
+    Scene { name, world: w }
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--soak") {
         soak(10);
+        return;
+    }
+    if std::env::args().any(|a| a == "--crowd") {
+        println!("mover separation cost (packed crowds, release recommended)\n");
+        for s in [
+            crowd("crowd 50", 50, 0),
+            crowd("crowd 200", 200, 0),
+            crowd("crowd 12 (village)", 12, 500),
+            crowd("crowd 50 + 500 static", 50, 500),
+            crowd("crowd 200 + 500 static", 200, 500),
+        ]
+        .iter_mut()
+        {
+            measure(s, 600);
+        }
         return;
     }
     let ticks: usize = std::env::args()

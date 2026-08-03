@@ -176,6 +176,151 @@ impl From<&Entity> for Solid {
     }
 }
 
+/// Relaxation passes per tick in [`separate_movers`]. Fixed, not
+/// convergence-based: an early-exit on "nothing moved" makes the result depend
+/// on iteration order, and this has to be bit-reproducible.
+pub const SEPARATION_ITERATIONS: usize = 3;
+
+/// Push overlapping movers apart so characters shoulder past each other
+/// instead of clipping through.
+///
+/// Deliberately a post-pass, not a change to the sweep: the sweep carries the
+/// 0.55 step-up, `CONTACT_SKIN` and the terrain-cliff logic, and it is the
+/// path every existing contract was written against. Movers are resolved
+/// AFTER they have all moved, which is also what makes the result independent
+/// of who was simulated first.
+///
+/// Horizontal only. Resolving the vertical axis is how characters end up
+/// standing on each other's heads — an overlapping pair is pushed apart on the
+/// ground plane and the stack unpicks itself.
+///
+/// `hits` entities (projectiles) are excluded, and that is a correctness
+/// requirement rather than a preference: [`collect_touches`] reports a
+/// projectile strike *from the overlap itself* ("movers pass through each
+/// other spatially, so overlap IS the hit"). Separating them would mean a
+/// bullet could never touch anyone.
+///
+/// [`collect_touches`]: crate::step::collect_touches
+pub fn separate_movers(entities: &mut [Entity], statics: &[Solid]) {
+    let mut idx: Vec<usize> = Vec::new();
+    let mut widest = 0.0f32;
+    for (i, e) in entities.iter().enumerate() {
+        if e.kind != BodyKind::Mover
+            || e.sensor
+            || !e.collide
+            // Riders are pinned to their carrier after this; shoving one would
+            // be overwritten anyway, and shoving its carrier is not our call.
+            || e.attached_to != 0
+            || e.hits
+        {
+            continue;
+        }
+        idx.push(i);
+        widest = widest.max(e.half.x).max(e.half.z);
+    }
+    if idx.len() < 2 {
+        return;
+    }
+    // A cell this wide means an overlapping pair can only ever be in the same
+    // or an adjacent cell, so the 3x3 neighbourhood is exhaustive.
+    let cell = (widest * 2.0).max(0.5);
+    // Sorted (cell, index) pairs rather than a hash map of buckets: a map
+    // allocates a Vec per occupied cell per iteration, and this runs three
+    // times a tick. Sorting is also what makes the neighbour walk ordered
+    // without a second sort of the candidates.
+    let mut keys: Vec<(i64, usize)> = Vec::with_capacity(idx.len());
+
+    for _ in 0..SEPARATION_ITERATIONS {
+        keys.clear();
+        for (n, &i) in idx.iter().enumerate() {
+            keys.push((cell_key(entities[i].pos, cell), n));
+        }
+        keys.sort_unstable();
+        // `idx` follows entity order and entities are sorted by id, so this
+        // walk is deterministic; within a cell, `keys` is ordered by index.
+        for an in 0..idx.len() {
+            let (cx, cz) = cell_xz(entities[idx[an]].pos, cell);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let want = pack_cell(cx + dx, cz + dz);
+                    let lo = keys.partition_point(|&(k, _)| k < want);
+                    for &(k, bn) in &keys[lo..] {
+                        if k != want {
+                            break;
+                        }
+                        if bn > an {
+                            resolve_mover_pair(entities, idx[an], idx[bn], statics);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cell_xz(p: Vec3f, cell: f32) -> (i32, i32) {
+    ((p.x / cell).floor() as i32, (p.z / cell).floor() as i32)
+}
+
+fn pack_cell(x: i32, z: i32) -> i64 {
+    ((x as i64) << 32) | (z as u32 as i64)
+}
+
+fn cell_key(p: Vec3f, cell: f32) -> i64 {
+    let (x, z) = cell_xz(p, cell);
+    pack_cell(x, z)
+}
+
+fn resolve_mover_pair(entities: &mut [Entity], a: usize, b: usize, statics: &[Solid]) {
+    let (pa, ha) = (entities[a].pos, entities[a].half);
+    let (pb, hb) = (entities[b].pos, entities[b].half);
+    let ox = (ha.x + hb.x) - (pa.x - pb.x).abs();
+    let oy = (ha.y + hb.y) - (pa.y - pb.y).abs();
+    let oz = (ha.z + hb.z) - (pa.z - pb.z).abs();
+    if ox <= 0.0 || oy <= 0.0 || oz <= 0.0 {
+        return;
+    }
+    // Least-penetration axis: the shortest way out is the one that looks like
+    // stepping aside rather than teleporting around.
+    let (axis, depth) = if ox <= oz { (0usize, ox) } else { (2usize, oz) };
+    let delta = axis_get(pa, axis) - axis_get(pb, axis);
+    let sign = if delta > 0.0 {
+        1.0
+    } else if delta < 0.0 {
+        -1.0
+    } else {
+        // Exactly coincident (two NPCs spawned on one point). Break by id so
+        // the pair always unpicks the same way.
+        if entities[a].id < entities[b].id {
+            -1.0
+        } else {
+            1.0
+        }
+    };
+    let push = (depth + CONTACT_SKIN) * sign;
+    let ma = push_mass_of(&entities[a]);
+    let mb = push_mass_of(&entities[b]);
+    let total = ma + mb;
+    // Heavier moves less: a's share is weighted by the OTHER body's mass.
+    shove(entities, a, axis, push * (mb / total), statics);
+    shove(entities, b, axis, -push * (ma / total), statics);
+}
+
+/// Apply one axis of separation, clamped against the solid world. Without the
+/// clamp a crowd pressed against a wall would squeeze its outermost members
+/// straight through it.
+fn shove(entities: &mut [Entity], i: usize, axis: usize, delta: f32, statics: &[Solid]) {
+    if delta == 0.0 {
+        return;
+    }
+    let (id, pos, half) = {
+        let e = &entities[i];
+        (e.id, e.pos, e.half)
+    };
+    let (clamped, _hit, _hit_id) = sweep_axis(statics, id, pos, half, axis, delta);
+    axis_set(&mut entities[i].pos, axis, clamped);
+}
+
 pub fn sweep_axis(
     entities: &[Solid],
     self_id: u64,

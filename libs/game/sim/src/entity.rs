@@ -141,6 +141,24 @@ pub struct Entity {
     pub density: f32,
     pub friction: f32,
     pub restitution: f32,
+    /// How hard this mover resists being shoved by another mover. Heavier
+    /// moves less: two equals each give half, a player at 4.0 against an NPC
+    /// at 1.0 gives up a fifth of the overlap and shoulders through.
+    ///
+    /// `0.0` — the `Default` — READS AS 1.0, not as weightless. A zero here
+    /// would make a default-constructed mover infinitely shovable and, worse,
+    /// divide by zero when two of them met. Same discipline as `hidden` over
+    /// `visible`: the value a `Default` lands on must be the sane one.
+    pub push_mass: f32,
+}
+
+/// Effective shove resistance, applying the zero-reads-as-one rule.
+pub fn push_mass_of(e: &Entity) -> f32 {
+    if e.push_mass > 0.0 {
+        e.push_mass
+    } else {
+        1.0
+    }
 }
 
 /// A purely visual box welded to an entity — eyes, arms, hats. No collision,
