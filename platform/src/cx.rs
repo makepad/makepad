@@ -67,6 +67,11 @@ pub struct Cx {
 
     pub(crate) os_type: OsType,
     pub in_makepad_studio: bool,
+    /// Game controllers forwarded by Studio. An app hosted by Studio is a
+    /// child process with no window, so the OS hands controller input to
+    /// Studio instead; this is where that arrives, and it is what
+    /// `game_input_states` reads while `in_makepad_studio` is set.
+    pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
     pub demo_time_repaint: bool,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
@@ -426,6 +431,7 @@ impl Cx {
             null_cube_texture,
             cpu_cores: 8,
             in_makepad_studio: false,
+            game_input_remote: Vec::new(),
             in_draw_event: false,
             os_type: OsType::Unknown,
             gpu_info: Default::default(),
