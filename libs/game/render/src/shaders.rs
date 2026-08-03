@@ -168,6 +168,93 @@ script_mod! {
         }
     }
 
+    // Generated foliage: the OPT-IN variant that adds growth and wind.
+    //
+    // Deliberately a sibling of DrawGameSkinned rather than a flag inside it.
+    // Wind costs ~20 vertex ALU and growth ~6; the cube shader draws most of
+    // the world and must not pay either. A plant opts in by being drawn with
+    // this shader; everything else keeps the cheap path untouched.
+    //
+    // Both animation weights ride in ONE unorm8 lane (the colour's alpha, high
+    // nibble = growth order, low = wind flex), so the variant costs zero extra
+    // vertex BYTES over the shared 24-byte layout — which is the bottleneck we
+    // actually measured.
+    mod.draw.DrawGameFoliage = mod.std.set_type_default() do #(DrawGameFoliage::script_shader(vm)){
+        alpha_blend: false
+        backface_culling: false
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.GameMeshVertex, geom.GameMeshGeom)
+        v_ambient: varying(vec3f)
+        v_direct: varying(vec3f)
+        v_color: varying(vec3f)
+        world: varying(vec4f)
+        v_fog: varying(float)
+
+        oct_decode: fn(e: vec2f) -> vec3f {
+            let nz = 1.0 - abs(e.x) - abs(e.y)
+            let t = max(0.0 - nz, 0.0)
+            let sx = step(0.0, e.x) * 2.0 - 1.0
+            let sy = step(0.0, e.y) * 2.0 - 1.0
+            return normalize(vec3(e.x - t * sx, e.y - t * sy, nz))
+        }
+
+        vertex: fn() {
+            let pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            let rgba = unpack4u8(self.geom.color)
+            // High nibble = growth order along the skeleton, low = wind flex.
+            let packed = floor(rgba.w * 255.0 + 0.5)
+            let growth_t = floor(packed / 16.0) / 15.0
+            let flex = (packed - floor(packed / 16.0) * 16.0) / 15.0
+
+            // Growth reveal: each vertex has its own threshold, so the plant
+            // unfurls root-first instead of scaling up as a whole. The band
+            // hides the 16-level quantisation of growth_t.
+            let reveal = smoothstep(growth_t - self.growth_band, growth_t, self.growth)
+            let grown = pos * reveal
+
+            // Per-instance phase from the instance's world position, so a
+            // forest sways individually rather than in lockstep — this is the
+            // detail that makes it read as wind rather than a global wobble.
+            let origin = (self.transform * vec4(0.0, 0.0, 0.0, 1.0)).xyz
+            let phase = origin.x * 0.7 + origin.z * 1.3
+            let t = self.wind_time
+            // Two frequencies: a slow sway plus a faster flutter.
+            let sway = sin(t * 1.1 + phase) * self.wind_strength
+            let flutter = sin(t * 3.7 + phase * 1.7) * self.wind_gust
+            // Clamped so a strong gust bends the plant instead of shearing it.
+            let amount = clamp((sway + flutter) * flex, 0.0 - 0.6, 0.6)
+            let bent = grown + self.wind_dir * amount
+
+            let normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
+            let model_view = self.draw_list.view_transform * self.transform
+            let world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
+            self.world = model_view * vec4(bent.x, bent.y, bent.z, 1.0)
+            let view_pos = self.draw_pass.camera_view * self.world
+            // Two-sided foliage: cards are lit by the absolute facing so a
+            // leaf seen from behind is not black.
+            let dp = abs(dot(world_normal, normalize(self.light_dir)))
+            let hemi = clamp(world_normal.y * 0.5 + 0.5, 0.0, 1.0)
+            self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
+            self.v_direct = self.sun_color * dp
+            self.v_color = rgba.xyz
+            self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos
+        }
+
+        pixel: fn() {
+            let lit = self.v_color * (self.v_ambient + self.v_direct)
+            return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+    }
+
     // Silhouette shadow mesh (shadow_mesh.rs): every caster's hull for the
     // whole frame, in ONE geometry and ONE draw call.
     //
@@ -327,6 +414,51 @@ pub struct DrawGameSkinned {
     pub sun_sky: Vec3f,
     #[live(vec3(0.28, 0.28, 0.28))]
     pub sun_ground: Vec3f,
+}
+
+/// Generated foliage: vertex-coloured mesh with growth reveal and wind sway.
+///
+/// A sibling of [`DrawGameSkinned`] rather than a mode inside it — the shared
+/// shaders draw most of the world and must not carry wind ALU they never use.
+/// Both animation weights ride in the packed vertex's existing alpha lane, so
+/// opting in costs vertex instructions but zero extra vertex bytes.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGameFoliage {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub transform: Mat4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(vec3(0.35, 0.8, 0.45))]
+    pub light_dir: Vec3f,
+    #[live(vec3(0.75, 0.87, 0.96))]
+    pub fog_color: Vec3f,
+    #[live(0.0)]
+    pub fog_density: f32,
+    #[live(vec3(0.72, 0.72, 0.72))]
+    pub sun_color: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_sky: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_ground: Vec3f,
+    /// Reveal threshold in [0, 1]. 1 = fully grown; defaults so a plant that
+    /// nobody animates is simply present.
+    #[live(1.0)]
+    pub growth: f32,
+    /// Width of the smoothstep band that hides growth_t's 16-level
+    /// quantisation and makes tips unfurl instead of popping.
+    #[live(0.12)]
+    pub growth_band: f32,
+    #[live(vec3(1.0, 0.0, 0.0))]
+    pub wind_dir: Vec3f,
+    #[live(0.0)]
+    pub wind_strength: f32,
+    #[live(0.0)]
+    pub wind_gust: f32,
+    #[live(0.0)]
+    pub wind_time: f32,
 }
 
 /// Silhouette shadow mesh: all casters' hulls in one geometry, one draw call.
