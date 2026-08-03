@@ -18,8 +18,10 @@ pub use endpoint::{
     MAX_PLAYERS, PEER_TIMEOUT,
 };
 pub use protocol::{
-    batch_entities, Announce, ClientToHost, EntityState, Envelope, FrameCodec, GameEvent, HostId,
+    batch_entities, Announce, ClientToHost, CoeditChange, CoeditRefusal, CoeditRequest,
+    CoeditResponse, EntityState, Envelope, FrameCodec, GameEvent, HostId,
     HostToClient,
-    InputFrame, Intent, LeaveReason, PacketClass, PlayerId, MAX_DATAGRAM_PAYLOAD, MAX_FRAME_BYTES,
+    InputFrame, Intent, LeaveReason, PacketClass, PlayerId, MAX_COEDIT_LEASE_TTL,
+    MAX_COEDIT_REGION, MAX_COEDIT_SOURCE, MAX_DATAGRAM_PAYLOAD, MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
 };

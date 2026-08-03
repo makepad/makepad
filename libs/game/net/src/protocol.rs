@@ -139,6 +139,128 @@ pub enum Intent {
 /// a payload; anything past this is someone probing for a buffer to grow.
 pub const MAX_AUTHORING_TEXT: usize = 4096;
 
+/// Largest game source a remote author may submit.
+///
+/// Deliberately well under `MAX_FRAME_BYTES`: an accepted source has to travel
+/// *back* out inside a `Rebase`, so a source the host would accept but could
+/// never re-send would strand the next author on an answer that never arrives.
+pub const MAX_COEDIT_SOURCE: usize = 192 * 1024;
+/// Longest region name on a lease request.
+pub const MAX_COEDIT_REGION: usize = 128;
+/// Longest lease a host will grant, in seconds. A soft lease that outlives the
+/// session it was taken for is just a stale claim.
+pub const MAX_COEDIT_LEASE_TTL: f64 = 600.0;
+
+/// A remote Claude's edit protocol (game.md §"Collaborative editing").
+///
+/// Reliable channel only — the host never accepts source over UDP, so no
+/// datagram can rewrite the game.
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub enum CoeditRequest {
+    /// Ask for the current source to write against.
+    GetBase,
+    /// `{intent, base generation, diff}` — the diff is derived host-side from
+    /// the submitted source, so a stale or malformed patch can never be applied.
+    Submit {
+        intent: String,
+        base_generation: u64,
+        source: String,
+    },
+    /// Advisory claim on a region ("vehicles"), so other authors pick other work.
+    AcquireLease { region: String, ttl: f64 },
+    ReleaseLease { region: String },
+}
+
+impl CoeditRequest {
+    /// Bounds every field that arrives off the wire. Checked before the request
+    /// reaches the intent log, so oversize input costs one allocation, not a
+    /// generation.
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            CoeditRequest::GetBase => true,
+            CoeditRequest::Submit { intent, source, .. } => {
+                !intent.trim().is_empty()
+                    && intent.len() <= MAX_AUTHORING_TEXT
+                    && source.len() <= MAX_COEDIT_SOURCE
+            }
+            CoeditRequest::AcquireLease { region, ttl } => {
+                !region.is_empty()
+                    && region.len() <= MAX_COEDIT_REGION
+                    && ttl.is_finite()
+                    && *ttl > 0.0
+                    && *ttl <= MAX_COEDIT_LEASE_TTL
+            }
+            CoeditRequest::ReleaseLease { region } => {
+                !region.is_empty() && region.len() <= MAX_COEDIT_REGION
+            }
+        }
+    }
+}
+
+/// Why the host would not record a submission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerBin, DeBin)]
+pub enum CoeditRefusal {
+    Malformed,
+    EmptyIntent,
+    IntentTooLong,
+    SourceTooLong,
+    UnknownBase,
+    QueueFull,
+    NoChange,
+}
+
+/// One intervening generation, so a rebasing author knows what moved.
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub struct CoeditChange {
+    pub generation: u64,
+    pub author: u64,
+    pub intent: String,
+    /// `(base_start, removed, added)` per hunk.
+    pub hunks: Vec<(u32, u32, u32)>,
+}
+
+/// Host → author. Addressed to one author, never broadcast: an eval failure
+/// belongs to whoever proposed it, not to the room.
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub enum CoeditResponse {
+    Base {
+        generation: u64,
+        source: String,
+    },
+    Accepted {
+        generation: u64,
+    },
+    /// "The base moved to generation N — re-apply your intent."
+    Rebase {
+        generation: u64,
+        base_source: String,
+        intervening: Vec<CoeditChange>,
+        conflict_regions: u32,
+    },
+    Refused {
+        reason: CoeditRefusal,
+    },
+    /// The accepted generation failed to evaluate; the world is still running
+    /// `last_good_generation`.
+    EvalError {
+        generation: u64,
+        message: String,
+        last_good_generation: u64,
+    },
+    LeaseGranted {
+        region: String,
+        expires_at: f64,
+    },
+    LeaseHeld {
+        region: String,
+        by: u64,
+        expires_at: f64,
+    },
+    LeaseRefused {
+        region: String,
+    },
+}
+
 /// Host-authored events on the reliable channel.
 #[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
 pub enum GameEvent {
@@ -162,6 +284,8 @@ pub enum ClientToHost {
     },
     Input { frame: InputFrame },
     Intent { intent: Intent },
+    /// Source editing. Reliable channel only — see `Host::pump_udp`.
+    Coedit { req: CoeditRequest },
     Leave,
     Ping { nonce: u64 },
 }
@@ -194,6 +318,9 @@ pub enum HostToClient {
     },
     Pong {
         nonce: u64,
+    },
+    Coedit {
+        res: CoeditResponse,
     },
 }
 

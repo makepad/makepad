@@ -155,6 +155,13 @@ pub enum HostEvent {
         player: PlayerId,
         intent: Intent,
     },
+    /// A remote Claude proposing an edit. Already bounds-checked
+    /// (`CoeditRequest::is_well_formed`); malformed ones are answered with a
+    /// refusal rather than surfaced.
+    Coedit {
+        player: PlayerId,
+        req: CoeditRequest,
+    },
 }
 
 struct PlayerSlot {
@@ -286,6 +293,21 @@ impl Host {
         let id = self.config.host_id.0;
         let key = self.config.lobby_key.clone();
         self.connections[index].queue(id, &payload, &key, class);
+    }
+
+    /// Answer one author's Claude. Addressed, never broadcast: a rebase or an
+    /// eval failure concerns the author that proposed it, and the rest of the
+    /// room neither wrote it nor can fix it (game.md).
+    pub fn send_coedit(&mut self, player: PlayerId, res: CoeditResponse) {
+        let Some(index) = self
+            .connections
+            .iter()
+            .position(|conn| conn.player == Some(player))
+        else {
+            return;
+        };
+        self.send_to(index, &HostToClient::Coedit { res }, PacketClass::Control);
+        let _ = self.connections[index].flush();
     }
 
     /// Reliable, ordered broadcast (spawns, removals, scores).
@@ -506,6 +528,29 @@ impl Host {
                 events.push(HostEvent::Intent { player, intent });
                 true
             }
+            ClientToHost::Coedit { req } => {
+                let Some(player) = self.connections[index].player else {
+                    return false;
+                };
+                if let Some(slot) = self.players.get_mut(&player) {
+                    slot.last_seen = now;
+                }
+                if req.is_well_formed() {
+                    events.push(HostEvent::Coedit { player, req });
+                } else {
+                    self.stats.malformed += 1;
+                    self.send_to(
+                        index,
+                        &HostToClient::Coedit {
+                            res: CoeditResponse::Refused {
+                                reason: CoeditRefusal::Malformed,
+                            },
+                        },
+                        PacketClass::Control,
+                    );
+                }
+                true
+            }
             // Input belongs on UDP; accepting it here too keeps a client that
             // has no working datagram path playable.
             ClientToHost::Input { frame } => {
@@ -667,6 +712,9 @@ pub enum ClientEvent {
     Descriptors { tick: u64 },
     Event { tick: u64, event: GameEvent },
     Disconnected { reason: LeaveReason },
+    /// The host's answer to this client's Claude: accepted, rebase, refusal or
+    /// an eval failure on a generation it proposed.
+    Coedit { res: CoeditResponse },
 }
 
 /// Client endpoint. Sends intent, receives truth, and reconstructs the world
@@ -753,6 +801,19 @@ impl Client {
             &self.key,
             PacketClass::Control,
         );
+    }
+
+    /// Submit an edit, ask for the base, or take a lease. Reliable channel: a
+    /// dropped transaction would leave the author waiting on an answer forever.
+    pub fn send_coedit(&mut self, req: CoeditRequest) {
+        let msg = ClientToHost::Coedit { req };
+        self.conn.queue(
+            self.client_id,
+            &msg.serialize_bin(),
+            &self.key,
+            PacketClass::Control,
+        );
+        let _ = self.conn.flush();
     }
 
     pub fn leave(&mut self) {
@@ -903,6 +964,7 @@ impl Client {
                 self.last_tick = self.last_tick.max(tick);
                 events.push(ClientEvent::Event { tick, event });
             }
+            HostToClient::Coedit { res } => events.push(ClientEvent::Coedit { res }),
             HostToClient::Bye { reason } => events.push(ClientEvent::Disconnected { reason }),
             HostToClient::Pong { .. } => {}
         }

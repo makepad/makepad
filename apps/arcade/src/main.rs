@@ -7,6 +7,7 @@ pub mod library;
 pub mod pairing;
 pub mod pair_server;
 pub mod ai;
+pub mod coedit;
 pub mod intent;
 pub mod settings;
 pub mod xr_input;
