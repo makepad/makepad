@@ -251,10 +251,7 @@ impl GameWorld {
                 None => return (0.0, 0.0),
             }
         };
-        (
-            axis_x * yaw.cos() as f64 - axis_z * yaw.sin() as f64,
-            axis_x * yaw.sin() as f64 + axis_z * yaw.cos() as f64,
-        )
+        camera_relative_move(axis_x, axis_z, yaw)
     }
 
     /// Reset everything a re-eval rebuilds. The HOST is responsible for two
@@ -372,6 +369,35 @@ impl GameWorld {
     pub fn is_static_visual(&self, id: u64) -> bool {
         self.entity(id).map_or(false, |e| e.kind == BodyKind::Static)
     }
+}
+
+/// Rotate raw stick/WASD axes into world movement by a camera yaw — "what the
+/// player MEANS by forward is where the camera is looking".
+///
+/// Shared rather than inlined: [`GameWorld::player_move`] uses it for players
+/// whose axes live in the world or in a replicated input packet, and the player
+/// prefab uses it for a host that reads its own devices. Two copies of this
+/// expression is how one of them ends up mirrored — the same class of bug as
+/// the inverted steering, which is why [`crate::heading`] exists.
+///
+/// The `f32::cos` widened to f64 is deliberate and load-bearing: it reproduces
+/// the original input-object expression character-for-character, so the numbers
+/// do not move.
+///
+/// # The yaw is a VIEW yaw, not a heading
+///
+/// `yaw` is the angle you hand the renderer's camera rig, which is the negation
+/// of a [`crate::heading`] yaw on both axes — the renderer looks along
+/// `(sin y, −cos y)` where a heading faces `(−sin y, −cos y)`. Passing an
+/// entity's `yaw` here compiles fine and mirrors the controls about the Z axis,
+/// so if you hold a heading, negate it once at a named boundary rather than
+/// here. With a view yaw, `axis_z = −1` ("forward") comes out along the camera's
+/// own look direction, which is the whole point of the function.
+pub fn camera_relative_move(axis_x: f64, axis_z: f64, yaw: f32) -> (f64, f64) {
+    (
+        axis_x * yaw.cos() as f64 - axis_z * yaw.sin() as f64,
+        axis_x * yaw.sin() as f64 + axis_z * yaw.cos() as f64,
+    )
 }
 
 /// Binary search over the sorted-by-id entity slice. Shared by the world's

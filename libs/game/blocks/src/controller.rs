@@ -15,6 +15,7 @@
 //! The character movement itself lives in [`crate::character`], on the mover
 //! sweep. This module owns only the camera and the seat.
 
+use crate::DriveInput;
 use makepad_game_sim::{camera_boom_limit, heading_delta, heading_to_forward, GameWorld, TICK_DT};
 use makepad_math::*;
 
@@ -261,6 +262,42 @@ impl FollowCamera {
         };
     }
 
+    /// This camera's aim in the *renderer's* angle convention.
+    ///
+    /// The rig thinks in the sim's heading convention, because that is the only
+    /// way `self.yaw = e.yaw` and recentring toward a velocity heading can mean
+    /// anything. The renderer uses the opposite sign on BOTH axes. Deriving it
+    /// rather than asserting it, since a guessed sign here is how the car ended
+    /// up steering backwards:
+    ///
+    /// - This rig places the eye at
+    ///   `pivot + (sin yaw·cos pitch, sin pitch, cos yaw·cos pitch)·boom`
+    ///   (see [`Self::eye`]), so `+pitch` lifts the camera and looks down.
+    /// - The renderer places it at `target − forward·distance` with
+    ///   `forward = (sin y·cos p, sin p, −cos y·cos p)`, i.e. at
+    ///   `target + (−sin y·cos p, −sin p, cos y·cos p)·distance`.
+    ///
+    /// Matching the two offsets component-wise gives `sin y = −sin yaw`,
+    /// `cos y = cos yaw` and `sin p = −sin pitch` — so `y = −yaw`, `p = −pitch`.
+    ///
+    /// The conversion itself lives in [`makepad_game_sim::heading`], which owns
+    /// every sign in this engine, rather than being a negation written here.
+    pub fn view_angles(&self) -> (f32, f32) {
+        (
+            makepad_game_sim::heading_to_camera_yaw(self.yaw),
+            makepad_game_sim::heading_to_camera_pitch(self.pitch),
+        )
+    }
+
+    /// Yaw to rotate movement axes by — see [`Self::view_angles`].
+    ///
+    /// Separate accessor because [`makepad_game_sim::camera_relative_move`]
+    /// takes a *view* yaw, not a heading, and passing `self.yaw` to it compiles
+    /// perfectly while mirroring the player's controls about the Z axis.
+    pub fn view_yaw(&self) -> f32 {
+        makepad_game_sim::heading_to_camera_yaw(self.yaw)
+    }
+
     /// Eye position this tick.
     pub fn eye(&self) -> Vec3f {
         let back = -heading_to_forward(self.yaw);
@@ -284,6 +321,11 @@ pub enum Seat {
     Driving(u64),
 }
 
+/// How far to the side of a car the driver is placed when getting out. Wide
+/// enough to clear a typical body's half-extent plus the character's own, so
+/// the dismount does not start life overlapping the car it just left.
+const DISMOUNT_REACH: f32 = 2.2;
+
 /// Mount state: which seat, and the character parked while driving.
 #[derive(Clone, Copy, Debug)]
 pub struct Mount {
@@ -305,6 +347,31 @@ impl Mount {
         }
     }
 
+    /// The vehicle this player would get into if they pressed the button now,
+    /// or `None` when nothing is in reach — or when they are already driving.
+    ///
+    /// Split out of [`Self::toggle`] so an affordance prompt ("Press E to get
+    /// in") and the button itself run the SAME search. Two searches drift, and
+    /// a prompt that disagrees with the button is worse than no prompt: it
+    /// tells the player the game is broken at the exact moment they are trying
+    /// to learn it.
+    pub fn candidate(&self, world: &GameWorld) -> Option<u64> {
+        if self.seat != Seat::OnFoot {
+            return None;
+        }
+        let pos = world.entity(self.character)?.pos;
+        // Nearest vehicle within reach.
+        let mut best: Option<(u64, f32)> = None;
+        for e in world.entities.iter().filter(|e| e.tag == "car") {
+            let (dx, dz) = (e.pos.x - pos.x, e.pos.z - pos.z);
+            let d2 = dx * dx + dz * dz;
+            if d2 < self.reach * self.reach && best.map_or(true, |(_, b)| d2 < b) {
+                best = Some((e.id, d2));
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
     /// Handle a mount/dismount press. Returns the new seat if it changed, so
     /// the caller can swap the camera rig and re-point input.
     ///
@@ -314,17 +381,7 @@ impl Mount {
     pub fn toggle(&mut self, world: &mut GameWorld) -> Option<Seat> {
         match self.seat {
             Seat::OnFoot => {
-                let pos = world.entity(self.character)?.pos;
-                // Nearest vehicle within reach.
-                let mut best: Option<(u64, f32)> = None;
-                for e in world.entities.iter().filter(|e| e.tag == "car") {
-                    let (dx, dz) = (e.pos.x - pos.x, e.pos.z - pos.z);
-                    let d2 = dx * dx + dz * dz;
-                    if d2 < self.reach * self.reach && best.map_or(true, |(_, b)| d2 < b) {
-                        best = Some((e.id, d2));
-                    }
-                }
-                let (car, _) = best?;
+                let car = self.candidate(world)?;
                 // The character is parked, not destroyed: keeping the entity
                 // means the walk state, the camera history and anything the
                 // game attached to it all survive the round trip.
@@ -340,9 +397,26 @@ impl Mount {
                     let e = world.entity(car)?;
                     (e.pos, e.yaw)
                 };
-                // Step out to the left of the car's heading, on the ground.
-                let side = makepad_game_sim::heading_to_right(cyaw);
-                let out = vec3f(cpos.x - side.x * 2.2, cpos.y + 0.5, cpos.z - side.z * 2.2);
+                // Driver's door first, then the passenger side, then on top of
+                // the car as a last resort. Preferring one side unconditionally
+                // is how a player ends up inside a wall after parking against
+                // one — and being dumped inside geometry is the single most
+                // broken-feeling thing a get-out can do.
+                let right = makepad_game_sim::heading_to_right(cyaw);
+                let half = world
+                    .entity(self.character)
+                    .map_or(vec3f(0.4, 0.9, 0.4), |c| c.half);
+                let door = |s: f32| {
+                    vec3f(
+                        cpos.x + right.x * DISMOUNT_REACH * s,
+                        cpos.y + 0.5,
+                        cpos.z + right.z * DISMOUNT_REACH * s,
+                    )
+                };
+                let out = [door(-1.0), door(1.0)]
+                    .into_iter()
+                    .find(|p| makepad_game_sim::sense::spot_clear(world, self.character, *p, half))
+                    .unwrap_or_else(|| vec3f(cpos.x, cpos.y + 0.5, cpos.z));
                 if let Some(c) = world.entity_mut(self.character) {
                     c.hidden = false;
                     c.pos = out;
@@ -360,6 +434,165 @@ impl Mount {
             Seat::OnFoot => self.character,
             Seat::Driving(car) => car,
         }
+    }
+}
+
+/// What a device reports this tick, before any interpretation.
+///
+/// Deliberately device-agnostic: a keyboard fills `move_x/move_y` with -1/0/+1,
+/// a stick with its analogue value, a headset with its own mapping. The rig
+/// normalises and deadzones them identically, so every input path feels the
+/// same and none of them needs to know about the camera.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RawInput {
+    /// Strafe / forward, unnormalised. +y is forward.
+    pub move_x: f32,
+    pub move_y: f32,
+    /// Look delta THIS TICK (mouse pixels or stick × dt), not an absolute.
+    pub look_dx: f32,
+    pub look_dy: f32,
+    pub jump: bool,
+    pub jump_pressed: bool,
+    /// Sprint, 0..1. A keyboard sends 1.0 for shift; a pad sends deflection.
+    pub run: f32,
+    /// Enter/exit a vehicle. Edge-triggered by the caller.
+    pub use_pressed: bool,
+    /// Analog throttle, −1 reverse … +1 forward. A pad fills this from
+    /// `RT − LT`, a keyboard from W/S.
+    ///
+    /// Separate from `move_y` rather than derived from it, because a pad
+    /// drives with the *triggers* and walks with the *stick*, and those are
+    /// genuinely different axes on the device. The host fills both from the
+    /// same keys and the rig picks by seat, so there is still no second code
+    /// path — and analog triggers are most of why a pad beats a keyboard in a
+    /// car. Binary throttle is a tell.
+    pub throttle: f32,
+    pub brake: f32,
+    /// Handbrake, 0..1 — kills rear grip for a deliberate slide.
+    pub handbrake: f32,
+}
+
+/// **The player prefab.** Character on foot, vehicle when seated, one camera
+/// that follows whichever it is, and the mount between them.
+///
+/// This is the whole surface a game needs: build it once, call [`Self::tick`]
+/// each frame with what the device reported, feed the returned [`DriveInput`]
+/// to the blocks, then [`Self::apply_camera`]. A generated game should never
+/// assemble a camera rig or a mount state machine by hand — if using this
+/// takes more than a few lines, the prefab is the thing that needs fixing.
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerRig {
+    pub camera: FollowCamera,
+    pub mount: Mount,
+    /// Deadzone applied to the movement axes.
+    pub deadzone: f32,
+}
+
+impl PlayerRig {
+    /// `character` is the walker this player owns. Starts on foot.
+    pub fn new(character: u64) -> Self {
+        Self {
+            camera: FollowCamera::new(CameraConfig::on_foot()),
+            mount: Mount::new(character),
+            deadzone: 0.12,
+        }
+    }
+
+    /// Advance the rig and translate the device into game intent.
+    ///
+    /// Order matters: the seat is resolved first (so a mount this tick steers
+    /// the thing you just got into rather than the one you left), then the
+    /// camera, and only then are the movement axes rotated — because they are
+    /// rotated by the camera's NEW yaw. Doing it the other way walks the player
+    /// in the direction the camera was pointing a frame ago, which reads as
+    /// lag on every direction change.
+    pub fn tick(&mut self, world: &mut GameWorld, raw: RawInput) -> DriveInput {
+        if raw.use_pressed {
+            if let Some(seat) = self.mount.toggle(world) {
+                let cfg = match seat {
+                    Seat::OnFoot => CameraConfig::on_foot(),
+                    Seat::Driving(_) => CameraConfig::in_vehicle(),
+                };
+                self.camera.transition_to(cfg, self.mount.blend);
+            }
+        }
+
+        let subject = self.mount.subject();
+        self.camera.tick(world, subject, raw.look_dx, raw.look_dy);
+        // The rest of the engine reads movement intent through the world's own
+        // camera yaw, so publish it rather than keeping a private copy — a
+        // second source of "where is the player looking" is how the walking and
+        // driving paths drift apart. `cam_yaw` feeds `player_move`, which
+        // rotates by the same helper used below, so it takes the VIEW yaw.
+        world.cam_yaw = self.camera.view_yaw();
+
+        let (mx, my) = movement_intent(raw.move_x, raw.move_y, self.deadzone);
+        // -my: screen "up"/W is forward, which is -z when the camera faces down
+        // the axis. The yaw is the view yaw, not the rig's heading — see
+        // `FollowCamera::view_angles` for why they differ.
+        let (move_x, move_z) =
+            makepad_game_sim::camera_relative_move(mx as f64, -my as f64, self.camera.view_yaw());
+
+        DriveInput {
+            // Driving reads steer/throttle; walking reads move_x/move_z. Both
+            // are filled every tick so the seat switch needs no second path —
+            // whichever block is listening simply reads its own fields.
+            steer: mx,
+            throttle: raw.throttle,
+            brake: raw.brake,
+            handbrake: raw.handbrake,
+            move_x: move_x as f32,
+            move_z: move_z as f32,
+            jump: raw.jump,
+            jump_pressed: raw.jump_pressed,
+            pitch: my,
+            roll: mx,
+            look_dx: raw.look_dx,
+            look_dy: raw.look_dy,
+            run: raw.run,
+            use_pressed: raw.use_pressed,
+        }
+    }
+
+    /// Put the player back on foot without consulting the vehicle.
+    ///
+    /// The get-out in [`Mount::toggle`] reads the car to find a door to step
+    /// out of, so it cannot run when the car is the thing that vanished. This
+    /// is the recovery path for exactly that: the character reappears where it
+    /// last was and the camera blends back to the walking rig, rather than the
+    /// player being left holding controls attached to nothing.
+    pub fn eject(&mut self, world: &mut GameWorld) {
+        if self.mount.seat == Seat::OnFoot {
+            return;
+        }
+        self.mount.seat = Seat::OnFoot;
+        if let Some(c) = world.entity_mut(self.mount.character) {
+            c.hidden = false;
+            c.vel = vec3f(0.0, 0.0, 0.0);
+        }
+        self.camera
+            .transition_to(CameraConfig::on_foot(), self.mount.blend);
+    }
+
+    /// Publish the camera to the world for the renderer to read.
+    ///
+    /// Writes the *smoothed* pivot and the *already-obstruction-limited* boom,
+    /// so the shipped feel survives: the renderer's generic path places the eye
+    /// at `target - forward * distance`, which is exactly this rig's model.
+    pub fn apply_camera(&self, world: &mut GameWorld) {
+        world.cam_third = 0;
+        world.cam_follow = 0;
+        world.cam_target = self.camera.target();
+        world.cam_distance = self.camera.boom;
+    }
+
+    /// Yaw/pitch for the renderer's camera rig, ready to hand straight to it.
+    pub fn view_angles(&self) -> (f32, f32) {
+        self.camera.view_angles()
+    }
+
+    pub fn seat(&self) -> Seat {
+        self.mount.seat
     }
 }
 
@@ -384,6 +617,169 @@ pub fn movement_intent(x: f32, y: f32, deadzone: f32) -> (f32, f32) {
 mod tests {
     use super::*;
 
+    /// A world with one mover at the origin for the camera to follow.
+    ///
+    /// Not optional scaffolding: `FollowCamera::tick` returns early when its
+    /// subject is missing, so a camera test run against an empty world silently
+    /// exercises nothing and passes whatever it asserts.
+    fn world_with_subject() -> GameWorld {
+        use makepad_game_sim::{BodyKind, Entity};
+        let mut world = GameWorld::new();
+        world.push_entity(Entity {
+            id: 1,
+            kind: BodyKind::Mover,
+            pos: vec3f(0.0, 0.0, 0.0),
+            half: vec3f(0.4, 0.9, 0.4),
+            scale: vec3f(1.0, 1.0, 1.0),
+            ..Default::default()
+        });
+        world
+    }
+
+    /// Ground-plane forward and right for a *render* yaw. This is the basis
+    /// `script/src/input.rs` documents and the one `scene.rs` builds its view
+    /// matrix from — tests compare against it rather than against a sign
+    /// written out by hand here.
+    fn view_basis(yaw: f32) -> ((f32, f32), (f32, f32)) {
+        let fwd = (yaw.sin(), -yaw.cos());
+        // forward x up, i.e. (-f.z, f.x).
+        (fwd, (yaw.cos(), yaw.sin()))
+    }
+
+    #[test]
+    fn forward_walks_where_the_camera_looks() {
+        // Deliberately convention-independent: this test never names a sign.
+        // It asks the rig where its eye is, what it is aimed at, and which way
+        // "forward" moves the player, then requires the third to agree with the
+        // first two. A mirrored yaw, an inverted pitch, or a rotation handed a
+        // heading where it wanted a view angle all fail it — and all three of
+        // those pass a test that hand-writes the expected sign, because such a
+        // test is written by the same person making the same sign assumption.
+        use makepad_game_sim::{BodyKind, Entity};
+        let mut world = GameWorld::new();
+        world.push_entity(Entity {
+            id: 1,
+            kind: BodyKind::Mover,
+            pos: vec3f(0.0, 0.0, 0.0),
+            half: vec3f(0.4, 0.9, 0.4),
+            scale: vec3f(1.0, 1.0, 1.0),
+            ..Default::default()
+        });
+        // Several distinct aims: at yaw 0 a mirrored sign cancels itself out.
+        for look in [0.0f32, 140.0, -260.0, 90.0] {
+            let mut rig = PlayerRig::new(1);
+            let mut drive = DriveInput::default();
+            for _ in 0..8 {
+                drive = rig.tick(
+                    &mut world,
+                    RawInput {
+                        move_y: 1.0,
+                        look_dx: look,
+                        ..Default::default()
+                    },
+                );
+            }
+            let aim = rig.camera.target() - rig.camera.eye();
+            let an = (aim.x * aim.x + aim.z * aim.z).sqrt();
+            let (mx, mz) = (drive.move_x, drive.move_z);
+            let mn = (mx * mx + mz * mz).sqrt();
+            assert!(an > 1e-3 && mn > 0.5, "no aim/movement at look {look}");
+            let dot = (aim.x / an) * (mx / mn) + (aim.z / an) * (mz / mn);
+            assert!(
+                dot > 0.999,
+                "W walks {dot} off the camera's own aim at look {look}"
+            );
+        }
+    }
+
+    #[test]
+    fn strafing_right_moves_toward_the_screen_right() {
+        // The companion to the above: agreeing with the aim only pins the
+        // forward axis, and a left/right mirror keeps forward exactly right
+        // while swapping A and D. Screen-right is `aim × up` for the
+        // right-handed frame the renderer builds its view matrix in.
+        use makepad_game_sim::{BodyKind, Entity};
+        let mut world = GameWorld::new();
+        world.push_entity(Entity {
+            id: 1,
+            kind: BodyKind::Mover,
+            pos: vec3f(0.0, 0.0, 0.0),
+            half: vec3f(0.4, 0.9, 0.4),
+            scale: vec3f(1.0, 1.0, 1.0),
+            ..Default::default()
+        });
+        for look in [0.0f32, 140.0, -260.0] {
+            let mut rig = PlayerRig::new(1);
+            let mut drive = DriveInput::default();
+            for _ in 0..8 {
+                drive = rig.tick(
+                    &mut world,
+                    RawInput {
+                        move_x: 1.0,
+                        look_dx: look,
+                        ..Default::default()
+                    },
+                );
+            }
+            let aim = rig.camera.target() - rig.camera.eye();
+            // aim × (0,1,0) on the ground plane.
+            let (rx, rz) = (-aim.z, aim.x);
+            let rn = (rx * rx + rz * rz).sqrt();
+            let (mx, mz) = (drive.move_x, drive.move_z);
+            let mn = (mx * mx + mz * mz).sqrt();
+            assert!(rn > 1e-3 && mn > 0.5, "no aim/movement at look {look}");
+            let dot = (rx / rn) * (mx / mn) + (rz / rn) * (mz / mn);
+            assert!(dot > 0.999, "D strafes {dot} off screen-right at {look}");
+        }
+    }
+
+    #[test]
+    fn looking_right_turns_the_view_right() {
+        // Mouse-look, not drag-orbit. A drag-orbit camera moves the world with
+        // the cursor (drag right, subject spins right, camera goes left); this
+        // is a controller-style look, where right means right. The check runs
+        // in the renderer's frame, not the rig's internal one, because that is
+        // the frame the player's eyes are actually in.
+        let world = world_with_subject();
+        // From several starting aims — at yaw 0 a mirrored sign can still
+        // produce a plausible-looking x, and only an off-axis start separates
+        // "turned right" from "turned by the right amount in the wrong way".
+        for start in [0.0f32, 1.1, -2.3] {
+            let mut cam = FollowCamera::new(CameraConfig::on_foot());
+            cam.tick(&world, 1, 0.0, 0.0); // initialise off the subject
+            cam.yaw = start;
+            let (before, _) = cam.view_angles();
+            let (_, before_right) = view_basis(before);
+            cam.tick(&world, 1, 200.0, 0.0);
+            let (after, _) = cam.view_angles();
+            let (after_fwd, _) = view_basis(after);
+            // Did the aim swing toward where the player's right hand was?
+            let d = after_fwd.0 * before_right.0 + after_fwd.1 * before_right.1;
+            assert!(d > 0.0, "mouse right turned the view left at {start}: {d}");
+        }
+    }
+
+    #[test]
+    fn looking_down_lowers_the_view() {
+        // Non-inverted by default: pushing the mouse away from you (screen y
+        // grows downward) looks down. Checked as the render pitch's effect on
+        // eye height rather than as a raw sign, since the two conventions
+        // disagree about which sign "down" even is.
+        let world = world_with_subject();
+        let mut cam = FollowCamera::new(CameraConfig::on_foot());
+        cam.tick(&world, 1, 0.0, 0.0);
+        let (_, p0) = cam.view_angles();
+        cam.tick(&world, 1, 0.0, 100.0);
+        let (_, p1) = cam.view_angles();
+        // eye.y = target.y - sin(pitch) * distance, so a lower render pitch
+        // lifts the camera, and a camera lifted is a camera looking down.
+        assert!(
+            p1 < p0,
+            "mouse down should raise the eye and look down: {p0} -> {p1}"
+        );
+        assert!(cam.eye().y > cam.target().y, "eye did not rise above target");
+    }
+
     #[test]
     fn diagonal_is_not_faster_than_cardinal() {
         let (cx, cy) = movement_intent(1.0, 0.0, 0.1);
@@ -406,16 +802,23 @@ mod tests {
 
     #[test]
     fn pitch_cannot_invert_or_bury_the_camera() {
+        // Subject id 1 against a populated world, not 0 against an empty one:
+        // `tick` returns before touching pitch when the subject is missing, so
+        // the empty-world version of this test asserted the initial value of a
+        // camera that had never run and would have passed against any clamp at
+        // all — including none.
         let mut cam = FollowCamera::new(CameraConfig::on_foot());
-        let world = GameWorld::new();
+        let world = world_with_subject();
         for _ in 0..600 {
-            cam.tick(&world, 0, 0.0, 10_000.0);
+            cam.tick(&world, 1, 0.0, 10_000.0);
         }
         assert!(cam.pitch <= cam.config.pitch_max + 1e-5, "{}", cam.pitch);
+        assert!(cam.pitch > cam.config.pitch_max - 1e-3, "never reached max");
         for _ in 0..600 {
-            cam.tick(&world, 0, 0.0, -10_000.0);
+            cam.tick(&world, 1, 0.0, -10_000.0);
         }
         assert!(cam.pitch >= cam.config.pitch_min - 1e-5, "{}", cam.pitch);
+        assert!(cam.pitch < cam.config.pitch_min + 1e-3, "never reached min");
     }
 
     #[test]

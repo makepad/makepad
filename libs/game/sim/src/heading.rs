@@ -41,11 +41,48 @@ pub fn heading_to_forward(yaw: f32) -> Vec3f {
     vec3f(-s, 0.0, -c)
 }
 
-/// Unit right vector for a heading — forward rotated a quarter turn toward +X.
+/// Unit right vector for a heading — the body's own right hand.
+///
+/// This is `forward × up` for the right-handed frame, which at `yaw = 0`
+/// (facing −Z, +Y up) is `+X`. It returned `−X` — the LEFT vector — until it
+/// was checked against the cross product; the doc comment claimed +X the whole
+/// time, and the test asserted `r.x < -0.99 || r.x > 0.99`, which accepts both
+/// signs and so could never have failed. If you change this, change it because
+/// the cross product says so.
 #[inline]
 pub fn heading_to_right(yaw: f32) -> Vec3f {
     let (s, c) = gm::sincos(yaw);
-    vec3f(-c, 0.0, s)
+    vec3f(c, 0.0, -s)
+}
+
+/// Yaw for the *renderer's* camera rig, given a sim heading.
+///
+/// The two conventions are mirrored in X: a heading faces `(−sin y, −cos y)`
+/// and positive yaw turns LEFT, while the renderer looks along
+/// `(sin Y, −cos Y)` so positive yaw turns RIGHT. Both face −Z at zero, which
+/// is precisely why the disagreement survives casual testing — it is invisible
+/// until something is off-axis.
+///
+/// Convert here, once, at a named boundary. A negation written at a call site
+/// teaches the next call site nothing, and this module exists because that
+/// mistake has been made independently several times already.
+#[inline]
+pub fn heading_to_camera_yaw(yaw: f32) -> f32 {
+    -yaw
+}
+
+/// Pitch for the renderer's camera rig, given a "positive lifts the camera"
+/// pitch.
+///
+/// Same mirror: the renderer places the eye at `target − forward·distance` with
+/// `forward.y = sin P`, so *negative* render pitch puts the camera above its
+/// target looking down. A rig that thinks "positive is higher" — the intuitive
+/// direction, and the one [`crate::camera_boom_limit`]'s callers use — must
+/// flip. The renderer's own clamps corroborate it: it allows pitch in
+/// −1.2..0.25, a nearly all-negative range, for an over-the-shoulder camera.
+#[inline]
+pub fn heading_to_camera_pitch(pitch: f32) -> f32 {
+    -pitch
 }
 
 /// Heading that faces the given direction. The y component is ignored; a zero
@@ -108,7 +145,57 @@ mod tests {
     #[test]
     fn right_is_plus_x_when_facing_forward() {
         let r = heading_to_right(0.0);
-        assert!(r.x < -0.99 || r.x > 0.99, "right must be an X axis, got {r:?}");
+        // Was `r.x < -0.99 || r.x > 0.99`, which accepts the left vector too
+        // and passed for as long as the function returned it. A test that
+        // cannot fail is worse than no test: it reads as coverage.
+        assert!(r.x > 0.99, "right must be +X when facing -Z, got {r:?}");
+    }
+
+    #[test]
+    fn right_is_forward_crossed_with_up() {
+        // The definition, not a spot value — this is what makes the sign a
+        // derivation rather than a preference.
+        for deg in [-179.0f32, -90.0, -33.0, 0.0, 45.0, 90.0, 179.0] {
+            let yaw = deg.to_radians();
+            let f = heading_to_forward(yaw);
+            let r = heading_to_right(yaw);
+            // f x (0,1,0)
+            let (cx, cz) = (-f.z, f.x);
+            assert!(
+                (r.x - cx).abs() < 1e-5 && (r.z - cz).abs() < 1e-5,
+                "at {deg} deg right={r:?} but forward x up=({cx},{cz})"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_yaw_mirrors_the_heading_basis() {
+        // Pins the render conversion against the renderer's own expression:
+        // it looks along (sin Y cos P, sin P, -cos Y cos P). Converting a
+        // heading must produce a camera aimed exactly where that heading faces.
+        for deg in [-179.0f32, -90.0, -33.0, 0.0, 45.0, 90.0, 179.0] {
+            let yaw = deg.to_radians();
+            let f = heading_to_forward(yaw);
+            let cam = heading_to_camera_yaw(yaw);
+            let (cx, cz) = (cam.sin(), -cam.cos());
+            assert!(
+                (f.x - cx).abs() < 1e-5 && (f.z - cz).abs() < 1e-5,
+                "at {deg} deg heading faces {f:?} but camera looks ({cx},{cz})"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_pitch_flips_so_positive_still_means_higher() {
+        // A rig raising its eye by +pitch must hand the renderer a pitch that
+        // puts the eye above the target, since the renderer subtracts forward.
+        let p = 0.6f32;
+        let render = heading_to_camera_pitch(p);
+        // eye.y = target.y - sin(render) * distance
+        assert!(
+            -render.sin() > 0.0,
+            "positive rig pitch must lift the render eye, got {render}"
+        );
     }
 
     #[test]

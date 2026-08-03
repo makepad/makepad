@@ -1661,3 +1661,320 @@ fn the_camera_eases_back_out_after_an_obstruction_clears() {
         "snapped back out in one tick ({after_one} of {open}) — that is the pop"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The player prefab end to end (game.md §"Building blocks").
+//
+// These are the tests that decide whether the prefab is finished. The claim
+// being defended is not "the pieces work" but "a game gets a playable character
+// in and out of a car in a few lines and never touches a camera" — so the
+// setup below is exactly what a generated game would write, and if it grows,
+// the prefab has failed rather than the test.
+// ---------------------------------------------------------------------------
+
+/// The whole player setup a game performs. If this helper needs to grow, the
+/// prefab is the thing that should change.
+fn player_world() -> (GameWorld, Blocks, u64, u64) {
+    let mut world = world_with_ground();
+    let ch = walker(&mut world, vec3f(0.0, 0.9, 0.0));
+    let car = rigid(&mut world, vec3f(2.5, 1.0, 0.0), vec3f(0.9, 0.4, 1.6));
+    if let Some(e) = world.entity_mut(car) {
+        e.tag = "car".to_string();
+    }
+    let mut blocks = Blocks::new();
+    blocks.characters.push(Character::new(
+        ch,
+        CharacterConfig::default(),
+        ControlSource::Player,
+        None,
+    ));
+    blocks
+        .cars
+        .push(Car::new(car, CarConfig::default(), ControlSource::Player));
+    blocks.player_rigs.insert(PlayerId::LOCAL, PlayerRig::new(ch));
+    (world, blocks, ch, car)
+}
+
+/// One frame: rigs, then blocks, then the sim. The ordering the host owes.
+fn player_tick(world: &mut GameWorld, blocks: &mut Blocks, raw: RawInput) {
+    let mut inputs = std::collections::HashMap::new();
+    inputs.insert(PlayerId::LOCAL, raw);
+    blocks.tick_player_rigs(world, &inputs);
+    blocks.pre_step(world);
+    step_world(world);
+    world.tick += 1;
+    blocks.post_step(world);
+}
+
+#[test]
+fn a_player_walks_gets_in_drives_and_gets_out() {
+    // The headline journey, in the order a player performs it. Every leg
+    // asserts the thing that leg is for; a pass means the feature works
+    // end to end, not that its parts compile together.
+    let (mut world, mut blocks, ch, car) = player_world();
+
+    // --- walk toward the car -------------------------------------------
+    for _ in 0..40 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { move_y: 1.0, ..Default::default() },
+        );
+    }
+    let walked = world.entity(ch).unwrap().pos;
+    let moved = (walked.x * walked.x + walked.z * walked.z).sqrt();
+    assert!(moved > 2.0, "the character barely walked: {moved:.2}");
+    assert_eq!(blocks.player_rigs[&PlayerId::LOCAL].seat(), Seat::OnFoot);
+
+    // --- get in ---------------------------------------------------------
+    // Stand the player next to the car rather than relying on where the walk
+    // ended: this test is about the seat, not about pathing.
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    let rig = &blocks.player_rigs[&PlayerId::LOCAL];
+    assert_eq!(rig.seat(), Seat::Driving(car), "did not get into the car");
+    assert!(world.entity(ch).unwrap().hidden, "the driver is still standing there");
+
+    // --- drive ----------------------------------------------------------
+    let before = world.entity(car).unwrap().pos;
+    for _ in 0..90 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { throttle: 1.0, ..Default::default() },
+        );
+    }
+    let after = world.entity(car).unwrap().pos;
+    let drove = ((after.x - before.x).powi(2) + (after.z - before.z).powi(2)).sqrt();
+    assert!(drove > 5.0, "the car did not drive: {drove:.2}");
+
+    // --- get out --------------------------------------------------------
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    assert_eq!(blocks.player_rigs[&PlayerId::LOCAL].seat(), Seat::OnFoot);
+    let (c, k) = (world.entity(ch).unwrap(), world.entity(car).unwrap());
+    assert!(!c.hidden, "the driver never reappeared");
+    let gap = ((c.pos.x - k.pos.x).powi(2) + (c.pos.z - k.pos.z).powi(2)).sqrt();
+    assert!(gap > 1.0 && gap < 4.0, "stepped out {gap:.2} units from the car");
+    // And the camera came with them, rather than staying on the abandoned car.
+    assert_eq!(blocks.player_rigs[&PlayerId::LOCAL].mount.subject(), ch);
+}
+
+#[test]
+fn driving_does_not_also_walk_your_parked_character() {
+    // The modality bug: a player owns both a character and a car, `pre_step`
+    // matches blocks by owner, so the same stick that steers you would also
+    // walk the body you left in the driver's seat. Invisible while you drive —
+    // and then you get out somewhere you never went.
+    let (mut world, mut blocks, ch, _car) = player_world();
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    let parked = world.entity(ch).unwrap().pos;
+    for _ in 0..90 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { throttle: 1.0, move_y: 1.0, move_x: 1.0, ..Default::default() },
+        );
+    }
+    let now = world.entity(ch).unwrap().pos;
+    let drift = ((now.x - parked.x).powi(2) + (now.z - parked.z).powi(2)).sqrt();
+    assert!(drift < 0.5, "the parked driver walked {drift:.2} units while driving");
+}
+
+#[test]
+fn analog_deflection_gives_intermediate_speed() {
+    // A pad has to be able to amble. Snapping from walk to run past a
+    // threshold is the clearest "toy" tell in a character controller, and a
+    // bool `run` cannot express anything else.
+    let cfg = CharacterConfig::default();
+    let top = |run: f32| {
+        let (_, _, _, speeds) = run_character(
+            cfg,
+            move |_| DriveInput { move_z: -1.0, run, ..Default::default() },
+            90,
+        );
+        *speeds.last().unwrap()
+    };
+    let (walk, half, sprint) = (top(0.0), top(0.5), top(1.0));
+    assert!(sprint > walk * 1.3, "run does nothing: {walk} -> {sprint}");
+    // The point of the test: half deflection is genuinely in between, not
+    // rounded to one of the two ends.
+    let midpoint = (walk + sprint) * 0.5;
+    assert!(
+        (half - midpoint).abs() < walk * 0.1,
+        "half stick gave {half}, not the {midpoint} between {walk} and {sprint}"
+    );
+}
+
+#[test]
+fn a_reload_keeps_you_in_the_car_with_the_camera_where_it_was() {
+    // Task #24 in the place it is most visible. An edit to the game's script
+    // must not eject the player mid-corner and snap the view — where you are
+    // sitting and where you are looking are the player's state, not the
+    // game's content.
+    let (mut world, mut blocks, ch, car) = player_world();
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    for _ in 0..8 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { look_dx: 40.0, ..Default::default() },
+        );
+    }
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    let (seat, angles) = {
+        let r = &blocks.player_rigs[&PlayerId::LOCAL];
+        (r.seat(), r.view_angles())
+    };
+    assert_eq!(seat, Seat::Driving(car));
+
+    blocks.clear();
+
+    let r = blocks
+        .player_rigs
+        .get(&PlayerId::LOCAL)
+        .expect("the reload threw the player out of the world");
+    assert_eq!(r.seat(), seat, "a reload ejected the driver");
+    assert_eq!(r.view_angles(), angles, "a reload snapped the camera");
+}
+
+#[test]
+fn losing_the_car_you_are_driving_puts_you_back_on_your_feet() {
+    // A despawn, a rollback or a re-eval that does not recreate the car leaves
+    // the player driving a ghost: no camera subject, no block taking their
+    // input, and no way out, because the get-out reads the car to find a door.
+    // Dead controls are worse than any reset.
+    let (mut world, mut blocks, ch, car) = player_world();
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    assert_eq!(blocks.player_rigs[&PlayerId::LOCAL].seat(), Seat::Driving(car));
+
+    world.entities.retain(|e| e.id != car);
+    player_tick(&mut world, &mut blocks, RawInput::default());
+
+    let rig = &blocks.player_rigs[&PlayerId::LOCAL];
+    assert_eq!(rig.seat(), Seat::OnFoot, "still driving a car that is gone");
+    assert_eq!(rig.mount.subject(), ch, "the camera has nothing to follow");
+    assert!(!world.entity(ch).unwrap().hidden, "the player stayed invisible");
+
+    // And the controls work again.
+    for _ in 0..40 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { move_y: 1.0, ..Default::default() },
+        );
+    }
+    let e = world.entity(ch).unwrap();
+    let speed = (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt();
+    assert!(speed > 1.0, "the player cannot move after being ejected: {speed}");
+}
+
+#[test]
+fn stepping_out_against_a_wall_uses_the_other_door() {
+    // Parking tight against something is normal. Preferring one side
+    // unconditionally drops the player inside it, and the separation pass then
+    // shoves them somewhere arbitrary — the most broken-feeling thing a
+    // get-out can do.
+    let (mut world, mut blocks, ch, car) = player_world();
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    // Wall hard against the driver's side of the car's resting heading.
+    let cpos = world.entity(car).unwrap().pos;
+    let right = heading_to_right(world.entity(car).unwrap().yaw);
+    block(
+        &mut world,
+        vec3f(cpos.x - right.x * 2.2, cpos.y, cpos.z - right.z * 2.2),
+        vec3f(1.0, 1.5, 1.0),
+    );
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    let c = world.entity(ch).unwrap().pos;
+    // Came out on the far side instead — dot against `right` says which.
+    let side = (c.x - cpos.x) * right.x + (c.z - cpos.z) * right.z;
+    assert!(side > 0.5, "stepped out into the wall (side {side:.2})");
+}
+
+#[test]
+fn the_prompt_and_the_button_always_agree() {
+    // An affordance prompt that runs its own search drifts from the button it
+    // describes, and "press E to get in" that does nothing is worse than no
+    // prompt at all — it teaches the player the game is broken at the moment
+    // they are learning it. Walking the whole approach checks agreement at
+    // every distance, including right at the reach boundary where a duplicated
+    // search would differ first.
+    let (mut world, mut blocks, ch, car) = player_world();
+    for step in 0..24 {
+        if let Some(e) = world.entity_mut(ch) {
+            e.pos = vec3f(2.5, 0.9, 12.0 - step as f32 * 0.5);
+        }
+        let rig = &blocks.player_rigs[&PlayerId::LOCAL];
+        let promised = rig.mount.candidate(&world);
+        let mut probe = rig.mount;
+        let got = match probe.toggle(&mut world) {
+            Some(Seat::Driving(id)) => Some(id),
+            _ => None,
+        };
+        assert_eq!(promised, got, "prompt and button disagreed at step {step}");
+        // Undo whatever the probe did to the world before the next step.
+        if let Some(e) = world.entity_mut(ch) {
+            e.hidden = false;
+        }
+    }
+    // And it did become available somewhere along that approach, or the test
+    // proved only that both agree on "never".
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.0);
+    }
+    assert_eq!(
+        blocks.player_rigs[&PlayerId::LOCAL].mount.candidate(&world),
+        Some(car),
+        "the car was never offerable"
+    );
+    // Once seated there is nothing to get into, so no prompt should appear.
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    let rig = &blocks.player_rigs[&PlayerId::LOCAL];
+    assert_eq!(rig.seat(), Seat::Driving(car));
+    assert_eq!(rig.mount.candidate(&world), None, "offered a car while driving");
+}

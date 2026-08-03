@@ -39,7 +39,9 @@ pub mod race;
 pub use brain::{Brain, BrainKind};
 pub use car::{Car, CarConfig};
 pub use character::{Character, CharacterConfig, CharacterPose};
-pub use controller::{CameraConfig, FollowCamera, Mount, Seat, movement_intent};
+pub use controller::{
+    movement_intent, CameraConfig, FollowCamera, Mount, PlayerRig, RawInput, Seat,
+};
 pub use npc::{Activity, DoorUse, Npc, NpcConfig, Personality, Poi, PoiSet, DAY_SECONDS};
 pub use plane::{Plane, PlaneConfig};
 pub use race::{Checkpoint, RaceKit, SpawnPoint, Standing};
@@ -71,9 +73,14 @@ pub struct DriveInput {
     /// looking is presentation (Local tier) and must never reach the world.
     pub look_dx: f32,
     pub look_dy: f32,
-    /// Sprint held. Separate from throttle so a keyboard and a stick produce
+    /// Sprint, 0..1. Separate from throttle so a keyboard and a stick produce
     /// the same intent.
-    pub run: bool,
+    ///
+    /// Analog rather than a bool so stick deflection gives a walk→run
+    /// continuum. A keyboard fills 1.0 for shift and 0.0 otherwise and is
+    /// unchanged; a pad fills it from deflection and gets the richer input,
+    /// which is the point of holding a pad.
+    pub run: f32,
     /// Mount/dismount pressed this tick (get in or out of the nearest vehicle).
     pub use_pressed: bool,
 }
@@ -109,6 +116,13 @@ pub struct Blocks {
     /// entry for its `owner`. An empty map means single-player, where every
     /// owner resolves to `player_input` — so the local path is unchanged.
     pub player_inputs: std::collections::HashMap<makepad_game_sim::PlayerId, DriveInput>,
+    /// Per-player camera + seat. One entry per player who controls a character
+    /// directly; a game that only drives blocks from script has none.
+    ///
+    /// Lives here rather than host-side because the rig decides *which entity*
+    /// a player is driving, and `pre_step` needs that to give a player's input
+    /// to exactly one block. A host-side rig would leave this file guessing.
+    pub player_rigs: std::collections::HashMap<makepad_game_sim::PlayerId, controller::PlayerRig>,
     /// Sounds produced this tick. The host drains these after `post_step` and
     /// hands them to its mixer; blocks never touch an audio device.
     pub audio: audio_emit::AudioEmitter,
@@ -132,6 +146,14 @@ impl Blocks {
             // survives a reload exactly like a held key does.
             player_input: self.player_input,
             player_inputs: std::mem::take(&mut self.player_inputs),
+            // Rigs survive for the same reason, and a stronger one: where the
+            // camera is pointing and whether you are in the car are the
+            // player's position in the game, not the game's content. Dropping
+            // them would snap the view and eject a driver mid-corner on every
+            // edit — the jarring-reload problem, in the most visible place it
+            // could possibly happen. `reconcile` repairs any rig whose entity
+            // the re-eval did not recreate.
+            player_rigs: std::mem::take(&mut self.player_rigs),
             ..Default::default()
         };
     }
@@ -157,6 +179,59 @@ impl Blocks {
         self.npcs.retain(|n| alive(n.entity));
         self.pois.reconcile(world);
         self.race.reconcile(world);
+        // A rig whose character is gone has nothing left to control. The
+        // seat-vs-vanished-car case needs a mutable world, so it is repaired in
+        // `tick_player_rigs` instead.
+        self.player_rigs.retain(|_, r| alive(r.mount.character));
+    }
+
+    /// Advance every player's camera and seat, and turn their device input into
+    /// block intent. The host calls this once per tick BEFORE [`Self::pre_step`].
+    ///
+    /// Ordering is not incidental. This must also run before
+    /// `GameWorld::sync_local_player`, because it writes `world.cam_yaw` and
+    /// that sync copies the yaw out into player slot 0 for replication — run it
+    /// after and every remote observer sees camera-relative movement lag by a
+    /// frame, which looks like latency and is not.
+    pub fn tick_player_rigs(
+        &mut self,
+        world: &mut GameWorld,
+        raw: &std::collections::HashMap<makepad_game_sim::PlayerId, controller::RawInput>,
+    ) {
+        // Sorted, because rig ticks can mutate shared world state (a mount
+        // hides a character; a dismount claims a spot) and a HashMap's order
+        // is not stable across runs. Determinism is not optional here — this
+        // feeds the replicated input stream.
+        let mut players: Vec<_> = self.player_rigs.keys().copied().collect();
+        players.sort_by_key(|p| p.0);
+        // A player whose car vanished — despawned, rolled back, not recreated
+        // by a re-eval — must be put back on their feet before anything else
+        // runs. Left alone they keep "driving" a ghost: no camera subject, no
+        // block receiving their input, and no button that gets them out, since
+        // the get-out reads the car it can no longer find. Being stuck holding
+        // dead controls is worse than any reset.
+        for player in players.iter() {
+            let Some(rig) = self.player_rigs.get(player) else {
+                continue;
+            };
+            if let controller::Seat::Driving(car) = rig.mount.seat {
+                if world.entity(car).is_none() {
+                    if let Some(rig) = self.player_rigs.get_mut(player) {
+                        let mut r = *rig;
+                        r.eject(world);
+                        self.player_rigs.insert(*player, r);
+                    }
+                }
+            }
+        }
+        for player in players {
+            let Some(mut rig) = self.player_rigs.remove(&player) else {
+                continue;
+            };
+            let input = rig.tick(world, raw.get(&player).copied().unwrap_or_default());
+            self.player_inputs.insert(player, input);
+            self.player_rigs.insert(player, rig);
+        }
     }
 
     /// Phase 1: turn intent into motion — runs BEFORE the sim step.
@@ -164,9 +239,23 @@ impl Blocks {
         self.reconcile(world);
         let fallback = self.player_input;
         let inputs = &self.player_inputs;
+        let rigs = &self.player_rigs;
         // One player's intent, whichever source filled it. Single-player leaves
         // the map empty and every block reads `player_input`, exactly as before.
-        let intent = |owner: makepad_game_sim::PlayerId| -> DriveInput {
+        //
+        // The `entity` argument is the modality gate, and it is the whole
+        // reason this is one closure rather than three lookups. A player who
+        // owns both a character and a car matches BOTH as an owner, so without
+        // it, climbing into a car leaves your parked character being walked by
+        // the same stick that is steering you — invisible until you get out
+        // somewhere you never chose to be. A player who has a rig drives
+        // exactly what that rig is sitting in; everything else they own goes
+        // inert. Players with no rig are unaffected, which keeps script-driven
+        // and AI-owned blocks exactly as they were.
+        let intent = |owner: makepad_game_sim::PlayerId, entity: u64| -> DriveInput {
+            if rigs.get(&owner).is_some_and(|r| r.mount.subject() != entity) {
+                return DriveInput::default();
+            }
             inputs.get(&owner).copied().unwrap_or(fallback)
         };
         for brain in self.brains.iter_mut() {
@@ -178,15 +267,15 @@ impl Blocks {
             npc.tick(world, &mut self.pois, &mut self.door_uses);
         }
         for car in self.cars.iter_mut() {
-            let input = intent(car.owner);
+            let input = intent(car.owner, car.entity);
             car.tick(world, &input);
         }
         for character in self.characters.iter_mut() {
-            let input = intent(character.owner);
+            let input = intent(character.owner, character.entity);
             character.tick(world, &input);
         }
         for plane in self.planes.iter_mut() {
-            let input = intent(plane.owner);
+            let input = intent(plane.owner, plane.entity);
             plane.tick(world, &input);
         }
     }

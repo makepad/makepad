@@ -452,5 +452,14 @@ pub fn drive_input_for(world: &GameWorld, player: PlayerId) -> DriveInput {
         jump_pressed: world.action_pressed_for(player, live_id!(jump)),
         pitch: -axis_z as f32,
         roll: axis_x as f32,
+        // Camera-look and modifiers arrive per-device, not from the shared
+        // action set, so a replicated input packet carries none of them.
+        look_dx: 0.0,
+        look_dy: 0.0,
+        // `run` became analog (0..1) so a pad's stick deflection can produce a
+        // walk→run continuum rather than snapping at a threshold. This path
+        // carries no sprint at all, which is 0.0 either way.
+        run: 0.0,
+        use_pressed: false,
     }
 }

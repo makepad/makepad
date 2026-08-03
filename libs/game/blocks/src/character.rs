@@ -206,11 +206,14 @@ impl Character {
         // ---- horizontal: ramp toward intent, never snap -------------------
         // Diagonals are normalised by the caller, so `intent` is already a
         // unit-or-less vector: a diagonal must not outrun a cardinal.
-        let speed = if input.run {
-            config.speed * config.run_multiplier
-        } else {
-            config.speed
-        } * entity.speed_mult;
+        // Run is a continuum, not a switch. A pad's stick deflection has to be
+        // able to produce a genuine amble — snapping to full run past some
+        // threshold is the single clearest "toy" tell in a character
+        // controller. A keyboard sends 1.0 for shift and 0.0 otherwise, so it
+        // lands on exactly the two speeds it always had.
+        let run = input.run.clamp(0.0, 1.0);
+        let speed =
+            config.speed * (1.0 + (config.run_multiplier - 1.0) * run) * entity.speed_mult;
         let want_x = input.move_x * speed;
         let want_z = input.move_z * speed;
         let moving = input.move_x != 0.0 || input.move_z != 0.0;
