@@ -1063,7 +1063,7 @@ impl Widget for ArcadeView {
                     );
                     knight.model.palette(&knight.blended, &mut knight.palette);
                     let mut vertices = Vec::new();
-                    knight.model.skin_to_pbr(&knight.palette, &mut vertices);
+                    knight.model.skin_to_packed(&knight.palette, &mut vertices);
                     let mut transform = Mat4f::rotation(vec3f(0.0, knight.yaw, 0.0));
                     transform.v[12] = knight.pos.x;
                     transform.v[13] = knight.pos.y;
