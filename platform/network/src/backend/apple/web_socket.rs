@@ -156,7 +156,11 @@ impl AppleWebSocket {
                             let data: ObjcId = msg_send![message, data];
                             let bytes: *const u8 = msg_send![data, bytes];
                             let length: usize = msg_send![data, length];
-                            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                            let data_bytes: &[u8] = if bytes.is_null() || length == 0 {
+                                &[]
+                            } else {
+                                std::slice::from_raw_parts(bytes, length)
+                            };
                             let _ = rx_sender.send(WebSocketMessage::Binary(data_bytes.to_vec()));
                         } else {
                             let text: ObjcId = msg_send![message, string];
