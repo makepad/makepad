@@ -104,7 +104,10 @@ pub fn camera_boom_limit(world: &GameWorld, pivot: Vec3f, dir: Vec3f, boom: f32)
             if e.sensor || e.tag == "scenery" {
                 continue;
             }
-            if !matches!(e.kind, BodyKind::Static | BodyKind::Kinematic) {
+            if !matches!(
+                e.kind,
+                BodyKind::Static | BodyKind::Kinematic | BodyKind::Rigid
+            ) {
                 continue;
             }
             if (p.x - e.pos.x).abs() < e.half.x
@@ -133,6 +136,11 @@ pub fn axis_set(v: &mut Vec3f, axis: usize, value: f32) {
         _ => v.z = value,
     }
 }
+
+/// Gap left between a swept body and whatever it lands against, so resting
+/// contact is never exactly flush. Small enough to be invisible, large enough
+/// that a perpendicular sweep in the same tick cannot mistake it for overlap.
+pub const CONTACT_SKIN: f32 = 1.0e-3;
 
 pub fn overlaps(a_pos: Vec3f, a_half: Vec3f, b_pos: Vec3f, b_half: Vec3f) -> bool {
     (a_pos.x - b_pos.x).abs() < a_half.x + b_half.x
@@ -186,13 +194,22 @@ pub fn sweep_axis(
         if other.id == self_id {
             continue;
         }
-        if !matches!(other.kind, BodyKind::Static | BodyKind::Kinematic) {
+        if !matches!(
+            other.kind,
+            BodyKind::Static | BodyKind::Kinematic | BodyKind::Rigid
+        ) {
             continue;
         }
         let mut probe = pos;
         axis_set(&mut probe, axis, new_axis);
         if overlaps(probe, half, other.pos, other.half) {
-            let gap = axis_get(half, axis) + axis_get(other.half, axis);
+            // Stop a hair short of flush. Clamping to exactly touching leaves
+            // the two boxes at |d| == sum-of-halves, where float error decides
+            // the next axis' overlap test either way — and a "yes" there sent a
+            // falling mover UP onto a crate it had merely walked into, clean
+            // through the 0.55 step-up contract. The skin makes contact
+            // unambiguous instead of borderline.
+            let gap = axis_get(half, axis) + axis_get(other.half, axis) + CONTACT_SKIN;
             if delta > 0.0 {
                 new_axis = new_axis.min(axis_get(other.pos, axis) - gap);
                 hit = 1.0;

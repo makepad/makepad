@@ -154,11 +154,15 @@ fn mover_path_matches_golden() {
         let _ = collect_touches(&w);
     }
     let got = hash_world(&w);
-    // Recorded on aarch64. This hash is stable across the terrain-borrow and
-    // Solid-snapshot optimisation (verified against the pre-change build and
-    // against gamemaker's input tape, which replayed byte-identically).
+    // Recorded on aarch64. Re-baselined once, deliberately: CONTACT_SKIN made
+    // resting contact stop a hair short of flush, which shifts every clamped
+    // position by 1e-3. That was a bug fix — flush contact let a falling mover
+    // be resolved UP onto a crate it had walked into, ignoring the 0.55
+    // step-up contract — so the movement it describes is now correct, not
+    // merely different. Any FURTHER change to this hash needs the same
+    // justification.
     assert_eq!(
-        got, 0xeaca2b2e45fc29ef,
+        got, 0x4461e8c70ceaf60e,
         "mover/terrain/attach path changed observable results (got {got:#x})"
     );
 }
@@ -204,5 +208,36 @@ fn platform_carry_uses_pre_integration_snapshot() {
     assert!(
         (moved - expected).abs() < 0.02,
         "rider should be carried {expected} but moved {moved}"
+    );
+}
+
+/// A character must not walk through a rigid body. Rigids were absent from the
+/// mover sweep set when box3d dynamics landed, so the Knight strolled straight
+/// through a crate stack — the most obvious "this world isn't real" tell.
+/// Their pose is read back from box3d at the end of the previous tick, so at
+/// snapshot time a rigid is as settled as a kinematic.
+#[test]
+fn mover_is_blocked_by_a_rigid_body() {
+    let mut w = GameWorld::new();
+    w.reset_content();
+    w.push_entity(ent(1, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(20.0, 0.5, 20.0)));
+    // A crate sitting on the ground, directly in the walker's path.
+    w.push_entity(ent(2, BodyKind::Rigid, vec3f(2.0, 0.5, 0.0), vec3f(0.5, 0.5, 0.5)));
+    let mut walker = ent(3, BodyKind::Mover, vec3f(0.0, 0.5, 0.0), vec3f(0.3, 0.5, 0.3));
+    walker.vel = vec3f(3.0, 0.0, 0.0);
+    w.push_entity(walker);
+
+    for _ in 0..60 {
+        // Walk is a velocity the script re-asserts each tick.
+        w.entity_mut(3).unwrap().vel.x = 3.0;
+        step_world(&mut w);
+    }
+
+    let x = w.entity(3).unwrap().pos.x;
+    // Unblocked it would reach x = 3.0; it must stop at the crate's near face
+    // (2.0 - 0.5 crate half - 0.3 walker half = 1.2).
+    assert!(
+        x < 1.35,
+        "walker should stop at the crate's face (~1.2) but reached {x}"
     );
 }
