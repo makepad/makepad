@@ -17,6 +17,7 @@
 
 pub mod dynamics;
 pub mod entity;
+pub mod particles;
 pub mod player;
 pub mod queries;
 pub mod step;
@@ -25,6 +26,7 @@ pub mod world;
 
 pub use dynamics::*;
 pub use entity::*;
+pub use particles::*;
 pub use player::*;
 pub use queries::*;
 pub use step::*;

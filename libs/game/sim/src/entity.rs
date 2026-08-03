@@ -254,6 +254,26 @@ impl Default for SkyConfig {
     }
 }
 
+/// What `game.sun({...})` asked for. The sim stores only the request — it
+/// cannot depend on `makepad_draw`, so the renderer resolves this against
+/// the shared `SceneSun` model (see game_render's `resolve_sun`). Lighting
+/// is presentation: nothing here is ever read by the step.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct SunConfig {
+    /// Local solar hour 0..24. `None` keeps the default rig.
+    pub time_of_day: Option<f32>,
+    /// Latitude for the solar model, degrees.
+    pub latitude: f32,
+    /// Explicit direction toward the sun (y-up), overriding `time_of_day`.
+    pub dir: Option<Vec3f>,
+    /// Direct-term multiplier.
+    pub color: Option<Vec3f>,
+    /// Flat ambient, applied to both hemisphere terms.
+    pub ambient: Option<Vec3f>,
+    /// How dark cast shadows draw, 0..1.
+    pub shadow_alpha: Option<f32>,
+}
+
 /// Script-registered timer. The callback is an opaque host slot — the sim
 /// never touches the script VM (game.md: no ScriptObjectRef in sim state).
 #[derive(Clone)]

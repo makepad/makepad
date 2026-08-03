@@ -37,14 +37,19 @@ script_mod! {
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
             let dp = max(dot(normal, normalize(self.light_dir)), 0.0)
-            self.lit_color = self.get_color(dp)
+            self.lit_color = self.get_color(dp, normal.y)
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
 
-        get_color: fn(dp: float) {
-            let ambient = self.color.xyz * 0.28
-            let lit = ambient + self.color.xyz * dp * 0.72
+        // One lighting model for every game shader (sun.rs): hemisphere
+        // ambient by surface-up-ness, plus the sun's direct term. With the
+        // default flat sun (sky == ground == 0.28, color 0.72) this is
+        // exactly the constant split the shaders each used to hardcode.
+        get_color: fn(dp: float, nrm_y: float) {
+            let hemi = clamp(nrm_y * 0.5 + 0.5, 0.0, 1.0)
+            let ambient = mix(self.sun_ground, self.sun_sky, hemi)
+            let lit = self.color.xyz * (ambient + self.sun_color * dp)
             // Emission: glowing eyes, beacons, bolts (energy ramps at runtime).
             let glowing = lit + self.color.xyz * self.glow * 0.6
             return vec4(glowing, self.color.w)
@@ -106,7 +111,8 @@ script_mod! {
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
         tex: texture_2d(float)
-        v_light: varying(float)
+        v_ambient: varying(vec3f)
+        v_direct: varying(vec3f)
         v_uv: varying(vec2f)
         world: varying(vec4f)
         v_fog: varying(float)
@@ -119,7 +125,9 @@ script_mod! {
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
             let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)
-            self.v_light = 0.34 + dp * 0.66
+            let hemi = clamp(world_normal.y * 0.5 + 0.5, 0.0, 1.0)
+            self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
+            self.v_direct = self.sun_color * dp
             self.v_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w)
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
@@ -127,7 +135,7 @@ script_mod! {
 
         pixel: fn() {
             let albedo = self.tex.sample_as_bgra(self.v_uv)
-            let lit = albedo.xyz * self.v_light
+            let lit = albedo.xyz * (self.v_ambient + self.v_direct)
             return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
         }
 
@@ -158,8 +166,12 @@ script_mod! {
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
             let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)
-            let ambient = self.geom.color.xyz * 0.34
-            self.lit_color = vec4(ambient + self.geom.color.xyz * dp * 0.66, self.geom.color.w)
+            let hemi = clamp(world_normal.y * 0.5 + 0.5, 0.0, 1.0)
+            let ambient = mix(self.sun_ground, self.sun_sky, hemi)
+            self.lit_color = vec4(
+                self.geom.color.xyz * (ambient + self.sun_color * dp),
+                self.geom.color.w
+            )
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
@@ -194,6 +206,14 @@ pub struct DrawGameCube {
     pub fog_color: Vec3f,
     #[live(0.0)]
     pub fog_density: f32,
+    /// Sun terms, written every frame from one [`crate::sun::GameSun`].
+    /// Defaults reproduce the legacy hardcoded 0.28/0.72 split.
+    #[live(vec3(0.72, 0.72, 0.72))]
+    pub sun_color: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_sky: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_ground: Vec3f,
 }
 
 /// Alpha-blended variant: water, sensor ghosts, blob shadows.
@@ -236,6 +256,13 @@ pub struct DrawGameSkinned {
     pub fog_color: Vec3f,
     #[live(0.0)]
     pub fog_density: f32,
+    /// Sun terms, written every frame from one [`crate::sun::GameSun`].
+    #[live(vec3(0.72, 0.72, 0.72))]
+    pub sun_color: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_sky: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_ground: Vec3f,
 }
 
 /// The smooth terrain mesh (PbrVertex layout: per-vertex color).
@@ -254,4 +281,11 @@ pub struct DrawGameTerrain {
     pub fog_color: Vec3f,
     #[live(0.0)]
     pub fog_density: f32,
+    /// Sun terms, written every frame from one [`crate::sun::GameSun`].
+    #[live(vec3(0.72, 0.72, 0.72))]
+    pub sun_color: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_sky: Vec3f,
+    #[live(vec3(0.28, 0.28, 0.28))]
+    pub sun_ground: Vec3f,
 }
