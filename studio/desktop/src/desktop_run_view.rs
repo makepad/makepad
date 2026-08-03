@@ -9,8 +9,9 @@ use crate::makepad_widgets::makepad_platform::shared_framebuf::{
 use crate::makepad_widgets::*;
 use makepad_studio_protocol::hub_protocol::{FrameCodec, QueryId, RunViewInputVizKind};
 use makepad_studio_protocol::{
-    MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
-    RemoteMouseUp, RemoteScroll, RunViewFrameData, RunViewFrameRequest, StudioToApp,
+    MouseButton, PresentableDraw, RemoteGameInput, RemoteKeyModifiers, RemoteMouseDown,
+    RemoteMouseMove, RemoteMouseUp, RemoteScroll, RunViewFrameData, RunViewFrameRequest,
+    StudioToApp,
     StudioToAppVec,
 };
 use std::collections::VecDeque;
@@ -213,6 +214,11 @@ pub struct DesktopRunView {
     remote_cursor: MouseCursor,
     #[rust]
     is_hovered: bool,
+    /// Last controller set forwarded to the app, so an idle pad costs nothing.
+    /// `None` means "nothing sent yet", which forces one send — a freshly
+    /// targeted app must learn the current state, not just future changes.
+    #[rust]
+    last_game_input: Option<Vec<RemoteGameInput>>,
     #[rust]
     ai_viz_kind: Option<RunViewInputVizKind>,
     #[rust]
@@ -275,6 +281,34 @@ impl DesktopRunView {
             self.uid,
             DesktopRunViewAction::ForwardToApp { build_id, msg_bin },
         );
+    }
+
+    /// Forward Studio's game controllers to the hosted app.
+    ///
+    /// A Studio-hosted app is a child process with no window of its own, so
+    /// the OS hands controller input to Studio and never to it — exactly the
+    /// reason mouse and key events are forwarded rather than read directly.
+    /// Without this a game is playable standalone and dead under Studio, which
+    /// is precisely where it gets developed.
+    ///
+    /// Only the focused view forwards, so two open run views cannot both drive
+    /// from one stick; that is the same rule the keyboard already follows.
+    /// Sent on change only — an untouched pad reports the same level state
+    /// every tick and is not worth the wire.
+    fn game_input_msg_if_changed(&mut self, cx: &mut Cx) -> Option<StudioToApp> {
+        if !cx.has_key_focus(self.area) {
+            // Drop the memo, so regaining focus resends rather than assuming
+            // the app still holds what we last sent.
+            self.last_game_input = None;
+            return None;
+        }
+        let states: Vec<RemoteGameInput> =
+            cx.game_input_states().iter().map(|s| s.into()).collect();
+        if self.last_game_input.as_ref() == Some(&states) {
+            return None;
+        }
+        self.last_game_input = Some(states.clone());
+        Some(StudioToApp::GameInput(states))
     }
 
     fn set_target(&mut self, cx: &mut Cx, target: Option<RunTarget>) {
@@ -1197,6 +1231,9 @@ impl Widget for DesktopRunView {
                     }
                     if let Some(request) = self.request_remote_frame_if_needed(target) {
                         msgs.push(request);
+                    }
+                    if let Some(msg) = self.game_input_msg_if_changed(cx) {
+                        msgs.push(msg);
                     }
                     msgs.push(StudioToApp::Tick);
                     self.emit_to_app(cx, target.build_id, msgs);
