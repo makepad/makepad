@@ -27,8 +27,18 @@ pub fn step_world(world: &mut GameWorld) {
         .iter()
         // Sensors report touches but never collide; `collide: false` decor
         // neither collides nor reports — both documented contracts.
+        // Rigids are included: their pose was read back from box3d at the end
+        // of last tick, so at snapshot time they hold a settled position just
+        // like a kinematic. Without them a character walks straight through a
+        // crate stack, which is the single most obvious "the world isn't real"
+        // tell. Movers still do not collide with each other (see BodyKind).
         .filter(|e| {
-            !e.sensor && e.collide && matches!(e.kind, BodyKind::Static | BodyKind::Kinematic)
+            !e.sensor
+                && e.collide
+                && matches!(
+                    e.kind,
+                    BodyKind::Static | BodyKind::Kinematic | BodyKind::Rigid
+                )
         })
         .map(Solid::from)
         .collect();
