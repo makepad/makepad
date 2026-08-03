@@ -205,6 +205,24 @@ fn from_b3_quat(q: B3Quat) -> Quat {
     }
 }
 
+/// Clamp a dimension to something a solver can actually work with.
+///
+/// A kid's game (or a generated one) can hand us 0, a negative, a NaN or an
+/// INFINITY. NaN is already absorbed by `max`, but infinity is not: it poisons
+/// every plane normal to NaN, so box3d's face query never beats its
+/// `-f32::MAX` starting separation, leaves `max_face_index` at the -1
+/// sentinel, and that sentinel is cast through `u8` into 255 and used as an
+/// array index. The port is faithful to upstream C here — C just reads garbage
+/// where Rust panics — so the fix belongs at the boundary: never hand the
+/// solver a value it cannot reason about.
+fn sane_extent(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.01, 1.0e6)
+    } else {
+        0.01
+    }
+}
+
 fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId {
     let mut body_def = default_body_def();
     body_def.body_type = match kind {
@@ -224,7 +242,7 @@ fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId
     let body = create_body(world, &body_def);
 
     let mut shape_def = default_shape_def();
-    shape_def.density = e.density.max(0.01);
+    shape_def.density = sane_extent(e.density);
     shape_def.base_material.friction = e.friction;
     shape_def.base_material.restitution = e.restitution;
     shape_def.user_data = e.id;
@@ -239,7 +257,16 @@ fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId
             create_sphere_shape(world, body, &shape_def, &sphere);
         }
         _ => {
-            let hull = make_box_hull(e.half.x.max(0.01), e.half.y.max(0.01), e.half.z.max(0.01));
+            // `max` already swallows NaN (it returns the non-NaN operand), but
+            // INFINITY survives it and makes every plane computation NaN, which
+            // leaves box3d's face query at its -1 sentinel — and that sentinel
+            // is cast through u8 to 255 and used as an index. A generated game
+            // that produced an infinite extent took the whole process down.
+            let hull = make_box_hull(
+                sane_extent(e.half.x),
+                sane_extent(e.half.y),
+                sane_extent(e.half.z),
+            );
             create_hull_shape(world, body, &shape_def, &hull);
         }
     }
