@@ -387,7 +387,10 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
     // shrinks it); require half that plus slack, which comfortably covers
     // the real ratio observed on cell weaves.
     if let Some(free) = free_disk_bytes(&options.output) {
-        let needed = sources_bytes / 2 + 5_000_000_000;
+        // Full summed source size, not an estimate: mid-run weaves stay
+        // blocked while the store still occupies the disk, and resume
+        // automatically the moment the endgame frees it.
+        let needed = sources_bytes + 5_000_000_000;
         if free < needed {
             return Err(format!(
                 "insufficient disk for weave: {free} bytes free, ~{needed} needed — free space and retry"
