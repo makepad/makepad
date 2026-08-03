@@ -1,7 +1,8 @@
 # Splash Game DSL Guide
 
-The complete `game.*` API for games running in the Makepad Game Maker
-(`examples/gamemaker`). A game is ONE splash script — `game.splash` — evaluated
+The complete `game.*` API for games running in Makepad Arcade (`apps/arcade`;
+also `examples/gamemaker`, which shares the same engine and is being retired).
+A game is ONE splash script — `game.splash` — evaluated
 live: statements run top to bottom, build the world, then drive it from
 `game.on_tick`. Every clean edit hot-reloads the running world instantly; a
 broken edit never replaces it (the last working world keeps running and the
@@ -29,6 +30,10 @@ adding a verb = a match arm in `examples/gamemaker/src/game_view.rs`
   `lerp(a, b, t)` (scalars and vectors), constants `PI` and `TAU`, and vector
   methods `v.length()`, `v.normalized()`, `a.dot(b)`, `a.cross(b)` — steering
   AI is `(target - me).normalized() * speed`.
+- Arrays: `let xs = []`, then **`xs.push(v)`** (a METHOD — there is no free
+  `push(xs, v)` function; calling one is an error that stops the game),
+  `xs.len()`, `xs[i]`, and `for x in xs { }`. `game.find("tag")` and
+  `game.overlap_sphere(pos, r)` hand you arrays to walk the same way.
 - Everything is procedural: colored shapes and synthesized sound. No image,
   model, or audio files — no files besides game.splash.
 - ALWAYS check `./tools/ag errors` after editing. Empty = live. Error = the
@@ -291,7 +296,7 @@ Attach an AI to any mover. Re-issuing a brain on the same entity replaces it.
 |---|---|
 | `game.wander(id, {home, range, speed, pause})` | Amble to random points near home, pausing between trips. |
 | `game.chase(id, {tag, range, catch, speed})` | Hunt the nearest entity carrying `tag`. `game.caught(id)` returns who it reached this tick. |
-| `game.patrol(id, {points: [vec3, ...], speed, loop})` | Walk a fixed route (ping-pongs when `loop: false`). |
+| `game.patrol(id, {points: [vec3, ...], speed})` | Walk a fixed route, looping forever. **Do not pass `loop:`** — `loop` is a reserved word and using it as an option key hangs the script until the instruction limit kills the eval, so the game never starts. Looping is the default; ping-pong is unavailable until the engine renames that key. |
 
 ### Race kit
 
