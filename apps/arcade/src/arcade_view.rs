@@ -283,6 +283,33 @@ pub struct ArcadeView {
 }
 
 /// Entity literal with the same defaults gamemaker's spawn verb uses.
+/// Sit every static on the ground under it.
+///
+/// Movers get this for free — `step.rs` clamps them to the terrain every tick
+/// — but a static is placed once and never simulated, so on a heightfield it
+/// keeps whatever y it was authored with and either floats or sinks. Run once
+/// after the world is composed, so placement code stays terrain-unaware and
+/// there is exactly one place that knows the rule.
+///
+/// The entity's own bottom is what lands on the ground, not its centre, so a
+/// tree and a fence post both meet the slope rather than being buried by half
+/// their height. Anything tagged `ground` or `water` is skipped: those are
+/// world-spanning slabs whose height is the whole point of them.
+fn conform_statics_to_terrain(world: &mut GameWorld) {
+    let Some(terrain) = world.terrain.clone() else {
+        return;
+    };
+    for e in world.entities.iter_mut() {
+        if e.kind != BodyKind::Static || e.tag == "ground" || e.tag == "water" {
+            continue;
+        }
+        if let Some(h) = terrain.height_at(e.pos.x, e.pos.z) {
+            e.pos.y = h + e.half.y;
+        }
+    }
+    world.mark_render_dirty();
+}
+
 fn spawn(
     world: &mut GameWorld,
     kind: BodyKind,
@@ -877,16 +904,47 @@ impl ArcadeView {
         w.orbit_yaw = 0.62;
         w.orbit_pitch = -0.34;
 
-        // Ground slab.
-        spawn(
-            w,
-            BodyKind::Static,
-            Shape::Box,
-            vec3f(0.0, -0.5, 0.0),
-            vec3f(64.0, 1.0, 64.0),
-            vec4(0.46, 0.56, 0.36, 1.0),
-            "ground",
-        );
+        // The ground is a heightfield, not a slab.
+        //
+        // The village itself sits on a plaza — genuinely flat, because the
+        // road is one long box and the houses are boxes with square feet, and
+        // none of those can follow a slope. Past the plaza the ramp lets go
+        // and `rim_relief` grows the landscape outward, so the horizon is
+        // hills rather than the edge of a green table. That combination is
+        // the point: a playfield that still works and a view worth turning
+        // the camera for.
+        //
+        // Movers need no help — `step.rs` already clamps them to the terrain,
+        // so villagers, the player and the car find the ground themselves.
+        // Statics do not, which is what `conform_statics_to_terrain` is for.
+        let field = makepad_game_gen::terrain::generate(&makepad_game_gen::terrain::TerrainParams {
+            seed: 0x5747_4E56,
+            span: 260.0,
+            cells: 261,
+            base: 0.0,
+            amp: 5.0,
+            feature_size: 90.0,
+            flatten: 1.25,
+            rim_relief: 5.0,
+            rim_start: 0.34,
+            plaza: Some(makepad_game_gen::terrain::TerrainPlaza {
+                center_x: 0.0,
+                center_z: 0.0,
+                // Covers the road (±58) and the houses either side of it.
+                radius: 66.0,
+                ramp: 26.0,
+                height: 0.0,
+            }),
+            ..Default::default()
+        });
+        w.terrain = Some(makepad_game_sim::Terrain {
+            cells: field.cells,
+            cell_size: field.cell_size,
+            origin: field.origin,
+            heights: field.heights,
+            colors: field.colors,
+            revision: 1,
+        });
         // The road: a strip through the middle of the green. Flat enough to
         // drive over, and `collide: false` so it is a surface rather than a
         // kerb the car has to climb.
@@ -1071,6 +1129,7 @@ impl ArcadeView {
         for (i, v) in self.villagers.iter_mut().enumerate() {
             v.kind = i % kinds;
         }
+        conform_statics_to_terrain(w);
         self.world_built = true;
     }
 
@@ -1130,24 +1189,36 @@ impl ArcadeView {
     /// own bounds to the body it rides so the wheels meet the road.
     fn vehicle_instance(&self) -> Option<ModelInstance> {
         let id = self.vehicle_model.as_ref()?;
-        let (min, max) = self.renderer.model_bounds(id)?;
+        let bounds = self.renderer.model_bounds(id)?;
+        let (min, max) = bounds;
         let world = self.world.borrow();
         let car = world.entities.iter().find(|e| e.tag == "car")?;
         // Scale the model's length onto the chassis length: a car reads by its
         // proportions, and the packs author them at every size.
         let native_len = (max.z - min.z).max(max.x - min.x).max(0.001);
         let s = (car.half.z * 2.0) / native_len;
-        let mut m = GameRenderer::rigid_transform(car);
-        for i in 0..12 {
-            m.v[i] *= s;
-        }
-        // Sit the model on the chassis floor rather than its centre, or the
-        // car floats by half its own height.
-        m.v[13] -= car.half.y;
-        Some(ModelInstance {
-            model: id.clone(),
-            transform: m,
-        })
+        // Where the road is under this body. NOT the chassis box: a raycast
+        // vehicle's box hangs a wheel radius plus an uncompressed spring clear
+        // of the ground and never touches it, so sitting the mesh on the box —
+        // the rule that IS right for a walker, whose box bottom is its feet —
+        // left the car hovering by the difference. The car block measures it
+        // from the suspension it just ran. A rigid with no car block has no
+        // wheels holding it up either, so there the box bottom really is the
+        // contact plane.
+        let drop = self
+            .blocks
+            .borrow()
+            .cars
+            .iter()
+            .find(|c| c.entity == car.id)
+            .map_or(car.half.y, |c| c.contact_drop());
+        Some(ModelInstance::on_body(
+            id.clone(),
+            bounds,
+            s,
+            drop,
+            &GameRenderer::rigid_transform(car),
+        ))
     }
 
     /// Turn the plan's placements into draw instances and collider boxes.
