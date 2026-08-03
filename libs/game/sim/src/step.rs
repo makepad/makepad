@@ -18,7 +18,11 @@ pub fn step_world(world: &mut GameWorld) {
     // else (retain/rollback) once per tick in debug builds.
     debug_assert!(world.entities_sorted_by_id());
     let gravity = world.gravity;
-    let statics: Vec<Entity> = world
+    // Snapshotted BEFORE the kinematic integration below: movers sweep against
+    // last tick's kinematic poses. That ordering is load-bearing for tape
+    // parity, so this stays a copy — but a copy of the 48-byte `Solid` view,
+    // not the whole 208-byte entity.
+    let statics: Vec<Solid> = world
         .entities
         .iter()
         // Sensors report touches but never collide; `collide: false` decor
@@ -26,22 +30,30 @@ pub fn step_world(world: &mut GameWorld) {
         .filter(|e| {
             !e.sensor && e.collide && matches!(e.kind, BodyKind::Static | BodyKind::Kinematic)
         })
-        .cloned()
+        .map(Solid::from)
         .collect();
-    // Cloned like `statics` above: the mover loop holds &mut entities.
-    let terrain = world.terrain.clone();
     /// A step this tall walks up for free (Godot floor snapping over the
     /// terraced 0.5 steps); anything taller is a cliff wall.
     const CLIMB: f32 = 0.55;
 
+    // Terrain is read-only here and was previously cloned once per tick purely
+    // to dodge the `&mut entities` borrow — 1.3 MB of memcpy per tick on a
+    // 257² field. Splitting the struct borrow costs nothing and copies nothing.
+    let GameWorld {
+        entities: world_entities,
+        terrain: world_terrain,
+        ..
+    } = &mut *world;
+    let terrain = world_terrain.as_ref();
+
     // Kinematics move first (script set their velocity).
-    for e in world.entities.iter_mut() {
+    for e in world_entities.iter_mut() {
         if e.kind == BodyKind::Kinematic {
             e.pos = e.pos + e.vel * TICK_DT;
         }
     }
 
-    for e in world.entities.iter_mut() {
+    for e in world_entities.iter_mut() {
         if e.kind != BodyKind::Mover {
             continue;
         }
@@ -72,7 +84,7 @@ pub fn step_world(world: &mut GameWorld) {
         }
         // Terrain cliffs block sideways movement; steps ≤ CLIMB pass (the y
         // pass snaps the mover up onto them).
-        if let Some(t) = &terrain {
+        if let Some(t) = terrain {
             if let Some(ground) = t.floor_under(e.pos, e.half) {
                 if ground > feet + CLIMB {
                     e.pos.x = nx - e.vel.x * TICK_DT;
@@ -91,7 +103,7 @@ pub fn step_world(world: &mut GameWorld) {
                 e.hit_wall = hz_id;
             }
         }
-        if let Some(t) = &terrain {
+        if let Some(t) = terrain {
             if let Some(ground) = t.floor_under(e.pos, e.half) {
                 if ground > feet + CLIMB {
                     e.pos.z = nz - e.vel.z * TICK_DT;
@@ -118,7 +130,7 @@ pub fn step_world(world: &mut GameWorld) {
             }
         }
         // The terrain is a floor: feet never sink below the ground surface.
-        if let Some(t) = &terrain {
+        if let Some(t) = terrain {
             if let Some(ground) = t.floor_under(e.pos, e.half) {
                 let floor_y = ground + e.half.y;
                 if e.pos.y <= floor_y {
@@ -138,8 +150,15 @@ pub fn step_world(world: &mut GameWorld) {
 
     // Pin riders to their owners (vehicle seats, latched headcrabs). One pass
     // after integration, same frame the owner moved — the Godot mount pattern.
-    let owner_pose: Vec<(u64, Vec3f, f32)> =
-        world.entities.iter().map(|e| (e.id, e.pos, e.yaw)).collect();
+    // Most worlds attach nothing, and this pose table used to be built over
+    // every entity regardless; the guard skips both the allocation and the
+    // scan when no rider exists. The loop below is a no-op in that case, so
+    // behaviour is unchanged.
+    let owner_pose: Vec<(u64, Vec3f, f32)> = if world.entities.iter().any(|e| e.attached_to != 0) {
+        world.entities.iter().map(|e| (e.id, e.pos, e.yaw)).collect()
+    } else {
+        Vec::new()
+    };
     for e in world.entities.iter_mut() {
         if e.attached_to == 0 {
             continue;
