@@ -27,7 +27,12 @@ fn fake_glb(path: &Path, rigged: bool) {
         json.push(b' ');
     }
     let mut out = Vec::new();
-    out.extend_from_slice(&0x4655_4C67u32.to_le_bytes()); // "glTF"
+    // "glTF" little-endian. This fixture previously wrote 0x4655_4C67 —
+    // which spells "gLUF" — matching a typo in the probe's own constant, so
+    // the two agreed with each other while every REAL Kenney GLB was
+    // rejected and indexed with no bounds and no rigged flag. Writing the
+    // true magic is what makes this test able to fail.
+    out.extend_from_slice(&0x4654_6C67u32.to_le_bytes());
     out.extend_from_slice(&2u32.to_le_bytes());
     out.extend_from_slice(&((20 + json.len()) as u32).to_le_bytes());
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
