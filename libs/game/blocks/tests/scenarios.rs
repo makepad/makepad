@@ -1773,9 +1773,11 @@ fn a_player_walks_gets_in_drives_and_gets_out() {
 fn driving_does_not_also_walk_your_parked_character() {
     // The modality bug: a player owns both a character and a car, `pre_step`
     // matches blocks by owner, so the same stick that steers you would also
-    // walk the body you left in the driver's seat. Invisible while you drive —
-    // and then you get out somewhere you never went.
-    let (mut world, mut blocks, ch, _car) = player_world();
+    // walk the body you left in the driver's seat — and then you get out
+    // somewhere you never went. The seat pin now carries the body with the
+    // car, so the property to check is that it stays WITH the car rather than
+    // that it stays put.
+    let (mut world, mut blocks, ch, car) = player_world();
     if let Some(e) = world.entity_mut(ch) {
         e.pos = vec3f(2.5, 0.9, 1.2);
     }
@@ -1784,7 +1786,6 @@ fn driving_does_not_also_walk_your_parked_character() {
         &mut blocks,
         RawInput { use_pressed: true, ..Default::default() },
     );
-    let parked = world.entity(ch).unwrap().pos;
     for _ in 0..90 {
         player_tick(
             &mut world,
@@ -1792,9 +1793,58 @@ fn driving_does_not_also_walk_your_parked_character() {
             RawInput { throttle: 1.0, move_y: 1.0, move_x: 1.0, ..Default::default() },
         );
     }
-    let now = world.entity(ch).unwrap().pos;
-    let drift = ((now.x - parked.x).powi(2) + (now.z - parked.z).powi(2)).sqrt();
-    assert!(drift < 0.5, "the parked driver walked {drift:.2} units while driving");
+    let (c, k) = (world.entity(ch).unwrap(), world.entity(car).unwrap());
+    let apart = ((c.pos.x - k.pos.x).powi(2) + (c.pos.z - k.pos.z).powi(2)).sqrt();
+    assert!(apart < 1.0, "the parked driver walked {apart:.2} units off the car");
+    // And getting out puts them beside THIS car, not back where they boarded.
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    let (c, k) = (world.entity(ch).unwrap(), world.entity(car).unwrap());
+    let gap = ((c.pos.x - k.pos.x).powi(2) + (c.pos.z - k.pos.z).powi(2)).sqrt();
+    assert!(gap < 4.0, "got out {gap:.2} units from the car they were driving");
+}
+
+#[test]
+fn driving_one_car_does_not_also_drive_your_other_one() {
+    // The modality gate where it is directly observable. Nothing pins a second
+    // vehicle, so if `pre_step` handed this player's throttle to every block
+    // they own, the spare car drives itself off across the map while they are
+    // sitting in the first one.
+    let (mut world, mut blocks, ch, car) = player_world();
+    let spare = rigid(&mut world, vec3f(-8.0, 1.0, 0.0), vec3f(0.9, 0.4, 1.6));
+    if let Some(e) = world.entity_mut(spare) {
+        e.tag = "car".to_string();
+    }
+    blocks
+        .cars
+        .push(Car::new(spare, CarConfig::default(), ControlSource::Player));
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    assert_eq!(blocks.player_rigs[&PlayerId::LOCAL].seat(), Seat::Driving(car));
+    let parked_at = world.entity(spare).unwrap().pos;
+    for _ in 0..90 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { throttle: 1.0, move_x: 0.4, ..Default::default() },
+        );
+    }
+    let now = world.entity(spare).unwrap().pos;
+    let drift = ((now.x - parked_at.x).powi(2) + (now.z - parked_at.z).powi(2)).sqrt();
+    assert!(drift < 0.5, "the spare car drove itself {drift:.2} units");
+    // And the one being driven definitely moved, or this proves nothing.
+    let driven = world.entity(car).unwrap().pos;
+    let d = ((driven.x - 2.5).powi(2) + driven.z.powi(2)).sqrt();
+    assert!(d > 5.0, "the driven car did not move either: {d:.2}");
 }
 
 #[test]
@@ -1977,4 +2027,130 @@ fn the_prompt_and_the_button_always_agree() {
     let rig = &blocks.player_rigs[&PlayerId::LOCAL];
     assert_eq!(rig.seat(), Seat::Driving(car));
     assert_eq!(rig.mount.candidate(&world), None, "offered a car while driving");
+}
+
+#[test]
+fn getting_out_does_not_unhide_a_model_based_player() {
+    // `hidden` is the HOST's field: "my appearance is a mesh, don't also draw
+    // my collider box". Every game that uses a model rather than a coloured box
+    // sets it, which is every real game. Mount must restore it, not clear it —
+    // otherwise getting out pops a grey collision slab into the world beside
+    // the car, and the only host-side fix is re-asserting `hidden` every tick
+    // forever.
+    for host_hidden in [false, true] {
+        let (mut world, mut blocks, ch, _car) = player_world();
+        if let Some(e) = world.entity_mut(ch) {
+            e.pos = vec3f(2.5, 0.9, 1.2);
+            e.hidden = host_hidden;
+        }
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { use_pressed: true, ..Default::default() },
+        );
+        assert!(world.entity(ch).unwrap().hidden, "the driver was still drawn");
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { use_pressed: true, ..Default::default() },
+        );
+        assert_eq!(
+            world.entity(ch).unwrap().hidden,
+            host_hidden,
+            "getting out overwrote the host's `hidden` (was {host_hidden})"
+        );
+    }
+}
+
+#[test]
+fn the_driver_rides_along_instead_of_being_left_as_an_invisible_wall() {
+    // `hidden` means "solid to everything, drawn by nothing", so hiding the
+    // driver in place leaves their collider standing where they boarded: drive
+    // back past it later and you hit a wall that is not there. The seat pin
+    // takes the body out of physics and carries it with the car.
+    let (mut world, mut blocks, ch, car) = player_world();
+    if let Some(e) = world.entity_mut(ch) {
+        e.pos = vec3f(2.5, 0.9, 1.2);
+    }
+    let boarded_at = world.entity(ch).unwrap().pos;
+    player_tick(
+        &mut world,
+        &mut blocks,
+        RawInput { use_pressed: true, ..Default::default() },
+    );
+    for _ in 0..90 {
+        player_tick(
+            &mut world,
+            &mut blocks,
+            RawInput { throttle: 1.0, ..Default::default() },
+        );
+    }
+    let (c, k) = (world.entity(ch).unwrap(), world.entity(car).unwrap());
+    let left_behind = ((c.pos.x - boarded_at.x).powi(2) + (c.pos.z - boarded_at.z).powi(2)).sqrt();
+    assert!(left_behind > 3.0, "the body stayed at the kerb: {left_behind:.2}");
+    let to_car = ((c.pos.x - k.pos.x).powi(2) + (c.pos.z - k.pos.z).powi(2)).sqrt();
+    assert!(to_car < 1.0, "the rider is not travelling with the car: {to_car:.2}");
+}
+
+#[test]
+fn a_new_world_falls_without_being_told_to() {
+    // Gravity was set only by `reset_content`, which script evaluation calls
+    // and nothing else does — so every world built through the sim API floated
+    // until its caller happened to know. The symptom is not "physics looks
+    // wrong", it is a character that silently never reports `on_floor` and so
+    // refuses to jump. Four test files had each grown their own
+    // `world.gravity = 30.0`; a workaround that gets copy-pasted means the
+    // default is the bug.
+    let mut world = GameWorld::new();
+    assert!(world.gravity > 0.0, "a fresh world has no gravity");
+    ground(&mut world, vec3f(40.0, 1.0, 40.0));
+    let id = walker(&mut world, vec3f(0.0, 6.0, 0.0));
+    for _ in 0..120 {
+        step_world(&mut world);
+        world.tick += 1;
+    }
+    let e = world.entity(id).unwrap();
+    assert!(e.on_floor, "never landed, so a jump would never fire");
+    assert!(e.pos.y < 3.0, "did not fall: y={}", e.pos.y);
+}
+
+#[test]
+fn reverse_moves_the_car_but_the_brake_still_wins() {
+    // Two separate claims, because conflating them is what makes "reverse
+    // barely works" hard to diagnose.
+    //
+    // 1. Reverse alone must actually reverse. Half engine authority is the
+    //    arcade convention and is fine; being immobile is not.
+    // 2. Brake AND reverse together must stay near-immobile. That is correct
+    //    car behaviour — a foot on the brake wins — so it is pinned here
+    //    rather than "fixed". Any input path that maps one control to BOTH
+    //    brake and negative throttle will therefore read as broken reverse,
+    //    and the bug is in that mapping, not in this force model.
+    let drive_for = |input: DriveInput, ticks: usize| -> f32 {
+        let (mut world, mut blocks, chassis) = car_world();
+        if let Some(c) = blocks.car_mut(chassis) {
+            c.control = ControlSource::Script;
+            c.input = input;
+        }
+        let start = world.entity(chassis).unwrap().pos;
+        run(&mut world, &mut blocks, ticks);
+        let e = world.entity(chassis).unwrap();
+        ((e.pos.x - start.x).powi(2) + (e.pos.z - start.z).powi(2)).sqrt()
+    };
+    let secs = (2.0 / DT) as usize;
+    let forward = drive_for(DriveInput { throttle: 1.0, ..Default::default() }, secs);
+    let reverse = drive_for(DriveInput { throttle: -1.0, ..Default::default() }, secs);
+    let braked = drive_for(
+        DriveInput { throttle: -1.0, brake: 1.0, ..Default::default() },
+        secs,
+    );
+    assert!(forward > 10.0, "the car did not drive forward at all: {forward:.2}");
+    assert!(
+        reverse > forward * 0.4,
+        "reverse is not usable: {reverse:.2}m vs {forward:.2}m forward"
+    );
+    assert!(
+        braked < reverse * 0.2,
+        "the brake did not hold the car: {braked:.2}m vs {reverse:.2}m free"
+    );
 }

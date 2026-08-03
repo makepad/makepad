@@ -11,6 +11,7 @@ pub mod compose;
 pub mod dispatch;
 pub mod host;
 pub mod input;
+pub mod interact;
 pub mod sandbox;
 pub mod value;
 

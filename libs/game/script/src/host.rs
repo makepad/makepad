@@ -48,6 +48,9 @@ pub struct ScriptHost {
     assets: Rc<Option<AssetIndex>>,
     /// Stock model placements queued by this eval, drained by the host.
     models: Rc<RefCell<Vec<ModelRequest>>>,
+    /// Script-declared interactables. Public so the host can ask what the
+    /// primary activity button would do and draw the affordance.
+    pub interact: Rc<RefCell<crate::interact::InteractSet>>,
     verbs: Rc<HashMap<LiveId, VerbFn>>,
     vm_id: SplashVmId,
     /// Checkpoint identity for streaming eval. gamemaker abuses the widget's
@@ -87,6 +90,7 @@ impl ScriptHost {
             next_emitter: Rc::new(Cell::new(0)),
             assets: Rc::new(None),
             models: Rc::new(RefCell::new(Vec::new())),
+            interact: Rc::new(RefCell::new(crate::interact::InteractSet::default())),
             verbs: Rc::new(verb_table()),
             vm_id: MAIN_SPLASH_VM_ID,
             body_id: next_body_id(),
@@ -150,6 +154,7 @@ impl ScriptHost {
             next_tone: self.next_tone.clone(),
             assets: self.assets.clone(),
             models: self.models.clone(),
+            interact: self.interact.clone(),
         }
     }
 
@@ -195,8 +200,13 @@ impl ScriptHost {
         // Last-good: a full clone, so no field can be forgotten on rollback.
         let snapshot = self.world.borrow().clone();
         let blocks_snapshot = self.blocks.borrow().clone();
+        let interact_snapshot = self.interact.borrow().clone();
         self.world.borrow_mut().reset_content();
         self.blocks.borrow_mut().clear();
+        // Declarations are script content, so they rebuild with it. Rolled
+        // back below alongside world and blocks — three snapshots restored
+        // together or a failed edit leaves prompts pointing at dead entities.
+        self.interact.borrow_mut().clear();
 
         // The trailing "\n;" finalizes the stream: eval_with_append_source is
         // a STREAMING parser, so a last statement with no terminator is held
@@ -243,6 +253,7 @@ impl ScriptHost {
             let time = snapshot.time;
             *self.world.borrow_mut() = snapshot;
             *self.blocks.borrow_mut() = blocks_snapshot;
+            *self.interact.borrow_mut() = interact_snapshot;
             // The rolled-back world keeps ITS clock.
             self.world.borrow_mut().time = time;
             let joined = errors.join("\n");

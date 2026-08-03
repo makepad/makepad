@@ -15,7 +15,7 @@ use makepad_game_gen::{
 };
 use makepad_game_blocks::{
     Blocks, Brain, BrainKind, Car, CarConfig, Character, CharacterConfig, ControlSource, Plane,
-    PlaneConfig,
+    PlaneConfig, PlayerRig,
 };
 use makepad_game_sim::*;
 use makepad_widgets::*;
@@ -118,6 +118,10 @@ pub struct Ctx {
     pub assets: Rc<Option<AssetIndex>>,
     /// Stock model placements, drained by the host each eval.
     pub models: Rc<RefCell<Vec<ModelRequest>>>,
+    /// Things script declared interactable. Derived interactables (cars,
+    /// doors) are NOT in here — they are read from the blocks that already
+    /// describe them, so this stays empty for most games.
+    pub interact: Rc<RefCell<crate::interact::InteractSet>>,
 }
 
 pub type VerbFn = fn(&mut ScriptVm, &Ctx, ScriptObject) -> ScriptValue;
@@ -1019,6 +1023,133 @@ fn v_character(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue 
     ch.owner = owner;
     ctx.blocks.borrow_mut().characters.push(ch);
     num(id as f64)
+}
+
+/// `game.player_character({...})` — **the one line that makes a game playable.**
+///
+/// A character plus the whole crafted rig: third-person follow camera, mount
+/// state machine, and the modality switch between walking and driving. The
+/// bare call is the point —
+///
+/// ```text
+/// game.player_character({pos: [0, 2, 0]})
+/// ```
+///
+/// gets coyote time, jump buffering, variable jump height, asymmetric
+/// accel/decel, a boom that snaps in against a wall and eases back out,
+/// look-ahead, speed pullback and delayed recentring, with no knobs touched.
+/// Every option below is a nudge to something that already feels right; an AI
+/// that passes nothing must get the good version, because passing nothing is
+/// what it will usually do.
+///
+/// Distinct from `game.character`, which is a walker with no camera and no
+/// mount — what you want for an NPC or a second body script drives itself.
+fn v_player_character(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let allowed = &[
+        id!(pos), id!(size), id!(color), id!(tag), id!(player), id!(model),
+        id!(speed), id!(jump), id!(run_multiplier), id!(view), id!(gravity),
+        id!(rot_y), id!(camera_distance), id!(camera_height),
+    ];
+    let Some((id, opts, owner)) = block_common(vm, ctx, args, allowed, "player_character") else {
+        return nil();
+    };
+    let model = opt_string(vm, opts, id!(model));
+    let mut config = CharacterConfig::default();
+    config.speed = opt_f32(vm, opts, id!(speed), config.speed);
+    config.jump = opt_f32(vm, opts, id!(jump), config.jump);
+    config.run_multiplier = opt_f32(vm, opts, id!(run_multiplier), config.run_multiplier);
+    let mut ch = Character::new(id, config, ControlSource::Player, model);
+    ch.owner = owner;
+
+    let mut rig = PlayerRig::new(id);
+    // Nudges to the on-foot rig only. The in-vehicle config is deliberately not
+    // exposed: it is tuned against the car's speed, and a game that wanted a
+    // different chase camera per vehicle would need a per-vehicle knob, not a
+    // per-player one.
+    rig.camera.config.distance =
+        opt_f32(vm, opts, id!(camera_distance), rig.camera.config.distance);
+    rig.camera.config.pivot_height =
+        opt_f32(vm, opts, id!(camera_height), rig.camera.config.pivot_height);
+    rig.camera.boom = rig.camera.config.distance;
+
+    let mut blocks = ctx.blocks.borrow_mut();
+    blocks.characters.push(ch);
+    // One rig per player. Re-registering replaces, so a re-eval that runs the
+    // same line twice leaves one rig rather than two fighting over the camera.
+    blocks.player_rigs.insert(owner, rig);
+    num(id as f64)
+}
+
+/// `game.interactable(entity, {kind, prompt, range})` — declare something the
+/// primary activity button can act on.
+///
+/// Only needed for what the engine cannot infer. A car is already drivable and
+/// a door that leads to an interior is already an entrance; neither needs this
+/// call. Use it for a chest, a switch, a lever — things whose meaning lives in
+/// the game's own rules. The `kind` comes back to script when the player
+/// presses the button, so one handler can serve every custom interactable.
+fn v_interactable(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let entity = arg_id(vm, args, 0);
+    let Some(opts) = opts_of(vm, args, 1) else {
+        return nil();
+    };
+    let allowed = &[id!(kind), id!(prompt), id!(range)];
+    warn_unknown_keys(vm, &ctx.world, "interactable", opts, allowed);
+    let kind = opt_string(vm, opts, id!(kind)).unwrap_or_else(|| "use".to_string());
+    let prompt = opt_string(vm, opts, id!(prompt)).unwrap_or_else(|| "Use".to_string());
+    let range = opt_f32(vm, opts, id!(range), crate::interact::DEFAULT_RANGE);
+    ctx.interact.borrow_mut().declare(crate::interact::Declared {
+        entity,
+        kind: LiveId::from_str(&kind),
+        prompt,
+        range,
+    });
+    num(entity as f64)
+}
+
+/// `game.interact_prompt()` — what the primary activity button would do right
+/// now, or nil when nothing is in reach.
+///
+/// Returns `{entity, kind, prompt, distance}`. The HOST already draws the
+/// affordance; this exists so a game can style its own, and so a test can
+/// assert what the player is being offered without rendering anything.
+fn v_interact_prompt(vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    let world = ctx.world.borrow();
+    let blocks = ctx.blocks.borrow();
+    let Some(rig) = blocks.player_rigs.get(&PlayerId(0)) else {
+        return nil();
+    };
+    let Some(me) = world.entity(rig.mount.subject()) else {
+        return nil();
+    };
+    let facing = makepad_game_sim::heading_to_forward(rig.camera.yaw);
+    let Some(found) = crate::interact::choose(
+        &world,
+        &blocks,
+        &ctx.interact.borrow(),
+        rig.seat(),
+        me.pos,
+        facing,
+    ) else {
+        return nil();
+    };
+    drop(world);
+    drop(blocks);
+    let obj = vm.bx.heap.new_object();
+    let heap = &mut vm.bx.heap;
+    heap.set_value_def(obj, id!(entity).into(), ScriptValue::from_f64(found.entity as f64));
+    heap.set_value_def(obj, id!(distance).into(), ScriptValue::from_f64(found.distance as f64));
+    let kind = match &found.kind {
+        crate::interact::InteractKind::Drive => "drive".to_string(),
+        crate::interact::InteractKind::Exit => "exit".to_string(),
+        crate::interact::InteractKind::Enter(_) => "enter".to_string(),
+        crate::interact::InteractKind::Custom(k) => format!("{k}"),
+    };
+    let kind_v = heap.new_string_from_str(&kind);
+    heap.set_value_def(obj, id!(kind).into(), kind_v);
+    let prompt_v = heap.new_string_from_str(&found.prompt);
+    heap.set_value_def(obj, id!(prompt).into(), prompt_v);
+    obj.into()
 }
 
 fn v_plane(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
@@ -2356,6 +2487,9 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("jingle", v_jingle, "(notes, ms)"),
     ("car", v_car, "({pos, size, color, tag, player, top_speed, accel, braking, grip, steer_rate, seats}) -> id"),
     ("character", v_character, "({pos, size, color, tag, player, model, speed, jump, view}) -> id"),
+    ("player_character", v_player_character, "({pos, model, speed, jump, run_multiplier, player, camera_distance, camera_height}) -> id  — walker + follow camera + mount, all crafted defaults"),
+    ("interactable", v_interactable, "(entity, {kind, prompt, range}) — cars and doors need no declaration"),
+    ("interact_prompt", v_interact_prompt, "() -> {entity, kind, prompt, distance} or nil"),
     ("plane", v_plane, "({pos, size, color, tag, player, thrust, top_speed, lift_speed, auto_level}) -> id"),
     ("drive", v_drive, "(id, {steer, throttle, brake, handbrake, pitch, roll, move_x, move_z, jump})"),
     ("autodrive", v_autodrive, "(id, {points, pace})"),
@@ -2500,6 +2634,7 @@ mod tests {
             // rather than fail, and that path deserves coverage too.
             assets: Rc::new(None),
             models: Rc::new(RefCell::new(Vec::new())),
+            interact: Rc::new(RefCell::new(crate::interact::InteractSet::default())),
         }
     }
 
@@ -3017,10 +3152,12 @@ mod tests {
         // particles, burst, particles_stop), +8 for the stock library
         // (find_model, find_palette, model, kits, cast, road_network, town,
         // dungeon) — the verbs that turn 4,700 models from a warehouse into
-        // a vocabulary the AI can actually write with.
+        // a vocabulary the AI can actually write with, +3 for the player
+        // controller (player_character, interactable, interact_prompt), which
+        // turn "a game you can watch" into "a game you can play".
         assert_eq!(
             VERBS.len(),
-            115,
+            118,
             "verb count changed — sync with splashgame.md"
         );
     }

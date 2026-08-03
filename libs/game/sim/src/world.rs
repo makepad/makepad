@@ -149,6 +149,17 @@ impl GameWorld {
         // which hid this from gamemaker; a world built straight through the
         // sim API (arcade, tests, blocks) never calls reset_content.
         world.rng = 0x9E37_79B9_7F4A_7C15;
+        // Gravity is the same trap and was missed by the same reasoning: it is
+        // set by `reset_content` only, so every world built through the sim API
+        // floated until its caller happened to know to set it. Four separate
+        // test files had each grown their own `world.gravity = 30.0` line —
+        // when a workaround gets copy-pasted, the default is the bug.
+        //
+        // A floating character reports no `on_floor`, so the symptom is a
+        // controller that silently refuses to jump rather than anything that
+        // looks like a physics problem. Matches `reset_content` deliberately:
+        // two constructors that disagree about gravity is a worse trap again.
+        world.gravity = 30.0;
         world
     }
 

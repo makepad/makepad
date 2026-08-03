@@ -7,8 +7,10 @@
 
 use crate::bigworld;
 use makepad_game_blocks::{
-    Blocks, Car, CarConfig, ControlSource, DriveInput, Npc, NpcConfig, Poi, PoiSet,
+    Blocks, Car, CarConfig, Character, CharacterConfig, ControlSource, Npc, NpcConfig, Poi,
+    PlayerRig, PoiSet, RawInput, Seat,
 };
+use makepad_game_script::interact::{self, InteractAction, InteractSet};
 use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_game_render::particles::ParticleSystem;
 use makepad_game_render::stage::{Stage, StageMode};
@@ -20,8 +22,9 @@ use makepad_game_render::{
 use makepad_game_session::{Session, SessionEvent};
 use makepad_game_sim::{
     BodyKind, EmitterAnchor, Entity, GameWorld, PadState, ParticleKind, ParticleRequest,
-    ParticleSpec, Shape, SkyConfig, SunConfig, TICK_DT,
+    ParticleSpec, PlayerId, Shape, SkyConfig, SunConfig, TICK_DT,
 };
+use makepad_platform::event::game_input::{GameInputState, GamepadState};
 use makepad_widgets::*;
 use makepad_game_script::audio3d::Listener;
 use makepad_game_script::{AudioRequest, ScriptHost};
@@ -185,12 +188,47 @@ pub struct ArcadeView {
     time_accum: f64,
     #[rust]
     last_time: Option<f64>,
+    /// Free-orbit pose, used ONLY when no player rig exists (the bare-world
+    /// debug view). With a player, the rig owns the camera and these are dead.
     #[rust(0.7f32)]
     orbit_yaw: f32,
     #[rust(-0.35f32)]
     orbit_pitch: f32,
     #[rust]
     orbit_last_abs: Option<DVec2>,
+    /// The player's walker. 0 before `spawn_blocks` has run.
+    #[rust]
+    player: u64,
+    /// Most-active gamepad this frame, or `None` when no pad is connected.
+    #[rust]
+    pad: Option<GamepadState>,
+    /// Edge detection for the pad's buttons — `use`/`jump` are presses, not
+    /// holds, and a pad reports level rather than edges.
+    #[rust]
+    pad_use_prev: bool,
+    /// Keyboard press edges, same reason as the pad's.
+    #[rust]
+    jump_prev: bool,
+    #[rust]
+    use_prev: bool,
+    #[rust]
+    pad_jump_prev: bool,
+    /// Which device the player last actually moved. Drives nothing but the
+    /// affordance glyph — the intent itself is merged, never switched.
+    #[rust]
+    pad_is_active: bool,
+    /// Mouse look accumulated since the last tick, in pixels. Drained by
+    /// `raw_input` so a 120Hz mouse and a 60Hz tick agree on total rotation.
+    #[rust]
+    look_accum: DVec2,
+    /// What the primary activity button would do right now, recomputed each
+    /// tick from the same call that performs it.
+    #[rust]
+    prompt: Option<String>,
+    /// Script-declared interactables. Empty here: arcade builds its world in
+    /// Rust, and cars and doors are DERIVED, so nothing needs declaring.
+    #[rust]
+    interact: InteractSet,
     #[rust]
     view_rect: Rect,
     #[rust]
@@ -347,6 +385,9 @@ struct Villager {
     /// 0 = idle, 1 = walking. Eased, so stopping settles rather than snaps.
     blend: f32,
     yaw: f32,
+    /// Has a travel direction ever been observed? Until it has, the yaw is
+    /// seeded from the entity's heading rather than left at its authored zero.
+    faced: bool,
     /// Where the SWEEP put it, read back after the step — not where the walk
     /// wanted to go. The two differ exactly when something is in the way.
     pos: Vec3f,
@@ -381,6 +422,7 @@ impl Villager {
             clock: draw() * 4.0,
             blend: 0.0,
             yaw: 0.0,
+            faced: false,
             pos: vec3f(0.0, 0.0, 0.0),
             tint: vec4(warm, mid, cool, 1.0),
             scale: 0.92 + draw() * 0.22,
@@ -399,6 +441,20 @@ impl Villager {
         // Face where it is actually going, not where it intended to.
         if speed > 0.15 {
             self.yaw = makepad_game_sim::math::atan2(e.vel.x, e.vel.z);
+            self.faced = true;
+        } else if !self.faced {
+            // Never moved yet, so there is no travel direction to read. Seed
+            // from the entity's own heading instead, or the character stands
+            // at its authored facing — which for these rigs is straight at the
+            // camera, so a third-person player spawns looking at their own
+            // face until they take a step.
+            //
+            // The half-turn is not a fudge: the render yaw runs a half-turn
+            // off the sim heading because the rigs are modelled facing +Z
+            // while the engine's forward is -Z. The atan2(x, z) above bakes in
+            // the same offset (atan2 of a heading's forward vector gives
+            // heading + PI), which is why the two paths agree once moving.
+            self.yaw = e.yaw + std::f32::consts::PI;
         }
         let target = if speed > 0.35 { 1.0 } else { 0.0 };
         self.blend += (target - self.blend) * 0.12;
@@ -1558,12 +1614,52 @@ impl ArcadeView {
             friction: 0.7,
             ..Default::default()
         });
-        w.mark_render_dirty();
         blocks.cars.push(Car::new(
             car,
             CarConfig::default(),
             ControlSource::Player,
         ));
+
+        // The player. THIS is the whole binding — a body, a character block,
+        // and a rig. Everything else (third-person camera, mount state
+        // machine, the walk/drive modality switch, getting back out beside the
+        // car) comes from the prefab with no further wiring here.
+        w.next_id += 1;
+        self.player = w.next_id;
+        w.push_entity(Entity {
+            id: self.player,
+            kind: BodyKind::Mover,
+            // Out on the open verge rather than tucked against a house: the
+            // boom correctly pulls in when a wall is behind you, and spawning
+            // in that pocket makes the very first frame look broken.
+            pos: vec3f(-6.0, 2.0, 9.5),
+            half: vec3f(0.35, 0.9, 0.35),
+            color: vec4(0.35, 0.55, 0.95, 1.0),
+            tag: "player".to_string(),
+            // Hidden box, skinned mesh for the appearance — the same split
+            // the villagers use, so the player collides like everyone else
+            // without being a floating grey slab in the middle of the screen.
+            hidden: true,
+            collide: true,
+            gravity_scale: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            density: 1.0,
+            friction: 0.7,
+            ..Default::default()
+        });
+        blocks.characters.push(Character::new(
+            self.player,
+            CharacterConfig::default(),
+            ControlSource::Player,
+            None,
+        ));
+        blocks
+            .player_rigs
+            .insert(PlayerId(0), PlayerRig::new(self.player));
+
+        w.mark_render_dirty();
 
         // Destinations first: the NPC block scores POIs, so a village with
         // none degrades to aimless wandering. These come from the composed
@@ -1589,6 +1685,13 @@ impl ArcadeView {
                 0x51de_0000 ^ (i as u64).wrapping_mul(0x9E37_79B9),
             ));
         }
+        drop(world);
+        drop(blocks);
+        // The player wears a real rig like everyone else. A cube with a
+        // camera behind it reads as a debug view; the whole point of the
+        // third-person controller is that you can see yourself walk.
+        let me = self.player;
+        self.villagers.push(Villager::new(me, 0x91ae_5eed));
     }
 
     /// Points of interest derived from the composed street.
@@ -1620,29 +1723,292 @@ impl ArcadeView {
         pois
     }
 
-    /// Local player's intent from the keyboard: arrows/WASD steer and drive.
-    fn player_input(&self) -> DriveInput {
-        let down = |k: KeyCode| self.keys.contains(&k);
-        let steer = (down(KeyCode::ArrowRight) || down(KeyCode::KeyD)) as i8 as f32
-            - (down(KeyCode::ArrowLeft) || down(KeyCode::KeyA)) as i8 as f32;
-        let throttle = (down(KeyCode::ArrowUp) || down(KeyCode::KeyW)) as i8 as f32
-            - (down(KeyCode::ArrowDown) || down(KeyCode::KeyS)) as i8 as f32;
-        // A headset drives the same player as the keyboard: whichever moved
-        // wins, so picking up a controller mid-session just works.
-        let (xr_steer, xr_throttle) = if self.xr_active {
-            (self.xr_pad.axis_x as f32, -self.xr_pad.axis_z as f32)
-        } else {
-            (0.0, 0.0)
-        };
-        DriveInput {
-            steer: if steer != 0.0 { steer } else { xr_steer },
-            throttle: if throttle != 0.0 {
-                throttle
+    /// How fast the right stick turns the camera, in mouse-pixel equivalents
+    /// per second. The rig's own `sensitivity` converts to radians, so stick
+    /// and mouse share one tuning constant instead of drifting apart.
+    const PAD_LOOK_SPEED: f32 = 520.0;
+    /// Right-stick deadzone. Sticks drift; without this the camera creeps.
+    const PAD_LOOK_DEADZONE: f32 = 0.18;
+    /// Deflection at which the walk becomes a run. Below it the stick scales
+    /// speed on its own; above it `run` fades in the run multiplier, so the
+    /// whole range from a crawl to a sprint is one continuous push.
+    const PAD_RUN_KNEE: f32 = 0.75;
+
+    /// Poll the most active gamepad into `self.pad`.
+    ///
+    /// Arcade never did this. That — not a wrong button number — is why a
+    /// paired PS5 pad did nothing: the device's state never entered the app,
+    /// so every binding downstream was reading a struct nobody filled.
+    ///
+    /// "Most active" rather than "first": a machine with a wheel, a headset
+    /// and a pad connected should follow whichever the player is holding.
+    /// gamemaker's precedent, and it has the same known limitation — the
+    /// runners-up are DISCARDED, so two pads cannot be two local players yet.
+    fn poll_gamepad(&mut self, cx: &mut Cx) {
+        let mut best: Option<GamepadState> = None;
+        let mut best_score = 0.0f32;
+        for state in cx.game_input_states() {
+            let GameInputState::Gamepad(pad) = state else {
+                continue;
+            };
+            let score = pad.left_stick.x.abs() as f32
+                + pad.left_stick.y.abs() as f32
+                + pad.right_stick.x.abs() as f32
+                + pad.right_stick.y.abs() as f32
+                + pad.left_trigger
+                + pad.right_trigger
+                + pad.a
+                + pad.b
+                + pad.x
+                + pad.y
+                + pad.dpad_up
+                + pad.dpad_down
+                + pad.dpad_left
+                + pad.dpad_right;
+            if best.is_none() || score > best_score {
+                best_score = score;
+                best = Some(pad.clone());
+            }
+        }
+        // Device switching is by activity, not by menu: touch the pad and it
+        // takes over the affordance glyph; touch the keyboard and it hands
+        // back (see `raw_input`). The intent itself is always merged, so
+        // nothing is ever ignored — only the hint changes.
+        if best_score > 0.05 {
+            self.pad_is_active = true;
+        }
+        if std::env::var("ARCADE_PAD_DEBUG").is_ok() {
+            if let Some(p) = &best {
+                log!(
+                    "pad: LS({:+.2},{:+.2}) RS({:+.2},{:+.2}) LT{:.2} RT{:.2} \
+                     a{:.0} b{:.0} x{:.0} y{:.0} L1{:.0} R1{:.0}",
+                    p.left_stick.x, p.left_stick.y, p.right_stick.x, p.right_stick.y,
+                    p.left_trigger, p.right_trigger, p.a, p.b, p.x, p.y,
+                    p.left_shoulder, p.right_shoulder
+                );
             } else {
-                xr_throttle
-            },
-            brake: (down(KeyCode::Space) as i8 as f32).max(self.xr_pad.jump as i8 as f32),
-            ..Default::default()
+                log!("pad: none connected");
+            }
+        }
+        self.pad = best;
+    }
+
+    /// **One normalised intent, three devices.**
+    ///
+    /// Keyboard, gamepad and headset all land in the same [`RawInput`]; the
+    /// rig has no idea which produced it, which is what keeps walking and
+    /// driving from growing a per-device branch each. Merged rather than
+    /// switched — a keyboard press during a stick push still counts.
+    ///
+    /// The ONE place the devices legitimately differ is `run`: a key has no
+    /// deflection, so shift means full run, while a stick derives it from how
+    /// far it is pushed. Everything else is the same signal from a different
+    /// wire.
+    fn raw_input(&mut self, dt: f32) -> RawInput {
+        let down = |k: KeyCode| self.keys.contains(&k);
+        let axis = |pos: bool, neg: bool| pos as i8 as f32 - neg as i8 as f32;
+
+        let key_x = axis(
+            down(KeyCode::ArrowRight) || down(KeyCode::KeyD),
+            down(KeyCode::ArrowLeft) || down(KeyCode::KeyA),
+        );
+        // +y is forward, and W/Up is forward.
+        let key_y = axis(
+            down(KeyCode::ArrowUp) || down(KeyCode::KeyW),
+            down(KeyCode::ArrowDown) || down(KeyCode::KeyS),
+        );
+        let key_run = down(KeyCode::Shift);
+        let key_jump = down(KeyCode::Space);
+        let key_use = down(KeyCode::KeyE);
+        if key_x != 0.0 || key_y != 0.0 || key_jump || key_use {
+            self.pad_is_active = false;
+        }
+
+        let mut raw = RawInput {
+            move_x: key_x,
+            move_y: key_y,
+            // A keyboard cannot express "half forward", so shift is the whole
+            // continuum it gets. This is the only device-specific line here.
+            run: if key_run { 1.0 } else { 0.0 },
+            jump: key_jump,
+            jump_pressed: key_jump && !self.jump_prev,
+            use_pressed: key_use && !self.use_prev,
+            // Held keys drive BOTH modalities; the rig picks by seat, so one
+            // key never needs to know whether the player is walking today.
+            throttle: key_y,
+            brake: 0.0,
+            handbrake: if key_jump { 1.0 } else { 0.0 },
+            look_dx: self.look_accum.x as f32,
+            look_dy: self.look_accum.y as f32,
+        };
+        self.jump_prev = key_jump;
+        self.use_prev = key_use;
+        self.look_accum = dvec2(0.0, 0.0);
+
+        if let Some(pad) = self.pad.clone() {
+            // Left stick + dpad: movement. Passed RAW — the rig's own
+            // `movement_intent` deadzones and normalises it, so there is
+            // exactly one deadzone implementation in the walking path.
+            let stick_x = pad.left_stick.x as f32
+                + axis(pad.dpad_right > 0.5, pad.dpad_left > 0.5);
+            // Stick up reports +y and means forward, same as W.
+            let stick_y = pad.left_stick.y as f32
+                + axis(pad.dpad_up > 0.5, pad.dpad_down > 0.5);
+            if stick_x != 0.0 || stick_y != 0.0 {
+                raw.move_x = stick_x.clamp(-1.0, 1.0);
+                raw.move_y = stick_y.clamp(-1.0, 1.0);
+                // Walk→run from deflection alone: below the knee the stick
+                // scales speed by itself, above it the run multiplier fades
+                // in. No threshold, so nothing snaps.
+                let mag = (raw.move_x * raw.move_x + raw.move_y * raw.move_y)
+                    .sqrt()
+                    .min(1.0);
+                raw.run = ((mag - Self::PAD_RUN_KNEE) / (1.0 - Self::PAD_RUN_KNEE))
+                    .clamp(0.0, 1.0);
+            }
+            // Analog triggers. THIS is why a pad beats a keyboard in a car:
+            // partial pressure is partial acceleration. Confirmed real 0..1
+            // floats from GCController's leftTrigger.value / rightTrigger.value.
+            let trigger = pad.right_trigger - pad.left_trigger;
+            if trigger != 0.0 {
+                raw.throttle = trigger;
+            }
+            // LT is deliberately NOT mapped to `brake` as well. The car block
+            // already does brake-then-reverse by context from the throttle
+            // sign alone (car.rs: negative throttle while rolling forward
+            // applies braking; once stopped it drives backward). Setting
+            // `brake` at the same time adds a force that opposes the reverse
+            // it just asked for, which reads as "reverse barely works".
+            raw.handbrake = raw.handbrake.max(pad.right_shoulder);
+            // Right stick: camera. Its own deadzone, then scaled into the
+            // same pixel-equivalent units the mouse produces so both share
+            // the rig's clamped pitch and smoothing.
+            let (lx, ly) = makepad_game_blocks::movement_intent(
+                pad.right_stick.x as f32,
+                pad.right_stick.y as f32,
+                Self::PAD_LOOK_DEADZONE,
+            );
+            let invert = if std::env::var("ARCADE_INVERT_Y").is_ok() { -1.0 } else { 1.0 };
+            raw.look_dx += lx * Self::PAD_LOOK_SPEED * dt;
+            raw.look_dy += ly * Self::PAD_LOOK_SPEED * dt * invert;
+            // Cross jumps; Square always interacts. Cross ALSO interacts when
+            // something is in reach, because "Press ✕ to drive" is the hint a
+            // player expects — the prompt is on screen at that moment, so the
+            // meaning is never ambiguous, and Square stays available if you
+            // did want to jump beside a car.
+            let cross = pad.a > 0.5;
+            let square = pad.x > 0.5;
+            let offered = self.prompt.is_some();
+            let cross_edge = cross && !self.pad_jump_prev;
+            let square_edge = square && !self.pad_use_prev;
+            raw.jump |= cross && !offered;
+            raw.jump_pressed |= cross_edge && !offered;
+            raw.use_pressed |= square_edge || (cross_edge && offered);
+            self.pad_jump_prev = cross;
+            self.pad_use_prev = square;
+        }
+
+        // A headset drives the same player as everything else.
+        if self.xr_active {
+            if raw.move_x == 0.0 && raw.move_y == 0.0 {
+                raw.move_x = self.xr_pad.axis_x as f32;
+                raw.move_y = -self.xr_pad.axis_z as f32;
+            }
+            raw.jump |= self.xr_pad.jump;
+            raw.jump_pressed |= self.xr_pad.jump_pressed;
+            raw.use_pressed |= self.xr_pad.grab_pressed;
+        }
+        raw
+    }
+
+    /// Resolve the activity button, then advance the player rig.
+    ///
+    /// Runs BEFORE `session.tick` (which does pre_step → step_world →
+    /// post_step) because the rig produces the input those steps consume, and
+    /// before `sync_local_player` so slot 0 replicates this tick's camera yaw
+    /// rather than the last one's.
+    fn tick_player(&mut self, mut raw: RawInput) {
+        let world_rc = self.world.clone();
+        let blocks_rc = self.blocks.clone();
+        let mut world = world_rc.borrow_mut();
+        let mut blocks = blocks_rc.borrow_mut();
+
+        let Some(rig) = blocks.player_rigs.get(&PlayerId(0)).copied() else {
+            self.prompt = None;
+            return;
+        };
+
+        // Ask ONCE what the button would do. The same answer draws the prompt
+        // and performs the press, so the hint can never promise something
+        // different from what happens.
+        let subject = rig.mount.subject();
+        let facing = makepad_game_sim::heading_to_forward(rig.camera.yaw);
+        let found = world.entity(subject).map(|e| e.pos).and_then(|pos| {
+            interact::choose(&world, &blocks, &self.interact, rig.seat(), pos, facing)
+        });
+        self.prompt = found
+            .as_ref()
+            .map(|f| format!("Press {} to {}", self.activity_glyph(), f.prompt));
+        // Publish on the engine's own HUD channel rather than a private field,
+        // so the affordance appears wherever a HUD is drawn instead of only in
+        // whichever host happened to build it. Arcade has no HUD renderer yet,
+        // which is why the mechanic is currently discoverable only by pressing
+        // the button — the single biggest gap left in this binding.
+        world.hud_slots.retain(|(name, _)| name != "interact");
+        if let Some(text) = &self.prompt {
+            world.hud_slots.push((
+                "interact".to_string(),
+                makepad_game_sim::HudSlot {
+                    text: text.clone(),
+                    color: vec4(1.0, 1.0, 1.0, 0.9),
+                    size: 1.0,
+                    anchor: makepad_game_sim::HudAnchor::Bottom,
+                },
+            ));
+        }
+
+        if raw.use_pressed {
+            match found.map(|f| f.action(self.player)) {
+                // The rig owns the seat, so the press passes through to it.
+                Some(InteractAction::ToggleMount) => {}
+                // An interior is a pocket elsewhere in the same world, so
+                // going inside is a position write — the same shape as the
+                // NPCs' DoorUse, performed by the host rather than a block.
+                Some(InteractAction::Teleport { entity, to }) => {
+                    if let Some(e) = world.entity_mut(entity) {
+                        e.pos = to;
+                        e.vel = vec3f(0.0, 0.0, 0.0);
+                    }
+                    raw.use_pressed = false;
+                }
+                // Arcade has no script VM, so a declared interactable has
+                // nowhere to dispatch to yet. Consumed rather than leaked to
+                // the mount, which would silently put the player in a car.
+                Some(InteractAction::Script { .. }) => raw.use_pressed = false,
+                // Nothing in reach: a silent no-op, not a mount attempt.
+                None => raw.use_pressed = false,
+            }
+        }
+
+        let mut intents = HashMap::new();
+        intents.insert(PlayerId(0), raw);
+        blocks.tick_player_rigs(&mut world, &intents);
+        // Publish the smoothed pivot and the obstruction-limited boom for the
+        // renderer. Local tier: the camera never reaches the sim, so this is
+        // the last thing that happens to it.
+        if let Some(rig) = blocks.player_rigs.get(&PlayerId(0)) {
+            rig.apply_camera(&mut world);
+        }
+        world.sync_local_player();
+    }
+
+    /// Name the primary activity button for the device in the player's hands.
+    /// A hint that says "E" to someone holding a pad is worse than no hint.
+    fn activity_glyph(&self) -> &'static str {
+        if self.pad_is_active {
+            "✕"
+        } else {
+            "E"
         }
     }
 
@@ -1804,8 +2170,8 @@ impl ArcadeView {
             self.particles.step(TICK_DT, &lookup);
         }
 
-        let player_input = self.player_input();
-        self.blocks.borrow_mut().player_input = player_input;
+        let raw = self.raw_input(TICK_DT);
+        self.tick_player(raw);
         // One tick, whichever role this device holds: Local and Host simulate,
         // a Client applies host truth and derives the rest.
         let now = self.world.borrow().tick as f64 * TICK_DT as f64;
@@ -1879,13 +2245,22 @@ impl ArcadeView {
     }
 
     fn scene(&self, rect: Rect, time: f64) -> Option<SceneState3D> {
+        // With a player, the rig owns the camera — including WHAT it follows,
+        // so it tracks the car the moment you get in with no branch here.
+        // view_angles() is already in the renderer's convention (which is the
+        // mirror of the sim's heading convention); handing it straight over is
+        // deliberate, and negating anything here would be the bug.
+        let (yaw, pitch) = match self.blocks.borrow().player_rigs.get(&PlayerId(0)) {
+            Some(rig) => rig.view_angles(),
+            None => (self.orbit_yaw, self.orbit_pitch),
+        };
         render_scene_state(
             &self.world.borrow(),
             rect,
             time,
             &CameraRig {
-                yaw: self.orbit_yaw,
-                pitch: self.orbit_pitch,
+                yaw,
+                pitch,
                 in_test: false,
             },
         )
@@ -1928,14 +2303,19 @@ impl Widget for ArcadeView {
             let time = cx.seconds_since_app_start();
             let last = self.last_time.replace(time).unwrap_or(time);
             self.time_accum += (time - last).min(0.25);
+            // Once per frame, not once per tick: the pad is device state, and
+            // polling it twice inside one catch-up would double-count edges.
+            self.poll_gamepad(cx);
             let mut ticked = false;
             while self.time_accum >= TICK_DT as f64 {
                 self.time_accum -= TICK_DT as f64;
                 if self.script.is_some() {
                     // Script mode: the host owns on_tick, timers and physics.
-                    let input = self.player_input();
+                    // The rig still runs here, because it produces the input
+                    // those steps consume.
+                    let raw = self.raw_input(TICK_DT);
+                    self.tick_player(raw);
                     if let Some(host) = &mut self.script {
-                        host.blocks.borrow_mut().player_input = input;
                         host.tick(cx, TICK_DT);
                     }
                 } else {
@@ -1981,6 +2361,12 @@ impl Widget for ArcadeView {
             Event::MouseMove(me) => {
                 if let Some(last) = self.orbit_last_abs {
                     let delta = me.abs - last;
+                    // Accumulated, not applied: the mouse reports faster than
+                    // the 60Hz tick, and dropping the extra samples would make
+                    // a fast flick turn less than a slow one.
+                    self.look_accum += delta;
+                    self.pad_is_active = false;
+                    // Fallback pose for the no-player debug view.
                     self.orbit_yaw -= delta.x as f32 * 0.01;
                     self.orbit_pitch =
                         (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
@@ -2193,8 +2579,22 @@ impl Widget for ArcadeView {
                 // GPU skinning (the bone palette is already computed here, so
                 // the swap is this loop plus a shader) or impostors for the
                 // distant ones.
+                // While seated the player IS the car; drawing their body too
+                // leaves a second copy of them standing in the road.
+                let hide_player = matches!(
+                    self.blocks
+                        .borrow()
+                        .player_rigs
+                        .get(&PlayerId(0))
+                        .map(|r| r.seat()),
+                    Some(Seat::Driving(_))
+                );
+                let player_entity = self.player;
                 let cast = &self.cast;
                 for (i, v) in self.villagers.iter_mut().enumerate() {
+                    if hide_player && v.entity == player_entity {
+                        continue;
+                    }
                     let Some(c) = cast.get(v.kind).filter(|c| c.texture.is_some()) else {
                         continue;
                     };

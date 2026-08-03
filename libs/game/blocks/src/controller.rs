@@ -80,7 +80,23 @@ impl CameraConfig {
     /// the car once the player stops looking around.
     pub fn in_vehicle() -> Self {
         Self {
-            distance: 9.0,
+            // Sized against how far the car travels, not against how big it
+            // looks parked. `CarConfig::top_speed` is 24 m/s, so a 9m boom
+            // showed well under a second of road ahead — the reported "a bit
+            // too close", and the reason a corner arrives before you can plan
+            // for it. 13m is a shade over half a second at speed, and
+            // `speed_pullback` takes the effective range to ~17m at cruise
+            // while leaving it tight enough to park with.
+            //
+            // If `top_speed` ever moves, this wants to move with it: the boom
+            // is a time budget, not a length.
+            distance: 13.0,
+            // Deliberately NOT raised alongside the boom. The eye sits at
+            // `pivot.y + sin(pitch)·boom`, so a longer boom already lifts the
+            // camera — about 1.2m more at the resting pitch — and the car
+            // drops in frame on its own, which is the thing a higher pivot
+            // would have been for. Driving stays lower than walking, which is
+            // what makes a car feel planted.
             pivot_height: 1.1,
             follow_rate: 6.5,
             rotate_rate: 9.0,
@@ -335,6 +351,16 @@ pub struct Mount {
     pub reach: f32,
     /// Camera blend length when changing seats.
     pub blend: f32,
+    /// What `hidden` was before we sat down, so getting out restores it rather
+    /// than asserting a value.
+    ///
+    /// `hidden` is the HOST's field, meaning "my appearance comes from a mesh,
+    /// so do not also draw my collider box". Every game that uses a model
+    /// rather than a coloured box sets it — which is every real game. Clearing
+    /// it on dismount pops a grey collision slab into the world next to the
+    /// car, and the host cannot fix that without re-asserting `hidden` every
+    /// tick forever. Seating is our state; visibility is theirs.
+    was_hidden: bool,
 }
 
 impl Mount {
@@ -344,6 +370,7 @@ impl Mount {
             character,
             reach: 3.5,
             blend: 0.35,
+            was_hidden: false,
         }
     }
 
@@ -385,8 +412,19 @@ impl Mount {
                 // The character is parked, not destroyed: keeping the entity
                 // means the walk state, the camera history and anything the
                 // game attached to it all survive the round trip.
+                //
+                // Parked means RIDING, via the sim's own seat pin. `hidden`
+                // alone would not do: it means "solid to everything, drawn by
+                // nothing", so the driver's body stayed behind as an invisible
+                // wall at the spot they boarded — drive back past it later and
+                // you hit nothing you can see. `attached_to` takes the body out
+                // of physics and carries it with the car, and releases itself
+                // if the car despawns.
                 if let Some(c) = world.entity_mut(self.character) {
+                    self.was_hidden = c.hidden;
                     c.hidden = true;
+                    c.attached_to = car;
+                    c.attach_offset = vec3f(0.0, 0.0, 0.0);
                     c.vel = vec3f(0.0, 0.0, 0.0);
                 }
                 self.seat = Seat::Driving(car);
@@ -418,7 +456,11 @@ impl Mount {
                     .find(|p| makepad_game_sim::sense::spot_clear(world, self.character, *p, half))
                     .unwrap_or_else(|| vec3f(cpos.x, cpos.y + 0.5, cpos.z));
                 if let Some(c) = world.entity_mut(self.character) {
-                    c.hidden = false;
+                    // Restored, not cleared — see `was_hidden`.
+                    c.hidden = self.was_hidden;
+                    // Off the seat pin before the position write, or the next
+                    // step would snap the body straight back onto the car.
+                    c.attached_to = 0;
                     c.pos = out;
                     c.vel = vec3f(0.0, 0.0, 0.0);
                 }
@@ -567,7 +609,10 @@ impl PlayerRig {
         }
         self.mount.seat = Seat::OnFoot;
         if let Some(c) = world.entity_mut(self.mount.character) {
-            c.hidden = false;
+            c.hidden = self.mount.was_hidden;
+            // The sim clears this itself when an owner despawns, but eject is
+            // also reachable by other routes; clearing it twice is free.
+            c.attached_to = 0;
             c.vel = vec3f(0.0, 0.0, 0.0);
         }
         self.camera
@@ -850,6 +895,26 @@ mod tests {
             (cam.effective().distance - car).abs() < 1e-4,
             "blend did not finish: {}",
             cam.effective().distance
+        );
+    }
+
+    #[test]
+    fn the_chase_camera_shows_enough_road_to_plan_a_turn() {
+        // The boom is a time budget, not a length. Against a 24 m/s top speed
+        // the old 9m showed under half a second of road, which is the reported
+        // "a bit too close" and why a corner arrives before you can plan for
+        // it. Expressed against `top_speed` so that raising the car's speed
+        // fails here instead of quietly making the camera too tight again.
+        let car = CameraConfig::in_vehicle();
+        let top = crate::CarConfig::default().top_speed;
+        let seconds = car.distance / top;
+        assert!(seconds > 0.5, "only {seconds:.2}s of road ahead at top speed");
+        // The speed pullback must not be the only thing keeping it usable:
+        // parking and manoeuvring happen at zero speed, where it contributes
+        // nothing.
+        assert!(
+            car.distance > CameraConfig::on_foot().distance * 1.5,
+            "the driving camera is barely further out than the walking one"
         );
     }
 
