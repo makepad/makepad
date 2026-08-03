@@ -5,7 +5,7 @@
 //! VerbFn>` once at handle-registration time, so a call is one hash lookup
 //! instead of up to 84 compares on the hot path.
 
-use crate::build::{spawn_entity, spawn_terrain};
+use crate::build::{spawn_entity, spawn_entity_unchecked, spawn_terrain};
 use crate::callbacks::CallbackTable;
 use crate::value::*;
 use makepad_game_blocks::{
@@ -53,7 +53,7 @@ impl ToneWave {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AudioRequest {
     Sfx { name: String, pitch: f32 },
-    Beep { freq: f32, to: f32, ms: f32, gain: f32 },
+    Beep { freq: f32, to: f32, ms: f32, wave: ToneWave, gain: f32 },
     Jingle { notes: String, ms: f32 },
     Tone { id: u64, freq: f32, wave: ToneWave, gain: f32 },
     ToneSet { id: u64, freq: Option<f32>, gain: Option<f32> },
@@ -721,24 +721,29 @@ fn v_sfx(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
 }
 
 fn v_beep(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
-    let (mut freq, mut to, mut ms, mut gain) = (440.0f32, 0.0f32, 120.0f32, 0.3f32);
-    if let Some(opts) = opts_of(vm, args, 0) {
-        warn_unknown_keys(vm, &ctx.world, "beep", opts, &[id!(freq), id!(to), id!(ms), id!(gain), id!(wave)]);
-        freq = opt_f32(vm, opts, id!(freq), freq);
-        to = opt_f32(vm, opts, id!(to), to);
-        ms = opt_f32(vm, opts, id!(ms), ms);
-        gain = opt_f32(vm, opts, id!(gain), gain);
-    }
+    let Some(opts) = opts_of(vm, args, 0) else {
+        return nil();
+    };
+    warn_unknown_keys(vm, &ctx.world, "beep", opts, &[id!(freq), id!(to), id!(ms), id!(gain), id!(wave)]);
+    let freq = opt_f32(vm, opts, id!(freq), 440.0);
+    // `to` defaults to `freq` — a beep with no sweep, not a sweep to silence.
+    let to = opt_f32(vm, opts, id!(to), freq);
+    let ms = opt_f32(vm, opts, id!(ms), 120.0);
+    let gain = opt_f32(vm, opts, id!(gain), 0.25);
+    let wave = match opt_string(vm, opts, id!(wave)) {
+        Some(name) => ToneWave::parse(&name),
+        None => ToneWave::Square,
+    };
     ctx.audio
         .borrow_mut()
-        .push(AudioRequest::Beep { freq, to, ms, gain });
+        .push(AudioRequest::Beep { freq, to, ms, wave, gain });
     nil()
 }
 
 fn v_jingle(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
     let notes = arg_string(vm, args, 0);
     let ms_v = arg(vm, args, 1);
-    let ms = if ms_v.is_nil() { 140.0 } else { value_f32(vm, ms_v) };
+    let ms = if ms_v.is_nil() { 100.0 } else { value_f32(vm, ms_v) };
     ctx.audio
         .borrow_mut()
         .push(AudioRequest::Jingle { notes, ms });
@@ -780,7 +785,8 @@ fn spawn_entity_from_opts(
     let wrapper = vm.bx.heap.new_object();
     vm.bx.heap.set_object_storage_vec2(wrapper);
     vm.bx.heap.vec_push_unchecked(wrapper, NIL, opts.into());
-    let out = spawn_entity(vm, &ctx.world, wrapper, kind);
+    // Unchecked: the block verb validated the (larger) option set already.
+    let out = spawn_entity_unchecked(vm, &ctx.world, wrapper, kind);
     vm.release_transient(wrapper.into());
     out
 }
@@ -2338,6 +2344,73 @@ mod tests {
         assert_eq!(suggest("chekpoint"), Some("checkpoint"));
         assert_eq!(suggest("cammera"), Some("camera"));
         assert_eq!(suggest("zzzzzzzzzz"), None);
+    }
+
+    #[test]
+    fn block_options_are_not_warned_as_unknown_box_options() {
+        // car/character/plane spawn their body through the box path, which has
+        // a smaller allowed-key set. Re-checking there flagged every block
+        // option as a typo — eight bogus warnings per eval of the racing
+        // fixture, straight into the channel the agent reads.
+        let mut harness = Harness::new();
+        let mut vm = harness.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let pos = vec3_value(&mut vm, vec3f(0.0, 1.0, 0.0));
+        let opts = opts_of_pairs(
+            &mut vm,
+            &[
+                (id!(pos), pos),
+                (id!(top_speed), ScriptValue::from_f64(30.0)),
+                (id!(player), ScriptValue::from_f64(1.0)),
+            ],
+        );
+        call("car", &mut vm, &ctx, &[opts]);
+        let warnings: Vec<String> = ctx
+            .world
+            .borrow()
+            .log_pending
+            .iter()
+            .filter(|line| line.contains("unknown option"))
+            .cloned()
+            .collect();
+        assert!(warnings.is_empty(), "spurious warnings: {warnings:?}");
+
+        // A genuine typo on a box must still warn — the guard is scoped to the
+        // block path, not a blanket disable. (The key prints as a hex LiveId
+        // here because a never-interned identifier has no string in the LUT.)
+        let typo = opts_of_pairs(&mut vm, &[(id!(psoition), ScriptValue::from_f64(1.0))]);
+        call("box", &mut vm, &ctx, &[typo]);
+        let box_warnings = ctx
+            .world
+            .borrow()
+            .log_pending
+            .iter()
+            .filter(|l| l.contains("unknown option"))
+            .count();
+        assert_eq!(box_warnings, 1, "a real typo on game.box must still warn");
+    }
+
+    #[test]
+    fn beep_defaults_match_the_reference_host() {
+        // `to` defaults to `freq` (a beep, not a sweep to silence) and the
+        // wave option is actually read — both were wrong here while gamemaker
+        // carried the second implementation.
+        let mut harness = Harness::new();
+        let mut vm = harness.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let opts = opts_of_pairs(&mut vm, &[(id!(freq), ScriptValue::from_f64(880.0))]);
+        call("beep", &mut vm, &ctx, &[opts]);
+        let queued = ctx.audio.borrow().first().cloned();
+        match queued {
+            Some(AudioRequest::Beep { freq, to, ms, wave, gain }) => {
+                assert_eq!(freq, 880.0);
+                assert_eq!(to, 880.0);
+                assert_eq!(ms, 120.0);
+                assert_eq!(wave, ToneWave::Square);
+                assert_eq!(gain, 0.25);
+            }
+            other => panic!("expected a Beep request, got {other:?}"),
+        }
     }
 
     #[test]

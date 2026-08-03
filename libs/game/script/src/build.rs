@@ -18,10 +18,34 @@ pub(crate) fn spawn_entity(
     args: ScriptObject,
     kind: BodyKind,
 ) -> ScriptValue {
+    spawn_entity_inner(vm, world, args, kind, true)
+}
+
+/// Block verbs (car/character/plane) reuse this body-spawning path but have
+/// already validated their own, larger option set — re-checking here would
+/// flag every block option (`top_speed`, `player`, ...) as an unknown box
+/// option. A typo warning that cries wolf is worse than none.
+pub(crate) fn spawn_entity_unchecked(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    args: ScriptObject,
+    kind: BodyKind,
+) -> ScriptValue {
+    spawn_entity_inner(vm, world, args, kind, false)
+}
+
+fn spawn_entity_inner(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    args: ScriptObject,
+    kind: BodyKind,
+    warn: bool,
+) -> ScriptValue {
     let opts_val = arg(vm, args, 0);
     let Some(opts) = opts_val.as_object() else {
         return NIL;
     };
+    if warn {
     warn_unknown_keys(
         vm,
         world,
@@ -49,6 +73,7 @@ pub(crate) fn spawn_entity(
             id!(restitution),
         ],
     );
+    }
     let pos_v = opts_value(vm, opts, id!(pos));
     let size_v = opts_value(vm, opts, id!(size));
     let color_v = opts_value(vm, opts, id!(color));
