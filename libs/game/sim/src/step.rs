@@ -42,6 +42,16 @@ pub fn step_world(world: &mut GameWorld) {
         })
         .map(Solid::from)
         .collect();
+    // Wedges are RAMPS, not walls. They are excluded from the axis sweeps and
+    // handled as floors below, the same way the terrain is: a surface you walk
+    // up, blocked only where it rises faster than you can climb. Collided as
+    // their bounding box (which is what happened before) the ramp built to be
+    // walked and driven up was an invisible cube.
+    let walls: Vec<Solid> = statics
+        .iter()
+        .filter(|s| s.shape != Shape::Wedge)
+        .copied()
+        .collect();
     /// A step this tall walks up for free (Godot floor snapping over the
     /// terraced 0.5 steps); anything taller is a cliff wall.
     const CLIMB: f32 = 0.55;
@@ -86,11 +96,19 @@ pub fn step_world(world: &mut GameWorld) {
         // falling doesn't stick, and floors resolve last for on_floor).
         e.hit_wall = 0;
         let feet = e.pos.y - e.half.y;
-        let (nx, hx, hx_id) = sweep_axis(&statics, e.id, e.pos, e.half, 0, e.vel.x * TICK_DT);
+        let (nx, hx, hx_id) = sweep_axis(&walls, e.id, e.pos, e.half, 0, e.vel.x * TICK_DT);
         e.pos.x = nx;
         if hx != 0.0 {
             e.vel.x = 0.0;
             e.hit_wall = hx_id;
+        }
+        // A ramp too steep to step onto blocks exactly like a terrain cliff —
+        // which is what makes the wedge's vertical back face still a wall.
+        if let Some((ramp, _)) = ramp_floor_under(&statics, e.pos, e.half) {
+            if ramp > feet + CLIMB {
+                e.pos.x = nx - e.vel.x * TICK_DT;
+                e.vel.x = 0.0;
+            }
         }
         // Terrain cliffs block sideways movement; steps ≤ CLIMB pass (the y
         // pass snaps the mover up onto them).
@@ -105,7 +123,7 @@ pub fn step_world(world: &mut GameWorld) {
                 }
             }
         }
-        let (nz, hz, hz_id) = sweep_axis(&statics, e.id, e.pos, e.half, 2, e.vel.z * TICK_DT);
+        let (nz, hz, hz_id) = sweep_axis(&walls, e.id, e.pos, e.half, 2, e.vel.z * TICK_DT);
         e.pos.z = nz;
         if hz != 0.0 {
             e.vel.z = 0.0;
@@ -124,7 +142,13 @@ pub fn step_world(world: &mut GameWorld) {
                 }
             }
         }
-        let (ny, hy, hy_id) = sweep_axis(&statics, e.id, e.pos, e.half, 1, e.vel.y * TICK_DT);
+        if let Some((ramp, _)) = ramp_floor_under(&statics, e.pos, e.half) {
+            if ramp > feet + CLIMB {
+                e.pos.z = nz - e.vel.z * TICK_DT;
+                e.vel.z = 0.0;
+            }
+        }
+        let (ny, hy, hy_id) = sweep_axis(&walls, e.id, e.pos, e.half, 1, e.vel.y * TICK_DT);
         e.pos.y = ny;
         e.on_floor = false;
         e.floor_id = 0;
@@ -137,6 +161,18 @@ pub fn step_world(world: &mut GameWorld) {
             if e.hit_wall == 0 && e.hits {
                 // A lobbed projectile landing counts as a hit too.
                 e.hit_wall = hy_id;
+            }
+        }
+        // A ramp is a floor: standing on the slope is the point of it.
+        if let Some((ramp, id)) = ramp_floor_under(&statics, e.pos, e.half) {
+            let floor_y = ramp + e.half.y;
+            if e.pos.y <= floor_y {
+                e.pos.y = floor_y;
+                if e.vel.y <= 0.0 {
+                    e.on_floor = true;
+                    e.floor_id = id;
+                    e.vel.y = 0.0;
+                }
             }
         }
         // The terrain is a floor: feet never sink below the ground surface.
@@ -326,4 +362,160 @@ pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
         }
     }
     touches
+}
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::*;
+
+    /// A ramp 12 wide, 2 tall, 7 deep, sitting on the ground: its surface runs
+    /// from y=0 at z=-7 up to y=4 at z=+7.
+    fn world_with_ramp() -> GameWorld {
+        let mut w = GameWorld::new();
+        w.gravity = 30.0;
+        // Ground. Without it the walker falls past the ramp and meets it from
+        // BELOW, where being blocked is correct — which is what the first
+        // version of this test was actually measuring.
+        w.next_id += 1;
+        let ground = w.next_id;
+        w.push_entity(Entity {
+            id: ground,
+            kind: BodyKind::Static,
+            shape: Shape::Box,
+            pos: vec3f(0.0, -0.5, 0.0),
+            half: vec3f(60.0, 0.5, 60.0),
+            collide: true,
+            push_mass: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            density: 1.0,
+            friction: 0.6,
+            ..Default::default()
+        });
+        w.next_id += 1;
+        let ramp = w.next_id;
+        w.push_entity(Entity {
+            id: ramp,
+            kind: BodyKind::Static,
+            shape: Shape::Wedge,
+            pos: vec3f(0.0, 2.0, 0.0),
+            half: vec3f(6.0, 2.0, 7.0),
+            collide: true,
+            push_mass: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            density: 1.0,
+            friction: 0.6,
+            ..Default::default()
+        });
+        w.next_id += 1;
+        let walker = w.next_id;
+        w.push_entity(Entity {
+            id: walker,
+            kind: BodyKind::Mover,
+            shape: Shape::Box,
+            // On the ground just in front of the ramp's low edge.
+            pos: vec3f(0.0, 0.9, -9.0),
+            half: vec3f(0.35, 0.9, 0.35),
+            collide: true,
+            gravity_scale: 1.0,
+            push_mass: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            density: 1.0,
+            friction: 0.6,
+            ..Default::default()
+        });
+        w
+    }
+
+    fn walker(w: &GameWorld) -> Entity {
+        w.entities.iter().find(|e| e.kind == BodyKind::Mover).unwrap().clone()
+    }
+
+    /// The reported bug: "i dont seem to be able to walk the character up the
+    /// slanted block towards the platform".
+    ///
+    /// A wedge was collided as the box that CONTAINS it, so the ramp built to
+    /// be walked up presented a vertical wall at its low edge. Walking into it
+    /// stopped you dead against nothing you could see.
+    #[test]
+    fn a_character_can_walk_up_a_ramp() {
+        let mut w = world_with_ramp();
+        let start = walker(&w).pos;
+        for _ in 0..180 {
+            if let Some(e) = w.entities.iter_mut().find(|e| e.kind == BodyKind::Mover) {
+                e.vel.x = 0.0;
+                e.vel.z = 4.0; // walk toward the ramp's low edge and up it
+            }
+            step_world(&mut w);
+        }
+        let end = walker(&w).pos;
+        assert!(
+            end.z > start.z + 6.0,
+            "walker only advanced from z={:.2} to z={:.2} — it is stuck on the ramp's face",
+            start.z,
+            end.z
+        );
+        assert!(
+            end.y > start.y + 1.5,
+            "walker reached z={:.2} but only rose to y={:.2} from {:.2} — it walked THROUGH the \
+             ramp instead of up it",
+            end.z,
+            end.y,
+            start.y
+        );
+    }
+
+    /// The slope is walkable; the vertical back face is not. Approaching from
+    /// behind (+z, walking in -z) must still be blocked, or the "ramp" is just
+    /// a hole in the world.
+    #[test]
+    fn the_ramps_tall_back_face_is_still_a_wall() {
+        let mut w = world_with_ramp();
+        if let Some(e) = w.entities.iter_mut().find(|e| e.kind == BodyKind::Mover) {
+            e.pos = vec3f(0.0, 0.9, 9.0); // behind the tall edge, on the ground
+        }
+        for _ in 0..120 {
+            if let Some(e) = w.entities.iter_mut().find(|e| e.kind == BodyKind::Mover) {
+                e.vel.z = -4.0;
+            }
+            step_world(&mut w);
+        }
+        let end = walker(&w);
+        assert!(
+            end.pos.z > 6.5,
+            "walker at z={:.2} pushed into the ramp's full-height back face",
+            end.pos.z
+        );
+        assert!(
+            end.pos.y < 2.0,
+            "walker was lifted to y={:.2} by a face it should have been stopped by",
+            end.pos.y
+        );
+    }
+
+    /// Standing on the slope must report a floor, or the controller refuses to
+    /// jump and the walk animation never plays.
+    #[test]
+    fn standing_on_the_slope_counts_as_being_on_the_floor() {
+        let mut w = world_with_ramp();
+        if let Some(e) = w.entities.iter_mut().find(|e| e.kind == BodyKind::Mover) {
+            e.pos = vec3f(0.0, 4.0, 0.0); // above the middle of the ramp
+        }
+        for _ in 0..90 {
+            step_world(&mut w);
+        }
+        let end = walker(&w);
+        assert!(end.on_floor, "not on_floor while resting on the ramp");
+        // Mid-ramp the surface is half its height: 0 + 2.0, plus half a body.
+        assert!(
+            (end.pos.y - (2.0 + 0.9)).abs() < 0.2,
+            "resting at y={:.2}, expected ~2.9 on the middle of the slope",
+            end.pos.y
+        );
+    }
 }

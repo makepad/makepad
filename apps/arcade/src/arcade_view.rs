@@ -291,10 +291,21 @@ pub struct ArcadeView {
 /// after the world is composed, so placement code stays terrain-unaware and
 /// there is exactly one place that knows the rule.
 ///
-/// The entity's own bottom is what lands on the ground, not its centre, so a
-/// tree and a fence post both meet the slope rather than being buried by half
-/// their height. Anything tagged `ground` or `water` is skipped: those are
-/// world-spanning slabs whose height is the whole point of them.
+/// The ground height is ADDED to the authored y rather than replacing it.
+///
+/// Replacing looks equivalent — everything is authored resting on flat ground,
+/// so `y = ground + half.y` puts it back where it was — right up until
+/// something is deliberately in the air. A platform authored six units up, a
+/// ramp with a buried base, a sign on a post: replacing flattens all of them
+/// onto the dirt, and the failure looks like the level designer's fault rather
+/// than this function's.
+///
+/// Adding keeps both properties: on flat ground nothing moves at all (so this
+/// is a no-op against everything authored before terrain existed), and on a
+/// slope everything rides up with the ground it was placed on.
+///
+/// Anything tagged `ground` or `water` is skipped — those are world-spanning
+/// slabs whose height is the whole point of them.
 fn conform_statics_to_terrain(world: &mut GameWorld) {
     let Some(terrain) = world.terrain.clone() else {
         return;
@@ -304,7 +315,7 @@ fn conform_statics_to_terrain(world: &mut GameWorld) {
             continue;
         }
         if let Some(h) = terrain.height_at(e.pos.x, e.pos.z) {
-            e.pos.y = h + e.half.y;
+            e.pos.y += h;
         }
     }
     world.mark_render_dirty();
@@ -983,6 +994,37 @@ impl ArcadeView {
         if let Some(e) = w.entity_mut(road) {
             e.collide = false;
         }
+        // A crossroads. One straight road reads as a corridor you drive along;
+        // a junction is the smallest thing that makes a place feel like it has
+        // somewhere else to be. Same flat slab treatment — `collide: false`,
+        // so it is a surface rather than a kerb.
+        let cross = spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(0.0, 0.02, 0.0),
+            vec3f(7.0, 0.05, 52.0),
+            vec4(0.30, 0.30, 0.32, 1.0),
+            "road",
+        );
+        if let Some(e) = w.entity_mut(cross) {
+            e.collide = false;
+        }
+        // A side street out to the yard, so the physics corner is somewhere
+        // you drive TO rather than somewhere that happens to be nearby.
+        let side = spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(-20.0, 0.02, 11.0),
+            vec3f(4.0, 0.05, 11.0),
+            vec4(0.32, 0.32, 0.34, 1.0),
+            "road",
+        );
+        if let Some(e) = w.entity_mut(side) {
+            e.collide = false;
+        }
+
         // A short verge path from the road up to the middle house, so the
         // houses read as connected to the street rather than parked near it.
         let path = spawn(
@@ -1023,6 +1065,35 @@ impl ArcadeView {
             vec4(0.35, 0.6, 0.8, 1.0),
             "platform",
         );
+        // --- the jump course ------------------------------------------
+        // A route you can actually complete: step up, cross a platform that
+        // slides, ride one that rises, land on the far side. Laid out so the
+        // ramp's high edge is a natural run-up, which is what turns two
+        // separate toys into one thing to do.
+        //
+        // Gaps are sized against the character's jump, not eyeballed: the
+        // controller clears roughly 4 units of horizontal distance, so 4.5-unit
+        // spacing needs a committed jump without being a coin flip.
+        let course: [(&str, Vec3f, Vec3f, Vec4f); 4] = [
+            // A low static step to start from — somewhere to stand and look
+            // at the rest of the course before committing.
+            ("step", vec3f(-24.0, 1.2, 26.0), vec3f(2.2, 0.4, 2.2), vec4(0.55, 0.52, 0.46, 1.0)),
+            // Slides side to side across your path.
+            ("platform_x", vec3f(-28.5, 2.6, 30.0), vec3f(2.6, 0.4, 2.6), vec4(0.35, 0.60, 0.80, 1.0)),
+            // Rises and falls: an elevator you have to time.
+            ("platform_y", vec3f(-33.0, 4.2, 34.0), vec3f(2.6, 0.4, 2.6), vec4(0.42, 0.70, 0.52, 1.0)),
+            // The payoff — a wide, still ledge that is obviously the end.
+            ("goal", vec3f(-38.0, 6.0, 38.0), vec3f(3.2, 0.5, 3.2), vec4(0.80, 0.66, 0.32, 1.0)),
+        ];
+        for (tag, pos, half, color) in course {
+            let kind = if tag.starts_with("platform") {
+                BodyKind::Kinematic
+            } else {
+                BodyKind::Static
+            };
+            spawn(w, kind, Shape::Box, pos, half, color, tag);
+        }
+
         // Falling movers: land, rest, cast blob shadows.
         for i in 0..5 {
             spawn(
@@ -2278,6 +2349,11 @@ impl ArcadeView {
             match e.tag.as_str() {
                 // Kinematic platform: glide side to side.
                 "platform" => e.vel.x = makepad_game_math::cos(t * 0.7) * 5.0,
+                // The jump course. Deliberately different periods, so the two
+                // moving platforms drift in and out of phase instead of
+                // presenting the same crossing every lap.
+                "platform_x" => e.vel.x = makepad_game_math::cos(t * 0.55) * 4.2,
+                "platform_y" => e.vel.y = makepad_game_math::cos(t * 0.42) * 2.6,
                 // Bouncer: relaunch on landing.
                 "bouncer" => {
                     if e.on_floor {

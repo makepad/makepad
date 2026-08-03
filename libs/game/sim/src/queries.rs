@@ -162,6 +162,9 @@ pub struct Solid {
     pub pos: Vec3f,
     pub half: Vec3f,
     pub vel: Vec3f,
+    /// Carried so a sloped solid can be walked up instead of collided with as
+    /// the box that contains it — see [`ramp_floor_under`].
+    pub shape: Shape,
 }
 
 impl From<&Entity> for Solid {
@@ -172,8 +175,65 @@ impl From<&Entity> for Solid {
             pos: e.pos,
             half: e.half,
             vel: e.vel,
+            shape: e.shape,
         }
     }
+}
+
+/// Height of the walkable surface of a WEDGE at a world x/z, or `None` when
+/// the point is outside its footprint.
+///
+/// A wedge is authored sloping from its top back edge (+z) down to its bottom
+/// front edge (-z) — the same geometry the renderer draws, so what you see is
+/// what you climb.
+///
+/// This exists because a wedge was previously collided as its bounding box:
+/// the ramp built to be driven and walked up was, to the simulation, a solid
+/// cube with a vertical face. Walking into it stopped you dead against an
+/// invisible wall halfway up nothing.
+pub fn wedge_surface_at(s: &Solid, x: f32, z: f32) -> Option<f32> {
+    if s.shape != Shape::Wedge {
+        return None;
+    }
+    if x < s.pos.x - s.half.x || x > s.pos.x + s.half.x {
+        return None;
+    }
+    let z0 = s.pos.z - s.half.z;
+    let z1 = s.pos.z + s.half.z;
+    if z < z0 || z > z1 {
+        return None;
+    }
+    // 0 at the low front edge, 1 at the high back edge.
+    let t = ((z - z0) / (z1 - z0).max(1e-6)).clamp(0.0, 1.0);
+    Some(s.pos.y - s.half.y + t * (s.half.y * 2.0))
+}
+
+/// Highest wedge surface under a mover's FOOTPRINT, with the id of the wedge.
+///
+/// Sampled at the footprint's corners and centre rather than at its centre
+/// alone: a body standing with half its feet on a ramp should stand on the
+/// ramp, exactly as `Terrain::floor_under` treats the ground.
+pub fn ramp_floor_under(statics: &[Solid], pos: Vec3f, half: Vec3f) -> Option<(f32, u64)> {
+    let mut best: Option<(f32, u64)> = None;
+    for s in statics {
+        if s.shape != Shape::Wedge {
+            continue;
+        }
+        for (dx, dz) in [
+            (0.0, 0.0),
+            (-half.x, -half.z),
+            (half.x, -half.z),
+            (-half.x, half.z),
+            (half.x, half.z),
+        ] {
+            if let Some(y) = wedge_surface_at(s, pos.x + dx, pos.z + dz) {
+                if best.map_or(true, |(by, _)| y > by) {
+                    best = Some((y, s.id));
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Relaxation passes per tick in [`separate_movers`]. Fixed, not
