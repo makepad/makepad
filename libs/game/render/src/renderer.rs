@@ -112,7 +112,10 @@ pub struct GameRenderer {
     /// of being re-projected every frame. This is what makes static cast
     /// shadows affordable at all.
     static_shadow_mesh: ShadowMeshBuilder,
-    static_shadow_key: Option<(u64, u64)>,
+    static_shadow_key: Option<(u64, u64, u64)>,
+    /// Bumped when the placed-prop list changes, so it can join the static
+    /// shadow cache key.
+    models_rev: u64,
     static_shadow_count: u64,
     /// CPU-baked occlusion (bake.rs), folded into instance colours. Renderer
     /// state by construction: the sim has no field for it, so a device may
@@ -145,6 +148,59 @@ struct LoadedModel {
     geometry: Geometry,
     texture: Texture,
     triangles: usize,
+    /// Model-space bounds, kept so a caller can build a collider without
+    /// re-parsing the GLB. A prop the player walks through is not in the
+    /// world, it is painted on it.
+    min: Vec3f,
+    max: Vec3f,
+    /// Decimated model-space points for the shadow hull, computed once at
+    /// load. A tree's shadow should read as a tree rather than as its
+    /// bounding rectangle, so these come from the mesh — but the projector
+    /// convex-hulls whatever it is given, so a few dozen well-spread points
+    /// carry the silhouette as faithfully as thousands would.
+    shadow_points: Vec<Vec3f>,
+    /// Low-res multi-box collider in model space (model.rs collider_parts).
+    collider_parts: Vec<(Vec3f, Vec3f)>,
+}
+
+/// Pick a bounded, well-spread subset of a mesh's vertices for shadow casting.
+///
+/// Stride-sampling alone can miss the extremes that define a silhouette — the
+/// tip of a roof, the ends of a branch — so the per-axis extremes are always
+/// included and the stride fills in the shape between them.
+fn shadow_hull_points(vertices: &[f32], stride: usize) -> Vec<Vec3f> {
+    const TARGET: usize = 48;
+    let count = vertices.len() / stride;
+    if count == 0 {
+        return Vec::new();
+    }
+    let at = |i: usize| {
+        let b = i * stride;
+        vec3f(vertices[b], vertices[b + 1], vertices[b + 2])
+    };
+    let mut out = Vec::with_capacity(TARGET + 6);
+    let (mut lo, mut hi) = ([0usize; 3], [0usize; 3]);
+    for i in 1..count {
+        let p = at(i);
+        for (a, v) in [p.x, p.y, p.z].iter().enumerate() {
+            if *v < [at(lo[0]).x, at(lo[1]).y, at(lo[2]).z][a] {
+                lo[a] = i;
+            }
+            if *v > [at(hi[0]).x, at(hi[1]).y, at(hi[2]).z][a] {
+                hi[a] = i;
+            }
+        }
+    }
+    for i in lo.iter().chain(hi.iter()) {
+        out.push(at(*i));
+    }
+    let step = (count / TARGET).max(1);
+    let mut i = 0;
+    while i < count {
+        out.push(at(i));
+        i += step;
+    }
+    out
 }
 
 /// One placed stock prop. `model` is the asset id it was loaded under, e.g.
@@ -227,6 +283,7 @@ impl Default for GameRenderer {
             shadow_points: Vec::new(),
             static_shadow_mesh: ShadowMeshBuilder::default(),
             static_shadow_key: None,
+            models_rev: 0,
             static_shadow_count: 0,
             bake: LightBake::default(),
         }
@@ -264,6 +321,11 @@ impl GameRenderer {
     /// Hand this frame's stock props to the renderer. Order does not matter —
     /// `draw_models_inner` sorts by model so copies batch together.
     pub fn set_models(&mut self, instances: Vec<ModelInstance>) {
+        // Statics are cached against a key; a changed prop list must break it
+        // or the village would keep last frame's shadows forever.
+        if instances.len() != self.placed_models.len() {
+            self.models_rev = self.models_rev.wrapping_add(1);
+        }
         self.placed_models = instances;
     }
 
@@ -295,7 +357,7 @@ impl GameRenderer {
             .and_then(|t| t.floor_under(e.pos, e.half));
         let feet = e.pos.y - e.half.y;
         for s in world.entities.iter() {
-            if s.sensor || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic) {
+            if s.sensor || s.hidden || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic) {
                 continue;
             }
             let top = s.pos.y + s.half.y;
@@ -327,6 +389,7 @@ impl GameRenderer {
         for e in world.entities.iter() {
             if !matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
                 || e.sensor
+                || e.hidden
                 || e.attached_to != 0
             {
                 continue;
@@ -532,7 +595,11 @@ impl GameRenderer {
         }
         self.slab_instance_count = 0;
         // Static entities (opaque and sensor/alpha).
-        for e in world.entities.iter().filter(|e| e.kind == BodyKind::Static) {
+        for e in world
+            .entities
+            .iter()
+            .filter(|e| e.kind == BodyKind::Static && !e.hidden)
+        {
             let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
             transform.v[12] = e.pos.x;
             transform.v[13] = e.pos.y;
@@ -592,7 +659,7 @@ impl GameRenderer {
         self.static_shadow_mesh.clear();
         self.static_shadow_count = 0;
         for e in world.entities.iter() {
-            if e.kind != BodyKind::Static || e.sensor || e.color.w < 0.99 {
+            if e.kind != BodyKind::Static || e.sensor || e.hidden || e.color.w < 0.99 {
                 continue;
             }
             let half = vec3f(
@@ -633,6 +700,52 @@ impl GameRenderer {
                 self.static_shadow_count += 1;
             }
         }
+
+        // Stock props are drawn as meshes, not entities, so they never reach
+        // the loop above — which is why a village of trees and houses cast
+        // nothing at all. They are static by nature, so they belong in this
+        // same baked layer: projected once per (world, sun, prop list) and
+        // merged into ONE geometry, never re-projected per frame.
+        //
+        // Points come from the model's own mesh rather than its bounds: a
+        // pine's shadow should taper like a pine. The projector convex-hulls
+        // them anyway, so the decimated set carries the silhouette.
+        let ground = world
+            .entities
+            .iter()
+            .filter(|e| e.kind == BodyKind::Static && !e.sensor)
+            .map(|e| e.pos.y + e.half.y * e.scale.y)
+            .fold(f32::MIN, f32::max);
+        let ground = if ground == f32::MIN { 0.0 } else { ground };
+        for inst in &self.placed_models {
+            let Some((_, m)) = self.static_models.iter().find(|(k, _)| *k == inst.model) else {
+                continue;
+            };
+            if m.shadow_points.len() < 3 {
+                continue;
+            }
+            let t = &inst.transform;
+            self.shadow_points.clear();
+            self.shadow_points.extend(m.shadow_points.iter().map(|l| {
+                vec3f(
+                    t.v[0] * l.x + t.v[4] * l.y + t.v[8] * l.z + t.v[12],
+                    t.v[1] * l.x + t.v[5] * l.y + t.v[9] * l.z + t.v[13],
+                    t.v[2] * l.x + t.v[6] * l.y + t.v[10] * l.z + t.v[14],
+                )
+            }));
+            let receiver = Receiver {
+                base_y: ground,
+                terrain: world.terrain.as_ref(),
+            };
+            if crate::shadow_mesh::build_caster_shadow(
+                &self.shadow_points,
+                sun,
+                &receiver,
+                &mut self.static_shadow_mesh,
+            ) {
+                self.static_shadow_count += 1;
+            }
+        }
     }
 
     /// Load a stock prop onto the GPU under `id`, idempotent. `png` is the
@@ -649,6 +762,9 @@ impl GameRenderer {
         }
         let model = StaticModel::parse_glb(glb)?;
         let triangles = model.triangle_count();
+        let (min, max) = (model.min, model.max);
+        let shadow_points = shadow_hull_points(&model.vertices, crate::model::MODEL_VERTEX_FLOATS);
+        let collider_parts = model.collider_parts();
         let geometry = Geometry::new(cx);
         geometry.update(cx, model.indices, model.vertices);
         // Two Kenney conventions, one path. A pack that UV-maps into an atlas
@@ -680,6 +796,10 @@ impl GameRenderer {
                 geometry,
                 texture,
                 triangles,
+                min,
+                max,
+                shadow_points,
+                collider_parts,
             },
         ));
         Ok(triangles)
@@ -687,6 +807,23 @@ impl GameRenderer {
 
     pub fn model_is_loaded(&self, id: &str) -> bool {
         self.static_models.iter().any(|(k, _)| k == id)
+    }
+
+    /// The prop's low-res multi-box collider in model space. A house comes
+    /// back as walls and roof rather than one box, so its doorway is a gap.
+    pub fn model_collider_parts(&self, id: &str) -> Option<&[(Vec3f, Vec3f)]> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| m.collider_parts.as_slice())
+    }
+
+    /// Model-space bounds of a loaded prop, for building its collider.
+    pub fn model_bounds(&self, id: &str) -> Option<(Vec3f, Vec3f)> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| (m.min, m.max))
     }
 
     /// Draw the placed stock props. Instances are grouped by model, so N
@@ -925,7 +1062,7 @@ impl GameRenderer {
             // the world or the sun changes, so build it on that key and splice
             // the cache in. Without this, static shadows would cost a full
             // hull projection per pillar per frame for no new information.
-            let key = (world.render_rev, self.bake.generation());
+            let key = (world.render_rev, self.bake.generation(), self.models_rev);
             if self.static_shadow_key != Some(key) {
                 self.rebuild_static_shadows(world, &sun);
                 self.static_shadow_key = Some(key);
@@ -948,7 +1085,11 @@ impl GameRenderer {
         }
         let mut dyn_entity_shapes = [false; 5];
         let mut dyn_sensor_shapes = [false; 5];
-        for e in world.entities.iter().filter(|e| e.kind != BodyKind::Static) {
+        for e in world
+            .entities
+            .iter()
+            .filter(|e| e.kind != BodyKind::Static && !e.hidden)
+        {
             if e.sensor {
                 dyn_sensor_shapes[e.shape.index()] = true;
             } else {
@@ -984,7 +1125,7 @@ impl GameRenderer {
             for e in world
                 .entities
                 .iter()
-                .filter(|e| !e.sensor && e.kind != BodyKind::Static && e.shape == shape)
+                .filter(|e| !e.sensor && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
             {
                 let mut transform = Self::entity_rotation(e);
                 transform.v[12] = e.pos.x;
@@ -1134,6 +1275,7 @@ impl GameRenderer {
                 && world.entities.iter().any(|e| {
                     matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
                         && !e.sensor
+                        && !e.hidden
                         && e.attached_to == 0
                 });
             let has_particles = shape == Shape::Box && !self.particle_instances.is_empty();
@@ -1248,7 +1390,7 @@ impl GameRenderer {
             for e in world
                 .entities
                 .iter()
-                .filter(|e| e.sensor && e.kind != BodyKind::Static && e.shape == shape)
+                .filter(|e| e.sensor && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
             {
                 let mut transform = Self::entity_rotation(e);
                 transform.v[12] = e.pos.x;
@@ -1381,5 +1523,38 @@ mod sun_tests {
         assert_eq!(sun, GameSun::default());
         // Flat hemisphere collapses mix(ground, sky, h) to the old constant.
         assert_eq!(sun.sky, sun.ground);
+    }
+
+    /// The silhouette lives at the extremes: a stride-sample alone can miss a
+    /// roof ridge or a branch tip, and a shadow that loses them reads as the
+    /// wrong object. Also caps the count, since this runs per prop per rebake.
+    #[test]
+    fn shadow_hull_keeps_the_extremes_and_stays_bounded() {
+        // A tall spike among low noise — exactly the case a plain stride misses.
+        let stride = crate::model::MODEL_VERTEX_FLOATS;
+        let mut verts = Vec::new();
+        for i in 0..500 {
+            let x = (i % 10) as f32 * 0.1;
+            let z = (i / 10) as f32 * 0.1;
+            verts.extend_from_slice(&[x, 0.0, z, 0.0, 0.0, 0.0]);
+        }
+        // The spike sits at an index a stride of 10 would skip.
+        let spike = 253;
+        verts[spike * stride + 1] = 9.0;
+
+        let pts = shadow_hull_points(&verts, stride);
+        assert!(pts.len() <= 64, "unbounded hull: {}", pts.len());
+        assert!(
+            pts.iter().any(|p| p.y > 8.9),
+            "dropped the tallest point, so the silhouette is wrong"
+        );
+        // And the ground-plane corners survive, or the footprint shrinks.
+        assert!(pts.iter().any(|p| p.x > 0.85));
+        assert!(pts.iter().any(|p| p.z > 4.8));
+    }
+
+    #[test]
+    fn shadow_hull_handles_an_empty_mesh() {
+        assert!(shadow_hull_points(&[], crate::model::MODEL_VERTEX_FLOATS).is_empty());
     }
 }

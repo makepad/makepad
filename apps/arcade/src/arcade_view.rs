@@ -91,6 +91,10 @@ pub struct ArcadeView {
     props: HashMap<String, String>,
     #[rust]
     props_loaded: bool,
+    /// The composed scene's model instances, built once after the props load
+    /// (their footprints come from model bounds, which need the GLBs).
+    #[rust]
+    village: Vec<ModelInstance>,
     #[live(vec4(0.03, 0.045, 0.075, 1.0))]
     clear_color: Vec4f,
     #[new]
@@ -220,6 +224,7 @@ fn spawn(
         tag: tag.to_string(),
         sensor: false,
         collide: true,
+        hidden: false,
         gravity_scale: 1.0,
         on_floor: false,
         floor_id: 0,
@@ -243,6 +248,27 @@ fn spawn(
         restitution: 0.0,
     });
     id
+}
+
+/// What a placed prop does to something walking into it.
+#[derive(Clone, Copy, PartialEq)]
+enum Blocking {
+    /// Scenery only — lamps, ground decals. Walk straight through.
+    None,
+    /// The whole footprint stops you: buildings, fences, benches, rocks.
+    Solid,
+    /// Only the trunk. A canopy that blocked would make a wood impassable
+    /// and read as invisible walls.
+    Trunk,
+}
+
+/// A collider to spawn for a placed prop. Kept separate from the visual
+/// instance because a prop's silhouette and its obstruction are not the
+/// same shape.
+struct PropCollider {
+    pos: Vec3f,
+    half: Vec3f,
+    tag: &'static str,
 }
 
 /// The stock skinned character (KayKit Knight, CC0) + its animation state.
@@ -307,7 +333,7 @@ impl Knight {
             walk_time: 0.0,
             blend: 0.0,
             angle: 0.0,
-            pos: vec3f(10.0, 0.0, 0.0),
+            pos: vec3f(-20.0, 0.0, 5.6),
             yaw: 0.0,
         })
     }
@@ -323,21 +349,21 @@ impl Knight {
         let target = if walking { 1.0 } else { 0.0 };
         self.blend += (target - self.blend) * 0.08;
         if walking {
-            self.angle += dt * 0.22;
-            // Between the props (cone at r≈12) and the pillar ring (r=18).
-            let radius = 15.0;
-            self.pos = vec3f(
-                makepad_game_math::cos(self.angle) * radius,
-                0.0,
-                makepad_game_math::sin(self.angle) * radius,
-            );
-            // Tangent of the circle — the direction we're moving in.
-            let dir = vec3f(
-                -makepad_game_math::sin(self.angle),
-                0.0,
-                makepad_game_math::cos(self.angle),
-            );
-            self.yaw = makepad_game_math::atan2(dir.x, dir.z);
+            self.angle += dt * 0.30;
+            // Walks the pavement on the south side of the road, turning at
+            // each end — a pedestrian on a street, not an orbit in a field.
+            // A triangle wave over x with a fixed z keeps him on the verge.
+            let span = 20.0;
+            let t = self.angle * 0.5;
+            let saw = t - (t / 2.0).floor() * 2.0; // 0..2
+            let tri = if saw < 1.0 { saw } else { 2.0 - saw }; // 0..1..0
+            self.pos = vec3f(-span + tri * span * 2.0, 0.0, 5.6);
+            // Facing follows the leg of the walk he is on.
+            self.yaw = if saw < 1.0 {
+                std::f32::consts::FRAC_PI_2
+            } else {
+                -std::f32::consts::FRAC_PI_2
+            };
         }
         self.idle_time += dt;
         self.walk_time += dt;
@@ -428,8 +454,13 @@ impl ArcadeView {
         let w = &mut *world;
         w.reset_content();
         w.sky = Some(SkyConfig::default());
-        w.cam_target = vec3f(0.0, 3.0, 0.0);
-        w.cam_distance = 34.0;
+        // Framed on the street rather than on the origin: the road runs
+        // east-west through z=0, so looking slightly north of it puts the
+        // houses in frame and keeps the empty foreground off the bottom edge.
+        w.cam_target = vec3f(-4.0, 1.0, 2.0);
+        w.cam_distance = 56.0;
+        w.orbit_yaw = 0.62;
+        w.orbit_pitch = -0.40;
 
         // Ground slab.
         spawn(
@@ -437,51 +468,76 @@ impl ArcadeView {
             BodyKind::Static,
             Shape::Box,
             vec3f(0.0, -0.5, 0.0),
-            vec3f(60.0, 1.0, 60.0),
-            vec4(0.55, 0.62, 0.5, 1.0),
+            vec3f(64.0, 1.0, 64.0),
+            vec4(0.46, 0.56, 0.36, 1.0),
             "ground",
         );
-        // A ramp to drive up and a glowing beacon; the scenery is stock
-        // models now (see load_props), not coloured primitives.
+        // The road: a strip through the middle of the green. Flat enough to
+        // drive over, and `collide: false` so it is a surface rather than a
+        // kerb the car has to climb.
+        let road = spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(0.0, 0.02, 0.0),
+            vec3f(58.0, 0.05, 7.0),
+            vec4(0.30, 0.30, 0.32, 1.0),
+            "road",
+        );
+        if let Some(e) = w.entity_mut(road) {
+            e.collide = false;
+        }
+        // A short verge path from the road up to the middle house, so the
+        // houses read as connected to the street rather than parked near it.
+        let path = spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(0.5, 0.03, -6.0),
+            vec3f(2.0, 0.05, 6.0),
+            vec4(0.62, 0.58, 0.48, 1.0),
+            "path",
+        );
+        if let Some(e) = w.entity_mut(path) {
+            e.collide = false;
+        }
+
+        // --- the yard -------------------------------------------------
+        // The physics demo lives in one corner of the green, deliberately
+        // placed as a builder's yard rather than sprinkled across the map.
+        const YARD_X: f32 = -20.0;
+        const YARD_Z: f32 = 20.0;
+        // A ramp to drive up, at the yard entrance.
         spawn(
             w,
             BodyKind::Static,
             Shape::Wedge,
-            vec3f(-8.0, 1.0, 4.0),
-            vec3f(6.0, 2.0, 8.0),
-            vec4(0.75, 0.55, 0.35, 1.0),
+            vec3f(YARD_X + 12.0, 1.0, YARD_Z - 2.0),
+            vec3f(6.0, 2.0, 7.0),
+            vec4(0.72, 0.60, 0.42, 1.0),
             "ramp",
         );
-        let beacon = spawn(
-            w,
-            BodyKind::Static,
-            Shape::Sphere,
-            vec3f(0.0, 9.0, 0.0),
-            vec3f(1.6, 1.6, 1.6),
-            vec4(1.0, 0.85, 0.3, 1.0),
-            "beacon",
-        );
-        if let Some(e) = w.entity_mut(beacon) {
-            e.glow = 2.0;
-        }
         // Moving platform (kinematic, driven every tick below).
         spawn(
             w,
             BodyKind::Kinematic,
             Shape::Box,
-            vec3f(0.0, 2.5, -8.0),
+            vec3f(YARD_X + 4.0, 2.5, YARD_Z + 4.0),
             vec3f(6.0, 0.6, 3.0),
             vec4(0.35, 0.6, 0.8, 1.0),
             "platform",
         );
         // Falling movers: land, rest, cast blob shadows.
-        for i in 0..6 {
-            let x = -6.0 + i as f32 * 2.4;
+        for i in 0..5 {
             spawn(
                 w,
                 BodyKind::Mover,
                 if i % 2 == 0 { Shape::Box } else { Shape::Sphere },
-                vec3f(x, 6.0 + i as f32 * 2.0, -2.0 + (i % 3) as f32 * 2.0),
+                vec3f(
+                    YARD_X - 2.0 + i as f32 * 2.2,
+                    6.0 + i as f32 * 2.0,
+                    YARD_Z + 1.0 + (i % 3) as f32 * 1.6,
+                ),
                 vec3f(1.2, 1.2, 1.2),
                 vec4(0.85, 0.35 + 0.1 * i as f32, 0.35, 1.0),
                 "crate",
@@ -492,20 +548,23 @@ impl ArcadeView {
             w,
             BodyKind::Mover,
             Shape::Sphere,
-            vec3f(6.0, 4.0, -6.0),
+            vec3f(YARD_X + 7.0, 4.0, YARD_Z + 6.0),
             vec3f(1.4, 1.4, 1.4),
             vec4(0.3, 0.85, 0.5, 1.0),
             "bouncer",
         );
-        // Rigid-body corner (M1a): a crate stack + two balls on real box3d
-        // dynamics. The tick loop kicks the stack periodically to show off
-        // impulses/tumbling; between kicks it settles and sleeps.
+        // Rigid-body stack (M1a): real box3d dynamics, kicked periodically by
+        // the tick loop; between kicks it settles and sleeps.
         for i in 0..6 {
             let id = spawn(
                 w,
                 BodyKind::Rigid,
                 Shape::Box,
-                vec3f(-9.0 + (i as f32) * 0.04, 0.55 + i as f32 * 1.05, -9.0),
+                vec3f(
+                    YARD_X - 5.0 + (i as f32) * 0.04,
+                    0.55 + i as f32 * 1.05,
+                    YARD_Z - 4.0,
+                ),
                 vec3f(1.0, 1.0, 1.0),
                 vec4(0.9, 0.6 - 0.06 * i as f32, 0.2, 1.0),
                 "rigid_crate",
@@ -519,7 +578,7 @@ impl ArcadeView {
                 w,
                 BodyKind::Rigid,
                 Shape::Sphere,
-                vec3f(-6.0 + i as f32 * 1.6, 5.0, -10.0),
+                vec3f(YARD_X - 2.0 + i as f32 * 1.6, 5.0, YARD_Z - 5.0),
                 vec3f(1.1, 1.1, 1.1),
                 vec4(0.4, 0.5, 0.95, 1.0),
                 "rigid_ball",
@@ -546,22 +605,31 @@ impl ArcadeView {
         let wanted: &[(&str, &str)] = &[
             ("pine tree", "tree"),
             ("broadleaf tree", "tree2"),
-            ("boulder", "rock"),
+            ("rock stone", "rock"),
             ("wooden fence", "fence"),
-            ("wooden hut building", "house"),
-            ("wooden crate box", "crate"),
+            ("suburban house building", "house"),
+            ("suburban house type", "house2"),
+            ("park bench wooden", "bench"),
+            ("street light post tall", "lamp"),
         ];
         for (query, role) in wanted {
             // Walk the ranked hits rather than taking only the best one: a
             // pack whose atlas was not downloaded cannot render, so the next
             // candidate is a better answer than a hole in the scene. The
             // same fallthrough is what a generated game wants.
+            // Some kit tiles are welded to a chunk of ground
+            // (`hexagon-kit/building-house` is a house on a hex of grass) and
+            // read as floating islands when dropped on open grass. Skipping
+            // whole kits is the wrong lever though — it pushed "house" to a
+            // HOUSEBOAT — so the queries steer instead, and the ranked walk
+            // takes the first candidate that actually loads.
             let mut placed = false;
             for hit in index
                 .find(query)
                 .into_iter()
                 .filter(|h| h.entry.kind == makepad_game_assets::AssetKind::Model)
-                .take(12)
+                .filter(|h| !h.entry.id.contains("hexagon-kit"))
+                .take(14)
             {
                 let id = hit.entry.id.clone();
                 let path = hit.entry.path.clone();
@@ -584,60 +652,166 @@ impl ArcadeView {
         }
     }
 
-    /// Where the stock props stand. Positions are fixed rather than random so
-    /// the capture is comparable frame to frame.
-    fn prop_instances(&self) -> Vec<ModelInstance> {
-        let mut out = Vec::new();
-        let mut place = |role: &str, x: f32, z: f32, yaw: f32, scale: f32| {
-            if let Some(id) = self.props.get(role) {
-                let mut m = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
-                for i in 0..12 {
-                    m.v[i] *= scale;
+    /// One placed prop: where it stands and what it does to a walker.
+    ///
+    /// `blocking` is the half-extent of its collider, or `None` for scenery a
+    /// player should walk through. It is separate from the visual scale
+    /// because the two genuinely differ for foliage: a pine's canopy is most
+    /// of its silhouette and none of its obstruction.
+    fn compose_village(&self) -> (Vec<ModelInstance>, Vec<PropCollider>) {
+        let mut models = Vec::new();
+        let mut colliders = Vec::new();
+
+        // Kenney packs are authored at wildly different native sizes, so a
+        // fixed multiplier gives a 12-unit bench beside a 2-unit house. Scale
+        // to a TARGET HEIGHT read off the model's own bounds instead, and the
+        // scene keeps its proportions whichever pack a query resolves to.
+        let mut place = |role: &str, x: f32, z: f32, yaw: f32, target_h: f32, block: Blocking| {
+            let Some(id) = self.props.get(role) else { return };
+            let Some((min, max)) = self.renderer.model_bounds(id) else {
+                return;
+            };
+            let native_h = (max.y - min.y).max(0.001);
+            let s = target_h / native_h;
+            let mut m = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
+            for i in 0..12 {
+                m.v[i] *= s;
+            }
+            m.v[12] = x;
+            m.v[13] = 0.0;
+            m.v[14] = z;
+            models.push(ModelInstance {
+                model: id.clone(),
+                transform: m,
+            });
+            // The footprint is the model's own, scaled. A yaw of a quarter
+            // turn swaps x/z extents; anything between would need the rotated
+            // hull, and for props sitting on axis-aligned streets it never is.
+            let (hx, hz) = ((max.x - min.x) * 0.5 * s, (max.z - min.z) * 0.5 * s);
+            let quarter_turned = (yaw.abs() - std::f32::consts::FRAC_PI_2).abs() < 0.2;
+            let (hx, hz) = if quarter_turned { (hz, hx) } else { (hx, hz) };
+            if block == Blocking::None {
+                return;
+            }
+            // The prop's OWN primitives are the collider: a house arrives as
+            // walls and roof, so its doorway stays a gap; a tree as trunk and
+            // canopy, so the canopy can be dropped without inventing a shape.
+            // One AABB round either would be worse than nothing — a solid
+            // doorway, or a wall you bump into ten feet from the trunk.
+            let parts = self
+                .renderer
+                .model_collider_parts(id)
+                .unwrap_or_default()
+                .to_vec();
+            let quarter = quarter_turned;
+            let mut pushed = 0;
+            for (pa, pb) in &parts {
+                // Model space -> world: scale about the origin, then place.
+                let (cx, cy, cz) = (
+                    (pa.x + pb.x) * 0.5 * s,
+                    (pa.y + pb.y) * 0.5 * s,
+                    (pa.z + pb.z) * 0.5 * s,
+                );
+                let (mut ex, ey, mut ez) = (
+                    (pb.x - pa.x) * 0.5 * s,
+                    (pb.y - pa.y) * 0.5 * s,
+                    (pb.z - pa.z) * 0.5 * s,
+                );
+                let (mut ox, mut oz) = (cx, cz);
+                if quarter {
+                    std::mem::swap(&mut ex, &mut ez);
+                    let t = ox;
+                    ox = if yaw > 0.0 { -oz } else { oz };
+                    oz = if yaw > 0.0 { t } else { -t };
                 }
-                m.v[12] = x;
-                m.v[13] = 0.0;
-                m.v[14] = z;
-                out.push(ModelInstance {
-                    model: id.clone(),
-                    transform: m,
+                // Trunk-only: a canopy sits high and wide, a trunk low and
+                // narrow. Keeping the narrow low part is what lets a walker
+                // pass under branches but not through the tree.
+                if block == Blocking::Trunk {
+                    let slim = ex.max(ez) < (max.x - min.x) * 0.5 * s * 0.45;
+                    let low = cy < target_h * 0.6;
+                    if !(slim && low) {
+                        continue;
+                    }
+                }
+                colliders.push(PropCollider {
+                    pos: vec3f(x + ox, cy.max(ey), z + oz),
+                    half: vec3f(ex.max(0.08), ey.max(0.08), ez.max(0.08)),
+                    tag: "scenery",
+                });
+                pushed += 1;
+            }
+            // A model whose primitives were all filtered out still needs to be
+            // solid, or the prop silently becomes scenery again — which is the
+            // exact bug this work exists to fix. Trees need this most: a pine
+            // modelled as one merged mesh has no separate trunk to find, so
+            // fall back to a narrow post at its base.
+            if pushed == 0 {
+                let (ph, hy) = match block {
+                    Blocking::Trunk => (0.16, target_h * 0.35),
+                    _ => (1.0, target_h * 0.5),
+                };
+                colliders.push(PropCollider {
+                    pos: vec3f(x, hy, z),
+                    half: vec3f((hx * ph).max(0.18), hy, (hz * ph).max(0.18)),
+                    tag: "scenery",
                 });
             }
         };
-        // Kenney props are authored around 1 unit, so everything here scales
-        // up to sit against a 60-unit ground slab and 2-unit crates.
-        // A treeline along the back, at mixed scale and species so it reads as
-        // woodland rather than a row of identical props.
-        for i in 0..14 {
-            let x = -26.0 + i as f32 * 4.0;
-            let role = if i % 3 == 0 { "tree2" } else { "tree" };
-            place(role, x, -22.0 + (i % 3) as f32 * 2.5, i as f32 * 0.7, 4.0 + (i % 4) as f32 * 0.8);
+
+        // --- the street ------------------------------------------------
+        // Houses stand back from the road on the north side, all facing it.
+        // Uniform facing is the point: a row of houses that agree about where
+        // the street is reads as a street, and random yaw reads as debris.
+        const FACE_SOUTH: f32 = 0.0;
+        for (i, x) in [-19.0f32, -10.0, 0.5, 10.0, 19.0].iter().enumerate() {
+            let role = if i % 2 == 1 && self.props.contains_key("house2") {
+                "house2"
+            } else {
+                "house"
+            };
+            place(role, *x, -10.0, FACE_SOUTH, 4.4, Blocking::Solid);
         }
-        // A second, sparser band nearer the camera for depth.
-        for i in 0..6 {
-            place("tree", -20.0 + i as f32 * 8.0, 16.0, i as f32 * 1.1, 3.5);
+        // Lamps down the north verge, evenly spaced like street furniture.
+        for i in 0..5 {
+            place("lamp", -18.0 + i as f32 * 9.0, -4.6, 0.0, 3.2, Blocking::None);
         }
-        // Rocks scattered mid-ground at varied scale — same model, different
-        // transforms, which is exactly the case the instance batching serves.
-        for (i, (x, z)) in [
-            (-9.0, -6.0),
-            (7.0, -8.0),
-            (13.0, 2.0),
-            (-14.0, 4.0),
-            (4.0, 12.0),
-            (-6.0, 14.0),
-        ]
-        .iter()
-        .enumerate()
+        // Benches on the south verge, turned to face the road.
+        for x in [-12.0f32, 0.0, 12.0] {
+            place("bench", x, 5.2, std::f32::consts::PI, 0.9, Blocking::Solid);
+        }
+
+        // --- boundary --------------------------------------------------
+        // A fence along the south edge of the green: a continuous run, not a
+        // scatter, so it reads as an enclosure.
+        for i in 0..9 {
+            place("fence", -16.0 + i as f32 * 4.0, 17.0, 0.0, 1.1, Blocking::Solid);
+        }
+
+        // --- woodland --------------------------------------------------
+        // Clustered, not sprinkled: three stands with gaps between them is
+        // what makes a wood read as a wood rather than an orchard.
+        let stands: [(f32, f32, usize); 3] = [(-20.0, -22.0, 7), (2.0, -25.0, 6), (20.0, -21.0, 6)];
+        for (si, (cx, cz, n)) in stands.iter().enumerate() {
+            for i in 0..*n {
+                // Deterministic jitter — a fixed pattern, so captures compare.
+                let a = (si * 7 + i * 13) as f32 * 1.107;
+                let r = 3.0 + ((si * 5 + i * 3) % 7) as f32 * 1.3;
+                let x = cx + makepad_game_math::cos(a) * r;
+                let z = cz + makepad_game_math::sin(a) * r * 0.7;
+                let role = if (si + i) % 3 == 0 { "tree2" } else { "tree" };
+                let h = 5.5 + ((i * 3 + si) % 4) as f32 * 1.4;
+                place(role, x, z, a, h, Blocking::Trunk);
+            }
+        }
+        // Rocks at the wood's edge, where scree actually collects.
+        for (i, (x, z)) in [(-13.0f32, -16.0f32), (9.0, -17.0), (25.0, -14.0)]
+            .iter()
+            .enumerate()
         {
-            place("rock", *x, *z, i as f32 * 1.3, 1.2 + i as f32 * 0.3);
+            place("rock", *x, *z, i as f32 * 1.3, 1.1 + i as f32 * 0.35, Blocking::Solid);
         }
-        // A fence run along one side, leading the eye toward the house.
-        for i in 0..8 {
-            place("fence", -20.0 + i as f32 * 3.0, 13.0, 0.0, 1.6);
-        }
-        place("house", 17.0, -12.0, -0.6, 3.0);
-        place("house", -19.0, -9.0, 1.2, 2.6);
-        out
+        (models, colliders)
     }
 
     /// Spawn the driveable car and the patrolling Knight, proving blocks work
@@ -652,11 +826,12 @@ impl ArcadeView {
         w.push_entity(Entity {
             id: car,
             kind: BodyKind::Rigid,
-            pos: vec3f(-3.0, 2.0, -4.0),
+            pos: vec3f(-6.0, 1.2, 1.6),
             half: vec3f(0.9, 0.4, 1.6),
             color: vec4(0.86, 0.32, 0.28, 1.0),
             tag: "car".to_string(),
             collide: true,
+            hidden: false,
             gravity_scale: 1.0,
             speed_mult: 1.0,
             scale: vec3f(1.0, 1.0, 1.0),
@@ -828,10 +1003,31 @@ impl ArcadeView {
         }
         if self.particles.emitter_count() == 0 {
             // Exhaust follows the car by entity id — no sim state involved.
-            if let Some(car) = self.blocks.borrow().cars.first().map(|c| c.entity) {
+            // Gated on the car actually moving: a parked car standing under a
+            // column of its own smoke reads as a bug, not as atmosphere.
+            let driving = self
+                .blocks
+                .borrow()
+                .cars
+                .first()
+                .map(|c| c.entity)
+                .and_then(|id| {
+                    let world = self.world.borrow();
+                    makepad_game_sim::entity_index_sorted(&world.entities, id)
+                        .map(|i| world.entities[i].vel.length() > 3.0)
+                })
+                .unwrap_or(false);
+            if let Some(car) = self
+                .blocks
+                .borrow()
+                .cars
+                .first()
+                .map(|c| c.entity)
+                .filter(|_| driving)
+            {
                 let mut smoke = ParticleSpec::new(ParticleKind::Smoke);
-                smoke.rate = 18.0;
-                smoke.size = 0.14;
+                smoke.rate = 12.0;
+                smoke.size = 0.09;
                 smoke.color = vec4f(0.7, 0.7, 0.75, 0.5);
                 requests.push(ParticleRequest::Emitter {
                     id: 1,
@@ -1133,6 +1329,36 @@ impl Widget for ArcadeView {
             if !self.props_loaded {
                 self.props_loaded = true;
                 self.load_props(cx.cx);
+                // Compose once, then spawn a collider per solid prop. Doing
+                // it here (not in build_world) is forced by ordering: the
+                // footprints come from model bounds, which only exist after
+                // the GLBs are loaded, which needs a Cx.
+                let (models, colliders) = self.compose_village();
+                self.village = models;
+                if self.script.is_none() {
+                    let mut world = self.world.borrow_mut();
+                    for c in &colliders {
+                        let id = spawn(
+                            &mut world,
+                            BodyKind::Static,
+                            Shape::Box,
+                            c.pos,
+                            vec3f(c.half.x * 2.0, c.half.y * 2.0, c.half.z * 2.0),
+                            vec4(0.5, 0.5, 0.5, 1.0),
+                            c.tag,
+                        );
+                        // The mesh is the prop's appearance; this box is only
+                        // its substance.
+                        if let Some(e) = world.entity_mut(id) {
+                            e.hidden = true;
+                        }
+                    }
+                    log!(
+                        "arcade: village {} props, {} colliders",
+                        self.village.len(),
+                        colliders.len()
+                    );
+                }
             }
             // Knight texture is created before Cx3d mutably borrows cx.
             if let Some(knight) = &self.knight {
@@ -1179,7 +1405,7 @@ impl Widget for ArcadeView {
                 }
             }
             // Built before `batch` borrows self mutably.
-            let prop_instances = self.prop_instances();
+            let prop_instances = self.village.clone();
             let batch = match (&mut self.draw_skinned, &self.knight_texture) {
                 (skinned, Some(texture)) if !skinned_items.is_empty() => Some(SkinnedBatch {
                     skinned,

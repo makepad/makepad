@@ -79,6 +79,19 @@ pub struct Entity {
     /// physics, no touch reports (rotated road slabs, arches, scenery).
     /// Distinct from `sensor`, which is translucent AND reports touches.
     pub collide: bool,
+    /// `hidden: true` = the exact inverse of `collide: false` — solid to
+    /// everything, drawn by nothing. It exists for props whose *appearance*
+    /// comes from a mesh: a stock house is drawn as a model, so its collider
+    /// must not also draw a box around it. Skipped by the geometry batches
+    /// and by shadow casting, since an invisible box casting a shadow is
+    /// exactly the artifact this flag prevents.
+    ///
+    /// Stated as `hidden` rather than `visible` on purpose: `Entity` derives
+    /// `Default`, so the field that defaults to `false` must be the unusual
+    /// case. A `visible` flag would make every default-constructed entity
+    /// invisible — the same class of trap as the rng that defaulted to a
+    /// zero seed and the bodies that defaulted to zero gravity.
+    pub hidden: bool,
     pub gravity_scale: f32,
     pub on_floor: bool,
     /// Entity id this mover rests on (for kinematic carry), 0 = none.

@@ -28,9 +28,76 @@ pub struct StaticModel {
     /// Model-space bounds, for placing a prop on the ground without guessing.
     pub min: Vec3f,
     pub max: Vec3f,
+    /// Per-primitive model-space bounds — the prop's own decomposition.
+    ///
+    /// Kenney authors a house as walls, roof, door frame and chimney, and a
+    /// tree as trunk and canopy, so each primitive's box is a ready-made
+    /// low-res collider part. One AABB round the whole prop would make a
+    /// doorway solid and a canopy a wall you bump into from ten feet away —
+    /// both feel worse than no collision at all.
+    pub parts: Vec<(Vec3f, Vec3f)>,
 }
 
+/// Boxes below this fraction of the model's largest dimension are decoration
+/// — door handles, window frames, chimney pots. Colliding with them is worse
+/// than ignoring them: they add cost and snag a walker on nothing.
+const PART_MIN_FRACTION: f32 = 0.10;
+/// "Low-res" is the point. A handful of boxes captures a house; thirty
+/// captures its trim and feels no different to walk into.
+const PART_MAX: usize = 8;
+
 impl StaticModel {
+    /// A low-res multi-box collider derived from the prop's own primitives.
+    ///
+    /// Returned in model space, so the caller scales and offsets them exactly
+    /// as it does the visual instance. Boxes are dropped if they are tiny
+    /// relative to the model, merged when they nearly coincide, and capped —
+    /// the aim is a collider that *feels* right, not one that is exact.
+    pub fn collider_parts(&self) -> Vec<(Vec3f, Vec3f)> {
+        let span = (self.max.x - self.min.x)
+            .max(self.max.y - self.min.y)
+            .max(self.max.z - self.min.z);
+        if span <= 0.0 {
+            return Vec::new();
+        }
+        let floor = span * PART_MIN_FRACTION;
+        let mut kept: Vec<(Vec3f, Vec3f)> = Vec::new();
+        for (a, b) in &self.parts {
+            let (w, h, d) = (b.x - a.x, b.y - a.y, b.z - a.z);
+            // A part must be substantial in at least two axes: a flat panel is
+            // a wall and matters, a thin rod is trim and does not.
+            let big = [w, h, d].iter().filter(|v| **v >= floor).count();
+            if big < 2 {
+                continue;
+            }
+            // Merge into an existing box when they nearly coincide, which is
+            // what a wall split across several primitives looks like.
+            let tol = span * 0.08;
+            if let Some(e) = kept.iter_mut().find(|(ka, kb)| {
+                (ka.x - a.x).abs() < tol
+                    && (ka.z - a.z).abs() < tol
+                    && (kb.x - b.x).abs() < tol
+                    && (kb.z - b.z).abs() < tol
+            }) {
+                e.0.y = e.0.y.min(a.y);
+                e.1.y = e.1.y.max(b.y);
+                continue;
+            }
+            kept.push((*a, *b));
+        }
+        // Keep the biggest when over budget: the parts that carry the shape.
+        if kept.len() > PART_MAX {
+            kept.sort_by(|x, y| {
+                let vol = |p: &(Vec3f, Vec3f)| {
+                    (p.1.x - p.0.x) * (p.1.y - p.0.y) * (p.1.z - p.0.z)
+                };
+                vol(y).partial_cmp(&vol(x)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            kept.truncate(PART_MAX);
+        }
+        kept
+    }
+
     pub fn vertex_count(&self) -> usize {
         self.vertices.len() / MODEL_VERTEX_FLOATS
     }
@@ -140,6 +207,7 @@ impl StaticModel {
             z: f32::MIN,
         };
         let mut vert_total = 0usize;
+        let mut parts: Vec<(Vec3f, Vec3f)> = Vec::new();
 
         for (node_index, n) in node_vals.iter().enumerate() {
             let Some(mesh_index) = n.get("mesh").and_then(Val::usize) else {
@@ -195,6 +263,8 @@ impl StaticModel {
 
                 let base = vert_total as u32;
                 let count = pos.len() / 3;
+                let mut pmin = Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX };
+                let mut pmax = Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN };
                 for i in 0..count {
                     let g = |src: &Option<Vec<f32>>, lanes: usize, lane: usize, dflt: f32| {
                         src.as_ref()
@@ -231,6 +301,12 @@ impl StaticModel {
                     max.x = max.x.max(p.x);
                     max.y = max.y.max(p.y);
                     max.z = max.z.max(p.z);
+                    pmin.x = pmin.x.min(p.x);
+                    pmin.y = pmin.y.min(p.y);
+                    pmin.z = pmin.z.min(p.z);
+                    pmax.x = pmax.x.max(p.x);
+                    pmax.y = pmax.y.max(p.y);
+                    pmax.z = pmax.z.max(p.z);
                     let (ox, oy) = oct_encode(nrm);
                     vertices.extend_from_slice(&[
                         p.x,
@@ -248,6 +324,9 @@ impl StaticModel {
                     indices.extend((0..count as u32).map(|i| base + i));
                 }
                 vert_total += count;
+                if count > 0 {
+                    parts.push((pmin, pmax));
+                }
             }
         }
         if vertices.is_empty() {
@@ -269,6 +348,7 @@ impl StaticModel {
             texture_uri,
             min,
             max,
+            parts,
         })
     }
 }
@@ -348,5 +428,54 @@ mod tests {
     fn rejects_non_glb_input() {
         assert!(StaticModel::parse_glb(b"not a gltf at all").is_err());
         assert!(StaticModel::parse_glb(&[]).is_err());
+    }
+
+    /// A house is walls + roof + door frame, so its collider must be several
+    /// boxes with the doorway left as a GAP. One AABB would make the door
+    /// solid, which is the difference between a building and a rock.
+    #[test]
+    fn collider_parts_keep_structure_and_drop_trim() {
+        let model = StaticModel {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            texture_uri: None,
+            min: Vec3f { x: -2.0, y: 0.0, z: -2.0 },
+            max: Vec3f { x: 2.0, y: 3.0, z: 2.0 },
+            parts: vec![
+                // Two wall slabs either side of a doorway.
+                (Vec3f { x: -2.0, y: 0.0, z: -2.0 }, Vec3f { x: -0.5, y: 3.0, z: 2.0 }),
+                (Vec3f { x: 0.5, y: 0.0, z: -2.0 }, Vec3f { x: 2.0, y: 3.0, z: 2.0 }),
+                // A door handle: substantial in no axis, must be dropped.
+                (Vec3f { x: -0.4, y: 1.2, z: 1.9 }, Vec3f { x: -0.3, y: 1.3, z: 2.0 }),
+            ],
+        };
+        let parts = model.collider_parts();
+        assert_eq!(parts.len(), 2, "expected two walls, got {parts:?}");
+        // And the doorway between them really is open.
+        let gap = parts.iter().all(|(a, b)| !(a.x < 0.0 && b.x > 0.0));
+        assert!(gap, "a collider spans the doorway: {parts:?}");
+    }
+
+    /// Low-res by design: a prop with many primitives must not produce a
+    /// collider per screw. The biggest boxes carry the shape.
+    #[test]
+    fn collider_parts_are_capped() {
+        let mut parts = Vec::new();
+        for i in 0..40 {
+            let x = i as f32 * 0.5;
+            parts.push((
+                Vec3f { x, y: 0.0, z: 0.0 },
+                Vec3f { x: x + 2.0, y: 2.0, z: 2.0 },
+            ));
+        }
+        let model = StaticModel {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            texture_uri: None,
+            min: Vec3f { x: 0.0, y: 0.0, z: 0.0 },
+            max: Vec3f { x: 22.0, y: 2.0, z: 2.0 },
+            parts,
+        };
+        assert!(model.collider_parts().len() <= 8);
     }
 }

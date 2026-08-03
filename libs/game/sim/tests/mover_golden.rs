@@ -241,3 +241,109 @@ fn mover_is_blocked_by_a_rigid_body() {
         "walker should stop at the crate's face (~1.2) but reached {x}"
     );
 }
+
+/// A stock prop is drawn as a mesh, so its collider is a `hidden` box that
+/// the renderer skips. Hidden must affect DRAWING ONLY — if it leaked into
+/// the sweep set, every scenery prop would go back to being walk-through
+/// scenery, which is the bug this flag exists to fix.
+#[test]
+fn hidden_props_still_block_a_walker() {
+    let mut w = GameWorld::new();
+    w.reset_content();
+    w.push_entity(ent(1, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(30.0, 0.5, 30.0)));
+    // A house collider: invisible, but solid.
+    let mut house = ent(2, BodyKind::Static, vec3f(4.0, 2.0, 0.0), vec3f(2.0, 2.0, 2.0));
+    house.hidden = true;
+    w.push_entity(house);
+
+    let mut walker = ent(3, BodyKind::Mover, vec3f(0.0, 0.5, 0.0), vec3f(0.3, 0.5, 0.3));
+    walker.vel = vec3f(4.0, 0.0, 0.0);
+    w.push_entity(walker);
+    for _ in 0..90 {
+        w.entity_mut(3).unwrap().vel.x = 4.0;
+        step_world(&mut w);
+    }
+    let x = w.entity(3).unwrap().pos.x;
+    // Unobstructed he would cross the whole slab; the house's near face is at
+    // 4.0 - 2.0 = 2.0, so he stops around 1.7 (minus his own half-width).
+    assert!(
+        x < 1.85,
+        "hidden collider did not block the walker: reached {x}"
+    );
+    // And he must not have been shoved onto its roof.
+    let y = w.entity(3).unwrap().pos.y;
+    assert!(y < 1.0, "walker climbed the house: y {y}");
+}
+
+/// Walk a mover along +x from `from_z` and report where it stopped.
+fn walk_to_x(w: &mut GameWorld, id: u64, z: f32, ticks: usize) -> f32 {
+    if let Some(e) = w.entity_mut(id) {
+        e.pos = vec3f(-6.0, 0.5, z);
+    }
+    for _ in 0..ticks {
+        w.entity_mut(id).unwrap().vel.x = 4.0;
+        step_world(w);
+    }
+    w.entity(id).unwrap().pos.x
+}
+
+/// A prop's collider is several boxes derived from its own primitives, not one
+/// AABB. That distinction is the whole point: a house must stop you at its
+/// walls and let you through its doorway. One box would make the door solid,
+/// which is the difference between a building and a rock.
+#[test]
+fn a_multi_box_house_blocks_walls_but_not_the_doorway() {
+    let mut w = GameWorld::new();
+    w.reset_content();
+    w.push_entity(ent(1, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(40.0, 0.5, 40.0)));
+    // Two wall slabs at x=0 with a 1.6-wide doorway between them at z=0.
+    for (i, cz) in [-2.0f32, 2.0].iter().enumerate() {
+        let mut wall = ent(
+            2 + i as u64,
+            BodyKind::Static,
+            vec3f(0.0, 1.5, *cz),
+            vec3f(0.4, 1.5, 1.2),
+        );
+        wall.hidden = true;
+        w.push_entity(wall);
+    }
+    let mut walker = ent(9, BodyKind::Mover, vec3f(-6.0, 0.5, 0.0), vec3f(0.3, 0.5, 0.3));
+    walker.vel = vec3f(4.0, 0.0, 0.0);
+    w.push_entity(walker);
+
+    // Straight at a wall: stops short of it.
+    let blocked = walk_to_x(&mut w, 9, -2.0, 240);
+    assert!(blocked < -0.5, "wall did not block: reached x {blocked}");
+    // Through the gap between them: passes clean through.
+    let through = walk_to_x(&mut w, 9, 0.0, 240);
+    assert!(
+        through > 2.0,
+        "doorway was solid — a single AABB, not a multi-box collider (x {through})"
+    );
+}
+
+/// A tree collides at the trunk only. Blocking the canopy would put an
+/// invisible wall metres from the trunk and make a wood impassable.
+#[test]
+fn a_tree_blocks_at_the_trunk_and_not_under_the_canopy() {
+    let mut w = GameWorld::new();
+    w.reset_content();
+    w.push_entity(ent(1, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(40.0, 0.5, 40.0)));
+    // Trunk only: narrow and low. The canopy contributes no collider at all.
+    let mut trunk = ent(2, BodyKind::Static, vec3f(0.0, 1.2, 0.0), vec3f(0.22, 1.2, 0.22));
+    trunk.hidden = true;
+    w.push_entity(trunk);
+    let mut walker = ent(9, BodyKind::Mover, vec3f(-6.0, 0.5, 0.0), vec3f(0.3, 0.5, 0.3));
+    walker.vel = vec3f(4.0, 0.0, 0.0);
+    w.push_entity(walker);
+
+    // Dead at the trunk: stopped.
+    let hit = walk_to_x(&mut w, 9, 0.0, 240);
+    assert!(hit < -0.4, "trunk did not block: x {hit}");
+    // A stride to the side — under the canopy — is clear.
+    let clear = walk_to_x(&mut w, 9, 1.6, 240);
+    assert!(
+        clear > 2.0,
+        "canopy blocked a walker who should have passed under it (x {clear})"
+    );
+}
