@@ -78,6 +78,11 @@ struct Shared {
     /// Cells whose slice is too large to ship over the wire — only the
     /// local worker may take them.
     local_only: Mutex<std::collections::HashSet<usize>>,
+    /// Cells a worker is processing RIGHT NOW. A requeue rewinds the
+    /// claim cursor past later cells; without this set the rewind
+    /// re-issues cells that are mid-bake elsewhere (observed: remote and
+    /// local worker racing the same cell into a corrupt ledger entry).
+    in_flight: Mutex<std::collections::HashSet<usize>>,
     /// At most three concurrent slices: the store is read-only so parallel
     /// slicing is safe; ten workers need a fresh cell every couple of
     /// minutes and the NVMe sustains three readers without thrash.
@@ -111,6 +116,7 @@ fn main() {
         weave_dirty: AtomicBool::new(false),
         stop: AtomicBool::new(false),
         local_only: Mutex::new(Default::default()),
+        in_flight: Mutex::new(Default::default()),
         slice_gate: Mutex::new(0),
     });
     let config = Arc::new(config);
@@ -327,6 +333,9 @@ fn claim_cell(shared: &Shared, config: &Config, remote: bool) -> Option<(usize, 
         if remote && shared.local_only.lock().unwrap().contains(&index) {
             continue;
         }
+        if !shared.in_flight.lock().unwrap().insert(index) {
+            continue; // another worker is on it right now
+        }
         // Cells are in NL-spiral order — the same order the pass-4
         // frontier advances — so each worker blocks on its own claimed
         // cell and they unblock in sequence as the frontier grows.
@@ -428,13 +437,15 @@ fn local_worker(shared: &Shared, config: &Config) {
         match slice_cell(shared, config, index, &bbox) {
             Ok(false) => {
                 mark_empty(config, index);
-                shared.active.fetch_sub(1, Ordering::SeqCst);
+                shared.in_flight.lock().unwrap().remove(&index);
+        shared.active.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
             Err(err) => {
                 eprintln!("mapfleet: {name} slice error: {err} — requeue");
                 requeue(shared, index);
-                shared.active.fetch_sub(1, Ordering::SeqCst);
+                shared.in_flight.lock().unwrap().remove(&index);
+        shared.active.fetch_sub(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(30));
                 continue;
             }
@@ -443,7 +454,7 @@ fn local_worker(shared: &Shared, config: &Config) {
         println!("mapfleet: {name} bake (local)");
         // Bake into a temp name: the ledger name must appear atomically —
         // the weaver and the resume ledger both trust its existence.
-        let baked_tmp = baked.with_extension("mbtiles.tmp");
+        let baked_tmp = baked.with_extension("mbtiles.local-tmp");
         let _ = std::fs::remove_file(&baked_tmp);
         let mut cmd = Command::new("./target/release/mpbake-run");
         cmd.arg(&base).arg(&baked_tmp).args(BAKE_ARGS);
@@ -461,6 +472,7 @@ fn local_worker(shared: &Shared, config: &Config) {
                 eprintln!("mapfleet: {name} local bake failed: {other:?}");
             }
         }
+        shared.in_flight.lock().unwrap().remove(&index);
         shared.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -494,13 +506,15 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
         match slice_cell(shared, config, index, &bbox) {
             Ok(false) => {
                 mark_empty(config, index);
-                shared.active.fetch_sub(1, Ordering::SeqCst);
+                shared.in_flight.lock().unwrap().remove(&index);
+        shared.active.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
             Err(err) => {
                 eprintln!("mapfleet: {name} slice error: {err} — requeue");
                 requeue(shared, index);
-                shared.active.fetch_sub(1, Ordering::SeqCst);
+                shared.in_flight.lock().unwrap().remove(&index);
+        shared.active.fetch_sub(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(30));
                 continue;
             }
@@ -516,7 +530,8 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
             );
             shared.local_only.lock().unwrap().insert(index);
             requeue(shared, index);
-            shared.active.fetch_sub(1, Ordering::SeqCst);
+            shared.in_flight.lock().unwrap().remove(&index);
+        shared.active.fetch_sub(1, Ordering::SeqCst);
             continue;
         }
         let needs_dz = intersects_nl(&bbox);
@@ -576,12 +591,14 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
                     last_fail = Some(index);
                 }
                 requeue(shared, index);
-                shared.active.fetch_sub(1, Ordering::SeqCst);
+                shared.in_flight.lock().unwrap().remove(&index);
+        shared.active.fetch_sub(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(30));
                 continue;
             }
         }
         last_fail = None;
+        shared.in_flight.lock().unwrap().remove(&index);
         shared.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -659,7 +676,7 @@ fn remote_pull(host: &str, remote_path: &str, local_path: &Path) -> io::Result<(
         data.len() as f64 / 1e6
     );
     // Temp + rename: the ledger name must never exist half-written.
-    let tmp = local_path.with_extension("mbtiles.tmp");
+    let tmp = local_path.with_extension("mbtiles.pull-tmp");
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, local_path)?;
     Ok(())
