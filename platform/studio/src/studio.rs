@@ -174,6 +174,61 @@ pub struct RemoteTextInput {
     pub y: f64,
 }
 
+/// A gamepad's state, forwarded from Studio to the app it is hosting.
+///
+/// An app running under Studio is a child process with no window of its own,
+/// so the OS delivers game-controller input to Studio and never to it — the
+/// same reason mouse and key events are forwarded rather than read directly.
+/// Sticks are flattened to scalars so the wire protocol stays independent of
+/// the math crate, matching the other Remote* structs here.
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemoteGamepad {
+    pub a: f32,
+    pub b: f32,
+    pub x: f32,
+    pub y: f32,
+    pub left_shoulder: f32,
+    pub right_shoulder: f32,
+    pub left_trigger: f32,
+    pub right_trigger: f32,
+    pub select: f32,
+    pub start: f32,
+    pub home: f32,
+    pub left_thumb: f32,
+    pub right_thumb: f32,
+    pub dpad_up: f32,
+    pub dpad_down: f32,
+    pub dpad_left: f32,
+    pub dpad_right: f32,
+    pub left_stick_x: f32,
+    pub left_stick_y: f32,
+    pub right_stick_x: f32,
+    pub right_stick_y: f32,
+}
+
+/// A racing wheel's state. Carried alongside gamepads so a wheel does not
+/// silently vanish under Studio while a pad keeps working.
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemoteWheel {
+    pub steering: f32,
+    pub throttle: f32,
+    pub brake: f32,
+    pub clutch: f32,
+    pub steer_force: f32,
+}
+
+#[derive(Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub enum RemoteGameInput {
+    Gamepad(RemoteGamepad),
+    Wheel(RemoteWheel),
+}
+
+impl Default for RemoteGameInput {
+    fn default() -> Self {
+        Self::Gamepad(RemoteGamepad::default())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub struct RemoteScroll {
     pub time: f64,
@@ -360,6 +415,10 @@ pub enum StudioToApp {
     TextCopy,
     TextCut,
     Scroll(RemoteScroll),
+    /// The full set of game controllers Studio can see, resent whenever it
+    /// changes. Level state rather than edges, because that is what the OS
+    /// APIs report and what `Cx::game_input_states` hands back.
+    GameInput(Vec<RemoteGameInput>),
     /// Application-defined event. Delivered to the app as `Event::Custom`.
     Custom(String),
     #[default]
