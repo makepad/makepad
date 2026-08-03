@@ -340,3 +340,138 @@ fn a_client_authoring_request_reaches_the_host() {
     assert_eq!(authoring.len(), 1, "expected exactly one authoring intent");
     assert_eq!(authoring[0].1, "make a racing game with boats");
 }
+
+#[test]
+fn a_remote_claude_submits_an_edit_and_is_answered_over_the_wire() {
+    // The multi-Claude path: a client's agent asks for the base, submits an
+    // edit against it, and the host answers that client alone.
+    let mut clock = 0.0;
+    let mut host = host();
+    let mut client = join(&mut host, 11, "laptop", &mut clock);
+
+    client.send_coedit(CoeditRequest::GetBase);
+    let (events, _) = settle(&mut host, std::slice::from_mut(&mut client), &mut clock);
+    let asked = events.iter().any(|e| {
+        matches!(
+            e,
+            HostEvent::Coedit {
+                req: CoeditRequest::GetBase,
+                ..
+            }
+        )
+    });
+    assert!(asked, "the host must see the base request");
+
+    // The host answers with the source it holds.
+    host.send_coedit(
+        PlayerId(11),
+        CoeditResponse::Base {
+            generation: 0,
+            source: "cars {\n  count: 4\n}\n".to_string(),
+        },
+    );
+    let (_, client_events) = settle(&mut host, std::slice::from_mut(&mut client), &mut clock);
+    let base = client_events.iter().find_map(|e| match e {
+        ClientEvent::Coedit {
+            res: CoeditResponse::Base { generation, source },
+        } => Some((*generation, source.clone())),
+        _ => None,
+    });
+    assert_eq!(base, Some((0, "cars {\n  count: 4\n}\n".to_string())));
+
+    client.send_coedit(CoeditRequest::Submit {
+        intent: "eight cars".to_string(),
+        base_generation: 0,
+        source: "cars {\n  count: 8\n}\n".to_string(),
+    });
+    let (events, _) = settle(&mut host, std::slice::from_mut(&mut client), &mut clock);
+    let submitted = events.iter().find_map(|e| match e {
+        HostEvent::Coedit {
+            player,
+            req:
+                CoeditRequest::Submit {
+                    intent,
+                    base_generation,
+                    source,
+                },
+        } => Some((*player, intent.clone(), *base_generation, source.clone())),
+        _ => None,
+    });
+    let (player, intent, base_generation, source) =
+        submitted.expect("the submission must arrive intact");
+    assert_eq!(player, PlayerId(11));
+    assert_eq!(intent, "eight cars");
+    assert_eq!(base_generation, 0);
+    assert_eq!(source, "cars {\n  count: 8\n}\n");
+}
+
+#[test]
+fn a_malformed_edit_is_refused_without_reaching_the_intent_log() {
+    let mut clock = 0.0;
+    let mut host = host();
+    let mut client = join(&mut host, 12, "laptop", &mut clock);
+
+    // Empty intent and an over-cap source: both must be refused at the edge.
+    client.send_coedit(CoeditRequest::Submit {
+        intent: "   ".to_string(),
+        base_generation: 0,
+        source: "x\n".to_string(),
+    });
+    client.send_coedit(CoeditRequest::Submit {
+        intent: "huge".to_string(),
+        base_generation: 0,
+        source: "x".repeat(MAX_COEDIT_SOURCE + 1),
+    });
+    let (events, client_events) = settle(&mut host, std::slice::from_mut(&mut client), &mut clock);
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HostEvent::Coedit { .. })),
+        "malformed submissions must not surface as host events"
+    );
+    let refusals = client_events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ClientEvent::Coedit {
+                    res: CoeditResponse::Refused {
+                        reason: CoeditRefusal::Malformed
+                    }
+                }
+            )
+        })
+        .count();
+    assert_eq!(refusals, 2, "each malformed submission is answered");
+}
+
+#[test]
+fn source_cannot_be_rewritten_by_a_datagram() {
+    // Coedit is reliable-channel only: accepting it over UDP would let one
+    // spoofed datagram rewrite the game.
+    let mut clock = 0.0;
+    let mut host = host();
+    let mut client = join(&mut host, 13, "laptop", &mut clock);
+
+    let payload = ClientToHost::Coedit {
+        req: CoeditRequest::Submit {
+            intent: "sneaky".to_string(),
+            base_generation: 0,
+            source: "cars {\n  count: 999\n}\n".to_string(),
+        },
+    }
+    .serialize_bin();
+    // Correctly signed, from the real player — only the channel is wrong.
+    let datagram = Envelope::seal(13, &payload, &LobbyKey::new(SECRET));
+    let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    sock.send_to(&datagram, host.udp_addr()).unwrap();
+
+    let (events, _) = settle(&mut host, std::slice::from_mut(&mut client), &mut clock);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HostEvent::Coedit { .. })),
+        "a datagram must never carry an edit into the intent log"
+    );
+}

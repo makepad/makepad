@@ -295,6 +295,9 @@ impl HostSession {
                         }
                     }
                 }
+                // Source editing is the authoring layer's business, not
+                // replication's — the app drains these into its coedit bridge.
+                HostEvent::Coedit { .. } => {}
             }
         }
         out
@@ -390,6 +393,9 @@ impl ClientSession {
                 ClientEvent::Disconnected { reason } => {
                     out.push(SessionEvent::Disconnected { reason });
                 }
+                // Answers to this device's own Claude; the authoring layer
+                // reads them, the sim never does.
+                ClientEvent::Coedit { .. } => {}
             }
         }
         if dirty {
