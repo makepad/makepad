@@ -9,7 +9,7 @@
 //! OpenAI-compatible) can expose it; this module deliberately does not depend
 //! on `makepad_ai`.
 
-use crate::{AssetIndex, AssetKind, Filters, Source};
+use crate::{AssetIndex, AssetKind, Filters, Palette, Source, Spread, VarietyParams};
 
 /// A tool parameter, in the subset of JSON Schema every provider understands.
 pub struct ToolParam {
@@ -33,7 +33,11 @@ pub const FIND_MODEL: ToolDescriptor = ToolDescriptor {
                   description, and get back ids you can use. Use plain language: what the thing \
                   is, or what it is FOR (\"red truck\", \"something to hide behind\", \"trees \
                   for a forest\", \"sound when you crash\", \"happy win music\"). Always call \
-                  this before using an asset id; never invent one.",
+                  this before using an asset id; never invent one. \
+                  RESULTS ARE DISTINCT MODELS, NOT RANKED DUPLICATES: if you need several of \
+                  something — houses in a village, trees in a wood, rocks on a hill — ask for \
+                  several here and PLACE A DIFFERENT ONE EACH TIME. Placing result #1 five \
+                  times is the single most common way to make a scene look cheap.",
     params: &[
         ToolParam {
             name: "query",
@@ -63,7 +67,55 @@ pub const FIND_MODEL: ToolDescriptor = ToolDescriptor {
         ToolParam {
             name: "max_results",
             ty: "integer",
-            description: "How many results to return (default 5, max 20).",
+            description: "How many DISTINCT models to return (default 5, max 20). Ask for as \
+                          many as you intend to place — 6 houses, 8 trees — and use them all.",
+            required: false,
+        },
+        ToolParam {
+            name: "spread",
+            ty: "string",
+            description: "How different the results should be. \"mixed\" (default) spreads \
+                          across kinds before repeating a shape — right for a forest or a \
+                          street. \"kinds\" returns one of each kind only, for maximum \
+                          variety. \"variants\" returns members of one family, e.g. the same \
+                          house in several designs, for a row that should look related.",
+            required: false,
+        },
+        ToolParam {
+            name: "seed",
+            ty: "integer",
+            description: "Optional: changes which models are picked while keeping the same \
+                          picks on every re-run. Vary it to reroll a scene's look.",
+            required: false,
+        },
+    ],
+};
+
+/// Kenney authors each pack as a matched set, so drawing a whole scene from one
+/// pack is what makes it look authored. A palette hands the model that set in
+/// one call, instead of it running five unrelated searches and mixing five art
+/// styles into one village.
+pub const FIND_PALETTE: ToolDescriptor = ToolDescriptor {
+    name: "find_palette",
+    description: "Get a COHERENT SET of models that visually belong together — all from one \
+                  art pack — grouped by what each is for. Use this when building a whole \
+                  scene (\"a village\", \"a city street\", \"a spooky graveyard\", \"a space \
+                  station\") instead of searching separately for houses, then trees, then \
+                  fences: those searches can land in different art styles and the result \
+                  looks like a junk drawer. Returns the pack name and its groups with several \
+                  ids each, so you can place a DIFFERENT model from a group every time.",
+    params: &[
+        ToolParam {
+            name: "query",
+            ty: "string",
+            description: "The kind of place you are building, e.g. \"village\", \"race track\", \
+                          \"dungeon\", \"suburb\", \"pirate island\".",
+            required: true,
+        },
+        ToolParam {
+            name: "seed",
+            ty: "integer",
+            description: "Optional: reroll which members of each group come first.",
             required: false,
         },
     ],
@@ -78,11 +130,30 @@ pub struct FindParams {
     pub category: Option<String>,
     pub rigged_only: bool,
     pub max_results: Option<usize>,
+    /// How different the results should be from each other. `None` keeps the
+    /// old plain-ranked behaviour for callers that genuinely want a ranking
+    /// (`best`, `resolve_or_explain`); the agent path always sets it.
+    pub spread: Option<Spread>,
+    pub seed: u64,
 }
 
 impl FindParams {
     pub fn new(query: &str) -> Self {
         FindParams { query: query.to_string(), ..Default::default() }
+    }
+    /// Parse the `spread` argument. An unknown value means the default rather
+    /// than an error — a stray word should not fail the call.
+    pub fn with_spread_str(mut self, spread: &str) -> Self {
+        self.spread = Some(match spread.to_lowercase().as_str() {
+            "kinds" | "kind" | "distinct" => Spread::Kinds,
+            "variants" | "variant" | "family" => Spread::Variants,
+            _ => Spread::Mixed,
+        });
+        self
+    }
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
     }
     /// Parse the `kind` argument a model would send. Unknown values mean "no
     /// filter" rather than an error — a stray word should not fail the call.
@@ -115,6 +186,11 @@ pub struct FindResult {
 }
 
 /// Run a `find_model` call.
+///
+/// Results are DISTINCT models by default. The old behaviour — a plain ranked
+/// list whose top entries are often near-identical siblings — is what made a
+/// caller place the same house five times, so the variety pass is the default
+/// and a plain ranking has to be asked for explicitly (`spread: None`).
 pub fn execute(index: &AssetIndex, params: &FindParams) -> Vec<FindResult> {
     let limit = params.max_results.unwrap_or(5).clamp(1, 20);
     let filters = Filters {
@@ -124,21 +200,77 @@ pub fn execute(index: &AssetIndex, params: &FindParams) -> Vec<FindResult> {
         max_extent: None,
         kind: params.kind,
     };
-    index
-        .find_filtered(&params.query, &filters)
+    let entries: Vec<&crate::AssetEntry> = match params.spread {
+        Some(spread) => index.find_many(
+            &params.query,
+            &VarietyParams {
+                count: limit,
+                spread,
+                seed: params.seed,
+                filters: filters.clone(),
+            },
+        ),
+        None => index
+            .find_filtered(&params.query, &filters)
+            .into_iter()
+            .take(limit)
+            .map(|h| h.entry)
+            .collect(),
+    };
+    entries
         .into_iter()
-        .take(limit)
-        .map(|h| FindResult {
-            id: h.entry.id.clone(),
-            name: h.entry.name.clone(),
-            kind: h.entry.kind,
-            category: h.entry.categories.first().cloned().unwrap_or_default(),
-            rigged: h.entry.rigged,
-            size: h.entry.size,
-            loops: h.entry.loops,
-            playable: h.entry.decodable,
+        .map(|e| FindResult {
+            id: e.id.clone(),
+            name: e.name.clone(),
+            kind: e.kind,
+            category: e.categories.first().cloned().unwrap_or_default(),
+            rigged: e.rigged,
+            size: e.size,
+            loops: e.loops,
+            playable: e.decodable,
         })
         .collect()
+}
+
+/// Run a `find_palette` call.
+pub fn execute_palette(index: &AssetIndex, query: &str, seed: u64) -> Option<Palette> {
+    index.palette(query, seed)
+}
+
+/// Render a palette compactly. Groups are capped because a pack can hold
+/// hundreds of models and the model only needs enough of each to avoid
+/// repeating itself — every token here is paid for on every turn.
+pub fn palette_to_json(palette: &Palette, per_group: usize) -> String {
+    let mut s = format!("{{\"pack\":\"{}\",\"groups\":{{", palette.pack);
+    let mut first = true;
+    for (group, ids) in palette.groups.iter().take(12) {
+        if ids.is_empty() {
+            continue;
+        }
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        s.push_str(&format!("\"{group}\":["));
+        for (i, id) in ids.iter().take(per_group).enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            // Ids share the pack prefix, so send only the tail and state the
+            // prefix once — a village palette is ~40 ids and the repetition
+            // would be most of the payload.
+            let tail = id.rsplit('/').next().unwrap_or(id);
+            s.push_str(&format!("\"{tail}\""));
+        }
+        s.push(']');
+        if ids.len() > per_group {
+            // Tell the model more exist, so it knows it can ask for a bigger
+            // slice rather than assuming this is the whole group.
+            s.push_str("");
+        }
+    }
+    s.push_str("}}");
+    s
 }
 
 /// Render results as compact JSON for handing back to a model. One line per
@@ -215,8 +347,11 @@ pub fn library_summary(index: &AssetIndex) -> String {
     let music = index.count_of(AssetKind::Music);
     format!(
         "A stock CC0 asset library is available: {models} models, {sounds} sounds, {music} music \
-         jingles — {}. Call find_model(query) to search it in plain language (models, sounds and \
-         music together; filter with kind) — never guess an asset id. Ids look like {}.",
+         jingles — {}. Call find_model(query, max_results) to search in plain language — never \
+         guess an asset id. Ids look like {}. Results are DISTINCT models: ask for as many as \
+         you will place and use a different one each time, because repeating one model is what \
+         makes a scene look cheap. For a whole scene call find_palette(query) instead — it \
+         returns a matched set from one art pack, so the parts look like one game.",
         cats.join(", "),
         examples.join(", ")
     )

@@ -299,6 +299,27 @@ pub const SYNONYMS: &[(&str, &[&str])] = &[
 
 /// The curated catalogue. Keyed by `<pack>/<stem>`.
 pub const ALIASES: &[Alias] = &[
+    // ------------------------------------------------------- nature: rocks
+    // Landscape rocks lost "boulder" to `tower-defense-kit/weapon-ammo-boulder`
+    // — catapult ammo — purely because that filename says the word and these
+    // reach it only through the boulder->rock synonym. A confidently wrong top
+    // hit is worse than a miss here, because a composer places it five times.
+    Alias { key: "nature-kit/rock_largeA", name: "Boulder", categories: &["nature/rock"],
+        aliases: &["boulder", "rock", "stone", "big rock", "large rock", "landscape", "scenery", "nature", "outcrop"] },
+    Alias { key: "nature-kit/rock_largeB", name: "Boulder", categories: &["nature/rock"],
+        aliases: &["boulder", "rock", "stone", "big rock", "large rock", "landscape", "scenery", "nature", "outcrop"] },
+    Alias { key: "nature-kit/rock_largeC", name: "Boulder", categories: &["nature/rock"],
+        aliases: &["boulder", "rock", "stone", "big rock", "large rock", "landscape", "scenery", "nature", "outcrop"] },
+    Alias { key: "nature-kit/rock_largeD", name: "Boulder", categories: &["nature/rock"],
+        aliases: &["boulder", "rock", "stone", "big rock", "large rock", "landscape", "scenery", "nature", "outcrop"] },
+    Alias { key: "nature-kit/rock_largeE", name: "Boulder", categories: &["nature/rock"],
+        aliases: &["boulder", "rock", "stone", "big rock", "large rock", "landscape", "scenery", "nature", "outcrop"] },
+    Alias { key: "nature-kit/rock_largeF", name: "Boulder", categories: &["nature/rock"],
+        aliases: &["boulder", "rock", "stone", "big rock", "large rock", "landscape", "scenery", "nature", "outcrop"] },
+    Alias { key: "nature-kit/rock_smallA", name: "Rock", categories: &["nature/rock"],
+        aliases: &["rock", "stone", "boulder", "small rock", "pebble", "landscape", "scenery", "nature"] },
+    Alias { key: "nature-kit/rock_smallB", name: "Rock", categories: &["nature/rock"],
+        aliases: &["rock", "stone", "boulder", "small rock", "pebble", "landscape", "scenery", "nature"] },
     // ---------------------------------------------------------------- arena
     Alias { key: "arena/banner", name: "Banner", categories: &["prop/decoration"],
         aliases: &["banner", "flag", "pennant", "cloth", "hanging", "decoration", "medieval", "castle", "scenery", "wall hanging"] },

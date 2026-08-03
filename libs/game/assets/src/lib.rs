@@ -22,6 +22,9 @@ pub mod audio_aliases;
 mod glb;
 pub mod packs;
 pub mod states;
+pub mod variety;
+
+pub use variety::{Palette, Spread, VarietyParams};
 
 use std::path::{Path, PathBuf};
 
@@ -651,7 +654,7 @@ fn kind_rank(kind: AssetKind, prefer_audio: bool) -> u8 {
 /// Words ending "ss" are left alone (glass, grass, class must not become
 /// "gla"), and a stem shorter than the floor is rejected so "ring" does not
 /// become "r".
-fn stem(t: &str) -> Option<String> {
+pub(crate) fn stem(t: &str) -> Option<String> {
     let b = t.as_bytes();
     let n = t.len();
     if n >= 7 && t.ends_with("ing") && n - 3 >= 4 {
@@ -672,7 +675,7 @@ fn stem(t: &str) -> Option<String> {
     None
 }
 
-fn tokenize(q: &str) -> Vec<String> {
+pub(crate) fn tokenize(q: &str) -> Vec<String> {
     // Function words must be dropped, not merely down-weighted: the curated
     // aliases are phrases ("something to shoot at"), so a stray preposition in
     // the query would otherwise score a full word-in-phrase match and drag in
@@ -924,7 +927,7 @@ fn build_audio_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
 
 /// Split an identifier into lowercase words on separators AND camelCase
 /// boundaries: "spaceEngineLarge" -> ["space", "engine", "large"].
-fn split_ident(s: &str) -> Vec<String> {
+pub(crate) fn split_ident(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for ch in s.chars() {

@@ -280,11 +280,23 @@ fn index_build_and_query_stay_fast_at_full_catalogue_scale() {
 
     // Search sits in a chat loop, so it must be imperceptible. A naive
     // all-entries scan measured 73 ms here before the inverted index.
-    let t = Instant::now();
-    for q in ["truck", "something to drive", "a cat", "medieval castle", "laser"] {
-        let _ = idx.find(q);
+    //
+    // MIN-of-N, not an average: this test shares a machine with 23 others, and
+    // an averaged wall clock measures the contention rather than the query
+    // (2.1 ms run alone, 44 ms under a full parallel suite — a 20x swing with
+    // no code change). The fastest of several runs is the one where the query
+    // actually got the CPU, which is what we mean to bound. Same protocol the
+    // box3d benchmarks use for the same reason.
+    let queries = ["truck", "something to drive", "a cat", "medieval castle", "laser"];
+    let mut best = u128::MAX;
+    for _ in 0..5 {
+        let t = Instant::now();
+        for q in queries {
+            let _ = idx.find(q);
+        }
+        best = best.min(t.elapsed().as_micros() / queries.len() as u128);
     }
-    let us = t.elapsed().as_micros() / 5;
+    let us = best;
     assert!(us < 20_000, "average query {us} us — inverted index regressed?");
     eprintln!("scale: {} entries, build {build_ms} ms, {us} us/query", idx.len());
 }
@@ -408,4 +420,155 @@ fn find_kit_returns_compact_planning_data() {
     let with_ramps = agent::execute_kit(&idx, None, Some("ramp"));
     assert!(with_ramps.iter().all(|k| k.roles.iter().any(|(r, _)| r == "ramp")));
     assert!(with_ramps.len() < idx.kits().len());
+}
+
+// ---- variety and palettes ----------------------------------------------
+//
+// These test the index as a COMPOSITION tool rather than a search engine. The
+// failure they exist to prevent was visible in a screenshot: five identical
+// houses on five identical lots, identical tree clusters beside each. The
+// ranking was never wrong — 21 distinct houses came back at equal score — but
+// the caller took hit #1 and placed it five times, because nothing in the API
+// offered anything else.
+
+use makepad_game_assets::{Spread, VarietyParams};
+
+/// The village case: several houses that are actually different houses.
+#[test]
+fn a_village_gets_distinct_houses_not_one_house_five_times() {
+    let Some(idx) = index() else { return };
+    let picks = idx.find_many("suburban house building", &VarietyParams::new(5));
+    assert!(picks.len() >= 4, "only {} houses offered", picks.len());
+    let ids: Vec<&str> = picks.iter().map(|e| e.id.as_str()).collect();
+    let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+    assert_eq!(unique.len(), ids.len(), "repeated a model: {ids:?}");
+    // Every one must actually be a building — variety is not licence to drift
+    // onto driveways and fences that merely share the pack's theme.
+    assert!(
+        ids.iter().all(|id| id.contains("building")),
+        "variety drifted off-topic: {ids:?}"
+    );
+}
+
+/// Coherence: a street built from five packs is five art styles. The dominant
+/// pack has to be exhausted before the search crosses into another.
+#[test]
+fn a_scene_stays_in_one_art_pack_when_that_pack_can_supply_it() {
+    let Some(idx) = index() else { return };
+    let picks = idx.find_many("suburban house building", &VarietyParams::new(5));
+    let packs: std::collections::BTreeSet<&str> =
+        picks.iter().map(|e| e.pack.as_str()).collect();
+    assert_eq!(
+        packs.len(),
+        1,
+        "mixed {} art packs into one street: {:?}",
+        packs.len(),
+        packs
+    );
+}
+
+/// The forest case: several species, and the option of several variants of one.
+#[test]
+fn a_forest_gets_several_species_and_can_get_variants_of_one() {
+    let Some(idx) = index() else { return };
+    let mixed = idx.find_many("tree", &VarietyParams::new(8));
+    assert!(mixed.len() >= 6, "only {} trees offered", mixed.len());
+
+    // Distinct silhouettes, not one tree recoloured: `tree_blocks`,
+    // `tree_blocks_dark` and `tree_blocks_fall` are one shape in three
+    // palettes and must not count as three kinds.
+    let families: std::collections::BTreeSet<String> = mixed
+        .iter()
+        .map(|e| makepad_game_assets::variety::family_of(e))
+        .collect();
+    assert!(
+        families.len() >= 4,
+        "only {} distinct tree shapes in {:?}",
+        families.len(),
+        mixed.iter().map(|e| &e.id).collect::<Vec<_>>()
+    );
+
+    // And the other axis: a row of one kind, for when things should match.
+    let row = idx.find_many("tree", &VarietyParams::new(3).spread(Spread::Variants));
+    assert!(row.len() >= 2, "no variant row available");
+    let row_fams: std::collections::BTreeSet<String> = row
+        .iter()
+        .map(|e| makepad_game_assets::variety::family_of(e))
+        .collect();
+    assert_eq!(row_fams.len(), 1, "Variants spread crossed families: {row_fams:?}");
+}
+
+/// Selection must be reproducible from (query, seed) alone: multiplayer
+/// replicates a scene as parameters, and a re-run of a game must look the same.
+#[test]
+fn variety_is_seeded_reproducible_and_seed_actually_changes_it() {
+    let Some(idx) = index() else { return };
+    let take = |seed: u64| -> Vec<String> {
+        idx.find_many("tree", &VarietyParams::new(5).seed(seed))
+            .iter()
+            .map(|e| e.id.clone())
+            .collect()
+    };
+    assert_eq!(take(7), take(7), "same seed gave different picks");
+    assert_ne!(take(7), take(42), "seed had no effect");
+}
+
+/// A palette is a matched set from ONE pack, grouped coarsely enough to be
+/// usable — not a 167-entry listing of singletons.
+#[test]
+fn a_palette_is_a_coherent_set_grouped_usefully() {
+    let Some(idx) = index() else { return };
+    let p = idx.palette("village houses", 0).expect("a village pack exists");
+    assert!(p.total() >= 20, "palette too thin: {} models", p.total());
+    assert!(
+        p.groups.len() >= 4 && p.groups.len() <= 40,
+        "{} groups is a listing, not a palette",
+        p.groups.len()
+    );
+    // Every id must come from the one pack — that is what makes it coherent.
+    assert!(
+        p.groups
+            .iter()
+            .flat_map(|(_, ids)| ids)
+            .all(|id| id.contains(&p.pack)),
+        "palette leaked models from another pack"
+    );
+    // Biggest group first, and it must offer several options so the caller can
+    // place a different one each time.
+    assert!(p.groups[0].1.len() >= 3);
+}
+
+/// The agent path must default to distinct models, because that is the caller
+/// that was placing hit #1 five times.
+#[test]
+fn the_agent_tool_returns_distinct_models_by_default() {
+    let Some(idx) = index() else { return };
+    let results = agent::execute(
+        &idx,
+        &agent::FindParams::new("suburban house building")
+            .with_spread_str("mixed"),
+    );
+    let ids: std::collections::BTreeSet<&str> =
+        results.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids.len(), results.len(), "agent got duplicate ids");
+    assert!(results.len() >= 4);
+
+    // And the palette tool stays payload-cheap.
+    let p = agent::execute_palette(&idx, "village", 0).expect("palette");
+    let json = agent::palette_to_json(&p, 4);
+    assert!(json.len() < 1400, "palette json too fat: {} bytes", json.len());
+    assert!(!json.contains(".glb") && !json.contains("resources/"));
+}
+
+/// A landscape rock must not lose "boulder" to a catapult projectile: a
+/// confidently wrong top hit is worse than a miss, because a composer places
+/// it several times.
+#[test]
+fn boulder_finds_a_landscape_rock_not_ammunition() {
+    let Some(idx) = index() else { return };
+    let top: Vec<&str> = idx.find("boulder").iter().take(3).map(|h| h.entry.id.as_str()).collect();
+    assert!(
+        top.iter().any(|id| id.contains("nature-kit/rock")),
+        "boulder still ranks badly: {top:?}"
+    );
 }
