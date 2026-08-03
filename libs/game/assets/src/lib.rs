@@ -20,6 +20,7 @@ pub mod agent;
 pub mod aliases;
 pub mod audio_aliases;
 mod glb;
+pub mod packs;
 
 use std::path::{Path, PathBuf};
 
@@ -97,7 +98,13 @@ pub struct AssetEntry {
     pub license: &'static str,
     pub credit: &'static str,
     pub categories: Vec<String>,
+    /// Terms naming this specific thing: filename tokens and item curation.
     pub keywords: Vec<String>,
+    /// Terms inherited from the pack (setting/theme). Every model in
+    /// `pirate-kit` gets "boat", so these must rank BELOW keywords — otherwise
+    /// asking for "a boat" returns the pack's barrel just as strongly as its
+    /// boats.
+    pub themes: Vec<String>,
     /// Has a skin/skeleton — safe to drive with animation clips. Models only.
     pub rigged: bool,
     pub animated: bool,
@@ -149,7 +156,21 @@ pub struct AssetIndex {
     entries: Vec<AssetEntry>,
     /// Directories that were expected but absent — reported, never fatal.
     missing: Vec<PathBuf>,
+    /// Inverted index: search term -> (entry index, weight). Without this a
+    /// query scanned all ~5000 entries against every keyword, which measured
+    /// 73 ms per search — far too slow to sit in a chat loop.
+    postings: std::collections::HashMap<String, Vec<(u32, u8)>>,
 }
+
+/// Weights for how a term matched. Kept as constants because the ranking is
+/// only explainable if these have names.
+const W_EXACT: u8 = 6;
+const W_PHRASE_WORD: u8 = 4;
+const W_CATEGORY: u8 = 3;
+/// Pack-inherited theme terms. Deliberately weak: they make everything in a
+/// pack *reachable* by setting ("medieval", "space") without letting the pack
+/// drown out the item that is actually named.
+const W_THEME: u8 = 2;
 
 impl AssetIndex {
     /// Walk `root` (typically `apps/arcade/resources`) and index every `.glb`
@@ -221,7 +242,48 @@ impl AssetIndex {
             }
         }
         index.entries.sort_by(|a, b| a.id.cmp(&b.id));
+        index.build_postings();
         index
+    }
+
+    /// Build the inverted index. Every keyword contributes under its exact
+    /// form, and every word of a multi-word alias contributes separately, so
+    /// "drive" finds an entry aliased "something to drive".
+    fn build_postings(&mut self) {
+        let mut postings: std::collections::HashMap<String, Vec<(u32, u8)>> =
+            std::collections::HashMap::new();
+        let add = |term: &str, idx: u32, w: u8, p: &mut std::collections::HashMap<String, Vec<(u32, u8)>>| {
+            let slot = p.entry(term.to_string()).or_default();
+            match slot.iter_mut().find(|(i, _)| *i == idx) {
+                Some((_, existing)) => *existing = (*existing).max(w),
+                None => slot.push((idx, w)),
+            }
+        };
+        for (i, entry) in self.entries.iter().enumerate() {
+            let i = i as u32;
+            for kw in &entry.keywords {
+                add(kw, i, W_EXACT, &mut postings);
+                if kw.contains(' ') {
+                    for word in kw.split_whitespace() {
+                        add(word, i, W_PHRASE_WORD, &mut postings);
+                    }
+                }
+            }
+            for th in &entry.themes {
+                add(th, i, W_THEME, &mut postings);
+                if th.contains(' ') {
+                    for word in th.split_whitespace() {
+                        add(word, i, W_THEME, &mut postings);
+                    }
+                }
+            }
+            for cat in &entry.categories {
+                for part in cat.split('/') {
+                    add(part, i, W_CATEGORY, &mut postings);
+                }
+            }
+        }
+        self.postings = postings;
     }
 
     pub fn len(&self) -> usize {
@@ -295,8 +357,59 @@ impl AssetIndex {
 
     pub fn find_filtered(&self, query: &str, filters: &Filters) -> Vec<Hit<'_>> {
         let terms = tokenize(query);
+        // Gather candidates from the inverted index instead of scanning every
+        // entry: score per (entry, term) is the best weight that term achieved.
+        let mut acc: std::collections::HashMap<u32, (u32, Vec<String>)> =
+            std::collections::HashMap::new();
+        for term in &terms {
+            let mut probes: Vec<&str> = vec![term.as_str()];
+            for e in aliases::expand(term) {
+                if !probes.contains(&e) {
+                    probes.push(e);
+                }
+            }
+            // The stem, and anything the stem is a synonym for, probed at
+            // synonym strength: "smashing" reaches the alias "smash" without
+            // outranking an entry that literally says "smashing".
+            let stemmed = stem(term);
+            if let Some(s) = &stemmed {
+                if !probes.contains(&s.as_str()) {
+                    probes.push(s.as_str());
+                }
+                for e in aliases::expand(s) {
+                    if !probes.contains(&e) {
+                        probes.push(e);
+                    }
+                }
+            }
+            // Best weight this term achieved for each entry it touched.
+            let mut per_entry: std::collections::HashMap<u32, u32> =
+                std::collections::HashMap::new();
+            for (pi, probe) in probes.iter().enumerate() {
+                // The literal term is worth more than a synonym expansion.
+                let exact_bonus = if pi == 0 { 2 } else { 0 };
+                if let Some(list) = self.postings.get(*probe) {
+                    for (idx, w) in list {
+                        let v = *w as u32 + exact_bonus;
+                        let slot = per_entry.entry(*idx).or_insert(0);
+                        *slot = (*slot).max(v);
+                    }
+                }
+            }
+            for (idx, w) in per_entry {
+                let slot = acc.entry(idx).or_insert((0, Vec::new()));
+                slot.0 += w;
+                slot.1.push(term.clone());
+            }
+        }
+
         let mut hits: Vec<Hit> = Vec::new();
-        for entry in &self.entries {
+        // Deterministic candidate order before scoring/sorting.
+        let mut candidates: Vec<u32> = acc.keys().copied().collect();
+        candidates.sort_unstable();
+        for idx in candidates {
+            let entry = &self.entries[idx as usize];
+            let (mut score, matched) = acc[&idx].clone();
             if filters.rigged_only && !entry.rigged {
                 continue;
             }
@@ -320,18 +433,36 @@ impl AssetIndex {
                     continue;
                 }
             }
-            let (mut score, matched) = score_entry(entry, &terms);
-            // A lone substring brush (score 2-3) is noise, not a match: without
-            // this floor, asking for a "digger" — which the library does not
-            // contain — returned an unrelated model instead of nothing, and a
-            // confidently wrong answer is worse than an empty one.
+            // Reward covering more of the query: two matched terms out of two
+            // is a better answer than two out of five.
+            if matched.len() > 1 {
+                score += (matched.len() as u32 - 1) * 2;
+            }
+            // A single weak brush is noise, not a match: without this floor,
+            // asking for a "digger" — which the library does not contain —
+            // returned an unrelated model, and a confidently wrong answer is
+            // worse than an empty one.
             if score >= MIN_HIT_SCORE {
                 score += whole_query_bonus(entry, query);
                 hits.push(Hit { entry, score, matched });
             }
         }
-        // Deterministic: score desc, then id asc — never HashMap order.
-        hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.entry.id.cmp(&b.entry.id)));
+        // Deterministic: score desc, then the kind the query is probably
+        // asking for, then id asc — never HashMap order.
+        //
+        // The kind preference is a TIE-BREAK, deliberately not a score bonus:
+        // it can only reorder entries that already scored identically, so it
+        // cannot drag a weak model above a strong sound. "spaceship" tied a
+        // spacecraft model with a `spaceTrash` sound at 6 apiece and lost on
+        // alphabetical id; an unqualified noun is an object request, so the
+        // model should win that coin toss.
+        let prefer_audio = audio_intent(query);
+        hits.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| kind_rank(a.entry.kind, prefer_audio).cmp(&kind_rank(b.entry.kind, prefer_audio)))
+                .then_with(|| a.entry.id.cmp(&b.entry.id))
+        });
         hits
     }
 
@@ -379,6 +510,71 @@ const MIN_HIT_SCORE: u32 = 3;
 
 /// Split a query into lowercase terms, dropping stop words that carry no
 /// selection power ("a", "the", "some") but keeping short meaningful ones.
+/// Does the query ask for something *audible*? Used only to break ties
+/// between equally-scoring entries of different kinds.
+///
+/// Two signals: explicit words ("sound", "music"), and onomatopoeia or
+/// event verbs that only ever describe a noise — nobody asks for a model of
+/// a "clang". Absent either, an unqualified noun is treated as an object
+/// request, which is what the catalogue mostly holds (4443 models vs 556
+/// sounds).
+fn audio_intent(query: &str) -> bool {
+    const AUDIO_WORDS: &[&str] = &[
+        // explicit
+        "sound", "sounds", "noise", "noises", "sfx", "audio", "music", "song", "tune", "jingle",
+        "fanfare", "sting", "track", "hear", "hears", "loud", "quiet", "beep", "ringtone",
+        // onomatopoeia / noise-only events
+        "clang", "bang", "boom", "thud", "whoosh", "ding", "clink", "rumble", "squeak", "hiss",
+        "clatter", "chime", "ring", "buzz", "click",
+    ];
+    query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| AUDIO_WORDS.contains(&w) || stem(w).is_some_and(|s| AUDIO_WORDS.contains(&s.as_str())))
+}
+
+/// Sort key for the kind tie-break: 0 sorts first.
+fn kind_rank(kind: AssetKind, prefer_audio: bool) -> u8 {
+    match (kind, prefer_audio) {
+        (AssetKind::Model, false) => 0,
+        (AssetKind::Model, true) => 1,
+        (_, true) => 0,
+        (_, false) => 1,
+    }
+}
+
+/// Strip a common English inflection so an inflected query still reaches a
+/// base-form alias: "smashing" -> "smash", "coins" -> "coin", "crashes" ->
+/// "crash". Kids type inflected words and the curated tables are written in
+/// base form, so without this "glass smashing" matched only on "glass" and
+/// returned glass *pipes* instead of a glass *smash* sound.
+///
+/// Deliberately conservative — it only ever ADDS a probe, never replaces the
+/// literal term, so a wrong stem costs nothing but a lookup that misses.
+/// Words ending "ss" are left alone (glass, grass, class must not become
+/// "gla"), and a stem shorter than the floor is rejected so "ring" does not
+/// become "r".
+fn stem(t: &str) -> Option<String> {
+    let b = t.as_bytes();
+    let n = t.len();
+    if n >= 7 && t.ends_with("ing") && n - 3 >= 4 {
+        return Some(t[..n - 3].to_string());
+    }
+    if n >= 6 && t.ends_with("ed") && n - 2 >= 4 {
+        return Some(t[..n - 2].to_string());
+    }
+    // "-es" only after a sibilant (crashes, boxes, buses); otherwise the "-s"
+    // rule below handles it, so that "trees" becomes "tree" and not "tre".
+    if n >= 5 && t.ends_with("es") && matches!(b[n - 3], b's' | b'x' | b'z' | b'c' | b'h') && n - 2 >= 3
+    {
+        return Some(t[..n - 2].to_string());
+    }
+    if n >= 5 && t.ends_with('s') && !t.ends_with("ss") && n - 1 >= 4 {
+        return Some(t[..n - 1].to_string());
+    }
+    None
+}
+
 fn tokenize(q: &str) -> Vec<String> {
     // Function words must be dropped, not merely down-weighted: the curated
     // aliases are phrases ("something to shoot at"), so a stray preposition in
@@ -400,52 +596,6 @@ fn tokenize(q: &str) -> Vec<String> {
         .collect()
 }
 
-/// Score one entry against the query terms.
-///
-/// Weights encode the intent: an exact keyword hit is worth far more than a
-/// substring brush, and a phrase alias ("something to drive") that matches a
-/// multi-word query is worth the most, because those are the queries people
-/// actually type.
-fn score_entry(entry: &AssetEntry, terms: &[String]) -> (u32, Vec<String>) {
-    let mut score = 0u32;
-    let mut matched: Vec<String> = Vec::new();
-    for term in terms {
-        let mut best = 0u32;
-        // The term itself plus its curated expansions.
-        let mut probes: Vec<String> = vec![term.clone()];
-        for e in aliases::expand(term) {
-            probes.push(e.to_string());
-        }
-        for probe in &probes {
-            let exact_bonus = if probe == term { 2 } else { 0 };
-            for kw in &entry.keywords {
-                if kw == probe {
-                    best = best.max(6 + exact_bonus);
-                } else if kw.split_whitespace().any(|w| w == probe) {
-                    // A word inside a phrase alias ("drive" in "something to drive").
-                    best = best.max(4 + exact_bonus);
-                } else if kw.len() > 3 && probe.len() > 3 && kw.contains(probe.as_str()) {
-                    best = best.max(2 + exact_bonus);
-                }
-            }
-            for cat in &entry.categories {
-                if cat.split('/').any(|c| c == probe) {
-                    best = best.max(3 + exact_bonus);
-                }
-            }
-        }
-        if best > 0 {
-            score += best;
-            matched.push(term.clone());
-        }
-    }
-    // Reward covering more of the query: two matched terms out of two is a
-    // better answer than two out of five.
-    if matched.len() > 1 {
-        score += (matched.len() as u32 - 1) * 2;
-    }
-    (score, matched)
-}
 
 /// Bonuses that depend on the query as a whole rather than term by term.
 ///
@@ -487,21 +637,36 @@ fn build_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
     let key = format!("{pack}/{stem}");
     let curated = aliases::lookup(&key);
 
-    // Filename tokens are the floor; curation is the value on top.
+    // Three layers, cheapest first: filename tokens (free, scales to any
+    // catalogue size), the pack's theme row (~55 rows cover everything), then
+    // item curation (spent only on the few hundred most-requested things).
     let mut keywords: Vec<String> = Vec::new();
-    for tok in stem.split(['-', '_']) {
-        push_unique(&mut keywords, tok.to_lowercase());
+    for tok in split_ident(&stem) {
+        if !packs::is_noise_token(&tok) {
+            push_unique(&mut keywords, tok);
+        }
     }
-    push_unique(&mut keywords, pack.to_lowercase());
+    let mut themes: Vec<String> = Vec::new();
+    if let Some(t) = packs::theme_of(pack) {
+        for k in t.themes {
+            push_unique(&mut themes, k.to_string());
+        }
+    }
+    push_unique(&mut themes, pack.replace('-', " "));
     if let Some(c) = curated {
         for a in c.aliases {
             push_unique(&mut keywords, a.to_string());
         }
     }
 
-    let categories: Vec<String> = curated
-        .map(|c| c.categories.iter().map(|s| s.to_string()).collect())
-        .unwrap_or_default();
+    // Item curation wins; otherwise the pack's default keeps the 4400
+    // uncurated models inside the category tree instead of outside it.
+    let categories: Vec<String> = match curated {
+        Some(c) => c.categories.iter().map(|s| s.to_string()).collect(),
+        None => packs::default_category(pack)
+            .map(|c| vec![c.to_string()])
+            .unwrap_or_default(),
+    };
 
     let name = curated
         .map(|c| c.name.to_string())
@@ -521,6 +686,7 @@ fn build_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
         credit: source.credit(),
         categories,
         keywords,
+        themes,
         rigged: probe.rigged,
         animated: probe.animated,
         size: probe.size,
@@ -552,7 +718,8 @@ fn build_audio_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
     for tok in split_ident(&stem) {
         push_unique(&mut keywords, tok);
     }
-    push_unique(&mut keywords, pack.replace('-', " "));
+    let mut themes: Vec<String> = Vec::new();
+    push_unique(&mut themes, pack.replace('-', " "));
     if let Some(c) = curated {
         for a in c.aliases {
             push_unique(&mut keywords, a.to_string());
@@ -584,6 +751,7 @@ fn build_audio_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
         credit: source.credit(),
         categories,
         keywords,
+        themes,
         rigged: false,
         animated: false,
         size: None,
@@ -655,4 +823,66 @@ fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
         .collect();
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stemming_reaches_base_form_aliases() {
+        // The cases that matter: curated tables are written in base form,
+        // kids type inflected forms.
+        assert_eq!(stem("smashing").as_deref(), Some("smash"));
+        assert_eq!(stem("jumping").as_deref(), Some("jump"));
+        assert_eq!(stem("crashed").as_deref(), Some("crash"));
+        assert_eq!(stem("crashes").as_deref(), Some("crash"));
+        assert_eq!(stem("boxes").as_deref(), Some("box"));
+        assert_eq!(stem("coins").as_deref(), Some("coin"));
+        assert_eq!(stem("footsteps").as_deref(), Some("footstep"));
+        // "-es" after a non-sibilant must fall through to the "-s" rule, or
+        // "trees" would stem to "tre".
+        assert_eq!(stem("trees").as_deref(), Some("tree"));
+    }
+
+    #[test]
+    fn stemming_leaves_words_it_would_mangle() {
+        // Double-s words must survive: "glass" -> "gla" would match nothing
+        // and could match the wrong thing.
+        assert_eq!(stem("glass"), None);
+        assert_eq!(stem("grass"), None);
+        assert_eq!(stem("class"), None);
+        // Stems below the floor are rejected rather than emitted as noise.
+        assert_eq!(stem("ring"), None);
+        assert_eq!(stem("string"), None);
+        assert_eq!(stem("shed"), None);
+        // Already base form.
+        assert_eq!(stem("truck"), None);
+        assert_eq!(stem("car"), None);
+    }
+
+    #[test]
+    fn audio_intent_needs_a_real_signal() {
+        // Explicit, and onomatopoeia that can only describe a noise.
+        assert!(audio_intent("sound when you crash into a wall"));
+        assert!(audio_intent("happy win music"));
+        assert!(audio_intent("metal clang"));
+        assert!(audio_intent("a loud bang"));
+        // Inflected forms reach the same list through the stemmer.
+        assert!(audio_intent("ringing"));
+        // Plain object requests must NOT be read as audio, or the tie-break
+        // would push models below sounds.
+        assert!(!audio_intent("spaceship"));
+        assert!(!audio_intent("a red truck"));
+        assert!(!audio_intent("something to drive"));
+    }
+
+    #[test]
+    fn kind_tie_break_prefers_the_asked_for_kind() {
+        // Models first for an object request, audio first when the query
+        // asks to hear something.
+        assert!(kind_rank(AssetKind::Model, false) < kind_rank(AssetKind::Sound, false));
+        assert!(kind_rank(AssetKind::Sound, true) < kind_rank(AssetKind::Model, true));
+        assert!(kind_rank(AssetKind::Music, true) < kind_rank(AssetKind::Model, true));
+    }
 }

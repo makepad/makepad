@@ -84,6 +84,37 @@ const SUITE: &[(&str, &str)] = &[
     ("victory fanfare", "jingles"),
     ("retro 8-bit sound", "digital-audio"),
     ("spaceship engine", "spaceEngine"),
+    // --- full-catalogue breadth (added after the 4400-model pull) --------
+    ("a cat", "cat"),
+    ("a dog", "dog"),
+    ("penguin", "penguin"),
+    ("a boat", "boat"),
+    ("pirate ship", "ship"),
+    ("a train", "train"),
+    ("police car", "police"),
+    ("an ambulance", "ambulance"),
+    ("pizza", "pizza"),
+    ("an apple", "apple"),
+    ("a sofa", "sofa"),
+    ("a bed", "bed"),
+    ("skateboard", "skateboard"),
+    ("castle tower", "tower"),
+    ("spaceship", "craft"),
+    ("astronaut", "astronaut"),
+    ("an alien", "alien"),
+    ("traffic cone", "cone"),
+    ("gravestone", "grave"),
+    ("christmas tree", "tree"),
+    ("a barrel", "barrel"),
+    ("conveyor belt", "belt"),
+    ("golf hole", "golf"),
+    ("hexagon tile", "hex"),
+    ("a rock", "rock"),
+    ("a bridge", "bridge"),
+    ("staircase", "stairs"),
+    ("a fence", "fence"),
+    ("street lamp", "light"),
+    ("a chair", "chair"),
 ];
 
 #[test]
@@ -222,4 +253,72 @@ fn undecodable_audio_is_flagged_rather_than_silently_broken() {
     let results = agent::execute(&idx, &agent::FindParams::new("laser").with_kind_str("sound"));
     let json = agent::results_to_json(&results);
     assert!(json.contains("\"playable\":false"), "agent not told: {json}");
+}
+
+#[test]
+fn index_build_and_query_stay_fast_at_full_catalogue_scale() {
+    use std::time::Instant;
+    let t = Instant::now();
+    let Some(idx) = index() else { return };
+    let build_ms = t.elapsed().as_millis();
+    // Whole-catalogue build happens once at startup; a second would be felt.
+    assert!(build_ms < 3000, "index build took {build_ms} ms");
+
+    // Search sits in a chat loop, so it must be imperceptible. A naive
+    // all-entries scan measured 73 ms here before the inverted index.
+    let t = Instant::now();
+    for q in ["truck", "something to drive", "a cat", "medieval castle", "laser"] {
+        let _ = idx.find(q);
+    }
+    let us = t.elapsed().as_micros() / 5;
+    assert!(us < 20_000, "average query {us} us — inverted index regressed?");
+    eprintln!("scale: {} entries, build {build_ms} ms, {us} us/query", idx.len());
+}
+
+#[test]
+fn summary_stays_tiny_against_the_real_catalogue() {
+    let Some(idx) = index() else { return };
+    let s = agent::library_summary(&idx);
+    assert!(
+        s.len() < 800,
+        "summary is {} chars for {} entries:\n{s}",
+        s.len(),
+        idx.len()
+    );
+    // It must describe the catalogue, not enumerate it.
+    assert!(!s.contains(".glb"));
+}
+
+#[test]
+fn pack_themes_make_a_whole_pack_reachable_by_setting() {
+    let Some(idx) = index() else { return };
+    // No castle-kit filename contains "medieval", so any hit at all can only
+    // come from the pack theme layer. Reachability is the claim — curated
+    // keywords legitimately outrank themes, so this does not assert position.
+    let hits = idx.find("medieval");
+    assert!(
+        hits.iter().any(|h| h.entry.pack == "castle-kit"),
+        "pack theme layer not reaching castle-kit"
+    );
+    // "kingdom" is themed only by castle-kit, so it should lead there.
+    let kingdom = idx.find("kingdom");
+    assert!(
+        kingdom.first().map(|h| h.entry.pack.as_str()) == Some("castle-kit"),
+        "theme-only term did not lead to its pack: {:?}",
+        kingdom.first().map(|h| h.entry.id.clone())
+    );
+}
+
+#[test]
+fn pack_themes_never_outrank_the_item_that_is_actually_named() {
+    let Some(idx) = index() else { return };
+    // Every pirate-kit model inherits "boat" from its pack theme; the models
+    // actually called boat-* must still come first.
+    let top = idx.find("boat");
+    let first = top.first().expect("boats exist");
+    assert!(
+        first.entry.id.contains("boat") || first.entry.id.contains("ship"),
+        "theme weighting regressed: {} outranked the real boats",
+        first.entry.id
+    );
 }

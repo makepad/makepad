@@ -1,4 +1,7 @@
 # Downloaded by download_assets.sh — never committed (see repo policy in game.md).
-*.glb
-*.png
-*.jpg
+#
+# Allow-list rather than deny-list: a new pack shipping a format nobody
+# listed here (3d-road-tiles ships .gltf, not .glb) would otherwise put
+# hundreds of asset files into a commit by accident.
+*
+!.gitignore
