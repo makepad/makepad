@@ -12,6 +12,15 @@ makepad-game-sim = { path = "../../libs/game/sim" }
 makepad-game-session = { path = "../../libs/game/session" }
 makepad-game-blocks = { path = "../../libs/game/blocks" }
 makepad-game-render = { path = "../../libs/game/render" }
+makepad-game-script = { path = "../../libs/game/script" }
+makepad-game-net = { path = "../../libs/game/net" }
+makepad-ai = { path = "../../libs/makepad_ai" }
+makepad-converse = { path = "../../libs/converse" }
+
+[features]
+# Local model compute (Whisper/Silero/Qwen). Off by default so Quest/mobile
+# builds — which have no backend — never try to link it.
+local-llm = ["makepad-converse/local-llm"]
 
 [dev-dependencies]
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }

@@ -2,6 +2,11 @@
 pub use makepad_widgets;
 
 pub mod arcade_view;
+pub mod capability;
+pub mod library;
+pub mod pairing;
+pub mod pair_server;
+pub mod ai;
 
 use makepad_widgets::*;
 
