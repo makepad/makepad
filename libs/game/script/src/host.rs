@@ -347,7 +347,19 @@ impl ScriptHost {
             let args_obj = vm.bx.heap.new_object();
             vm.bx.heap.set_object_storage_vec2(args_obj);
             vm.bx.heap.clear_object_deep(args_obj);
+            // A NIL positional slot is the host's "build the input snapshot
+            // here" marker: the object must be created inside the isolate, so
+            // it cannot be prepared by the caller. Pushing the marker through
+            // unresolved is what left `input` nil in every on_tick.
+            let mut input = None;
             for value in values {
+                let value = if value.is_nil() {
+                    let obj = crate::input::build_input_object(vm, &world.borrow());
+                    input = Some(obj);
+                    obj
+                } else {
+                    value
+                };
                 vm.bx.heap.vec_push_unchecked(args_obj, NIL, value);
             }
             vm.bx.captured_errors = Some(Vec::new());
@@ -355,6 +367,9 @@ impl ScriptHost {
                 vm.call_with_args_object_with_me(func.as_object().into(), args_obj, NIL)
             });
             vm.release_transient(args_obj.into());
+            if let Some(input) = input {
+                vm.release_transient(input);
+            }
             (vm.take_errors(), vm.last_limit_consumed())
         });
         *budget = budget.saturating_sub(used);

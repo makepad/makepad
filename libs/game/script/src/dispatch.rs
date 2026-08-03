@@ -1867,7 +1867,11 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("speed", v_speed, "(id) -> speed"),
     ("wander", v_wander, "(id, {home, range, speed, pause})"),
     ("chase", v_chase, "(id, {tag, target, range, catch, speed})"),
-    ("patrol", v_patrol, "(id, {points, speed, loop})"),
+    // `loop` is deliberately NOT advertised: it is a reserved word, and using
+    // it as an option key hangs the script until the instruction limit kills
+    // the eval, so the game never starts. The dispatcher still reads the key
+    // (looping defaults to true) so nothing breaks once the parser is fixed.
+    ("patrol", v_patrol, "(id, {points, speed})"),
     ("caught", v_caught, "(id) -> entity caught this tick (0 = none)"),
     ("spawnpoint", v_spawnpoint, "({pos, yaw}) -> slot"),
     ("checkpoint", v_checkpoint, "({pos, size}) -> index"),

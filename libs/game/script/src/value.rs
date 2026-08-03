@@ -61,12 +61,39 @@ pub fn value_string(vm: &mut ScriptVm, v: ScriptValue) -> String {
     })
 }
 
+/// Report a wrong-typed option to the agent instead of coercing it silently.
+///
+/// A silent fallback is the most expensive failure mode we have: `size: [1,2,3]`
+/// became `vec3(0,0,0)` and `color: "#ff0000"` became grey, so a generated game
+/// looked correct in source and rendered an empty world with nothing to explain
+/// why. The engine already hard-fails unknown verbs with a did-you-mean; typed
+/// options deserve the same courtesy. NIL is exempt — a missing option is not a
+/// mistake, it is a default (that distinction is load-bearing, see the module
+/// docs).
+fn wrong_type(vm: &mut ScriptVm, expected: &str, hint: &str) {
+    let loc = vm
+        .bx
+        .code
+        .ip_to_loc(vm.bx.threads.cur_ref().trap.ip)
+        .map(|l| format!("{l}: "))
+        .unwrap_or_default();
+    let msg = format!("{loc}expected {expected} — {hint}");
+    if let Some(sink) = vm.bx.captured_errors.as_mut() {
+        sink.push(msg);
+    }
+}
+
 pub fn value_vec3(vm: &mut ScriptVm, v: ScriptValue) -> Vec3f {
     let ip = vm.bx.threads.cur_ref().trap.ip;
     match NumericValue::from_script_value_heap(&vm.bx.heap, v, ip) {
         NumericValue::Vec3(v) => v,
         NumericValue::F64(f) => vec3f(f as f32, f as f32, f as f32),
-        _ => vec3f(0.0, 0.0, 0.0),
+        _ => {
+            if !v.is_nil() {
+                wrong_type(vm, "a vec3", "write vec3(x, y, z); an array like [x, y, z] is not a position");
+            }
+            vec3f(0.0, 0.0, 0.0)
+        }
     }
 }
 
@@ -75,7 +102,12 @@ pub fn value_color(vm: &mut ScriptVm, v: ScriptValue) -> Vec4f {
     match NumericValue::from_script_value_heap(&vm.bx.heap, v, ip) {
         NumericValue::Color(c) => c,
         NumericValue::Vec4(c) => c,
-        _ => vec4(0.8, 0.8, 0.8, 1.0),
+        _ => {
+            if !v.is_nil() {
+                wrong_type(vm, "a color literal", "write #ff8800 (or #xff88ee when a digit is followed by e); a quoted \"#ff8800\" string is not a color");
+            }
+            vec4(0.8, 0.8, 0.8, 1.0)
+        }
     }
 }
 
