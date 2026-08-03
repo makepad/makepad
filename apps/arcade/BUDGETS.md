@@ -144,3 +144,67 @@ and the simulation cannot diverge — particles never touch the world RNG, which
 - Characters are the expensive thing. Two or three on Quest, not eight.
 - Terrain above ~129 cells starts to matter for eval time, not draw time (the
   isolate's wall-clock budget is 64 ms and it is a hard bail, not a yield).
+
+## step_world weight (measured 2026-08-03, release, aarch64)
+
+Measured with `cargo run -p makepad-game-sim --release --example weigh`, which
+wraps the global allocator so the byte counts include everything the tick
+touches, not just what the harness allocates.
+
+The tick used to clone two things per tick purely to dodge a borrow: the whole
+`Terrain` (its `heights: Vec<f32>` **and** `colors: Vec<Vec4f>`) and every
+static/kinematic `Entity` (208 bytes each). Terrain dominated — a 257² field is
+1.3 MB/tick, i.e. **79 MB/s of memcpy at 60 Hz on a world with seven entities
+in it**. Splitting the struct borrow removes the terrain copy entirely; the
+statics snapshot has to stay a copy (movers must sweep against *last* tick's
+kinematic poses — that ordering is load-bearing) but now copies a 48-byte
+`Solid` view instead of the full entity.
+
+| scene | ms/tick before → after | B/tick before → after |
+|---|---|---|
+| demo (arcade) | 0.002 → 0.003 | 15,140 → 4,796 (−68%) |
+| demo + terrain 65 | 0.003 → 0.004 | 99,640 → 4,796 (−95%) |
+| racing-ish (129 terrain) | 0.007 → 0.002 (−71%) | 362,316 → 8,576 (−98%) |
+| terrain 129 only | 0.005 → 0.000 | 335,804 → 896 (−99.7%) |
+| terrain 257 only | 0.019 → 0.001 (−95%) | 1,323,964 → 896 (−99.93%) |
+| large (500 static) | 0.063 → 0.056 (−11%) | 591,386 → 82,382 (−86%) |
+| stress (2000 static) | 0.583 → 0.457 (−22%) | 2,353,936 → 327,812 (−86%) |
+
+Allocations/tick fell from 6–14 to 3–11; the residual is the statics snapshot,
+the box3d reconcile and touch collection.
+
+**Leak check**: `--soak` runs 10 simulated minutes (36,000 ticks) of a busy
+world with projectiles spawning and expiring throughout. RSS is flat at 3.8 MB
+from warmup to the end (+0.4% drift, 242 entities alive) — the tick path does
+not leak.
+
+**Result-neutrality** is gated by `libs/game/sim/tests/mover_golden.rs`: the
+golden world-state hash is byte-identical before and after this optimisation
+(verified by reverting the source and re-running), and it covers the terrain,
+sweep, platform-carry, attach, projectile-lifetime and auto-face paths that
+`rigid_dynamics.rs` doesn't reach.
+
+## Memory and binary, whole app (measured 2026-08-03)
+
+| | value |
+|---|---|
+| sim core only, all 7 scenes incl. 2000-static stress | 13.4 MB RSS |
+| sim soak, busy world, steady state | 3.8 MB RSS |
+| `hello_world` (baseline makepad + widgets + headless) | 195 MB RSS, 13.5 MB binary |
+| `makepad-arcade` (headless) | 948 MB RSS, 25.1 MB binary |
+
+The engine core is genuinely small; the weight is above it. Two findings worth
+acting on, both outside the sim/render/script crates:
+
+1. **~750 MB of Arcade's RSS is not the sim** (13 MB) and not the framebuffer
+   (unchanged when the headless size changes). It needs a profiler pass to
+   attribute properly — candidates are the script isolates (each one
+   re-evaluates the *entire* widgets DSL, `widget_async.rs:317`, and a game
+   isolate needs none of those prototypes), the glyph/texture atlases, and the
+   offscreen pass chain.
+2. **The voice stack links unconditionally.** `makepad-converse` is a plain
+   dependency of `apps/arcade`, not feature-gated, so Kokoro TTS is compiled in
+   and initialised (`tts: backend Kokoro` appears in every boot log) even at the
+   `chatbox` tier where it can never be used. `voice`/`local-llm` gate the
+   *models*, not the crate. Gating this is the obvious binary-size win for a
+   Quest build; the binary carries whisper/kokoro/silero symbols today.

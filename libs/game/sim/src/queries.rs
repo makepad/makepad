@@ -141,8 +141,35 @@ pub fn overlaps(a_pos: Vec3f, a_half: Vec3f, b_pos: Vec3f, b_half: Vec3f) -> boo
 }
 
 /// Move one axis and clamp against every solid; returns (clamped, hit_dir, hit_id).
+/// The subset of an [`Entity`] a mover sweep actually reads. `step_world`
+/// snapshots the collidable statics/kinematics once per tick (movers hold
+/// `&mut entities` while sweeping, and the snapshot must predate this tick's
+/// kinematic integration — that ordering is load-bearing for tape parity).
+/// Copying 48 bytes instead of a 208-byte `Entity` is the whole point: at
+/// 2000 statics that is 416 KB/tick of memcpy turned into 96 KB.
+#[derive(Clone, Copy, Debug)]
+pub struct Solid {
+    pub id: u64,
+    pub kind: BodyKind,
+    pub pos: Vec3f,
+    pub half: Vec3f,
+    pub vel: Vec3f,
+}
+
+impl From<&Entity> for Solid {
+    fn from(e: &Entity) -> Self {
+        Self {
+            id: e.id,
+            kind: e.kind,
+            pos: e.pos,
+            half: e.half,
+            vel: e.vel,
+        }
+    }
+}
+
 pub fn sweep_axis(
-    entities: &[Entity],
+    entities: &[Solid],
     self_id: u64,
     pos: Vec3f,
     half: Vec3f,
@@ -153,7 +180,10 @@ pub fn sweep_axis(
     let mut hit = 0.0f32;
     let mut hit_id = 0u64;
     for other in entities {
-        if other.id == self_id || other.sensor {
+        // The caller's snapshot filter already drops sensors and non-colliders,
+        // so the old `other.sensor` test here was provably dead; the kind test
+        // is kept because it is part of the documented sweep contract.
+        if other.id == self_id {
             continue;
         }
         if !matches!(other.kind, BodyKind::Static | BodyKind::Kinematic) {
