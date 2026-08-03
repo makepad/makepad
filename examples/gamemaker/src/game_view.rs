@@ -697,6 +697,10 @@ impl GameView {
             // also what a fresh checkout of Arcade sees.
             assets: std::rc::Rc::new(None),
             models: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            // Script-declared interactables. gamemaker has no player rig to
+            // press the button, so nothing ever reads this — it exists to
+            // satisfy the shared Ctx, like `particles` above.
+            interact: std::rc::Rc::new(std::cell::RefCell::new(Default::default())),
         };
         let verbs = makepad_game_script::dispatch::verb_table();
         let vm_id = self.vm_id;
@@ -1109,7 +1113,7 @@ impl GameView {
             // prefab in libs/game/blocks is what consumes them.
             look_dx: 0.0,
             look_dy: 0.0,
-            run: false,
+            run: 0.0,
             use_pressed: false,
         }
     }
