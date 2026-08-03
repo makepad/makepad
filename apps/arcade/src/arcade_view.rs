@@ -14,7 +14,7 @@ use makepad_game_render::stage::{Stage, StageMode};
 use makepad_game_render::{
     scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
     DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws,
-    GameRenderer, SkinnedBatch, SkinnedDraw,
+    GameRenderer, ModelInstance, SkinnedBatch, SkinnedDraw,
 };
 use makepad_game_session::{Session, SessionEvent};
 use makepad_game_sim::{
@@ -25,6 +25,7 @@ use makepad_widgets::*;
 use makepad_game_script::audio3d::Listener;
 use makepad_game_script::{AudioRequest, ScriptHost};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 script_mod! {
@@ -45,6 +46,9 @@ script_mod! {
             light_dir: vec3(0.35, 0.8, 0.45)
         }
         draw_skinned +: {
+            light_dir: vec3(0.35, 0.8, 0.45)
+        }
+        draw_models +: {
             light_dir: vec3(0.35, 0.8, 0.45)
         }
     }
@@ -77,6 +81,16 @@ pub struct ArcadeView {
     draw_shadow: DrawGameShadow,
     #[live]
     draw_skinned: DrawGameSkinned,
+    /// Stock props share the skinned shader (both are textured packed
+    /// meshes); a separate instance because the skinned batch borrows the
+    /// other one for the same frame.
+    #[live]
+    draw_models: DrawGameSkinned,
+    /// role -> stock asset id, resolved by description at load.
+    #[rust]
+    props: HashMap<String, String>,
+    #[rust]
+    props_loaded: bool,
     #[live(vec4(0.03, 0.045, 0.075, 1.0))]
     clear_color: Vec4f,
     #[new]
@@ -427,21 +441,8 @@ impl ArcadeView {
             vec4(0.55, 0.62, 0.5, 1.0),
             "ground",
         );
-        // Pillar ring.
-        for i in 0..8 {
-            let a = std::f32::consts::TAU * i as f32 / 8.0;
-            let hue = i as f32 / 8.0;
-            spawn(
-                w,
-                BodyKind::Static,
-                Shape::Cylinder,
-                vec3f(a.cos() * 18.0, 3.0, a.sin() * 18.0),
-                vec3f(1.4, 6.0, 1.4),
-                vec4(0.4 + 0.5 * hue, 0.45, 0.85 - 0.5 * hue, 1.0),
-                "pillar",
-            );
-        }
-        // A ramp, a cone, a glowing beacon sphere.
+        // A ramp to drive up and a glowing beacon; the scenery is stock
+        // models now (see load_props), not coloured primitives.
         spawn(
             w,
             BodyKind::Static,
@@ -450,15 +451,6 @@ impl ArcadeView {
             vec3f(6.0, 2.0, 8.0),
             vec4(0.75, 0.55, 0.35, 1.0),
             "ramp",
-        );
-        spawn(
-            w,
-            BodyKind::Static,
-            Shape::Cone,
-            vec3f(9.0, 1.5, 8.0),
-            vec3f(3.0, 3.0, 3.0),
-            vec4(0.9, 0.45, 0.3, 1.0),
-            "cone",
         );
         let beacon = spawn(
             w,
@@ -543,6 +535,111 @@ impl ArcadeView {
 
     /// The demo's "game logic" — what a script or blocks component will do
     /// later, done directly in Rust here.
+    /// Load the stock props this demo places, choosing them BY DESCRIPTION
+    /// through the asset index — the same path a generated game takes, so the
+    /// demo exercises what Fable will actually use rather than a private
+    /// shortcut with hardcoded paths.
+    fn load_props(&mut self, cx: &mut Cx) {
+        let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
+        let index = makepad_game_assets::AssetIndex::build(&root);
+        // (query, how many to place, what it is for)
+        let wanted: &[(&str, &str)] = &[
+            ("pine tree", "tree"),
+            ("broadleaf tree", "tree2"),
+            ("boulder", "rock"),
+            ("wooden fence", "fence"),
+            ("wooden hut building", "house"),
+            ("wooden crate box", "crate"),
+        ];
+        for (query, role) in wanted {
+            // Walk the ranked hits rather than taking only the best one: a
+            // pack whose atlas was not downloaded cannot render, so the next
+            // candidate is a better answer than a hole in the scene. The
+            // same fallthrough is what a generated game wants.
+            let mut placed = false;
+            for hit in index
+                .find(query)
+                .into_iter()
+                .filter(|h| h.entry.kind == makepad_game_assets::AssetKind::Model)
+                .take(12)
+            {
+                let id = hit.entry.id.clone();
+                let path = hit.entry.path.clone();
+                // The atlas sits beside the model in the pack's Textures/ dir.
+                let png = path
+                    .parent()
+                    .map(|d| d.join("Textures").join("colormap.png"))
+                    .and_then(|p| std::fs::read(p).ok());
+                let Ok(glb) = std::fs::read(&path) else { continue };
+                if let Ok(tris) = self.renderer.load_model(cx, &id, &glb, png.as_deref()) {
+                    log!("arcade: prop '{role}' = {id} ({tris} tris)");
+                    self.props.insert(role.to_string(), id);
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                log!("arcade: no loadable stock model for '{query}'");
+            }
+        }
+    }
+
+    /// Where the stock props stand. Positions are fixed rather than random so
+    /// the capture is comparable frame to frame.
+    fn prop_instances(&self) -> Vec<ModelInstance> {
+        let mut out = Vec::new();
+        let mut place = |role: &str, x: f32, z: f32, yaw: f32, scale: f32| {
+            if let Some(id) = self.props.get(role) {
+                let mut m = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
+                for i in 0..12 {
+                    m.v[i] *= scale;
+                }
+                m.v[12] = x;
+                m.v[13] = 0.0;
+                m.v[14] = z;
+                out.push(ModelInstance {
+                    model: id.clone(),
+                    transform: m,
+                });
+            }
+        };
+        // Kenney props are authored around 1 unit, so everything here scales
+        // up to sit against a 60-unit ground slab and 2-unit crates.
+        // A treeline along the back, at mixed scale and species so it reads as
+        // woodland rather than a row of identical props.
+        for i in 0..14 {
+            let x = -26.0 + i as f32 * 4.0;
+            let role = if i % 3 == 0 { "tree2" } else { "tree" };
+            place(role, x, -22.0 + (i % 3) as f32 * 2.5, i as f32 * 0.7, 4.0 + (i % 4) as f32 * 0.8);
+        }
+        // A second, sparser band nearer the camera for depth.
+        for i in 0..6 {
+            place("tree", -20.0 + i as f32 * 8.0, 16.0, i as f32 * 1.1, 3.5);
+        }
+        // Rocks scattered mid-ground at varied scale — same model, different
+        // transforms, which is exactly the case the instance batching serves.
+        for (i, (x, z)) in [
+            (-9.0, -6.0),
+            (7.0, -8.0),
+            (13.0, 2.0),
+            (-14.0, 4.0),
+            (4.0, 12.0),
+            (-6.0, 14.0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            place("rock", *x, *z, i as f32 * 1.3, 1.2 + i as f32 * 0.3);
+        }
+        // A fence run along one side, leading the eye toward the house.
+        for i in 0..8 {
+            place("fence", -20.0 + i as f32 * 3.0, 13.0, 0.0, 1.6);
+        }
+        place("house", 17.0, -12.0, -0.6, 3.0);
+        place("house", -19.0, -9.0, 1.2, 2.6);
+        out
+    }
+
     /// Spawn the driveable car and the patrolling Knight, proving blocks work
     /// outside gamemaker: no script VM anywhere in this app.
     fn spawn_blocks(&mut self) {
@@ -1032,6 +1129,11 @@ impl Widget for ArcadeView {
         cx.begin_pass(&self.pass, None);
         if let Some(scene_state) = self.scene(rect, cx.time()) {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
+            // Stock props are uploaded once, on the first frame that has a Cx.
+            if !self.props_loaded {
+                self.props_loaded = true;
+                self.load_props(cx.cx);
+            }
             // Knight texture is created before Cx3d mutably borrows cx.
             if let Some(knight) = &self.knight {
                 if self.knight_texture.is_none() {
@@ -1076,6 +1178,8 @@ impl Widget for ArcadeView {
                     });
                 }
             }
+            // Built before `batch` borrows self mutably.
+            let prop_instances = self.prop_instances();
             let batch = match (&mut self.draw_skinned, &self.knight_texture) {
                 (skinned, Some(texture)) if !skinned_items.is_empty() => Some(SkinnedBatch {
                     skinned,
@@ -1086,6 +1190,7 @@ impl Widget for ArcadeView {
             };
 
             self.renderer.set_particles(self.particles.instances());
+            self.renderer.set_models(prop_instances);
             let cx3d = &mut Cx3d::new(cx.cx);
             let mut draws = GameDraws {
                 cube: &mut self.draw_cube,
@@ -1101,11 +1206,16 @@ impl Widget for ArcadeView {
                 &self.world.borrow(),
                 scene_state,
                 batch,
+                Some(&mut self.draw_models),
             );
             // One line, once: the numbers BUDGETS.md quotes come from here
             // rather than from counting struct fields by hand.
             if !self.logged_render_stats {
                 self.logged_render_stats = true;
+                log!(
+                    "arcade: stock props {} instances in {} draw items, {} tris",
+                    stats.model_instances, stats.model_draws, stats.model_triangles
+                );
                 let b = stats.bake;
                 log!(
                     "arcade: {} floats/instance ({} B) · bake ao {} us, sun {} us, probes {} us \

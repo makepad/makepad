@@ -124,6 +124,7 @@ script_mod! {
         v_ambient: varying(vec3f)
         v_direct: varying(vec3f)
         v_uv: varying(vec2f)
+        v_tint: varying(vec4f)
         world: varying(vec4f)
         v_fog: varying(float)
 
@@ -153,12 +154,17 @@ script_mod! {
             self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
             self.v_direct = self.sun_color * dp
             self.v_uv = unpack2f16(self.geom.uv)
+            self.v_tint = unpack4u8(self.geom.color)
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
 
         pixel: fn() {
-            let albedo = self.tex.sample_as_bgra(self.v_uv)
+            // Atlas x vertex tint. Kenney ships both conventions — most packs
+            // UV-map into one colormap (tint = white), nature-kit and friends
+            // carry no texture and colour per material (atlas = white 1x1).
+            // Multiplying serves both without a branch or a second shader.
+            let albedo = self.tex.sample_as_bgra(self.v_uv) * self.v_tint
             let lit = albedo.xyz * (self.v_ambient + self.v_direct)
             return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
         }
