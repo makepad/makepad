@@ -9,8 +9,10 @@
 //! being generated. Lifted out of the gamemaker example so any app can bolt a
 //! voice onto an agent.
 
+#[cfg(feature = "tts")]
 use makepad_tts::Speaker;
 use makepad_widgets::makepad_draw::audio::AudioBuffer;
+#[cfg(feature = "tts")]
 use makepad_widgets::log;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -90,17 +92,45 @@ impl SpeechOutput {
         let worker_generation = generation.clone();
         let voice = voice.to_string();
         std::thread::spawn(move || {
+            // Built without `tts`: the synthesis stack (Kokoro plus its
+            // embedded pronunciation lexicon) is ~10 MB of binary, so a build
+            // that can never speak does not link it. Drain the queue so senders
+            // never block — every other path (text, muting, generation
+            // cancellation) behaves exactly as it does with speech on.
+            #[cfg(not(feature = "tts"))]
+            {
+                let _ = (&voice, &worker_playback);
+                while let Ok((generation, _text)) = requests.recv() {
+                    let _ = generation.min(worker_generation.load(Ordering::Relaxed));
+                }
+                return;
+            }
             // Off the main thread on purpose: synthesis blocks until the whole
             // utterance is rendered.
-            let mut speaker = Speaker::from_makepad_env_with_voice(&voice);
-            log!("tts: backend {:?}", speaker.kind());
-            // Discarded warm-up: Kokoro's first synthesis initializes the Metal
-            // context on this thread; better now than on the first reply.
-            let _ = speaker.synthesize("Hi.");
+            //
+            // The speaker is built on the FIRST request, not here: the Kokoro
+            // model is ~327 MB resident, and an app that never speaks (text
+            // tier, muted, or a session where nobody triggers a reply) should
+            // not pay for it. Construction is still off the main thread, so
+            // the load cost lands on the worker either way.
+            #[cfg(feature = "tts")]
+            let mut speaker: Option<Speaker> = None;
+            #[cfg(feature = "tts")]
             while let Ok((generation, text)) = requests.recv() {
                 if generation != worker_generation.load(Ordering::Relaxed) {
                     continue;
                 }
+                let speaker = match speaker {
+                    Some(ref mut speaker) => speaker,
+                    ref mut none => {
+                        let mut fresh = Speaker::from_makepad_env_with_voice(&voice);
+                        log!("tts: backend {:?}", fresh.kind());
+                        // Discarded warm-up: Kokoro's first synthesis
+                        // initializes the Metal context on this thread.
+                        let _ = fresh.synthesize("Hi.");
+                        none.insert(fresh)
+                    }
+                };
                 match speaker.synthesize(&text) {
                     Ok(audio) if !audio.is_empty() => {
                         // Re-check: synthesis is slow enough that a cancel can
@@ -270,4 +300,58 @@ pub fn spoken_text(markdown: &str) -> String {
         }
     }
     spoken.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Constructing the output must NOT load the synthesis model: Kokoro is
+    /// ~327 MB resident, and an app that never speaks should not pay for it.
+    /// Model load happens on the first enqueued utterance instead.
+    ///
+    /// Proxy for "did not load": construction returns promptly. A real load
+    /// reads hundreds of MB off disk and warms a Metal context, which cannot
+    /// happen in this budget on any machine we build on.
+    #[test]
+    fn constructing_speech_output_does_not_load_the_model() {
+        let start = std::time::Instant::now();
+        let speech = SpeechOutput::new("bm_fable.mkvoice");
+        let elapsed = start.elapsed();
+        assert!(
+            speech.playback().lock().unwrap().samples.is_empty(),
+            "nothing should be synthesized before anything is said"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "construction took {elapsed:?} — the model is being loaded eagerly again"
+        );
+    }
+
+    /// The lazy path must still speak. Ignored by default: it loads the real
+    /// ~327 MB model and takes seconds.
+    ///
+    /// Model paths resolve relative to the CWD, which under `cargo test` is
+    /// the crate dir, not the repo root — so point them at the real files or
+    /// this silently falls back to a different backend and proves nothing:
+    ///
+    /// ```text
+    /// MAKEPAD_TTS_MODEL=$REPO/kokoro-v1_0.mktts \
+    /// MAKEPAD_TTS_VOICE=$REPO/bm_fable.mkvoice \
+    ///   cargo test -p makepad-converse --release lazily_loaded -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "loads the real Kokoro model (~327 MB); needs MAKEPAD_TTS_* paths"]
+    fn lazily_loaded_speaker_still_produces_audio() {
+        let mut speech = SpeechOutput::new("bm_fable.mkvoice");
+        speech.enqueue("Testing the lazy speech path.");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            if !speech.playback().lock().unwrap().samples.is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        panic!("no audio produced within the timeout — the lazy path is broken");
+    }
 }
