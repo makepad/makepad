@@ -137,6 +137,10 @@ pub struct Car {
     pub route_at: usize,
     /// Fraction of `top_speed` the AI driver aims for.
     pub route_pace: f32,
+    /// Audio-only state (Local tier, never replicated).
+    pub audio_engine_t: f32,
+    pub audio_skidding: bool,
+    pub audio_wheels_down: usize,
 }
 
 impl Car {
@@ -164,6 +168,9 @@ impl Car {
             route: Vec::new(),
             route_at: 0,
             route_pace: 1.0,
+            audio_engine_t: 0.0,
+            audio_skidding: false,
+            audio_wheels_down: 0,
         }
     }
 
@@ -446,5 +453,41 @@ impl EntityYaw for makepad_game_sim::Entity {
         }
         let forward = rotate(self.orient, vec3f(0.0, 0.0, -1.0));
         gm::atan2(-forward.x, -forward.z)
+    }
+}
+
+impl Car {
+    /// Engine note, tyre skid and suspension thud. The engine is a one-shot
+    /// re-triggered on change rather than a held loop: the host owns loop
+    /// lifetimes, and a car that despawns must not leave a note ringing.
+    pub fn emit_audio(&mut self, world: &GameWorld, out: &mut crate::audio_emit::AudioEmitter) {
+        use makepad_game_audio::director::Category;
+        let Some(entity) = world.entity(self.entity) else {
+            return;
+        };
+        let (gain, pitch) =
+            crate::audio_emit::engine_note(self.speed.abs(), self.config.top_speed, self.input.throttle.abs());
+        self.audio_engine_t += TICK_DT;
+        // Retrigger often enough to track revs, rarely enough not to flutter.
+        if self.audio_engine_t >= 0.12 {
+            self.audio_engine_t = 0.0;
+            out.cue("engine", Category::Movement, entity.pos, gain * 0.5, pitch);
+        }
+
+        // Skid: wheels down but the chassis is sliding sideways.
+        let planar = (entity.vel.x * entity.vel.x + entity.vel.z * entity.vel.z).sqrt();
+        let lateral = (planar - self.speed.abs()).abs();
+        let skidding = self.wheels_down() >= 3 && lateral > 2.0 && planar > 3.0;
+        if skidding && !self.audio_skidding {
+            out.cue("skid", Category::Movement, entity.pos, 0.6, 1.0);
+        }
+        self.audio_skidding = skidding;
+
+        // Landing thud when the wheels come back down.
+        let down = self.wheels_down();
+        if down >= 3 && self.audio_wheels_down < 2 {
+            out.cue("thud", Category::Impact, entity.pos, 0.7, 0.9);
+        }
+        self.audio_wheels_down = down;
     }
 }

@@ -56,6 +56,9 @@ pub struct RaceKit {
     pub running: bool,
     /// Set for one tick when the first racer finishes.
     pub winner: u64,
+    /// Audio-only bookkeeping (Local tier): last lap announced per racer.
+    pub audio_last_lap: std::collections::HashMap<u64, u32>,
+    pub audio_win_played: bool,
 }
 
 impl RaceKit {
@@ -241,5 +244,29 @@ impl RaceKit {
             mix(standing.score as i64 as u64);
         }
         h
+    }
+}
+
+impl RaceKit {
+    /// Checkpoint blips, lap chimes and the win sting. These are the moments a
+    /// player is listening for, so they are Action priority and centred rather
+    /// than positional — you should hear your own lap wherever you are.
+    pub fn emit_audio(&mut self, out: &mut crate::audio_emit::AudioEmitter) {
+        use makepad_game_audio::director::Category;
+        use makepad_math::Vec3f;
+        let here = Vec3f::default();
+        for s in self.standings.iter() {
+            if s.lap > self.audio_last_lap.get(&s.entity).copied().unwrap_or(0) {
+                self.audio_last_lap.insert(s.entity, s.lap);
+                out.cue("lap", Category::Action, here, 0.9, 1.0);
+            }
+        }
+        if self.winner != 0 && !self.audio_win_played {
+            self.audio_win_played = true;
+            out.cue("win", Category::Action, here, 1.0, 1.0);
+        }
+        if self.winner == 0 {
+            self.audio_win_played = false;
+        }
     }
 }

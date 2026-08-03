@@ -62,6 +62,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "tools/arcade_eval",
     # === tests ===
     "platform/script/test",
 ]

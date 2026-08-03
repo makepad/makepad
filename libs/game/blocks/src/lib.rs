@@ -27,6 +27,7 @@
 
 use makepad_game_sim::GameWorld;
 
+pub mod audio_emit;
 pub mod brain;
 pub mod car;
 pub mod character;
@@ -90,6 +91,9 @@ pub struct Blocks {
     /// entry for its `owner`. An empty map means single-player, where every
     /// owner resolves to `player_input` — so the local path is unchanged.
     pub player_inputs: std::collections::HashMap<makepad_game_sim::PlayerId, DriveInput>,
+    /// Sounds produced this tick. The host drains these after `post_step` and
+    /// hands them to its mixer; blocks never touch an audio device.
+    pub audio: audio_emit::AudioEmitter,
 }
 
 impl Blocks {
@@ -160,8 +164,16 @@ impl Blocks {
     pub fn post_step(&mut self, world: &mut GameWorld) {
         for character in self.characters.iter_mut() {
             character.post_tick(world);
+            character.emit_audio(world, &mut self.audio);
+        }
+        for car in self.cars.iter_mut() {
+            car.emit_audio(world, &mut self.audio);
+        }
+        for plane in self.planes.iter_mut() {
+            plane.emit_audio(world, &mut self.audio);
         }
         self.race.post_tick(world);
+        self.race.emit_audio(&mut self.audio);
     }
 
     pub fn car_mut(&mut self, entity: u64) -> Option<&mut Car> {
