@@ -39,6 +39,7 @@ fn main() {
     let mut recompress = false;
     let mut limit = usize::MAX;
     let mut threshold_ms = 60.0f64;
+    let mut fingerprint_only = false;
     let mut buckets: Vec<u32> = DEFAULT_BUCKETS.to_vec();
     // Tile zooms to bake. z14 tiles use the --buckets list; mid-zoom tiles
     // bake their native bucket only (the runtime cascade at z11-13 city
@@ -67,6 +68,11 @@ fn main() {
                 limit = args[i + 1].parse().expect("limit");
                 i += 2;
             }
+            "--fingerprint" => {
+                fingerprint_only = true;
+                i += 1;
+                continue;
+            }
             "--threshold-ms" => {
                 threshold_ms = args[i + 1].parse().expect("threshold");
                 i += 2;
@@ -94,6 +100,36 @@ fn main() {
 
     let mut reader = MbtilesReader::open(input).expect("open input");
     let metadata = reader.get_metadata().expect("metadata");
+    if fingerprint_only {
+        // Version handshake: bake the input's first z14 tile across the
+        // fleet buckets and print the xor of the cascade signatures. Any
+        // semantic drift anywhere in the paint pipeline changes this, so
+        // the dispatcher can refuse a stale worker BEFORE it bakes junk.
+        let theme = probe_compiled_theme();
+        let mut fingerprint = 0u64;
+        let codec = reader.tile_codec().clone();
+        reader
+            .for_each_tile(|tile| {
+                if tile.zoom_level != 14 || fingerprint != 0 {
+                    return;
+                }
+                let raw = codec.decode(&tile.tile_data).expect("decode");
+                let pbf = decode_vector_tile_payload(&raw).expect("payload");
+                let zoom = tile.zoom_level as u8;
+                let y = (1u32 << zoom) - 1 - tile.tile_row as u32;
+                let key = TileKey { z: zoom as u32, x: tile.tile_column as i32, y: y as i32 };
+                for bucket in [15u32, 16, 17, 18] {
+                    if let Some(baked) =
+                        bake_tile_paint_faces(key, &pbf, Some(&pbf), None, false, &theme, bucket)
+                    {
+                        fingerprint ^= baked.signature.rotate_left(bucket);
+                    }
+                }
+            })
+            .expect("iterate");
+        println!("MAPBAKE-FINGERPRINT {fingerprint:016x}");
+        return;
+    }
     let mut dz_reader = bridge_dz_path
         .as_deref()
         .map(|p| MbtilesReader::open(Path::new(p)).expect("open bridge-dz"));
