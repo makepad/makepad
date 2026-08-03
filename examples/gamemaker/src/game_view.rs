@@ -690,6 +690,13 @@ impl GameView {
             // renderer, so its queue is drained and dropped each eval.
             particles: self.particles.clone(),
             next_emitter: self.next_emitter.clone(),
+            // No stock library here: gamemaker draws primitives only and is
+            // being retired in favour of Arcade, which owns the model path.
+            // `None` is a supported state, not a stub — the asset verbs report
+            // "run download_assets.sh" rather than failing the eval, which is
+            // also what a fresh checkout of Arcade sees.
+            assets: std::rc::Rc::new(None),
+            models: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         };
         let verbs = makepad_game_script::dispatch::verb_table();
         let vm_id = self.vm_id;
