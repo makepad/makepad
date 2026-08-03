@@ -6,7 +6,7 @@
 //! Mouse drag orbits, wheel zooms — the same raw-event pattern GameView uses.
 
 use makepad_game_blocks::{
-    Blocks, Car, CarConfig, Character, CharacterConfig, ControlSource, DriveInput,
+    Blocks, Car, CarConfig, ControlSource, DriveInput, Npc, NpcConfig, Poi, PoiSet,
 };
 use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_game_render::particles::ParticleSystem;
@@ -108,6 +108,10 @@ pub struct ArcadeView {
     draw_list: DrawList,
     #[rust]
     knight: Option<Knight>,
+    /// Animation state per villager, parallel to `blocks.npcs`. The rig lives
+    /// once in `knight`; only the pose is per-villager.
+    #[rust]
+    villagers: Vec<Villager>,
     /// Engine-side blocks: the drivable car and the patrolling character.
     #[rust(Rc::new(RefCell::new(Blocks::new())))]
     blocks: Rc<RefCell<Blocks>>,
@@ -284,26 +288,95 @@ struct PropCollider {
 /// The stock skinned character (KayKit Knight, CC0) + its animation state.
 /// Assets are fetched by apps/arcade/download_assets.sh — everything here
 /// degrades gracefully when they're absent.
+/// The one rigged model we have, loaded once and shared by every villager.
+///
+/// A village of twelve costs one parse and one texture: the rig, its clips and
+/// its atlas are identical for everyone. What differs per villager is the POSE
+/// (each is at a different point in its own walk cycle) and the tint, so those
+/// live in [`Villager`] and this holds only what is genuinely shared.
 struct Knight {
     model: SkinnedModel,
     texture_png: Vec<u8>,
     idle: usize,
     walk: usize,
+}
+
+/// One animated villager: the sim entity it follows, plus the pose state that
+/// makes it look like a person rather than a sliding statue.
+///
+/// Deliberately holds NO opinion about where to walk. Motion comes from the
+/// [`Npc`] block through the mover sweep; this reads the result back and turns
+/// it into an animation. Facing follows travel and animation follows speed —
+/// both Derived-tier, recomputed from motion, never authoritative — which is
+/// why a villager that gets stuck against a fence stops walking on the spot
+/// instead of moonwalking into it.
+struct Villager {
+    entity: u64,
     pose_idle: PoseBuffer,
     pose_walk: PoseBuffer,
     blended: PoseBuffer,
     palette: Vec<Mat4f>,
-    idle_time: f32,
-    walk_time: f32,
-    /// 0 = idle, 1 = walking — eased toward the patrol state each tick.
+    /// Walk-cycle phase. Seeded apart per villager so a crowd doesn't step in
+    /// unison, which reads as a chorus line rather than a street.
+    clock: f32,
+    /// 0 = idle, 1 = walking. Eased, so stopping settles rather than snaps.
     blend: f32,
-    angle: f32,
-    /// Where the SWEEP put him, read back after the step — not where the walk
-    /// wanted him. The two differ exactly when something is in the way.
-    pos: Vec3f,
     yaw: f32,
-    /// -1, 0 or 1: which way this leg of the patrol is heading.
-    heading: f32,
+    /// Where the SWEEP put it, read back after the step — not where the walk
+    /// wanted to go. The two differ exactly when something is in the way.
+    pos: Vec3f,
+    tint: Vec4f,
+    scale: f32,
+}
+
+impl Villager {
+    fn new(entity: u64, seed: u64) -> Self {
+        // Cheap deterministic spread from the seed: hue and build vary per
+        // villager so one rig furnishes a street. Twelve identical knights is
+        // the same failure the prop variety work just fixed.
+        let mut r = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut draw = || {
+            r ^= r >> 12;
+            r ^= r << 25;
+            r ^= r >> 27;
+            ((r.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32) / 16_777_216.0
+        };
+        let warm = 0.75 + draw() * 0.45;
+        let cool = 0.75 + draw() * 0.45;
+        let mid = 0.75 + draw() * 0.45;
+        Self {
+            entity,
+            pose_idle: PoseBuffer::new(),
+            pose_walk: PoseBuffer::new(),
+            blended: PoseBuffer::new(),
+            palette: Vec::new(),
+            clock: draw() * 4.0,
+            blend: 0.0,
+            yaw: 0.0,
+            pos: vec3f(0.0, 0.0, 0.0),
+            tint: vec4(warm, mid, cool, 1.0),
+            scale: 0.92 + draw() * 0.22,
+        }
+    }
+
+    /// Read this tick's motion off the entity and turn it into animation.
+    fn follow(&mut self, world: &GameWorld) {
+        let Some(e) = world.entity(self.entity) else {
+            return;
+        };
+        // The mesh's origin is at the feet; the mover's is its centre.
+        self.pos = vec3f(e.pos.x, e.pos.y - e.half.y, e.pos.z);
+        let speed = (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt();
+        // Face where it is actually going, not where it intended to.
+        if speed > 0.15 {
+            self.yaw = makepad_game_sim::math::atan2(e.vel.x, e.vel.z);
+        }
+        let target = if speed > 0.35 { 1.0 } else { 0.0 };
+        self.blend += (target - self.blend) * 0.12;
+        // Advance the walk cycle with distance covered, so a villager blocked
+        // by a bench stops its legs instead of running in place.
+        self.clock += TICK_DT * (0.9 + speed * 0.28);
+    }
 }
 
 impl Knight {
@@ -339,58 +412,9 @@ impl Knight {
             texture_png,
             idle,
             walk,
-            pose_idle: PoseBuffer::new(),
-            pose_walk: PoseBuffer::new(),
-            blended: PoseBuffer::new(),
-            palette: Vec::new(),
-            idle_time: 0.0,
-            walk_time: 0.0,
-            blend: 0.0,
-            angle: 0.0,
-            pos: vec3f(-20.0, 0.0, 5.6),
-            yaw: 0.0,
-            heading: 0.0,
         })
     }
 
-    /// Patrol brain: walk the pillar ring for 6s, stand for 2s. Facing follows
-    /// the walk direction (the visual-only yaw convention); animation state is
-    /// Derived-tier — recomputed from motion, never authoritative.
-    fn tick(&mut self) {
-        let dt = TICK_DT;
-        let cycle = self.idle_time + self.walk_time; // monotonic clock
-        let phase = cycle - (cycle / 8.0).floor() * 8.0;
-        let walking = phase < 6.0;
-        let target = if walking { 1.0 } else { 0.0 };
-        self.blend += (target - self.blend) * 0.08;
-        if walking {
-            self.angle += dt * 0.30;
-            // Walks the pavement on the south side of the road, turning at
-            // each end — a pedestrian on a street, not an orbit in a field.
-            let t = self.angle * 0.5;
-            let saw = t - (t / 2.0).floor() * 2.0; // 0..2
-            // Which way he is heading on this leg of the walk.
-            self.heading = if saw < 1.0 { 1.0 } else { -1.0 };
-            self.yaw = if saw < 1.0 {
-                std::f32::consts::FRAC_PI_2
-            } else {
-                -std::f32::consts::FRAC_PI_2
-            };
-        } else {
-            self.heading = 0.0;
-        }
-        self.idle_time += dt;
-        self.walk_time += dt;
-    }
-
-    /// Desired ground velocity for this tick. The sweep turns it into an
-    /// actual position, so a bench in the way stops him instead of being
-    /// walked through — which is the entire difference between a character in
-    /// a world and a sprite sliding over a picture of one.
-    fn desired_velocity(&self) -> Vec3f {
-        const SPEED: f32 = 3.2;
-        vec3f(self.heading * SPEED, 0.0, 0.0)
-    }
 }
 
 impl ArcadeView {
@@ -496,10 +520,14 @@ impl ArcadeView {
         // Framed on the street rather than on the origin: the road runs
         // east-west through z=0, so looking slightly north of it puts the
         // houses in frame and keeps the empty foreground off the bottom edge.
-        w.cam_target = vec3f(-4.0, 1.0, 2.0);
-        w.cam_distance = 56.0;
+        // Pulled in and swung toward the yard: at 56 units the street sat in
+        // the top third with a third of the frame given to bare lawn, which
+        // reads as an unfinished map. Closer, and centred between the houses
+        // and the yard, both ends of the village earn their space.
+        w.cam_target = vec3f(-8.0, 1.0, 6.0);
+        w.cam_distance = 44.0;
         w.orbit_yaw = 0.62;
-        w.orbit_pitch = -0.40;
+        w.orbit_pitch = -0.34;
 
         // Ground slab.
         spawn(
@@ -653,19 +681,39 @@ impl ArcadeView {
         // furniture leaves him jammed against the first bench forever now
         // that he genuinely collides. Walking round obstacles is NPC
         // behaviour, not layout, and belongs with the brains work.
-        spawn(
-            w,
-            BodyKind::Mover,
-            Shape::Box,
-            vec3f(-20.0, 0.9, 4.1),
-            vec3f(0.7, 1.8, 0.7),
-            vec4(0.85, 0.85, 0.9, 1.0),
-            "knight",
-        );
-        if let Some(e) = w.entities.iter_mut().find(|e| e.tag == "knight") {
-            // The skinned mesh is his appearance; this box is only his
-            // substance, exactly as for the stock props.
-            e.hidden = true;
+        // A dozen villagers along the street. They are Movers like the player,
+        // so they collide with the houses, the benches and the fence exactly
+        // as he does; where they GO is decided by the NPC block, which scores
+        // the village's points of interest against each villager's own
+        // temperament and the time of day.
+        const VILLAGERS: usize = 11;
+        for i in 0..VILLAGERS {
+            // Spread the start line along the pavement so they don't all
+            // spawn inside one another and spend the first seconds pushing
+            // apart — a crowd that begins as a pile reads as a bug.
+            let x = -22.0 + i as f32 * 4.3;
+            let z = if i % 2 == 0 { 4.1 } else { 7.6 };
+            let id = spawn(
+                w,
+                BodyKind::Mover,
+                Shape::Box,
+                vec3f(x, 0.9, z),
+                vec3f(0.7, 1.8, 0.7),
+                vec4(0.85, 0.85, 0.9, 1.0),
+                "villager",
+            );
+            if let Some(e) = w.entity_mut(id) {
+                // The skinned mesh is the villager's appearance; this box is
+                // only its substance, exactly as for the stock props.
+                e.hidden = true;
+                // Both of these are ZERO under Entity::default() — the trap
+                // this codebase has now been bitten by three times. A villager
+                // with gravity_scale 0 hangs in the air; with speed_mult 0 it
+                // never moves however hard the brain pushes.
+                e.gravity_scale = 1.0;
+                e.speed_mult = 1.0;
+            }
+            self.villagers.push(Villager::new(id, 0x5eed_1701 ^ i as u64));
         }
         self.knight = Knight::load();
         self.world_built = true;
@@ -706,7 +754,16 @@ impl ArcadeView {
             // cave-mouth tile that reads as a small teal-roofed building
             // dropped on the grass. A known ranking wart — asking for fewer
             // is the honest workaround until "rock" stops meaning that.
-            ("rock stone", "rock", 2, Spread::Mixed),
+            // `Variants`, not `Mixed`: mixing round-robins across FAMILIES,
+            // and the neighbouring family is `cliff_blockCave_rock` — a
+            // cave-mouth tile that reads as a small teal-roofed building
+            // dropped on the grass. Staying inside the best family keeps a
+            // rock a rock.
+            ("rock stone", "rock", 2, Spread::Variants),
+            // Yard dressing: a builder's yard of bare primitives reads as a
+            // physics test, which is what it looked like.
+            ("wooden crate box", "crate_prop", 2, Spread::Variants),
+            ("barrel", "barrel", 2, Spread::Variants),
             ("fence", "fence", 1, Spread::Variants),
             ("suburban house building", "house", 5, Spread::Variants),
             ("park bench", "bench", 2, Spread::Variants),
@@ -939,19 +996,31 @@ impl ArcadeView {
                 ((max.x - min.x) * s * 0.98).max(0.4)
             })
             .unwrap_or(1.6);
-        let fence_run = 30.0f32;
-        let panels = (fence_run / fence_step).ceil() as usize;
-        for i in 0..panels {
-            place(
-                "fence",
-                0,
-                -fence_run * 0.5 + i as f32 * fence_step,
-                17.0,
-                0.0,
-                FENCE_H,
-                Blocking::Solid,
-            );
-        }
+        // The run BOUNDS THE YARD rather than crossing the green. A fence that
+        // encloses nothing is scenery pretending to be structure: it reads as
+        // a line dropped across the grass, which is exactly how the previous
+        // layout looked. Two legs meeting at a corner say "this is the yard"
+        // with the same panel count.
+        let mut fence_leg = |x0: f32, z0: f32, x1: f32, z1: f32, yaw: f32| {
+            let len = ((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0)).sqrt();
+            let panels = (len / fence_step).ceil().max(1.0) as usize;
+            for i in 0..panels {
+                let t = i as f32 / panels as f32;
+                place(
+                    "fence",
+                    0,
+                    x0 + (x1 - x0) * t,
+                    z0 + (z1 - z0) * t,
+                    yaw,
+                    FENCE_H,
+                    Blocking::Solid,
+                );
+            }
+        };
+        // North side, along the road — the face a passer-by sees.
+        fence_leg(-27.0, 13.5, -5.0, 13.5, 0.0);
+        // East side, closing the corner back toward the trees.
+        fence_leg(-5.0, 13.5, -5.0, 26.0, std::f32::consts::FRAC_PI_2);
 
         // --- woodland --------------------------------------------------
         // Clustered, not sprinkled: three stands with gaps between them is
@@ -985,6 +1054,21 @@ impl ArcadeView {
                 1.1 + i as f32 * 0.35,
                 Blocking::Solid,
             );
+        }
+        // Yard dressing. The rigid-body demo still does the physics; these are
+        // the props that make the corner read as a working yard rather than a
+        // test harness — stacked stock alongside the crates that topple.
+        for (i, (x, z)) in [(-24.0f32, 22.5f32), (-22.4, 23.4), (-11.0, 21.0)]
+            .iter()
+            .enumerate()
+        {
+            place("crate_prop", i, *x, *z, i as f32 * 0.7, 1.0, Blocking::Solid);
+        }
+        for (i, (x, z)) in [(-19.5f32, 24.0f32), (-18.3, 23.2), (-9.5, 23.5)]
+            .iter()
+            .enumerate()
+        {
+            place("barrel", i, *x, *z, i as f32 * 1.1, 1.1, Blocking::Solid);
         }
         (models, colliders)
     }
@@ -1022,21 +1106,59 @@ impl ArcadeView {
             ControlSource::Player,
         ));
 
-        // The Knight already exists as a mover; give it a character block so
-        // its walk animation is driven by real velocity.
-        let knight_entity = w
+        // Destinations first: the NPC block scores POIs, so a village with
+        // none degrades to aimless wandering. These come from the composed
+        // street rather than being listed as coordinates — the same call a
+        // generated game would make over its own props.
+        blocks.pois = self.village_pois();
+
+        // Then the villagers. Each gets its own seed, so identical config
+        // still yields unlike people: one hurries, one dawdles, one is
+        // sociable enough to fall into step beside a neighbour.
+        let villager_ids: Vec<u64> = w
             .entities
             .iter()
-            .find(|e| e.tag == "knight")
-            .map(|e| e.id);
-        if let Some(id) = knight_entity {
-            blocks.characters.push(Character::new(
-                id,
-                CharacterConfig::default(),
-                ControlSource::Script,
-                Some("Knight".to_string()),
+            .filter(|e| e.tag == "villager")
+            .map(|e| e.id)
+            .collect();
+        for (i, id) in villager_ids.iter().enumerate() {
+            let home = w.entity(*id).map(|e| e.pos).unwrap_or(vec3f(0.0, 0.9, 4.1));
+            blocks.npcs.push(Npc::new(
+                *id,
+                NpcConfig::default(),
+                home,
+                0x51de_0000 ^ (i as u64).wrapping_mul(0x9E37_79B9),
             ));
         }
+    }
+
+    /// Points of interest derived from the composed street.
+    ///
+    /// Positions come from `compose_village`'s own layout constants rather
+    /// than from the prop entities, because the props are ModelInstances and
+    /// their collider entities are all tagged "scenery" — a tag the camera
+    /// boom and the raycast both key on, so re-tagging them per role to feed
+    /// `PoiSet::from_tags` would change camera behaviour to buy nothing.
+    fn village_pois(&self) -> PoiSet {
+        let mut pois = PoiSet::default();
+        // Benches on the south verge: two seats each, so a third villager
+        // walks past a full one instead of standing inside the pair on it.
+        for x in [-16.0f32, -4.0, 8.0, 20.0] {
+            pois.push(Poi::new(vec3f(x, 0.0, 6.4), "bench").with_capacity(2));
+        }
+        // House doors on the north side: one at a time, which is what makes a
+        // villager wait or pick elsewhere rather than merging into a doorway.
+        for x in [-18.0f32, -9.0, 0.0, 9.0, 18.0] {
+            pois.push(Poi::new(vec3f(x, 0.0, -6.6), "door").with_capacity(1));
+        }
+        // The lamps and the yard gate are open ground: somewhere to stand
+        // about, which is what keeps the street from being only a commute
+        // between benches and doors.
+        for x in [-13.5f32, 4.5] {
+            pois.push(Poi::new(vec3f(x, 0.0, -3.4), "lamp").with_capacity(3));
+        }
+        pois.push(Poi::new(vec3f(-8.0, 0.0, 14.0), "yard").with_capacity(4));
+        pois
     }
 
     /// Local player's intent from the keyboard: arrows/WASD steer and drive.
@@ -1239,20 +1361,16 @@ impl ArcadeView {
             };
             log!("arcade: {}", self.session_status);
         }
-        if let Some(knight) = &mut self.knight {
-            knight.tick();
-            // Drive the mover, then take back whatever the sweep decided. The
-            // walk only ever expresses INTENT; a bench, a house wall or a
-            // fence panel gets the final say on where he ends up.
-            let mut world = self.world.borrow_mut();
-            let v = knight.desired_velocity();
-            if let Some(e) = world.entities.iter_mut().find(|e| e.tag == "knight") {
-                e.vel.x = v.x;
-                e.vel.z = v.z;
-            }
-            if let Some(e) = world.entities.iter().find(|e| e.tag == "knight") {
-                // The mesh's origin is at his feet; the mover's is its centre.
-                knight.pos = vec3f(e.pos.x, e.pos.y - e.half.y, e.pos.z);
+        // Villagers: the NPC blocks already ran inside `blocks.pre_step`, and
+        // `step_world` has already turned their intent into actual positions.
+        // All that is left is to read the result back into animation — facing
+        // from travel, walk-cycle from speed. A villager the sweep stopped
+        // against a bench therefore stops its legs too, rather than moonwalking
+        // into the obstacle.
+        {
+            let world = self.world.borrow();
+            for villager in &mut self.villagers {
+                villager.follow(&world);
             }
         }
     }
@@ -1563,33 +1681,58 @@ impl Widget for ArcadeView {
             // Items are prepared before the draw so the batch borrows stay
             // disjoint from GameDraws.
             let mut skinned_items = Vec::new();
-            if let Some(knight) = &mut self.knight {
+            if let Some(knight) = &self.knight {
                 if self.knight_texture.is_some() {
-                    knight
-                        .model
-                        .sample_clip(knight.idle, knight.idle_time, &mut knight.pose_idle);
-                    knight
-                        .model
-                        .sample_clip(knight.walk, knight.walk_time, &mut knight.pose_walk);
-                    SkinnedModel::blend_pose(
-                        &knight.pose_idle,
-                        &knight.pose_walk,
-                        knight.blend,
-                        &mut knight.blended,
-                    );
-                    knight.model.palette(&knight.blended, &mut knight.palette);
-                    let mut vertices = Vec::new();
-                    knight.model.skin_to_packed(&knight.palette, &mut vertices);
-                    let mut transform = Mat4f::rotation(vec3f(0.0, knight.yaw, 0.0));
-                    transform.v[12] = knight.pos.x;
-                    transform.v[13] = knight.pos.y;
-                    transform.v[14] = knight.pos.z;
-                    skinned_items.push(SkinnedDraw {
-                        key: 1,
-                        vertices,
-                        indices: knight.model.indices().to_vec(),
-                        transform,
-                    });
+                    // One rig, many poses: each villager samples the SHARED
+                    // clips at its own phase and skins into its own buffer.
+                    // The geometry key is per villager for exactly that reason
+                    // — they are the same mesh holding different poses, so
+                    // they cannot share a GPU buffer.
+                    //
+                    // COST, because this is the one thing here that does not
+                    // scale: skinning is on the CPU, so a crowd costs
+                    // villagers x 3716 verts EVERY FRAME — eleven of them is
+                    // ~41k verts and ~958 KB of upload per frame. Fine for a
+                    // village on a desktop; a town, or a Quest, wants GPU
+                    // skinning (the bone palette is already computed here, so
+                    // the swap is this loop plus a shader) or impostors for
+                    // the distant ones. Worth measuring before raising the
+                    // count.
+                    for (i, v) in self.villagers.iter_mut().enumerate() {
+                        knight
+                            .model
+                            .sample_clip(knight.idle, v.clock, &mut v.pose_idle);
+                        knight
+                            .model
+                            .sample_clip(knight.walk, v.clock, &mut v.pose_walk);
+                        SkinnedModel::blend_pose(
+                            &v.pose_idle,
+                            &v.pose_walk,
+                            v.blend,
+                            &mut v.blended,
+                        );
+                        knight.model.palette(&v.blended, &mut v.palette);
+                        let mut vertices = Vec::new();
+                        knight.model.skin_to_packed(&v.palette, &mut vertices);
+                        let mut transform = Mat4f::rotation(vec3f(0.0, v.yaw, 0.0));
+                        // Build varies a little per villager; the rig is the
+                        // same height for everyone otherwise.
+                        for k in [0usize, 1, 2, 4, 5, 6, 8, 9, 10] {
+                            transform.v[k] *= v.scale;
+                        }
+                        transform.v[12] = v.pos.x;
+                        transform.v[13] = v.pos.y;
+                        transform.v[14] = v.pos.z;
+                        skinned_items.push(
+                            SkinnedDraw::new(
+                                i as u64 + 1,
+                                vertices,
+                                knight.model.indices().to_vec(),
+                                transform,
+                            )
+                            .with_tint(v.tint),
+                        );
+                    }
                 }
             }
             // Built before `batch` borrows self mutably.

@@ -154,7 +154,7 @@ script_mod! {
             self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
             self.v_direct = self.sun_color * dp
             self.v_uv = unpack2f16(self.geom.uv)
-            self.v_tint = unpack4u8(self.geom.color)
+            self.v_tint = unpack4u8(self.geom.color) * self.tint
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
@@ -420,6 +420,13 @@ pub struct DrawGameSkinned {
     pub sun_sky: Vec3f,
     #[live(vec3(0.28, 0.28, 0.28))]
     pub sun_ground: Vec3f,
+    /// Per-character wash over the vertex tint. One rig serves a whole village,
+    /// so without this every passer-by is the same knight in the same colours —
+    /// the identical-clones failure the prop variety work just fixed. Costs one
+    /// vec4 on an instance stream that carries a handful of characters, and one
+    /// multiply in the vertex stage.
+    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
+    pub tint: Vec4f,
 }
 
 /// Generated foliage: vertex-coloured mesh with growth reveal and wind sway.

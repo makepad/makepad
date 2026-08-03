@@ -127,10 +127,33 @@ pub struct GameRenderer {
 /// `vertices` is the packed GameMeshVertex layout `SkinnedModel::skin_to_packed`
 /// emits (6 floats/vertex).
 pub struct SkinnedDraw {
+    /// Identifies this character's GPU geometry buffer. Each animated
+    /// character needs its own — they hold different poses of the same rig.
     pub key: u64,
     pub vertices: Vec<f32>,
     pub indices: Vec<u32>,
     pub transform: Mat4f,
+    /// Per-character wash over the model's own colours, so one rig can furnish
+    /// a village without every villager being the same figure.
+    pub tint: Vec4f,
+}
+
+impl SkinnedDraw {
+    /// Untinted: the model's own colours, unchanged.
+    pub fn new(key: u64, vertices: Vec<f32>, indices: Vec<u32>, transform: Mat4f) -> Self {
+        Self {
+            key,
+            vertices,
+            indices,
+            transform,
+            tint: vec4(1.0, 1.0, 1.0, 1.0),
+        }
+    }
+
+    pub fn with_tint(mut self, tint: Vec4f) -> Self {
+        self.tint = tint;
+        self
+    }
 }
 
 /// The skinned characters for one frame, drawn between the opaque and alpha
@@ -920,6 +943,7 @@ impl GameRenderer {
             };
             batch.skinned.draw_vars.geometry_id = Some(geometry_id);
             batch.skinned.transform = item.transform;
+            batch.skinned.tint = item.tint;
             batch.skinned.depth_clip = 1.0;
             batch.skinned.fog_color = fog.0;
             batch.skinned.fog_density = fog.1;
