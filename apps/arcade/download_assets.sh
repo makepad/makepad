@@ -325,10 +325,22 @@ if [[ -f "$MANIFEST" ]]; then
 		chmod -R u+w "$zip.d" 2>/dev/null
 		# Prefer GLB and skip the OBJ/FBX/DAE copies — they are most of the
 		# archive and we cannot load them. NOTE GLB is NOT self-contained here:
-		# Kenney materials reference an external Textures/colormap.png shared
-		# by the whole pack, so the PNGs come too (they are tiny — 212 atlases
-		# total about 42 KB). Without them every model renders white.
-		find "$zip.d" -iname '*.png' -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
+		# Kenney materials reference an external `Textures/colormap.png` shared
+		# by the whole pack, and that URI is RELATIVE TO THE GLB — so the
+		# directory structure has to survive extraction. Flattening the PNGs
+		# into the pack root leaves every model looking for a path that no
+		# longer exists, which is indistinguishable from having no texture.
+		# Only the atlas is wanted: the archives also carry Preview/Sample and
+		# per-model thumbnails, which are ~200 MB of images nothing loads.
+		# The GLB's URI is `Textures/colormap.png` relative to itself, and GLBs
+		# land in the pack root — so keep the `Textures/` tail and drop
+		# everything above it (archives nest it under e.g. `FBX format/`,
+		# which varies per pack and must not survive).
+		while IFS= read -r tex; do
+			rel="Textures/${tex##*/Textures/}"
+			mkdir -p "$dest/$(dirname "$rel")"
+			mv -f "$tex" "$dest/$rel"
+		done < <(find "$zip.d" -ipath '*/Textures/*.png' ! -iname 'Preview*' ! -iname 'Sample*')
 		if [[ $(find "$zip.d" -iname '*.glb' | wc -l | tr -d ' ') -gt 0 ]]; then
 			find "$zip.d" -iname '*.glb' -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
 		else
