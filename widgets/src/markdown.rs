@@ -225,6 +225,15 @@ pub struct Markdown {
     in_splash_block: bool,
     #[rust]
     splash_block_string: String,
+    /// Set while reading the body of a ```mermaid fenced block. Mirrors
+    /// `in_splash_block` / `in_code_block`. The accumulated source is
+    /// dispatched to the `mermaid_block` template at CodeBlock end — the
+    /// template is expected to contain a widget whose `set_text` accepts
+    /// raw mermaid source (typically a `MermaidSvgView`).
+    #[rust]
+    in_mermaid_block: bool,
+    #[rust]
+    mermaid_block_string: String,
     #[live(false)]
     use_math_widget: bool,
     #[rust]
@@ -396,11 +405,24 @@ impl Markdown {
                         tf.new_line_collapsed_with_spacing(cx, self.pre_code_spacing);
                     }
                     is_first_block = false;
-                    // Check if this is a runsplash block
-                    let is_runsplash = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "runsplash");
-                    if is_runsplash {
+                    // Two fenced-block language hooks:
+                    //   ```runsplash  → dispatch to `splash_block` template
+                    //   ```mermaid    → dispatch to `mermaid_block` template
+                    // Any other language falls through to the generic
+                    // `code_block` template (or inline styling if that
+                    // template is not registered).
+                    let lang = if let CodeBlockKind::Fenced(l) = &kind {
+                        Some(l.as_ref())
+                    } else {
+                        None
+                    };
+                    let has_mermaid_tpl = tf.has_template(live_id!(mermaid_block));
+                    if lang == Some("runsplash") {
                         self.in_splash_block = true;
                         self.splash_block_string.clear();
+                    } else if lang == Some("mermaid") && has_mermaid_tpl {
+                        self.in_mermaid_block = true;
+                        self.mermaid_block_string.clear();
                     } else if self.use_code_block_widget {
                         self.in_code_block = true;
                         self.code_block_string.clear();
@@ -419,11 +441,19 @@ impl Markdown {
 
                         // Draw the splash block using the $splash_block template
                         tf.item_with(cx, entry_id, id!(splash_block), |cx, item, _tf| {
-                            //let tree = item.widget_tree();
-                            //cx.with_vm(|vm| {
-                            //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
-                            //});
                             item.widget(cx, ids!(splash_view)).set_text(cx, sbs);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else if self.in_mermaid_block {
+                        self.in_mermaid_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let mbs = self.mermaid_block_string.clone();
+                        // Dispatch the raw mermaid source to the template's
+                        // `mermaid_view` widget. The template provider
+                        // (e.g. aichat/MermaidSvgView) implements
+                        // `Widget::set_text` to render source → SVG in place.
+                        tf.item_with(cx, entry_id, id!(mermaid_block), |cx, item, _tf| {
+                            item.widget(cx, ids!(mermaid_view)).set_text(cx, &mbs);
                             item.draw_all_unscoped(cx);
                         });
                     } else if self.in_code_block {
@@ -503,6 +533,8 @@ impl Markdown {
                 MdEvent::Text(text) => {
                     if self.in_splash_block {
                         self.splash_block_string.push_str(&text);
+                    } else if self.in_mermaid_block {
+                        self.mermaid_block_string.push_str(&text);
                     } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
@@ -512,6 +544,8 @@ impl Markdown {
                 MdEvent::SoftBreak => {
                     if self.in_splash_block {
                         self.splash_block_string.push('\n');
+                    } else if self.in_mermaid_block {
+                        self.mermaid_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
@@ -521,6 +555,8 @@ impl Markdown {
                 MdEvent::HardBreak => {
                     if self.in_splash_block {
                         self.splash_block_string.push('\n');
+                    } else if self.in_mermaid_block {
+                        self.mermaid_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {

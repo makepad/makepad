@@ -808,6 +808,13 @@ pub struct TextFlow {
 }
 
 impl TextFlow {
+    /// Returns true if a template with the given id has been registered.
+    /// Used by language-hook Markdown consumers (e.g. mermaid) to gate
+    /// widget dispatch on optional template availability.
+    pub fn has_template(&self, id: LiveId) -> bool {
+        self.templates.contains_key(&id)
+    }
+
     fn apply_template(
         &mut self,
         vm: &mut ScriptVm,
