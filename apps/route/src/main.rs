@@ -873,9 +873,10 @@ impl App {
     /// dispatcher instead. Claude, when a key exists, otherwise serves as
     /// the cloud_ask escalation tool.
     fn init_agent(&mut self, cx: &mut Cx) {
-        // Perf iteration: ALL AI loading off unless explicitly requested —
-        // the 9B/4B/whisper chain shares the GPU with the map renderer.
-        if std::env::var_os("MAKEPAD_AI").is_none() {
+        // AI on by default again (perf campaign over); MAKEPAD_NO_AI=1
+        // keeps the GPU clear of the 9B/4B/whisper chain when profiling
+        // the map renderer.
+        if std::env::var_os("MAKEPAD_NO_AI").is_some() {
             return;
         }
         let api_key = read_secret("ANTHROPIC_API_KEY");
