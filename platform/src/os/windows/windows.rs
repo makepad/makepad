@@ -147,8 +147,13 @@ impl Cx {
                 self.call_event_handler(&Event::WindowGeomChange(re));
             }
             Win32Event::WindowClosed(wc) => {
+                // This WM_DESTROY-generated event reaches this arm exactly once on every
+                // close path; no other code may synthesize a WindowClosed, or the app
+                // would see it twice.
                 let window_id = wc.window_id;
-                // Cascade-close any popup windows parented to this window
+                // Cascade-close popups parented to this window. Their own WindowClosed
+                // arrives via the queued authentic event; removing the D3d11Window now
+                // makes the app's `WindowHandle::close()` response a no-op.
                 let popup_ids: Vec<WindowId> = d3d11_windows
                     .iter()
                     .filter(|w| self.windows[w.window_id].popup_parent == Some(window_id))
@@ -161,24 +166,42 @@ impl Cx {
                             reason: crate::event::PopupDismissReason::ParentClosed,
                         },
                     ));
-                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent {
-                        window_id: popup_id,
-                    }));
-                    self.windows[popup_id].is_created = false;
-                    if let Some(idx) = d3d11_windows.iter().position(|w| w.window_id == popup_id) {
-                        d3d11_windows[idx].win32_window.close_window();
-                        d3d11_windows.remove(idx);
+                    if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == popup_id)
+                    {
+                        self.windows[popup_id].is_created = false;
+                        d3d11_windows[index].win32_window.close_window();
+                        d3d11_windows.remove(index);
                     }
                 }
                 self.call_event_handler(&Event::WindowClosed(wc));
-                // lets remove the window from the set
+                // Remove the window; tolerate CxOsOp::CloseWindow having removed it already.
                 self.windows[window_id].is_created = false;
                 if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == window_id) {
                     d3d11_windows.remove(index);
-                    if d3d11_windows.len() == 0 {
-                        self.call_event_handler(&Event::Shutdown);
-                        return EventFlow::Exit;
-                    }
+                }
+                // The main pass can no longer be painted; clear its dirty flag so
+                // `any_passes_dirty()` cannot keep the loop in Poll forever.
+                if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                    self.passes[main_pass_id].paint_dirty = false;
+                }
+                // Exit once the last window is gone, but not while another WindowClosed
+                // is still queued (the app must see every WindowClosed before Shutdown)
+                // or a CreateWindow op is pending (the app is not actually windowless).
+                if d3d11_windows.is_empty()
+                    && !with_win32_app(|app| {
+                        app.pending_events
+                            .iter()
+                            .any(|e| matches!(e, Win32Event::WindowClosed(_)))
+                    })
+                    && !self.platform_ops.iter().any(|op| {
+                        matches!(
+                            op,
+                            CxOsOp::CreateWindow(_) | CxOsOp::CreatePopupWindow { .. }
+                        )
+                    })
+                {
+                    self.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
                 }
             }
             Win32Event::Paint => {
@@ -267,7 +290,8 @@ impl Cx {
                 // blocking call at all, so a NextFrame listener that re-arms without
                 // dirtying a pass (e.g. a video player polling between decoded frames)
                 // would spin the loop at full speed; sleep briefly to cap that.
-                if !presented && self.new_next_frames.len() != 0 {
+                // `any_passes_dirty` also paces a popup's waitless dropped-present retry.
+                if !presented && (self.new_next_frames.len() != 0 || self.any_passes_dirty()) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
 
@@ -318,11 +342,13 @@ impl Cx {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }
             Win32Event::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
-            Win32Event::Drag(e) => {
+            Win32Event::Drag(window_id, mut e) => {
+                self.dpi_override_scale(&mut e.abs, window_id);
                 self.call_event_handler(&Event::Drag(e));
                 self.drag_drop.cycle_drag();
             }
-            Win32Event::Drop(e) => {
+            Win32Event::Drop(window_id, mut e) => {
+                self.dpi_override_scale(&mut e.abs, window_id);
                 self.call_event_handler(&Event::Drop(e));
                 self.drag_drop.cycle_drag();
             }
@@ -415,8 +441,9 @@ impl Cx {
         }
     }
 
-    /// Repaints all dirty passes. Returns whether any window pass was presented,
-    /// so the Paint handler can tell a paced (vsync-blocking) pass from a no-op one.
+    /// Repaints all dirty passes. Returns whether any window pass actually presented a
+    /// frame, so the Paint handler can tell a paced (vsync-blocking) pass from a no-op
+    /// or dropped one; a dropped present does not count and re-marks its pass dirty.
     pub(crate) fn handle_repaint(
         &mut self,
         d3d11_windows: &mut Vec<D3d11Window>,
@@ -441,8 +468,19 @@ impl Cx {
                         window.resize_buffers(&d3d11_cx);
                         // Present paced to the display refresh (vsync); see `windows_window_vsync()`
                         // for why this defaults to ON.
-                        self.draw_pass_to_window(*draw_pass_id, windows_window_vsync(), window, d3d11_cx);
-                        presented = true;
+                        if self.draw_pass_to_window(
+                            *draw_pass_id,
+                            windows_window_vsync(),
+                            window,
+                            d3d11_cx,
+                        ) {
+                            presented = true;
+                        } else {
+                            // The frame was dropped: re-mark the pass dirty so the next loop
+                            // pass re-presents, or the loop settles into Wait on stale
+                            // content. The frame-latency wait paces the retry.
+                            self.repaint_pass(*draw_pass_id);
+                        }
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
@@ -560,15 +598,14 @@ impl Cx {
                     });
                 }
                 CxOsOp::CloseWindow(window_id) => {
-                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
+                    // The authentic WindowClosed event this triggers delivers
+                    // Event::WindowClosed and the exit check; firing it here would double it.
+                    // Remove the D3d11Window now so later ops cannot touch the destroyed hwnd.
                     if let Some(index) = d3d11_windows.iter().position(|w| w.window_id == window_id)
                     {
                         self.windows[window_id].is_created = false;
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
-                        if d3d11_windows.len() == 0 {
-                            ret = EventFlow::Exit
-                        }
                     }
                 }
                 CxOsOp::MinimizeWindow(window_id) => {
@@ -586,7 +623,14 @@ impl Cx {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
+                        // Apps rely on an unconditional WindowGeomChange echo, but ShowWindow
+                        // sends no WM_SIZE when already in the target state; detect that
+                        // no-op via the geometry-event generation and send it ourselves.
+                        let gen = window.win32_window.geom_event_gen.get();
                         window.win32_window.maximize();
+                        if window.win32_window.geom_event_gen.get() == gen {
+                            window.win32_window.send_change_event();
+                        }
                     }
                 }
                 CxOsOp::ResizeWindow(window_id, size) => {
@@ -607,7 +651,12 @@ impl Cx {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
+                        // See MaximizeWindow: echo a WindowGeomChange on a ShowWindow no-op.
+                        let gen = window.win32_window.geom_event_gen.get();
                         window.win32_window.restore();
+                        if window.win32_window.geom_event_gen.get() == gen {
+                            window.win32_window.send_change_event();
+                        }
                     }
                 }
                 CxOsOp::Quit => ret = EventFlow::Exit,

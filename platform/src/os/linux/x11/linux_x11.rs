@@ -277,13 +277,15 @@ impl X11Cx {
                 let mut cx = self.cx.borrow_mut();
                 cx.call_event_handler(&Event::TextInput(e))
             }
-            XlibEvent::Drag(e) => {
+            XlibEvent::Drag(window_id, mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, window_id);
                 cx.call_event_handler(&Event::Drag(e));
                 cx.drag_drop.cycle_drag();
             }
-            XlibEvent::Drop(e) => {
+            XlibEvent::Drop(window_id, mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, window_id);
                 cx.call_event_handler(&Event::Drop(e));
                 cx.drag_drop.cycle_drag();
             }
