@@ -127,6 +127,11 @@ pub struct Car {
     pub owner: makepad_game_sim::PlayerId,
     pub config: CarConfig,
     pub control: ControlSource,
+    /// Stock model id for this vehicle's appearance, as `Character` carries
+    /// one. Without it a host can only draw ONE kind of car — which is what
+    /// forced the arcade demo to keep its fleet in Rust and left splash-
+    /// authored worlds unable to have more than a single vehicle shape.
+    pub model: Option<String>,
     pub input: DriveInput,
     pub wheels: [Wheel; 4],
     /// Signed forward speed (negative = reversing), units/second.
@@ -161,6 +166,7 @@ impl Car {
             owner: makepad_game_sim::PlayerId::LOCAL,
             config,
             control,
+            model: None,
             input: DriveInput::default(),
             wheels,
             speed: 0.0,

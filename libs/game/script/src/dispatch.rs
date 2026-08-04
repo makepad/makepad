@@ -985,7 +985,7 @@ fn v_car(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
     let allowed = &[
         id!(pos), id!(size), id!(color), id!(tag), id!(player), id!(top_speed),
         id!(accel), id!(braking), id!(grip), id!(steer_rate), id!(seats),
-        id!(density), id!(friction), id!(restitution), id!(rot_y),
+        id!(density), id!(friction), id!(restitution), id!(rot_y), id!(model),
     ];
     let Some((id, opts, owner)) = block_common(vm, ctx, args, allowed, "car") else {
         return nil();
@@ -1002,6 +1002,9 @@ fn v_car(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
     let control = ControlSource::Player;
     let mut car = Car::new(id, config, control);
     car.owner = owner;
+    // Appearance, exactly as `character` takes one. Ids come from
+    // `game.find_model`, never guessed.
+    car.model = opt_string(vm, opts, id!(model));
     ctx.blocks.borrow_mut().cars.push(car);
     num(id as f64)
 }
@@ -2437,7 +2440,7 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("block", v_box, "alias of box"),
     ("mover", v_mover, "({...box opts, gravity, vel, turn_rate, face}) -> id"),
     ("spawn", v_mover, "({...mover opts, vel, life, hits}) -> id — projectile"),
-    ("terrain", v_terrain, "({size, cells, base, amp, seed, freq, offset, step, min, max, plaza, bands, heights, colors, color, tag, smooth, water}) "),
+    ("terrain", v_terrain, "({size, cells, base, amp, seed, feature, octaves, warp, ridged, flatten, rim, rim_start, step, min, max, plaza, bands, heights, colors, color, tag, smooth, water}) — feature = distance between hills in world units; rim grows relief toward the edge (playable middle, scenic horizon); step terraces, 0 = smooth"),
     ("sky", v_sky, "({top, bottom, fog, fog_density})"),
     ("gravity", v_gravity, "(g)"),
     ("remove", v_remove, "(id)"),
@@ -2485,7 +2488,7 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("particles_stop", v_particles_stop, "(emitter)"),
     ("beep", v_beep, "({freq, to, ms, gain})"),
     ("jingle", v_jingle, "(notes, ms)"),
-    ("car", v_car, "({pos, size, color, tag, player, top_speed, accel, braking, grip, steer_rate, seats}) -> id"),
+    ("car", v_car, "({pos, size, color, tag, model, player, top_speed, accel, braking, grip, steer_rate, seats}) -> id — model from game.find_model gives each vehicle its own shape"),
     ("character", v_character, "({pos, size, color, tag, player, model, speed, jump, view}) -> id"),
     ("player_character", v_player_character, "({pos, model, speed, jump, run_multiplier, player, camera_distance, camera_height}) -> id  — walker + follow camera + mount, all crafted defaults"),
     ("interactable", v_interactable, "(entity, {kind, prompt, range}) — cars and doors need no declaration"),

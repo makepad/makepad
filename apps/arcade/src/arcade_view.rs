@@ -1497,7 +1497,17 @@ impl ArcadeView {
         }
         let mut out = Vec::new();
         for (i, car) in world.entities.iter().filter(|e| e.tag == "car").enumerate() {
-            let id = &models[i % models.len()];
+            // The car block's OWN model wins. A splash-authored game picks a
+            // vehicle per car via `game.car({model: ...})`; only the built-in
+            // demo, which declares no models, falls back to walking the
+            // `parked_car` role. That fallback is what lets the same renderer
+            // serve both without the script having to know it exists.
+            let block_model = blocks
+                .cars
+                .iter()
+                .find(|c| c.entity == car.id)
+                .and_then(|c| c.model.clone());
+            let id = block_model.as_ref().unwrap_or(&models[i % models.len()]);
             let Some(bounds) = self.renderer.model_bounds(id) else {
                 continue;
             };
