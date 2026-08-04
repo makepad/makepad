@@ -22296,6 +22296,7 @@ pub struct VARIANT_BOOL(pub i16);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WAIT_EVENT(pub u32);
 pub const WAIT_OBJECT_0: WAIT_EVENT = WAIT_EVENT(0u32);
+pub const WAIT_TIMEOUT: WAIT_EVENT = WAIT_EVENT(258u32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct WPARAM(pub usize);
@@ -29887,6 +29888,7 @@ impl Default for DXGI_OUTPUT_DESC1 {
         unsafe { core::mem::zeroed() }
     }
 }
+pub const DXGI_ERROR_WAS_STILL_DRAWING: windows_core::HRESULT = windows_core::HRESULT(0x887A000A_u32 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_PRESENT(pub u32);
@@ -29923,6 +29925,7 @@ impl core::ops::Not for DXGI_PRESENT {
         Self(self.0.not())
     }
 }
+pub const DXGI_PRESENT_DO_NOT_WAIT: DXGI_PRESENT = DXGI_PRESENT(8u32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DXGI_PRESENT_PARAMETERS {
@@ -45129,6 +45132,11 @@ pub unsafe fn GetMessageW(lpmsg: *mut MSG, hwnd: Option<super::super::Foundation
     windows_core::link!("user32.dll" "system" fn GetMessageW(lpmsg : *mut MSG, hwnd : super::super::Foundation:: HWND, wmsgfiltermin : u32, wmsgfiltermax : u32) -> windows_core::BOOL);
     unsafe { GetMessageW(lpmsg as _, hwnd.unwrap_or(core::mem::zeroed()) as _, wmsgfiltermin, wmsgfiltermax) }
 }
+#[inline]
+pub unsafe fn GetSystemMetrics(nindex: SYSTEM_METRICS_INDEX) -> i32 {
+    windows_core::link!("user32.dll" "system" fn GetSystemMetrics(nindex : SYSTEM_METRICS_INDEX) -> i32);
+    unsafe { GetSystemMetrics(nindex) }
+}
 #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn GetWindowLongPtrW(hwnd: super::super::Foundation::HWND, nindex: WINDOW_LONG_PTR_INDEX) -> isize {
@@ -45183,6 +45191,15 @@ where
 {
     windows_core::link!("user32.dll" "system" fn LoadIconW(hinstance : super::super::Foundation:: HINSTANCE, lpiconname : windows_core::PCWSTR) -> HICON);
     let result__ = unsafe { LoadIconW(hinstance.unwrap_or(core::mem::zeroed()) as _, lpiconname.param().abi()) };
+    (!result__.is_invalid()).then_some(result__).ok_or_else(windows_core::Error::from_thread)
+}
+#[inline]
+pub unsafe fn LoadImageW<P1>(hinst: Option<super::super::Foundation::HINSTANCE>, name: P1, r#type: GDI_IMAGE_TYPE, cx: i32, cy: i32, fuload: IMAGE_FLAGS) -> windows_core::Result<super::super::Foundation::HANDLE>
+where
+    P1: windows_core::Param<windows_core::PCWSTR>,
+{
+    windows_core::link!("user32.dll" "system" fn LoadImageW(hinst : super::super::Foundation:: HINSTANCE, name : windows_core::PCWSTR, r#type : GDI_IMAGE_TYPE, cx : i32, cy : i32, fuload : IMAGE_FLAGS) -> super::super::Foundation:: HANDLE);
+    let result__ = unsafe { LoadImageW(hinst.unwrap_or(core::mem::zeroed()) as _, name.param().abi(), r#type, cx, cy, fuload) };
     (!result__.is_invalid()).then_some(result__).ok_or_else(windows_core::Error::from_thread)
 }
 #[inline]
@@ -45263,6 +45280,9 @@ pub const CS_HREDRAW: WNDCLASS_STYLES = WNDCLASS_STYLES(2u32);
 pub const CS_OWNDC: WNDCLASS_STYLES = WNDCLASS_STYLES(32u32);
 pub const CS_VREDRAW: WNDCLASS_STYLES = WNDCLASS_STYLES(1u32);
 pub const CW_USEDEFAULT: i32 = -2147483648i32;
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GDI_IMAGE_TYPE(pub u32);
 pub const GWLP_USERDATA: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-21i32);
 pub const GWL_EXSTYLE: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-20i32);
 #[repr(transparent)]
@@ -45370,6 +45390,10 @@ pub const IDC_SIZEWE: windows_core::PCWSTR = windows_core::PCWSTR(32644u16 as _)
 pub const IDI_WINLOGO: windows_core::PCWSTR = windows_core::PCWSTR(32517u32 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IMAGE_FLAGS(pub u32);
+pub const IMAGE_ICON: GDI_IMAGE_TYPE = GDI_IMAGE_TYPE(1u32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LAYERED_WINDOW_ATTRIBUTES_FLAGS(pub u32);
 impl LAYERED_WINDOW_ATTRIBUTES_FLAGS {
     pub const fn contains(&self, other: Self) -> bool {
@@ -45404,6 +45428,7 @@ impl core::ops::Not for LAYERED_WINDOW_ATTRIBUTES_FLAGS {
         Self(self.0.not())
     }
 }
+pub const LR_DEFAULTCOLOR: IMAGE_FLAGS = IMAGE_FLAGS(0u32);
 pub const LWA_ALPHA: LAYERED_WINDOW_ATTRIBUTES_FLAGS = LAYERED_WINDOW_ATTRIBUTES_FLAGS(2u32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -45492,12 +45517,21 @@ impl core::ops::Not for SET_WINDOW_POS_FLAGS {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SHOW_WINDOW_CMD(pub i32);
+pub const SM_CXICON: SYSTEM_METRICS_INDEX = SYSTEM_METRICS_INDEX(11i32);
+pub const SM_CXSMICON: SYSTEM_METRICS_INDEX = SYSTEM_METRICS_INDEX(49i32);
+pub const SM_CYICON: SYSTEM_METRICS_INDEX = SYSTEM_METRICS_INDEX(12i32);
+pub const SM_CYSMICON: SYSTEM_METRICS_INDEX = SYSTEM_METRICS_INDEX(50i32);
+pub const SWP_NOACTIVATE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(16u32);
 pub const SWP_NOMOVE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(2u32);
 pub const SWP_NOSIZE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(1u32);
+pub const SWP_NOZORDER: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(4u32);
 pub const SW_MAXIMIZE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(3i32);
 pub const SW_MINIMIZE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(6i32);
 pub const SW_RESTORE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(9i32);
 pub const SW_SHOW: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(5i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SYSTEM_METRICS_INDEX(pub i32);
 pub type TIMERPROC = Option<unsafe extern "system" fn(param0: super::super::Foundation::HWND, param1: u32, param2: usize, param3: u32)>;
 pub const WA_ACTIVE: u32 = 1u32;
 #[repr(C)]
