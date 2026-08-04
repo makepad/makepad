@@ -43,12 +43,14 @@ use {
                         MONITOR_DPI_TYPE, PROCESS_DPI_AWARENESS, PROCESS_PER_MONITOR_DPI_AWARE,
                     },
                     WindowsAndMessaging::{
-                        DispatchMessageW, GetMessageW, IsGUIThread, IsProcessDPIAware, KillTimer,
-                        LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
-                        SetTimer, ShowCursor, TranslateMessage, CS_OWNDC, HICON, IDC_ARROW,
-                        IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
-                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, MSG,
-                        PM_NOREMOVE, PM_REMOVE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSEXW,
+                        DispatchMessageW, GetMessageW, GetSystemMetrics, IsGUIThread,
+                        IsProcessDPIAware, KillTimer, LoadCursorW, LoadIconW, LoadImageW,
+                        PeekMessageW, RegisterClassExW, SetCursor, SetTimer, ShowCursor,
+                        TranslateMessage, CS_OWNDC, HICON, IDC_ARROW, IDC_CROSS, IDC_HAND,
+                        IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+                        IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, IMAGE_ICON, LR_DEFAULTCOLOR, MSG,
+                        PM_NOREMOVE, PM_REMOVE, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
+                        SYSTEM_METRICS_INDEX, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSEXW,
                     },
                 },
             },
@@ -56,6 +58,7 @@ use {
     },
     std::{
         cell::{Cell, RefCell},
+        collections::VecDeque,
         ffi::OsStr,
         mem,
         os::windows::ffi::OsStrExt,
@@ -178,6 +181,9 @@ unsafe fn coalesce_mouse_wheel(mut msg: MSG) -> MSG {
 
 pub struct Win32App {
     event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow>>,
+    /// Events queued by re-entrant `do_callback` calls; drained FIFO by the outer
+    /// call so they are delivered late rather than dropped.
+    pub pending_events: VecDeque<Win32Event>,
     pub window_class_name: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub time: Win32Time,
@@ -268,6 +274,7 @@ impl Win32App {
             was_signal_poll: false,
             time: Win32Time::new(),
             event_callback: Some(event_callback),
+            pending_events: VecDeque::new(),
             event_flow: EventFlow::Poll,
             all_windows: Vec::new(),
             timers: Vec::new(),
@@ -332,23 +339,35 @@ impl Win32App {
 
         let pick = |target: u32| icon.buffers.iter().min_by_key(|b| b.width.abs_diff(target));
 
-        let load_exe_or_default = || unsafe {
-            let from_exe = GetModuleHandleW(None).ok().and_then(
-                |h| LoadIconW(Some(h.into()), PCWSTR(1 as *const u16)).ok()
-            );
-            from_exe.unwrap_or_else(|| LoadIconW(None, IDI_WINLOGO).unwrap())
+        // Fallback: the exe-embedded icon (resource id 1). LoadImageW, unlike LoadIconW,
+        // can request the proper system size for each class icon slot.
+        let load_exe_or_default = |cx: SYSTEM_METRICS_INDEX, cy: SYSTEM_METRICS_INDEX| unsafe {
+            let from_exe = GetModuleHandleW(None).ok().and_then(|h| {
+                LoadImageW(
+                    Some(h.into()),
+                    PCWSTR(1 as *const u16),
+                    IMAGE_ICON,
+                    GetSystemMetrics(cx),
+                    GetSystemMetrics(cy),
+                    LR_DEFAULTCOLOR,
+                )
+                .ok()
+            });
+            from_exe
+                .map(|handle| HICON(handle.0))
+                .unwrap_or_else(|| LoadIconW(None, IDI_WINLOGO).unwrap())
         };
 
         let big = if let Some(buf) = pick(64).or_else(|| icon.buffers.first()) {
             Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
         } else {
-            load_exe_or_default()
+            load_exe_or_default(SM_CXICON, SM_CYICON)
         };
 
         let small = if let Some(buf) = pick(32).or_else(|| icon.buffers.first()) {
             Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
         } else {
-            load_exe_or_default()
+            load_exe_or_default(SM_CXSMICON, SM_CYSMICON)
         };
 
         (big, small)
@@ -435,17 +454,33 @@ impl Win32App {
         }
     }
 
+    /// Dispatch `event` to the application's event callback.
+    ///
+    /// The callback is taken out of the global while it runs, so Win32 calls inside it
+    /// that synchronously re-enter the wndproc land here re-entrantly; those events are
+    /// queued and drained FIFO by the outermost call, delivered late but never dropped.
     pub fn do_callback(event: Win32Event) {
         let cb = with_win32_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
             let event_flow = callback(event);
             with_win32_app(|app| app.event_flow = event_flow);
-            if let EventFlow::Exit = event_flow {
+            let mut exit = matches!(event_flow, EventFlow::Exit);
+            // Drain re-entrantly queued events (re-checked each pass) BEFORE acting on
+            // an Exit, so e.g. a queued WindowClosed is not swallowed by ExitProcess.
+            while let Some(event) = with_win32_app(|app| app.pending_events.pop_front()) {
+                let event_flow = callback(event);
+                with_win32_app(|app| app.event_flow = event_flow);
+                exit |= matches!(event_flow, EventFlow::Exit);
+            }
+            if exit {
                 unsafe {
                     ExitProcess(0);
                 }
             }
             with_win32_app(|app| app.event_callback = Some(callback));
+        } else {
+            // Re-entered while the callback runs higher up the stack; queue for the outer call.
+            with_win32_app(|app| app.pending_events.push_back(event));
         }
     }
 

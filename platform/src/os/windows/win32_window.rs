@@ -78,7 +78,8 @@ use {
                         ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM,
                         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
                         HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
-                        LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+                        LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
                         SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
                         WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
                         WM_EXITSIZEMOVE, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
@@ -193,6 +194,13 @@ pub struct Win32Window {
     /// snapshots it before dispatching `WindowDragQuery` and only writes the result back if it is
     /// unchanged, so a reentrant invalidation during that dispatch is not clobbered by a stale write.
     pub nc_dq_gen: Cell<u32>,
+    /// Generation counter bumped by every `send_change_event()`; snapshotted around calls
+    /// that may re-enter the wndproc to detect whether a nested re-entry already published
+    /// the geometry. A `Cell` because the re-entry mutates this window through a second `&mut`.
+    pub geom_event_gen: Cell<u32>,
+    /// Set by `close_window()`; suppresses the WM_ACTIVATE-derived
+    /// `PopupDismissed(FocusLost)`, which would duplicate the closer's dismissal.
+    pub is_closing: Cell<bool>,
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
@@ -266,6 +274,8 @@ impl Win32Window {
             cached_dpi: Cell::new(0.0),
             nc_dq_cache: Cell::new(None),
             nc_dq_gen: Cell::new(0),
+            geom_event_gen: Cell::new(0),
+            is_closing: Cell::new(false),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -316,6 +326,8 @@ impl Win32Window {
             cached_dpi: Cell::new(0.0),
             nc_dq_cache: Cell::new(None),
             nc_dq_gen: Cell::new(0),
+            geom_event_gen: Cell::new(0),
+            is_closing: Cell::new(false),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -383,10 +395,14 @@ impl Win32Window {
                     window.do_callback(Win32Event::WindowGotFocus(window.window_id));
                 } else {
                     if window.is_popup {
-                        window.do_callback(Win32Event::PopupDismissed(PopupDismissedEvent {
-                            window_id: window.window_id,
-                            reason: PopupDismissReason::FocusLost,
-                        }));
+                        // While close_window() tears this popup down, a focus-loss dismissal
+                        // would duplicate the one the closer already reported.
+                        if !window.is_closing.get() {
+                            window.do_callback(Win32Event::PopupDismissed(PopupDismissedEvent {
+                                window_id: window.window_id,
+                                reason: PopupDismissReason::FocusLost,
+                            }));
+                        }
                     } else {
                         window.do_callback(Win32Event::WindowLostFocus(window.window_id));
                     }
@@ -789,11 +805,40 @@ impl Win32Window {
                 let proposed_rect = &*(lparam.0 as *const RECT);
                 window.send_sizing_event(proposed_rect);
             }
-            WM_SIZE | WM_DPICHANGED => {
+            WM_SIZE => {
                 // The window may have moved to a monitor with a different scale; drop the cached
                 // DPI so send_change_event() (and subsequent hit-tests) re-read the new value.
                 window.invalidate_cached_dpi();
                 window.send_change_event();
+            }
+            WM_DPICHANGED => {
+                // Drop the cached DPI so send_change_event() re-reads the new value.
+                window.invalidate_cached_dpi();
+                // Adopt the OS-suggested rect, which keeps the window's logical size at the
+                // new DPI; the SetWindowPos delivers a nested WM_SIZE whose
+                // send_change_event() publishes the new dpi_factor and size to the app.
+                let suggested_rect = &*(lparam.0 as *const RECT);
+                // Snapshot the generation, not the geometry: the nested WM_SIZE mutates this
+                // window through a second `&mut` (see `geom_event_gen`).
+                let geom_gen = window.geom_event_gen.get();
+                if let Err(e) = SetWindowPos(
+                    hwnd,
+                    None,
+                    suggested_rect.left,
+                    suggested_rect.top,
+                    suggested_rect.right - suggested_rect.left,
+                    suggested_rect.bottom - suggested_rect.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                ) {
+                    crate::error!("WM_DPICHANGED: SetWindowPos failed: {}", e);
+                }
+                // An unchanged generation means no nested WM_SIZE fired (rect already
+                // matched), so publish the new DPI to the app ourselves.
+                if window.geom_event_gen.get() == geom_gen {
+                    window.send_change_event();
+                }
+                // The WM_DPICHANGED contract requires returning zero (the shared tail returns 1).
+                return LRESULT(0);
             }
             // WM_MOVE (0x0003): the window changed position without necessarily changing size, so
             // WM_SIZE / send_change_event do not fire. nc_dq_cache is keyed by screen-space cursor
@@ -855,7 +900,7 @@ impl Win32Window {
                         let dpi_factor = window.get_dpi_factor();
 
                         // send to makepad
-                        window.do_callback(Win32Event::Drag(DragEvent {
+                        window.do_callback(Win32Event::Drag(window.window_id, DragEvent {
                             modifiers: KeyModifiers {
                                 shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
                                 control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
@@ -882,7 +927,7 @@ impl Win32Window {
                         let dpi_factor = window.get_dpi_factor();
 
                         // send to makepad
-                        window.do_callback(Win32Event::Drop(DropEvent {
+                        window.do_callback(Win32Event::Drop(window.window_id, DropEvent {
                             modifiers: KeyModifiers {
                                 shift: (flags & MK_SHIFT) != MODIFIERKEYS_FLAGS(0),
                                 control: (flags & MK_CONTROL) != MODIFIERKEYS_FLAGS(0),
@@ -965,23 +1010,26 @@ impl Win32Window {
 
     pub fn set_mouse_cursor(&mut self, _cursor: MouseCursor) {}
 
+    // ShowWindow's synchronous WM_SIZE is queued and drained by do_callback, so it
+    // already reaches the app; posting a compensating WM_SIZE would duplicate it.
     pub fn restore(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_RESTORE);
-            PostMessageW(Some(self.hwnd), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
 
     pub fn maximize(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_MAXIMIZE);
-            PostMessageW(Some(self.hwnd), WM_SIZE, WPARAM(0), LPARAM(0)).unwrap();
         }
     }
 
     pub fn close_window(&self) {
+        // Lets the WM_ACTIVATE arm suppress a redundant popup dismissal.
+        self.is_closing.set(true);
+        // A second close of an already-destroyed window must be a no-op, not a panic.
         unsafe {
-            DestroyWindow(self.hwnd).unwrap();
+            let _ = DestroyWindow(self.hwnd);
         }
     }
 
@@ -1317,6 +1365,8 @@ impl Win32Window {
     }
 
     pub fn send_change_event(&mut self) {
+        // Record that a geometry event is published (see `geom_event_gen`).
+        self.geom_event_gen.set(self.geom_event_gen.get().wrapping_add(1));
         // The window/caption geometry changed; drop the WM_NCHITTEST hit-test cache and bump its
         // generation so an in-flight WindowDragQuery dispatch does not write a stale result back.
         self.nc_dq_cache.set(None);

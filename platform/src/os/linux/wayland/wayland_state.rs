@@ -1323,12 +1323,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                 }));
                                 if btn == MouseButton::PRIMARY {
                                     if let Some(items) = state.internal_drag_items.take() {
-                                        state.do_callback(XlibEvent::Drop(DropEvent {
-                                            modifiers: state.modifiers,
-                                            handled: Arc::new(Mutex::new(false)),
-                                            abs: state.last_mouse_pos,
-                                            items,
-                                        }));
+                                        state.do_callback(XlibEvent::Drop(
+                                            window_id,
+                                            DropEvent {
+                                                modifiers: state.modifiers,
+                                                handled: Arc::new(Mutex::new(false)),
+                                                abs: state.last_mouse_pos,
+                                                items,
+                                            },
+                                        ));
                                         state.do_callback(XlibEvent::DragEnd);
                                     }
                                 }
@@ -1771,13 +1774,16 @@ impl WaylandState {
             handled: Cell::new(Area::Empty),
         }));
         if let Some(items) = self.internal_drag_items.as_ref() {
-            self.do_callback(XlibEvent::Drag(DragEvent {
-                modifiers: self.modifiers,
-                handled: Arc::new(Mutex::new(false)),
-                abs: pos,
-                items: items.clone(),
-                response: Arc::new(Mutex::new(DragResponse::None)),
-            }));
+            self.do_callback(XlibEvent::Drag(
+                window_id,
+                DragEvent {
+                    modifiers: self.modifiers,
+                    handled: Arc::new(Mutex::new(false)),
+                    abs: pos,
+                    items: items.clone(),
+                    response: Arc::new(Mutex::new(DragResponse::None)),
+                },
+            ));
         }
     }
 
