@@ -1,0 +1,151 @@
+// Makepad Arcade — the starting world.
+//
+// This is a TEMPLATE, not a demo: it is what a new world begins as, and it is
+// meant to be edited. Everything here is a `game.*` verb, so the AI editing
+// this file can change any of it — which is the whole point. Nothing about
+// this world lives in Rust.
+//
+// It is deliberately readable top to bottom: sky, ground, town, cars, a
+// player, something to climb. If you are adding to it, add a section.
+
+// ---------------------------------------------------------------- sky & sun
+game.sky({})
+// A FIXED sun, given as a direction rather than a time of day. 38 degrees of
+// elevation casts a shadow about 1.3x its caster's height: long enough to show
+// what shape threw it and which way the ground slopes, short enough that the
+// village does not disappear into its own shade. A moving sun re-bakes the
+// world's shadows continuously and nothing on screen ever settles.
+game.sun({dir: vec3(0.55, 0.62, 0.56)})
+
+// ------------------------------------------------------------------ terrain
+// `feature` is how far apart the hills are, in world units. `rim` grows the
+// relief toward the edge of the map: a playable basin with a scenic horizon,
+// which is the answer to terrain being either boring or unbuildable. The
+// plaza keeps the town's ground genuinely flat — a road is one long box and a
+// house has square feet, and neither can follow a slope.
+game.terrain({
+    size: 260,
+    cells: 129,
+    smooth: true,
+    seed: 1466247766,
+    amp: 5,
+    feature: 90,
+    flatten: 1.25,
+    rim: 5,
+    rim_start: 0.34,
+    plaza: {r: 66, ramp: 26, h: 0},
+    color: #5a8f46
+})
+
+// -------------------------------------------------------------------- roads
+// A crossroads, not a corridor. A junction is the smallest thing that makes a
+// place feel like it has somewhere else to be. `collide: false` makes these
+// surfaces rather than kerbs the car has to climb.
+game.box({pos: vec3(0, 0.02, 0), size: vec3(116, 0.1, 14), color: #4d4d52, tag: "road", collide: false})
+game.box({pos: vec3(0, 0.02, 0), size: vec3(14, 0.1, 104), color: #4d4d52, tag: "road", collide: false})
+game.box({pos: vec3(-20, 0.02, 11), size: vec3(8, 0.1, 22), color: #52525a, tag: "road", collide: false})
+
+// ------------------------------------------------------------------- houses
+// `find_model` returns DISTINCT models. Ask for several and place a different
+// one at each lot — five identical houses read as wallpaper however good the
+// model is. Four, not more: this kit runs out of houses and starts returning
+// lot pieces, one of which is a swimming pool.
+let houses = game.find_model("suburban house building", {count: 4, spread: "variants"})
+
+game.model(houses[0], {pos: vec3(-30, 0, -10), yaw: 0, scale: 4.2, tag: "house"})
+game.model(houses[1], {pos: vec3(-19, 0, -10), yaw: 0, scale: 4.5, tag: "house"})
+game.model(houses[2], {pos: vec3(-10, 0, -10), yaw: 0, scale: 4.2, tag: "house"})
+game.model(houses[3], {pos: vec3(0.5, 0, -10), yaw: 0, scale: 4.5, tag: "house"})
+game.model(houses[0], {pos: vec3(10, 0, -10), yaw: 0, scale: 4.2, tag: "house"})
+game.model(houses[1], {pos: vec3(19, 0, -10), yaw: 0, scale: 4.5, tag: "house"})
+game.model(houses[2], {pos: vec3(30, 0, -10), yaw: 0, scale: 4.2, tag: "house"})
+// North side, set well back: the third-person camera sits about 9 units behind
+// you, so a row any closer is in the shot rather than behind it.
+game.model(houses[3], {pos: vec3(-25, 0, 26), yaw: 3.14159, scale: 4.0, tag: "house"})
+game.model(houses[0], {pos: vec3(-14.5, 0, 26), yaw: 3.14159, scale: 4.4, tag: "house"})
+game.model(houses[1], {pos: vec3(14.5, 0, 26), yaw: 3.14159, scale: 4.0, tag: "house"})
+game.model(houses[2], {pos: vec3(25, 0, 26), yaw: 3.14159, scale: 4.4, tag: "house"})
+
+// ------------------------------------------------------------------ scenery
+let trees = game.find_model("tree pine", {count: 4, spread: "kinds"})
+game.model(trees[0], {pos: vec3(-34, 0, -26), scale: 7, tag: "tree"})
+game.model(trees[1], {pos: vec3(-24, 0, -30), scale: 6, tag: "tree"})
+game.model(trees[2], {pos: vec3(12, 0, -28), scale: 7, tag: "tree"})
+game.model(trees[3], {pos: vec3(28, 0, -24), scale: 6, tag: "tree"})
+game.model(trees[0], {pos: vec3(38, 0, 8), scale: 7, tag: "tree"})
+
+// --------------------------------------------------------------------- cars
+// `spread: "kinds"` gives one model per FAMILY — one of each type. "variants"
+// would give six of the same kind, which is right for a terrace of houses and
+// wrong for traffic.
+//
+// Every one of these is a real vehicle: walk up to any of them and the engine
+// offers to let you in. Cars need no `game.interactable` — the prompt is
+// derived from the car itself.
+let cars = game.find_model("ambulance delivery taxi police sedan hatchback", {count: 6, spread: "kinds"})
+
+game.car({pos: vec3(-6, 1.2, 1.6), model: cars[0], player: true})
+game.car({pos: vec3(-24, 1.2, 5.2), model: cars[1]})
+game.car({pos: vec3(-13, 1.2, 5.2), model: cars[2]})
+game.car({pos: vec3(7.5, 1.2, 5.2), model: cars[3]})
+game.car({pos: vec3(22, 1.2, 5.2), model: cars[4]})
+game.car({pos: vec3(16.5, 1.2, -4.5), model: cars[5], rot_y: 3.14159})
+
+// ------------------------------------------------------------------- people
+// A bearded hero on the full hero rig. `player_character` is the whole
+// third-person binding — walker, follow camera, and getting in and out of
+// cars — with crafted defaults you never have to name.
+let heroes = game.find_model("barbarian", {count: 1, rigged: true})
+let me = game.player_character({pos: vec3(-6, 2, 9.5), model: heroes[0]})
+game.label(me, "You")
+
+// Townsfolk who wander their own patch.
+let folk = game.find_model("character person", {count: 4, spread: "kinds", rigged: true})
+let a = game.character({pos: vec3(-14, 2, 8), model: folk[0], tag: "villager"})
+game.wander(a, {home: vec3(-14, 0, 8), range: 14, speed: 2.0})
+let b = game.character({pos: vec3(4, 2, 10), model: folk[1], tag: "villager"})
+game.wander(b, {home: vec3(4, 0, 10), range: 14, speed: 2.2})
+let c = game.character({pos: vec3(18, 2, 6), model: folk[2], tag: "villager"})
+game.wander(c, {home: vec3(18, 0, 6), range: 12, speed: 1.9})
+let d = game.character({pos: vec3(-26, 2, 2), model: folk[3], tag: "villager"})
+game.wander(d, {home: vec3(-26, 0, 2), range: 12, speed: 2.1})
+
+// -------------------------------------------------------------------- climb
+// A tower you spiral around rather than a line of pads: the thing you are
+// climbing stays in view, so your progress is legible from the ground.
+//
+// Three rules make a course feel fair rather than fiddly — every jump is
+// survivable from a standstill, the whole route is visible from the bottom,
+// and falling costs height rather than a life.
+game.box({pos: vec3(-36, 8, 34), size: vec3(6, 16, 6), color: #857569, tag: "tower"})
+
+// Nine ledges, easing outward as they rise so the last steps are the boldest.
+game.box({pos: vec3(-30.1, 1.6, 36.5), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-31.3, 3.35, 40.4), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-35.6, 5.1, 42.3), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-40.4, 6.85, 41.1), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-43.6, 8.6, 37.2), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-44.0, 10.35, 32.1), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-41.4, 12.1, 27.6), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-36.6, 13.85, 25.4), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+game.box({pos: vec3(-31.4, 15.6, 26.5), size: vec3(4.2, 0.7, 4.2), color: #99855c, tag: "ledge"})
+
+// Two gaps are bridged by moving platforms instead — the timing beats.
+let plat_x = game.box({pos: vec3(-25, 6.5, 32), size: vec3(4.6, 0.7, 4.6), color: #5999cc, tag: "lift", body: "kinematic"})
+let plat_y = game.box({pos: vec3(-39, 11, 45), size: vec3(4.6, 0.7, 4.6), color: #6bb385, tag: "lift", body: "kinematic"})
+
+// The summit: wide, still, and obviously the end.
+game.box({pos: vec3(-36, 16.8, 34), size: vec3(8, 1, 8), color: #d9b34d, tag: "goal"})
+
+// A ramp at the base, so the climb starts from the ground rather than from a
+// jump you have to already know is there.
+game.box({pos: vec3(-28, 1, 25), size: vec3(6, 2, 10), color: #b89a6b, tag: "ramp", shape: "wedge"})
+
+// The lifts. Different periods, so they are never the same crossing twice.
+game.on_tick(|dt| {
+    let t = game.time()
+    game.set_vel(plat_x, vec3(cos(t * 0.55) * 4.2, 0, 0))
+    game.set_vel(plat_y, vec3(0, cos(t * 0.42) * 2.6, 0))
+})
+
+game.text("hint", "WASD move · mouse look · space jump", {anchor: "top_left"})
