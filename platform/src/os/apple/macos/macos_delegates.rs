@@ -888,7 +888,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             get_event_key_modifier(ns_event)
         };
 
-        window.do_callback(MacosEvent::Drag(DragEvent {
+        window.do_callback(MacosEvent::Drag(window.window_id, DragEvent {
             modifiers,
             handled: Arc::new(Mutex::new(false)),
             abs: pos,
@@ -984,7 +984,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let window = get_cocoa_window(this);
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
         let handled = Arc::new(Mutex::new(false));
-        window.do_callback(MacosEvent::Drop(DropEvent {
+        window.do_callback(MacosEvent::Drop(window.window_id, DropEvent {
             modifiers,
             handled: handled.clone(),
             abs: pos,
