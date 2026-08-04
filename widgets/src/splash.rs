@@ -45,6 +45,16 @@ pub struct Splash {
     /// between eval and a later call).
     #[rust]
     body_id: Option<u16>,
+    /// What to call this script in error messages. Set by the host to the
+    /// mini-app's id; empty for previews and one-off evals.
+    ///
+    /// Script errors are logged as `{file}:{line}:{col} - {message}` with
+    /// nothing else to go on, and every Splash app used to report an empty
+    /// file — so an error from a generated app named neither the app nor a
+    /// usable line, and finding the culprit meant grepping every installed
+    /// script by hand.
+    #[rust]
+    debug_name: String,
 }
 
 // `let fs = mod.fs` puts the jailed storage module (splash_storage.rs) in
@@ -62,6 +72,33 @@ impl Splash {
         self as *const Self as usize
     }
 
+    /// Names this script for error reporting — see [`Self::debug_name`].
+    pub fn set_debug_name(&mut self, name: &str) {
+        self.debug_name = name.to_string();
+    }
+
+    /// The body's identity within its isolate, carried in `ScriptMod`'s
+    /// `module_path`.
+    ///
+    /// It used to live in `line`, which the VM adds to a script's real line
+    /// when it reports an error (`ScriptCode::ip_to_loc`) — so every location
+    /// came out as `real_line + a_pointer_address`, i.e. numbers like
+    /// 1804943384. `module_path` is a free-form string nobody else reads for
+    /// these bodies, so identity and line no longer fight over one field.
+    fn body_key(&self) -> String {
+        format!("splash#{}", self.self_id())
+    }
+
+    /// The name a script error reports. Falls back to something searchable
+    /// rather than the empty string that made these untraceable.
+    fn source_label(&self) -> String {
+        if self.debug_name.is_empty() {
+            format!("splash:{}", self.self_id())
+        } else {
+            format!("splash:{}", self.debug_name)
+        }
+    }
+
     fn eval_body(&mut self, cx: &mut Cx) {
         let body = self.body.as_ref();
         if body.is_empty() {
@@ -76,7 +113,7 @@ impl Splash {
         let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
         crate::splash_storage::set_root_for_heap(heap_key, self.sandbox_dir.clone());
 
-        let self_id = self.self_id();
+        let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
         let prefix = if self.allow_net {
             SPLASH_NET_PREFIX
@@ -85,12 +122,14 @@ impl Splash {
         };
         let code = format!("{}{}", prefix, body);
 
-        // ScriptMod identity is stable (same file/line/column each call)
+        // Identity is stable (same module_path each call) AND the location
+        // fields are left alone, so `ip_to_loc` reports the script's own line
+        // instead of one offset by a pointer address.
         let script_mod = ScriptMod {
             cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: String::new(),
-            line: self_id,
+            module_path: self.body_key(),
+            file: self.source_label(),
+            line: 0,
             column: 0,
             code: String::new(),
             values: vec![],
@@ -113,7 +152,7 @@ impl Splash {
             self.body_id = cx.with_script_vm_id(vm_id, |vm| {
                 let bodies = vm.bx.code.bodies.borrow();
                 bodies.iter().position(|body| match &body.source {
-                    ScriptSource::Mod(m) => m.line == self_id && m.file.is_empty(),
+                    ScriptSource::Mod(m) => m.module_path == body_key,
                     _ => false,
                 })
             })
@@ -193,9 +232,12 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
     let code = format!("{}{}", prefix, body);
     let script_mod = ScriptMod {
         cargo_manifest_path: String::new(),
-        module_path: String::new(),
-        file: String::new(),
-        line: vm_id.0 as usize,
+        module_path: format!("splash-validate#{}", vm_id.0),
+        // Named, and NOT via `line` — the validator's errors are shown to the
+        // user (and fed back to the agent as repair input), so a location
+        // offset by a vm id would be actively misleading there.
+        file: "splash:validating".to_string(),
+        line: 0,
         column: 0,
         code: String::new(),
         values: vec![],
@@ -362,7 +404,7 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return None;
         }
-        let self_id = self.self_id();
+        let body_key = self.body_key();
         let body_id = self.body_id;
         cx.with_script_vm_id(self.vm_id, |vm| {
             let bodies = vm.bx.code.bodies.borrow();
@@ -370,7 +412,7 @@ impl Splash {
                 return Some(body.scope.as_object());
             }
             bodies.iter().find_map(|body| match &body.source {
-                ScriptSource::Mod(m) if m.line == self_id && m.file.is_empty() => {
+                ScriptSource::Mod(m) if m.module_path == body_key => {
                     Some(body.scope.as_object())
                 }
                 _ => None,
