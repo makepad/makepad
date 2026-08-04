@@ -28,7 +28,7 @@ use crate::{
             PCSTR,
         },
         Win32::{
-            Foundation::{CloseHandle, HANDLE, HMODULE, S_FALSE},
+            Foundation::{CloseHandle, HANDLE, HMODULE, S_FALSE, WAIT_TIMEOUT},
             Graphics::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
@@ -86,7 +86,8 @@ use crate::{
                         DXGI_SAMPLE_DESC,
                     },
                     CreateDXGIFactory2, IDXGIFactory2, IDXGIResource,
-                    IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_RGBA,
+                    IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS,
+                    DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT, DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
                     DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
                     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -560,13 +561,15 @@ impl Cx {
             .update_with_f32_constant_data(&d3d11_cx, cxpass.pass_uniforms.as_slice());
     }
 
+    /// Renders the pass and presents it to the window. Returns whether a frame was
+    /// actually presented; `false` means it was dropped and the caller must re-present.
     pub fn draw_pass_to_window(
         &mut self,
         pass_id: DrawPassId,
         vsync: bool,
         d3d11_window: &mut D3d11Window,
         d3d11_cx: &D3d11Cx,
-    ) {
+    ) -> bool {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
@@ -577,13 +580,17 @@ impl Cx {
         // and live-resize presents without vsync, so neither waits here. The
         // finite timeout (roughly two refresh intervals) keeps the loop alive
         // if the compositor stops signaling, e.g. while the window is
-        // occluded; on timeout we simply proceed with the frame.
+        // occluded; on timeout the frame is still built but the Present is
+        // downgraded to non-blocking (see `present`) so a stalled DWM cannot
+        // park the thread indefinitely.
+        let mut latency_wait_timed_out = false;
         if vsync
             && !d3d11_window.is_in_resize
             && !d3d11_window.frame_latency_waitable.is_invalid()
         {
             unsafe {
-                let _ = WaitForSingleObject(d3d11_window.frame_latency_waitable, 33);
+                latency_wait_timed_out =
+                    WaitForSingleObject(d3d11_window.frame_latency_waitable, 33) == WAIT_TIMEOUT;
             }
         }
 
@@ -593,12 +600,15 @@ impl Cx {
         let zbias_step = self.passes[pass_id].zbias_step;
 
         self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
-        d3d11_window.present(vsync);
-        if d3d11_window.first_draw {
+        let presented = d3d11_window.present(vsync, latency_wait_timed_out);
+        // Reveal the window only once a frame reached the compositor; showing it
+        // earlier would flash an uncomposited black window.
+        if presented && d3d11_window.first_draw {
             d3d11_window.win32_window.show();
             d3d11_window.first_draw = false;
         }
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
+        presented
     }
 
     pub fn draw_pass_to_texture(
@@ -851,6 +861,11 @@ pub struct D3d11Window {
     /// we track this at creation rather than inferring it from `frame_latency_waitable`
     /// (which can be null even on a waitable chain if the `IDXGISwapChain2` cast failed).
     pub waitable_swap_chain: bool,
+    /// Once-per-failure-episode log latch for `resize_buffers` errors, which are
+    /// retried every paint and would otherwise log on each attempt.
+    pub resize_error_logged: bool,
+    /// Same once-per-failure-episode latch for the `present` error path.
+    pub present_error_logged: bool,
 }
 
 impl D3d11Window {
@@ -935,6 +950,8 @@ impl D3d11Window {
                 swap_chain: swap_chain,
                 frame_latency_waitable,
                 waitable_swap_chain: true,
+                resize_error_logged: false,
+                present_error_logged: false,
             }
         }
     }
@@ -1001,6 +1018,8 @@ impl D3d11Window {
                 // and the render loop will skip waiting on it.
                 frame_latency_waitable: HANDLE(std::ptr::null_mut()),
                 waitable_swap_chain: false,
+                resize_error_logged: false,
+                present_error_logged: false,
             }
         }
     }
@@ -1052,9 +1071,12 @@ impl D3d11Window {
             return; // ResizeBuffers rejects zero dimensions.
         }
         self.alloc_size = self.window_geom.inner_size;
+        // ResizeBuffers requires all references to the old backbuffers released first.
         self.swap_texture = None;
         self.render_target_view = None;
 
+        // Any step below can transiently fail during a display change; each error path
+        // logs and resets alloc_size so the next paint retries, instead of crashing.
         unsafe {
             let wg = &self.window_geom;
             // ResizeBuffers must be given the SAME flags the swap chain was
@@ -1067,45 +1089,99 @@ impl D3d11Window {
             } else {
                 DXGI_SWAP_CHAIN_FLAG(0)
             };
-            self.swap_chain
-                .ResizeBuffers(
-                    2,
-                    (wg.inner_size.x * wg.dpi_factor) as u32,
-                    (wg.inner_size.y * wg.dpi_factor) as u32,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    resize_flags,
-                )
-                .unwrap();
+            let mut resize_ok = true;
+            if let Err(e) = self.swap_chain.ResizeBuffers(
+                2,
+                (wg.inner_size.x * wg.dpi_factor) as u32,
+                (wg.inner_size.y * wg.dpi_factor) as u32,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                resize_flags,
+            ) {
+                if !self.resize_error_logged {
+                    self.resize_error_logged = true;
+                    crate::error!("IDXGISwapChain::ResizeBuffers failed: {}", e);
+                }
+                self.alloc_size = Vec2d::default();
+                resize_ok = false;
+                // Fall through: re-acquire the old-size backbuffer so we keep presenting.
+            }
 
-            let swap_texture = self.swap_chain.GetBuffer(0).unwrap();
+            let swap_texture: ID3D11Texture2D = match self.swap_chain.GetBuffer(0) {
+                Ok(texture) => texture,
+                Err(e) => {
+                    if !self.resize_error_logged {
+                        self.resize_error_logged = true;
+                        crate::error!("IDXGISwapChain::GetBuffer failed: {}", e);
+                    }
+                    self.alloc_size = Vec2d::default();
+                    return;
+                }
+            };
             let mut render_target_view = None;
-            d3d11_cx
-                .device
-                .CreateRenderTargetView(&swap_texture, None, Some(&mut render_target_view))
-                .unwrap();
+            if let Err(e) = d3d11_cx.device.CreateRenderTargetView(
+                &swap_texture,
+                None,
+                Some(&mut render_target_view),
+            ) {
+                if !self.resize_error_logged {
+                    self.resize_error_logged = true;
+                    crate::error!("CreateRenderTargetView failed: {}", e);
+                }
+                self.alloc_size = Vec2d::default();
+                return;
+            }
 
             self.swap_texture = Some(swap_texture);
             self.render_target_view = render_target_view;
+            // Only a fully successful resize ends the failure episode; the fall-through
+            // path retries and would re-log every retry if it cleared the latch here.
+            if resize_ok {
+                self.resize_error_logged = false;
+            }
         }
     }
 
-    pub fn present(&mut self, vsync: bool) {
+    /// Presents the frame just rendered into the backbuffer. Returns whether a frame
+    /// was actually handed to the compositor; on `false` the frame was dropped and the
+    /// caller must re-mark the pass dirty to schedule a re-present.
+    pub fn present(&mut self, vsync: bool, latency_wait_timed_out: bool) -> bool {
         unsafe {
             // During an active window resize, present without the vsync interval and rely on
             // dwm_flush() below for compositor sync: a blocking Present(1) would add up to a refresh
             // interval of latency to every resize frame, making live-resize feel heavier. Steady-
             // state frames still present with vsync.
             let sync_interval = if vsync && !self.is_in_resize { 1 } else { 0 };
-            self.swap_chain
-                .Present(sync_interval, DXGI_PRESENT(0))
-                .unwrap();
+            // After a timed-out frame-latency wait, a blocking Present could park the
+            // thread until DWM recovers (potentially forever); present non-blocking
+            // instead and treat "still busy" as a benign dropped frame.
+            let flags = if latency_wait_timed_out {
+                DXGI_PRESENT_DO_NOT_WAIT
+            } else {
+                DXGI_PRESENT(0)
+            };
+            let hr = self.swap_chain.Present(sync_interval, flags);
+            if hr == DXGI_ERROR_WAS_STILL_DRAWING {
+                // DO_NOT_WAIT path only: a benign dropped frame; the caller schedules a retry.
+                return false;
+            }
+            if hr.is_err() {
+                // Transient failures must not hard-abort the app; log once per failure
+                // episode and carry on with stale content.
+                if !self.present_error_logged {
+                    self.present_error_logged = true;
+                    crate::error!("IDXGISwapChain::Present failed: {}", hr);
+                }
+                return false;
+            }
+            self.present_error_logged = false;
 
             // During an active window resize, synchronize with the DWM compositor so the
             // freshly-presented frame is composited before the desktop is repainted at the new size.
             if self.is_in_resize {
                 dwm_flush();
             }
-        };
+            true
+        }
     }
 }
 

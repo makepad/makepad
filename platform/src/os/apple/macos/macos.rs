@@ -962,11 +962,15 @@ impl Cx {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }
             MacosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
-            MacosEvent::Drag(e) => {
+            MacosEvent::Drag(window_id, mut e) => {
+                // External drags arrive in native-logical coordinates; remap into
+                // layout space when a dpi_override is set on the window.
+                self.dpi_override_scale(&mut e.abs, window_id);
                 self.call_event_handler(&Event::Drag(e));
                 self.drag_drop.cycle_drag();
             }
-            MacosEvent::Drop(e) => {
+            MacosEvent::Drop(window_id, mut e) => {
+                self.dpi_override_scale(&mut e.abs, window_id);
                 self.call_event_handler(&Event::Drop(e));
                 self.drag_drop.cycle_drag();
             }
