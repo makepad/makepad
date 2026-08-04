@@ -1173,33 +1173,121 @@ impl ArcadeView {
             vec4(0.35, 0.6, 0.8, 1.0),
             "platform",
         );
-        // --- the jump course ------------------------------------------
-        // A route you can actually complete: step up, cross a platform that
-        // slides, ride one that rises, land on the far side. Laid out so the
-        // ramp's high edge is a natural run-up, which is what turns two
-        // separate toys into one thing to do.
+        // --- the climb ------------------------------------------------
+        // A Mario 64 course rather than a line of pads: you ascend a SPIRAL
+        // around a tower, so the thing you are climbing stays in view and your
+        // progress is legible from the ground. A straight run reads as a test
+        // fixture; a tower reads as somewhere to go.
         //
-        // Gaps are sized against the character's jump, not eyeballed: the
-        // controller clears roughly 4 units of horizontal distance, so 4.5-unit
-        // spacing needs a committed jump without being a coin flip.
-        let course: [(&str, Vec3f, Vec3f, Vec4f); 4] = [
-            // A low static step to start from — somewhere to stand and look
-            // at the rest of the course before committing.
-            ("step", vec3f(-24.0, 1.2, 26.0), vec3f(2.2, 0.4, 2.2), vec4(0.55, 0.52, 0.46, 1.0)),
-            // Slides side to side across your path.
-            ("platform_x", vec3f(-28.5, 2.6, 30.0), vec3f(2.6, 0.4, 2.6), vec4(0.35, 0.60, 0.80, 1.0)),
-            // Rises and falls: an elevator you have to time.
-            ("platform_y", vec3f(-33.0, 4.2, 34.0), vec3f(2.6, 0.4, 2.6), vec4(0.42, 0.70, 0.52, 1.0)),
-            // The payoff — a wide, still ledge that is obviously the end.
-            ("goal", vec3f(-38.0, 6.0, 38.0), vec3f(3.2, 0.5, 3.2), vec4(0.80, 0.66, 0.32, 1.0)),
-        ];
-        for (tag, pos, half, color) in course {
-            let kind = if tag.starts_with("platform") {
-                BodyKind::Kinematic
-            } else {
-                BodyKind::Static
-            };
-            spawn(w, kind, Shape::Box, pos, half, color, tag);
+        // Three rules borrowed from those levels, because they are what make a
+        // course feel fair rather than fiddly:
+        //  - every jump is survivable from a standstill, so nothing needs a
+        //    run-up you cannot see you need;
+        //  - the whole route is visible from the bottom, so you can plan it;
+        //  - falling costs height, never a life — you land on grass and walk
+        //    back to the ramp.
+        const TOWER_X: f32 = -36.0;
+        const TOWER_Z: f32 = 34.0;
+
+        // The tower: a solid core to spiral around, and the landmark that
+        // makes the course readable from across the map.
+        spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(TOWER_X, 8.0, TOWER_Z),
+            vec3f(3.0, 8.0, 3.0),
+            vec4(0.52, 0.46, 0.42, 1.0),
+            "tower",
+        );
+
+        // Nine ledges spiralling up. The radius eases outward as it climbs, so
+        // the last steps are the boldest, while the RISE per ledge stays
+        // inside one jump the whole way.
+        for i in 0..9 {
+            let t = i as f32 / 8.0;
+            let ang = t * 6.2 + 0.4;
+            let r = 6.4 + t * 2.6;
+            let (sa, ca) = (makepad_game_math::sin(ang), makepad_game_math::cos(ang));
+            spawn(
+                w,
+                BodyKind::Static,
+                Shape::Box,
+                vec3f(TOWER_X + ca * r, 1.6 + i as f32 * 1.75, TOWER_Z + sa * r),
+                vec3f(2.1, 0.35, 2.1),
+                vec4(0.60, 0.52, 0.40, 1.0),
+                "ledge",
+            );
+        }
+
+        // Two gaps are bridged by moving platforms instead of ledges — the
+        // timing beats. Different periods, so they are never the same crossing
+        // twice.
+        spawn(
+            w,
+            BodyKind::Kinematic,
+            Shape::Box,
+            vec3f(TOWER_X + 11.0, 6.5, TOWER_Z - 2.0),
+            vec3f(2.3, 0.35, 2.3),
+            vec4(0.35, 0.60, 0.80, 1.0),
+            "platform_x",
+        );
+        spawn(
+            w,
+            BodyKind::Kinematic,
+            Shape::Box,
+            vec3f(TOWER_X - 3.0, 11.0, TOWER_Z + 11.0),
+            vec3f(2.3, 0.35, 2.3),
+            vec4(0.42, 0.70, 0.52, 1.0),
+            "platform_y",
+        );
+        // An orbiting lift circling the tower: the one you wait for and ride.
+        spawn(
+            w,
+            BodyKind::Kinematic,
+            Shape::Box,
+            vec3f(TOWER_X + 9.0, 14.5, TOWER_Z),
+            vec3f(2.4, 0.35, 2.4),
+            vec4(0.80, 0.55, 0.75, 1.0),
+            "platform_orbit",
+        );
+
+        // The summit: wide, still, and obviously the end.
+        spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(TOWER_X, 16.8, TOWER_Z),
+            vec3f(4.0, 0.5, 4.0),
+            vec4(0.85, 0.70, 0.30, 1.0),
+            "goal",
+        );
+
+        // A ramp at the base, so the climb starts from the ground rather than
+        // from a jump you have to already know is there.
+        spawn(
+            w,
+            BodyKind::Static,
+            Shape::Wedge,
+            vec3f(TOWER_X + 8.0, 1.0, TOWER_Z - 9.0),
+            vec3f(3.0, 1.0, 5.0),
+            vec4(0.72, 0.60, 0.42, 1.0),
+            "ramp",
+        );
+
+        // Stepping stones out to one side: an optional detour with a longer
+        // drop, which is where a course gets its texture.
+        for i in 0..4 {
+            let f = i as f32;
+            spawn(
+                w,
+                BodyKind::Static,
+                Shape::Box,
+                vec3f(TOWER_X + 15.0 + f * 4.3, 3.2 + f * 1.5, TOWER_Z + 9.0 - f * 2.0),
+                vec3f(1.5, 0.35, 1.5),
+                vec4(0.55, 0.52, 0.46, 1.0),
+                "stone",
+            );
         }
 
         // Falling movers: land, rest, cast blob shadows.
@@ -1389,38 +1477,55 @@ impl ArcadeView {
     /// rigid body — collision fidelity past a sane box buys nothing for an
     /// arcade car — and this is only its appearance, scaled from the model's
     /// own bounds to the body it rides so the wheels meet the road.
-    fn vehicle_instance(&self) -> Option<ModelInstance> {
-        let id = self.vehicle_model.as_ref()?;
-        let bounds = self.renderer.model_bounds(id)?;
-        let (min, max) = bounds;
+    fn vehicle_instances(&self) -> Vec<ModelInstance> {
+        // Every entity tagged "car" gets its own model, so a fleet of six
+        // draws as six different vehicles rather than six of one. The model
+        // list is the `parked_car` role — the same distinct-kinds resolution
+        // the street furniture uses — with the drivable truck as the fallback
+        // when no pack resolved.
         let world = self.world.borrow();
-        let car = world.entities.iter().find(|e| e.tag == "car")?;
-        // Scale the model's length onto the chassis length: a car reads by its
-        // proportions, and the packs author them at every size.
-        let native_len = (max.z - min.z).max(max.x - min.x).max(0.001);
-        let s = (car.half.z * 2.0) / native_len;
-        // Where the road is under this body. NOT the chassis box: a raycast
-        // vehicle's box hangs a wheel radius plus an uncompressed spring clear
-        // of the ground and never touches it, so sitting the mesh on the box —
-        // the rule that IS right for a walker, whose box bottom is its feet —
-        // left the car hovering by the difference. The car block measures it
-        // from the suspension it just ran. A rigid with no car block has no
-        // wheels holding it up either, so there the box bottom really is the
-        // contact plane.
-        let drop = self
-            .blocks
-            .borrow()
-            .cars
-            .iter()
-            .find(|c| c.entity == car.id)
-            .map_or(car.half.y, |c| c.contact_drop());
-        Some(ModelInstance::on_body(
-            id.clone(),
-            bounds,
-            s,
-            drop,
-            &GameRenderer::rigid_transform(car),
-        ))
+        let blocks = self.blocks.borrow();
+        let models: Vec<String> = self
+            .props
+            .get("parked_car")
+            .cloned()
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .or_else(|| self.vehicle_model.clone().map(|m| vec![m]))
+            .unwrap_or_default();
+        if models.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (i, car) in world.entities.iter().filter(|e| e.tag == "car").enumerate() {
+            let id = &models[i % models.len()];
+            let Some(bounds) = self.renderer.model_bounds(id) else {
+                continue;
+            };
+            let (min, max) = bounds;
+            // Scale the model's length onto the chassis length: a car reads by
+            // its proportions, and the packs author them at every size.
+            let native_len = (max.z - min.z).max(max.x - min.x).max(0.001);
+            let s = (car.half.z * 2.0) / native_len;
+            // Where the road is under this body. NOT the chassis box: a
+            // raycast vehicle's box hangs a wheel radius plus an uncompressed
+            // spring clear of the ground and never touches it, so sitting the
+            // mesh on the box — the rule that IS right for a walker, whose box
+            // bottom is its feet — left the car hovering by the difference.
+            // The car block measures it from the suspension it just ran.
+            let drop = blocks
+                .cars
+                .iter()
+                .find(|c| c.entity == car.id)
+                .map_or(car.half.y, |c| c.contact_drop());
+            out.push(ModelInstance::on_body(
+                id.clone(),
+                bounds,
+                s,
+                drop,
+                &GameRenderer::rigid_transform(car),
+            ));
+        }
+        out
     }
 
     /// Turn the plan's placements into draw instances and collider boxes.
@@ -1570,16 +1675,10 @@ impl ArcadeView {
                     }
                 }
                 self.vehicle_model = Some(id);
-                // The chassis box is now only the physics body; leaving it
-                // visible would draw a coloured slab inside the car.
-                let mut world = self.world.borrow_mut();
-                let car = world.entities.iter().find(|e| e.tag == "car").map(|e| e.id);
-                if let Some(car) = car {
-                    if let Some(e) = world.entity_mut(car) {
-                        e.hidden = true;
-                    }
-                }
-                world.mark_render_dirty();
+                // Nothing to hide here any more: a car chassis spawns `hidden`
+                // (see spawn_blocks). It is a physics body, and a physics body
+                // was never something to look at.
+                self.world.borrow_mut().mark_render_dirty();
                 return;
             }
         }
@@ -1626,7 +1725,20 @@ impl ArcadeView {
             ("wooden crate box", "crate_prop", 2, Spread::Variants),
             ("barrel", "barrel", 2, Spread::Variants),
             ("fence", "fence", 1, Spread::Variants),
-            ("suburban house building", "house", 5, Spread::Variants),
+            // FOUR. The suburban kit runs out of houses after building-type-h
+            // and starts returning lot pieces — `building-type-o` is a
+            // SWIMMING POOL, which duly appeared on the street scaled to house
+            // height. More variants is not more variety once the good ones run
+            // out, and the failure is silent: a pool is a valid model that
+            // scales like anything else.
+            ("suburban house building", "house", 4, Spread::Variants),
+            // `Kinds`, not `Variants`. Variants means "all from ONE family",
+            // which is right for a terrace of houses and exactly wrong here —
+            // it returned six ambulances. Kinds caps it at one model per
+            // family, which is the definition of one of each type. The query
+            // names what the models are actually CALLED; "car vehicle sedan
+            // truck van" matched a single model.
+            ("ambulance delivery taxi police sedan hatchback", "parked_car", 6, Spread::Kinds),
             ("park bench", "bench", 2, Spread::Variants),
             ("street light post", "lamp", 2, Spread::Variants),
         ];
@@ -1817,13 +1929,29 @@ impl ArcadeView {
         // Uniform facing is the point: a row of houses that agree about where
         // the street is reads as a street, and random yaw reads as debris.
         const FACE_SOUTH: f32 = 0.0;
+        const FACE_NORTH: f32 = 3.141_592_7;
         // A different house design at every lot, and heights that vary a
         // little: a terrace of clones reads as wallpaper, however good the
         // model is.
-        for (i, x) in [-19.0f32, -10.0, 0.5, 10.0, 19.0].iter().enumerate() {
+        // A street has two sides. One row read as a film set: from the road
+        // you could see the back of the world.
+        for (i, x) in [-30.0f32, -19.0, -10.0, 0.5, 10.0, 19.0, 30.0].iter().enumerate() {
             let h = 4.2 + (i % 3) as f32 * 0.35;
             place("house", i, *x, -10.0, FACE_SOUTH, h, Blocking::Solid);
         }
+        // North side, set well back. 15 units put a roof across the camera —
+        // the third-person boom sits about 9 units behind the player and these
+        // are 8-unit-wide buildings, so a row that close is inside the shot
+        // rather than behind it.
+        for (i, x) in [-25.0f32, -14.5, 14.5, 25.0].iter().enumerate() {
+            let h = 4.0 + ((i + 2) % 3) as f32 * 0.4;
+            place("house", i + 2, *x, 26.0, FACE_NORTH, h, Blocking::Solid);
+        }
+        // NOTE: parked cars are not placed here. They are real vehicles
+        // spawned in `spawn_blocks` and drawn by `vehicle_instances`, which is
+        // what makes every one of them driveable — placing them as props too
+        // would draw each twice and give the second copy no wheels.
+
         // Lamps down the north verge, evenly spaced like street furniture.
         for i in 0..5 {
             place("lamp", i, -18.0 + i as f32 * 9.0, -4.6, 0.0, 3.2, Blocking::None);
@@ -1939,30 +2067,57 @@ impl ArcadeView {
         blocks.clear();
         let mut world = self.world.borrow_mut();
         let w = &mut *world;
-        w.next_id += 1;
-        let car = w.next_id;
-        w.push_entity(Entity {
-            id: car,
-            kind: BodyKind::Rigid,
-            pos: vec3f(-6.0, 1.2, 1.6),
-            half: vec3f(0.9, 0.4, 1.6),
-            color: vec4(0.86, 0.32, 0.28, 1.0),
-            tag: "car".to_string(),
-            collide: true,
-            hidden: false,
-            gravity_scale: 1.0,
-            speed_mult: 1.0,
-            scale: vec3f(1.0, 1.0, 1.0),
-            scale_target: vec3f(1.0, 1.0, 1.0),
-            density: 1.0,
-            friction: 0.7,
-            ..Default::default()
-        });
-        blocks.cars.push(Car::new(
-            car,
-            CarConfig::default(),
-            ControlSource::Player,
-        ));
+        // A FLEET, not a car. Every one of these is a real vehicle — chassis,
+        // Car block, its own model — so any of them can be walked up to, got
+        // into and driven off.
+        //
+        // The logic is shared by construction rather than by copying: the
+        // interact prompt is DERIVED from the presence of a car block, the
+        // mount is derived from the prompt, and the renderer walks entities
+        // tagged "car". So going from one vehicle to six needed no new
+        // plumbing in any of those three places — only more entities.
+        for (x, z, yaw) in [
+            (-6.0f32, 1.6f32, 0.0f32),
+            (-24.0, 5.2, 0.0),
+            (-13.0, 5.2, 0.0),
+            (7.5, 5.2, 0.0),
+            (22.0, 5.2, 0.0),
+            (16.5, -4.5, 3.141_592_7),
+        ] {
+            w.next_id += 1;
+            let car = w.next_id;
+            w.push_entity(Entity {
+                id: car,
+                kind: BodyKind::Rigid,
+                pos: vec3f(x, 1.2, z),
+                half: vec3f(0.9, 0.4, 1.6),
+                color: vec4(0.86, 0.32, 0.28, 1.0),
+                tag: "car".to_string(),
+                yaw,
+                collide: true,
+                // Physics only. The chassis is a box3d body, never a thing to
+                // look at — the model is the appearance, exactly as for the
+                // player and the villagers, who are also hidden boxes wearing
+                // a mesh.
+                //
+                // It used to spawn VISIBLE and get hidden once a model loaded,
+                // which is backwards: it made "draw a red slab inside the car"
+                // the default and correctness a later correction. With one car
+                // that correction happened to fire; with six it hid the first
+                // and left the rest driving around inside red boxes.
+                hidden: true,
+                gravity_scale: 1.0,
+                speed_mult: 1.0,
+                scale: vec3f(1.0, 1.0, 1.0),
+                scale_target: vec3f(1.0, 1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                ..Default::default()
+            });
+            blocks
+                .cars
+                .push(Car::new(car, CarConfig::default(), ControlSource::Player));
+        }
 
         // The player. THIS is the whole binding — a body, a character block,
         // and a rig. Everything else (third-person camera, mount state
@@ -2462,6 +2617,20 @@ impl ArcadeView {
                 // presenting the same crossing every lap.
                 "platform_x" => e.vel.x = makepad_game_math::cos(t * 0.55) * 4.2,
                 "platform_y" => e.vel.y = makepad_game_math::cos(t * 0.42) * 2.6,
+                // Orbits the tower. Velocity is tangential, so whoever is
+                // standing on it is carried around with it by the same
+                // kinematic-carry rule that moves you on any platform.
+                "platform_orbit" => {
+                    let (dx, dz) = (e.pos.x - (-36.0), e.pos.z - 34.0);
+                    let r = (dx * dx + dz * dz).sqrt().max(0.001);
+                    // Tangent, plus a gentle pull back toward a 9-unit radius:
+                    // integrating a tangent alone drifts, and a lift that
+                    // spirals into the tower it circles is a bug you only see
+                    // after two minutes of watching.
+                    let pull = (9.0 - r) * 0.7;
+                    e.vel.x = (0.0 - dz / r) * 3.2 + (dx / r) * pull;
+                    e.vel.z = (dx / r) * 3.2 + (dz / r) * pull;
+                }
                 // Bouncer: relaunch on landing.
                 "bouncer" => {
                     if e.on_floor {
@@ -3086,9 +3255,7 @@ impl Widget for ArcadeView {
             // round — the chassis stays the box3d body and the model is only
             // its appearance, which is the same split the villagers use.
             let mut prop_instances = self.village.clone();
-            if let Some(inst) = self.vehicle_instance() {
-                prop_instances.push(inst);
-            }
+            prop_instances.extend(self.vehicle_instances());
             let textures: Vec<&Texture> =
                 self.cast.iter().filter_map(|c| c.texture.as_ref()).collect();
             let batch = if skinned_items.is_empty() || textures.is_empty() {
