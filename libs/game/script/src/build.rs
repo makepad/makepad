@@ -254,7 +254,7 @@ pub(crate) fn spawn_terrain(
     // flattens a disc at the origin with a blend ramp — the corpus layout.
     let noise_freq = f32_opt(vm, opts, id!(freq), 0.18).clamp(0.005, 2.0);
     let noise_offset = f32_opt(vm, opts, id!(offset), 0.0);
-    let terrace = f32_opt(vm, opts, id!(step), 1.0).max(0.0);
+    let terrace = f32_opt(vm, opts, id!(step), 0.0).max(0.0);
     let clamp_min = f32_opt(vm, opts, id!(min), f32::MIN);
     let clamp_max = f32_opt(vm, opts, id!(max), f32::MAX);
     let plaza_v = opts_value(vm, opts, id!(plaza));
@@ -301,53 +301,66 @@ pub(crate) fn spawn_terrain(
             tops.push(top);
         }
     } else {
-        // Deterministic terraced value noise (xorshift lattice + bilinear).
-        let lattice = |x: i64, z: i64| -> f32 {
-            let mut h = seed
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add((x as u64).wrapping_mul(0x2545_F491_4F6C_DD1D))
-                .wrapping_add((z as u64).wrapping_mul(0x27D4_EB2F_1656_67C5));
-            h ^= h >> 33;
-            h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-            h ^= h >> 33;
-            (h >> 11) as f32 / (1u64 << 53) as f32
-        };
-        let cell_size = span / (cells - 1).max(1) as f32;
-        let origin = -span * 0.5;
-        for iz in 0..cells {
-            for ix in 0..cells {
-                let fx = ix as f32 * noise_freq;
-                let fz = iz as f32 * noise_freq;
-                let (x0, z0) = (fx.floor() as i64, fz.floor() as i64);
-                let (tx, tz) = (fx.fract(), fz.fract());
-                let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
-                let (sx, sz) = (smooth(tx), smooth(tz));
-                let h00 = lattice(x0, z0);
-                let h10 = lattice(x0 + 1, z0);
-                let h01 = lattice(x0, z0 + 1);
-                let h11 = lattice(x0 + 1, z0 + 1);
-                let h = h00 + (h10 - h00) * sx + (h01 - h00) * sz
-                    + (h00 - h10 - h01 + h11) * sx * sz;
-                let mut top = noise_offset + h * amp;
-                if let Some((r, ramp, flat_h)) = plaza {
-                    let wx = origin + ix as f32 * cell_size;
-                    let wz = origin + iz as f32 * cell_size;
-                    let d = (wx * wx + wz * wz).sqrt();
-                    if d < r {
-                        top = flat_h;
-                    } else if d < r + ramp {
-                        top = flat_h + (top - flat_h) * ((d - r) / ramp);
-                    }
-                }
-                // Terraces: steps a mover can jump up, like the corpus.
-                if terrace > 0.0 {
-                    top = (top / terrace).floor() * terrace;
-                }
-                tops.push(top.clamp(clamp_min, clamp_max));
-            }
-        }
-    }
+        // The real generator (libs/game/gen/terrain.rs), not a second copy of
+        // one. This verb used to carry its own single-octave value noise —
+        // which meant the terrain an AI could reach from splash was strictly
+        // worse than the terrain the engine could make, and the two drifted
+        // independently. One generator, one set of bugs.
+        use makepad_game_gen::terrain as gt;
 
+        // `feature` is the new name and says what it means: how far apart the
+        // hills are, in world units. `freq` is kept working because scripts
+        // exist that use it — it was cycles per CELL INDEX, so its wavelength
+        // in world units is span/((cells-1)*freq). Translating rather than
+        // ignoring it keeps an old world looking like itself.
+        let default_feature = span / 2.2;
+        let feature = if opts_value(vm, opts, id!(feature)).is_nil() {
+            if opts_value(vm, opts, id!(freq)).is_nil() {
+                default_feature
+            } else {
+                (span / ((cells.max(2) - 1) as f32 * noise_freq)).clamp(4.0, span * 4.0)
+            }
+        } else {
+            f32_opt(vm, opts, id!(feature), default_feature)
+        };
+
+        let params = gt::TerrainParams {
+            seed,
+            span,
+            cells,
+            base: base + noise_offset,
+            amp,
+            feature_size: feature,
+            octaves: f32_opt(vm, opts, id!(octaves), 5.0).clamp(1.0, 9.0) as u32,
+            lacunarity: f32_opt(vm, opts, id!(lacunarity), 2.0),
+            gain: f32_opt(vm, opts, id!(gain), 0.5),
+            warp: f32_opt(vm, opts, id!(warp), 0.35),
+            ridged: f32_opt(vm, opts, id!(ridged), 0.0).clamp(0.0, 1.0),
+            flatten: f32_opt(vm, opts, id!(flatten), 1.35).max(0.01),
+            // Terracing defaults OFF. The old default was 1.0, which quantised
+            // every smooth slope into one-unit stairs and rendered as a
+            // contour map — scripts asking for smooth terrain got steps.
+            terrace,
+            min_height: clamp_min,
+            max_height: clamp_max,
+            plaza: plaza.map(|(r, ramp, h)| gt::TerrainPlaza {
+                center_x: 0.0,
+                center_z: 0.0,
+                radius: r,
+                ramp,
+                height: h,
+            }),
+            rim_relief: f32_opt(vm, opts, id!(rim), 0.0).max(0.0),
+            rim_start: f32_opt(vm, opts, id!(rim_start), 0.45).clamp(0.0, 0.99),
+            palette: gt::TerrainPalette {
+                low: base_color,
+                high: base_color,
+                ..Default::default()
+            },
+        };
+        let field = gt::generate(&params);
+        tops = field.heights;
+    }
     let (min_top, max_top) = tops.iter().fold((f32::MAX, f32::MIN), |(lo, hi), t| {
         (lo.min(*t), hi.max(*t))
     });
