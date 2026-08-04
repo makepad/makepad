@@ -61,6 +61,15 @@ pub struct Splash {
 // scope as a bare name — app scripts say `fs.read("/x")`, not `mod.fs.read`.
 // A script reassigning `fs` only sabotages its own binding; the jail itself
 // lives host-side.
+/// Lines the prefixes below occupy, which is the amount every reported script
+/// line is ahead of the app's own file. Subtract it to get the line in the
+/// `.splash` source.
+///
+/// It cannot be zero: the prefix would then have to share line 1 with the
+/// app's first line, and a generated app's first line is its `// name:`
+/// header — a comment, which would swallow the rest of the prefix.
+pub const SPLASH_PREFIX_LINES: u32 = 2;
+
 const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nlet fs = mod.fs\nView{height:Fit, ";
 const SPLASH_NET_PREFIX: &str =
     "use mod.prelude.widgets.*\nuse mod.net\nlet fs = mod.fs\nView{height:Fit, ";
@@ -91,6 +100,9 @@ impl Splash {
 
     /// The name a script error reports. Falls back to something searchable
     /// rather than the empty string that made these untraceable.
+    ///
+    /// Errors read `splash:<name>:<line>:<col>`, where `<line>` is ahead of
+    /// the app's own file by [`SPLASH_PREFIX_LINES`].
     fn source_label(&self) -> String {
         if self.debug_name.is_empty() {
             format!("splash:{}", self.self_id())
