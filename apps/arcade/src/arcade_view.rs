@@ -275,6 +275,9 @@ pub struct ArcadeView {
     /// spark (libs/game/render/src/firework.rs).
     #[rust]
     fireworks: FireworkSystem,
+    /// The stock library, indexed once (see `asset_index`).
+    #[rust]
+    assets: Option<std::rc::Rc<Option<makepad_game_assets::AssetIndex>>>,
     /// Last frame's rigid speeds, to notice a hard landing worth a spark.
     #[rust]
     impact_speed: Vec<(u64, f32)>,
@@ -795,6 +798,72 @@ impl ArcadeView {
 
     /// As `load_game`, but for a game that arrived from a registry or a peer:
     /// its isolate is capability-stripped (no fs, no process spawn, no net).
+    /// The stock library, indexed ONCE and shared.
+    ///
+    /// Walking 4,700 models is not free, and both the built-in world and any
+    /// authored game need the same index — so it is built lazily on first ask
+    /// and handed to the script host as well as used here. `Rc<Option<..>>` is
+    /// the shape `ScriptHost::set_assets` wants: `None` is not an error, since
+    /// a game made of primitives must still run on a machine that never
+    /// downloaded the packs.
+    fn asset_index(&mut self) -> std::rc::Rc<Option<makepad_game_assets::AssetIndex>> {
+        if let Some(idx) = &self.assets {
+            return idx.clone();
+        }
+        let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
+        let idx = makepad_game_assets::AssetIndex::build(&root);
+        let idx = std::rc::Rc::new(if idx.is_empty() { None } else { Some(idx) });
+        self.assets = Some(idx.clone());
+        idx
+    }
+
+    /// Give a script-declared character its skinned body.
+    ///
+    /// The skinned draw path walks `self.villagers`, which only the built-in
+    /// Rust world ever filled — so every character in an AUTHORED game
+    /// rendered as its bare collision box. That is most of what made a splash
+    /// world look like a programmer test next to the demo.
+    ///
+    /// Matching is by the model id the script asked for: `game.character({
+    /// model: "kenney/.../character-male-a"})` finds the cast member whose
+    /// label the id ends with. An unmatched model round-robins rather than
+    /// failing — a wrong-looking character is a far better outcome than an
+    /// invisible one, and the id is logged so the miss is findable.
+    fn sync_script_characters(&mut self) {
+        if self.cast.is_empty() {
+            self.cast = CharacterModel::load_cast();
+        }
+        let kinds = self.cast.len().max(1);
+        let wanted: Vec<(u64, Option<String>)> = self
+            .blocks
+            .borrow()
+            .characters
+            .iter()
+            .map(|c| (c.entity, c.model.clone()))
+            .collect();
+        self.villagers.clear();
+        for (i, (entity, model)) in wanted.iter().enumerate() {
+            let kind = model
+                .as_ref()
+                .and_then(|m| {
+                    self.cast
+                        .iter()
+                        .position(|c| m.ends_with(&c.label) || c.label.ends_with(m.as_str()))
+                })
+                .unwrap_or(i % kinds);
+            let mut v = Villager::new(*entity, 0x5eed_9001 ^ i as u64);
+            v.kind = kind;
+            self.villagers.push(v);
+            // The box is substance, the mesh is appearance — the same split
+            // the built-in world uses, and without it the collider draws
+            // inside the character.
+            if let Some(e) = self.world.borrow_mut().entity_mut(*entity) {
+                e.hidden = true;
+            }
+        }
+        self.world.borrow_mut().mark_render_dirty();
+    }
+
     pub fn load_game_with_trust(
         &mut self,
         cx: &mut Cx,
@@ -811,6 +880,14 @@ impl ArcadeView {
         // through exactly the same fields as the demo path.
         self.world = host.world.clone();
         self.blocks = host.blocks.clone();
+        // Hand the script the SAME stock library the built-in world uses.
+        // Without this every asset verb — find_model, model, kits, cast —
+        // reported "no stock library on this device" on a machine with 4,700
+        // models sitting on disk, because arcade built an index for its own
+        // Rust demo and never passed it on. That made an authored game unable
+        // to use any of the art the demo is made of, which is most of the
+        // reason the demo had to stay in Rust.
+        host.set_assets(self.asset_index());
         let report = {
             let r = host.set_source(cx, &source);
             r.map(|r| (r.ok, r.error, r.entities))
@@ -822,7 +899,11 @@ impl ArcadeView {
         match report {
             Some((false, error, _)) => error,
             Some((true, _, entities)) => {
-                log!("arcade: eval ok, {entities} entities");
+                self.sync_script_characters();
+                log!(
+                    "arcade: eval ok, {entities} entities, {} skinned characters",
+                    self.villagers.len()
+                );
                 None
             }
             _ => None,
