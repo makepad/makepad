@@ -400,6 +400,14 @@ impl LayoutContext {
             .map_or(false, |max| self.rows.len() >= max)
     }
 
+    /// Whether the row currently being laid out is the last one `max_rows`
+    /// permits.
+    fn current_row_is_last_allowed(&self) -> bool {
+        self.options
+            .max_rows
+            .map_or(false, |max| self.rows.len() + 1 >= max)
+    }
+
     fn layout(&mut self, len: usize) {
         if self.remaining_width_in_lpxs().is_none() {
             self.layout_directly(len);
@@ -425,6 +433,14 @@ impl LayoutContext {
                     let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
                     if next_word.chars().all(|char| char.is_whitespace()) {
                         self.layout_directly(fitter.pop());
+                    } else if self.options.ellipsis && self.current_row_is_last_allowed() {
+                        // The last permitted row ends in an ellipsis, so word
+                        // integrity is moot: fill it to the width limit by
+                        // grapheme so the ellipsis truncates at the last glyph
+                        // that fits instead of at the last whole word — a word
+                        // that wraps away from this row would otherwise leave
+                        // it ellipsized far short of the available width.
+                        self.layout_by_grapheme(fitter.pop());
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
                     } else {
