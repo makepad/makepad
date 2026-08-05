@@ -990,6 +990,15 @@ fn handle_custom_widget(
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
 ) {
+    // A custom widget draws straight into the turtle rather than through
+    // `TextFlow::draw_text`, so it has to honour the line budget itself.
+    // `jump_to_close` keeps the parser from spilling the widget's inner text
+    // into the flow as loose text once the widget itself is skipped.
+    if tf.is_content_truncated() {
+        node.jump_to_close();
+        return;
+    }
+
     let id = if let Some(id) = node.find_attr_lc(live_id!(id)) {
         LiveId::from_str(id)
     } else {
@@ -1005,8 +1014,15 @@ fn handle_custom_widget(
 
     if let Some(item) = tf.item_with_scope(cx, &mut scope_with_attrs, id, template) {
         item.set_text(cx, node.find_text().unwrap_or(""));
+        // A widget is walked atomically, so on the last allowed line it has to
+        // be kept there rather than relocated onto a row the budget cannot pay
+        // for; when it overruns that line it is cut at the edge with an
+        // ellipsis. `end_inline_content` also charges the row the widget landed
+        // on, which costs a line even when no text run follows to notice it.
+        let hold = tf.begin_inline_content(cx);
         let mut draw_scope = Scope::with_data(tf);
         item.draw_all(cx, &mut draw_scope);
+        tf.end_inline_content(cx, hold);
     }
 
     node.jump_to_close();

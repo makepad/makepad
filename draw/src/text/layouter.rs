@@ -400,6 +400,14 @@ impl LayoutContext {
             .map_or(false, |max| self.rows.len() >= max)
     }
 
+    /// Whether the row currently being laid out is the last one `max_rows`
+    /// permits.
+    fn current_row_is_last_allowed(&self) -> bool {
+        self.options
+            .max_rows
+            .map_or(false, |max| self.rows.len() + 1 >= max)
+    }
+
     fn layout(&mut self, len: usize) {
         if self.remaining_width_in_lpxs().is_none() {
             self.layout_directly(len);
@@ -425,6 +433,14 @@ impl LayoutContext {
                     let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
                     if next_word.chars().all(|char| char.is_whitespace()) {
                         self.layout_directly(fitter.pop());
+                    } else if self.options.ellipsis && self.current_row_is_last_allowed() {
+                        // The last permitted row ends in an ellipsis, so word
+                        // integrity is moot: fill it to the width limit by
+                        // grapheme so the ellipsis truncates at the last glyph
+                        // that fits instead of at the last whole word — a word
+                        // that wraps away from this row would otherwise leave
+                        // it ellipsized far short of the available width.
+                        self.layout_by_grapheme(fitter.pop());
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
                     } else {
@@ -515,7 +531,21 @@ impl LayoutContext {
 
         self.current_point_in_lpxs.x = 0.0;
         self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
-            prev_row.line_spacing_in_lpxs(&row)
+            let natural_in_lpxs = prev_row.line_spacing_in_lpxs(&row);
+            if self.rows.len() == 1 {
+                // The first row can share its visual row with earlier inline
+                // content that is taller than the text; the caller passes that
+                // row's real height (plus wrap spacing) so the second row's
+                // top edge clears it. The floor is a top-to-top distance, so
+                // it converts to a baseline advance by adding the change in
+                // ascender between the two rows.
+                let min_advance_in_lpxs = self.options.first_row_min_line_spacing_below_in_lpxs
+                    + row.ascender_in_lpxs
+                    - prev_row.ascender_in_lpxs;
+                natural_in_lpxs.max(min_advance_in_lpxs)
+            } else {
+                natural_in_lpxs
+            }
         });
         let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
         let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
@@ -576,9 +606,23 @@ impl LayoutContext {
             }
         };
 
-        let text_was_truncated = self.rows.len() > max_rows || !all_text_consumed;
+        let mut text_was_truncated = self.rows.len() > max_rows || !all_text_consumed;
 
         self.rows.truncate(max_rows);
+
+        // A non-wrapping layout puts every glyph on a single row, so its
+        // overflow shows up as a row wider than the bound rather than as
+        // surplus rows. Row counting alone therefore reports "nothing was
+        // truncated" for the very case the ellipsis exists to handle.
+        // Restricted to non-wrapping layouts because a wrapped row's width
+        // includes any first-row indent and may legitimately reach the bound.
+        if self.options.ellipsis && !self.options.wrap {
+            if let Some(max_width) = self.options.max_width_in_lpxs {
+                if self.rows.last().is_some_and(|row| row.width_in_lpxs > max_width) {
+                    text_was_truncated = true;
+                }
+            }
+        }
 
         if !text_was_truncated {
             return self.finish_with(false);
@@ -990,8 +1034,12 @@ impl PartialEq for Style {
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
     pub first_row_indent_in_lpxs: f32,
-    // Note: currently does nothing. Only used by `TextFlow`. Should be removed once `TextFlow` is
-    // replaced with `TextFlow2`.
+    /// Minimum distance in logical pixels from the first row's top edge to the
+    /// second row's top edge. A continuation run's first row can share its
+    /// visual row with earlier inline content that is taller than the text;
+    /// callers pass that row's real height (plus wrap spacing) so the second
+    /// row clears it. Zero keeps pure font-metric spacing. Only the first row
+    /// boundary is affected; later rows always use font-metric spacing.
     pub first_row_min_line_spacing_below_in_lpxs: f32,
     pub max_width_in_lpxs: Option<f32>,
     pub wrap: bool,
