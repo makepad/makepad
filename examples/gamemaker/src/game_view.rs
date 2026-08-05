@@ -1567,6 +1567,7 @@ impl GameView {
             // Legacy blob tier: gamemaker is the tape/parity oracle, so it
             // keeps the shadows it has always drawn. Arcade opts in.
             shadow: None,
+            firework: None,
         };
         let stats = self
             .renderer
