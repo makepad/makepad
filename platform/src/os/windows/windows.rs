@@ -1000,4 +1000,5 @@ pub struct CxOs {
     pub(crate) windows_game_input: Option<WindowsGameInput>,
     pub(crate) video_players: HashMap<LiveId, WindowsUnifiedVideoPlayer>,
     pub(crate) async_hlsl_compile: crate::os::windows::d3d11::AsyncHlslCompile,
+    pub(crate) stdin_timers: crate::os::shared_framebuf::PollTimers,
 }

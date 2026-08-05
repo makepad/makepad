@@ -4,12 +4,14 @@ use {
         cx_api::CxOsOp,
         draw_pass::CxDrawPassParent,
         event::Event,
-        event::WindowGeom,
+        event::{WindowGeom, WindowGeomChangeEvent},
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
             d3d11::D3d11Cx,
-            shared_framebuf::{PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
+            shared_framebuf::{
+                PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT,
+            },
             win32_app::Win32Time,
         },
         texture::{Texture, TextureFormat},
@@ -60,7 +62,9 @@ impl Cx {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
                     // only render to swapchain if swapchain exists
-                    let window = &mut windows[window_id.id()];
+                    let Some(window) = windows.get_mut(window_id.id()) else {
+                        continue;
+                    };
                     if let Some(swapchain) = &window.swapchain {
                         // and if GPU is not already rendering something else
                         if window.new_frame_being_rendered.is_none() {
@@ -122,6 +126,7 @@ impl Cx {
                 Some(incoming) => incoming,
                 None => break,
             };
+            crate::memory_watchdog::note_stdin_host_message();
 
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
@@ -228,13 +233,30 @@ impl Cx {
                 height,
                 window_id,
             } => {
-                self.windows[CxWindowPool::from_usize(window_id)].window_geom = WindowGeom {
-                    dpi_factor,
-                    position: dvec2(0.0, 0.0),
-                    inner_size: dvec2(width, height),
-                    ..Default::default()
-                };
-                self.redraw_all();
+                let window_id = CxWindowPool::from_usize(window_id);
+                if self.windows.is_valid(window_id) {
+                    let old_geom = self.windows[window_id].window_geom.clone();
+                    let new_geom = WindowGeom {
+                        position: dvec2(0.0, 0.0),
+                        dpi_factor,
+                        inner_size: dvec2(width, height),
+                        ..Default::default()
+                    };
+                    self.windows[window_id].window_geom = new_geom.clone();
+                    let re = WindowGeomChangeEvent {
+                        window_id,
+                        new_geom,
+                        old_geom,
+                    };
+                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                        || re.old_geom.inner_size != re.new_geom.inner_size
+                    {
+                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
+                        }
+                    }
+                    self.call_event_handler(&Event::WindowGeomChange(re));
+                }
             }
             StudioToApp::Swapchain(new_swapchain) => {
                 let window_id = new_swapchain.window_id;
@@ -275,6 +297,12 @@ impl Cx {
                     self.handle_action_receiver();
                 }
                 self.poll_control_channel();
+
+                let events = self.os.stdin_timers.get_dispatch();
+                for event in events {
+                    self.handle_script_timer(&event);
+                    self.call_event_handler(&Event::Timer(event));
+                }
 
                 self.handle_networking_events();
                 self.stdin_handle_platform_ops(stdin_windows);
@@ -321,6 +349,13 @@ impl Cx {
                         }
                     }
                 }
+
+                if !self.new_next_frames.is_empty()
+                    || self.need_redrawing()
+                    || !self.os.stdin_timers.timers.is_empty()
+                {
+                    Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
+                }
             }
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
@@ -364,6 +399,28 @@ impl Cx {
                 }
                 CxOsOp::SetCursor(cursor) => {
                     Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));
+                }
+                CxOsOp::StartTimer {
+                    timer_id,
+                    interval,
+                    repeats,
+                } => {
+                    self.os
+                        .stdin_timers
+                        .timers
+                        .insert(timer_id, PollTimer::new(interval, repeats));
+                }
+                CxOsOp::StopTimer(timer_id) => {
+                    self.os.stdin_timers.timers.remove(&timer_id);
+                }
+                CxOsOp::HttpRequest {
+                    request_id,
+                    request,
+                } => {
+                    let _ = self.net.http_start(request_id, request);
+                }
+                CxOsOp::CancelHttpRequest { request_id } => {
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));
