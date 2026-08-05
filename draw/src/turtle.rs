@@ -660,6 +660,20 @@ impl Turtle {
         self.layout.padding.right = right;
     }
 
+    /// Sets whether this turtle's `Flow::Right` layout wraps onto a new row,
+    /// leaving any other flow untouched.
+    ///
+    /// Turning wrapping off confines the following walks to the current row,
+    /// which is how a caller that has run out of rows to give keeps an
+    /// oversized walk from opening one anyway. Such a walk overruns the row's
+    /// width instead, exactly as unwrappable text does. Save the previous
+    /// setting via [`Turtle::layout`] and restore it when done.
+    pub fn set_flow_wrap(&mut self, wrap: bool) {
+        if let Flow::Right { wrap: flow_wrap, .. } = &mut self.layout.flow {
+            *flow_wrap = wrap;
+        }
+    }
+
     /// Returns the alignment of each walk of this turtle with respect to it's rectangle.
     pub fn align(&self) -> Align {
         self.layout.align

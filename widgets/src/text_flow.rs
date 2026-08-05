@@ -683,9 +683,18 @@ pub struct TextFlow {
     /// Used for widget-level `max_lines` tracking in rich text.
     #[rust]
     lines_drawn: usize,
-    /// Set when `lines_drawn >= max_lines`; further text draws are skipped.
+    /// Latched once content has been dropped: either a run needed a new visual
+    /// line and the `max_lines` budget had none, or the layouter cut a run
+    /// short. Gates every later draw. A full budget alone does not latch it —
+    /// the last allowed line stays open to runs that continue it.
     #[rust]
     content_truncated: bool,
+    /// Turtle y position where the most recent text run ended, identifying the
+    /// visual line that run last occupied. A later run landing on a different
+    /// row means something other than a text run opened that row. NaN until
+    /// the first run of a draw pass.
+    #[rust]
+    last_row_y: f64,
 
     #[rust]
     pub areas_tracker: RectAreasTracker,
@@ -825,6 +834,152 @@ impl TextFlow {
             if *templ_id == id {
                 node.script_apply(vm, apply, scope, template_value);
             }
+        }
+    }
+
+    /// Whether the `max_lines` budget is spent, so any further inline content
+    /// would render past the line allowance.
+    ///
+    /// Text drawn through [`Self::draw_text`] honours this automatically.
+    /// Callers that draw child widgets straight into the turtle — link pills,
+    /// images, fold buttons — bypass that path and must consult this first.
+    pub fn is_content_truncated(&self) -> bool {
+        self.content_truncated
+    }
+
+    /// Prepares the turtle for inline content that TextFlow does not lay out
+    /// itself, returning state that [`Self::end_inline_content`] needs.
+    ///
+    /// Such content is walked as one atomic unit, so a turtle with wrapping on
+    /// relocates it whole onto a fresh row when it does not fit. On the last
+    /// line `max_lines` allows there is no row to relocate it to, and its size
+    /// is not knowable until it has been drawn, so wrapping is switched off for
+    /// the duration of its walk: it stays on the last allowed line. A tracked
+    /// clip brackets the draw so that, when the content overruns the line,
+    /// `end_inline_content` can cut it at the line's right edge and end the
+    /// flow with an ellipsis instead of letting it run past the container.
+    /// Returns `None` (and does nothing) while the line budget still has room.
+    /// Pair every call with [`Self::end_inline_content`].
+    pub fn begin_inline_content(&mut self, cx: &mut Cx2d) -> Option<InlineContentHold> {
+        if self.max_lines == 0 || self.lines_drawn < self.max_lines {
+            return None;
+        }
+        let restore_wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+        if restore_wrap {
+            cx.turtle_mut().set_flow_wrap(false);
+        }
+        // A covering rect, so the clip is a no-op unless the content overruns
+        // and end_inline_content shrinks it.
+        let clip_index = cx.push_clip_rect_tracked(Rect {
+            pos: dvec2(-1e7, -1e7),
+            size: dvec2(2e7, 2e7),
+        });
+        Some(InlineContentHold {
+            restore_wrap,
+            clip_index,
+            start_x: cx.turtle().pos().x,
+        })
+    }
+
+    /// Completes an inline-content draw begun with
+    /// [`Self::begin_inline_content`] and charges the content to the line
+    /// budget.
+    ///
+    /// When the content was held on the last allowed line and overran it, the
+    /// content is hidden entirely, an ellipsis is drawn where it began, and
+    /// the flow is truncated — the same visual contract text truncation has,
+    /// which drops whole glyphs rather than slicing one open.
+    pub fn end_inline_content(&mut self, cx: &mut Cx2d, hold: Option<InlineContentHold>) {
+        let Some(hold) = hold else {
+            self.track_inline_content(cx);
+            return;
+        };
+        cx.pop_clip_rect();
+
+        let turtle = cx.turtle();
+        let pos = turtle.pos();
+        let inner = turtle.inner_rect();
+        let right = inner.pos.x + inner.size.x;
+        let overran = !inner.size.x.is_nan() && pos.x > right + 0.5;
+
+        if overran {
+            // The ellipsis is measured with the normal text style at the
+            // current font size, matching what draw_text will use to render it.
+            let font_size = *self.font_sizes.last().unwrap_or(&self.font_size);
+            self.draw_text.text_style = self.text_style_normal.clone();
+            self.draw_text.text_style.font_size = font_size;
+            self.draw_text.max_lines = 0;
+            self.draw_text.text_overflow = TextOverflow::Clip;
+            let laid = self
+                .draw_text
+                .layout(cx, 0.0, 0.0, None, false, Align::default(), "…");
+            let ellipsis_width = (laid.size_in_lpxs.width * self.draw_text.font_scale) as f64;
+
+            // The whole widget is hidden rather than sliced mid-glyph: text
+            // truncation drops entire glyphs before appending the ellipsis,
+            // and an atomic inline widget is one glyph in that sense. The
+            // ellipsis lands where the widget began, pulled left when even
+            // that spot cannot fit it.
+            let row_y = pos.y;
+            let boundary = hold
+                .start_x
+                .min(right - ellipsis_width)
+                .max(inner.pos.x);
+            cx.update_clip_rect_at(
+                hold.clip_index,
+                Rect {
+                    pos: dvec2(-1e7, -1e7),
+                    size: dvec2(boundary + 1e7, 2e7),
+                },
+            );
+
+            // The ellipsis is drawn at the cut while wrapping is still off, so
+            // it cannot open a row the budget has no line for.
+            cx.turtle_mut().move_to(dvec2(boundary, row_y));
+            self.draw_text(cx, "…");
+            if hold.restore_wrap {
+                cx.turtle_mut().set_flow_wrap(true);
+            }
+            self.content_truncated = true;
+            self.last_row_y = row_y;
+        } else {
+            if hold.restore_wrap {
+                cx.turtle_mut().set_flow_wrap(true);
+            }
+            self.track_inline_content(cx);
+        }
+    }
+
+    /// Charges the `max_lines` budget for inline content that TextFlow does not
+    /// lay out itself: a link pill, an image, a fold button.
+    ///
+    /// The turtle relocates such content whole onto a fresh row when it does
+    /// not fit, and that row counts against `max_lines` exactly like a row of
+    /// text. Call this immediately after drawing the content. Content sharing
+    /// the row of the previously charged item costs nothing, so calling it for
+    /// every inline item is correct.
+    ///
+    /// Whether the content fits is only knowable after it is drawn — makepad
+    /// has no measure-without-draw path for widgets — so content that spills
+    /// past the last allowed line latches truncation to stop everything after
+    /// it rather than being withdrawn.
+    pub fn track_inline_content(&mut self, cx: &mut Cx2d) {
+        if self.max_lines == 0 {
+            return;
+        }
+        let turtle = cx.turtle();
+        let pos = turtle.pos();
+        let inner = turtle.inner_rect();
+        if self.last_row_y.is_nan() || (pos.y - self.last_row_y).abs() > 0.5 {
+            self.lines_drawn += 1;
+        }
+        self.last_row_y = pos.y;
+        // Content held on the last allowed line runs past the right edge when
+        // it did not fit. Nothing after it can be placed without opening a row
+        // the budget cannot pay for, so the flow ends here.
+        let overran_row = !inner.size.x.is_nan() && pos.x > inner.pos.x + inner.size.x + 0.5;
+        if self.lines_drawn > self.max_lines || overran_row {
+            self.content_truncated = true;
         }
     }
 
@@ -1142,6 +1297,7 @@ impl TextFlow {
         self.clear_stacks();
         self.lines_drawn = 0;
         self.content_truncated = false;
+        self.last_row_y = f64::NAN;
         if self.selectable {
             self.selection_tracker.clear();
             self.widget_text_entries.clear();
@@ -1478,7 +1634,18 @@ impl TextFlow {
         cx.turtle_mut()
             .move_right_down(dvec2(-font_based_padding, 0.0));
 
+        // The marker and the item's first content run share one visual line,
+        // but the padding adjustment below puts the content run back at the
+        // line's left edge, where it reads as starting a line of its own. Let
+        // the content run be the one that charges the line to the `max_lines`
+        // budget, so a one-line list item costs one line rather than two.
+        // A marker that exhausts the budget outright still truncates: only the
+        // count is rolled back, never the truncation itself.
+        let lines_before_marker = self.lines_drawn;
         self.draw_text(cx, dot);
+        if !self.content_truncated {
+            self.lines_drawn = lines_before_marker;
+        }
         TextFlow::walk_margin(cx, self.list_item_marker_pad);
 
         // Adjust the left padding to match the actual cursor position after the
@@ -1949,7 +2116,7 @@ impl TextFlow {
             // Widget-level max_lines: compute how many layouter rows this run
             // is allowed. A "continuation" run starts mid-line (turtle x > left
             // edge), so its first row shares the current visual line.
-            let is_continuation = if self.max_lines > 0 {
+            let mut is_continuation = if self.max_lines > 0 {
                 let turtle_pos = cx.turtle().pos();
                 let turtle_rect = cx.turtle().inner_rect();
                 (turtle_pos.x - turtle_rect.pos.x) > 0.5
@@ -1957,8 +2124,25 @@ impl TextFlow {
                 false
             };
 
+            // A continuation run joins a visual line that something else
+            // already opened. When the opener was not a text run — an inline
+            // widget such as a link pill or an image, a list bullet, a margin
+            // walk — nothing has charged that line to the budget yet, so
+            // charge it here. Rows are identified by the turtle's y position:
+            // a continuation landing on the row the previous run ended on is
+            // already paid for, any other row is not.
+            if is_continuation {
+                let row_y = cx.turtle().pos().y;
+                if self.last_row_y.is_nan() || (row_y - self.last_row_y).abs() > 0.5 {
+                    self.lines_drawn += 1;
+                }
+            }
+
+            // Visual lines the widget may still start. Meaningless when
+            // `max_lines` is 0 (unlimited), so every use is guarded by it.
+            let remaining_new_lines = self.max_lines.saturating_sub(self.lines_drawn);
+
             if self.max_lines > 0 {
-                let remaining_new_lines = self.max_lines.saturating_sub(self.lines_drawn);
                 if remaining_new_lines == 0 && !is_continuation {
                     // No visual lines left and this run would start a new one.
                     self.content_truncated = true;
@@ -2046,7 +2230,12 @@ impl TextFlow {
                 };
                 let wrap_enabled =
                     matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
-                if wrap_enabled && !self.first_thing_on_a_line {
+                // A forced wrap starts a new visual line, so it is only
+                // permissible while the widget-level `max_lines` budget still
+                // has a line to give. Without this guard the wrap smuggles in
+                // an extra line that the budget never accounted for.
+                let may_force_wrap = self.max_lines == 0 || remaining_new_lines > 0;
+                if wrap_enabled && !self.first_thing_on_a_line && may_force_wrap {
                     if let Some(max_width) = max_width {
                         // The eventual layout will start at cursor + pad_l
                         // (because we walk pad_l below). Predict against
@@ -2055,6 +2244,15 @@ impl TextFlow {
                             (turtle_pos.x - turtle_rect.pos.x) as f32 + pad_l as f32;
                         let row_offset = cx.turtle().next_row_offset() as f32;
                         let layout_align = dt.layout_align;
+                        // These two layouts only measure how the run would
+                        // break; they must see the run's natural row count, so
+                        // the `max_lines` clamp is lifted for the probe. With
+                        // the clamp applied, a run limited to one row always
+                        // reports "fits on one line" and never wraps.
+                        let clamped_max_lines = dt.max_lines;
+                        let clamped_overflow = dt.text_overflow;
+                        dt.max_lines = 0;
+                        dt.text_overflow = TextOverflow::Clip;
                         let measured = dt.layout(
                             cx,
                             first_row_indent,
@@ -2082,6 +2280,8 @@ impl TextFlow {
                             text,
                         );
                         let fits_on_fresh_line = fresh.rows.len() == 1;
+                        dt.max_lines = clamped_max_lines;
+                        dt.text_overflow = clamped_overflow;
                         // Wrap to a new line if EITHER:
                         //   (a) row 0 would be empty (continuation didn't
                         //       admit any glyphs) — leaving a stranded
@@ -2117,6 +2317,19 @@ impl TextFlow {
                             cx.turtle_mut().set_padding_left(old_padding_left);
                             cx.turtle_new_line_with_spacing(ws);
                             cx.turtle_mut().set_padding_left(old_padding_left + pad_l);
+
+                            // Past this wrap the run begins at the left edge, so
+                            // its first row starts a new visual line instead of
+                            // sharing the previous one. Both the budget handed to
+                            // the layouter and the post-draw line accounting
+                            // are derived from `is_continuation`, so it must be
+                            // corrected here or this run draws one line more
+                            // than `max_lines` allows and reports one line
+                            // fewer than it drew.
+                            is_continuation = false;
+                            if self.max_lines > 0 {
+                                dt.max_lines = remaining_new_lines;
+                            }
                         }
                     }
                 }
@@ -2190,6 +2403,11 @@ impl TextFlow {
                     self.content_truncated = true;
                 }
             }
+
+            // Remember the row this run ended on, so the next run can tell
+            // whether it is joining this same visual line or one that inline
+            // content opened in between.
+            self.last_row_y = cx.turtle().pos().y;
         }
         self.first_thing_on_a_line = false;
     }
@@ -2216,6 +2434,18 @@ impl TextFlow {
             item.draw_all(cx, &mut Scope::with_data(tf));
         })
     }
+}
+
+/// State carried from [`TextFlow::begin_inline_content`] to
+/// [`TextFlow::end_inline_content`] while an inline child widget is held on
+/// the last allowed line: whether wrapping must be restored, and the align
+/// list index of the tracked clip bracketing the widget's draw.
+pub struct InlineContentHold {
+    restore_wrap: bool,
+    clip_index: usize,
+    /// Turtle x position where the widget's walk begins; the ellipsis replaces
+    /// the widget at this position when the widget overruns the line.
+    start_x: f64,
 }
 
 /// Actions emitted by TextFlow for cross-boundary selection in PortalList

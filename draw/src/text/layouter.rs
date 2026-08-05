@@ -576,9 +576,23 @@ impl LayoutContext {
             }
         };
 
-        let text_was_truncated = self.rows.len() > max_rows || !all_text_consumed;
+        let mut text_was_truncated = self.rows.len() > max_rows || !all_text_consumed;
 
         self.rows.truncate(max_rows);
+
+        // A non-wrapping layout puts every glyph on a single row, so its
+        // overflow shows up as a row wider than the bound rather than as
+        // surplus rows. Row counting alone therefore reports "nothing was
+        // truncated" for the very case the ellipsis exists to handle.
+        // Restricted to non-wrapping layouts because a wrapped row's width
+        // includes any first-row indent and may legitimately reach the bound.
+        if self.options.ellipsis && !self.options.wrap {
+            if let Some(max_width) = self.options.max_width_in_lpxs {
+                if self.rows.last().is_some_and(|row| row.width_in_lpxs > max_width) {
+                    text_was_truncated = true;
+                }
+            }
+        }
 
         if !text_was_truncated {
             return self.finish_with(false);
