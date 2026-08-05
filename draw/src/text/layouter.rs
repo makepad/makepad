@@ -515,7 +515,21 @@ impl LayoutContext {
 
         self.current_point_in_lpxs.x = 0.0;
         self.current_point_in_lpxs.y += self.rows.last().map_or(row.ascender_in_lpxs, |prev_row| {
-            prev_row.line_spacing_in_lpxs(&row)
+            let natural_in_lpxs = prev_row.line_spacing_in_lpxs(&row);
+            if self.rows.len() == 1 {
+                // The first row can share its visual row with earlier inline
+                // content that is taller than the text; the caller passes that
+                // row's real height (plus wrap spacing) so the second row's
+                // top edge clears it. The floor is a top-to-top distance, so
+                // it converts to a baseline advance by adding the change in
+                // ascender between the two rows.
+                let min_advance_in_lpxs = self.options.first_row_min_line_spacing_below_in_lpxs
+                    + row.ascender_in_lpxs
+                    - prev_row.ascender_in_lpxs;
+                natural_in_lpxs.max(min_advance_in_lpxs)
+            } else {
+                natural_in_lpxs
+            }
         });
         let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
         let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
@@ -1004,8 +1018,12 @@ impl PartialEq for Style {
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutOptions {
     pub first_row_indent_in_lpxs: f32,
-    // Note: currently does nothing. Only used by `TextFlow`. Should be removed once `TextFlow` is
-    // replaced with `TextFlow2`.
+    /// Minimum distance in logical pixels from the first row's top edge to the
+    /// second row's top edge. A continuation run's first row can share its
+    /// visual row with earlier inline content that is taller than the text;
+    /// callers pass that row's real height (plus wrap spacing) so the second
+    /// row clears it. Zero keeps pure font-metric spacing. Only the first row
+    /// boundary is affected; later rows always use font-metric spacing.
     pub first_row_min_line_spacing_below_in_lpxs: f32,
     pub max_width_in_lpxs: Option<f32>,
     pub wrap: bool,

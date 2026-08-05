@@ -2220,6 +2220,7 @@ impl DrawText {
             cx.cx.debug.area(area, vec4(1.0, 1.0, 1.0, 1.0));
         }
 
+
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_rect.pos.y as f32);
         self.draw_text(cx, origin_in_lpxs, laidout_text);
 
@@ -2274,7 +2275,7 @@ impl DrawText {
         let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
-        let row_height = cx.turtle().next_row_offset();
+        let row_height = self.resumable_first_row_min_spacing(cx) as f64;
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
@@ -2319,6 +2320,7 @@ impl DrawText {
         let per_row = self.many_instances.is_none() && text.rows.len() > 1;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         let per_row = false;
+
 
         if per_row {
             // ── PER-ROW path ──
@@ -2460,16 +2462,6 @@ impl DrawText {
 
             self.draw_text(cx, origin_in_lpxs, &text);
 
-            let turtle = cx.turtle_mut();
-            turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
-            turtle.allocate_width(used_size_in_lpxs.width as f64);
-            turtle.allocate_height(used_size_in_lpxs.height as f64);
-            turtle.move_to(new_turtle_pos);
-            turtle.set_wrap_spacing(
-                (last_row.ascender_in_lpxs * last_row.line_spacing_scale
-                    - last_row.ascender_in_lpxs) as f64,
-            );
-
             if !callback_before_text {
                 for (row_index, row) in text.rows.iter().enumerate() {
                     let (sx, ex) = row_span_x_bounds_in_lpxs(
@@ -2495,25 +2487,167 @@ impl DrawText {
                 }
             }
 
-            // Only pass the centering height for single-row runs; a multi-row
-            // walk here spans the whole block, which centering already skips.
-            cx.emit_turtle_walk_with_align_height(
-                Rect {
-                    pos: new_turtle_pos,
-                    size: dvec2(
-                        used_size_in_lpxs.width as f64,
-                        used_size_in_lpxs.height as f64,
-                    ),
-                },
-                align_list_start,
-                Metrics::default(),
-                self.align_row_height
-                    .filter(|_| text.rows.len() == 1)
-                    .map(|h| (h * self.font_scale) as f64),
-            );
+            let wrap_spacing = (last_row.ascender_in_lpxs * last_row.line_spacing_scale
+                - last_row.ascender_in_lpxs) as f64;
+
+            if text.rows.len() == 1 {
+                let turtle = cx.turtle_mut();
+                turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+                turtle.allocate_width(used_size_in_lpxs.width as f64);
+                turtle.allocate_height(used_size_in_lpxs.height as f64);
+                turtle.move_to(new_turtle_pos);
+                turtle.set_wrap_spacing(wrap_spacing);
+
+                cx.emit_turtle_walk_with_align_height(
+                    Rect {
+                        pos: new_turtle_pos,
+                        size: dvec2(
+                            used_size_in_lpxs.width as f64,
+                            used_size_in_lpxs.height as f64,
+                        ),
+                    },
+                    align_list_start,
+                    Metrics::default(),
+                    self.align_row_height.map(|h| (h * self.font_scale) as f64),
+                );
+            } else {
+                // The turtle's row bookkeeping must see this run's internal
+                // row boundaries: RowAlign shifts and row heights are computed
+                // per turtle row when `finish_row` runs, and without a boundary
+                // here every walk since the previous one — including content
+                // that sits on an earlier visual row — is aligned against the
+                // final row's height. Only the finished-walk and row
+                // bookkeeping is per-row; the glyphs stay in one instance
+                // batch, so no per-row shifting of this run's own rows is
+                // possible and its walks carry ranges accordingly.
+                let fs = self.font_scale as f64;
+                let row_top = |row: &crate::text::layouter::LaidoutRow| {
+                    origin_in_lpxs.y as f64
+                        + (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64 * fs
+                };
+                let row_height = |row: &crate::text::layouter::LaidoutRow| {
+                    (row.ascender_in_lpxs - row.descender_in_lpxs) as f64 * fs
+                };
+
+
+                let first_row = &text.rows[0];
+                let turtle = cx.turtle_mut();
+                turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+                turtle.allocate_width(used_size_in_lpxs.width as f64);
+                turtle.allocate_height(row_height(first_row));
+
+                // The first row's walk owns every align entry this run emitted
+                // and is immovable — shifting it would displace the later
+                // rows' glyphs, which share its instance batch. When the first
+                // row holds visible text it anchors its row's center line, so
+                // a taller inline item beside it centers on the text; when it
+                // holds nothing visible — no glyphs, or only whitespace (a
+                // continuation that wrapped immediately, often with a single
+                // leading space fitting the line's slack) — the walk is inert,
+                // so the row of preceding content keeps its normal alignment
+                // instead of anchoring to an invisible line.
+                let first_row_role = if first_row.text.trim().is_empty() {
+                    crate::turtle::RowAlignRole::Fixed
+                } else {
+                    crate::turtle::RowAlignRole::Anchor
+                };
+                cx.emit_turtle_walk_with_role(
+                    Rect {
+                        pos: dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64),
+                        size: dvec2(
+                            (first_row.width_in_lpxs * self.font_scale) as f64,
+                            row_height(first_row),
+                        ),
+                    },
+                    align_list_start,
+                    Metrics::default(),
+                    self.align_row_height.map(|h| (h * self.font_scale) as f64),
+                    first_row_role,
+                );
+
+                for row_index in 1..text.rows.len() {
+                    // A new turtle row starts at origin.y + used_height +
+                    // spacing. Anchoring the spacing to the turtle's real used
+                    // bottom — which includes any inline content on the
+                    // previous visual row that is taller than the text — lands
+                    // the turtle exactly on this laidout row's top, so turtle
+                    // geometry and glyph geometry agree at every internal row
+                    // boundary.
+                    let used_bottom = cx.turtle().origin().y + cx.turtle().used_height();
+                    let spacing = row_top(&text.rows[row_index]) - used_bottom;
+                    cx.turtle_new_line_with_spacing(spacing);
+                    cx.turtle_mut().allocate_height(row_height(&text.rows[row_index]));
+                }
+
+                let turtle = cx.turtle_mut();
+                turtle.move_to(new_turtle_pos);
+                turtle.set_wrap_spacing(wrap_spacing);
+
+                // The last row's walk carries an empty align range: this run's
+                // glyphs live in the first row's walk and must not be shifted
+                // again when the last row finishes. Because those glyphs can
+                // never move, the walk anchors the row's center line — a
+                // taller item that joins this row (an inline pill) centers on
+                // the text instead of dragging the row's center below it.
+                let empty_range = cx.align_list_len();
+                cx.emit_turtle_walk_with_role(
+                    Rect {
+                        pos: new_turtle_pos,
+                        size: dvec2(
+                            (last_row.width_in_lpxs * self.font_scale) as f64,
+                            row_height(last_row),
+                        ),
+                    },
+                    empty_range,
+                    Metrics::default(),
+                    Some(row_height(last_row)),
+                    crate::turtle::RowAlignRole::Anchor,
+                );
+            }
         }
 
         (text.rows.len(), text.is_truncated)
+    }
+
+    /// Returns the `first_row_min_line_spacing_below_in_lpxs` a resumable run
+    /// passes to the layouter for the current turtle. In a centering wrap flow
+    /// this is the offset to the next turtle row (converted into layout units
+    /// by dividing out `font_scale`), so a continuation run's second row
+    /// clears inline content on its first visual row that is taller than the
+    /// text. Other flows pass zero and keep pure font-metric row spacing.
+    /// Every layout of the same run (draw, selection capture, wrap probes)
+    /// must use this same value so they share one layout-cache entry.
+    pub fn resumable_first_row_min_spacing(&self, cx: &Cx2d) -> f32 {
+        if matches!(
+            cx.turtle().layout().flow,
+            Flow::Right {
+                wrap: true,
+                row_align: crate::turtle::RowAlign::Center,
+                ..
+            }
+        ) {
+            // When the current row holds inline content taller than the text
+            // line (pills), the following row is expected to hold the same
+            // kind of content beside this run's text, and RowAlign::Center
+            // will seat that content's center on the text's center — placing
+            // its top (row_height − text_height)/2 ABOVE the text's top. The
+            // floor therefore positions the second row's text one full
+            // current-row advance below, plus that overhang, so centered
+            // content on the next row starts exactly one wrap gap below the
+            // current row's content with zero residual shift. When the text
+            // is the tallest content, the floor equals `next_row_offset()`
+            // and pure font-metric spacing wins where it is larger.
+            let row_height = cx.turtle().row_height();
+            let text_row_height = self
+                .align_row_height
+                .map(|h| (h * self.font_scale) as f64)
+                .unwrap_or(row_height);
+            let overhang = ((row_height - text_row_height) * 0.5).max(0.0);
+            ((row_height + cx.turtle().wrap_spacing() + overhang)
+                / self.font_scale.max(0.0001) as f64) as f32
+        } else {
+            0.0
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

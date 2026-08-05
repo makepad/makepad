@@ -2166,7 +2166,10 @@ impl TextFlow {
                 let turtle_rect = cx.turtle().inner_rect();
                 let origin = dvec2(turtle_rect.pos.x, turtle_pos.y);
                 let first_row_indent = (turtle_pos.x - turtle_rect.pos.x) as f32;
-                let row_height = cx.turtle().next_row_offset() as f32;
+                // Must match the value the draw pass hands to the layouter, or
+                // the captured selection layout diverges from the drawn glyphs
+                // and pays for a second layout-cache entry.
+                let row_height = dt.resumable_first_row_min_spacing(cx);
                 let max_width = if !turtle_rect.size.x.is_nan() {
                     Some(turtle_rect.size.x as f32)
                 } else {
@@ -2242,7 +2245,10 @@ impl TextFlow {
                         // that effective indent.
                         let first_row_indent =
                             (turtle_pos.x - turtle_rect.pos.x) as f32 + pad_l as f32;
-                        let row_offset = cx.turtle().next_row_offset() as f32;
+                        // Must match the value the draw pass hands to the
+                        // layouter so the probe shares its layout-cache entry
+                        // and predicts the same row structure.
+                        let row_offset = dt.resumable_first_row_min_spacing(cx);
                         let layout_align = dt.layout_align;
                         // These two layouts only measure how the run would
                         // break; they must see the run's natural row count, so
