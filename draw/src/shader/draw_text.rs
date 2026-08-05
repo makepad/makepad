@@ -2162,9 +2162,27 @@ impl DrawText {
             } = walk.width
             {
                 if let Some(resolved) = max_bound.eval_width(cx) {
-                    let padding = cx.turtle().padding();
-                    max_width_in_lpxs =
-                        Some((resolved - padding.left - padding.right).max(0.0) as f32);
+                    let turtle = cx.turtle();
+                    let padding = turtle.padding();
+                    // The bound limits this walk's margin box, so the text
+                    // itself gets the bound minus the walk's own horizontal
+                    // margins and the enclosing turtle's padding.
+                    let mut available =
+                        resolved - padding.left - padding.right - walk.margin.width();
+                    // When the enclosing turtle is itself an unresolved Fit
+                    // with a max bound (a Label sizing itself around this
+                    // text), its final width is clamped to the bound minus
+                    // its outer margins; the text must shrink by the same
+                    // amount, or the clamped clip slices off its tail.
+                    if turtle.width().is_nan()
+                        && matches!(
+                            turtle.walk().width,
+                            crate::turtle::Size::Fit { max: Some(_), .. }
+                        )
+                    {
+                        available -= turtle.walk().margin.width();
+                    }
+                    max_width_in_lpxs = Some(available.max(0.0) as f32);
                 }
             }
         }
