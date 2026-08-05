@@ -2182,7 +2182,11 @@ impl DrawText {
                     {
                         available -= turtle.walk().margin.width();
                     }
-                    max_width_in_lpxs = Some(available.max(0.0) as f32);
+                    // The layouter works in unscaled units; rows are multiplied
+                    // by font_scale on output, so the bound must be divided by
+                    // it here, as max_layout_width_for_walk does.
+                    max_width_in_lpxs =
+                        Some((available.max(0.0) as f32) / self.font_scale.max(0.0001));
                 }
             }
         }
