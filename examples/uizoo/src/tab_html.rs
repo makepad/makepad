@@ -238,6 +238,84 @@ script_mod! {
             Markdown{body: "# Html\n\nThe Html widget renders HTML content."}
         }
         demos +: {
+            H4{text: "Fit-max bounded pill labels at widths across the cap"}
+            P{text: "A pill-like label bounded to 60% of the enclosing width, at widths walking across the cap. Truncation must always show a trailing ellipsis, never a bare cut."}
+            View{
+                width: Fill, height: Fit, flow: Down, spacing: 6
+                View{ width: 300, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    View{ width: Fit, height: Fit,
+                        View{ width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Full, factor: 0.6}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@somebody-with-a-long-name:example.org" }
+                            }
+                        }
+                    }
+                }
+                View{ width: 220, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    View{ width: Fit, height: Fit,
+                        View{ width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Full, factor: 0.6}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@somebody-with-a-long-name:example.org" }
+                            }
+                        }
+                    }
+                }
+                View{ width: 160, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    View{ width: Fit, height: Fit,
+                        View{ width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Full, factor: 0.6}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@quokka:example.org" }
+                            }
+                        }
+                    }
+                }
+                View{ width: 160, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    Html{ width: Fill, height: Fit, font_size: 11
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        text_style_normal +: { font_size: 11, line_spacing: 1.3 }
+                        pill := View { width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Full, factor: 0.6}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@somebody-with-a-long-name:example.org" }
+                            }
+                        }
+                        body: "hi <pill></pill> ok"
+                    }
+                }
+            }
+            Hr{}
+
             H4{text: "REPRO: timeline message, pills + text, no line clamp"}
             P{text: "Rows starting with regular text after a pill-heavy row must keep the text and the pills on one center line, pill tops must never be cut, and inter-line spacing must be uniform."}
             View{
