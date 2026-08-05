@@ -660,6 +660,20 @@ impl Turtle {
         self.layout.padding.right = right;
     }
 
+    /// Sets whether this turtle's `Flow::Right` layout wraps onto a new row,
+    /// leaving any other flow untouched.
+    ///
+    /// Turning wrapping off confines the following walks to the current row,
+    /// which is how a caller that has run out of rows to give keeps an
+    /// oversized walk from opening one anyway. Such a walk overruns the row's
+    /// width instead, exactly as unwrappable text does. Save the previous
+    /// setting via [`Turtle::layout`] and restore it when done.
+    pub fn set_flow_wrap(&mut self, wrap: bool) {
+        if let Flow::Right { wrap: flow_wrap, .. } = &mut self.layout.flow {
+            *flow_wrap = wrap;
+        }
+    }
+
     /// Returns the alignment of each walk of this turtle with respect to it's rectangle.
     pub fn align(&self) -> Align {
         self.layout.align
@@ -1271,10 +1285,36 @@ pub struct FinishedWalk {
 
     metrics: Metrics,
 
+    /// How row alignment may treat this walk (see [`RowAlignRole`]).
+    align_role: RowAlignRole,
+
     /// Height to center by under `RowAlign::Center` instead of `outer_size.y`.
     /// Text runs pass their line's height here so mixed-font runs on a row all
     /// get the same shift and keep their relative baselines.
     align_height: Option<f64>,
+}
+
+/// How row alignment may treat a finished walk.
+///
+/// A multi-row text run draws all of its glyphs in one instance batch, so no
+/// individual row of it can ever be repositioned; the run's per-row walks are
+/// therefore immovable and declare one of the non-`Shiftable` roles.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum RowAlignRole {
+    /// Row alignment may shift this walk's align range.
+    #[default]
+    Shiftable,
+    /// Immovable, and under `RowAlign::Center` the row's center line anchors
+    /// to this walk's own center instead of the tallest walk's, so every
+    /// shiftable walk on the row — including a taller one, which then shifts
+    /// UP — centers on it. Declared by a wrapped run's rows that hold visible
+    /// text.
+    Anchor,
+    /// Immovable and inert: neither shifted nor an anchor. Declared by a
+    /// wrapped run's first-row walk when that row holds no glyphs (the run
+    /// wrapped immediately), so a row of other content is not anchored to an
+    /// invisible line.
+    Fixed,
 }
 
 /// The horizontal shift that centers a `Flow::Right` row's actually-drawn content
@@ -1507,7 +1547,11 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     ///
     /// The current turtle should be finished with the same guard area that was used to start it.
     pub fn end_turtle_with_guard(&mut self, guard: Area) -> Rect {
-        self.finish_row(self.align_list.len());
+        // The final row's bottom forgiveness is deliberately discarded: the
+        // turtle's used height keeps that row's full physical extent, so
+        // up-centered walks on a last row stay inside the reported rect and
+        // its clip bottom.
+        let _ = self.finish_row(self.align_list.len());
         self.compute_final_size();
 
         let mut turtle = self.turtles.last_mut().unwrap();
@@ -1803,6 +1847,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 clip_max.y = clip_min.y + turtle.height();
             }
         };
+
     }
 
     /// Computes the maximum available height for the current turtle by walking up
@@ -1934,6 +1979,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 deferred_before_count: 0,
                 outer_size: size + walk.margin.size(),
                 metrics: walk.metrics,
+                align_role: RowAlignRole::Shiftable,
                 align_height: None,
             });
 
@@ -1977,6 +2023,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 }
             };
 
+
             let defer_index = self.turtle().deferred_fills.len();
             self.turtle_mut().current_row_metrics =
                 self.turtle().current_row_metrics.max(walk.metrics);
@@ -1985,6 +2032,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 deferred_before_count: defer_index,
                 outer_size,
                 metrics: walk.metrics,
+                align_role: RowAlignRole::Shiftable,
                 align_height: None,
             });
 
@@ -2179,12 +2227,26 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         metrics: Metrics,
         align_height: Option<f64>,
     ) {
+        self.emit_turtle_walk_with_role(rect, align_list_start, metrics, align_height, RowAlignRole::Shiftable)
+    }
+
+    /// Like [`emit_turtle_walk_with_align_height`] but with an explicit
+    /// [`RowAlignRole`].
+    pub fn emit_turtle_walk_with_role(
+        &mut self,
+        rect: Rect,
+        align_list_start: usize,
+        metrics: Metrics,
+        align_height: Option<f64>,
+        align_role: RowAlignRole,
+    ) {
         let turtle = self.turtles.last().unwrap();
         self.finished_walks.push(FinishedWalk {
             align_list_start,
             deferred_before_count: turtle.deferred_fills.len(),
             outer_size: rect.size,
             metrics,
+            align_role,
             align_height,
         });
     }
@@ -2237,7 +2299,20 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     pub fn turtle_new_line_internal(&mut self, spacing: f64, align_list_start: usize) {
-        self.finish_row(align_list_start);
+        let row_bottom_forgiveness = self.finish_row(align_list_start);
+        if row_bottom_forgiveness > 0.0 {
+            // An anchored row's up-centered walks overhang the row's anchor
+            // symmetrically, and the top overhang already intrudes into the
+            // gap above the row; forgiving the same amount below it keeps the
+            // gaps on both sides of the row equal. The reduction happens only
+            // on the new-line path — a turtle's final row is finished by
+            // `end_turtle_with_guard`, which discards the forgiveness — so a
+            // turtle's reported height always covers its last row's full
+            // physical extent.
+            let used_width = self.turtle().used_width();
+            let reduced_used_height = self.turtle().used_height() - row_bottom_forgiveness;
+            self.turtle_mut().set_used(used_width, reduced_used_height);
+        }
         let new_pos = dvec2(
             self.turtle().origin.x + self.turtle().padding().left,
             self.turtle().origin.y + self.turtle().used_height() + spacing,
@@ -2246,28 +2321,34 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.turtle_mut().allocate_height(0.0);
     }
 
-    fn finish_row(&mut self, align_list_start: usize) {
+    /// Finishes the current row: applies its row alignment and rolls the row
+    /// bookkeeping forward.
+    ///
+    /// Returns the row's bottom forgiveness (see [`Cx2d::finish_row_center`]);
+    /// rows under `RowAlign::Top` and `RowAlign::Bottom` always return zero.
+    fn finish_row(&mut self, align_list_start: usize) -> f64 {
         let row_align = if let Flow::Right { row_align, .. } = self.turtle().flow() {
             row_align
         } else {
             RowAlign::Top
         };
 
-        match row_align {
+        let row_bottom_forgiveness = match row_align {
             RowAlign::Top => {
                 // No per-walk shifts needed — items stay at the row top.
+                0.0
             }
             RowAlign::Bottom => {
                 self.finish_row_bottom(align_list_start);
+                0.0
             }
-            RowAlign::Center => {
-                self.finish_row_center(align_list_start);
-            }
-        }
+            RowAlign::Center => self.finish_row_center(align_list_start),
+        };
 
         self.turtle_mut().prev_row_metrics = self.turtle().current_row_metrics;
         self.turtle_mut().current_row_metrics = Metrics::default();
         self.finished_rows.push(self.finished_walks.len());
+        row_bottom_forgiveness
     }
 
     /// Baseline-aligns every finished walk in the current row so that its
@@ -2316,6 +2397,11 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let finished_walks_start = self.current_row_walks_start();
         let finished_walks_end = self.finished_walks.len();
         for finished_walk_index in finished_walks_start..finished_walks_end {
+            // Immovable walks (a wrapped run's rows — their glyphs live in one
+            // shared batch) cannot be baseline-shifted either.
+            if self.finished_walks[finished_walk_index].align_role != RowAlignRole::Shiftable {
+                continue;
+            }
             let finished_walk_height = self.finished_walks[finished_walk_index].outer_size.y;
             let finished_walk_metrics = self.finished_walks[finished_walk_index].metrics;
 
@@ -2329,6 +2415,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
             // The total amount by which we have to shift the current finished walk.
             let shift = descender_shift + baseline_shift + line_spacing_shift;
+
 
             let start = self.finished_walks[finished_walk_index].align_list_start;
             let end = if finished_walk_index + 1 < self.finished_walks.len() {
@@ -2363,31 +2450,93 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// Vertically centers every finished walk in the current row on the row's
     /// vertical center line.
     ///
-    /// The row height is the max height of any walk on the row, so the tallest
-    /// walk (e.g. an inline pill widget) has a zero shift and stays put. Shorter
-    /// walks (e.g. surrounding text) are shifted down by half the difference,
-    /// so their vertical centers land on the same horizontal line as the tallest
-    /// walk's center. For symmetrically-padded pills this makes the pill's
-    /// internal text visually align with the surrounding text.
+    /// Without an anchor walk, the row centers on its tallest walk: shifts are
+    /// downward only and every walk stays entirely within the row's bounds, so
+    /// `used_height` is untouched. With an anchor walk (an immovable wrapped-run
+    /// row), every shiftable walk centers on the anchor's center line instead,
+    /// so a walk taller than the anchor shifts UP and overhangs the anchor's
+    /// box symmetrically — by equal amounts above and below it.
     ///
-    /// This alignment does not grow the row's `used_height` — every walk stays
-    /// entirely within the row's bounds because each shift is at most
-    /// `(row_height - walk_height) / 2` and each walk has height
-    /// `<= row_height`.
-    fn finish_row_center(&mut self, align_list_start: usize) {
+    /// An up-shift is clamped so that no walk's top rises above the turtle's
+    /// own rectangle top: that edge is also the turtle's clip top, and content
+    /// shifted above it renders with its top edge cut off. The clamp can only
+    /// restrict an up-shift; it never turns one into a downward shift.
+    ///
+    /// Returns the row's bottom forgiveness: how far the row's allocated
+    /// bottom extent hangs below the bottom of its anchor-centered content,
+    /// capped at twice the largest up-shift actually applied. The new-line
+    /// path subtracts this from the advance to the next row, so a centered
+    /// walk's symmetric overhang intrudes equally into the row gaps above and
+    /// below it instead of pushing the next row further down. Anchorless rows
+    /// return zero, which leaves the advance untouched.
+    fn finish_row_center(&mut self, align_list_start: usize) -> f64 {
         let current_row_height = self.turtle().row_height();
 
         let finished_walks_start = self.current_row_walks_start();
         let finished_walks_end = self.finished_walks.len();
 
+        // An anchor walk stands for content that cannot be shifted, so the
+        // row's center line is anchored to its center rather than the tallest
+        // walk's. Shiftable walks then move toward that line in either
+        // direction: a taller item (an inline pill beside a wrapped run's
+        // text row) moves UP to center on the text. Without an anchor, the
+        // row centers on its tallest walk and shifts are downward only.
+        let mut anchor_center: Option<f64> = None;
         for finished_walk_index in finished_walks_start..finished_walks_end {
             let finished_walk = &self.finished_walks[finished_walk_index];
+            if finished_walk.align_role == RowAlignRole::Anchor {
+                let center = finished_walk
+                    .align_height
+                    .unwrap_or(finished_walk.outer_size.y)
+                    * 0.5;
+                anchor_center = Some(anchor_center.map_or(center, |c: f64| c.max(center)));
+            }
+        }
+
+
+        // The largest post-shift "effective bottom" of any walk on this row,
+        // relative to the row top: the walk's own box displaced by the shift
+        // that was actually applied to it. An up-shifted walk's bottom rises
+        // by exactly its shift, so the row's visual extent ends that much
+        // above its allocation, and only that surplus may be forgiven.
+        let mut max_effective_bottom: f64 = 0.0;
+        // The largest upward shift actually applied on this row; it bounds
+        // the returned forgiveness so that allocations no walk accounts for
+        // (pre-allocated text row boxes, vertical margins) are never forgiven.
+        let mut max_up_overhang: f64 = 0.0;
+
+        for finished_walk_index in finished_walks_start..finished_walks_end {
+            let finished_walk = &self.finished_walks[finished_walk_index];
+            if finished_walk.align_role != RowAlignRole::Shiftable {
+                max_effective_bottom = max_effective_bottom.max(finished_walk.outer_size.y);
+                continue;
+            }
             let finished_walk_height = finished_walk
                 .align_height
                 .unwrap_or(finished_walk.outer_size.y);
-            let shift = (current_row_height - finished_walk_height) * 0.5;
+            let shift = match anchor_center {
+                Some(center) => {
+                    // The row top is the turtle's position while the row
+                    // finishes; the walk's top after shifting is the row top
+                    // plus the shift. A negative bound keeps the walk's top at
+                    // or below the turtle's own rectangle top (its clip top);
+                    // the `min(0.0)` keeps the bound from ever forcing a
+                    // downward shift.
+                    let min_shift =
+                        (self.turtle().origin().y - self.turtle().pos().y).min(0.0);
+                    (center - finished_walk_height * 0.5).max(min_shift)
+                }
+                None => (current_row_height - finished_walk_height) * 0.5,
+            };
 
-            if shift <= 0.0 {
+            let applied = !((anchor_center.is_none() && shift <= 0.0) || shift == 0.0);
+            let applied_shift = if applied { shift } else { 0.0 };
+            max_up_overhang = max_up_overhang.max((-applied_shift).max(0.0));
+            max_effective_bottom =
+                max_effective_bottom.max(finished_walk.outer_size.y + applied_shift);
+
+
+            if !applied {
                 continue;
             }
 
@@ -2399,6 +2548,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             };
             self.move_align_list(start, end, 0.0, shift, false);
         }
+
+        if anchor_center.is_none() {
+            return 0.0;
+        }
+        let row_bottom_forgiveness = (current_row_height - max_effective_bottom.max(0.0))
+            .clamp(0.0, max_up_overhang);
+        row_bottom_forgiveness
     }
 
     /// Shifts the rendered content in the align list range `[start, end)` by
