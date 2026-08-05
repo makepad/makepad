@@ -41,7 +41,7 @@ impl ShaderOutput {
         out.push_str(shared_defs);
         out.push_str(
             "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
-vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
+vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
@@ -64,7 +64,7 @@ vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
         out.push_str(shared_defs);
         out.push_str(
             "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
-vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
+vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
