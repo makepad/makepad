@@ -1440,9 +1440,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     ///   where it is, so the bound is the remnant: the distance from the
     ///   pen to the line's inner right edge, minus the trailing insets.
     ///
-    /// The current turtle's own walk margins are not subtracted here; a
-    /// `Fit` max bound is resolved against the walk's margin box by its
-    /// consumer.
+    /// The current turtle's own trailing margin is left for the consumer,
+    /// which resolves a `Fit` max bound against the walk's margin box. Its
+    /// leading margin is part of the measured lead-in (the turtle's origin
+    /// lies past it), so a consumer that subtracts the full margin width
+    /// counts the leading side twice — a deliberately conservative overlap
+    /// of a few pixels that keeps a remnant-fitted walk safely inside the
+    /// line's overrun tolerance.
     pub fn find_line_available_width(&self) -> Option<f64> {
         let (current, outer_turtles) = self.turtles.split_last()?;
         // Measured from the current turtle's content origin, not its pen:
@@ -1879,8 +1883,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     turtle = self.turtles.last_mut().unwrap();
                     if let Some(max) = max {
                         // take the margin into account when calculating a Fit bound
-                        // with a relative-to-parent max value.
-                        turtle.width = turtle.width.min(max - turtle.walk.margin.width());
+                        // with a relative-to-parent max value. The floor keeps a
+                        // bound smaller than the margins (a near-zero line
+                        // remnant) from producing a negative width and an
+                        // inverted clip.
+                        turtle.width = turtle
+                            .width
+                            .min((max - turtle.walk.margin.width()).max(0.0));
                     }
                 }
             }
