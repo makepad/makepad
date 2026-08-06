@@ -2185,8 +2185,23 @@ impl DrawText {
                     // The layouter works in unscaled units; rows are multiplied
                     // by font_scale on output, so the bound must be divided by
                     // it here, as max_layout_width_for_walk does.
-                    max_width_in_lpxs =
-                        Some((available.max(0.0) as f32) / self.font_scale.max(0.0001));
+                    let available_in_lpxs =
+                        (available.max(0.0) as f32) / self.font_scale.max(0.0001);
+                    // A bound too narrow for even the truncation ellipsis is no
+                    // bound at all: the layouter appends the ellipsis glyph
+                    // unconditionally, so a narrower clip would slice it open.
+                    // Left unbounded, the text overflows honestly, which lets
+                    // an enclosing flow's inline-content clamp hide it and
+                    // draw the ellipsis itself.
+                    let below_ellipsis_width = self.text_overflow == TextOverflow::Ellipsis
+                        && available_in_lpxs
+                            < self
+                                .layout(cx, 0.0, 0.0, None, false, Align::default(), "…")
+                                .size_in_lpxs
+                                .width;
+                    if !below_ellipsis_width {
+                        max_width_in_lpxs = Some(available_in_lpxs);
+                    }
                 }
             }
         }
