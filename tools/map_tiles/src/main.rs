@@ -1,5 +1,6 @@
 mod bridge_bake;
 mod merge;
+mod mkmap;
 mod nav_build;
 mod native;
 mod pbf_audit;
@@ -7,7 +8,6 @@ mod versatiles;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use makepad_fast_inflate::gzip_decompress_vec;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -22,6 +22,7 @@ const USAGE: &str = "\
 Usage:
   makepad-map-tiles versatiles <source.versatiles> <output.mbtiles> [options]
   makepad-map-tiles pbf-detail <source.osm.pbf> <output.mbtiles> --store <directory> [options]
+  makepad-map-tiles pbf-base <source.osm.pbf> <output.mbtiles> --store <directory> [options]
   makepad-map-tiles inspect-pbf <source.osm.pbf>
   makepad-map-tiles audit-pbf <source.osm.pbf>
   makepad-map-tiles probe-mbtiles <source.mbtiles> <z/x/y>
@@ -29,6 +30,9 @@ Usage:
   makepad-map-tiles nav-probe <basename> search <query...> [--near lon,lat]
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
   makepad-map-tiles bridge-bake <detail.mbtiles> <output.mbtiles> --bbox w,s,e,n [--ahn DIR] [--base base.mbtiles] [--zoom 14]
+  makepad-map-tiles transmux <source.mbtiles> <output.mkmap> [--shard-cap-bytes N]
+  makepad-map-tiles mkmap-verify <source.mbtiles>... <dir.mkmap> [stride]
+  makepad-map-tiles verify-mbtiles <archive.mbtiles> [--stride N]
 
 The legacy form without the 'versatiles' command is also accepted.
 
@@ -46,6 +50,16 @@ PBF detail options:
   --store DIRECTORY              Required bounded-memory scratch directory
   --zoom N                       Detail tile zoom (default: 14)
   --sort-memory-mib N            Per-block external-sort memory (default: 256)
+
+PBF base options (reuses a completed pbf-detail store; emits base layers
+z0..=14 plus the all-tag detail layers at z14 into ONE brotli archive):
+  --store DIRECTORY              Required completed pbf-detail store
+  --bbox w,s,e,n                 Geographic extract (default: whole store)
+  --brotli-quality N             Brotli quality 0-11 (default: 11)
+  --dict                         Encode with the shared dict-v1 dictionary
+  --threads N                    Worker threads (default: all cores)
+  --max-zoom N                   Top zoom (default: 14; below 14 skips detail)
+  --sort-memory-mib N            Per-block external-sort memory (default: 128)
 
 General:
   -h, --help                     Show this help
@@ -99,8 +113,52 @@ fn run() -> Result<(), String> {
         }
         return probe_mbtiles(Path::new(&args[1]), &args[2]);
     }
+    // verify-mbtiles <archive> [--stride N]: decode + MVT-parse every Nth
+    // tile (default 50) with the archive's codec; prints per-zoom stats.
+    if args.first().is_some_and(|arg| arg == "verify-mbtiles") {
+        let mut stride = 50_u64;
+        let mut path = None;
+        let mut iter = args[1..].iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--stride" {
+                stride = iter
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--stride needs a number")?;
+            } else {
+                path = Some(arg.clone());
+            }
+        }
+        let path = path.ok_or("verify-mbtiles needs an archive path")?;
+        return verify_mbtiles(Path::new(&path), stride.max(1));
+    }
     if args.first().is_some_and(|arg| arg == "pbf-detail") {
         return native::convert_detail(parse_detail_options(&args)?);
+    }
+    if args.first().is_some_and(|arg| arg == "pbf-base") {
+        return native::convert_base(parse_base_options(&args)?);
+    }
+    // transmux <source.mbtiles> <output.mkmap> [--shard-cap-bytes N] [--sample-stride N]
+    if args.first().is_some_and(|arg| arg == "transmux") {
+        return mkmap::transmux(mkmap::parse_transmux_options(&args)?);
+    }
+    // mkmap-verify <source.mbtiles>... <dir.mkmap> [stride]
+    if args.first().is_some_and(|arg| arg == "mkmap-verify") {
+        if args.len() < 3 {
+            return Err("mkmap-verify needs <source.mbtiles>... <dir.mkmap>".to_string());
+        }
+        // A numeric last arg is the stride; the arg before it (or the
+        // last) is the mkmap dir; everything else is the source list.
+        let (stride, dir_index) = match args.last().and_then(|v| v.parse::<u64>().ok()) {
+            Some(stride) if args.len() >= 4 => (stride.max(1), args.len() - 2),
+            _ => (37_u64, args.len() - 1),
+        };
+        let sources: Vec<std::path::PathBuf> =
+            args[1..dir_index].iter().map(Into::into).collect();
+        if sources.is_empty() {
+            return Err("mkmap-verify needs at least one source".to_string());
+        }
+        return mkmap::verify(&sources, Path::new(&args[dir_index]), stride);
     }
     if args.first().is_some_and(|arg| arg == "bridge-bake") {
         return bridge_bake::bake(bridge_bake::parse_bake_options(&args)?);
@@ -145,6 +203,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
     let mut store = None;
     let mut zoom = None;
     let mut sort_memory_mib = None;
+    let mut no_tiles = false;
     let mut index = 3;
     while index < args.len() {
         match args[index].as_str() {
@@ -178,6 +237,10 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
                     })?);
                 index += 2;
             }
+            "--no-tiles" => {
+                no_tiles = true;
+                index += 1;
+            }
             value => return Err(format!("unknown pbf-detail argument '{value}'\n\n{USAGE}")),
         }
     }
@@ -189,6 +252,111 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
     if let Some(sort_memory_mib) = sort_memory_mib {
         options.sort_memory_mib = sort_memory_mib;
     }
+    options.no_tiles = no_tiles;
+    Ok(options)
+}
+
+fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
+    if args.len() < 3 {
+        return Err(USAGE.to_string());
+    }
+    let source = PathBuf::from(&args[1]);
+    let output = PathBuf::from(&args[2]);
+    let mut store = None;
+    let mut bbox = None;
+    let mut brotli_quality = None;
+    let mut use_dict = false;
+    let mut threads = None;
+    let mut max_zoom = None;
+    let mut sort_memory_mib = None;
+    let mut baseline = None;
+    let mut index = 3;
+    while index < args.len() {
+        let take_value = |name: &str, index: usize| -> Result<&String, String> {
+            args.get(index + 1)
+                .ok_or_else(|| format!("{name} requires a value"))
+        };
+        match args[index].as_str() {
+            "--store" => {
+                if store
+                    .replace(PathBuf::from(take_value("--store", index)?))
+                    .is_some()
+                {
+                    return Err("--store may only be specified once".to_string());
+                }
+                index += 2;
+            }
+            "--bbox" => {
+                bbox = Some(GeoBounds::parse(take_value("--bbox", index)?)?);
+                index += 2;
+            }
+            "--brotli-quality" => {
+                let value = take_value("--brotli-quality", index)?;
+                brotli_quality = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|err| format!("invalid --brotli-quality '{value}': {err}"))?,
+                );
+                index += 2;
+            }
+            "--dict" => {
+                use_dict = true;
+                index += 1;
+            }
+            "--threads" => {
+                let value = take_value("--threads", index)?;
+                threads = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|err| format!("invalid --threads '{value}': {err}"))?,
+                );
+                index += 2;
+            }
+            "--max-zoom" => {
+                let value = take_value("--max-zoom", index)?;
+                max_zoom = Some(
+                    value
+                        .parse::<u8>()
+                        .map_err(|err| format!("invalid --max-zoom '{value}': {err}"))?,
+                );
+                index += 2;
+            }
+            "--sort-memory-mib" => {
+                let value = take_value("--sort-memory-mib", index)?;
+                sort_memory_mib = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|err| format!("invalid --sort-memory-mib '{value}': {err}"))?,
+                );
+                index += 2;
+            }
+            "--baseline" => {
+                baseline = Some(native::ProgressBaseline::parse(take_value(
+                    "--baseline",
+                    index,
+                )?)?);
+                index += 2;
+            }
+            value => return Err(format!("unknown pbf-base argument '{value}'\n\n{USAGE}")),
+        }
+    }
+    let store = store.ok_or_else(|| "pbf-base requires --store DIRECTORY".to_string())?;
+    let mut options = native::default_base_options(source, output, store);
+    options.bbox = bbox;
+    options.use_dict = use_dict;
+    if let Some(quality) = brotli_quality {
+        options.brotli_quality = quality;
+    }
+    if let Some(threads) = threads {
+        options.threads = threads.max(1);
+    }
+    if let Some(max_zoom) = max_zoom {
+        options.max_zoom = max_zoom;
+    }
+    if let Some(sort_memory_mib) = sort_memory_mib {
+        options.sort_memory_mib = sort_memory_mib.max(1);
+    }
+    options.baseline = baseline;
     Ok(options)
 }
 
@@ -236,14 +404,10 @@ fn probe_mbtiles(path: &Path, tile: &str) -> Result<(), String> {
     println!("tile={zoom}/{x}/{y}");
     println!("direct_lookup={direct}");
     println!("tile_bytes={}", payload.len());
-    let gzip = payload.starts_with(&[0x1f, 0x8b]);
-    println!("compression={}", if gzip { "gzip" } else { "uncompressed" });
-    let pbf = if gzip {
-        gzip_decompress_vec(&payload)
-            .map_err(|err| format!("decompress z{zoom}/{x}/{y}: {err}"))?
-    } else {
-        payload
-    };
+    println!("compression={}", reader.tile_codec().metadata_value());
+    let pbf = reader
+        .decode_tile(&payload)
+        .map_err(|err| format!("decompress z{zoom}/{x}/{y}: {err}"))?;
     let inspected = native::inspect_mvt_tile(&pbf)
         .map_err(|err| format!("inspect MVT z{zoom}/{x}/{y}: {err}"))?;
     let mut feature_total = 0_u64;
@@ -280,6 +444,72 @@ fn probe_mbtiles(path: &Path, tile: &str) -> Result<(), String> {
         }
     }
     println!("elapsed_milliseconds={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+    Ok(())
+}
+
+fn verify_mbtiles(path: &Path, stride: u64) -> Result<(), String> {
+    let started = Instant::now();
+    let mut reader =
+        MbtilesReader::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
+    println!("archive={}", path.display());
+    println!("compression={}", reader.tile_codec().metadata_value());
+    let codec = reader.tile_codec().clone();
+
+    #[derive(Default, Clone)]
+    struct ZoomStat {
+        tiles: u64,
+        bytes: u64,
+        checked: u64,
+        features: u64,
+    }
+    let mut per_zoom: BTreeMap<i64, ZoomStat> = BTreeMap::new();
+    let mut layer_features: BTreeMap<String, u64> = BTreeMap::new();
+    let mut index = 0_u64;
+    let mut failures = 0_u64;
+    reader
+        .for_each_tile(|tile| {
+            let stat = per_zoom.entry(tile.zoom_level).or_default();
+            stat.tiles += 1;
+            stat.bytes += tile.tile_data.len() as u64;
+            if index % stride == 0 {
+                match codec
+                    .decode(&tile.tile_data)
+                    .map_err(|err| err.to_string())
+                    .and_then(|pbf| native::inspect_mvt_tile(&pbf))
+                {
+                    Ok(inspection) => {
+                        stat.checked += 1;
+                        for layer in inspection.layers {
+                            stat.features += layer.features;
+                            *layer_features.entry(layer.name).or_default() += layer.features;
+                        }
+                    }
+                    Err(err) => {
+                        failures += 1;
+                        eprintln!(
+                            "decode z{}/{}/{} failed: {err}",
+                            tile.zoom_level, tile.tile_column, tile.tile_row
+                        );
+                    }
+                }
+            }
+            index += 1;
+        })
+        .map_err(|err| format!("scan {}: {err}", path.display()))?;
+    for (zoom, stat) in &per_zoom {
+        println!(
+            "zoom={zoom} tiles={} bytes={} checked={} checked_features={}",
+            stat.tiles, stat.bytes, stat.checked, stat.features
+        );
+    }
+    for (layer, features) in &layer_features {
+        println!("layer[{layer}]_checked_features={features}");
+    }
+    println!("decode_failures={failures}");
+    println!("elapsed_seconds={:.1}", started.elapsed().as_secs_f64());
+    if failures > 0 {
+        return Err(format!("{failures} sampled tiles failed to decode"));
+    }
     Ok(())
 }
 

@@ -1,0 +1,7 @@
+# Downloaded by download_assets.sh — never committed (see repo policy in game.md).
+#
+# Allow-list rather than deny-list: LICENSE-CC0.txt is checked in deliberately,
+# everything else here is fetched.
+*
+!.gitignore
+!LICENSE-CC0.txt

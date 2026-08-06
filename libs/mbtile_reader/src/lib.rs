@@ -18,7 +18,14 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+mod codec;
+mod mkmap;
 mod writer;
+pub use codec::{
+    compress_tile, compression_metadata_rows, TileCodec, TileCompression,
+    COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
+};
+pub use mkmap::{mkmap_tile_id, MkmapReader, TileArchiveReader};
 pub use writer::{MbtilesWriter, MbtilesWriterStats, WriterValue};
 
 // ---------------------------------------------------------------------------
@@ -38,6 +45,7 @@ pub enum Error {
     Utf16Decode,
     InvalidInput(String),
     InvalidWriterState(&'static str),
+    Codec(String),
 }
 
 impl std::fmt::Display for Error {
@@ -54,6 +62,7 @@ impl std::fmt::Display for Error {
             Error::Utf16Decode => write!(f, "invalid UTF-16 text"),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::InvalidWriterState(msg) => write!(f, "invalid writer state: {msg}"),
+            Error::Codec(msg) => write!(f, "codec: {msg}"),
         }
     }
 }
@@ -422,6 +431,8 @@ pub struct MbtilesReader {
     tile_index_root_page: Option<u32>,
     /// Makepad-authored files use deterministic rowids for direct B-tree lookup.
     makepad_block_rowids: bool,
+    /// Tile payload codec, parsed once from metadata (absent = gzip).
+    tile_codec: TileCodec,
     /// Small, bounded cache for table B-tree pages reused by adjacent lookups.
     btree_page_cache: HashMap<u32, Vec<u8>>,
     btree_page_cache_order: VecDeque<u32>,
@@ -457,6 +468,7 @@ impl MbtilesReader {
             metadata_root_page: 0,
             tile_index_root_page: None,
             makepad_block_rowids: false,
+            tile_codec: TileCodec::gzip(),
             btree_page_cache: HashMap::new(),
             btree_page_cache_order: VecDeque::new(),
         };
@@ -468,10 +480,11 @@ impl MbtilesReader {
             return Err(Error::TableNotFound("tiles"));
         }
 
-        reader.makepad_block_rowids = reader
-            .get_metadata()?
+        let metadata = reader.get_metadata()?;
+        reader.makepad_block_rowids = metadata
             .get("makepad_rowid_scheme")
             .is_some_and(|value| value == "block-v1-xyz");
+        reader.tile_codec = TileCodec::from_metadata(&metadata)?;
 
         Ok(reader)
     }
@@ -1004,6 +1017,31 @@ impl MbtilesReader {
         Ok(result)
     }
 
+    /// The archive's tile payload codec (parsed once from metadata at open;
+    /// archives without a `compression` metadata row are gzip).
+    pub fn tile_codec(&self) -> &TileCodec {
+        &self.tile_codec
+    }
+
+    /// Decode a stored tile payload to raw bytes using the archive's codec.
+    ///
+    /// For gzip archives this sniffs gzip/zlib magic and passes unknown
+    /// payloads through untouched (the historical behavior); for brotli
+    /// archives it brotli-decodes, attaching the shared dictionary when the
+    /// archive declares one.
+    pub fn decode_tile(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        self.tile_codec.decode(bytes)
+    }
+
+    /// [`MbtilesReader::get_tile`] followed by [`MbtilesReader::decode_tile`]:
+    /// returns the raw (decompressed) tile payload.
+    pub fn get_tile_decoded(&mut self, zoom: i64, column: i64, row: i64) -> Result<Option<Vec<u8>>> {
+        match self.get_tile(zoom, column, row)? {
+            Some(bytes) => Ok(Some(self.decode_tile(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Get all tiles at a given zoom level.
     pub fn get_tiles_at_zoom(&mut self, zoom: i64) -> Result<Vec<Tile>> {
         let mut tiles = Vec::new();
@@ -1095,6 +1133,7 @@ impl MbtilesReader {
             metadata_root_page: 0,
             tile_index_root_page: None,
             makepad_block_rowids: false,
+            tile_codec: TileCodec::gzip(),
             btree_page_cache: HashMap::new(),
             btree_page_cache_order: VecDeque::new(),
         })

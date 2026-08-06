@@ -3,15 +3,17 @@ use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
-    append_tessellated_geometry, append_tessellated_geometry_decked, tessellate_path_fill,
-    LineCap, LineJoin, Tessellator, VVertex,
+    append_expanded_stroke_geometry, append_tessellated_geometry,
+    append_tessellated_geometry_decked, compute_clip_radii, pack_vector_vertices,
+    VECTOR_PACKED_FLOATS_PER_VERTEX,
+    tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
 };
 use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
 use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
-use makepad_mbtile_reader::MbtilesReader;
+use makepad_mbtile_reader::{MbtilesReader, TileArchiveReader};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,6 +83,17 @@ pub enum TileLoadState {
         casing_geometry: Option<Geometry>,
         stroke_geometry: Option<Geometry>,
         icon_geometry: Option<Geometry>,
+        /// Street-band icons (zoom floor > ICON_HIGH_BAND_FLOOR) — drawn
+        /// only when the view can actually reveal them.
+        icon_high_geometry: Option<Geometry>,
+        /// Analytic AA fringes — skipped at strong tilt where blur and
+        /// density hide 1px edge AA.
+        fringe_geometry: Option<Geometry>,
+        /// 3D volume geometry, distance-faded from the view focus.
+        fill_3d_geometry: Option<Geometry>,
+        wall_geometry: Option<Geometry>,
+        tree_geometry: Option<Geometry>,
+        tree_cross_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -95,6 +108,11 @@ pub struct TileEntry {
     pub state: TileLoadState,
     pub last_used: u64,
     pub attempts: u8,
+    /// Earliest frame a REBUILD of a still-drawable stale entry may be
+    /// re-requested (backoff after a failed rebuild). A failed rebuild must
+    /// never replace live stale geometry with a gray placeholder; the
+    /// backoff lives here instead of in TileLoadState::Failed.
+    pub retry_after: u64,
     /// Geometry buffer footprint (CPU-side floats at bake time; the GPU
     /// copy is the same order of magnitude). Drives byte-budget eviction —
     /// 3D building tiles reach 60-90 MB each, so a tile-count cap alone
@@ -193,6 +211,88 @@ pub struct PinHit {
     pub lift_m: f32,
 }
 
+/// Zoom floor above which icons go to the high (street) band; the draw
+/// skips that band entirely below view ~16.25.
+pub const ICON_HIGH_BAND_FLOOR: f32 = 16.01;
+
+/// Partition icon geometry by per-vertex zoom floor (slot 15): triangles
+/// whose vertices carry a floor above the threshold move to the high band.
+/// One O(n) pass on the builder thread; vertex records are remapped
+/// per-band so both halves are self-contained (verts, indices) pairs.
+fn split_icon_band(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+) -> (Vec<f32>, Vec<u32>) {
+    split_band_by(vertices, indices, |record| record[15] > ICON_HIGH_BAND_FLOOR)
+}
+
+/// Partition the analytic AA fringes (stroke_mult sentinel 2e6, slot 8)
+/// out of the casing buffer: at strong tilt the tilt-shift blur and
+/// geometry density hide 1px edge AA, and the fringes are ~2/3 of the
+/// casing vertex mass on street tiles.
+fn split_fringe_band(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+) -> (Vec<f32>, Vec<u32>) {
+    split_band_by(vertices, indices, |record| record[8] > 1.5e6)
+}
+
+fn split_band_by(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    predicate: impl Fn(&[f32]) -> bool,
+) -> (Vec<f32>, Vec<u32>) {
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut is_high = vec![false; vert_count];
+    let mut any_high = false;
+    for (vi, record) in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX).enumerate() {
+        if predicate(record) {
+            is_high[vi] = true;
+            any_high = true;
+        }
+    }
+    if !any_high {
+        return (Vec::new(), Vec::new());
+    }
+    let mut low_vertices = Vec::new();
+    let mut low_indices = Vec::new();
+    let mut high_vertices = Vec::new();
+    let mut high_indices = Vec::new();
+    // Old vertex index -> new index in its band (u32::MAX = unmapped).
+    let mut remap = vec![u32::MAX; vert_count];
+    for tri in indices.chunks_exact(3) {
+        let high = is_high[tri[0] as usize];
+        let (band_verts, band_indices) = if high {
+            (&mut high_vertices, &mut high_indices)
+        } else {
+            (&mut low_vertices, &mut low_indices)
+        };
+        for &old in tri {
+            let slot = &mut remap[old as usize];
+            if *slot == u32::MAX || (is_high[old as usize] != high) {
+                // (mixed triangles duplicate the odd vertex into this band)
+            }
+            let mapped = if *slot != u32::MAX && is_high[old as usize] == high {
+                *slot
+            } else {
+                let new_index = (band_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                let start = old as usize * VECTOR_FLOATS_PER_VERTEX;
+                band_verts.extend_from_slice(
+                    &vertices[start..start + VECTOR_FLOATS_PER_VERTEX],
+                );
+                if is_high[old as usize] == high {
+                    *slot = new_index;
+                }
+                new_index
+            };
+            band_indices.push(mapped);
+        }
+    }
+    *vertices = low_vertices;
+    *indices = low_indices;
+    (high_vertices, high_indices)
+}
+
 #[derive(Debug)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
@@ -204,6 +304,28 @@ pub struct TileBuffers {
     pub stroke_vertices: Vec<f32>,
     pub icon_indices: Vec<u32>,
     pub icon_vertices: Vec<f32>,
+    /// Street-band icons (per-vertex zoom floor > ICON_HIGH_BAND_FLOOR):
+    /// the z18 horizon carries millions of shader-collapsed icon verts
+    /// that mid zooms never show — split out so the draw skips the whole
+    /// band below the floor instead of vertex-processing it every frame.
+    pub icon_high_indices: Vec<u32>,
+    pub icon_high_vertices: Vec<f32>,
+    /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
+    pub fringe_indices: Vec<u32>,
+    pub fringe_vertices: Vec<f32>,
+    /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
+    /// tilt so the far field skips its vertex mass.
+    pub fill_3d_indices: Vec<u32>,
+    pub fill_3d_vertices: Vec<f32>,
+    /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
+    pub wall_indices: Vec<u32>,
+    pub wall_vertices: Vec<f32>,
+    /// Full canopy balls (MAT_CANOPY) — near ring only.
+    pub tree_indices: Vec<u32>,
+    pub tree_vertices: Vec<f32>,
+    /// Crossed-quad tree stand-ins for the mid/far rings.
+    pub tree_cross_indices: Vec<u32>,
+    pub tree_cross_vertices: Vec<f32>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -216,6 +338,10 @@ pub struct TileBuffers {
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
     pub render_zoom: u32,
+    /// Compact per-stage build timing ("stage:ms stage:ms ..."), filled for
+    /// builds over ~100ms — carried into the SLOW-tile log so a slow build
+    /// is replayable headlessly without re-hitting it in-app.
+    pub stage_summary: String,
 }
 
 impl TileBuffers {
@@ -228,6 +354,18 @@ impl TileBuffers {
             + self.stroke_indices.len()
             + self.stroke_vertices.len()
             + self.icon_indices.len()
+            + self.icon_high_indices.len()
+            + self.icon_high_vertices.len()
+            + self.fringe_indices.len()
+            + self.fringe_vertices.len()
+            + self.fill_3d_indices.len()
+            + self.fill_3d_vertices.len()
+            + self.wall_indices.len()
+            + self.wall_vertices.len()
+            + self.tree_indices.len()
+            + self.tree_vertices.len()
+            + self.tree_cross_indices.len()
+            + self.tree_cross_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len())
@@ -245,10 +383,15 @@ impl TileBuffers {
         if road_indices.is_empty() || road_vertices.is_empty() {
             return;
         }
-        let vertex_base = (self.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        // icon_vertices is GPU-PACKED at this point (12-slot stride); the
+        // cached road decals are kept as logical 19-float records — pack
+        // them on the way in and base indices on the packed stride.
+        let vertex_base =
+            (self.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX) as u32;
         self.icon_indices
             .extend(road_indices.iter().map(|index| index + vertex_base));
-        self.icon_vertices.extend_from_slice(road_vertices);
+        self.icon_vertices
+            .extend_from_slice(&pack_vector_vertices(road_vertices));
         self.road_icon_indices.clear();
         self.road_icon_indices.extend_from_slice(road_indices);
         self.road_icon_vertices.clear();
@@ -342,9 +485,34 @@ enum RoadVerticalClass {
     Elevated,
 }
 
+/// Sentinel for "no casing pass" in `RoadSurfaceKey::casing_width_bits`
+/// (real width bit patterns never collide with it).
+const NO_CASING_BITS: u32 = u32::MAX;
+
+/// Expand-class band offset selecting the CLAMPED face correction in the
+/// shader (faces only widen; strokes keep the exact curve).
+pub const FACE_MORPH_CLASS_OFFSET: f32 = 4.0;
+
+/// Cascade-input dump lever: env for headless runs, file flag for
+/// studio-launched apps (their env is the studio's).
+fn cascade_dump_armed() -> bool {
+    std::env::var_os("MAKEPAD_CASCADE_DUMP").is_some()
+        || std::path::Path::new("/tmp/mp_cascade_dump").exists()
+}
+
+/// Theme-stable identity of one road-surface union tier. NO resolved
+/// colors: grouping, paint-order tiebreaks and the faces-bake signature
+/// key on the styling rule's class id plus the geometric fields, so one
+/// bake serves the light/dark/circuit themes (which by contract only
+/// recolor). Field order is the derived Ord = the tier paint order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
-struct RoadSurfaceKey {
-    style: StrokeStyleKey,
+pub(crate) struct RoadSurfaceKey {
+    sort_rank: i16,
+    class_id: u32,
+    center_width_bits: u32,
+    center_depth_micro_bits: u32,
+    casing_width_bits: u32,
+    casing_depth_micro_bits: u32,
     vertical: RoadVerticalClass,
     /// Normalized OSM stack level. Untagged signed profiles use -1/+1.
     layer: i8,
@@ -361,6 +529,7 @@ impl RoadSurfaceKey {
         let raw_layer = tags
             .get("osm_layer")
             .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
             .map(|value| value.round() as i32);
         // Mirror the importer/baker's normalization so renderer-side sheet
         // identity cannot disagree with the profile solver.
@@ -395,7 +564,16 @@ impl RoadSurfaceKey {
             (RoadVerticalClass::Surface, 0)
         };
         Self {
-            style: StrokeStyleKey::from(style),
+            sort_rank: style.sort_rank,
+            class_id: style.class_id,
+            center_width_bits: style.center.width.to_bits(),
+            center_depth_micro_bits: style.center.depth_micro.to_bits(),
+            casing_width_bits: style
+                .casing
+                .map_or(NO_CASING_BITS, |pass| pass.width.to_bits()),
+            casing_depth_micro_bits: style
+                .casing
+                .map_or(NO_CASING_BITS, |pass| pass.depth_micro.to_bits()),
             vertical,
             layer,
         }
@@ -444,11 +622,13 @@ fn road_semantic_param5(level: i8, phase: u8, depth_micro: f32) -> f32 {
 
 fn road_surface_param5(key: RoadSurfaceKey, phase: u8) -> f32 {
     let depth_micro = if phase == 1 {
-        key.style.casing.map_or(0.0, |pass| {
-            f32::from_bits(pass.depth_micro_bits)
-        })
+        if key.casing_depth_micro_bits == NO_CASING_BITS {
+            0.0
+        } else {
+            f32::from_bits(key.casing_depth_micro_bits)
+        }
     } else {
-        f32::from_bits(key.style.center.depth_micro_bits)
+        f32::from_bits(key.center_depth_micro_bits)
     };
     road_semantic_param5(key.depth_level(), phase, depth_micro)
 }
@@ -568,6 +748,54 @@ struct RoadTierGradeCorrection {
 /// for a typed link joining a non-link road of the same family. That typed
 /// relationship is also the only one allowed to lower an endpoint: the
 /// wider through road is authoritative in either direction.
+/// Way-bbox cell grid for the endpoint join passes: an endpoint query
+/// returns every way whose bbox expanded by its own half-width plus the
+/// caller's worst-case source reach can contain the point. Candidate lists
+/// stay in ascending way order (insertion order), so first-match iteration
+/// semantics survive the prefilter exactly.
+struct WayBboxGrid {
+    cell: f32,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl WayBboxGrid {
+    fn build(
+        way_bounds: &[(f32, f32, f32, f32, f32)],
+        ways: &[RoadTierJoinWay],
+        extra_reach: f32,
+    ) -> WayBboxGrid {
+        let cell = 16.0f32;
+        let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for (way_index, (&(bx0, by0, bx1, by1, _), way)) in
+            way_bounds.iter().zip(ways).enumerate()
+        {
+            if bx0 > bx1 {
+                continue;
+            }
+            let reach = way.half_width + extra_reach + 0.01;
+            let clamp_cell = |v: f32| ((v / cell).floor() as i32).clamp(-64, 64);
+            let x0 = clamp_cell(bx0 - reach);
+            let x1 = clamp_cell(bx1 + reach);
+            let y0 = clamp_cell(by0 - reach);
+            let y1 = clamp_cell(by1 + reach);
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    cells.entry((cx, cy)).or_default().push(way_index as u32);
+                }
+            }
+        }
+        WayBboxGrid { cell, cells }
+    }
+
+    fn candidates(&self, point: (f32, f32)) -> &[u32] {
+        let key = (
+            ((point.0 / self.cell).floor() as i32).clamp(-64, 64),
+            ((point.1 / self.cell).floor() as i32).clamp(-64, 64),
+        );
+        self.cells.get(&key).map_or(&[], |cell| cell.as_slice())
+    }
+}
+
 fn endpoint_to_through_grade_corrections(
     ways: &[RoadTierJoinWay],
 ) -> Vec<RoadTierGradeCorrection> {
@@ -577,6 +805,37 @@ fn endpoint_to_through_grade_corrections(
     const MAX_TYPED_CORRECTION_M: f32 = 40.0;
     const CORRECTION_EPSILON_M: f32 = 0.001;
 
+    // Per-way bbox + polyline length, computed once: every distance gate
+    // below is bounded by source.half_width + target.half_width, so an
+    // endpoint outside the target's expanded bbox can never contribute —
+    // the pair scan was O(ways^2 x points) on mid-zoom city tiles.
+    let way_bounds: Vec<(f32, f32, f32, f32, f32)> = ways
+        .iter()
+        .map(|way| {
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            for &(x, y) in &way.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            let total_len: f32 = way
+                .points
+                .windows(2)
+                .map(|pair| {
+                    let dx = pair[1].0 - pair[0].0;
+                    let dy = pair[1].1 - pair[0].1;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .sum();
+            (min_x, min_y, max_x, max_y, total_len)
+        })
+        .collect();
+    let max_source_hw = ways.iter().map(|way| way.half_width).fold(0.0f32, f32::max);
+    let bbox_grid = WayBboxGrid::build(&way_bounds, ways, max_source_hw);
     let mut corrections = Vec::new();
     for source in ways {
         if source.points.len() < 2 || source.dz.len() != source.points.len() {
@@ -609,7 +868,18 @@ fn endpoint_to_through_grade_corrections(
             let source_dz = source.dz[end_index];
             let mut best: Option<(f32, f32)> = None;
 
-            for target in ways {
+            for &target_index in bbox_grid.candidates(point) {
+                let target_index = target_index as usize;
+                let target = &ways[target_index];
+                let (bx0, by0, bx1, by1, total_len) = way_bounds[target_index];
+                let reach = source.half_width + target.half_width;
+                if point.0 < bx0 - reach
+                    || point.0 > bx1 + reach
+                    || point.1 < by0 - reach
+                    || point.1 > by1 + reach
+                {
+                    continue;
+                }
                 if target.key == source.key
                     || !source.key.grade_compatible(target.key)
                     || target.points.len() < 2
@@ -619,21 +889,12 @@ fn endpoint_to_through_grade_corrections(
                 }
                 // A link inherits from its mainline, never the reverse.
                 // Width handles styles whose painter ranks happen to tie.
-                if target.key.style.sort_rank <= source.key.style.sort_rank
+                if target.key.sort_rank <= source.key.sort_rank
                     && target.half_width <= source.half_width * 1.1
                 {
                     continue;
                 }
 
-                let total_len: f32 = target
-                    .points
-                    .windows(2)
-                    .map(|pair| {
-                        let dx = pair[1].0 - pair[0].0;
-                        let dy = pair[1].1 - pair[0].1;
-                        (dx * dx + dy * dy).sqrt()
-                    })
-                    .sum();
                 if total_len <= 1e-4 {
                     continue;
                 }
@@ -702,7 +963,7 @@ fn endpoint_to_through_grade_corrections(
                     let large_join_gap = (source.half_width * 0.25).max(0.35);
                     if (delta < -CORRECTION_EPSILON_M || delta > MAX_RAISE_M)
                         && (tangent_dot < LARGE_JOIN_TANGENT_DOT
-                            || target.key.style.sort_rank <= source.key.style.sort_rank
+                            || target.key.sort_rank <= source.key.sort_rank
                             || target.half_width <= source.half_width * 1.1
                             || distance_sq > large_join_gap * large_join_gap)
                     {
@@ -782,9 +1043,23 @@ fn endpoint_to_through_flush_ends(
         })
         .collect();
 
+    // Endpoint hash grid (1-unit cells): continuation proofs join endpoints
+    // within MAX_NODE_DISTANCE (0.2), so candidates always share the 3x3
+    // neighborhood — the previous all-ways rescan per endpoint was the
+    // larger quadratic half of this pass on mid-zoom city tiles.
+    let mut endpoint_cells: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (way_index, slots) in endpoints.iter().enumerate() {
+        for endpoint in slots.iter().flatten() {
+            let cell = (endpoint.point.0.floor() as i32, endpoint.point.1.floor() as i32);
+            let entry = endpoint_cells.entry(cell).or_default();
+            if entry.last() != Some(&way_index) {
+                entry.push(way_index);
+            }
+        }
+    }
     // Precompute the exact through proof once. Looking it up inside every
-    // source/target pair keeps this pass quadratic rather than rescanning all
-    // ways a third time for every candidate.
+    // source/target pair keeps this pass linear-ish rather than rescanning
+    // all ways a third time for every candidate.
     let continuations: Vec<[Vec<usize>; 2]> = ways
         .iter()
         .enumerate()
@@ -793,18 +1068,31 @@ fn endpoint_to_through_flush_ends(
                 let Some(target_end) = endpoints[target_index][target_end_slot] else {
                     return Vec::new();
                 };
-                ways.iter()
-                    .enumerate()
-                    .filter(|(continuation_index, continuation)| {
+                let cell_x = target_end.point.0.floor() as i32;
+                let cell_y = target_end.point.1.floor() as i32;
+                let mut candidates: Vec<usize> = Vec::new();
+                for cy in (cell_y - 1)..=(cell_y + 1) {
+                    for cx in (cell_x - 1)..=(cell_x + 1) {
+                        if let Some(cell) = endpoint_cells.get(&(cx, cy)) {
+                            candidates.extend_from_slice(cell);
+                        }
+                    }
+                }
+                candidates.sort_unstable();
+                candidates.dedup();
+                candidates
+                    .into_iter()
+                    .filter(|&continuation_index| {
+                        let continuation = &ways[continuation_index];
                         let min_width = target.half_width.min(continuation.half_width);
                         let max_width = target.half_width.max(continuation.half_width);
-                        *continuation_index != target_index
+                        continuation_index != target_index
                             && target.meta.same_known_family(continuation.meta)
                             && target.key.grade_compatible(continuation.key)
                             && target.meta.is_link == continuation.meta.is_link
                             && min_width > 1e-5
                             && max_width / min_width <= 1.25
-                            && endpoints[*continuation_index]
+                            && endpoints[continuation_index]
                                 .iter()
                                 .flatten()
                                 .any(|continuation_end| {
@@ -822,12 +1110,42 @@ fn endpoint_to_through_flush_ends(
                                             < MAX_DZ_GAP_M
                                 })
                     })
-                    .map(|(continuation_index, _)| continuation_index)
                     .collect()
             })
         })
         .collect();
 
+    // Same bbox prefilter as the grade pass: every proximity gate in the
+    // target loop is bounded by half-width sums (plus the 0.35 centerline
+    // floor), so distant targets can never classify an end as flush.
+    let way_bounds: Vec<(f32, f32, f32, f32, f32)> = ways
+        .iter()
+        .map(|way| {
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            for &(x, y) in &way.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            let total_len: f32 = way
+                .points
+                .windows(2)
+                .map(|pair| {
+                    let dx = pair[1].0 - pair[0].0;
+                    let dy = pair[1].1 - pair[0].1;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .sum();
+            (min_x, min_y, max_x, max_y, total_len)
+        })
+        .collect();
+    let max_source_hw = ways.iter().map(|way| way.half_width).fold(0.0f32, f32::max);
+    let bbox_grid =
+        WayBboxGrid::build(&way_bounds, ways, max_source_hw + MIN_CENTERLINE_GAP);
     let mut flush = std::collections::HashSet::new();
     for (source_index, source) in ways.iter().enumerate() {
         if source.points.len() < 2 || source.dz.len() != source.points.len() {
@@ -858,7 +1176,18 @@ fn endpoint_to_through_flush_ends(
             }
             let outward = (out_x / out_len, out_y / out_len);
 
-            'targets: for (target_index, target) in ways.iter().enumerate() {
+            'targets: for &target_index in bbox_grid.candidates(point) {
+                let target_index = target_index as usize;
+                let target = &ways[target_index];
+                let (bx0, by0, bx1, by1, precomputed_len) = way_bounds[target_index];
+                let reach = source.half_width + target.half_width + MIN_CENTERLINE_GAP;
+                if point.0 < bx0 - reach
+                    || point.0 > bx1 + reach
+                    || point.1 < by0 - reach
+                    || point.1 > by1 + reach
+                {
+                    continue;
+                }
                 if target.key == source.key
                     || !source.key.grade_compatible(target.key)
                     || target.points.len() < 2
@@ -967,15 +1296,7 @@ fn endpoint_to_through_flush_ends(
                     }
                 }
 
-                let total_len: f32 = target
-                    .points
-                    .windows(2)
-                    .map(|pair| {
-                        let dx = pair[1].0 - pair[0].0;
-                        let dy = pair[1].1 - pair[0].1;
-                        (dx * dx + dy * dy).sqrt()
-                    })
-                    .sum();
+                let total_len = precomputed_len;
                 if total_len <= 1e-4 {
                     continue;
                 }
@@ -1245,6 +1566,10 @@ struct FillFeatureGroup {
     /// close zoom lift with the stroke decks instead of lying flat under
     /// the crossing.
     deck_m: f32,
+    /// Index into the tile's decoded baked-fill list when this feature's
+    /// triangulation was pre-baked (payload v2-fills-1). Flat mode then
+    /// skips runtime ring classification + tessellation for the body.
+    baked: Option<usize>,
     /// Road-surface polygon: eligible for per-vertex corridor decks when a
     /// baked bridge-dz overlay covers the tile.
     deckable: bool,
@@ -1427,6 +1752,7 @@ pub fn build_tile_buffers_from_body(
             tags: way.tags,
             closed: way.closed,
             dz: None,
+            fidx: None,
         });
     }
 
@@ -1441,6 +1767,8 @@ pub fn build_tile_buffers_from_body(
         Vec::new(),
         false,
         false,
+        Vec::new(),
+        None,
     ))
 }
 
@@ -1448,6 +1776,14 @@ pub fn build_tile_buffers_from_body(
 /// coordinates — no lon/lat round trip, no generated-JSON detour.
 /// Render buckets from which 2.5D buildings are baked.
 pub const BUILDING_3D_MIN_ZOOM: u32 = 15;
+
+/// Icon INCLUSION horizon: from the high keyframe bucket (16) tiles carry
+/// every icon through z18 with its real zoom floor encoded per icon; the
+/// shader's live `icon_zoom` uniform reveals them per frame. Inclusion
+/// stays bucket-gated below the keyframe so mid-zoom buffers stay lean.
+fn icon_inclusion_zoom(render_zoom: u32) -> f32 {
+    if render_zoom >= 16 { 18.0 } else { render_zoom as f32 }
+}
 
 pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
@@ -1462,11 +1798,45 @@ pub fn build_tile_buffers_from_mvt(
     build_road_core: bool,
 ) -> Result<TileBuffers, String> {
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
+    let mut profiler = TileProfiler::new();
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
+    profiler.lap("payload-decode", "");
+    // Baked fill triangulations (payload v2-fills-1, field 100): flat mode
+    // substitutes them for the runtime tessellation of the big polygon
+    // features. 3D/terrain ignores the stream — drape and extrusion re-grid
+    // from the rings. MAKEPAD_NO_BAKED_FILLS=1 is the kill switch (also the
+    // A/B lever for benchmarks).
+    static NO_BAKED_FILLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let no_baked =
+        *NO_BAKED_FILLS.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FILLS").is_ok());
+    let baked_fills: Vec<BakedFillFeature> = if buildings_3d || no_baked {
+        Vec::new()
+    } else {
+        parse_baked_fills(&pbf_data).unwrap_or_default()
+    };
+    // Baked painter-cascade faces (v2-faces-1, field 101): z14 tiles carry
+    // buckets 14/16, mid-zoom tiles their native bucket (the runtime
+    // cascade at z11-13 city tiles measured 117-340ms — worse than z14).
+    // A bucket missing from the stream or any signature mismatch falls
+    // back to the runtime cascade. MAKEPAD_NO_BAKED_FACES=1 is the kill
+    // switch / A/B lever.
+    static NO_BAKED_FACES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let no_baked_faces =
+        *NO_BAKED_FACES.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FACES").is_ok());
+    let baked_faces = if !no_baked_faces
+        && (10..=18).contains(&render_zoom)
+        && !faces_bake_sink_armed()
+    {
+        parse_baked_faces(&pbf_data, render_zoom)
+    } else {
+        None
+    };
+    profiler.lap("baked-parse", "");
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
         .max(1e-3) as f32;
     let mut collector = MvtLocalCollector::new(render_scale);
+    collector.layer_filter = LayerParseFilter::BaseNoDetailLayers;
     // Baked base_dz overlay: dense solved height profiles keyed to this
     // tile's exact base features. The profile geometry replaces sparse base
     // edges during collection after an endpoint identity check.
@@ -1482,14 +1852,17 @@ pub fn build_tile_buffers_from_mvt(
             ),
         }
     }
+    profiler.lap("dz-parse", "");
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    profiler.lap("mvt-parse", "");
     // Compose micro-POIs (trees, benches, bins…) and, in 2.5D mode, building
     // footprints with real heights from the all-tag detail archive over the
     // shortbread base — skip the extra decode below the zooms that use them.
     let want_buildings = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
     let mut bridge_corridors = Vec::<BridgeCorridor>::new();
     // Bridge corridors want the detail archive from bucket 14 in 3D.
-    let want_detail_points = render_zoom >= ICON_MIN_ZOOM;
+    let want_detail_points = !faces_bake_sink_armed()
+        && icon_inclusion_zoom(render_zoom) >= ICON_MIN_ZOOM as f32;
     let want_detail_platforms = render_zoom >= 16;
     // Road elevation is camera-independent. Outside solved bridge-dz
     // coverage collect the heuristic corridors in flat mode too, making
@@ -1524,6 +1897,7 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
 
+    profiler.lap("detail-merge", "");
     for overlay in overlay_tiles {
         if let Err(err) = merge_overlay_features(
             overlay,
@@ -1541,7 +1915,9 @@ pub fn build_tile_buffers_from_mvt(
             );
         }
     }
-    Ok(build_tile_buffers_from_features(
+    profiler.lap("overlay-merge", "");
+    Ok(build_tile_buffers_from_features_profiled(
+        profiler,
         tile_key,
         collector.ways,
         collector.points,
@@ -1552,6 +1928,8 @@ pub fn build_tile_buffers_from_mvt(
         bridge_corridors,
         bridge_dz_covered,
         have_charger_overlay,
+        baked_fills,
+        baked_faces,
     ))
 }
 
@@ -1590,6 +1968,7 @@ impl MvtSink for BridgeDzCollector {
             tags,
             closed: close,
             dz: None,
+            fidx: None,
         });
     }
 
@@ -1878,10 +2257,27 @@ fn merge_detail_features(
     ways: &mut Vec<TileWay>,
     corridors: &mut Vec<BridgeCorridor>,
 ) -> Result<(), String> {
+    let census_start = ways.len();
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
-    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
+    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
+    // buffers carry all street icons; the shader reveals by live zoom.
+    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
+    // Combined archives carry base AND detail layers in one tile; this
+    // pass only consumes the raw osm_* layers, and of those only the
+    // geometry classes the flags below reach:
+    // - points: micro-POI icons (want_points only)
+    // - lines: heuristic bridge corridors, barrier/pedestrian/attraction
+    //   rings (platform zooms)
+    // - polygons: buildings, platforms, and polygon-anchored POI icons
+    let want_platform_zoom = render_zoom >= 15.5;
+    collector.layer_filter = LayerParseFilter::DetailLayers {
+        points: want_points,
+        lines: collect_corridors || want_platform_zoom,
+        polygons: want_buildings || want_platform_zoom || want_points,
+    };
+    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     for way in &collector.ways {
         if !collect_corridors {
             break;
@@ -1905,6 +2301,7 @@ fn merge_detail_features(
         let osm_layer = tags
             .get("osm_layer")
             .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
             .unwrap_or(0.0);
         let deck_m = if osm_layer >= 1.0 {
             5.5 * osm_layer.min(3.0)
@@ -1923,6 +2320,7 @@ fn merge_detail_features(
         let half_width = tags
             .get("width")
             .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
             .map(|w| (w * 0.75).clamp(4.0, 14.0))
             .unwrap_or(7.0)
             * units_per_m;
@@ -1943,7 +2341,7 @@ fn merge_detail_features(
                 && (tags.contains_key("attraction") || tags.contains_key("zoo"));
             match micro_icon_for_tags(&tags) {
                 Some((icon, _)) => {
-                    if render_zoom < micro_icon_min_zoom(icon) {
+                    if icon_horizon < micro_icon_min_zoom(icon) {
                         continue;
                     }
                 }
@@ -1971,7 +2369,7 @@ fn merge_detail_features(
                 let underground =
                     way.tags.get("parking").map(|v| v.as_str()) == Some("underground");
                 if let Some((icon, _)) = micro_icon_for_tags(&way.tags).filter(|_| !underground) {
-                    if render_zoom >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
+                    if icon_horizon >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
                         let mut tags = way.tags.clone();
                         tags.insert("layer".to_string(), "micro_pois".to_string());
                         points.push((ring_centroid(&way.points), tags));
@@ -2144,6 +2542,17 @@ fn merge_detail_features(
                 .insert("layer".to_string(), "detail_buildings".to_string());
             ways.push(way);
         }
+    }
+    // MAKEPAD_DETAIL_KEY_CENSUS=1: distinct tag keys on forwarded detail
+    // ways — the ground truth for the parse whitelist above.
+    if std::env::var_os("MAKEPAD_DETAIL_KEY_CENSUS").is_some() {
+        let mut census = std::collections::BTreeMap::<String, usize>::new();
+        for way in ways.iter().skip(census_start) {
+            for key in way.tags.keys() {
+                *census.entry(key.clone()).or_default() += 1;
+            }
+        }
+        eprintln!("DETAIL-KEY-CENSUS z{}/{}/{}: {census:?}", tile_key.z, tile_key.x, tile_key.y);
     }
     Ok(())
 }
@@ -2322,7 +2731,11 @@ fn building_height_m(tags: &HashMap<String, String>) -> f32 {
     }
     if let Some(levels) = tags.get("building:levels") {
         if let Ok(n) = levels.trim().parse::<f32>() {
-            return (n * 3.0 + 2.0).clamp(3.0, 220.0);
+            // "nan"/"inf" parse as valid f32s; three buildings on the
+            // planet carry such tags and a NaN height panics the bake.
+            if n.is_finite() {
+                return (n * 3.0 + 2.0).clamp(3.0, 220.0);
+            }
         }
     }
     8.0
@@ -2343,7 +2756,9 @@ fn building_min_height_m(tags: &HashMap<String, String>) -> f32 {
     }
     if let Some(levels) = tags.get("building:min_level") {
         if let Ok(n) = levels.trim().parse::<f32>() {
-            return (n * 3.0).clamp(0.0, 220.0);
+            if n.is_finite() {
+                return (n * 3.0).clamp(0.0, 220.0);
+            }
         }
     }
     0.0
@@ -2845,6 +3260,10 @@ pub struct TileWay {
     /// Baked per-vertex deck height (m), aligned with `points` — from the
     /// base_dz overlay join. The way lifts off its own profile.
     pub dz: Option<Vec<f32>>,
+    /// Source-layer feature index in MVT decode order: the join key into
+    /// the baked fill stream (protobuf field 100, payload v2-fills-1).
+    /// None for ways that did not come from a plain base-tile decode.
+    pub fidx: Option<u32>,
 }
 
 /// Stage clock for MP_TILE_PROFILE=1: per-stage wall time to stderr, so the
@@ -2853,6 +3272,9 @@ struct TileProfiler {
     on: bool,
     last: std::time::Instant,
     start: std::time::Instant,
+    /// Always recorded (cheap): fuels the SLOW-tile replay log even when
+    /// stage printing is off.
+    laps: Vec<(&'static str, f64)>,
 }
 
 impl TileProfiler {
@@ -2861,21 +3283,36 @@ impl TileProfiler {
         // File flag reaches studio-launched apps where env vars cannot.
         TileProfiler {
             on: std::env::var_os("MP_TILE_PROFILE").is_some()
+                || std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
                 || std::path::Path::new("/tmp/mp_tile_profile").exists(),
             last: now,
             start: now,
+            laps: Vec::new(),
         }
     }
-    fn lap(&mut self, name: &str, extra: &str) {
-        if !self.on {
-            return;
-        }
+    fn lap(&mut self, name: &'static str, extra: &str) {
         let now = std::time::Instant::now();
-        eprintln!(
-            "MPPROF {name} {:.1}ms {extra}",
-            (now - self.last).as_secs_f64() * 1000.0
-        );
+        let ms = (now - self.last).as_secs_f64() * 1000.0;
+        self.laps.push((name, ms));
+        if self.on {
+            eprintln!("MPPROF {name} {ms:.1}ms {extra}");
+        }
         self.last = now;
+    }
+
+    /// Compact "stage:ms" summary for builds worth logging.
+    fn summary(&self) -> String {
+        let mut out = String::new();
+        for (name, ms) in &self.laps {
+            if *ms < 0.5 {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{name}:{ms:.0}"));
+        }
+        out
     }
     fn total(&self, tile_key: TileKey, extra: &str) {
         if !self.on {
@@ -2891,6 +3328,56 @@ impl TileProfiler {
     }
 }
 
+/// Deck (overpass) ground-shadow shapes: chunked dissolve of the swept
+/// slab quads, minus grounded building footprints. Deterministic per
+/// (tile, bucket) — baked into the shadow section at capture time; the
+/// runtime only runs this on a shadow-bake MISS.
+fn dissolve_deck_shadows(
+    deck_shadow_paths: Vec<Vec<[f64; 2]>>,
+    building_shadow_footprints: &[Vec<[f64; 2]>],
+) -> Vec<Vec<Vec<[f64; 2]>>> {
+    use i_overlay::core::fill_rule::FillRule as IoFillRule;
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::float::simplify::SimplifyShape;
+    use i_overlay::float::single::SingleFloatOverlay;
+    const DECK_SHADOW_CHUNK: usize = 3000;
+    let mut shapes = if deck_shadow_paths.len() <= DECK_SHADOW_CHUNK {
+        deck_shadow_paths.simplify_shape(IoFillRule::NonZero)
+    } else {
+        let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+        for chunk in deck_shadow_paths.chunks(DECK_SHADOW_CHUNK) {
+            let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
+            if acc.is_empty() {
+                acc = part;
+            } else {
+                let part_paths: Vec<Vec<[f64; 2]>> = part
+                    .iter()
+                    .flat_map(|shape| shape.iter().cloned())
+                    .collect();
+                acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
+            }
+        }
+        acc
+    };
+    if !building_shadow_footprints.is_empty() {
+        let mut acc = shapes;
+        for chunk in building_shadow_footprints.chunks(DECK_SHADOW_CHUNK) {
+            let subject: Vec<Vec<[f64; 2]>> = acc
+                .iter()
+                .flat_map(|shape| shape.iter().cloned())
+                .collect();
+            acc = subject.overlay(
+                &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
+                OverlayRule::Difference,
+                IoFillRule::NonZero,
+            );
+        }
+        shapes = acc;
+    }
+    shapes
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_tile_buffers_from_features(
     tile_key: TileKey,
     tile_ways: Vec<TileWay>,
@@ -2902,8 +3389,45 @@ fn build_tile_buffers_from_features(
     bridge_corridors: Vec<BridgeCorridor>,
     bridge_dz_covered: bool,
     have_charger_overlay: bool,
+    baked_fills: Vec<BakedFillFeature>,
+    baked_faces: Option<BakedFacesBucket>,
 ) -> TileBuffers {
-    let mut profiler = TileProfiler::new();
+    build_tile_buffers_from_features_profiled(
+        TileProfiler::new(),
+        tile_key,
+        tile_ways,
+        tagged_points,
+        theme,
+        render_zoom,
+        buildings_3d,
+        build_road_core,
+        bridge_corridors,
+        bridge_dz_covered,
+        have_charger_overlay,
+        baked_fills,
+        baked_faces,
+    )
+}
+
+/// The shared feature builder with the caller's stage clock: the mbtiles
+/// path laps its parse/merge stages on the same profiler so the SLOW-tile
+/// log accounts for the WHOLE build, not just post-parse.
+#[allow(clippy::too_many_arguments)]
+fn build_tile_buffers_from_features_profiled(
+    mut profiler: TileProfiler,
+    tile_key: TileKey,
+    tile_ways: Vec<TileWay>,
+    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+    bridge_corridors: Vec<BridgeCorridor>,
+    bridge_dz_covered: bool,
+    have_charger_overlay: bool,
+    baked_fills: Vec<BakedFillFeature>,
+    baked_faces: Option<BakedFacesBucket>,
+) -> TileBuffers {
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -2985,7 +3509,7 @@ fn build_tile_buffers_from_features(
             "stops" => 13,
             _ => ICON_MIN_ZOOM,
         };
-        if render_zoom >= icon_zoom_floor {
+        if icon_inclusion_zoom(render_zoom) >= icon_zoom_floor as f32 {
             if let Some((icon_name, color_class)) = icon_for_tags(tags) {
                 if let Some(mesh) = icon_mesh(icon_name) {
                     // Doors and generic dots yield to real symbols in the
@@ -3227,9 +3751,20 @@ fn build_tile_buffers_from_features(
 
     let mut path = VectorPath::new();
     let mut tess = Tessellator::default();
+    // Map polygon rings have trustworthy winding everywhere fills are
+    // emitted from here: MVT rings are orientation-normalized by
+    // classify_polygon_rings, boolean overlay/shadow outputs are
+    // winding-consistent by construction. This lets fill() derive the AA
+    // fill-side sign from ring orientation instead of O(V^2) probing.
+    tess.set_trust_fill_winding(true);
     let mut tess_verts = Vec::<VVertex>::new();
     let mut tess_indices = Vec::<u32>::new();
 
+    // NOTE: do NOT pre-reserve these to "final" sizes. A generous
+    // reservation (tried at up to 24M floats) made 12 concurrent builders
+    // first-touch ~240MB of fresh zero pages each and serialized the whole
+    // pool on the kernel fault path — the buildings stage went 340ms ->
+    // 3000ms in-app while staying at 11ms in the serial harness.
     let mut fill_indices = Vec::<u32>::new();
     let mut fill_vertices = Vec::<f32>::new();
     let mut casing_indices = Vec::<u32>::new();
@@ -3293,6 +3828,12 @@ fn build_tile_buffers_from_features(
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
     let mut plaza_rings: Vec<(u32, f32, Vec<(f32, f32)>, Option<Vec<f32>>)> = Vec::new();
     let mut fill_group_lookup = HashMap::<(String, u32, u32), usize>::new();
+    // Baked fill join: (baker Layer discriminant, per-layer feature index).
+    let baked_fill_lookup: HashMap<(u8, u32), usize> = baked_fills
+        .iter()
+        .enumerate()
+        .map(|(index, bake)| ((bake.layer_id, bake.feature_index), index))
+        .collect();
     for (order, prepared_way) in prepared.iter().enumerate() {
         let way = &tile_ways[prepared_way.way_index];
         if way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings") {
@@ -3410,12 +3951,17 @@ fn build_tile_buffers_from_features(
             } else {
                 0.0
             };
+            let baked = way.fidx.and_then(|fidx| {
+                let layer_id = baked_layer_discriminant(mvt_layer)?;
+                baked_fill_lookup.get(&(layer_id, fidx)).copied()
+            });
             fill_groups.push(FillFeatureGroup {
                 color,
                 layer_rank: fill_layer_rank(&way.tags),
                 is_building: way.tags.contains_key("building"),
                 alpha,
                 pattern,
+                baked,
                 material: fill_material_for_tags(&way.tags),
                 late: matches!(
                     way.tags.get("layer").map(|v| v.as_str()),
@@ -3494,8 +4040,65 @@ fn build_tile_buffers_from_features(
         if !build_road_core && group.deckable {
             continue;
         }
-        let polygons = classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS);
+        // Baked fast path: the feature's body triangulation was pre-baked
+        // into the tile (v2-fills-1). Emit the clipped strip triangles
+        // directly and add ONLY the AA fringe from the (clipped) runtime
+        // rings — the fringe strips are self-contained, so edge AA is the
+        // exact geometry the runtime fill would have produced, while the
+        // body skips ring classification + sweep tessellation entirely.
+        // Empty rings mean the whole feature was diverted (plaza tier) or
+        // clipped away — never double-paint from the bake then.
+        let baked_body = group
+            .baked
+            .and_then(|index| baked_fills.get(index))
+            .filter(|_| !group.rings.is_empty());
+        let mut baked_ready = false;
+        if let Some(baked) = baked_body {
+            let clip = tile_clip_rect((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
+            let baked_area =
+                emit_baked_fill_body(baked, clip, &mut tess_verts, &mut tess_indices);
+            // Sanity guard: the clipped baked partition must cover the
+            // feature's net (clipped) ring area. A bake that disagrees —
+            // e.g. an inverted-winding source feature whose exterior the
+            // baker mistook for a hole — would erase whole surfaces, so it
+            // falls back to runtime tessellation instead.
+            let net_ring_area: f64 = group.rings.iter().map(|r| r.signed_area).sum();
+            let net_ring_area = net_ring_area.abs();
+            if net_ring_area > 1e-6 && (baked_area - net_ring_area).abs() <= net_ring_area * 0.05
+            {
+                if aa_units > 0.0 {
+                    for ring in &group.rings {
+                        emit_path(&mut path, &ring.points, true);
+                    }
+                    tess.flatten(&path, tolerance);
+                    tess.fill_fringe_into(
+                        aa_units,
+                        LineJoin::Miter,
+                        4.0,
+                        false,
+                        &mut tess_verts,
+                        &mut tess_indices,
+                    );
+                    path.clear();
+                }
+                compute_clip_radii(&mut tess_verts, &tess_indices);
+                baked_ready = true;
+            } else {
+                tess_verts.clear();
+                tess_indices.clear();
+            }
+        }
+        let polygons = if baked_ready {
+            // One synthetic piece drives the shared emission tail below.
+            vec![Vec::new()]
+        } else {
+            classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS)
+        };
         for polygon in polygons {
+            if baked_ready {
+                // tess_verts / tess_indices already hold the baked body +
+                // fringe for this single piece.
+            } else {
             if polygon.is_empty() {
                 continue;
             }
@@ -3513,6 +4116,7 @@ fn build_tile_buffers_from_features(
                 false,
                 tolerance,
             );
+            }
             // Road-surface polygons join the STROKE pass: in tilt mode
             // passes 1-3 carry the relief depth boost, and a junction
             // plaza left in the unboosted fill domain gets sliced by every
@@ -3624,11 +4228,28 @@ fn build_tile_buffers_from_features(
     }
 
     profiler.lap("fills", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
+    // Everything appended to the fill buffers from here through the
+    // buildings lap is 3D volume (walls, roofs, trees, skirts): split off
+    // as fill_3d so distant tiles under tilt can skip/fade it.
+    let fill_3d_vert_start = fill_vertices.len();
+    let fill_3d_index_start = fill_indices.len();
+    let mut tree_cross_vertices: Vec<f32> = Vec::new();
+    let mut tree_cross_indices: Vec<u32> = Vec::new();
 
     // Cast-shadow union outlines, kept for the tree/signal contact discs:
     // a tree already standing in a building's shadow must not stack its
     // own disc on top (double-darkening + equal-depth z-fight).
     let mut building_shadow_shapes: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+    // Shadow input signature captured when the runtime pipeline runs, so
+    // the faces-bake sink stores it with the shapes.
+    let mut captured_shadow_sig = 0u64;
+    // Baked shadows consumed: gates the runtime deck-shadow dissolve off
+    // (the baked shapes already contain the deck set).
+    let mut shadow_baked_hit = false;
+    // v4 building-dissolve capture: filled in the buildings block (jobs
+    // are local there), consumed by the bake sink.
+    let mut captured_building_sig = 0u64;
+    let mut captured_building_groups: Vec<BakedBuildingGroup> = Vec::new();
     // Grounded building footprints (positive winding), kept so deck
     // shadows can subtract them exactly like the building shadows did.
     let mut building_shadow_footprints: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -3666,14 +4287,53 @@ fn build_tile_buffers_from_features(
             })
             .collect();
         if !part_centroids.is_empty() {
+            // Cell grid over part centroids: point_in_ring can only hit a
+            // centroid inside the ring's bbox, so the cover test visits one
+            // bbox worth of cells instead of every part in the tile —
+            // dense part cities (Paris) ran groups x rings x parts x verts.
+            const CENTROID_CELL: f32 = 16.0;
+            let mut centroid_cells: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+            for &c in &part_centroids {
+                centroid_cells
+                    .entry((
+                        (c.0 / CENTROID_CELL).floor() as i32,
+                        (c.1 / CENTROID_CELL).floor() as i32,
+                    ))
+                    .or_default()
+                    .push(c);
+            }
             for group in building_groups.iter_mut() {
                 if group.is_part {
                     continue;
                 }
                 let covers = group.rings.iter().any(|ring| {
-                    part_centroids
-                        .iter()
-                        .any(|c| point_in_ring(*c, &ring.points))
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for &(x, y) in &ring.points {
+                        min_x = min_x.min(x);
+                        min_y = min_y.min(y);
+                        max_x = max_x.max(x);
+                        max_y = max_y.max(y);
+                    }
+                    let cx0 = (min_x / CENTROID_CELL).floor() as i32;
+                    let cy0 = (min_y / CENTROID_CELL).floor() as i32;
+                    let cx1 = (max_x / CENTROID_CELL).floor() as i32;
+                    let cy1 = (max_y / CENTROID_CELL).floor() as i32;
+                    (cy0..=cy1).any(|cy| {
+                        (cx0..=cx1).any(|cx| {
+                            centroid_cells.get(&(cx, cy)).is_some_and(|cell| {
+                                cell.iter().any(|&c| {
+                                    c.0 >= min_x
+                                        && c.0 <= max_x
+                                        && c.1 >= min_y
+                                        && c.1 <= max_y
+                                        && point_in_ring(c, &ring.points)
+                                })
+                            })
+                        })
+                    })
                 });
                 if covers {
                     group.height_m = 0.0;
@@ -3711,10 +4371,20 @@ fn build_tile_buffers_from_features(
                         found
                     })
                 };
+                let height_m = if group.height_m.is_finite() {
+                    group.height_m.max(0.0)
+                } else {
+                    8.0
+                };
+                let base_m = if group.min_height_m.is_finite() {
+                    group.min_height_m.clamp(0.0, height_m)
+                } else {
+                    0.0
+                };
                 building_jobs.push(BuildingJob {
                     polygon,
-                    height_m: group.height_m,
-                    base_m: group.min_height_m.clamp(0.0, group.height_m),
+                    height_m,
+                    base_m,
                     tint,
                     min_y,
                 });
@@ -3725,6 +4395,7 @@ fn build_tile_buffers_from_features(
                 .partial_cmp(&b.min_y)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        profiler.lap("b-jobs", &format!("jobs={}", building_jobs.len()));
         let building_units_per_m = {
             let n = (1u32 << tile_key.z) as f64;
             let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
@@ -3756,6 +4427,70 @@ fn build_tile_buffers_from_features(
             // footprint micro-detail, and sub-meter edges spawn needle
             // slivers out of the boolean at high overzoom.
             let shadow_min_edge = (1.2 / render_scale).max(0.35);
+            // Signature over everything the sweep+dissolve consumes: job
+            // rings and heights, sun, scale, simplification floor. On a
+            // baked match the entire boolean pipeline below is skipped and
+            // the baked shapes/footprints substitute — the 0.2-2.6s tail
+            // the in-app slow-tile log kept catching on building-dense
+            // tiles.
+            let shadow_sig = {
+                use std::hash::Hasher;
+                let mut h = FnvStdHasher(0xcbf2_9ce4_8422_2325);
+                h.write(&sun_2d.x.to_bits().to_le_bytes());
+                h.write(&sun_2d.y.to_bits().to_le_bytes());
+                h.write(&len_per_m.to_bits().to_le_bytes());
+                h.write(&shadow_min_edge.to_bits().to_le_bytes());
+                h.write(&building_units_per_m.to_bits().to_le_bytes());
+                h.write(&render_scale.to_bits().to_le_bytes());
+                h.write(&(building_jobs.len() as u32).to_le_bytes());
+                // Hash job content UNCONDITIONALLY: the bake sink runs with
+                // faces_bake_sink_armed() true, and a sink-gated filter here
+                // made the baker store a jobs-less signature no runtime could
+                // ever match — the shadow bake was dead weight in the stream.
+                for job in building_jobs.iter() {
+                    h.write(&job.height_m.to_bits().to_le_bytes());
+                    h.write(&job.base_m.to_bits().to_le_bytes());
+                    h.write(&(job.polygon.len() as u32).to_le_bytes());
+                    for ring in &job.polygon {
+                        h.write(&(ring.len() as u32).to_le_bytes());
+                        for &(x, y) in ring {
+                            h.write(&x.to_bits().to_le_bytes());
+                            h.write(&y.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+                h.0
+            };
+            let baked_shadow = (!faces_bake_sink_armed())
+                .then(|| baked_faces.as_ref())
+                .flatten()
+                .filter(|bake| {
+                    bake.bucket == render_zoom && bake.shadow_signature == shadow_sig
+                });
+            if let Some(bake) = baked_shadow {
+                shadow_baked_hit = true;
+                building_shadow_footprints = bake.shadow_footprints.clone();
+                building_shadow_shapes = bake.shadow_shapes.clone();
+                profiler.lap("b-sh-baked", &format!("shapes={}", building_shadow_shapes.len()));
+                let fill_clip_bounds =
+                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
+                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
+                emit_shadow_shapes(
+                    bake.shadow_shapes.clone(),
+                    fill_clip_bounds,
+                    shadow_aa,
+                    tolerance,
+                    &mut path,
+                    &mut tess,
+                    &mut tess_verts,
+                    &mut tess_indices,
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+                feature_count += 1;
+            } else {
+            captured_shadow_sig = shadow_sig;
             let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
             let mut push_positive = |ring: &mut Vec<[f64; 2]>| {
                 // NonZero dissolve: every contributing path must wind
@@ -3771,7 +4506,10 @@ fn build_tile_buffers_from_features(
                 }
                 paths.push(std::mem::take(ring));
             };
-            for job in &building_jobs {
+            // No sink gate here: the WHOLE POINT of the bake is to run this
+            // sweep offline. Gated, the baker captured deck-only shadow sets
+            // (invisible while the sig bug masked it with permanent misses).
+            for job in building_jobs.iter() {
                 let height = job.height_m;
                 if height <= 0.5 {
                     continue;
@@ -3795,11 +4533,12 @@ fn build_tile_buffers_from_features(
                     }
                     // The swept hull needs all three parts: footprint,
                     // TRANSLATED footprint, and the connecting edge quads.
-                    // Without the translated ring the far side is stitched
-                    // only from quads, and any facing gate then leaves
-                    // grid-aligned buildings with sheared wedge shadows;
-                    // with it, thin near-parallel quads are interior to
-                    // the hull and can never show as spikes.
+                    // (A single Minkowski-sweep path was tried and REVERTED:
+                    // epsilon-concave rings hand i_overlay self-crossing
+                    // near-degenerate polygons and the dissolve explodes to
+                    // 10-15s. The real fix for shadow cost is baking the
+                    // dissolved shadow shapes per bucket, not a cleverer
+                    // runtime construction.)
                     let mut scratch: Vec<[f64; 2]> = ring
                         .iter()
                         .map(|p| [p.0 as f64, p.1 as f64])
@@ -3818,9 +4557,6 @@ fn build_tile_buffers_from_features(
                         if len < 1e-4 {
                             continue;
                         }
-                        // Outward normal of a positively-wound ring: only
-                        // skip true degenerates — coverage comes from the
-                        // two rings, quads just connect them.
                         if (dy / len) * sx + (-dx / len) * sy <= 0.02 {
                             continue;
                         }
@@ -3834,6 +4570,7 @@ fn build_tile_buffers_from_features(
                     }
                 }
             }
+            profiler.lap("b-sh-sweep", &format!("paths={}", paths.len()));
             if !paths.is_empty() {
                 // Chunked dissolve (union-mesh lesson: the solver
                 // degenerates on ring soups past a few thousand rings).
@@ -3895,6 +4632,7 @@ fn build_tile_buffers_from_features(
                         footprints.push(fp);
                     }
                 }
+                profiler.lap("b-sh-dissolve", "");
                 if !footprints.is_empty() {
                     let mut acc = shapes;
                     for chunk in footprints.chunks(SHADOW_DISSOLVE_CHUNK) {
@@ -3911,6 +4649,7 @@ fn build_tile_buffers_from_features(
                     shapes = acc;
                 }
                 building_shadow_footprints = footprints;
+                profiler.lap("b-sh-diff", "");
                 let fill_clip_bounds =
                     tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
                 // ~1.2 m analytic AA fringe softens the shadow edge.
@@ -3933,6 +4672,7 @@ fn build_tile_buffers_from_features(
                     }
                 }
                 building_shadow_shapes = shapes.clone();
+                profiler.lap("b-sh-open", "");
                 emit_shadow_shapes(
                     shapes,
                     fill_clip_bounds,
@@ -3947,6 +4687,172 @@ fn build_tile_buffers_from_features(
                     &mut icon_zbias,
                 );
                 feature_count += 1;
+            }
+            }
+        }
+        profiler.lap("b-shadow", "");
+        // v4 block dissolve: same-height touching buildings union at BAKE
+        // time so shared interior walls never reach the extruder. Runtime
+        // pays ZERO booleans — a signature HIT swaps the eligible jobs for
+        // the baked union groups; a MISS keeps the per-building path.
+        {
+            // Deterministic dissolve-eligibility, identical at bake and
+            // runtime (both sides hash only eligible jobs): grounded, and
+            // NOT part of a monster same-height set — the Westland
+            // greenhouse belt puts thousands of identical-height rings in
+            // one tile and the union blowup got the bake jetsam-killed.
+            let mut key_jobs: std::collections::HashMap<(i32, u32), (u32, u64)> =
+                std::collections::HashMap::new();
+            for job in building_jobs.iter().filter(|job| job.base_m.abs() < 0.01) {
+                let key = (
+                    (job.height_m * 2.0).round() as i32,
+                    job.tint.map_or(0, |t| t | 0x8000_0000),
+                );
+                let points: u64 = job.polygon.iter().map(|r| r.len() as u64).sum();
+                let entry = key_jobs.entry(key).or_default();
+                entry.0 += 1;
+                entry.1 += points;
+            }
+            let group_ok = |job: &BuildingJob| {
+                let key = (
+                    (job.height_m * 2.0).round() as i32,
+                    job.tint.map_or(0, |t| t | 0x8000_0000),
+                );
+                key_jobs
+                    .get(&key)
+                    .is_some_and(|&(count, points)| count <= 800 && points <= 120_000)
+            };
+            let eligible = |job: &BuildingJob| job.base_m.abs() < 0.01 && group_ok(job);
+            let building_sig = {
+                use std::hash::Hasher;
+                let mut h = FnvStdHasher(0x9e37_79b9_97f4_a7c5);
+                for job in building_jobs.iter().filter(|job| eligible(job)) {
+                    h.write(&job.height_m.to_bits().to_le_bytes());
+                    h.write(&job.tint.unwrap_or(0).to_le_bytes());
+                    h.write(&(job.polygon.len() as u32).to_le_bytes());
+                    for ring in &job.polygon {
+                        h.write(&(ring.len() as u32).to_le_bytes());
+                        for &(x, y) in ring {
+                            h.write(&x.to_bits().to_le_bytes());
+                            h.write(&y.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+                h.0
+            };
+            if faces_bake_sink_armed() {
+                use i_overlay::core::fill_rule::FillRule as IoFillRule;
+                use i_overlay::core::overlay_rule::OverlayRule;
+                use i_overlay::float::simplify::SimplifyShape;
+                use i_overlay::float::single::SingleFloatOverlay;
+                use std::collections::BTreeMap;
+                let mut by_key: BTreeMap<(i32, u32), Vec<Vec<[f64; 2]>>> = BTreeMap::new();
+                for job in building_jobs.iter().filter(|job| eligible(job)) {
+                    let key = (
+                        (job.height_m * 2.0).round() as i32,
+                        job.tint.map_or(0, |t| t | 0x8000_0000),
+                    );
+                    by_key.entry(key).or_default().extend(
+                        job.polygon.iter().map(|ring| {
+                            ring.iter()
+                                .map(|&(x, y)| [x as f64, y as f64])
+                                .collect::<Vec<_>>()
+                        }),
+                    );
+                }
+                captured_building_sig = building_sig;
+                for ((height_q, tint), rings) in by_key {
+                    const CHUNK: usize = 3000;
+                    let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+                    for chunk in rings.chunks(CHUNK) {
+                        let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
+                        if acc.is_empty() {
+                            acc = part;
+                        } else {
+                            let part_paths: Vec<Vec<[f64; 2]>> = part
+                                .iter()
+                                .flat_map(|shape| shape.iter().cloned())
+                                .collect();
+                            acc = part_paths.overlay(
+                                &acc,
+                                OverlayRule::Union,
+                                IoFillRule::NonZero,
+                            );
+                        }
+                    }
+                    // ONE group per connected shape: a group's ring set is
+                    // one polygon-with-holes for the roof earcut — merging
+                    // separate blocks into one ring list turns disjoint
+                    // outers into phantom holes. Winding normalizes to the
+                    // extruder's y-down convention (outer signed area > 0,
+                    // holes < 0) — i_overlay's output orientation differs.
+                    for shape in acc {
+                        let mut rings: Vec<Vec<[f64; 2]>> = Vec::with_capacity(shape.len());
+                        for (ring_index, mut ring) in shape.into_iter().enumerate() {
+                            // Same shoelace form as polygon_signed_area so
+                            // the outer test matches the extruder exactly.
+                            let mut area = 0.0f64;
+                            for i in 0..ring.len() {
+                                let j = (i + 1) % ring.len();
+                                area += ring[i][0] * ring[j][1] - ring[j][0] * ring[i][1];
+                            }
+                            let outer = ring_index == 0;
+                            if (outer && area < 0.0) || (!outer && area > 0.0) {
+                                ring.reverse();
+                            }
+                            rings.push(ring);
+                        }
+                        if !rings.is_empty() {
+                            captured_building_groups.push(BakedBuildingGroup {
+                                height_m: height_q as f32 / 2.0,
+                                tint,
+                                rings,
+                            });
+                        }
+                    }
+                }
+            } else if let Some(bake) = baked_faces
+                .as_ref()
+                .filter(|bake| {
+                    bake.bucket == render_zoom
+                        && bake.building_signature == building_sig
+                        && !bake.buildings.is_empty()
+                })
+            {
+                let dissolved: Vec<BuildingJob> = bake
+                    .buildings
+                    .iter()
+                    .map(|group| {
+                        let polygon: Vec<Vec<(f32, f32)>> = group
+                            .rings
+                            .iter()
+                            .map(|ring| {
+                                ring.iter().map(|p| (p[0] as f32, p[1] as f32)).collect()
+                            })
+                            .collect();
+                        let min_y = polygon
+                            .iter()
+                            .flat_map(|ring| ring.iter().map(|p| p.1))
+                            .fold(f32::MAX, f32::min);
+                        BuildingJob {
+                            polygon,
+                            height_m: group.height_m,
+                            base_m: 0.0,
+                            tint: (group.tint != 0).then(|| group.tint & 0x7fff_ffff),
+                            min_y,
+                        }
+                    })
+                    .collect();
+                building_jobs.retain(|job| !eligible(job));
+                building_jobs.extend(dissolved);
+                // Preserve the north->south paint order the pre-dissolve
+                // sort established (walls paint over northern neighbors).
+                building_jobs.sort_by(|a, b| {
+                    a.min_y
+                        .partial_cmp(&b.min_y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                profiler.lap("b-dissolved", &format!("groups={}", bake.buildings.len()));
             }
         }
         // T2 vertical AO: ground-contact vertices darken so buildings sit
@@ -4148,38 +5054,46 @@ fn build_tile_buffers_from_features(
                 );
             }
         }
-        for (x, y) in &tree_points_3d {
+        // Every street tree is the same mesh (shading depends on normals
+        // and the sun, not the anchor): build ONE tree at the origin and
+        // instance it by memcpy + anchor/zbias patch. Dense park tiles at
+        // the icon horizon carry thousands — the per-tree sin/cos rebuild
+        // was most of the buildings stage there.
+        if !tree_points_3d.is_empty() && !faces_bake_sink_armed() {
+            let mut template_verts = Vec::<f32>::new();
+            let mut template_indices = Vec::<u32>::new();
+            let mut template_zbias = 0.0f32;
             append_wall_quad(
-                (*x - arm, *y),
-                (*x + arm, *y),
+                (-arm, 0.0),
+                (arm, 0.0),
                 0.0,
                 7.5,
                 trunk_color,
                 trunk_ao,
                 (0.0, 0.0),
                 MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
+                &mut template_verts,
+                &mut template_indices,
+                &mut template_zbias,
             );
             append_wall_quad(
-                (*x, *y - arm),
-                (*x, *y + arm),
+                (0.0, -arm),
+                (0.0, arm),
                 0.0,
                 7.5,
                 trunk_color,
                 trunk_ao,
                 (0.0, 0.0),
                 MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
+                &mut template_verts,
+                &mut template_indices,
+                &mut template_zbias,
             );
             // Street-tree proportions vs buildings: ~11.5m total. The
             // canopy is a PROLATE ellipsoid (taller than wide) on a tall
             // trunk — scaling the ball uniformly reads as a bush.
             append_ball(
-                (*x, *y),
+                (0.0, 0.0),
                 2.9 * units_per_m,
                 4.0,
                 7.5,
@@ -4188,17 +5102,107 @@ fn build_tile_buffers_from_features(
                 canopy_segs_v,
                 &theme.shiny.sun,
                 MAT_CANOPY,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
+                &mut template_verts,
+                &mut template_indices,
+                &mut template_zbias,
             );
-            feature_count += 1;
+            // Mid/far-ring stand-in: two crossed vertical quads per tree
+            // (canopy color, canopy material) — 8 verts vs ~70.
+            let cross_r = 2.6 * units_per_m;
+            for (x, y) in tree_points_3d.iter() {
+                append_wall_quad(
+                    (*x - cross_r, *y),
+                    (*x + cross_r, *y),
+                    1.5,
+                    11.0,
+                    canopy_color,
+                    trunk_ao,
+                    (0.0, 1.0),
+                    MAT_CANOPY,
+                    &mut tree_cross_vertices,
+                    &mut tree_cross_indices,
+                    &mut fill_zbias,
+                );
+                append_wall_quad(
+                    (*x, *y - cross_r),
+                    (*x, *y + cross_r),
+                    1.5,
+                    11.0,
+                    canopy_color,
+                    trunk_ao,
+                    (1.0, 0.0),
+                    MAT_CANOPY,
+                    &mut tree_cross_vertices,
+                    &mut tree_cross_indices,
+                    &mut fill_zbias,
+                );
+            }
+            let floats = template_verts.len();
+            fill_vertices.reserve(floats * tree_points_3d.len());
+            fill_indices.reserve(template_indices.len() * tree_points_3d.len());
+            for (instance, (x, y)) in tree_points_3d.iter().enumerate() {
+                let base_vert =
+                    (fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                let zbias_shift = fill_zbias + instance as f32 * template_zbias;
+                let start = fill_vertices.len();
+                fill_vertices.extend_from_slice(&template_verts);
+                for record in fill_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX)
+                {
+                    record[0] += *x;
+                    record[1] += *y;
+                    record[18] += zbias_shift;
+                }
+                fill_indices
+                    .extend(template_indices.iter().map(|i| i + base_vert));
+                feature_count += 1;
+            }
+            fill_zbias += tree_points_3d.len() as f32 * template_zbias;
         }
     }
 
     // Dynamic stalk heights: every flying marker clears the building under
     // it by ~8 m (a 100 m tower gets a 108 m pin), plus a small
     // deterministic stagger so clustered pins don't form one flat plane.
+    // Cell grid over building rings: the stalk-clearance scan was
+    // icons x groups x rings, and the icon horizon multiplied the icon
+    // side by ~10 (75ms on center tiles). A point query now touches one
+    // cell's candidates.
+    let lift_grid: CellMap<Vec<u32>> = {
+        const LIFT_CELL: f32 = 24.0;
+        let mut grid: CellMap<Vec<u32>> = CellMap::default();
+        for (group_index, group) in building_groups.iter().enumerate() {
+            if group.height_m <= 0.0 {
+                continue;
+            }
+            for ring in &group.rings {
+                if ring.signed_area <= 0.0 {
+                    continue;
+                }
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+                for &(x, y) in &ring.points {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+                for cy in (min_y / LIFT_CELL).floor() as i32..=(max_y / LIFT_CELL).floor() as i32
+                {
+                    for cx in
+                        (min_x / LIFT_CELL).floor() as i32..=(max_x / LIFT_CELL).floor() as i32
+                    {
+                        let cell = grid.entry((cx, cy)).or_default();
+                        if cell.last() != Some(&(group_index as u32)) {
+                            cell.push(group_index as u32);
+                        }
+                    }
+                }
+            }
+        }
+        grid
+    };
     let job_lifts: Vec<f32> = icon_jobs
         .iter()
         .map(|job| {
@@ -4208,17 +5212,22 @@ fn build_tile_buffers_from_features(
             }
             let (px, py) = job.0;
             let mut clearance = 0.0f32;
-            for group in &building_groups {
-                if group.height_m <= clearance {
-                    continue;
-                }
-                for ring in &group.rings {
-                    if ring.signed_area <= 0.0 {
+            const LIFT_CELL: f32 = 24.0;
+            let key = ((px / LIFT_CELL).floor() as i32, (py / LIFT_CELL).floor() as i32);
+            if let Some(candidates) = lift_grid.get(&key) {
+                for &group_index in candidates {
+                    let group = &building_groups[group_index as usize];
+                    if group.height_m <= clearance {
                         continue;
                     }
-                    if point_in_ring((px, py), &ring.points) {
-                        clearance = clearance.max(group.height_m);
-                        break;
+                    for ring in &group.rings {
+                        if ring.signed_area <= 0.0 {
+                            continue;
+                        }
+                        if point_in_ring((px, py), &ring.points) {
+                            clearance = clearance.max(group.height_m);
+                            break;
+                        }
                     }
                 }
             }
@@ -4525,7 +5534,13 @@ fn build_tile_buffers_from_features(
         }
     }
 
-    profiler.lap("buildings", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
+    let fill_3d_vertices = fill_vertices.split_off(fill_3d_vert_start);
+    let mut fill_3d_indices = fill_indices.split_off(fill_3d_index_start);
+    let fill_3d_base = (fill_3d_vert_start / VECTOR_FLOATS_PER_VERTEX) as u32;
+    for index in fill_3d_indices.iter_mut() {
+        *index -= fill_3d_base;
+    }
+    profiler.lap("buildings", &format!("fill={}KB", fill_3d_vertices.len() * 4 / 1024));
 
     let mut union_tiers =
         HashMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
@@ -4590,6 +5605,7 @@ fn build_tile_buffers_from_features(
         let parts = build_polyline_parts(&smooth, clip_bounds, false, ROAD_SMOOTH_FACTOR);
         merged_stroke_parts.push((job.style, parts));
     }
+    profiler.lap("sp-merge", "");
 
     // Painter interleave vs the road faces: patterned/non-surface strokes
     // whose rank is
@@ -4640,13 +5656,17 @@ fn build_tile_buffers_from_features(
                 })
         })
         .collect();
+    profiler.lap("sp-joinways", "");
     let mut endpoint_grade_corrections = endpoint_to_through_grade_corrections(&join_ways);
+    profiler.lap("sp-through", &format!("ways={}", join_ways.len()));
     let interior_fascia_ends: std::collections::HashSet<RoadTierEnd> =
         endpoint_grade_corrections
             .iter()
             .map(|correction| correction.end)
             .collect();
-    for correction in endpoint_continuation_grade_corrections(&join_ways) {
+    let continuation_corrections = endpoint_continuation_grade_corrections(&join_ways);
+    profiler.lap("sp-continuation", "");
+    for correction in continuation_corrections {
         if let Some(existing) = endpoint_grade_corrections
             .iter_mut()
             .find(|existing| existing.end == correction.end)
@@ -4694,6 +5714,7 @@ fn build_tile_buffers_from_features(
             );
         }
     }
+    profiler.lap("sp-apply", "");
     // Classify flush endpoint-to-interior joins only after all dz
     // corrections have landed; their safety gate requires the final two
     // deck profiles to agree at the contact point.
@@ -4714,26 +5735,32 @@ fn build_tile_buffers_from_features(
         RoadSurfaceKey,
         &(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>),
     )> = union_tiers.iter().map(|(key, entry)| (*key, entry)).collect();
-    tier_list.sort_by_key(|(key, entry)| {
-        (
-            entry.0.sort_rank,
-            entry.0.center.color,
-            entry.0.center.width.to_bits(),
-            *key,
-        )
-    });
+    // Theme-stable paint order: the key's derived Ord leads with sort_rank
+    // and never reads resolved colors, so tier order (and with it the baked
+    // regions' group indices) is identical across recolor-only themes.
+    tier_list.sort_by_key(|(key, _)| *key);
     let mut groups: Vec<PaintGroup> = Vec::new();
     {
-        let mut plaza_keys: Vec<(u32, u32)> = plaza_rings
+        // Road-polygon fills all resolve to ONE theme constant
+        // (street_area_fill), so alpha is the only structural discriminant
+        // — grouping by it alone is identical to the old (color, alpha)
+        // grouping within any single theme AND theme-stable across
+        // recolors. The paint color comes from the group's first member.
+        let mut plaza_keys: Vec<u32> = plaza_rings
             .iter()
-            .map(|(color, alpha, _, _)| (*color, alpha.to_bits()))
+            .map(|(_, alpha, _, _)| alpha.to_bits())
             .collect();
         plaza_keys.sort_unstable();
         plaza_keys.dedup();
-        for (color, alpha_bits) in plaza_keys {
+        for alpha_bits in plaza_keys {
+            let color = plaza_rings
+                .iter()
+                .find(|(_, a, _, _)| a.to_bits() == alpha_bits)
+                .map(|(c, _, _, _)| *c)
+                .unwrap_or(0);
             let ribbons: Vec<RoadRibbon> = plaza_rings
                 .iter()
-                .filter(|(c, a, _, _)| *c == color && a.to_bits() == alpha_bits)
+                .filter(|(_, a, _, _)| a.to_bits() == alpha_bits)
                 .map(|(_, _, points, dz)| RoadRibbon {
                     points,
                     dz: dz.as_deref(),
@@ -4772,7 +5799,13 @@ fn build_tile_buffers_from_features(
     // continuation must not turn every branch at that node into a butt end.
     let mut endpoint_tiers: HashMap<(i32, i32), Vec<(RoadTierEnd, (f32, f32), f32)>> =
         HashMap::new();
-    for (key, (_, ways)) in union_tiers.iter() {
+    // Iterate the SORTED tier list, not the HashMap: per-node candidate
+    // order feeds flush-joint pairing and the groups' skirt-joint lists,
+    // and raw map order made builds nondeterministic run-to-run (which the
+    // per-bucket face bake verification caught).
+    for &(key, entry) in tier_list.iter() {
+        let ways = &entry.1;
+        let key = &key;
         for (way_index, (points, dz)) in ways.iter().enumerate() {
             if points.len() < 2 {
                 continue;
@@ -4874,6 +5907,26 @@ fn build_tile_buffers_from_features(
             )
         })
         .collect();
+    profiler.lap("rf-smooth", "");
+    // Input signature over everything ring construction consumes. When it
+    // matches the baked bucket, the i_overlay tier ring construction (and
+    // its per-ring-vertex field classification) is skipped entirely — the
+    // baked regions carry the geometry, and every other group ingredient
+    // (styling, fields, skirt joints, shadows) derives from the ways.
+    // Bake capture and the dump diagnostic need real rings, so both force
+    // the full path.
+    let input_sig = paint_input_signature(
+        &smoothed_tiers,
+        &plaza_rings,
+        &tier_joint_ends,
+        &tunnel_portals,
+        union_clip,
+    );
+    let baked_input_hit = !faces_bake_sink_armed()
+        && !cascade_dump_armed()
+        && baked_faces
+            .as_ref()
+            .is_some_and(|bake| bake.bucket == render_zoom && bake.signature == input_sig);
     // Per-tier deck fields: index 0 is the plaza field, tier i lives at
     // 1 + i. Casing and center faces of one tier share one field, so both
     // displace identically in tilt — no more detached outlines on ramps.
@@ -4914,6 +5967,7 @@ fn build_tile_buffers_from_features(
             .collect();
         dz_fields.push(DzField::build(&ways_ref, half_width + 2.0, union_clip));
     }
+    profiler.lap("rf-fields", "");
     // T3 deck shadows: elevated road segments project along the sun by
     // their per-vertex height, so overpasses ground themselves the way
     // buildings do. Collected as slab quads per lifted segment (grounded
@@ -4968,7 +6022,11 @@ fn build_tile_buffers_from_features(
                     }
                 })
                 .collect();
-            let rings = road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), union_clip);
+            let rings = if baked_input_hit {
+                Vec::new()
+            } else {
+                road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), union_clip)
+            };
             if pass == 1 {
                 if let Some((sx, sy, len_per_m_units)) = deck_shadow_ctx {
                     let hw = (width * 0.5).max(0.05);
@@ -5102,10 +6160,171 @@ fn build_tile_buffers_from_features(
             &format!("groups={} rings={} ring_verts={}", groups.len(), ring_count, ring_verts),
         );
     }
+    // Bake mode (offline tool): capture the cascade output + signature and
+    // stop — nothing after the faces is needed for the bake.
+    if faces_bake_sink_armed() {
+        let regions = if groups.is_empty() {
+            Vec::new()
+        } else {
+            compute_visible_regions(&groups)
+        };
+        // The baked shadow set = building shadows ++ dissolved deck
+        // shadows (concat matches the runtime's two separate emits
+        // exactly, overlap behavior included).
+        let mut shadow_shapes = building_shadow_shapes.clone();
+        if !deck_shadow_paths.is_empty() {
+            shadow_shapes.extend(dissolve_deck_shadows(
+                std::mem::take(&mut deck_shadow_paths),
+                &building_shadow_footprints,
+            ));
+        }
+        let bucket = BakedFacesBucket {
+            bucket: render_zoom,
+            signature: input_sig,
+            regions,
+            shadow_signature: captured_shadow_sig,
+            shadow_shapes,
+            shadow_footprints: building_shadow_footprints.clone(),
+            building_signature: captured_building_sig,
+            buildings: std::mem::take(&mut captured_building_groups),
+        };
+        FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
+        return TileBuffers {
+            pin_hits: Vec::new(),
+            fill_indices: Vec::new(),
+            fill_vertices: Vec::new(),
+            casing_indices: Vec::new(),
+            casing_vertices: Vec::new(),
+            stroke_indices: Vec::new(),
+            stroke_vertices: Vec::new(),
+            icon_indices: Vec::new(),
+            icon_vertices: Vec::new(),
+            icon_high_indices: Vec::new(),
+            icon_high_vertices: Vec::new(),
+            fringe_indices: Vec::new(),
+            fringe_vertices: Vec::new(),
+            fill_3d_indices: Vec::new(),
+            fill_3d_vertices: Vec::new(),
+            wall_indices: Vec::new(),
+            wall_vertices: Vec::new(),
+            tree_indices: Vec::new(),
+            tree_vertices: Vec::new(),
+            tree_cross_indices: Vec::new(),
+            tree_cross_vertices: Vec::new(),
+            road_icon_indices: Vec::new(),
+            road_icon_vertices: Vec::new(),
+            mode_overlay_only: false,
+            feature_count: 0,
+            labels: Vec::new(),
+            render_zoom,
+            stage_summary: String::new(),
+        };
+    }
     let faces = if groups.is_empty() {
         Vec::new()
     } else {
-        overlay_paint_groups(&groups, &mut tess, tolerance, analytic_fringe_units)
+        // Baked cascade fast path: regions from the archive, tessellation +
+        // styling at runtime. Guarded by the group-structure signature (and
+        // the stream's coordinate checksum at parse time); any mismatch
+        // falls back to the runtime cascade.
+        // MAKEPAD_CASCADE_DUMP=1 (or `touch /tmp/mp_cascade_dump` for
+        // studio-launched apps): structural dump of the cascade input —
+        // diff two runs (e.g. light vs night) to find what diverges.
+        if cascade_dump_armed() {
+            for (key, _, ways) in &smoothed_tiers {
+                let pts: usize = ways.iter().map(|(points, _)| points.len()).sum();
+                let dzs: usize = ways
+                    .iter()
+                    .filter(|(_, dz)| dz.is_some())
+                    .count();
+                eprintln!(
+                    "CASCADE-TIER class={:08x} rank={} cw={:08x} caw={:08x} v={:?} l={} ways={} pts={} dz={}",
+                    key.class_id,
+                    key.sort_rank,
+                    key.center_width_bits,
+                    key.casing_width_bits,
+                    key.vertical,
+                    key.layer,
+                    ways.len(),
+                    pts,
+                    dzs
+                );
+            }
+            let plaza_pts: usize = plaza_rings.iter().map(|(_, _, p, _)| p.len()).sum();
+            eprintln!(
+                "CASCADE-PLAZA count={} pts={} joints={} portals={}",
+                plaza_rings.len(),
+                plaza_pts,
+                tier_joint_ends.len(),
+                tunnel_portals.len()
+            );
+            for (gi, group) in groups.iter().enumerate() {
+                let ring_lens: Vec<usize> =
+                    group.rings.iter().map(|(ring, _, _)| ring.len()).collect();
+                let lift_bits: Vec<u8> = group
+                    .rings
+                    .iter()
+                    .map(|(_, min_dz, max_dz)| {
+                        (*max_dz >= LIFT_COVER_M) as u8 | (((*min_dz <= -LIFT_COVER_M) as u8) << 1)
+                    })
+                    .collect();
+                eprintln!(
+                    "CASCADE-GROUP {gi}: phase={} rank={} field={} hw={} rings={:?} lift={:?}",
+                    group.phase, group.rank, group.field, group.half_width, ring_lens, lift_bits
+                );
+            }
+        }
+        let baked = baked_faces.as_ref().filter(|bake| {
+            let ok = bake.bucket == render_zoom && bake.signature == input_sig;
+            if !ok && profiler.on {
+                eprintln!(
+                    "MPPROF cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
+                    bake.bucket,
+                    render_zoom,
+                    bake.signature,
+                    input_sig,
+                    bake.regions.len(),
+                    groups.len(),
+                );
+            }
+            ok
+        });
+        match baked {
+            Some(bake) => {
+                if profiler.on {
+                    eprintln!("MPPROF cascade-baked regions={}", bake.regions.len());
+                }
+                // Group count is pinned by the input signature; an index
+                // past it means a corrupt stream (already checksum-guarded
+                // at parse). Drop such regions instead of indexing OOB —
+                // the runtime cascade is NOT a fallback here, the rings
+                // were skipped on the signature's authority.
+                let in_range: Vec<VisibleRegions>;
+                let regions: &[VisibleRegions] = if bake
+                    .regions
+                    .iter()
+                    .all(|region| region.group_index < groups.len())
+                {
+                    &bake.regions
+                } else {
+                    log!(
+                        "MapView: baked faces region/group mismatch on z{} x{} y{} — dropping out-of-range regions",
+                        tile_key.z,
+                        tile_key.x,
+                        tile_key.y
+                    );
+                    in_range = bake
+                        .regions
+                        .iter()
+                        .filter(|region| region.group_index < groups.len())
+                        .cloned()
+                        .collect();
+                    &in_range
+                };
+                build_paint_faces(&groups, regions, &mut tess, tolerance, analytic_fringe_units)
+            }
+            None => overlay_paint_groups(&groups, &mut tess, tolerance, analytic_fringe_units),
+        }
     };
     if profiler.on {
         let face_verts: usize = faces.iter().map(|face| face.verts.len()).sum();
@@ -5130,6 +6349,7 @@ fn build_tile_buffers_from_features(
     let cap_eps = 0.05_f32;
     // Sort key gains a level-class prefix: sunk faces (tunnels) paint
     // before ALL surface content — under plazas, casings, everything.
+    let events_build_clock = std::time::Instant::now();
     let mut events: Vec<((u8, u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
     for (face_index, face) in faces.iter().enumerate() {
         let level_class = if face.level < 0 { 0u8 } else { 1 };
@@ -5184,45 +6404,13 @@ fn build_tile_buffers_from_features(
 
     // Dissolve + emit the collected deck shadows (minus building
     // footprints, same rule as building shadows: never on a roof).
-    if !deck_shadow_paths.is_empty() {
-        use i_overlay::core::fill_rule::FillRule as IoFillRule;
-        use i_overlay::core::overlay_rule::OverlayRule;
-        use i_overlay::float::simplify::SimplifyShape;
-        use i_overlay::float::single::SingleFloatOverlay;
-        const DECK_SHADOW_CHUNK: usize = 3000;
-        let mut shapes = if deck_shadow_paths.len() <= DECK_SHADOW_CHUNK {
-            deck_shadow_paths.simplify_shape(IoFillRule::NonZero)
-        } else {
-            let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-            for chunk in deck_shadow_paths.chunks(DECK_SHADOW_CHUNK) {
-                let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
-                if acc.is_empty() {
-                    acc = part;
-                } else {
-                    let part_paths: Vec<Vec<[f64; 2]>> = part
-                        .iter()
-                        .flat_map(|shape| shape.iter().cloned())
-                        .collect();
-                    acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
-                }
-            }
-            acc
-        };
-        if !building_shadow_footprints.is_empty() {
-            let mut acc = shapes;
-            for chunk in building_shadow_footprints.chunks(DECK_SHADOW_CHUNK) {
-                let subject: Vec<Vec<[f64; 2]>> = acc
-                    .iter()
-                    .flat_map(|shape| shape.iter().cloned())
-                    .collect();
-                acc = subject.overlay(
-                    &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
-                    OverlayRule::Difference,
-                    IoFillRule::NonZero,
-                );
-            }
-            shapes = acc;
-        }
+    // On a shadow-bake HIT the baked shapes already contain the deck
+    // shadows (concatenated at capture) — the dissolve is bake/MISS-only.
+    if !shadow_baked_hit && !deck_shadow_paths.is_empty() {
+        let shapes = dissolve_deck_shadows(
+            std::mem::take(&mut deck_shadow_paths),
+            &building_shadow_footprints,
+        );
         let fill_clip_bounds = tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
         emit_shadow_shapes(
             shapes,
@@ -5271,9 +6459,9 @@ fn build_tile_buffers_from_features(
             (min_x - reach, min_y - reach, max_x + reach, max_y + reach)
         })
         .collect();
-    let corridors_for_part = |part: &[(f32, f32)]| -> Vec<&BridgeCorridor> {
+    let part_near_corridor = |part: &[(f32, f32)]| -> bool {
         if corridor_boxes.is_empty() {
-            return Vec::new();
+            return false;
         }
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
@@ -5285,14 +6473,17 @@ fn build_tile_buffers_from_features(
             max_x = max_x.max(x);
             max_y = max_y.max(y);
         }
-        corridor_set
+        corridor_boxes
             .iter()
-            .zip(&corridor_boxes)
-            .filter_map(|(corridor, &(bx0, by0, bx1, by1))| {
-                (min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0)
-                    .then_some(corridor)
-            })
-            .collect()
+            .any(|&(bx0, by0, bx1, by1)| min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0)
+    };
+    // Segment grid for the matcher itself: the bbox gate above only decides
+    // WHETHER a part pays for deck matching, the grid keeps that matching
+    // from scanning every corridor segment per vertex.
+    let corridor_grid = CorridorGrid::build(corridor_set);
+    let corridor_query = CorridorGridQuery {
+        corridors: corridor_set,
+        grid: &corridor_grid,
     };
 
     // Tilt depth is semantic rather than face-ordinal. Adjacent tiles contain
@@ -5302,9 +6493,17 @@ fn build_tile_buffers_from_features(
     let mut prof_subdiv_ms = 0.0f64;
     let mut prof_sample_ms = 0.0f64;
     let mut prof_face_verts_out = 0usize;
+    let mut prof_skirt_ms = 0.0f64;
+    let mut prof_body_ms = 0.0f64;
+    let mut prof_fringe_ms = 0.0f64;
+    let mut prof_stroke_arm_ms = 0.0f64;
+    let mut prof_face_arm_ms = 0.0f64;
+    let prof_events_build_ms = events_build_clock.elapsed().as_secs_f64() * 1e3;
+    let events_loop_clock = std::time::Instant::now();
     for ((_, phase, _, _, _), event) in &events {
         match event {
             RoadPaintEvent::Face(face_index) => {
+                let whole_face_clock = std::time::Instant::now();
                 let face = &faces[*face_index];
                 let face_param5 =
                     road_semantic_param5(face.level, face.phase, face.depth_micro);
@@ -5317,6 +6516,7 @@ fn build_tile_buffers_from_features(
                     .and_then(|field| field.as_ref());
                 let mut sub_verts;
                 let mut sub_indices;
+                let mut sub_offsets: Vec<[f32; 2]> = Vec::new();
                 let (verts, indices, deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
                     match field {
                         // Only faces whose bbox touches lifted cells pay the
@@ -5340,7 +6540,21 @@ fn build_tile_buffers_from_features(
                             let clock = std::time::Instant::now();
                             sub_verts = face.verts.clone();
                             sub_indices = face.indices.clone();
-                            subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
+                            if face.morph_offsets.len() == face.verts.len()
+                                && face.emissive <= 0.001
+                            {
+                                sub_offsets = face.morph_offsets.clone();
+                                subdivide_face_mesh_morph(
+                                    &mut sub_verts,
+                                    &mut sub_indices,
+                                    &mut sub_offsets,
+                                    3.0,
+                                    field,
+                                );
+                            } else {
+                                sub_offsets = Vec::new();
+                                subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
+                            }
                             prof_subdiv_ms += clock.elapsed().as_secs_f64() * 1000.0;
                             let clock = std::time::Instant::now();
                             let deck: Vec<f32> = sub_verts
@@ -5354,6 +6568,7 @@ fn build_tile_buffers_from_features(
                         }
                         _ => (&face.verts, &face.indices, None),
                     };
+                let face_clock = std::time::Instant::now();
                 // Deck side walls first (under the face): top verts (v=0)
                 // ride the deck field, bottom verts (v=1) stay grounded —
                 // flat mode collapses them, tilt reveals the wall. Closes
@@ -5419,28 +6634,77 @@ fn build_tile_buffers_from_features(
                         }
                     }
                 }
-                append_tessellated_geometry_decked(
-                    verts,
-                    indices,
-                    &mut casing_vertices,
-                    &mut casing_indices,
-                    VectorRenderParams {
-                        color: face.color,
-                        stroke_mult: 1e6,
-                        shape_id: 0.0,
-                        params: [
-                            0.0,
-                            face.emissive,
-                            0.0,
-                            if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
-                            0.0,
-                            face_param5,
-                        ],
-                        zbias: casing_zbias,
-                    },
-                    deck.as_deref(),
-                );
+                prof_skirt_ms += face_clock.elapsed().as_secs_f64() * 1e3;
+                let face_clock = std::time::Instant::now();
+                // Morphable body: non-emissive faces whose offsets are
+                // 1:1 with the emitted verts — the dz-subdivided path
+                // carries them through midpoint averaging, so decked city
+                // centers morph too (pinned kf16 geometry there was the
+                // magnified-wide-roads glitch). Deck heights ride the
+                // expanded layout's per-vertex override.
+                let body_offsets: &[[f32; 2]] = if deck.is_some() {
+                    &sub_offsets
+                } else {
+                    &face.morph_offsets
+                };
+                static FACE_MORPH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let face_morph_on = *FACE_MORPH.get_or_init(|| {
+                    std::env::var_os("MAKEPAD_FACE_MORPH").is_some()
+                        || std::path::Path::new("/tmp/mp_face_morph").exists()
+                });
+                let body_morph = face_morph_on
+                    && face.emissive <= 0.001
+                    && body_offsets.len() == verts.len()
+                    && body_offsets.iter().any(|o| o[0] != 0.0 || o[1] != 0.0);
+                if body_morph {
+                    let anchors: Vec<[f32; 2]> = verts
+                        .iter()
+                        .zip(body_offsets)
+                        .map(|(v, o)| [v.x - o[0], v.y - o[1]])
+                        .collect();
+                    append_expanded_stroke_geometry(
+                        verts,
+                        &anchors,
+                        indices,
+                        &mut casing_vertices,
+                        &mut casing_indices,
+                        VectorRenderParams {
+                            color: face.color,
+                            stroke_mult: 1e6,
+                            shape_id: 0.0,
+                            params: [0.0, 0.0, 0.0, 0.0, 0.0, face_param5],
+                            zbias: casing_zbias,
+                        },
+                        EXPAND_CLASS_ROAD + FACE_MORPH_CLASS_OFFSET,
+                        0.0,
+                        deck.as_deref(),
+                    );
+                } else {
+                    append_tessellated_geometry_decked(
+                        verts,
+                        indices,
+                        &mut casing_vertices,
+                        &mut casing_indices,
+                        VectorRenderParams {
+                            color: face.color,
+                            stroke_mult: 1e6,
+                            shape_id: 0.0,
+                            params: [
+                                0.0,
+                                face.emissive,
+                                0.0,
+                                if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
+                                0.0,
+                                face_param5,
+                            ],
+                            zbias: casing_zbias,
+                        },
+                        deck.as_deref(),
+                    );
+                }
                 casing_zbias += VECTOR_ZBIAS_STEP;
+                prof_body_ms += face_clock.elapsed().as_secs_f64() * 1e3;
+                let face_clock = std::time::Instant::now();
                 // AA skirt: same slot, next zbias step — blends this face's
                 // boundary over whatever the ladder painted below it.
                 if !face.fringe_verts.is_empty() {
@@ -5476,31 +6740,77 @@ fn build_tile_buffers_from_features(
                     // Signed u runs 0 -> -1 from the exact road edge through
                     // a wide, outside-only carrier. DrawVector divides by
                     // its screen derivative to recover device-pixel distance.
-                    append_tessellated_geometry_decked(
-                        fr_verts,
-                        fr_indices,
-                        &mut casing_vertices,
-                        &mut casing_indices,
-                        VectorRenderParams {
-                            color: face.color,
-                            stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
-                            shape_id: 0.0,
-                            // A fixed sub-rank epsilon keeps the carrier on
-                            // its own face without making depth tile-local.
-                            params: [
-                                0.0,
-                                face.emissive,
-                                0.0,
-                                if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
-                                0.0,
-                                face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
-                            ],
-                            zbias: casing_zbias,
-                        },
-                        fr_deck.as_deref(),
-                    );
+                    // Morphable fringes ride the expandable band with their
+                    // boundary vertices' offsets so the AA edge tracks the
+                    // morphed face edge; carrier outer verts pin (u-ramp
+                    // stretches, coverage stays one pixel by fwidth).
+                    let fringe_morph = face_morph_on
+                        && fr_deck.is_none()
+                        && face.emissive <= 0.001
+                        && face.morph_fringe_offsets.len() == fr_verts.len()
+                        && face
+                            .morph_fringe_offsets
+                            .iter()
+                            .any(|o| o[0] != 0.0 || o[1] != 0.0);
+                    if fringe_morph {
+                        let anchors: Vec<[f32; 2]> = fr_verts
+                            .iter()
+                            .zip(&face.morph_fringe_offsets)
+                            .map(|(v, o)| [v.x - o[0], v.y - o[1]])
+                            .collect();
+                        append_expanded_stroke_geometry(
+                            fr_verts,
+                            &anchors,
+                            fr_indices,
+                            &mut casing_vertices,
+                            &mut casing_indices,
+                            VectorRenderParams {
+                                color: face.color,
+                                stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
+                                shape_id: 0.0,
+                                params: [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
+                                ],
+                                zbias: casing_zbias,
+                            },
+                            EXPAND_CLASS_ROAD + FACE_MORPH_CLASS_OFFSET,
+                            0.0,
+                            None,
+                        );
+                    } else {
+                        append_tessellated_geometry_decked(
+                            fr_verts,
+                            fr_indices,
+                            &mut casing_vertices,
+                            &mut casing_indices,
+                            VectorRenderParams {
+                                color: face.color,
+                                stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
+                                shape_id: 0.0,
+                                // A fixed sub-rank epsilon keeps the carrier on
+                                // its own face without making depth tile-local.
+                                params: [
+                                    0.0,
+                                    face.emissive,
+                                    0.0,
+                                    if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
+                                    0.0,
+                                    face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
+                                ],
+                                zbias: casing_zbias,
+                            },
+                            fr_deck.as_deref(),
+                        );
+                    }
                     casing_zbias += VECTOR_ZBIAS_STEP;
                 }
+                prof_fringe_ms += face_clock.elapsed().as_secs_f64() * 1e3;
+                prof_face_arm_ms += whole_face_clock.elapsed().as_secs_f64() * 1e3;
                 feature_count += 1;
             }
             RoadPaintEvent::Stroke {
@@ -5509,11 +6819,8 @@ fn build_tile_buffers_from_features(
                 start_cap,
                 end_cap,
             } => {
-                let nearby_corridors = if stroke_corridors_available {
-                    corridors_for_part(part)
-                } else {
-                    Vec::new()
-                };
+                let arm_clock = std::time::Instant::now();
+                let near_corridor = stroke_corridors_available && part_near_corridor(part);
                 let param5 = if pass.deck_m < 0.0 {
                     // Patterned tunnels have no physical sunk mesh; keep
                     // their visible cartographic casing and dashed center
@@ -5530,7 +6837,7 @@ fn build_tile_buffers_from_features(
                     &mut path,
                     part,
                     false,
-                    (!nearby_corridors.is_empty()).then_some(nearby_corridors.as_slice()),
+                    near_corridor.then_some(corridor_query),
                     &mut tess,
                     &mut tess_verts,
                     &mut tess_indices,
@@ -5545,19 +6852,35 @@ fn build_tile_buffers_from_features(
                     &mut casing_zbias,
                     param5,
                 );
+                prof_stroke_arm_ms += arm_clock.elapsed().as_secs_f64() * 1e3;
                 feature_count += 1;
             }
         }
     }
 
+    let prof_events_loop_ms = events_loop_clock.elapsed().as_secs_f64() * 1e3;
+    let sp = crate::map::geometry::stroke_prof_take();
     profiler.lap(
         "emit",
         &format!(
-            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={}",
+            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={} skirt={:.1} body={:.1} fringe={:.1} arm={:.1} facearm={:.1} ebuild={:.1} eloop={:.1} | strokes: calls={} verts={} densify={:.1}ms tess={:.1}ms deck={:.1}ms expand={:.1}ms",
             events.len(),
             prof_subdiv_ms,
             prof_sample_ms,
-            prof_face_verts_out
+            prof_face_verts_out,
+            prof_skirt_ms,
+            prof_body_ms,
+            prof_fringe_ms,
+            prof_stroke_arm_ms,
+            prof_face_arm_ms,
+            prof_events_build_ms,
+            prof_events_loop_ms,
+            sp.calls,
+            sp.verts,
+            sp.densify_ms,
+            sp.tess_ms,
+            sp.deck_ms,
+            sp.expand_ms
         ),
     );
 
@@ -5571,11 +6894,7 @@ fn build_tile_buffers_from_features(
             if part.len() < 2 {
                 continue;
             }
-            let nearby_corridors = if stroke_corridors_available {
-                corridors_for_part(part)
-            } else {
-                Vec::new()
-            };
+            let near_corridor = stroke_corridors_available && part_near_corridor(part);
             let start_cap = if point_on_bounds(part[0], clip_bounds, cap_eps) {
                 LineCap::Butt
             } else {
@@ -5590,7 +6909,7 @@ fn build_tile_buffers_from_features(
                 &mut path,
                 part,
                 false,
-                (!nearby_corridors.is_empty()).then_some(nearby_corridors.as_slice()),
+                near_corridor.then_some(corridor_query),
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
@@ -5784,18 +7103,83 @@ fn build_tile_buffers_from_features(
     compact_tile_labels(&mut labels);
 
     profiler.lap("tail", "");
+    // MAKEPAD_TILE_HASH=1: fnv over every emitted buffer, printed on the
+    // TOTAL line — the bit-identity oracle for geometry-path refactors.
+    let buffer_hash = if std::env::var_os("MAKEPAD_TILE_HASH").is_some() {
+        let mut h = 0xcbf29ce484222325u64;
+        let mut eat = |bytes: &[u8]| {
+            for &b in bytes {
+                h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+        };
+        for floats in [&fill_vertices, &casing_vertices, &stroke_vertices, &icon_vertices] {
+            for f in floats.iter() {
+                eat(&f.to_bits().to_le_bytes());
+            }
+        }
+        for indices in [&fill_indices, &casing_indices, &stroke_indices, &icon_indices] {
+            for i in indices.iter() {
+                eat(&i.to_le_bytes());
+            }
+        }
+        format!(" hash={h:016x}")
+    } else {
+        String::new()
+    };
     profiler.total(
         tile_key,
         &format!(
-            "rz{} fill={}KB casing={}KB stroke={}KB icon={}KB",
+            "rz{} fill={}KB casing={}KB stroke={}KB icon={}KB{}",
             render_zoom,
             (fill_vertices.len() + fill_indices.len()) * 4 / 1024,
             (casing_vertices.len() + casing_indices.len()) * 4 / 1024,
             (stroke_vertices.len() + stroke_indices.len()) * 4 / 1024,
             (icon_vertices.len() + icon_indices.len()) * 4 / 1024,
+            buffer_hash,
         ),
     );
 
+    let stage_summary = if profiler.start.elapsed().as_secs_f64() * 1e3 > 100.0 {
+        profiler.summary()
+    } else {
+        String::new()
+    };
+    let mut icon_vertices = icon_vertices;
+    let mut icon_indices = icon_indices;
+    let (icon_high_vertices, icon_high_indices) =
+        split_icon_band(&mut icon_vertices, &mut icon_indices);
+    let mut casing_vertices = casing_vertices;
+    let mut casing_indices = casing_indices;
+    let (fringe_vertices, fringe_indices) =
+        split_fringe_band(&mut casing_vertices, &mut casing_indices);
+    // 3D band sub-splits by material (param3, slot 14): walls skip at the
+    // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
+    // out. Materials were authored per-append so the predicate is exact.
+    let mut fill_3d_vertices = fill_3d_vertices;
+    let mut fill_3d_indices = fill_3d_indices;
+    let (wall_vertices, wall_indices) = split_band_by(
+        &mut fill_3d_vertices,
+        &mut fill_3d_indices,
+        |record| record[14] > 0.5 && record[14] < 1.5,
+    );
+    let (tree_vertices, tree_indices) = split_band_by(
+        &mut fill_3d_vertices,
+        &mut fill_3d_indices,
+        |record| record[14] > 3.5 && record[14] < 4.5,
+    );
+    // GPU-pack on the builder thread: uploads ship pre-packed bytes (the
+    // main-thread pack was 10-15ms per street tile and throttled the
+    // upload drain to one tile per frame).
+    let fill_vertices = pack_vector_vertices(&fill_vertices);
+    let fill_3d_vertices = pack_vector_vertices(&fill_3d_vertices);
+    let casing_vertices = pack_vector_vertices(&casing_vertices);
+    let stroke_vertices = pack_vector_vertices(&stroke_vertices);
+    let icon_vertices = pack_vector_vertices(&icon_vertices);
+    let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
+    let fringe_vertices = pack_vector_vertices(&fringe_vertices);
+    let wall_vertices = pack_vector_vertices(&wall_vertices);
+    let tree_vertices = pack_vector_vertices(&tree_vertices);
+    let tree_cross_vertices = pack_vector_vertices(&tree_cross_vertices);
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -5806,12 +7190,25 @@ fn build_tile_buffers_from_features(
         stroke_vertices,
         icon_indices,
         icon_vertices,
+        icon_high_indices,
+        icon_high_vertices,
+        fringe_indices,
+        fringe_vertices,
+        fill_3d_indices,
+        fill_3d_vertices,
+        wall_indices,
+        wall_vertices,
+        tree_indices,
+        tree_vertices,
+        tree_cross_indices,
+        tree_cross_vertices,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
         feature_count,
         labels,
         render_zoom,
+        stage_summary,
     }
 }
 
@@ -5842,6 +7239,30 @@ fn simplify_wall_ring(ring: &[(f32, f32)], min_edge: f32) -> Vec<(f32, f32)> {
         let last = *out.last().unwrap();
         if (first.0 - last.0).powi(2) + (first.1 - last.1).powi(2) < min_sq {
             out.pop();
+        }
+    }
+    // Collinear-run merge: drop vertices whose turn is under ~2 degrees —
+    // the adjacent wall quads fuse into one (same plane, same shade, same
+    // silhouette). Footprint digitization noise makes these runs common.
+    if out.len() > 4 {
+        let mut merged = Vec::with_capacity(out.len());
+        let n = out.len();
+        for i in 0..n {
+            let prev = out[(i + n - 1) % n];
+            let cur = out[i];
+            let next = out[(i + 1) % n];
+            let (ax, ay) = (cur.0 - prev.0, cur.1 - prev.1);
+            let (bx, by) = (next.0 - cur.0, next.1 - cur.1);
+            let cross = ax * by - ay * bx;
+            let dot = ax * bx + ay * by;
+            let len2 = ((ax * ax + ay * ay) * (bx * bx + by * by)).sqrt();
+            let straight = len2 > 1e-9 && dot > 0.0 && cross.abs() / len2 < 0.035;
+            if !straight {
+                merged.push(cur);
+            }
+        }
+        if merged.len() >= 3 {
+            out = merged;
         }
     }
     out
@@ -6046,37 +7467,73 @@ fn append_icon_mesh_offset_scaled(
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for vertex in &mesh.verts {
-        out_vertices.extend_from_slice(&[
-            anchor.0,
-            anchor.1,
-            vertex.u,
-            vertex.v,
-            color[0],
-            color[1],
-            color[2],
-            color[3],
-            1e6, // stroke_mult: fill
-            vertex.stroke_dist,
-            ICON_SHAPE_ID,
-            0.0,      // param0: solid color
-            // param1/2: screen-px offset from the anchor
-            vertex.x * scale + screen_offset.0,
-            vertex.y * scale + screen_offset.1,
-            0.0,
-            // param4: this icon's view-zoom floor; the shader collapses the
-            // vertex when the live view zoom is below it (no stale flash).
-            min_zoom,
-            // Tilt depth: a SMALL camera-ward bias -- enough to clear the
-            // marker's own ground pixel (fill/stroke micro-ranks are tiny),
-            // small enough that buildings meaningfully in FRONT occlude
-            // the marker, keeping the 3D illusion honest.
-            0.35,
-            24.0, // clip_radius: generous, avoids pop-in at view edges
-            *zbias,
-        ]);
+    // Template cache: for a given (mesh, color, scale, offset) every
+    // instance differs only in anchor, zoom floor and zbias. City-center
+    // tiles at the icon horizon write tens of MB of icon vertices — the
+    // per-vertex construction loop was ~half of the emit stage. Build the
+    // 19-float block once, memcpy, patch 4 slots.
+    thread_local! {
+        static ICON_TEMPLATES: std::cell::RefCell<
+            HashMap<(usize, [u32; 4], u32, u32, u32), Vec<f32>>,
+        > = std::cell::RefCell::new(HashMap::new());
     }
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    let key = (
+        mesh as *const IconMesh as usize,
+        [
+            color[0].to_bits(),
+            color[1].to_bits(),
+            color[2].to_bits(),
+            color[3].to_bits(),
+        ],
+        scale.to_bits(),
+        screen_offset.0.to_bits(),
+        screen_offset.1.to_bits(),
+    );
+    ICON_TEMPLATES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let template = cache.entry(key).or_insert_with(|| {
+            let mut block = Vec::with_capacity(mesh.verts.len() * VECTOR_FLOATS_PER_VERTEX);
+            for vertex in &mesh.verts {
+                block.extend_from_slice(&[
+                    0.0,
+                    0.0,
+                    vertex.u,
+                    vertex.v,
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3],
+                    1e6, // stroke_mult: fill
+                    vertex.stroke_dist,
+                    ICON_SHAPE_ID,
+                    0.0, // param0: solid color
+                    // param1/2: screen-px offset from the anchor
+                    vertex.x * scale + screen_offset.0,
+                    vertex.y * scale + screen_offset.1,
+                    0.0,
+                    // param4: per-instance view-zoom floor (patched); the
+                    // shader collapses the vertex below it.
+                    0.0,
+                    // Tilt depth: a SMALL camera-ward bias -- enough to
+                    // clear the marker's own ground pixel, small enough
+                    // that buildings meaningfully in FRONT still occlude.
+                    0.35,
+                    24.0, // clip_radius: generous, avoids view-edge pop-in
+                    0.0,
+                ]);
+            }
+            block
+        });
+        let start = out_vertices.len();
+        out_vertices.extend_from_slice(template);
+        for record in out_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX) {
+            record[0] = anchor.0;
+            record[1] = anchor.1;
+            record[15] = min_zoom;
+            record[18] = *zbias;
+        }
+    });
     for index in &mesh.indices {
         out_indices.push(base + index);
     }
@@ -6206,7 +7663,7 @@ pub fn load_local_tile_batch(
         }
         let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
         let raw = reader
-            .get_tile(tile_key.z as i64, tile_key.x as i64, tms_row)
+            .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
             .ok()
             .flatten();
         (raw, true)
@@ -6245,7 +7702,7 @@ pub fn load_local_tile_batch(
             let fetch_x = (tile_key.x as u32 >> shift) as i64;
             let fetch_y = (tile_key.y as u32 >> shift) as i64;
             let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
-            if let Ok(Some(raw)) = reader.get_tile(fetch_z as i64, fetch_x, tms_row) {
+            if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
                 out.push(OverlayTileData {
                     raw,
                     shift,
@@ -6265,7 +7722,7 @@ pub fn load_local_tile_batch(
     let mut decode_failed = Vec::<TileKey>::new();
     let missing = requested;
 
-    let mut reader = MbtilesReader::open(mbtiles_path)
+    let mut reader = TileArchiveReader::open(mbtiles_path)
         .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
 
     // Optional all-tag detail overlay. At z14 it may supply fallback bridge
@@ -6274,10 +7731,14 @@ pub fn load_local_tile_batch(
     // reading the large blob when solved coverage makes every one of those
     // outputs unnecessary.
     let detail_may_be_needed = render_zoom >= 14;
-    let mut detail_reader = if detail_may_be_needed {
+    // Single-archive mode: base and detail layers live in the SAME file
+    // (the pbf-base combined build). Re-reading it through a second reader
+    // brotli-decoded every z14 blob twice — reuse the base bytes instead.
+    let combined_archive = detail_mbtiles_path == Some(mbtiles_path);
+    let mut detail_reader = if detail_may_be_needed && !combined_archive {
         detail_mbtiles_path
-            .filter(|path| path.is_file())
-            .and_then(|path| MbtilesReader::open(path).ok())
+            .filter(|path| path.is_file() || TileArchiveReader::is_mkmap_path(path))
+            .and_then(|path| TileArchiveReader::open(path).ok())
     } else {
         None
     };
@@ -6302,7 +7763,7 @@ pub fn load_local_tile_batch(
             for tile_key in keys {
                 let tms_row = tile_count - 1 - tile_key.y as i64;
                 let raw = reader
-                    .get_tile(zoom as i64, tile_key.x as i64, tms_row)
+                    .get_tile_decoded(zoom as i64, tile_key.x as i64, tms_row)
                     .map_err(|err| {
                         format!(
                             "read tile z{} x{} y{} from {}: {}",
@@ -6317,27 +7778,37 @@ pub fn load_local_tile_batch(
                     unavailable.push(tile_key);
                     continue;
                 };
+                let t_build = std::time::Instant::now();
                 let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
                 let detail_needed = render_zoom >= ICON_MIN_ZOOM
                     || render_zoom >= 16
                     || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
                     || !bridge_dz_covered;
-                let detail_raw = detail_needed
-                    .then(|| {
-                        detail_reader.as_mut().and_then(|reader| {
-                            reader
-                                .get_tile(zoom as i64, tile_key.x as i64, tms_row)
-                                .ok()
+                let detail_raw = if combined_archive {
+                    None // base bytes double as detail below
+                } else {
+                    detail_needed
+                        .then(|| {
+                            detail_reader.as_mut().and_then(|reader| {
+                                reader
+                                    .get_tile_decoded(zoom as i64, tile_key.x as i64, tms_row)
+                                    .ok()
+                            })
                         })
-                    })
-                    .flatten()
-                    .flatten();
+                        .flatten()
+                        .flatten()
+                };
+                let detail_slice = if combined_archive && detail_needed && tile_key.z >= 14 {
+                    Some(raw.as_slice())
+                } else {
+                    detail_raw.as_deref()
+                };
                 let overlay_tiles = fetch_overlays(tile_key);
 
                 match build_tile_buffers_from_mvt(
                     tile_key,
                     &raw,
-                    detail_raw.as_deref(),
+                    detail_slice,
                     bridge_dz_raw.as_deref(),
                     bridge_dz_covered,
                     &overlay_tiles,
@@ -6347,6 +7818,54 @@ pub fn load_local_tile_batch(
                     build_road_core,
                 ) {
                     Ok(buffers) => {
+                        // Slow-tile forensics: anything over 150ms is worth a
+                        // line — which tile, how many bytes, what it holds.
+                        let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
+                        if build_ms > 150.0 {
+                            // Everything needed to replay this exact build
+                            // headlessly, plus the ready-to-paste command.
+                            let detail_env = if combined_archive {
+                                String::new()
+                            } else {
+                                detail_mbtiles_path
+                                    .map(|p| {
+                                        format!(
+                                            " TILE_PROFILE_DETAIL_ARCHIVE={}",
+                                            p.display()
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            let dz_env = bridge_dz_mbtiles_path
+                                .map(|p| format!(" TILE_PROFILE_BRIDGE_DZ={}", p.display()))
+                                .unwrap_or_default();
+                            let overlays_env = if overlay_paths.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" TILE_PROFILE_OVERLAYS=\"{}\"", overlay_paths.join(";"))
+                            };
+                            log!(
+                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build rz{} {} raw {} detail {} | stages: {} | repro: MAKEPAD_TILE_STAGES=1 TILE_PROFILE_ARCHIVE={}{}{}{} TILE_PROFILE_KEYS=\"{},{},{}\" TILE_PROFILE_RENDER_ZOOM={} TILE_PROFILE_3D={} cargo test -p makepad-widgets --features maps --release profile_tile_build -- --ignored --nocapture",
+                                tile_key.z,
+                                tile_key.x,
+                                tile_key.y,
+                                build_ms,
+                                render_zoom,
+                                if buildings_3d { "3D" } else { "flat" },
+                                raw.len(),
+                                detail_slice.map_or(0, |d| d.len()),
+                                buffers.stage_summary,
+                                mbtiles_path.display(),
+                                detail_env,
+                                dz_env,
+                                overlays_env,
+                                tile_key.z,
+                                tile_key.x,
+                                tile_key.y,
+                                render_zoom,
+                                if buildings_3d { "1" } else { "0" },
+                            );
+                        }
                         loaded.push(LoadedLocalTile { tile_key, buffers });
                     }
                     Err(err) => {
@@ -6421,22 +7940,37 @@ pub fn load_local_tile_batch(
                 || render_zoom >= 16
                 || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
                 || !bridge_dz_covered;
-            let detail_raw = detail_needed
-                .then(|| {
-                    detail_reader.as_mut().and_then(|reader| {
-                        let tms_row = tile_count - 1 - tile_key.y as i64;
-                        reader
-                            .get_tile(zoom as i64, tile_key.x as i64, tms_row)
-                            .ok()
+            let detail_raw = if combined_archive {
+                None // base bytes double as detail below
+            } else {
+                detail_needed
+                    .then(|| {
+                        detail_reader.as_mut().and_then(|reader| {
+                            let tms_row = tile_count - 1 - tile_key.y as i64;
+                            reader
+                                .get_tile_decoded(zoom as i64, tile_key.x as i64, tms_row)
+                                .ok()
+                        })
                     })
-                })
-                .flatten()
-                .flatten();
+                    .flatten()
+                    .flatten()
+            };
             let overlay_tiles = fetch_overlays(tile_key);
+            // Codec-aware decode; a failure falls back to the raw payload,
+            // which the magic-byte sniff downstream still handles for the
+            // legacy gzip/zlib/raw archives this scan path serves.
+            let tile_data = reader
+                .decode_tile(&tile.tile_data)
+                .unwrap_or_else(|_| tile.tile_data.clone());
+            let detail_slice = if combined_archive && detail_needed && tile_key.z >= 14 {
+                Some(tile_data.as_slice())
+            } else {
+                detail_raw.as_deref()
+            };
             match build_tile_buffers_from_mvt(
                 tile_key,
-                &tile.tile_data,
-                detail_raw.as_deref(),
+                &tile_data,
+                detail_slice,
                 bridge_dz_raw.as_deref(),
                 bridge_dz_covered,
                 &overlay_tiles,
@@ -6481,6 +8015,22 @@ pub fn load_local_tile_batch(
 /// Receives decoded MVT features (tile-local integer geometry + tags).
 pub trait MvtSink {
     fn alloc_feature_id(&mut self) -> u64;
+    /// Layer-level lazy skip: consulted by `parse_mvt_layer` BEFORE decoding
+    /// a layer's features. MVT layers are length-prefixed, so returning
+    /// false skips the whole layer's geometry/tag decode. Default: consume
+    /// everything.
+    fn wants_layer(&self, _layer_name: &str) -> bool {
+        true
+    }
+    /// Tag-key whitelist for a layer, or None for all keys. Resolved once
+    /// per layer against the MVT key table, so the string compares are paid
+    /// per distinct key — the per-feature loop then skips unwanted pairs
+    /// before any String materializes. All-tag detail layers carry dozens
+    /// of keys per feature (multilingual names, addr:*) that no consumer
+    /// below the icon zooms ever reads.
+    fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
+        None
+    }
     fn add_path(
         &mut self,
         tile_key: TileKey,
@@ -6501,7 +8051,27 @@ pub trait MvtSink {
 /// Collects MVT features directly in tile-local f32 coordinates with
 /// scale-aware vertex thinning — the typed replacement for the old
 /// MVT -> Overpass-JSON -> parse round trip.
+/// Which MVT layers a collector pass consumes (layer-level lazy skip).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayerParseFilter {
+    /// Everything (legacy behavior; standalone probes).
+    All,
+    /// Base-tile pass of a combined base+detail archive: the six raw
+    /// `osm_*` detail layers are owned by the detail pass (bridge
+    /// corridors, micro-POIs, detail buildings/platforms) — wholesale
+    /// base ingestion double-styles them (roads exist in `streets` AND
+    /// `osm_lines`) and was measured tripling road-union input.
+    BaseNoDetailLayers,
+    /// Detail pass: ONLY the raw `osm_*` layers, and only the geometry
+    /// classes the current render bucket consumes. Point layers are the
+    /// bulk of a city-center detail blob (every tree/bench/POI with full
+    /// tags) and icons don't render below z17 — parsing them there was
+    /// most of a ~110ms/tile constant.
+    DetailLayers { points: bool, lines: bool, polygons: bool },
+}
+
 struct MvtLocalCollector {
+    layer_filter: LayerParseFilter,
     min_dist_sq: f32,
     next_feature_id: u64,
     ways: Vec<TileWay>,
@@ -6515,6 +8085,7 @@ impl MvtLocalCollector {
     fn new(render_scale: f32) -> Self {
         let min_dist = 0.35 / render_scale.max(0.001);
         Self {
+            layer_filter: LayerParseFilter::All,
             min_dist_sq: min_dist * min_dist,
             next_feature_id: 1,
             ways: Vec::new(),
@@ -6529,6 +8100,69 @@ impl MvtSink for MvtLocalCollector {
         let id = self.next_feature_id;
         self.next_feature_id = self.next_feature_id.wrapping_add(1).max(1);
         id
+    }
+
+    fn wants_layer(&self, layer_name: &str) -> bool {
+        let is_detail = layer_name.starts_with("osm_");
+        match self.layer_filter {
+            LayerParseFilter::All => true,
+            LayerParseFilter::BaseNoDetailLayers => !is_detail,
+            LayerParseFilter::DetailLayers { points, lines, polygons } => {
+                is_detail
+                    && match layer_name {
+                        "osm_points" | "osm_relation_points" => points,
+                        "osm_lines" | "osm_relation_lines" => lines,
+                        "osm_polygons" | "osm_relation_polygons" => polygons,
+                        _ => true,
+                    }
+            }
+        }
+    }
+
+    fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
+        // Every key the detail-merge way consumers (corridors, barriers,
+        // platforms, attraction/pedestrian/green rings, building extrusion)
+        // or downstream styling of their rewritten layers can read. Point
+        // features are the one consumer with an open-ended key set
+        // (micro_icon_for_tags), so the whitelist only arms when the point
+        // layers are off — below the icon zooms, exactly where the tag mass
+        // hurts.
+        const DETAIL_WAY_KEYS: &[&str] = &[
+            "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
+            "name", "attraction", "zoo", "tourism", "public_transport", "landuse",
+            "leisure", "natural", "building", "building:part", "height",
+            "building:levels", "min_height", "building:min_level", "location", "place",
+            "parking", "surface", "access", "service", "link", "rail", "waterway", "ref",
+        ];
+        // Point layers add the (bounded) icon-matcher key set: every key
+        // icons.rs or the point/attraction routing in merge_detail_features
+        // reads. micro POIs carry dozens of address/name-translation tags
+        // that nothing consumes — at the kf16 icon horizon this parse was
+        // ~140ms/tile with the whitelist forced off.
+        const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
+            "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office",
+            "operator", "shop", "osm_layer", "kerb", "bus", "shelter",
+        ];
+        static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+        static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *NO_WHITELIST
+            .get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some())
+        {
+            return None;
+        }
+        match self.layer_filter {
+            LayerParseFilter::DetailLayers { points: false, .. } => Some(DETAIL_WAY_KEYS),
+            LayerParseFilter::DetailLayers { points: true, .. } => Some(
+                POINT_KEYS
+                    .get_or_init(|| {
+                        let mut keys: Vec<&'static str> = DETAIL_WAY_KEYS.to_vec();
+                        keys.extend_from_slice(DETAIL_POINT_EXTRA_KEYS);
+                        keys
+                    })
+                    .as_slice(),
+            ),
+            _ => None,
+        }
     }
 
     fn add_path(
@@ -6551,7 +8185,7 @@ impl MvtSink for MvtLocalCollector {
         let profile = if self.base_dz.is_empty() {
             None
         } else {
-            match (tags.get("layer"), feature_index, path_index) {
+            match (tags.get("layer"), feature_index.as_deref(), path_index) {
                 (Some(layer), Some(fidx), Some(pidx)) => {
                     match (fidx.parse::<u32>(), pidx.parse::<u32>()) {
                         (Ok(fidx), Ok(pidx)) => self
@@ -6622,6 +8256,7 @@ impl MvtSink for MvtLocalCollector {
             tags,
             closed: close,
             dz,
+            fidx: feature_index.as_deref().and_then(|v| v.parse::<u32>().ok()),
         });
     }
 
@@ -6700,6 +8335,725 @@ impl MvtValue {
     }
 }
 
+// --- Baked painter-cascade faces (payload v2-faces-1) ----------------------
+// The road painter-order union cascade (compute_visible_regions) is fully
+// deterministic per (tile bytes, bridge-dz bytes, style structure, render
+// bucket). Field 101 stores its output rings per bucket 14/15/16 so the
+// renderer can skip the boolean cascade — the dominant cost of heavy urban
+// tiles. Group STYLING (colors/ranks/fields) stays runtime: baked regions
+// join the runtime-built PaintGroups by index, guarded by a structural
+// signature plus a coordinate checksum. Any mismatch falls back to the
+// runtime cascade, so the stream is strictly an accelerator.
+
+thread_local! {
+    /// Bake-tool sink: when armed (Some), build_tile_buffers_from_features
+    /// stops at the painter cascade and hands its regions back through
+    /// here. Thread-local so the offline baker needs no public signature
+    /// churn on the tile-build entry points; never armed in the app.
+    static FACES_BAKE_SINK: std::cell::RefCell<Option<Option<BakedFacesBucket>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn faces_bake_sink_armed() -> bool {
+    FACES_BAKE_SINK.with(|sink| sink.borrow().is_some())
+}
+
+/// Offline bake entry: run the real tile build up to the painter cascade
+/// for one bucket and return its captured regions + signature.
+pub fn bake_tile_paint_faces(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    theme: &CompiledMapTheme,
+    bucket: u32,
+) -> Option<BakedFacesBucket> {
+    FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(None));
+    let result = build_tile_buffers_from_mvt(
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        &[],
+        theme,
+        bucket,
+        // 3D build: the shadow pass (and the detail buildings feeding it)
+        // only runs there, and v3 buckets carry its dissolved output. Road
+        // tier inputs — the faces signature — are building-independent.
+        true,
+        true,
+    );
+    let captured = FACES_BAKE_SINK.with(|sink| sink.borrow_mut().take());
+    match (result, captured) {
+        (Ok(_), Some(bucket)) => bucket,
+        _ => None,
+    }
+}
+
+const BAKED_FACES_FIELD: u32 = 101;
+// v2: `signature` is paint_input_signature (hash of the ring-construction
+// INPUT), letting the consumer skip tier ring building on a hit. v1
+// streams carried the group-structure hash — semantically incompatible,
+// so they are rejected wholesale and fall back to the runtime cascade
+// until the archive is rebaked.
+// v3: bucket body gains shadow_signature + dissolved shadow shapes +
+// grounded footprints after the regions (same running checksum).
+const BAKED_FACES_VERSION: u8 = 4;
+/// Cascade coordinates are snapped to 1/64 unit (geometry.rs SNAP), so a
+/// x64 fixed-point roundtrip is EXACT.
+const BAKED_FACES_COORD_SCALE: f64 = 64.0;
+
+fn fnv1a64_step(hash: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *hash ^= b as u64;
+        *hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+/// Deterministic FNV-1a as a std Hasher: the baker and the app must agree
+/// across processes, which rules out SipHash's per-process keys. Feeds the
+/// derived Hash impls of the tier/style key types.
+struct FnvStdHasher(u64);
+
+impl std::hash::Hasher for FnvStdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
+/// Signature of the painter-cascade INPUT, taken BEFORE ring construction:
+/// tier order and style identity, every smoothed way's points and dz,
+/// plaza rings, and the end sets that decide ribbon caps. If this matches
+/// a baked bucket, the bake's regions are valid for the current input and
+/// the expensive i_overlay ring construction can be skipped wholesale —
+/// the regions carry all geometry, groups only contribute styling, fields
+/// and skirt joints, all of which derive from the ways directly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_input_signature(
+    smoothed_tiers: &[(
+        RoadSurfaceKey,
+        StrokeStyle,
+        Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>,
+    )],
+    plaza_rings: &[(u32, f32, Vec<(f32, f32)>, Option<Vec<f32>>)],
+    tier_joint_ends: &std::collections::HashSet<RoadTierEnd>,
+    tunnel_portals: &std::collections::HashSet<(i32, i32)>,
+    union_clip: GeoBounds,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = FnvStdHasher(0xcbf2_9ce4_8422_2325);
+    let eat_points = |h: &mut FnvStdHasher, points: &[(f32, f32)]| {
+        h.write(&(points.len() as u32).to_le_bytes());
+        for &(x, y) in points {
+            h.write(&x.to_bits().to_le_bytes());
+            h.write(&y.to_bits().to_le_bytes());
+        }
+    };
+    let eat_dz = |h: &mut FnvStdHasher, dz: &Option<Vec<f32>>| match dz {
+        Some(values) => {
+            h.write(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                h.write(&value.to_bits().to_le_bytes());
+            }
+        }
+        None => h.write(&u32::MAX.to_le_bytes()),
+    };
+    // NO resolved colors anywhere in this hash: the key carries the
+    // theme-stable class/rank/width identity, so recolor-only themes
+    // (light/dark/circuit) produce the same signature and share one bake.
+    h.write(&(plaza_rings.len() as u32).to_le_bytes());
+    for (_, alpha, points, dz) in plaza_rings {
+        h.write(&alpha.to_bits().to_le_bytes());
+        eat_points(&mut h, points);
+        eat_dz(&mut h, dz);
+    }
+    h.write(&(smoothed_tiers.len() as u32).to_le_bytes());
+    for (key, _, ways) in smoothed_tiers {
+        key.hash(&mut h);
+        h.write(&(ways.len() as u32).to_le_bytes());
+        for (points, dz) in ways {
+            eat_points(&mut h, points);
+            eat_dz(&mut h, dz);
+        }
+    }
+    // HashSet iteration is nondeterministic: sort before hashing.
+    let mut joint_ends: Vec<&RoadTierEnd> = tier_joint_ends.iter().collect();
+    joint_ends.sort_unstable();
+    h.write(&(joint_ends.len() as u32).to_le_bytes());
+    for end in joint_ends {
+        end.hash(&mut h);
+    }
+    let mut portals: Vec<&(i32, i32)> = tunnel_portals.iter().collect();
+    portals.sort_unstable();
+    h.write(&(portals.len() as u32).to_le_bytes());
+    for portal in portals {
+        portal.hash(&mut h);
+    }
+    h.write(&union_clip.min.x.to_bits().to_le_bytes());
+    h.write(&union_clip.min.y.to_bits().to_le_bytes());
+    h.write(&union_clip.max.x.to_bits().to_le_bytes());
+    h.write(&union_clip.max.y.to_bits().to_le_bytes());
+    h.0
+}
+
+/// Structural signature of the cascade INPUT: group order, phases, ranks,
+/// fields, ring counts/sizes and per-ring dz classification. Identical
+/// between bake and runtime iff the styling structure and tier input match.
+pub fn paint_groups_signature(groups: &[PaintGroup]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    fnv1a64_step(&mut hash, &(groups.len() as u32).to_le_bytes());
+    for group in groups {
+        fnv1a64_step(&mut hash, &[group.phase]);
+        fnv1a64_step(&mut hash, &group.rank.to_le_bytes());
+        fnv1a64_step(&mut hash, &group.field.to_le_bytes());
+        fnv1a64_step(&mut hash, &group.half_width.to_bits().to_le_bytes());
+        fnv1a64_step(&mut hash, &(group.rings.len() as u32).to_le_bytes());
+        for (ring, min_dz, max_dz) in &group.rings {
+            fnv1a64_step(&mut hash, &(ring.len() as u32).to_le_bytes());
+            let lifted = (*max_dz >= LIFT_COVER_M) as u8;
+            let sunk = (*min_dz <= -LIFT_COVER_M) as u8;
+            fnv1a64_step(&mut hash, &[lifted | (sunk << 1)]);
+        }
+    }
+    hash
+}
+
+fn write_faces_varint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn faces_zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn write_shapes(
+    shapes: &[Vec<Vec<[f64; 2]>>],
+    out: &mut Vec<u8>,
+    checksum: &mut u64,
+) {
+    write_faces_varint(shapes.len() as u64, out);
+    for shape in shapes {
+        write_faces_varint(shape.len() as u64, out);
+        for ring in shape {
+            write_faces_varint(ring.len() as u64, out);
+            let mut px = 0i64;
+            let mut py = 0i64;
+            for p in ring {
+                let x = (p[0] * BAKED_FACES_COORD_SCALE).round() as i64;
+                let y = (p[1] * BAKED_FACES_COORD_SCALE).round() as i64;
+                write_faces_varint(faces_zigzag(x - px), out);
+                write_faces_varint(faces_zigzag(y - py), out);
+                fnv1a64_step(checksum, &x.to_le_bytes());
+                fnv1a64_step(checksum, &y.to_le_bytes());
+                px = x;
+                py = y;
+            }
+        }
+    }
+}
+
+/// One bucket's baked cascade: the group-structure signature it was built
+/// against plus each group's visible regions.
+pub struct BakedFacesBucket {
+    pub bucket: u32,
+    pub signature: u64,
+    pub regions: Vec<VisibleRegions>,
+    /// Baked T3 building-shadow output (v3): the dissolved+opened shadow
+    /// shapes and the grounded footprints the deck-shadow pass subtracts.
+    /// Guarded by their own input signature — buildings and roads change
+    /// independently. Night themes leave shadows unsubmitted; the shapes
+    /// bake once under the standard sun.
+    pub shadow_signature: u64,
+    pub shadow_shapes: Vec<Vec<Vec<[f64; 2]>>>,
+    pub shadow_footprints: Vec<Vec<[f64; 2]>>,
+    /// v4: same-height building blocks pre-dissolved at bake time —
+    /// shared interior walls vanish before the extruder ever sees them.
+    /// Guarded by its own input signature; empty on v3 streams.
+    pub building_signature: u64,
+    pub buildings: Vec<BakedBuildingGroup>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BakedBuildingGroup {
+    pub height_m: f32,
+    /// 0 = untinted; otherwise the tint color with bit 31 set.
+    pub tint: u32,
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
+/// Encode buckets into the complete field-101 bytes to append to a tile.
+pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
+    let mut blob = Vec::new();
+    blob.push(BAKED_FACES_VERSION);
+    write_faces_varint(buckets.len() as u64, &mut blob);
+    for bucket in buckets {
+        write_faces_varint(bucket.bucket as u64, &mut blob);
+        blob.extend_from_slice(&bucket.signature.to_le_bytes());
+        let mut body = Vec::new();
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        write_faces_varint(bucket.regions.len() as u64, &mut body);
+        for region in &bucket.regions {
+            write_faces_varint(region.group_index as u64, &mut body);
+            write_shapes(&region.main, &mut body, &mut checksum);
+            write_shapes(&region.sunk, &mut body, &mut checksum);
+            write_shapes(&region.lifted_outlines, &mut body, &mut checksum);
+        }
+        // v3 shadow section, checksummed with the same running fnv.
+        body.extend_from_slice(&bucket.shadow_signature.to_le_bytes());
+        write_shapes(&bucket.shadow_shapes, &mut body, &mut checksum);
+        // Footprints are a flat ring list: wrap as single-ring shapes.
+        let footprint_shapes: Vec<Vec<Vec<[f64; 2]>>> = bucket
+            .shadow_footprints
+            .iter()
+            .map(|ring| vec![ring.clone()])
+            .collect();
+        write_shapes(&footprint_shapes, &mut body, &mut checksum);
+        // v4 building section: pre-dissolved same-height blocks.
+        body.extend_from_slice(&bucket.building_signature.to_le_bytes());
+        write_faces_varint(bucket.buildings.len() as u64, &mut body);
+        for group in &bucket.buildings {
+            write_faces_varint(
+                zigzag_encode((group.height_m * 16.0).round() as i64),
+                &mut body,
+            );
+            write_faces_varint(group.tint as u64, &mut body);
+            write_shapes(
+                &[group.rings.clone()],
+                &mut body,
+                &mut checksum,
+            );
+        }
+        blob.extend_from_slice(&checksum.to_le_bytes());
+        write_faces_varint(body.len() as u64, &mut blob);
+        blob.extend_from_slice(&body);
+    }
+    let mut field = Vec::with_capacity(blob.len() + 8);
+    write_faces_varint(u64::from(BAKED_FACES_FIELD) << 3 | 2, &mut field);
+    write_faces_varint(blob.len() as u64, &mut field);
+    field.extend_from_slice(&blob);
+    field
+}
+
+fn read_shapes(
+    blob: &[u8],
+    pos: &mut usize,
+    checksum: &mut u64,
+) -> Option<Vec<Vec<Vec<[f64; 2]>>>> {
+    let shape_count = read_pb_varint(blob, pos).ok()? as usize;
+    if shape_count > 1_000_000 {
+        return None;
+    }
+    let mut shapes = Vec::with_capacity(shape_count);
+    for _ in 0..shape_count {
+        let ring_count = read_pb_varint(blob, pos).ok()? as usize;
+        if ring_count > 1_000_000 {
+            return None;
+        }
+        let mut rings = Vec::with_capacity(ring_count);
+        for _ in 0..ring_count {
+            let pt_count = read_pb_varint(blob, pos).ok()? as usize;
+            if pt_count > 4_000_000 {
+                return None;
+            }
+            let mut ring = Vec::with_capacity(pt_count);
+            let mut px = 0i64;
+            let mut py = 0i64;
+            for _ in 0..pt_count {
+                px += zigzag_decode(read_pb_varint(blob, pos).ok()?);
+                py += zigzag_decode(read_pb_varint(blob, pos).ok()?);
+                fnv1a64_step(checksum, &px.to_le_bytes());
+                fnv1a64_step(checksum, &py.to_le_bytes());
+                ring.push([
+                    px as f64 / BAKED_FACES_COORD_SCALE,
+                    py as f64 / BAKED_FACES_COORD_SCALE,
+                ]);
+            }
+            rings.push(ring);
+        }
+        shapes.push(rings);
+    }
+    Some(shapes)
+}
+
+/// Scan a decoded tile for field 101 and decode ONE bucket's regions.
+/// None = absent/malformed/checksum-mismatch: caller runs the cascade.
+pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFacesBucket> {
+    let mut pos = 0usize;
+    let mut blob: Option<&[u8]> = None;
+    while pos < tile_data.len() {
+        let key = read_pb_varint(tile_data, &mut pos).ok()?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x7) as u8;
+        if field == BAKED_FACES_FIELD && wire == 2 {
+            blob = Some(read_pb_len_slice(tile_data, &mut pos).ok()?);
+            break;
+        }
+        skip_pb_field(tile_data, &mut pos, wire).ok()?;
+    }
+    let blob = blob?;
+    let stream_version = *blob.first()?;
+    if stream_version != 3 && stream_version != BAKED_FACES_VERSION {
+        return None;
+    }
+    let mut pos = 1usize;
+    let bucket_count = read_pb_varint(blob, &mut pos).ok()? as usize;
+    for _ in 0..bucket_count.min(16) {
+        let bucket = read_pb_varint(blob, &mut pos).ok()? as u32;
+        if pos + 16 > blob.len() {
+            return None;
+        }
+        let signature = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        let stored_checksum = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        let body_len = read_pb_varint(blob, &mut pos).ok()? as usize;
+        if pos + body_len > blob.len() {
+            return None;
+        }
+        if bucket != want_bucket {
+            pos += body_len;
+            continue;
+        }
+        let body = &blob[pos..pos + body_len];
+        let mut bpos = 0usize;
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        let region_count = read_pb_varint(body, &mut bpos).ok()? as usize;
+        if region_count > 100_000 {
+            return None;
+        }
+        let mut regions = Vec::with_capacity(region_count);
+        for _ in 0..region_count {
+            let group_index = read_pb_varint(body, &mut bpos).ok()? as usize;
+            let main = read_shapes(body, &mut bpos, &mut checksum)?;
+            let sunk = read_shapes(body, &mut bpos, &mut checksum)?;
+            let lifted_outlines = read_shapes(body, &mut bpos, &mut checksum)?;
+            regions.push(VisibleRegions {
+                group_index,
+                main,
+                sunk,
+                lifted_outlines,
+            });
+        }
+        // v3 shadow section.
+        if bpos + 8 > body.len() {
+            return None;
+        }
+        let shadow_signature = u64::from_le_bytes(body[bpos..bpos + 8].try_into().ok()?);
+        bpos += 8;
+        let shadow_shapes = read_shapes(body, &mut bpos, &mut checksum)?;
+        let footprint_shapes = read_shapes(body, &mut bpos, &mut checksum)?;
+        let shadow_footprints: Vec<Vec<[f64; 2]>> = footprint_shapes
+            .into_iter()
+            .filter_map(|mut shape| (!shape.is_empty()).then(|| shape.swap_remove(0)))
+            .collect();
+        let mut building_signature = 0u64;
+        let mut buildings = Vec::new();
+        if stream_version >= 4 {
+            if bpos + 8 > body.len() {
+                return None;
+            }
+            building_signature =
+                u64::from_le_bytes(body[bpos..bpos + 8].try_into().ok()?);
+            bpos += 8;
+            let group_count = read_pb_varint(body, &mut bpos).ok()? as usize;
+            if group_count > 100_000 {
+                return None;
+            }
+            for _ in 0..group_count {
+                let height_q = zigzag_decode(read_pb_varint(body, &mut bpos).ok()?);
+                let tint = read_pb_varint(body, &mut bpos).ok()? as u32;
+                let mut shape = read_shapes(body, &mut bpos, &mut checksum)?;
+                let rings = if shape.is_empty() {
+                    Vec::new()
+                } else {
+                    shape.swap_remove(0)
+                };
+                buildings.push(BakedBuildingGroup {
+                    height_m: height_q as f32 / 16.0,
+                    tint,
+                    rings,
+                });
+            }
+        }
+        if checksum != stored_checksum {
+            return None;
+        }
+        return Some(BakedFacesBucket {
+            bucket,
+            signature,
+            regions,
+            shadow_signature,
+            shadow_shapes,
+            shadow_footprints,
+            building_signature,
+            buildings,
+        });
+    }
+    None
+}
+
+// --- Baked fill triangulations (payload v2-fills-1) -----------------------
+// The pyramid baker (tools/map_tiles/src/native/bake.rs) appends top-level
+// protobuf field 100 to qualifying tiles: pre-earcut triangle strips for the
+// big polygon features (water_polygons / land / street_polygons, >=96 ring
+// vertices). Flat mode substitutes these for the runtime fill tessellation;
+// 3D/terrain ignores them (drape re-grids from the rings).
+
+/// One decoded baked-fill feature.
+pub struct BakedFillFeature {
+    /// tools/map_tiles Layer discriminant of the source polygon layer.
+    pub layer_id: u8,
+    /// Feature index within that MVT layer, decode order (joins __mp_fidx).
+    pub feature_index: u32,
+    /// Tile-local units (TILE_SIZE space), full MVT precision, UNCLIPPED:
+    /// geometry carries the emitter's 64-MVT-unit tile buffer, so consumers
+    /// must clip triangles to their own tile bounds.
+    pub verts: Vec<(f32, f32)>,
+    /// Decoded triangle list (positive y-down winding).
+    pub tris: Vec<[u32; 3]>,
+}
+
+/// Maps a renderer-side MVT layer NAME to the baker's Layer discriminant.
+/// Mirrors tools/map_tiles/src/native/mvt.rs `Layer`; only the layers the
+/// baker emits (bake.rs `baked_fills_field`) are listed.
+fn baked_layer_discriminant(layer_name: &str) -> Option<u8> {
+    match layer_name {
+        "water_polygons" => Some(9),
+        "land" => Some(11),
+        "street_polygons" => Some(13),
+        _ => None,
+    }
+}
+
+fn zigzag_encode(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn zigzag_decode(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ -((value & 1) as i64)
+}
+
+/// Decode the strip stream exactly like the baker's `strip_to_triangles`:
+/// sliding window of 3, even/odd winding alternation by absolute window
+/// index, degenerate windows (repeated index) restart the strip.
+fn baked_strip_to_triangles(strip: &[u32]) -> Vec<[u32; 3]> {
+    let mut out = Vec::with_capacity(strip.len().saturating_sub(2));
+    let mut odd = false;
+    for window in strip.windows(3) {
+        let [a, b, c] = [window[0], window[1], window[2]];
+        if a != b && b != c && a != c {
+            out.push(if odd { [b, a, c] } else { [a, b, c] });
+        }
+        odd = !odd;
+    }
+    out
+}
+
+/// Scan a decoded (uncompressed) tile for field 100 and decode the baked
+/// fill stream. Returns None when absent or malformed (renderer falls back
+/// to runtime tessellation — the stream is strictly an accelerator).
+pub fn parse_baked_fills(tile_data: &[u8]) -> Option<Vec<BakedFillFeature>> {
+    let mut pos = 0usize;
+    let mut blob: Option<&[u8]> = None;
+    while pos < tile_data.len() {
+        let key = read_pb_varint(tile_data, &mut pos).ok()?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x7) as u8;
+        if field == 100 && wire == 2 {
+            blob = Some(read_pb_len_slice(tile_data, &mut pos).ok()?);
+            break;
+        }
+        skip_pb_field(tile_data, &mut pos, wire).ok()?;
+    }
+    let blob = blob?;
+    if blob.first() != Some(&1u8) {
+        return None;
+    }
+    // The baker writes MVT extent 4096 for every layer (mvt.rs MVT_EXTENT);
+    // baked coordinates are in the same local tile space.
+    const BAKED_MVT_EXTENT: f32 = 4096.0;
+    let scale = TILE_SIZE as f32 / BAKED_MVT_EXTENT;
+    let mut pos = 1usize;
+    let count = read_pb_varint(blob, &mut pos).ok()? as usize;
+    // Cap against garbage: a tile never has millions of baked features.
+    if count > 100_000 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let layer_id = read_pb_varint(blob, &mut pos).ok()?;
+        let feature_index = read_pb_varint(blob, &mut pos).ok()?;
+        let vertex_count = read_pb_varint(blob, &mut pos).ok()? as usize;
+        let index_count = read_pb_varint(blob, &mut pos).ok()? as usize;
+        if vertex_count > 4_000_000 || index_count > 12_000_000 {
+            return None;
+        }
+        let mut verts = vec![(0.0f32, 0.0f32); vertex_count];
+        let mut previous = 0i64;
+        for vert in verts.iter_mut() {
+            previous += zigzag_decode(read_pb_varint(blob, &mut pos).ok()?);
+            vert.0 = previous as f32 * scale;
+        }
+        previous = 0;
+        for vert in verts.iter_mut() {
+            previous += zigzag_decode(read_pb_varint(blob, &mut pos).ok()?);
+            vert.1 = previous as f32 * scale;
+        }
+        let mut strip = Vec::with_capacity(index_count);
+        previous = 0;
+        for _ in 0..index_count {
+            previous += zigzag_decode(read_pb_varint(blob, &mut pos).ok()?);
+            if previous < 0 || previous as usize >= vertex_count {
+                return None;
+            }
+            strip.push(previous as u32);
+        }
+        let tris = baked_strip_to_triangles(&strip);
+        out.push(BakedFillFeature {
+            layer_id: layer_id as u8,
+            feature_index: feature_index as u32,
+            verts,
+            tris,
+        });
+    }
+    Some(out)
+}
+
+/// Clip a convex polygon against one half-plane (Sutherland–Hodgman step).
+/// `inside`/`intersect` in f64 for edge-crossing robustness.
+fn clip_poly_axis(
+    input: &[(f64, f64)],
+    output: &mut Vec<(f64, f64)>,
+    axis_x: bool,
+    bound: f64,
+    keep_less: bool,
+) {
+    output.clear();
+    let inside = |p: (f64, f64)| {
+        let v = if axis_x { p.0 } else { p.1 };
+        if keep_less {
+            v <= bound
+        } else {
+            v >= bound
+        }
+    };
+    let n = input.len();
+    for i in 0..n {
+        let cur = input[i];
+        let prev = input[(i + n - 1) % n];
+        let cur_in = inside(cur);
+        let prev_in = inside(prev);
+        if cur_in != prev_in {
+            // Edge crosses the boundary: emit intersection.
+            let (num, den) = if axis_x {
+                (bound - prev.0, cur.0 - prev.0)
+            } else {
+                (bound - prev.1, cur.1 - prev.1)
+            };
+            let t = if den.abs() > 1e-12 { num / den } else { 0.0 };
+            output.push((prev.0 + (cur.0 - prev.0) * t, prev.1 + (cur.1 - prev.1) * t));
+        }
+        if cur_in {
+            output.push(cur);
+        }
+    }
+}
+
+/// Emit a baked fill body into `verts`/`indices` (clears both): shared
+/// vertices for fully-inside triangles, per-triangle Sutherland–Hodgman
+/// clipping + fan retriangulation at the tile clip rect. Vertex semantics
+/// match `Tessellator::fill`'s EvenOdd body: position on the ring,
+/// u=0.5 / v=1.0 (opaque interior). Returns the emitted (clipped)
+/// triangle area — callers sanity-check it against the feature's net ring
+/// area and fall back to runtime tessellation on disagreement.
+fn emit_baked_fill_body(
+    baked: &BakedFillFeature,
+    clip: (f32, f32, f32, f32),
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+) -> f64 {
+    verts.clear();
+    indices.clear();
+    let (min_x, min_y, max_x, max_y) = clip;
+    for &(x, y) in &baked.verts {
+        verts.push(VVertex {
+            x,
+            y,
+            u: 0.5,
+            v: 1.0,
+            stroke_dist: 0.0,
+            clip_radius: 0.0,
+        });
+    }
+    let inside = |x: f32, y: f32| x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+    let tri_area = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| -> f64 {
+        0.5 * ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs()
+    };
+    let mut area = 0.0f64;
+    let mut poly_a: Vec<(f64, f64)> = Vec::with_capacity(8);
+    let mut poly_b: Vec<(f64, f64)> = Vec::with_capacity(8);
+    for tri in &baked.tris {
+        let a = &baked.verts[tri[0] as usize];
+        let b = &baked.verts[tri[1] as usize];
+        let c = &baked.verts[tri[2] as usize];
+        if inside(a.0, a.1) && inside(b.0, b.1) && inside(c.0, c.1) {
+            indices.extend_from_slice(&[tri[0], tri[1], tri[2]]);
+            area += tri_area(
+                (a.0 as f64, a.1 as f64),
+                (b.0 as f64, b.1 as f64),
+                (c.0 as f64, c.1 as f64),
+            );
+            continue;
+        }
+        // Clip against the four rect edges; the result is convex, so a
+        // fan preserves the (positive) winding.
+        poly_a.clear();
+        poly_a.extend([
+            (a.0 as f64, a.1 as f64),
+            (b.0 as f64, b.1 as f64),
+            (c.0 as f64, c.1 as f64),
+        ]);
+        clip_poly_axis(&poly_a, &mut poly_b, true, min_x as f64, false);
+        clip_poly_axis(&poly_b, &mut poly_a, true, max_x as f64, true);
+        clip_poly_axis(&poly_a, &mut poly_b, false, min_y as f64, false);
+        clip_poly_axis(&poly_b, &mut poly_a, false, max_y as f64, true);
+        if poly_a.len() < 3 {
+            continue;
+        }
+        let start = verts.len() as u32;
+        for &(x, y) in poly_a.iter() {
+            verts.push(VVertex {
+                x: x as f32,
+                y: y as f32,
+                u: 0.5,
+                v: 1.0,
+                stroke_dist: 0.0,
+                clip_radius: 0.0,
+            });
+        }
+        for k in 1..poly_a.len() as u32 - 1 {
+            indices.extend_from_slice(&[start, start + k, start + k + 1]);
+            area += tri_area(
+                poly_a[0],
+                poly_a[k as usize],
+                poly_a[k as usize + 1],
+            );
+        }
+    }
+    area
+}
+
 pub fn parse_mvt_tile(
     tile_data: &[u8],
     tile_key: TileKey,
@@ -6757,6 +9111,17 @@ fn parse_mvt_layer(
     }
 
     let extent = extent.max(1);
+    // Layer-level lazy skip: drop the whole layer before any feature decode
+    // when the sink does not consume it in this pass.
+    if !builder.wants_layer(&layer_name) {
+        return Ok(());
+    }
+    // Key-level lazy skip: one bool per key-table entry.
+    let key_wanted: Option<Vec<bool>> = builder.tag_key_whitelist(&layer_name).map(|whitelist| {
+        keys.iter()
+            .map(|key| whitelist.contains(&key.as_str()))
+            .collect()
+    });
     for (feature_index, feature_data) in features.into_iter().enumerate() {
         parse_mvt_feature(
             feature_index as u32,
@@ -6764,6 +9129,7 @@ fn parse_mvt_layer(
             &layer_name,
             &keys,
             &values,
+            key_wanted.as_deref(),
             extent,
             tile_key,
             builder,
@@ -6772,12 +9138,14 @@ fn parse_mvt_layer(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_mvt_feature(
     feature_index: u32,
     feature_data: &[u8],
     layer_name: &str,
     keys: &[String],
     values: &[MvtValue],
+    key_wanted: Option<&[bool]>,
     extent: u32,
     tile_key: TileKey,
     builder: &mut impl MvtSink,
@@ -6815,6 +9183,11 @@ fn parse_mvt_feature(
     for pair in tag_indexes.chunks_exact(2) {
         let key_index = pair[0] as usize;
         let value_index = pair[1] as usize;
+        if let Some(wanted) = key_wanted {
+            if !wanted.get(key_index).copied().unwrap_or(false) {
+                continue;
+            }
+        }
         let Some(key) = keys.get(key_index) else {
             continue;
         };
@@ -7210,6 +9583,481 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
 mod bridge_probe_tests {
     use super::*;
 
+    /// Baked-fill audit (payload v2-fills-1): per baked feature, compare the
+    /// clipped baked body triangle area against the runtime tessellation of
+    /// the SAME feature's (clipped, min-dist-deduped) rings. NaN scan on the
+    /// baked vertices included. Env:
+    ///   BAKED_AUDIT_ARCHIVE (default ../local/maps/nl-base-br.mbtiles)
+    ///   BAKED_AUDIT_KEYS "z,x,y;..." (default a z10-13 spread)
+    /// Run:
+    ///   cargo test -p makepad-widgets --features maps --release \
+    ///     baked_fill_audit -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn baked_fill_audit() {
+        let archive = std::env::var("BAKED_AUDIT_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive at {archive}");
+            return;
+        }
+        let keys_spec = std::env::var("BAKED_AUDIT_KEYS").unwrap_or_else(|_| {
+            "10,528,340;11,1057,678;12,2103,1346;13,4207,2692;13,4211,2691".into()
+        });
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
+        let mut total_features = 0usize;
+        let mut total_diverged = 0usize;
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let Some(blob) = reader.get_tile(z, x, (1 << z) - 1 - y).ok().flatten() else {
+                println!("z{z} {x}/{y}: missing");
+                continue;
+            };
+            let raw = reader.decode_tile(&blob).unwrap();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let Some(baked) = parse_baked_fills(&pbf) else {
+                println!("z{z} {x}/{y}: no baked stream");
+                continue;
+            };
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            // Collect ways exactly like the flat build (render_zoom = z).
+            let mut collector = MvtLocalCollector::new(1.0);
+            parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+            // Group rings per (layer discriminant, fidx).
+            let mut rings_of: HashMap<(u8, u32), Vec<FillRing>> = HashMap::new();
+            let clip_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP);
+            for (order, way) in collector.ways.iter().enumerate() {
+                let Some(fidx) = way.fidx else { continue };
+                let layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+                let Some(layer_id) = baked_layer_discriminant(layer) else {
+                    continue;
+                };
+                let Some(mut ring_points) = normalize_polygon_ring(&way.points) else {
+                    continue;
+                };
+                if !ring_inside_bounds(&ring_points, clip_bounds) {
+                    ring_points = clip_ring_to_rect(&ring_points, clip_bounds);
+                    if ring_points.len() < 3 {
+                        continue;
+                    }
+                }
+                let signed_area = polygon_signed_area(&ring_points);
+                if signed_area.abs() <= POLYGON_AREA_EPSILON {
+                    continue;
+                }
+                let ring_order = way
+                    .tags
+                    .get(MVT_INTERNAL_RING_INDEX_KEY)
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(order);
+                rings_of.entry((layer_id, fidx)).or_default().push(FillRing {
+                    order: ring_order,
+                    points: ring_points,
+                    signed_area,
+                });
+            }
+            if std::env::var("BAKED_AUDIT_DEBUG").is_ok() {
+                let mut runtime_list: Vec<((u8, u32), usize, f64)> = rings_of
+                    .iter()
+                    .map(|(&k, rings)| {
+                        (
+                            k,
+                            rings.iter().map(|r| r.points.len()).sum::<usize>(),
+                            rings.iter().map(|r| r.signed_area).sum::<f64>(),
+                        )
+                    })
+                    .collect();
+                runtime_list.sort_by_key(|entry| entry.0);
+                for (k, nv, area) in runtime_list.iter().take(30) {
+                    println!("  runtime layer {} fidx {}: {} ring verts, net area {:.2}", k.0, k.1, nv, area);
+                }
+                for bake in baked.iter().take(30) {
+                    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                    for &(x, y) in &bake.verts {
+                        minx = minx.min(x); miny = miny.min(y); maxx = maxx.max(x); maxy = maxy.max(y);
+                    }
+                    println!(
+                        "  baked layer {} fidx {}: {} verts {} tris bbox ({:.1},{:.1})-({:.1},{:.1})",
+                        bake.layer_id, bake.feature_index, bake.verts.len(), bake.tris.len(), minx, miny, maxx, maxy
+                    );
+                }
+            }
+            // Sum of per-triangle |area|: both tessellations partition their
+            // region (no overlaps), so this equals covered area regardless
+            // of triangle winding (the sweep emits mixed orientations).
+            let tri_area = |verts: &[VVertex], indices: &[u32]| -> f64 {
+                let mut area = 0.0f64;
+                for tri in indices.chunks_exact(3) {
+                    let a = &verts[tri[0] as usize];
+                    let b = &verts[tri[1] as usize];
+                    let c = &verts[tri[2] as usize];
+                    area += 0.5
+                        * ((b.x as f64 - a.x as f64) * (c.y as f64 - a.y as f64)
+                            - (c.x as f64 - a.x as f64) * (b.y as f64 - a.y as f64))
+                            .abs();
+                }
+                area
+            };
+            let mut tess = Tessellator::default();
+            tess.set_trust_fill_winding(true);
+            let mut path = VectorPath::new();
+            let mut verts = Vec::<VVertex>::new();
+            let mut indices = Vec::<u32>::new();
+            let mut diverged = 0usize;
+            let mut nan_verts = 0usize;
+            let mut max_rel = 0.0f64;
+            let mut guard_rejected = 0usize;
+            let mut max_rel_accepted = 0.0f64;
+            for bake in &baked {
+                total_features += 1;
+                // Baked body, clipped like the fill pass at render_zoom = z.
+                let clip = tile_clip_rect(FILL_CLIP_OVERLAP);
+                emit_baked_fill_body(bake, clip, &mut verts, &mut indices);
+                nan_verts += verts
+                    .iter()
+                    .filter(|v| !v.x.is_finite() || !v.y.is_finite())
+                    .count();
+                let baked_area = tri_area(&verts, &indices);
+                // Runtime tessellation of the same feature's rings
+                // (aa = 0: body only, no fringe — the fringe is shared
+                // construction in both paths).
+                let mut runtime_area = 0.0f64;
+                if let Some(rings) = rings_of.get(&(bake.layer_id, bake.feature_index)) {
+                    for polygon in classify_polygon_rings(rings, EARCUT_MAX_RINGS) {
+                        if polygon.is_empty() {
+                            continue;
+                        }
+                        for ring in &polygon {
+                            emit_path(&mut path, ring, true);
+                        }
+                        tessellate_path_fill(
+                            &mut path,
+                            &mut tess,
+                            &mut verts,
+                            &mut indices,
+                            LineJoin::Miter,
+                            4.0,
+                            0.0,
+                            false,
+                            DEFAULT_FLATTEN_TOLERANCE,
+                        );
+                        runtime_area += tri_area(&verts, &indices);
+                    }
+                }
+                let denom = runtime_area.max(1e-6);
+                let rel = (baked_area - runtime_area).abs() / denom;
+                max_rel = max_rel.max(rel);
+                // Mirror the shipping fast path's sanity guard: baked
+                // partition area vs the feature's net clipped ring area.
+                let net_ring_area: f64 = rings_of
+                    .get(&(bake.layer_id, bake.feature_index))
+                    .map(|rings| rings.iter().map(|r| r.signed_area).sum::<f64>().abs())
+                    .unwrap_or(0.0);
+                let guard_accepts = net_ring_area > 1e-6
+                    && (baked_area - net_ring_area).abs() <= net_ring_area * 0.05;
+                if guard_accepts {
+                    max_rel_accepted = max_rel_accepted.max(rel);
+                } else {
+                    guard_rejected += 1;
+                }
+                if rel > 1e-3 {
+                    diverged += 1;
+                    if diverged <= 5 {
+                        let rings = rings_of
+                            .get(&(bake.layer_id, bake.feature_index))
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let net: f64 = rings.iter().map(|r| r.signed_area).sum();
+                        println!(
+                            "  DIVERGED layer {} fidx {}: baked {:.3} runtime {:.3} rel {:.2e} ({} verts {} tris, {} rings net {:.3})",
+                            bake.layer_id,
+                            bake.feature_index,
+                            baked_area,
+                            runtime_area,
+                            rel,
+                            bake.verts.len(),
+                            bake.tris.len(),
+                            rings.len(),
+                            net,
+                        );
+                        if rel > 3e-2 {
+                            for (ri, ring) in rings.iter().enumerate().take(12) {
+                                println!(
+                                    "    ring {ri}: {} pts area {:.3}",
+                                    ring.points.len(),
+                                    ring.signed_area
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            total_diverged += diverged;
+            println!(
+                "z{z} {x}/{y}: {} baked features, {} diverged (>1e-3 rel), max rel {:.2e}, {} NaN verts | guard rejects {}, max rel among accepted {:.2e}",
+                baked.len(),
+                diverged,
+                max_rel,
+                nan_verts,
+                guard_rejected,
+                max_rel_accepted,
+            );
+            assert_eq!(nan_verts, 0, "NaN in baked vertices");
+        }
+        println!("audit total: {total_features} baked features, {total_diverged} diverged");
+    }
+
+    /// Per-layer way census for one tile of TILE_PROFILE_ARCHIVE — used to
+    /// attribute build-time regressions to emission changes. Prints layer,
+    /// way count, total verts, and per-key street-class breakdown.
+    #[test]
+    #[ignore]
+    fn layer_census() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let keys_spec = std::env::var("TILE_PROFILE_KEYS").unwrap_or_else(|_| "14,8414,5386".into());
+        let mut reader =
+            makepad_mbtile_reader::TileArchiveReader::open(std::path::Path::new(&archive)).unwrap();
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let Some(blob) = reader.get_tile(z, x, (1 << z) - 1 - y).ok().flatten() else {
+                println!("missing");
+                continue;
+            };
+            let raw = reader.decode_tile(&blob).unwrap();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let mut collector = MvtLocalCollector::new(1.0);
+            parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+            let mut per_layer: std::collections::BTreeMap<String, (usize, usize)> =
+                Default::default();
+            let mut point_layers: std::collections::BTreeMap<String, usize> = Default::default();
+            for (_pos, tags) in &collector.points {
+                let layer = tags.get("layer").cloned().unwrap_or_default();
+                *point_layers.entry(layer).or_default() += 1;
+            }
+            for (layer, count) in &point_layers {
+                println!("  POINTS {:<24} {:>6}", layer, count);
+            }
+            // The real micro-POI path: merge_detail_features with the
+            // detail whitelist (trees/benches/bins enter here, not via
+            // plain parsing).
+            {
+                let mut points = Vec::new();
+                let mut ways = Vec::new();
+                let mut corridors = Vec::new();
+                merge_detail_features(
+                    &raw,
+                    key,
+                    4.0,
+                    true,
+                    true,
+                    false,
+                    &mut points,
+                    &mut ways,
+                    &mut corridors,
+                )
+                .unwrap();
+                let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+                for (_pos, tags) in &points {
+                    let kind = tags
+                        .get("natural")
+                        .or_else(|| tags.get("amenity"))
+                        .or_else(|| tags.get("highway"))
+                        .cloned()
+                        .unwrap_or_else(|| "other".into());
+                    *kinds.entry(kind).or_default() += 1;
+                }
+                println!("  DETAIL-MERGE points={} ways={}", points.len(), ways.len());
+                for (kind, count) in kinds.iter().take(8) {
+                    println!("    micro {:<16} {:>6}", kind, count);
+                }
+            }
+            let mut street_kind: std::collections::BTreeMap<String, usize> = Default::default();
+            for way in &collector.ways {
+                let layer = way.tags.get("layer").cloned().unwrap_or_default();
+                let e = per_layer.entry(layer.clone()).or_default();
+                e.0 += 1;
+                e.1 += way.points.len();
+                if layer.starts_with("street") {
+                    let kind = way
+                        .tags
+                        .get("kind")
+                        .or_else(|| way.tags.get("highway"))
+                        .cloned()
+                        .unwrap_or_default();
+                    *street_kind.entry(kind).or_default() += 1;
+                }
+            }
+            println!("z{z} {x}/{y} ({} bytes blob): {} ways", blob.len(), collector.ways.len());
+            for (layer, (n, verts)) in &per_layer {
+                println!("  {layer:<24} {n:>6} ways {verts:>8} verts");
+            }
+            for (kind, n) in &street_kind {
+                println!("    street kind {kind:<20} {n:>6}");
+            }
+        }
+    }
+
+    /// Baked painter-cascade roundtrip: bake one tile's faces per bucket,
+    /// append the field-101 stream to the payload, rebuild through the
+    /// normal path, and require BIT-IDENTICAL buffers vs the runtime
+    /// cascade (same code builds the faces either way; the stream's 1/64
+    /// fixed-point roundtrip is exact).
+    #[test]
+    #[ignore]
+    fn baked_faces_roundtrip() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive");
+            return;
+        }
+        let keys = std::env::var("TILE_PROFILE_KEYS")
+            .unwrap_or_else(|_| "14,8414,5386;14,8415,5387".into());
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
+        let mut dz_reader = std::env::var("TILE_PROFILE_BRIDGE_DZ")
+            .ok()
+            .map(|p| makepad_mbtile_reader::TileArchiveReader::open(std::path::Path::new(&p)).unwrap());
+        let theme = crate::map::style::probe_compiled_theme();
+        for spec in keys.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let raw = reader
+                .get_tile_decoded(z, x, (1 << z) - 1 - y)
+                .unwrap()
+                .unwrap();
+            let dz_raw = dz_reader
+                .as_mut()
+                .and_then(|r| r.get_tile_decoded(z, x, (1 << z) - 1 - y).ok().flatten());
+            let dz_covered = dz_reader.is_some();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            for bucket in [14u32, 15, 16] {
+                let Some(baked) =
+                    bake_tile_paint_faces(key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &theme, bucket)
+                else {
+                    println!("z{z} {x}/{y} b{bucket}: no bake");
+                    continue;
+                };
+                let baked2 =
+                    bake_tile_paint_faces(key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &theme, bucket)
+                        .unwrap();
+                println!(
+                    "bake determinism: sig {} regions {} vs sig {} regions {} | encode equal {}",
+                    baked.signature,
+                    baked.regions.len(),
+                    baked2.signature,
+                    baked2.regions.len(),
+                    encode_baked_faces_field(std::slice::from_ref(&baked))
+                        == encode_baked_faces_field(std::slice::from_ref(&baked2)),
+                );
+                let region_count = baked.regions.len();
+                let field = encode_baked_faces_field(&[baked]);
+                let mut with_field = pbf.clone();
+                with_field.extend_from_slice(&field);
+                // Decode sanity through the parse path.
+                let parsed = parse_baked_faces(&with_field, bucket).expect("parse baked");
+                assert_eq!(parsed.regions.len(), region_count);
+                let runtime = build_tile_buffers_from_mvt(
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                )
+                .unwrap();
+                let runtime2 = build_tile_buffers_from_mvt(
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                )
+                .unwrap();
+                let baked_build = build_tile_buffers_from_mvt(
+                    key,
+                    &with_field,
+                    Some(&with_field),
+                    dz_raw.as_deref(),
+                    dz_covered,
+                    &[],
+                    &theme,
+                    bucket,
+                    false,
+                    true,
+                )
+                .unwrap();
+                // Emission ORDER is not deterministic run-to-run in
+                // production (HashMap-fed passes downstream of the faces;
+                // order-derived floats zbias/micro-depth ride along), so
+                // equivalence is order-independent: identical vertex
+                // MULTISETS with the two order-derived fields masked, and
+                // runtime-vs-runtime must show the same equivalence as
+                // baked-vs-runtime (proving the bake adds no divergence
+                // beyond the pre-existing jitter).
+                let vert_multiset = |verts: &[f32]| -> Vec<Vec<u32>> {
+                    let mut rows: Vec<Vec<u32>> = verts
+                        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+                        .map(|chunk| {
+                            chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| *i != 16 && *i != 18)
+                                .map(|(_, v)| v.to_bits())
+                                .collect()
+                        })
+                        .collect();
+                    rows.sort_unstable();
+                    rows
+                };
+                for (name, a, b, c) in [
+                    (
+                        "casing",
+                        &runtime.casing_vertices,
+                        &runtime2.casing_vertices,
+                        &baked_build.casing_vertices,
+                    ),
+                    (
+                        "stroke",
+                        &runtime.stroke_vertices,
+                        &runtime2.stroke_vertices,
+                        &baked_build.stroke_vertices,
+                    ),
+                    (
+                        "fill",
+                        &runtime.fill_vertices,
+                        &runtime2.fill_vertices,
+                        &baked_build.fill_vertices,
+                    ),
+                ] {
+                    let ma = vert_multiset(a);
+                    assert_eq!(
+                        ma,
+                        vert_multiset(b),
+                        "{name} runtime-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}"
+                    );
+                    let mc = vert_multiset(c);
+                    if ma != mc {
+                        let only_a: Vec<_> = ma.iter().filter(|r| !mc.contains(r)).take(3).collect();
+                        let only_c: Vec<_> = mc.iter().filter(|r| !ma.contains(r)).take(3).collect();
+                        println!("{name}: rows {} vs {}", ma.len(), mc.len());
+                        for r in &only_a {
+                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
+                            println!("  only-runtime: {:?}", &f[..8.min(f.len())]);
+                        }
+                        for r in &only_c {
+                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
+                            println!("  only-baked:   {:?}", &f[..8.min(f.len())]);
+                        }
+                        panic!("{name} baked-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}");
+                    }
+                }
+                println!(
+                    "z{z} {x}/{y} b{bucket}: OK bit-identical, {} regions, field {} bytes",
+                    region_count,
+                    field.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn structural_bridge_area_is_3d_only() {
         assert!(!structural_bridge_area_visible("bridges", false));
@@ -7228,8 +10076,23 @@ mod bridge_probe_tests {
             casing_vertices: Vec::new(),
             stroke_indices: Vec::new(),
             stroke_vertices: Vec::new(),
+            // icon_vertices holds GPU-PACKED records post-finalize; the
+            // cached road decals stay logical 19-float and pack on append.
             icon_indices: vec![0],
-            icon_vertices: vec![1.0; VECTOR_FLOATS_PER_VERTEX],
+            icon_vertices: vec![1.0; VECTOR_PACKED_FLOATS_PER_VERTEX],
+            icon_high_indices: Vec::new(),
+            icon_high_vertices: Vec::new(),
+            fringe_indices: Vec::new(),
+            fringe_vertices: Vec::new(),
+            fill_3d_indices: Vec::new(),
+            fill_3d_vertices: Vec::new(),
+            wall_indices: Vec::new(),
+            wall_vertices: Vec::new(),
+            tree_indices: Vec::new(),
+            tree_vertices: Vec::new(),
+            tree_cross_indices: Vec::new(),
+            tree_cross_vertices: Vec::new(),
+            stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: true,
@@ -7240,7 +10103,10 @@ mod bridge_probe_tests {
         let road_vertices = vec![2.0; VECTOR_FLOATS_PER_VERTEX * 2];
         buffers.append_cached_road_icons(&[0, 1], &road_vertices);
         assert_eq!(buffers.icon_indices, vec![0, 1, 2]);
-        assert_eq!(buffers.icon_vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+        assert_eq!(
+            buffers.icon_vertices.len(),
+            VECTOR_PACKED_FLOATS_PER_VERTEX * 3
+        );
         assert_eq!(buffers.road_icon_indices, vec![0, 1]);
         assert_eq!(buffers.road_icon_vertices, road_vertices);
     }
@@ -7625,16 +10491,14 @@ mod bridge_probe_tests {
         layer: i8,
     ) -> RoadSurfaceKey {
         RoadSurfaceKey {
-            style: StrokeStyleKey {
-                sort_rank: rank,
-                casing: None,
-                center: StrokePassKey {
-                    color,
-                    width_bits: width.to_bits(),
-                    shape_id_bits: 0,
-                    depth_micro_bits: (rank as f32 * DEPTH_MICRO_PER_RANK).to_bits(),
-                },
-            },
+            sort_rank: rank,
+            // Tests previously discriminated tiers by color; the key is
+            // color-free now, so the color argument doubles as class id.
+            class_id: color,
+            center_width_bits: width.to_bits(),
+            center_depth_micro_bits: (rank as f32 * DEPTH_MICRO_PER_RANK).to_bits(),
+            casing_width_bits: NO_CASING_BITS,
+            casing_depth_micro_bits: NO_CASING_BITS,
             vertical,
             layer,
         }
@@ -8254,7 +11118,7 @@ mod bridge_probe_tests {
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
-        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("nl-bridge-dz.mbtiles")).unwrap();
         let theme = crate::map::style::probe_compiled_theme();
         let spots = [
             ("raampoort", 4.8785f64, 52.3798f64),
@@ -8327,7 +11191,7 @@ mod bridge_probe_tests {
         use super::*;
         let (lon, lat) = (4.9445f64, 52.3382f64);
         let maps = Path::new("../examples/map/local/maps");
-        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("nl-bridge-dz.mbtiles")).unwrap();
         let z = 14u32;
         let n = (1u64 << z) as f64;
         let nx = (lon + 180.0) / 360.0 * n;
@@ -8392,7 +11256,7 @@ mod bridge_probe_tests {
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
-        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("nl-bridge-dz.mbtiles")).unwrap();
         let theme = crate::map::style::probe_compiled_theme();
         let (z, tx, ty) = (14u32, 8414i64, 5386i64);
         let tms = (1i64 << z) - 1 - ty;
@@ -8572,7 +11436,7 @@ mod bridge_probe_tests {
     #[ignore] // needs local bake output
     fn probe_bridge_dz_load() {
         use super::*;
-        let path = std::path::Path::new("../local/maps/ams-bridge-dz.mbtiles");
+        let path = std::path::Path::new("../local/maps/nl-bridge-dz.mbtiles");
         assert!(path.is_file(), "no bake output at {}", path.display());
         let mut reader = MbtilesReader::open(path).unwrap();
         let meta = reader.get_metadata().unwrap_or_default();
@@ -8995,13 +11859,247 @@ mod bridge_probe_tests {
         );
     }
 
+    /// Headless tile-build profiler: the app's exact hot path (decode +
+    /// parse + style + tessellation) over real archive tiles, no window.
+    /// TILE_PROFILE_KEYS="z,x,y;z,x,y;..." overrides the default slow set;
+    /// The theme-independence contract: baking a tile under the light
+    /// theme and under a full recolor (the dark/circuit stand-in) must
+    /// produce identical signatures and regions — proving one bake serves
+    /// every recolor-only theme. Uses TILE_PROFILE_ARCHIVE/KEYS.
+    #[test]
+    #[ignore]
+    fn baked_faces_theme_independent() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br3.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive at {archive}");
+            return;
+        }
+        let keys_spec = std::env::var("TILE_PROFILE_KEYS")
+            .unwrap_or_else(|_| "14,8414,5384;13,4207,2690;12,2103,1346".into());
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
+        let light = crate::map::style::probe_compiled_theme();
+        let recolored = crate::map::style::probe_compiled_theme_recolored();
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let tile_count = 1_i64 << z;
+            let Some(blob) = reader.get_tile(z, x, tile_count - 1 - y).ok().flatten() else {
+                panic!("tile z{z} {x}/{y} missing from {archive}");
+            };
+            let raw = reader.decode_tile(&blob).unwrap();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let bucket = if z >= 14 { 16 } else { z as u32 };
+            let a = bake_tile_paint_faces(key, &pbf, Some(&pbf), None, false, &light, bucket)
+                .unwrap_or_else(|| panic!("light bake produced nothing for z{z} {x}/{y}"));
+            let b = bake_tile_paint_faces(key, &pbf, Some(&pbf), None, false, &recolored, bucket)
+                .unwrap_or_else(|| panic!("recolored bake produced nothing for z{z} {x}/{y}"));
+            assert_eq!(
+                a.signature, b.signature,
+                "signature diverged across recolor on z{z} {x}/{y}"
+            );
+            assert_eq!(
+                a.regions.len(),
+                b.regions.len(),
+                "region count diverged on z{z} {x}/{y}"
+            );
+            for (ra, rb) in a.regions.iter().zip(&b.regions) {
+                assert_eq!(ra.group_index, rb.group_index, "group order diverged");
+                assert_eq!(
+                    ra.main.len(),
+                    rb.main.len(),
+                    "main region shapes diverged on z{z} {x}/{y}"
+                );
+                assert_eq!(ra.sunk.len(), rb.sunk.len(), "sunk shapes diverged");
+            }
+            println!(
+                "z{z} {x}/{y} bucket {bucket}: sig {:016x} identical across recolor, {} regions",
+                a.signature,
+                a.regions.len()
+            );
+        }
+    }
+
+    /// TILE_PROFILE_REPS=N (default 3). Run:
+    ///   cargo test -p makepad-widgets --features maps --release \
+    ///     profile_tile_build -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn profile_tile_build() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive at {archive}");
+            return;
+        }
+        // Defaults: the worst offenders from the in-app slow-tile log plus
+        // one mid and one deep zoom for contrast.
+        let keys_spec = std::env::var("TILE_PROFILE_KEYS").unwrap_or_else(|_| {
+            "9,265,170;9,265,171;9,264,171;9,266,170;11,1057,678;13,4207,2692;14,8414,5387".into()
+        });
+        let reps: usize = std::env::var("TILE_PROFILE_REPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
+        // TILE_PROFILE_DETAIL_ARCHIVE: two-reader mode replicating the old
+        // base+detail archive pair (europe-shortbread + europe-osm-detail);
+        // without it, deep-zoom detail comes from the combined archive's own
+        // tile bytes (the nl-base-br pattern).
+        let mut detail_reader = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE")
+            .ok()
+            .map(|p| makepad_mbtile_reader::TileArchiveReader::open(std::path::Path::new(&p)).unwrap());
+        // The real compiled day theme: a default CompiledMapTheme styles
+        // nothing and skips the entire tessellation path being profiled.
+        let theme = crate::map::style::probe_compiled_theme();
+        println!(
+            "{:<16} {:>9} {:>9} {:>9} {:>9} {:>8} {:>9}",
+            "tile", "bytes", "decode", "build", "best", "feats", "verts"
+        );
+        let mut total_best = 0.0f64;
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let tile_count = 1_i64 << z;
+            let Some(blob) = reader.get_tile(z, x, tile_count - 1 - y).ok().flatten() else {
+                println!("{:<16} missing", format!("z{z} {x}/{y}"));
+                continue;
+            };
+            let t0 = std::time::Instant::now();
+            let raw = reader.decode_tile(&blob).unwrap();
+            let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let mut best = f64::MAX;
+            let mut last = None;
+            // Simulate overzoom/3D: TILE_PROFILE_RENDER_ZOOM overrides the
+            // render zoom (e.g. 16 for z14 tiles at building-3D zooms) and
+            // TILE_PROFILE_3D=0/1 forces the buildings mode.
+            let render_zoom: u32 = std::env::var("TILE_PROFILE_RENDER_ZOOM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(z as u32);
+            let force_3d = std::env::var("TILE_PROFILE_3D")
+                .ok()
+                .map(|v| v == "1")
+                .unwrap_or(z >= 14);
+            // TILE_PROFILE_BRIDGE_DZ / TILE_PROFILE_OVERLAYS: reproduce the
+            // in-app worker path exactly (the SLOW-log replay contract) by
+            // delegating to load_local_tile_batch, which owns dz-coverage
+            // bounds and overlay quadrant/filter handling.
+            let bridge_dz_env = std::env::var("TILE_PROFILE_BRIDGE_DZ").ok();
+            let overlays_env: Vec<String> = std::env::var("TILE_PROFILE_OVERLAYS")
+                .map(|v| {
+                    v.split(';')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if bridge_dz_env.is_some() || !overlays_env.is_empty() {
+                let mut best = f64::MAX;
+                let mut last = None;
+                for _ in 0..reps {
+                    let t1 = std::time::Instant::now();
+                    // Combined archives are their own detail source (the
+                    // app passes the same path for both).
+                    let detail_env = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE").ok();
+                    let (loaded, _failed) = load_local_tile_batch(
+                        path,
+                        Some(
+                            detail_env
+                                .as_deref()
+                                .map(std::path::Path::new)
+                                .unwrap_or(path),
+                        ),
+                        bridge_dz_env.as_deref().map(std::path::Path::new),
+                        &overlays_env,
+                        &[TileKey { z: z as u32, x: x as i32, y: y as i32 }],
+                        &theme,
+                        render_zoom,
+                        force_3d,
+                        true,
+                    )
+                    .unwrap();
+                    best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                    last = loaded.into_iter().next().map(|t| t.buffers);
+                }
+                let Some(buffers) = last else {
+                    println!("{:<16} missing (batch)", format!("z{z} {x}/{y}"));
+                    continue;
+                };
+                total_best += best;
+                println!(
+                    "{:<16} {:>9} {:>8.1}m {:>8.1}m {:>8.1}m {:>8} {:>9}  (full batch path)",
+                    format!("z{z} {x}/{y}"),
+                    blob.len(),
+                    decode_ms,
+                    best,
+                    best,
+                    buffers.feature_count,
+                    buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                );
+                continue;
+            }
+            let detail_raw: Option<Vec<u8>> = detail_reader.as_mut().and_then(|dr| {
+                let blob = dr.get_tile(z, x, tile_count - 1 - y).ok().flatten()?;
+                dr.decode_tile(&blob).ok()
+            });
+            for _ in 0..reps {
+                let t1 = std::time::Instant::now();
+                let detail = if detail_reader.is_some() {
+                    // Old two-archive pattern: detail strictly from its own
+                    // archive (may be absent for a tile).
+                    detail_raw.as_deref().filter(|_| z >= 14)
+                } else {
+                    (z >= 14).then_some(raw.as_slice())
+                };
+                let buffers = build_tile_buffers_from_mvt(
+                    key,
+                    &raw,
+                    detail,
+                    None,
+                    false,
+                    &[],
+                    &theme,
+                    render_zoom,
+                    force_3d,
+                    true,
+                )
+                .unwrap();
+                best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                last = Some(buffers);
+            }
+            let buffers = last.unwrap();
+            total_best += best;
+            println!(
+                "{:<16} {:>9} {:>8.1}m {:>8.1}m {:>8.1}m {:>8} {:>9}",
+                format!("z{z} {x}/{y}"),
+                blob.len(),
+                decode_ms,
+                best,
+                best,
+                buffers.feature_count,
+                buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            );
+            println!(
+                "                  icons {} labels {}",
+                buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                buffers.labels.len()
+            );
+        }
+        println!("total best-of-{reps}: {total_best:.1}ms");
+    }
+
     #[test]
     #[ignore]
     fn weesperplein_tear_probe() {
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
         let dz_name = std::env::var("TEAR_DZ")
-            .unwrap_or_else(|_| "../local/maps/ams-bridge-dz.mbtiles".to_string());
+            .unwrap_or_else(|_| "../local/maps/nl-bridge-dz.mbtiles".to_string());
         let dz = std::path::Path::new(&dz_name);
         if !base.exists() || !detail.exists() || !dz.exists() {
             println!("no archives");
@@ -9222,7 +12320,7 @@ mod bridge_probe_tests {
         if !path.exists() {
             return;
         }
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         for y in 5378..=5392 {
             let Some(raw) = reader.get_tile(14, 8415, 16383 - y).unwrap() else {
                 continue;
@@ -9301,7 +12399,7 @@ mod bridge_probe_tests {
         if !path.exists() {
             return;
         }
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         let raw = reader.get_tile(14, 8414, 16383 - 5386).unwrap().unwrap();
         let data = decode_vector_tile_payload(&raw).unwrap();
         let mut collector = MvtLocalCollector::new(1.0);

@@ -65,6 +65,7 @@ pub struct WindowVoiceInput {
     default_input: Option<AudioDeviceId>,
     pending_permission_request: Option<i32>,
     capture_enabled: Arc<AtomicBool>,
+    echo_cancellation: bool,
     callback_state: Arc<Mutex<CaptureCallbackState>>,
     control_tx: mpsc::Sender<VoiceControlMessage>,
     text_rx: Receiver<String>,
@@ -101,6 +102,10 @@ impl Default for WindowVoiceInput {
             default_input: None,
             pending_permission_request: None,
             capture_enabled,
+            // Constant AEC while capturing: swapping the unit mid-stream to
+            // dodge ducking glitches the assistant's own audio start, and
+            // standard+Min ducking is gentle enough to live with.
+            echo_cancellation: true,
             callback_state,
             control_tx,
             text_rx,
@@ -244,19 +249,36 @@ impl WindowVoiceInput {
     fn start_capture(&mut self, cx: &mut Cx) {
         self.reset_pipeline();
         let _ = self.control_tx.send(VoiceControlMessage::Preload);
+        self.rearm_capture(cx);
+    }
+
+    /// (Re)apply device + options for the current capture state. Called on
+    /// start and whenever the echo-cancellation need flips.
+    fn rearm_capture(&mut self, cx: &mut Cx) {
         if let Some(device_id) = self.default_input {
             self.capture_enabled.store(true, Ordering::Relaxed);
-            // Speech capture wants the OS voice-processing path: echo
-            // cancellation keeps the app's own TTS out of the transcript.
             cx.use_audio_inputs_with_options(
                 &[device_id],
                 AudioInputOptions {
-                    echo_cancellation: true,
+                    echo_cancellation: self.echo_cancellation,
                 },
             );
         } else {
             self.capture_enabled.store(false, Ordering::Relaxed);
             cx.use_audio_inputs(&[]);
+        }
+    }
+
+    /// Half-duplex echo control: the app arms the OS voice-processing path
+    /// (which DUCKS all other audio) only while its own voice output plays —
+    /// idle listening stays on plain capture with music untouched.
+    pub fn set_echo_cancellation(&mut self, cx: &mut Cx, on: bool) {
+        if self.echo_cancellation == on {
+            return;
+        }
+        self.echo_cancellation = on;
+        if self.desired_enabled {
+            self.rearm_capture(cx);
         }
     }
 

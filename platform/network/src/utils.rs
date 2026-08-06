@@ -1,5 +1,4 @@
 use std::io::prelude::*;
-use std::io::BufReader;
 use std::net::{Shutdown, SocketAddr, TcpStream};
 
 #[cfg(feature = "script")]
@@ -93,23 +92,63 @@ pub struct HttpServerHeaders {
     pub sec_websocket_key: Option<String>,
 }
 
+/// Largest request head we will buffer before giving up.
+const MAX_HEAD_BYTES: usize = 1024 * 1024;
+
+/// Index just past the `\r\n\r\n` that ends the request head, if present.
+fn find_head_end(buf: &[u8], search_from: usize) -> Option<usize> {
+    let start = search_from.saturating_sub(3);
+    buf[start..]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| start + p + 4)
+}
+
 impl HttpServerHeaders {
-    pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<HttpServerHeaders> {
-        let addr = tcp_stream.peer_addr().unwrap();
-        let mut reader = BufReader::new(tcp_stream);
+    /// Reads the request head, returning the parsed headers together with every
+    /// byte that was read past the head terminator.
+    ///
+    /// Those trailing bytes are the start of the body whenever a client sends
+    /// headers and body in one TCP segment. Whatever finds the end of the head
+    /// must read ahead to do it, and the socket will not hand those bytes over
+    /// a second time — so they travel with the headers and the caller consumes
+    /// them before reading further.
+    pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<(HttpServerHeaders, Vec<u8>)> {
+        let addr = tcp_stream.peer_addr().ok()?;
+
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // Bytes already scanned for the terminator; each pass re-checks only
+        // the new bytes plus the three that could hold a straddling \r\n\r\n.
+        let mut searched = 0;
+        let head_end = loop {
+            if let Some(end) = find_head_end(&buf, searched) {
+                break end;
+            }
+            searched = buf.len();
+            if buf.len() > MAX_HEAD_BYTES {
+                return None;
+            }
+            match tcp_stream.read(&mut chunk) {
+                // EOF before the head ended: not a request we can serve.
+                Ok(0) => return None,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => return None,
+            }
+        };
+
+        // The head minus its blank terminator line, so each entry still keeps
+        // the trailing \r\n that split_header_line trims.
+        let head = String::from_utf8_lossy(&buf[..head_end - 2]).into_owned();
+        let body_prefix = buf[head_end..].to_vec();
 
         let mut lines = Vec::new();
         let mut content_length = None;
         let mut accept_encoding = None;
         let mut sec_websocket_key = None;
-        let mut line = String::new();
 
-        while reader.read_line(&mut line).is_ok() {
-            // TODO replace this with a non-line read
-            if line == "\r\n" {
-                // the newline
-                break;
-            }
+        for raw in head.split_inclusive("\r\n") {
+            let line = raw.to_string();
             if let Some(v) = split_header_line(&line, "Content-Length: ") {
                 content_length = Some(if let Ok(v) = v.parse() {
                     v
@@ -127,8 +166,7 @@ impl HttpServerHeaders {
                 // some overflow protection
                 return None;
             }
-            lines.push(line.clone());
-            line.clear();
+            lines.push(line);
         }
         if lines.len() < 2 {
             return None;
@@ -153,24 +191,84 @@ impl HttpServerHeaders {
         path.as_ref()?;
         let path = path.unwrap();
 
-        Some(HttpServerHeaders {
-            addr,
-            addr_text: format!("{}", addr),
-            verb: verb.to_string(),
-            path_no_slash: path.0[1..].to_string(),
-            path: path.0,
-            search: path.1,
-            lines,
-            content_length,
-            accept_encoding,
-            sec_websocket_key,
-        })
+        Some((
+            HttpServerHeaders {
+                addr,
+                addr_text: format!("{}", addr),
+                verb: verb.to_string(),
+                path_no_slash: path.0[1..].to_string(),
+                path: path.0,
+                search: path.1,
+                lines,
+                content_length,
+                accept_encoding,
+                sec_websocket_key,
+            },
+            body_prefix,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_url_path;
+    use super::{parse_url_path, HttpServerHeaders};
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+
+    /// Serves one connection, returning what `from_tcp_stream` produced.
+    fn read_head(write_request: impl FnOnce(&mut TcpStream) + Send + 'static) -> (Vec<String>, Vec<u8>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            write_request(&mut stream);
+            // Hold the connection open: a server that has to go back to the
+            // socket for the body would otherwise see EOF and pass by luck.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+        let (mut server, _) = listener.accept().unwrap();
+        let (headers, body_prefix) = HttpServerHeaders::from_tcp_stream(&mut server).unwrap();
+        client.join().unwrap();
+        (headers.lines, body_prefix)
+    }
+
+    #[test]
+    fn body_sent_with_the_headers_is_returned_not_swallowed() {
+        // The case that used to wedge the server thread forever: one write, so
+        // the body lands in the same segment as the headers.
+        let (lines, body) = read_head(|stream| {
+            stream
+                .write_all(b"POST /pair HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
+        });
+        assert_eq!(lines.len(), 3);
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn body_sent_after_the_headers_is_left_on_the_socket() {
+        let (lines, body) = read_head(|stream| {
+            stream
+                .write_all(b"POST /pair HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            stream.write_all(b"hello").unwrap();
+        });
+        assert_eq!(lines.len(), 3);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn get_without_a_body_parses_the_request_line() {
+        let (lines, body) = read_head(|stream| {
+            stream
+                .write_all(b"GET /ui/ HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+        });
+        assert_eq!(lines[0], "GET /ui/ HTTP/1.1\r\n");
+        assert!(body.is_empty());
+    }
 
     #[test]
     fn appends_index_html_for_plain_http_directory_paths() {

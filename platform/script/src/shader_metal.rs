@@ -6,6 +6,20 @@ use std::fmt::Write;
 
 impl ShaderOutput {
     pub fn metal_create_helpers(&self, out: &mut String) {
+        // Packed vertex attribute unpackers: two f16s / four unorm8s
+        // bitcast into one f32 geometry slot (packed map vertex format).
+        writeln!(out, "inline float2 _mp_unpack2f16(float x) {{").ok();
+        writeln!(out, "    half2 h = as_type<half2>(as_type<uint>(x));").ok();
+        writeln!(out, "    return float2(h.x, h.y);").ok();
+        writeln!(out, "}}").ok();
+        writeln!(out, "inline float4 _mp_unpack4u8(float x) {{").ok();
+        writeln!(out, "    uint u = as_type<uint>(x);").ok();
+        writeln!(
+            out,
+            "    return float4(float(u & 0xffu), float((u >> 8) & 0xffu), float((u >> 16) & 0xffu), float((u >> 24) & 0xffu)) * (1.0 / 255.0);"
+        )
+        .ok();
+        writeln!(out, "}}").ok();
         writeln!(out, "inline float4x4 _mp_inverse(float4x4 m) {{").ok();
         writeln!(out, "    float a00 = m[0][0];").ok();
         writeln!(out, "    float a01 = m[0][1];").ok();

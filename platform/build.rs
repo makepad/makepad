@@ -157,6 +157,7 @@ fn main() {
         "macos" => {
             println!("cargo:rustc-link-lib=framework=GameController");
             println!("cargo:rustc-link-lib=framework=CoreLocation");
+            println!("cargo:rustc-link-lib=framework=AudioToolbox");
         }
         "ios" => {
             if target == "aarch64-apple-ios-sim" {
@@ -165,6 +166,7 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=MetalKit");
             println!("cargo:rustc-link-lib=framework=GameController");
             println!("cargo:rustc-link-lib=framework=CoreLocation");
+            println!("cargo:rustc-link-lib=framework=AudioToolbox");
         }
         "tvos" => {
             if target == "aarch64-apple-tvos-sim" {

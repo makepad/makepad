@@ -14,7 +14,7 @@ script_mod! {
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.VectorVertex, geom.VectorGeom)
+        geom: vertex_buffer(geom.VectorVertexPacked, geom.VectorGeomPacked)
         gradient_texture: texture_2d(float)
 
         v_tcoord: varying(vec2f)
@@ -33,22 +33,27 @@ script_mod! {
 
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
-            self.v_tcoord = vec2(self.geom.u, self.geom.v);
-            self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
+            let g_uv = unpack2f16(self.geom.uv)
+            let g_color = unpack4u8(self.geom.color)
+            let g_p0s = unpack2f16(self.geom.p0s)
+            let g_p12 = unpack2f16(self.geom.p12)
+            let g_p3c = unpack2f16(self.geom.p3c)
+            self.v_tcoord = g_uv;
+            self.v_color = g_color;
             self.v_stroke_mult = self.geom.stroke_mult;
             self.v_stroke_dist = self.geom.stroke_dist;
-            self.v_shape_id = self.geom.shape_id;
-            self.v_param0 = self.geom.param0;
-            self.v_param1 = self.geom.param1;
-            self.v_param2 = self.geom.param2;
-            self.v_param3 = self.geom.param3;
+            self.v_shape_id = g_p0s.y;
+            self.v_param0 = g_p0s.x;
+            self.v_param1 = g_p12.x;
+            self.v_param2 = g_p12.y;
+            self.v_param3 = g_p3c.x;
             self.v_param4 = self.geom.param4;
             self.v_param5 = self.geom.param5;
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
 
             // Early clip rejection in local space.
-            let cr = self.geom.clip_radius;
+            let cr = unpack2f16(self.geom.p3c).y;
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
                 let clip = vec4(
@@ -716,7 +721,9 @@ impl DrawVector {
         }
 
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geom.update_with_recycled_buffers(cx.cx.cx, &mut self.acc_indices, &mut self.acc_verts);
+        let mut packed = crate::vector::pack_vector_vertices(&self.acc_verts);
+        let mut indices = self.acc_indices.clone();
+        geom.update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {

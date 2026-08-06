@@ -1,0 +1,1036 @@
+//! `.mkmap` sharded tile container: transmux a finished MBTiles archive
+//! into a CDN-ready directory of files, none of which may reach the
+//! Cloudflare cacheable-object limit.
+//!
+//! Layout of `<output>.mkmap/`:
+//! - `root.mkidx` — tiny index: fixed header, brotli JSON metadata (the
+//!   MBTiles metadata table, including `compression` / `compression_dict`),
+//!   the raw shared dictionary when present, the root directory mapping
+//!   Hilbert tile-ID ranges -> (shard, leaf-dir offset, len), and a brotli
+//!   copy of that root directory.
+//! - `tiles-NNN.mkshard` — Hilbert-ordered raw tile blobs (copied verbatim
+//!   from the MBTiles archive, no re-encoding) with content-hash dedup,
+//!   followed by the shard's brotli leaf directory (per-tile entries).
+//!
+//! Tile IDs follow the PMTiles convention: `(4^z - 1)/3 + hilbert(z, x, y)`
+//! with XYZ row orientation, so consecutive IDs are spatially adjacent and
+//! range->shard mapping stays compact.
+//!
+//! Every shard file (and the index) must stay under the hard cap of
+//! 510_000_000 bytes: Cloudflare documents a "512 MB" cacheable limit with
+//! ambiguous MB/MiB semantics, so the cap sits safely under both readings.
+//! The writer asserts the cap per shard and the built-in verification pass
+//! stats every produced file again and fails loudly on violation.
+
+use makepad_mbtile_reader::{MbtilesReader, TileCompression};
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+pub const SHARD_HARD_CAP: u64 = 510_000_000;
+const MAGIC: &[u8; 8] = b"MKMAPIX1";
+// v2: metadata section is varint KV (was JSON).
+const VERSION: u32 = 2;
+const HEADER_LEN: usize = 112;
+const ROOT_RECORD_LEN: usize = 36;
+
+pub struct TransmuxOptions {
+    /// Additional source archives woven AFTER `source` (first-wins on
+    /// duplicate tile ids — order the world low-zoom slab first, then the
+    /// spiral cells).
+    pub extra_sources: Vec<PathBuf>,
+    pub source: PathBuf,
+    pub output: PathBuf,
+    pub shard_cap: u64,
+    pub sample_stride: u64,
+}
+
+pub fn parse_transmux_options(args: &[String]) -> Result<TransmuxOptions, String> {
+    if args.len() < 3 {
+        return Err(
+            "transmux needs <source.mbtiles> [more.mbtiles ...] <output.mkmap>".to_string(),
+        );
+    }
+    // All-but-last positional args are sources; the last is the output.
+    let mut positional_end = args.len();
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if arg.starts_with("--") {
+            positional_end = i;
+            break;
+        }
+    }
+    if positional_end < 3 {
+        return Err("transmux needs at least one source and an output".to_string());
+    }
+    let mut options = TransmuxOptions {
+        source: PathBuf::from(&args[1]),
+        extra_sources: args[2..positional_end - 1]
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+        output: PathBuf::from(&args[positional_end - 1]),
+        shard_cap: SHARD_HARD_CAP,
+        sample_stride: 37,
+    };
+    let mut index = positional_end;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--shard-cap-bytes" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or("--shard-cap-bytes requires a number")?;
+                options.shard_cap = value
+                    .parse::<u64>()
+                    .map_err(|err| format!("invalid --shard-cap-bytes '{value}': {err}"))?;
+                index += 2;
+            }
+            "--sample-stride" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or("--sample-stride requires a number")?;
+                options.sample_stride = value
+                    .parse::<u64>()
+                    .map_err(|err| format!("invalid --sample-stride '{value}': {err}"))?
+                    .max(1);
+                index += 2;
+            }
+            value => return Err(format!("unknown transmux argument '{value}'")),
+        }
+    }
+    if options.shard_cap > SHARD_HARD_CAP {
+        return Err(format!(
+            "--shard-cap-bytes {} exceeds the hard cap {SHARD_HARD_CAP}",
+            options.shard_cap
+        ));
+    }
+    Ok(options)
+}
+
+// ---------------------------------------------------------------------------
+// Hilbert tile ids (PMTiles convention: XYZ rows, per-zoom Hilbert curve)
+// ---------------------------------------------------------------------------
+
+fn hilbert_rotate(side: u32, x: &mut u32, y: &mut u32, rx: u32, ry: u32) {
+    if ry == 0 {
+        if rx == 1 {
+            *x = side.wrapping_sub(1).wrapping_sub(*x);
+            *y = side.wrapping_sub(1).wrapping_sub(*y);
+        }
+        std::mem::swap(x, y);
+    }
+}
+
+fn hilbert_xy_to_d(zoom: u8, mut x: u32, mut y: u32) -> u64 {
+    let side = 1_u32 << zoom;
+    let mut d = 0_u64;
+    let mut s = side >> 1;
+    while s > 0 {
+        let rx = u32::from(x & s > 0);
+        let ry = u32::from(y & s > 0);
+        d += u64::from(s) * u64::from(s) * u64::from((3 * rx) ^ ry);
+        hilbert_rotate(s.wrapping_mul(2), &mut x, &mut y, rx, ry);
+        s >>= 1;
+    }
+    d
+}
+
+#[cfg(test)]
+fn hilbert_d_to_xy(zoom: u8, mut d: u64) -> (u32, u32) {
+    let side = 1_u32 << zoom;
+    let (mut x, mut y) = (0_u32, 0_u32);
+    let mut s = 1_u32;
+    while s < side {
+        let rx = 1 & (d / 2) as u32;
+        let ry = 1 & ((d as u32) ^ rx);
+        hilbert_rotate(s, &mut x, &mut y, rx, ry);
+        x += s * rx;
+        y += s * ry;
+        d /= 4;
+        s <<= 1;
+    }
+    (x, y)
+}
+
+/// Cumulative tile count of all zooms below `zoom`: (4^zoom - 1) / 3.
+fn zoom_base_id(zoom: u8) -> u64 {
+    ((1_u128 << (2 * u32::from(zoom))) as u64).wrapping_sub(1) / 3
+}
+
+pub fn tile_id(zoom: u8, x: u32, y: u32) -> u64 {
+    zoom_base_id(zoom) + hilbert_xy_to_d(zoom, x, y)
+}
+
+#[cfg(test)]
+pub fn tile_id_to_zxy(id: u64) -> (u8, u32, u32) {
+    let mut zoom = 0_u8;
+    while zoom < 31 && zoom_base_id(zoom + 1) <= id {
+        zoom += 1;
+    }
+    let (x, y) = hilbert_d_to_xy(zoom, id - zoom_base_id(zoom));
+    (zoom, x, y)
+}
+
+// ---------------------------------------------------------------------------
+// varint + hashing helpers
+// ---------------------------------------------------------------------------
+
+fn write_varint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_varint(input: &[u8], offset: &mut usize) -> Result<u64, String> {
+    let mut value = 0_u64;
+    for shift in (0..=63).step_by(7) {
+        let byte = *input
+            .get(*offset)
+            .ok_or_else(|| "truncated mkmap varint".to_string())?;
+        *offset += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err("mkmap varint overflow".to_string())
+}
+
+/// 128-bit content hash for dedup (two independently seeded 64-bit mixes;
+/// collision odds for tens of millions of blobs are ~2^-75, far below disk
+/// error rates).
+fn content_hash(bytes: &[u8]) -> u128 {
+    fn mix(seed: u64, bytes: &[u8]) -> u64 {
+        let mut hash = seed ^ 0xcbf2_9ce4_8422_2325;
+        for chunk in bytes.chunks(8) {
+            let mut word = [0_u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            let mut value = u64::from_le_bytes(word) ^ hash;
+            value = value.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            value ^= value >> 29;
+            value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value ^= value >> 32;
+            hash = hash.rotate_left(27) ^ value;
+        }
+        hash ^ (bytes.len() as u64)
+    }
+    (u128::from(mix(0x5851_f42d_4c95_7f2d, bytes)) << 64)
+        | u128::from(mix(0x1405_7b7e_f767_814f, bytes))
+}
+
+fn brotli_pack(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    makepad_mbtile_reader::compress_tile(&TileCompression::Brotli { quality: 9 }, None, bytes)
+        .map_err(|err| format!("brotli pack: {err}"))
+}
+
+// ---------------------------------------------------------------------------
+// Writer
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct BlobRef {
+    shard: u32,
+    offset: u64,
+    len: u64,
+}
+
+struct LeafEntry {
+    tile_id: u64,
+    blob: BlobRef,
+}
+
+fn encode_leaf_directory(entries: &[LeafEntry]) -> Result<Vec<u8>, String> {
+    let mut raw = Vec::with_capacity(entries.len() * 8);
+    write_varint(entries.len() as u64, &mut raw);
+    let mut previous_id = 0_u64;
+    for entry in entries {
+        write_varint(entry.tile_id - previous_id, &mut raw);
+        previous_id = entry.tile_id;
+        write_varint(u64::from(entry.blob.shard), &mut raw);
+        write_varint(entry.blob.offset, &mut raw);
+        write_varint(entry.blob.len, &mut raw);
+    }
+    brotli_pack(&raw)
+}
+
+fn decode_leaf_directory(packed: &[u8]) -> Result<Vec<LeafEntry>, String> {
+    let raw = makepad_mbtile_reader::TileCodec::from_metadata(
+        &[("compression".to_string(), "br".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|err| err.to_string())?
+    .decode(packed)
+    .map_err(|err| format!("leaf directory decode: {err}"))?;
+    let mut offset = 0;
+    let count = read_varint(&raw, &mut offset)? as usize;
+    let mut entries = Vec::with_capacity(count);
+    let mut tile_id = 0_u64;
+    for _ in 0..count {
+        tile_id += read_varint(&raw, &mut offset)?;
+        let shard = u32::try_from(read_varint(&raw, &mut offset)?)
+            .map_err(|_| "leaf shard exceeds u32".to_string())?;
+        let blob_offset = read_varint(&raw, &mut offset)?;
+        let len = read_varint(&raw, &mut offset)?;
+        entries.push(LeafEntry {
+            tile_id,
+            blob: BlobRef {
+                shard,
+                offset: blob_offset,
+                len,
+            },
+        });
+    }
+    Ok(entries)
+}
+
+struct RootRecord {
+    start_tile_id: u64,
+    end_tile_id: u64,
+    shard: u32,
+    dir_offset: u64,
+    dir_len: u64,
+}
+
+fn shard_path(dir: &Path, shard: u32) -> PathBuf {
+    dir.join(format!("tiles-{shard:03}.mkshard"))
+}
+
+pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
+    let started = Instant::now();
+    if options.output.exists() {
+        return Err(format!(
+            "{} already exists; refusing to overwrite it",
+            options.output.display()
+        ));
+    }
+    let all_paths: Vec<PathBuf> = std::iter::once(options.source.clone())
+        .chain(options.extra_sources.iter().cloned())
+        .collect();
+
+    // Pass 1: enumerate all sources' tiles, map to Hilbert ids. Duplicate
+    // ids resolve FIRST-SOURCE-WINS (weave: world low-zoom slab first,
+    // then spiral cells — each cell's clipped world tiles lose).
+    // A source that fails to open or scan (e.g. a corrupt cell mbtiles) is
+    // SKIPPED with a loud warning instead of aborting the whole weave —
+    // the operator deletes the corrupt ledger file so a later fleet pass
+    // rebakes that cell.
+    println!("mkmap: pass 1/3 enumerating tiles ({} sources)", all_paths.len());
+    let mut source_paths: Vec<PathBuf> = Vec::with_capacity(all_paths.len());
+    let mut readers: Vec<MbtilesReader> = Vec::with_capacity(all_paths.len());
+    let mut sources_bytes = 0_u64;
+    let mut tiles: Vec<(u64, u8, u32, u32, u32)> = Vec::new();
+    let mut min_zoom = u8::MAX;
+    let mut max_zoom = 0_u8;
+    for path in &all_paths {
+        let mut reader = match MbtilesReader::open(path) {
+            Ok(reader) => reader,
+            Err(err) => {
+                eprintln!(
+                    "mkmap: WARNING skipping unreadable source {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let src = readers.len() as u32;
+        let mut local: Vec<(u64, u8, u32, u32, u32)> = Vec::new();
+        let mut local_min = u8::MAX;
+        let mut local_max = 0_u8;
+        let scanned = reader.for_each_tile(|tile| {
+            let zoom = tile.zoom_level as u8;
+            let x = tile.tile_column as u32;
+            let axis = 1_u32 << zoom;
+            let y = axis - 1 - tile.tile_row as u32; // TMS -> XYZ
+            local.push((tile_id(zoom, x, y), zoom, x, y, src));
+            local_min = local_min.min(zoom);
+            local_max = local_max.max(zoom);
+        });
+        if let Err(err) = scanned {
+            eprintln!(
+                "mkmap: WARNING skipping corrupt source {}: {err}",
+                path.display()
+            );
+            continue;
+        }
+        tiles.extend(local);
+        min_zoom = min_zoom.min(local_min);
+        max_zoom = max_zoom.max(local_max);
+        sources_bytes += fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        source_paths.push(path.clone());
+        readers.push(reader);
+    }
+    if source_paths.len() < all_paths.len() {
+        eprintln!(
+            "mkmap: WARNING {} of {} sources skipped — output will have holes until they are rebaked",
+            all_paths.len() - source_paths.len(),
+            all_paths.len()
+        );
+    }
+    if tiles.is_empty() {
+        return Err("source archives contain no tiles".to_string());
+    }
+    let metadata = readers[0]
+        .get_metadata()
+        .map_err(|err| format!("read metadata: {err}"))?;
+    let dict = readers[0].tile_codec().dict().map(<[u8]>::to_vec);
+    for (path, reader) in source_paths.iter().zip(&readers).skip(1) {
+        if reader.tile_codec().dict().map(<[u8]>::to_vec) != dict {
+            return Err(format!("{}: dictionary differs from first source", path.display()));
+        }
+    }
+    // Disk preflight: refuse before writing gigabytes that cannot fit.
+    // The woven output is bounded by the summed source sizes (dedup only
+    // shrinks it); require half that plus slack, which comfortably covers
+    // the real ratio observed on cell weaves.
+    if let Some(free) = free_disk_bytes(&options.output) {
+        // Full summed source size, not an estimate: mid-run weaves stay
+        // blocked while the store still occupies the disk, and resume
+        // automatically the moment the endgame frees it.
+        let needed = sources_bytes + 5_000_000_000;
+        if free < needed {
+            return Err(format!(
+                "insufficient disk for weave: {free} bytes free, ~{needed} needed — free space and retry"
+            ));
+        }
+    }
+    // Stable resolution: sort by (id, src). z14+ duplicates resolve
+    // first-source-wins (full per-tile spool copies — identical content).
+    // BELOW z14 the copies are per-cell clipped pyramid halves; keep all
+    // sources per id so pass 2 can MERGE them (first-wins there produced
+    // blank stripes along every cell boundary).
+    tiles.sort_unstable_by_key(|&(id, _, _, _, src)| (id, src));
+    let before = tiles.len();
+    let mut merge_sources: HashMap<u64, Vec<u32>> = HashMap::new();
+    {
+        let mut read = 0usize;
+        let mut write = 0usize;
+        while read < tiles.len() {
+            let (id, zoom, ..) = tiles[read];
+            let mut end = read + 1;
+            while end < tiles.len() && tiles[end].0 == id {
+                end += 1;
+            }
+            if end - read > 1 && zoom < 14 {
+                merge_sources
+                    .insert(id, tiles[read..end].iter().map(|t| t.4).collect());
+            }
+            tiles[write] = tiles[read];
+            write += 1;
+            read = end;
+        }
+        tiles.truncate(write);
+    }
+    let woven_out = before - tiles.len();
+    if woven_out > 0 {
+        println!(
+            "  {} duplicate tiles: {} merged below z14, rest first-source-wins",
+            woven_out,
+            merge_sources.len()
+        );
+    }
+    println!("  {} tiles, z{}..z{}", tiles.len(), min_zoom, max_zoom);
+
+    fs::create_dir_all(&options.output)
+        .map_err(|err| format!("create {}: {err}", options.output.display()))?;
+
+    // Pass 2: write shards in Hilbert order with content dedup.
+    println!("mkmap: pass 2/3 writing shards (cap {} bytes)", options.shard_cap);
+    let mut dedup: HashMap<u128, BlobRef> = HashMap::new();
+    let mut root: Vec<RootRecord> = Vec::new();
+    let mut shard_index = 0_u32;
+    let mut shard_buffer: Vec<u8> = Vec::with_capacity(options.shard_cap as usize / 2);
+    let mut shard_entries: Vec<LeafEntry> = Vec::new();
+    let mut total_blob_bytes = 0_u64;
+    let mut unique_blobs = 0_u64;
+    let mut last_progress = Instant::now();
+
+    // Estimated leaf-directory overhead per entry (compressed); generous,
+    // re-checked exactly at finalize time.
+    const DIR_ENTRY_ESTIMATE: u64 = 12;
+    const DIR_FIXED_ESTIMATE: u64 = 4096;
+
+    let finalize_shard = |shard_index: &mut u32,
+                              shard_buffer: &mut Vec<u8>,
+                              shard_entries: &mut Vec<LeafEntry>,
+                              root: &mut Vec<RootRecord>|
+     -> Result<(), String> {
+        if shard_entries.is_empty() {
+            return Ok(());
+        }
+        let directory = encode_leaf_directory(shard_entries)?;
+        let total = shard_buffer.len() as u64 + directory.len() as u64;
+        if total >= options.shard_cap {
+            return Err(format!(
+                "internal error: shard {} would be {total} bytes (cap {})",
+                *shard_index, options.shard_cap
+            ));
+        }
+        let path = shard_path(&options.output, *shard_index);
+        let file =
+            File::create(&path).map_err(|err| format!("create {}: {err}", path.display()))?;
+        let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, file);
+        writer
+            .write_all(shard_buffer)
+            .and_then(|_| writer.write_all(&directory))
+            .and_then(|_| writer.flush())
+            .map_err(|err| format!("write {}: {err}", path.display()))?;
+        root.push(RootRecord {
+            start_tile_id: shard_entries.first().unwrap().tile_id,
+            end_tile_id: shard_entries.last().unwrap().tile_id,
+            shard: *shard_index,
+            dir_offset: shard_buffer.len() as u64,
+            dir_len: directory.len() as u64,
+        });
+        *shard_index += 1;
+        shard_buffer.clear();
+        shard_entries.clear();
+        Ok(())
+    };
+
+    let output_compression = TileCompression::Brotli { quality: 11 };
+    for (index, &(id, zoom, x, y, src)) in tiles.iter().enumerate() {
+        let axis = 1_i64 << zoom;
+        let tms_row = axis - 1 - i64::from(y);
+        let blob = match merge_sources.get(&id) {
+            Some(sources) => {
+                let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(sources.len());
+                for &merge_src in sources {
+                    let copy = readers[merge_src as usize]
+                        .get_tile(i64::from(zoom), i64::from(x), tms_row)
+                        .map_err(|err| format!("read z{zoom}/{x}/{y}: {err}"))?
+                        .ok_or_else(|| {
+                            format!("tile z{zoom}/{x}/{y} vanished during transmux")
+                        })?;
+                    let raw = readers[merge_src as usize]
+                        .decode_tile(&copy)
+                        .map_err(|err| format!("decode z{zoom}/{x}/{y}: {err}"))?;
+                    let raw = strip_baked_field(raw);
+                    if !decoded.contains(&raw) {
+                        decoded.push(raw);
+                    }
+                }
+                let mut merged =
+                    Vec::with_capacity(decoded.iter().map(Vec::len).sum());
+                for part in &decoded {
+                    merged.extend_from_slice(part);
+                }
+                makepad_mbtile_reader::compress_tile(
+                    &output_compression,
+                    dict.as_deref(),
+                    &merged,
+                )
+                .map_err(|err| format!("compress merged z{zoom}/{x}/{y}: {err}"))?
+            }
+            None => readers[src as usize]
+                .get_tile(i64::from(zoom), i64::from(x), tms_row)
+                .map_err(|err| format!("read z{zoom}/{x}/{y}: {err}"))?
+                .ok_or_else(|| format!("tile z{zoom}/{x}/{y} vanished during transmux"))?,
+        };
+        let hash = content_hash(&blob);
+        let blob_ref = if let Some(existing) = dedup.get(&hash) {
+            *existing
+        } else {
+            let projected = shard_buffer.len() as u64
+                + blob.len() as u64
+                + (shard_entries.len() as u64 + 1) * DIR_ENTRY_ESTIMATE
+                + DIR_FIXED_ESTIMATE;
+            if projected >= options.shard_cap {
+                finalize_shard(
+                    &mut shard_index,
+                    &mut shard_buffer,
+                    &mut shard_entries,
+                    &mut root,
+                )?;
+            }
+            let blob_ref = BlobRef {
+                shard: shard_index,
+                offset: shard_buffer.len() as u64,
+                len: blob.len() as u64,
+            };
+            shard_buffer.extend_from_slice(&blob);
+            total_blob_bytes += blob.len() as u64;
+            unique_blobs += 1;
+            dedup.insert(hash, blob_ref);
+            blob_ref
+        };
+        shard_entries.push(LeafEntry { tile_id: id, blob: blob_ref });
+        if last_progress.elapsed().as_secs() >= 2 {
+            println!(
+                "  {}/{} tiles | shard {} | {:.2} GiB unique blobs",
+                index + 1,
+                tiles.len(),
+                shard_index,
+                total_blob_bytes as f64 / 1_073_741_824.0
+            );
+            last_progress = Instant::now();
+        }
+    }
+    finalize_shard(
+        &mut shard_index,
+        &mut shard_buffer,
+        &mut shard_entries,
+        &mut root,
+    )?;
+
+    // Index file. Metadata is varint KV pairs (count, then per pair
+    // length-prefixed key and value bytes) — same primitive the leaf
+    // directories use; no JSON anywhere in the container.
+    let metadata_map: std::collections::BTreeMap<&str, &str> = metadata
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let mut metadata_raw = Vec::new();
+    write_varint(metadata_map.len() as u64, &mut metadata_raw);
+    for (key, value) in &metadata_map {
+        write_varint(key.len() as u64, &mut metadata_raw);
+        metadata_raw.extend_from_slice(key.as_bytes());
+        write_varint(value.len() as u64, &mut metadata_raw);
+        metadata_raw.extend_from_slice(value.as_bytes());
+    }
+    let metadata_br = brotli_pack(&metadata_raw)?;
+    let mut root_raw = Vec::with_capacity(root.len() * ROOT_RECORD_LEN);
+    for record in &root {
+        root_raw.extend_from_slice(&record.start_tile_id.to_le_bytes());
+        root_raw.extend_from_slice(&record.end_tile_id.to_le_bytes());
+        root_raw.extend_from_slice(&record.shard.to_le_bytes());
+        root_raw.extend_from_slice(&record.dir_offset.to_le_bytes());
+        root_raw.extend_from_slice(&record.dir_len.to_le_bytes());
+    }
+    let root_br = brotli_pack(&root_raw)?;
+
+    let dict_bytes = dict.as_deref().unwrap_or(&[]);
+    let mut header = vec![0_u8; HEADER_LEN];
+    header[0..8].copy_from_slice(MAGIC);
+    header[8..12].copy_from_slice(&VERSION.to_le_bytes());
+    header[12..16].copy_from_slice(&shard_index.to_le_bytes());
+    header[16..24].copy_from_slice(&options.shard_cap.to_le_bytes());
+    header[24..32].copy_from_slice(&(tiles.len() as u64).to_le_bytes());
+    header[32..40].copy_from_slice(&unique_blobs.to_le_bytes());
+    header[40] = min_zoom;
+    header[41] = max_zoom;
+    let mut cursor = HEADER_LEN as u64;
+    for (slot, len) in [
+        (48_usize, metadata_br.len() as u64),
+        (64, dict_bytes.len() as u64),
+        (80, root_raw.len() as u64),
+        (96, root_br.len() as u64),
+    ] {
+        header[slot..slot + 8].copy_from_slice(&cursor.to_le_bytes());
+        header[slot + 8..slot + 16].copy_from_slice(&len.to_le_bytes());
+        cursor += len;
+    }
+    let index_path = options.output.join("root.mkidx");
+    let mut index_file = BufWriter::new(
+        File::create(&index_path)
+            .map_err(|err| format!("create {}: {err}", index_path.display()))?,
+    );
+    index_file
+        .write_all(&header)
+        .and_then(|_| index_file.write_all(&metadata_br))
+        .and_then(|_| index_file.write_all(dict_bytes))
+        .and_then(|_| index_file.write_all(&root_raw))
+        .and_then(|_| index_file.write_all(&root_br))
+        .and_then(|_| index_file.flush())
+        .map_err(|err| format!("write {}: {err}", index_path.display()))?;
+    drop(index_file);
+
+    println!(
+        "mkmap: wrote {} shards, {} tiles ({} unique blobs, {:.2} GiB), index {} bytes in {:.1}s",
+        shard_index,
+        tiles.len(),
+        unique_blobs,
+        total_blob_bytes as f64 / 1_073_741_824.0,
+        fs::metadata(&index_path).map(|m| m.len()).unwrap_or(0),
+        started.elapsed().as_secs_f64()
+    );
+
+    // Pass 3: verification (mandatory) — against the READABLE sources.
+    println!("mkmap: pass 3/3 verification");
+    verify(&source_paths, &options.output, options.sample_stride)
+}
+
+/// Remove any baked-faces field (field 101, LEN) from a decoded tile
+/// payload: a per-cell bake covers clipped content and is invalid for a
+/// merged border tile.
+fn strip_baked_field(pbf: Vec<u8>) -> Vec<u8> {
+    const BAKED_FACES_FIELD: u64 = 101;
+    let read_varint = |bytes: &[u8], i: &mut usize| -> Option<u64> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let byte = *bytes.get(*i)?;
+            *i += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+            shift += 7;
+            if shift > 63 {
+                return None;
+            }
+        }
+    };
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0usize;
+    while i < pbf.len() {
+        let start = i;
+        let Some(key) = read_varint(&pbf, &mut i) else { break };
+        if key & 0x7 != 2 {
+            break;
+        }
+        let Some(len) = read_varint(&pbf, &mut i) else { break };
+        let end = i + len as usize;
+        if end > pbf.len() {
+            break;
+        }
+        if key >> 3 == BAKED_FACES_FIELD {
+            if out.is_none() {
+                let mut fresh = Vec::with_capacity(pbf.len());
+                fresh.extend_from_slice(&pbf[..start]);
+                out = Some(fresh);
+            }
+        } else if let Some(out) = out.as_mut() {
+            out.extend_from_slice(&pbf[start..end]);
+        }
+        i = end;
+    }
+    out.unwrap_or(pbf)
+}
+
+/// Free bytes on the filesystem holding `path` (via df; None if that
+/// fails — preflight then simply doesn't gate).
+fn free_disk_bytes(path: &Path) -> Option<u64> {
+    let probe = path.parent().filter(|p| p.exists()).unwrap_or(Path::new("."));
+    let output = std::process::Command::new("df")
+        .arg("-k")
+        .arg(probe)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().nth(1)?;
+    let avail_kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(avail_kb * 1024)
+}
+
+// ---------------------------------------------------------------------------
+// Verification reader
+// ---------------------------------------------------------------------------
+
+struct MkmapReader {
+    dir: PathBuf,
+    root: Vec<RootRecord>,
+    shard_cap: u64,
+    shard_count: u32,
+    tile_count: u64,
+    /// Cache of decoded leaf directories, keyed by root record index.
+    leaf_cache: HashMap<usize, Vec<LeafEntry>>,
+    shard_files: HashMap<u32, File>,
+}
+
+impl MkmapReader {
+    fn open(dir: &Path) -> Result<Self, String> {
+        let index_path = dir.join("root.mkidx");
+        let bytes = fs::read(&index_path)
+            .map_err(|err| format!("read {}: {err}", index_path.display()))?;
+        if bytes.len() < HEADER_LEN || &bytes[0..8] != MAGIC {
+            return Err(format!("{} is not an mkmap index", index_path.display()));
+        }
+        let read_u64 = |slot: usize| {
+            u64::from_le_bytes(bytes[slot..slot + 8].try_into().unwrap())
+        };
+        let shard_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let shard_cap = read_u64(16);
+        let tile_count = read_u64(24);
+        let root_offset = read_u64(80) as usize;
+        let root_len = read_u64(88) as usize;
+        let root_raw = bytes
+            .get(root_offset..root_offset + root_len)
+            .ok_or_else(|| "root directory out of bounds".to_string())?;
+        if root_len % ROOT_RECORD_LEN != 0 {
+            return Err("root directory length is not record-aligned".to_string());
+        }
+        let mut root = Vec::with_capacity(root_len / ROOT_RECORD_LEN);
+        for record in root_raw.chunks_exact(ROOT_RECORD_LEN) {
+            root.push(RootRecord {
+                start_tile_id: u64::from_le_bytes(record[0..8].try_into().unwrap()),
+                end_tile_id: u64::from_le_bytes(record[8..16].try_into().unwrap()),
+                shard: u32::from_le_bytes(record[16..20].try_into().unwrap()),
+                dir_offset: u64::from_le_bytes(record[20..28].try_into().unwrap()),
+                dir_len: u64::from_le_bytes(record[28..36].try_into().unwrap()),
+            });
+        }
+        // The compressed root copy must decode to the same bytes.
+        let root_br_offset = read_u64(96) as usize;
+        let root_br_len = read_u64(104) as usize;
+        let root_br = bytes
+            .get(root_br_offset..root_br_offset + root_br_len)
+            .ok_or_else(|| "compressed root copy out of bounds".to_string())?;
+        let unpacked = decode_brotli_section(root_br)?;
+        if unpacked != root_raw {
+            return Err("compressed root copy does not match raw root".to_string());
+        }
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            root,
+            shard_cap,
+            shard_count,
+            tile_count,
+            leaf_cache: HashMap::new(),
+            shard_files: HashMap::new(),
+        })
+    }
+
+    fn shard_file(&mut self, shard: u32) -> Result<&mut File, String> {
+        if !self.shard_files.contains_key(&shard) {
+            let path = shard_path(&self.dir, shard);
+            let file =
+                File::open(&path).map_err(|err| format!("open {}: {err}", path.display()))?;
+            self.shard_files.insert(shard, file);
+        }
+        Ok(self.shard_files.get_mut(&shard).unwrap())
+    }
+
+    fn read_range(&mut self, shard: u32, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+        let file = self.shard_file(shard)?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|err| format!("seek shard {shard}: {err}"))?;
+        let mut bytes = vec![0_u8; len as usize];
+        file.read_exact(&mut bytes)
+            .map_err(|err| format!("read shard {shard}: {err}"))?;
+        Ok(bytes)
+    }
+
+    fn resolve(&mut self, zoom: u8, x: u32, y: u32) -> Result<Option<BlobRef>, String> {
+        let id = tile_id(zoom, x, y);
+        let record_index = match self
+            .root
+            .binary_search_by(|record| {
+                if id < record.start_tile_id {
+                    std::cmp::Ordering::Greater
+                } else if id > record.end_tile_id {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            }) {
+            Ok(index) => index,
+            Err(_) => return Ok(None),
+        };
+        if !self.leaf_cache.contains_key(&record_index) {
+            let record = &self.root[record_index];
+            let (shard, offset, len) = (record.shard, record.dir_offset, record.dir_len);
+            let packed = self.read_range(shard, offset, len)?;
+            let entries = decode_leaf_directory(&packed)?;
+            if self.leaf_cache.len() > 8 {
+                self.leaf_cache.clear();
+            }
+            self.leaf_cache.insert(record_index, entries);
+        }
+        let entries = &self.leaf_cache[&record_index];
+        Ok(entries
+            .binary_search_by_key(&id, |entry| entry.tile_id)
+            .ok()
+            .map(|found| entries[found].blob))
+    }
+}
+
+fn decode_brotli_section(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    makepad_mbtile_reader::TileCodec::from_metadata(
+        &[("compression".to_string(), "br".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .map_err(|err| err.to_string())?
+    .decode(bytes)
+    .map_err(|err| format!("brotli section decode: {err}"))
+}
+
+/// Verify an mkmap directory against its source archive: every shard under
+/// the cap, the index resolving every tile, and sampled tiles byte-identical.
+pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(), String> {
+    let mut container = MkmapReader::open(mkmap)?;
+    // Shard cap re-check straight from the filesystem.
+    for shard in 0..container.shard_count {
+        let path = shard_path(mkmap, shard);
+        let len = fs::metadata(&path)
+            .map_err(|err| format!("stat {}: {err}", path.display()))?
+            .len();
+        if len >= container.shard_cap.min(SHARD_HARD_CAP) {
+            return Err(format!(
+                "VERIFICATION FAILED: {} is {len} bytes, cap {}",
+                path.display(),
+                container.shard_cap.min(SHARD_HARD_CAP)
+            ));
+        }
+    }
+    let index_len = fs::metadata(mkmap.join("root.mkidx"))
+        .map_err(|err| format!("stat index: {err}"))?
+        .len();
+    if index_len >= SHARD_HARD_CAP {
+        return Err(format!(
+            "VERIFICATION FAILED: index is {index_len} bytes, cap {SHARD_HARD_CAP}"
+        ));
+    }
+
+    // Expected tile set: union over ALL sources with the same
+    // first-source-wins ownership as the weave, so each tile is byte-
+    // compared against the source that actually supplied it.
+    let mut readers: Vec<MbtilesReader> = Vec::with_capacity(sources.len());
+    for path in sources {
+        readers.push(
+            MbtilesReader::open(path)
+                .map_err(|err| format!("open {}: {err}", path.display()))?,
+        );
+    }
+    let mut owner: HashMap<u64, (usize, u8, u32, u32, u32)> = HashMap::new();
+    for (src, reader) in readers.iter_mut().enumerate() {
+        reader
+            .for_each_tile(|tile| {
+                let zoom = tile.zoom_level as u8;
+                let axis = 1_u32 << zoom;
+                let x = tile.tile_column as u32;
+                let y = axis - 1 - tile.tile_row as u32;
+                owner
+                    .entry(tile_id(zoom, x, y))
+                    .and_modify(|entry| entry.4 += 1)
+                    .or_insert((src, zoom, x, y, 1));
+            })
+            .map_err(|err| format!("scan {}: {err}", sources[src].display()))?;
+    }
+    if owner.len() as u64 != container.tile_count {
+        return Err(format!(
+            "VERIFICATION FAILED: index declares {} tiles, sources have {}",
+            container.tile_count,
+            owner.len()
+        ));
+    }
+    // Resolve in Hilbert order so leaf loads are sequential.
+    let mut listed: Vec<(u64, usize, u8, u32, u32, u32)> = owner
+        .into_iter()
+        .map(|(id, (src, zoom, x, y, copies))| (id, src, zoom, x, y, copies))
+        .collect();
+    listed.sort_unstable_by_key(|&(id, ..)| id);
+    let mut resolved = 0_u64;
+    let mut compared = 0_u64;
+    for (index, &(_, src, zoom, x, y, copies)) in listed.iter().enumerate() {
+        let blob_ref = container
+            .resolve(zoom, x, y)?
+            .ok_or_else(|| {
+                format!("VERIFICATION FAILED: z{zoom}/{x}/{y} does not resolve")
+            })?;
+        resolved += 1;
+        // Merged tiles (multi-copy below z14) are a layer-union of their
+        // sources: resolvable, but byte-compare against one source would
+        // rightly fail — skip the sample there.
+        let merged = copies > 1 && zoom < 14;
+        if !merged && index as u64 % sample_stride == 0 {
+            let from_shard =
+                container.read_range(blob_ref.shard, blob_ref.offset, blob_ref.len)?;
+            let axis = 1_i64 << zoom;
+            let from_source = readers[src]
+                .get_tile(i64::from(zoom), i64::from(x), axis - 1 - i64::from(y))
+                .map_err(|err| format!("read source z{zoom}/{x}/{y}: {err}"))?
+                .ok_or_else(|| format!("source lost z{zoom}/{x}/{y}"))?;
+            if from_shard != from_source {
+                return Err(format!(
+                    "VERIFICATION FAILED: z{zoom}/{x}/{y} bytes differ (shard {} offset {})",
+                    blob_ref.shard, blob_ref.offset
+                ));
+            }
+            compared += 1;
+        }
+    }
+    println!(
+        "mkmap: verification OK — {} shards under cap, {resolved} tiles resolved, {compared} sampled byte-identical against {} sources",
+        container.shard_count,
+        readers.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hilbert_round_trips_and_covers_each_zoom() {
+        for zoom in 0..=6_u8 {
+            let side = 1_u32 << zoom;
+            let mut seen = vec![false; (side as usize) * (side as usize)];
+            for y in 0..side {
+                for x in 0..side {
+                    let d = hilbert_xy_to_d(zoom, x, y);
+                    assert!(d < u64::from(side) * u64::from(side));
+                    assert!(!seen[d as usize], "duplicate d at z{zoom} {x},{y}");
+                    seen[d as usize] = true;
+                    assert_eq!(hilbert_d_to_xy(zoom, d), (x, y));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hilbert_neighbors_are_adjacent() {
+        // Consecutive d values must be 4-neighbors (the defining property).
+        for zoom in 1..=5_u8 {
+            let side = 1_u64 << zoom;
+            let mut previous = hilbert_d_to_xy(zoom, 0);
+            for d in 1..side * side {
+                let current = hilbert_d_to_xy(zoom, d);
+                let dx = i64::from(current.0) - i64::from(previous.0);
+                let dy = i64::from(current.1) - i64::from(previous.1);
+                assert_eq!(dx.abs() + dy.abs(), 1, "z{zoom} d{d}");
+                previous = current;
+            }
+        }
+    }
+
+    #[test]
+    fn tile_ids_are_zoom_prefixed_and_reversible() {
+        assert_eq!(tile_id(0, 0, 0), 0);
+        assert_eq!(zoom_base_id(1), 1);
+        assert_eq!(zoom_base_id(2), 5);
+        assert_eq!(zoom_base_id(14), (4_u64.pow(14) - 1) / 3);
+        for (zoom, x, y) in [(1, 1, 0), (5, 17, 9), (14, 8412, 5384)] {
+            let id = tile_id(zoom, x, y);
+            assert_eq!(tile_id_to_zxy(id), (zoom, x, y));
+        }
+    }
+
+    #[test]
+    fn leaf_directory_round_trips() {
+        let entries: Vec<LeafEntry> = (0..1000)
+            .map(|index| LeafEntry {
+                tile_id: 5 + index * 3,
+                blob: BlobRef {
+                    shard: (index % 4) as u32,
+                    offset: index * 1717,
+                    len: 100 + index,
+                },
+            })
+            .collect();
+        let packed = encode_leaf_directory(&entries).unwrap();
+        let decoded = decode_leaf_directory(&packed).unwrap();
+        assert_eq!(decoded.len(), entries.len());
+        for (a, b) in entries.iter().zip(&decoded) {
+            assert_eq!(a.tile_id, b.tile_id);
+            assert_eq!(a.blob.shard, b.blob.shard);
+            assert_eq!(a.blob.offset, b.blob.offset);
+            assert_eq!(a.blob.len, b.blob.len);
+        }
+    }
+
+    #[test]
+    fn content_hash_distinguishes_blobs() {
+        let a = content_hash(b"tile one");
+        let b = content_hash(b"tile two");
+        let c = content_hash(b"tile one");
+        assert_ne!(a, b);
+        assert_eq!(a, c);
+        assert_ne!(content_hash(b""), content_hash(b"\0"));
+    }
+}

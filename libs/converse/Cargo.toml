@@ -6,13 +6,20 @@ description = "Conversational voice pipeline for Makepad apps: streamed agent re
 license = "MIT OR Apache-2.0"
 
 [features]
+# Speech synthesis (Kokoro). Default ON so existing consumers are unchanged,
+# but separable: the model plus its embedded pronunciation lexicon is ~10 MB of
+# binary and ~327 MB resident, which a build that can never speak should not
+# carry. With it off, SpeechOutput still exists and every non-audio path
+# behaves identically — the worker just drains its queue in silence.
+default = ["tts"]
+tts = ["dep:makepad-tts"]
 # The local filtering LLM (QwenFilter) on makepad-llama; heavy, so opt-in.
 local-llm = ["dep:makepad-llama"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-ai = { path = "../makepad_ai" }
-makepad-tts = { path = "../tts" }
+makepad-tts = { path = "../tts", optional = true }
 makepad-llama = { path = "../llama", optional = true }
 
 [[bin]]

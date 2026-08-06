@@ -1,7 +1,8 @@
 # Splash Game DSL Guide
 
-The complete `game.*` API for games running in the Makepad Game Maker
-(`examples/gamemaker`). A game is ONE splash script — `game.splash` — evaluated
+The complete `game.*` API for games running in Makepad Arcade (`apps/arcade`;
+also `examples/gamemaker`, which shares the same engine and is being retired).
+A game is ONE splash script — `game.splash` — evaluated
 live: statements run top to bottom, build the world, then drive it from
 `game.on_tick`. Every clean edit hot-reloads the running world instantly; a
 broken edit never replaces it (the last working world keeps running and the
@@ -29,8 +30,15 @@ adding a verb = a match arm in `examples/gamemaker/src/game_view.rs`
   `lerp(a, b, t)` (scalars and vectors), constants `PI` and `TAU`, and vector
   methods `v.length()`, `v.normalized()`, `a.dot(b)`, `a.cross(b)` — steering
   AI is `(target - me).normalized() * speed`.
-- Everything is procedural: colored shapes and synthesized sound. No image,
-  model, or audio files — no files besides game.splash.
+- Arrays: `let xs = []`, then **`xs.push(v)`** (a METHOD — there is no free
+  `push(xs, v)` function; calling one is an error that stops the game),
+  `xs.len()`, `xs[i]`, and `for x in xs { }`. `game.find("tag")` and
+  `game.overlap_sphere(pos, r)` hand you arrays to walk the same way.
+- **Use the stock library.** ~4,700 CC0 models ship with Arcade — houses,
+  vehicles, trees, rocks, furniture, dungeon and road tiles, rigged
+  characters. A scene built from bare `game.box` primitives looks cheap; the
+  same scene with real models looks like a game. See **The stock library**.
+  Sound is synthesized; the only file a game itself owns is `game.splash`.
 - ALWAYS check `./tools/ag errors` after editing. Empty = live. Error = the
   player still sees the OLD world.
 
@@ -67,7 +75,7 @@ game.on_tick(|dt, input| {
 
 | call | meaning |
 |---|---|
-| `game.box({pos, size, color, tag, sensor, collide, body, glow, shape, rot_y})` | a solid. `sensor: true` = no collision, reports touches (goals, pickups), drawn translucent. `collide: false` = opaque DECORATION — looks solid, no physics (rotated road slabs!). `rot_y: 0.6` turns the visual (collision stays the axis box). `body: "kinematic"` = script-moved platform (set its vel; movers standing on it are carried). `glow: 2` = emissive |
+| `game.box({pos, size, color, tag, sensor, collide, body, glow, shape, rot_y, density, friction, restitution})` | a solid. `sensor: true` = no collision, reports touches (goals, pickups), drawn translucent. `collide: false` = opaque DECORATION — looks solid, no physics (rotated road slabs!). `rot_y: 0.6` turns the visual (collision stays the axis box). `body: "kinematic"` = script-moved platform (set its vel; movers standing on it are carried). `body: "rigid"` = REAL physics (box3d): stacks, tumbles, rotates, bounces — crates, balls, dominoes. Rigids collide with statics/kinematics/each other, NOT with movers; `density`/`friction`/`restitution` tune the material; `shape:"sphere"` rigids roll (collider radius = half width). Rigid state is shared-tier (networked); `push` gives a real impulse. `glow: 2` = emissive |
 | `game.mover({pos, size, color, tag, gravity, turn_rate, shape})` | a character: gravity + collides with the world. `gravity: 0` floats. Movers **auto-face where they walk** (front = -z); `turn_rate` rad/s (default 7) |
 | `game.spawn({pos, vel, size, color, tag, life, hits, gravity, glow, shape})` | a projectile: auto-removed after `life` seconds; `hits: true` reports everything it touches through `on_touch` (creatures AND walls) |
 | `game.part(owner, {pos, size, color, glow, rot_x/rot_y/rot_z, shape})` → part id | a visual-only shape welded to an entity IN ITS FRAME (turns and scales with it; front = -z): eyes, arms, ears, horns, hats, wheels. No collision; dies with its owner |
@@ -139,7 +147,7 @@ controller is never locked out of something you built.
 | `game.attach(id, owner, offset)` / `game.detach(id)` | seat-mount (vehicles, carrying) — rider faces with the owner |
 | `game.attach(id, owner, {pos, mode: "ride", spin: 2})` | latch ON someone (headcrab): pinned each frame, model spins |
 | `game.speed_mult(id, 0.5)` | scale an entity's walk speed engine-side (debuffs) until changed |
-| `game.push(id, v)` | ADD to velocity (a shunt, a gust) — `set_vel` overwrites, `push` nudges. Movers pass through each other: to bump someone, detect overlap (`hits`/`on_touch`/`overlap_sphere`) and `push` them |
+| `game.push(id, v)` | ADD to velocity (a shunt, a gust) — `set_vel` overwrites, `push` nudges. Movers pass through each other: to bump someone, detect overlap (`hits`/`on_touch`/`overlap_sphere`) and `push` them. On a `body:"rigid"` entity this is a true mass-scaled impulse (same Δv feel; wakes the body) |
 | `game.raycast(from, dir, max)` | → nil or `{hit, pos, normal, dist}`. Hits terrain (`hit` = -1), walls, creatures, decor. THE sense for wall-avoiding AI, brake-for-the-car-ahead, line of sight, aimed guns. It also hits the caster — cast from just outside your own body, or skip a hit whose id is you |
 | `game.overlap_sphere(pos, r)` | → array of entity ids near a point |
 | `game.ground_normal(x, z)` | → terrain surface normal (align cars to slopes) |
@@ -178,6 +186,108 @@ House style: give every creature a face (`game.part` eyes) and a name
 (`game.label`) — two lines each, do it without being asked. Build big
 characters from many parts and animate them with `move_part`/`scale`/`glow`.
 
+## The stock library — ~4,700 CC0 models
+
+Arcade ships Kenney's low-poly library: houses, vehicles, trees, rocks, walls,
+furniture, food, weapons, road and dungeon tiles, and rigged characters.
+**Reach for these before `game.box`.** A scene of coloured primitives reads as
+a prototype; the same layout with real models reads as a game.
+
+| call | meaning |
+|---|---|
+| `game.find_model("pine tree", {count: 4})` | search → **a LIST of DISTINCT model ids**. Options: `count`, `spread` (`mixed` default / `kinds` / `variants`), `seed`, `kind` (`model`/`sound`), `rigged: true`, `max_size` |
+| `game.find_palette("village", 7)` | → `{pack, group: [ids], ...}` — a MATCHED set from ONE art pack |
+| `game.model(id, {pos, yaw, scale, collide, tag})` | place one. Ids come from `find_model` — never invent one; a wrong id reports near-misses and places nothing |
+| `game.kits()` | → `[{pack, tiles, tile_size, roles}]` — the packs whose tiles snap together |
+| `game.cast()` | → `[{joints, members, states}]` — rigged characters, grouped by shared rig (one animation set drives every member of a group) |
+
+### The three rules that decide whether it looks good
+
+1. **Never place result #1 five times.** This is the single most common way to
+   make a scene look cheap. `find_model` returns a list precisely so you can
+   walk it — a village wants five different houses, a wood wants several
+   species and several variants of each.
+2. **One art pack per region.** Spreading across the whole library gives a
+   suburban house beside a hex-tile house beside a sci-fi house. Use
+   `find_palette` for a region, or keep to one `pack`.
+3. **Generate layouts; don't hand-place a hundred things.** `game.town`,
+   `game.dungeon` and `game.road_network` lay real tiles with correct corners
+   and junctions, which is tedious and error-prone by hand.
+
+```
+// WRONG — one house, five times
+let h = game.find_model("house")[0]
+for i in 0..5 { game.model(h, {pos: vec3(i * 8.0, 0.0, 0.0)}) }
+
+// RIGHT — five different houses, all from one pack, all facing the street
+let houses = game.find_model("suburban house", {count: 5, seed: 3})
+for i in 0..5 {
+    game.model(houses[i], {pos: vec3(i * 8.0 - 16.0, 0.0, -10.0), yaw: 0.0})
+}
+```
+
+## Building a place (composition)
+
+Tiles from a kit snap onto a grid; the generators pick corners, junctions and
+dead ends from how the layout actually connects, so you never name a piece.
+
+| call | meaning |
+|---|---|
+| `game.road_network({kit, paths: [[vec3, vec3, ...], ...], seed})` | polylines → a road. Two paths that cross give a crossroad, one that tees gives a T — automatically |
+| `game.town({roads_kit, buildings_kit, props_kit, extent: 24, block: 4, density: 0.8, seed})` | a street grid with buildings FRONTING the streets |
+| `game.dungeon({kit, extent: 32, min_room: 5, depth: 4, seed})` | rooms + corridors, every room reachable. Returns `{tiles, entrance, exit}` — spawn the player at `entrance` |
+
+All three return `{tiles}` (a count) and take `collide` (default on for towns
+and dungeons, off for roads so cars drive over them). All are
+**seed-deterministic**: the same seed gives the same level every load.
+
+`modular-dungeon-kit`, `modular-cave-kit` and `modular-space-kit` share one
+role vocabulary — the same `game.dungeon` call gives a crypt, a cavern or a
+space station purely by swapping `kit`.
+
+```
+// A small place: a road, a village along it, and a dungeon to find.
+let d = game.dungeon({kit: "kenney/modular-dungeon-kit", extent: 24, seed: 5})
+game.town({
+    roads_kit: "kenney/city-kit-roads",
+    buildings_kit: "kenney/city-kit-suburban",
+    extent: 20, block: 5, density: 0.7, seed: 5,
+})
+let trees = game.find_model("pine tree", {count: 4, seed: 5})
+for i in 0..24 {
+    let a = i * 0.26
+    game.model(trees[i % 4], {pos: vec3(cos(a) * 34.0, 0.0, sin(a) * 34.0)})
+}
+let hero = game.mover({pos: d.entrance, size: vec3(0.6, 1.7, 0.6)})
+game.camera({third_person: hero, boom: 9, pitch: -0.3})
+```
+
+## Light and weather
+
+| call | meaning |
+|---|---|
+| `game.sun({time_of_day: 8.5})` | one sun for the whole scene: 0..24 local hours. Morning and evening are warm and throw long shadows, noon is white and short |
+| `game.sun({dir: vec3(0.3, 0.9, 0.2), color: vec3(1.0, 0.9, 0.7)})` | or aim it yourself. `ambient` lifts the shadow side, `shadow_alpha` (0..1) sets how dark cast shadows draw |
+
+Objects cast real shadows that stretch and swing as the sun moves — you get
+them for free, there is nothing to turn on.
+
+## Particles (device-local — never affects the game)
+
+| call | meaning |
+|---|---|
+| `game.particles(id, {kind: "smoke", rate: 20})` → emitter | a continuous emitter that FOLLOWS an entity: exhaust, fire, a dust trail |
+| `game.particles(vec3(x,y,z), {kind: "dust"})` → emitter | or pinned to a spot |
+| `game.burst(vec3(x,y,z), {kind: "spark", count: 16})` | a one-shot puff: impacts, pickups, explosions |
+| `game.particles_stop(emitter)` | stop one emitter |
+
+Kinds: `spark` (fast, falls), `smoke` (rises, grows), `dust` (drifts, settles),
+`trail` (fades in place). Tune with `life size color spread speed gravity`.
+
+Particles are **cosmetic only**. They never collide, never touch game state,
+and each device draws its own — so never make a rule depend on one. A phone may
+draw fewer than a PC in the same game, and that is fine by design.
+
 ## Sound (all synthesized — never files)
 
 | call | meaning |
@@ -188,6 +298,7 @@ characters from many parts and animate them with `move_part`/`scale`/`glow`.
 | `game.tone({freq: 80, wave: "saw", gain: 0.15})` → tone id | a SUSTAINED tone — the car-engine primitive. Starts and keeps sounding |
 | `game.tone_set(id, {freq: 80 + speed * 6})` | retune it per tick — smoothed, never retriggers |
 | `game.tone_stop(id)` | fade it out. Tones also stop on every reload (no stuck hums) |
+| `game.sfx_at(vec3(x,y,z), "clank", {range: 40})` | same bank, but POSITIONED: quieter with distance, panned left/right by where it is relative to the camera. Use it for anything with a place — impacts, engines, other players |
 
 Add sounds without being asked — jumps, pickups, winning. They make it real.
 
@@ -236,3 +347,80 @@ names above (`left right up down jump shoot grab`).
   on > 0.55. Note the camera yaw is NOT an entity yaw — entities face
   `(-sin(e_yaw), -cos(e_yaw))`; the x sign differs. Don't equate the two —
   that's why chase cams belong to `camera({chase})`, not hand-rolled math.
+
+## Building blocks
+
+High-level prefabs. **The engine runs these at 60Hz** — you call the verb once
+to create and configure, then the block drives itself. Don't reimplement their
+behaviour in `on_tick`; steer them with `game.drive` or let them run.
+
+All block state is **Shared tier**: laps, scores, positions and control intent
+replicate to other players. Animation blending is Derived (recomputed from
+velocity), so it costs nothing over the network.
+
+| verb | what you get |
+|---|---|
+| `game.car({pos, color, player: true, top_speed, accel, grip, seats})` | A driveable raycast vehicle on a rigid chassis: suspension, grip, arcade steering, and it will not roll over. Returns the entity id. |
+| `game.character({pos, color, player: true, model, speed, jump, view: "third"})` | A walker on the mover sweep (0.55 step-up, jumps, camera-relative movement) with idle↔walk↔run blending driven by its own speed. |
+| `game.plane({pos, color, player: true, thrust, lift_speed})` | Arcade flight: lift from airspeed, auto-level, weathervane stability. Holding pitch loops; it cannot stall or spin. |
+| `game.drive(id, {steer, throttle, brake, handbrake, pitch, roll, move_x, move_z, jump})` | Feed control intent to any block — this is how script-driven or AI opponents are controlled. |
+| `game.autodrive(car, {points: [vec3, ...], pace})` | Hands a car a racing line to follow. `pace` is 0..1 of its top speed. |
+| `game.speed(id)` | Forward speed for a car, airspeed for a plane, planar speed otherwise. |
+
+### Brains
+
+Attach an AI to any mover. Re-issuing a brain on the same entity replaces it.
+
+| verb | behaviour |
+|---|---|
+| `game.wander(id, {home, range, speed, pause})` | Amble to random points near home, pausing between trips. |
+| `game.chase(id, {tag, range, catch, speed})` | Hunt the nearest entity carrying `tag`. `game.caught(id)` returns who it reached this tick. |
+| `game.patrol(id, {points: [vec3, ...], speed})` | Walk a fixed route, looping forever. **Do not pass `loop:`** — `loop` is a reserved word and using it as an option key hangs the script until the instruction limit kills the eval, so the game never starts. Looping is the default; ping-pong is unavailable until the engine renames that key. |
+
+### Race kit
+
+| verb | behaviour |
+|---|---|
+| `game.spawnpoint({pos, yaw})` | Declares a start slot; returns its index. |
+| `game.checkpoint({pos, size})` | Declares a gate. Gates are numbered in declaration order and **must be crossed in order** — cutting the course scores nothing. |
+| `game.place(id, slot)` | Puts an entity on a start slot and enters it in the race. |
+| `game.race({laps})` | (Re)starts lap tracking. Call it again to restart a race. |
+| `game.standings()` | `[{entity, lap, checkpoint, finished, score}]`, leader first. |
+| `game.lap(id)` / `game.rank(id)` / `game.finished(id)` | Per-racer progress. |
+| `game.score(id, points)` / `game.score_of(id)` | Scoring for non-racing games too. |
+
+A complete 4-car race is ~60 lines — see
+`examples/gamemaker/resources/fixtures/racing.splash`.
+
+## Players (multiplayer)
+
+Every world has at least one player: id `0`, this device. A hosted room adds one
+per connected client, plus any bots the game creates. Blocks take `player:` to
+say who drives them.
+
+| verb | what it does |
+|---|---|
+| `game.players()` | all player ids, local first — **Shared** |
+| `game.player_name(p)` | display name — **Shared** |
+| `game.player_entity(p)` | the entity this player drives, 0 if none — **Shared** |
+| `game.player_input(p)` | that player's input object (same shape `on_tick` gets) |
+| `game.bot(name)` | add a host-side player with no device — **Shared** |
+| `game.on_join(fn(p))` | someone joined the room |
+| `game.on_leave(fn(p))` | someone left; their body is freed for you |
+
+Movement stays camera-relative per player: `move_x`/`move_z` are rotated by *that
+player's* camera yaw, which travels inside their input packet. A client's camera
+is presentation only and never replicates.
+
+**Replication tiers.** The host simulates; clients receive. What crosses the wire
+is decided per field, not per entity:
+
+- **Shared** — position, velocity, size, body kind, tag, score, lap progress.
+  Host to clients, every tick.
+- **Derived** — facing yaw, walk-cycle blending, part animation, scale and glow
+  easing, blob shadows. Never sent: a client recomputes these from Shared state,
+  which is why 200 moving props cost nothing to rotate.
+- **Local** — camera, audio, particles. This device's business alone.
+
+Gameplay must not depend on Local state, or late joiners will see a different
+game from everyone else.

@@ -915,6 +915,9 @@ fn windows_window_vsync() -> bool {
 
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
+        if self.in_makepad_studio {
+            return self.game_input_remote.get(index);
+        }
         if let Some(game_input) = &self.os.windows_game_input {
             if index < game_input.states.len() {
                 return Some(&game_input.states[index]);
@@ -924,6 +927,11 @@ impl CxGameInputApi for Cx {
     }
 
     fn game_input_states(&mut self) -> &[GameInputState] {
+        // Hosted by Studio: this process has no window, so the OS never gave
+        // it the controllers. Studio forwards them instead.
+        if self.in_makepad_studio {
+            return &self.game_input_remote;
+        }
         if let Some(game_input) = &self.os.windows_game_input {
             return &game_input.states;
         }
@@ -931,6 +939,9 @@ impl CxGameInputApi for Cx {
     }
 
     fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState> {
+        if self.in_makepad_studio {
+            return self.game_input_remote.get_mut(index);
+        }
         if let Some(game_input) = &mut self.os.windows_game_input {
             if index < game_input.states.len() {
                 return Some(&mut game_input.states[index]);
@@ -940,6 +951,9 @@ impl CxGameInputApi for Cx {
     }
 
     fn game_input_states_mut(&mut self) -> &mut [GameInputState] {
+        if self.in_makepad_studio {
+            return &mut self.game_input_remote;
+        }
         if let Some(game_input) = &mut self.os.windows_game_input {
             return &mut game_input.states;
         }
@@ -986,4 +1000,5 @@ pub struct CxOs {
     pub(crate) windows_game_input: Option<WindowsGameInput>,
     pub(crate) video_players: HashMap<LiveId, WindowsUnifiedVideoPlayer>,
     pub(crate) async_hlsl_compile: crate::os::windows::d3d11::AsyncHlslCompile,
+    pub(crate) stdin_timers: crate::os::shared_framebuf::PollTimers,
 }

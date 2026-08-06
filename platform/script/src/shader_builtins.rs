@@ -818,6 +818,70 @@ pub fn define_shader_builtins(
             x_nv.zip_f32(y_nv, |a, b| a.powf(b)).to_script_value_vm(vm)
         },
     );
+    // Packed-attribute unpackers: two f16s / four unorm8s bitcast into one
+    // f32 slot. CPU impls mirror the GPU helpers bit-exactly for the
+    // headless runtime.
+    native.add_method(
+        heap,
+        math,
+        id_lut!(unpack2f16),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            let bits = (x_val.as_f64().unwrap_or(0.0) as f32).to_bits();
+            let decode = |h: u32| -> f32 {
+                let sign = ((h >> 15) & 1) << 31;
+                let exp = (h >> 10) & 0x1f;
+                let frac = h & 0x3ff;
+                let bits32 = if exp == 0 {
+                    if frac == 0 {
+                        sign
+                    } else {
+                        let mut exp = 127 - 15 + 1;
+                        let mut frac = frac;
+                        while frac & 0x400 == 0 {
+                            frac <<= 1;
+                            exp -= 1;
+                        }
+                        sign | ((exp as u32) << 23) | ((frac & 0x3ff) << 13)
+                    }
+                } else if exp == 0x1f {
+                    sign | 0x7f80_0000 | (frac << 13)
+                } else {
+                    sign | ((exp + 127 - 15) << 23) | (frac << 13)
+                };
+                f32::from_bits(bits32)
+            };
+            NumericValue::Vec2(Vec2f {
+                x: decode(bits & 0xffff),
+                y: decode(bits >> 16),
+            })
+            .to_script_value_vm(vm)
+        },
+    );
+    native.add_method(
+        heap,
+        math,
+        id_lut!(unpack4u8),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            let bits = (x_val.as_f64().unwrap_or(0.0) as f32).to_bits();
+            NumericValue::Vec4(Vec4f {
+                x: (bits & 0xff) as f32 / 255.0,
+                y: ((bits >> 8) & 0xff) as f32 / 255.0,
+                z: ((bits >> 16) & 0xff) as f32 / 255.0,
+                w: ((bits >> 24) & 0xff) as f32 / 255.0,
+            })
+            .to_script_value_vm(vm)
+        },
+    );
     // modf (fmod) - float modulo
     native.add_method(
         heap,
@@ -1340,6 +1404,22 @@ pub fn type_table_builtin(
                 fmt_ty(t)
             );
             return builtins.pod_void;
+        }
+        // Packed-attribute unpackers: one f32 slot carrying two f16s or
+        // four unorm8s (packed map vertex format). Scalar float in.
+        id!(unpack2f16) | id!(unpack4u8) => {
+            if args.len() != 1 || !is_any_float(args[0]) {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin {:?} requires 1 float arg",
+                    name
+                );
+                return builtins.pod_void;
+            }
+            if name == id!(unpack2f16) {
+                return builtins.pod_vec2f;
+            }
+            return builtins.pod_vec4f;
         }
         // Float 2 arguments
         id!(atan2) | id!(pow) | id!(modf) => {

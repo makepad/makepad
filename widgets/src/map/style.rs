@@ -83,6 +83,11 @@ fn zoom_width_mult_continuous(view_zoom: f64) -> f64 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StrokeStyle {
     pub sort_rank: i16,
+    /// Theme-stable style identity ([`style_class_id`] of the source rule's
+    /// kind). Tier grouping, paint-order tiebreaks and the faces-bake
+    /// signature key on this instead of resolved colors, so themes that are
+    /// pure recolors of one rule table share one bake.
+    pub class_id: u32,
     pub casing: Option<StrokePassStyle>,
     pub center: StrokePassStyle,
 }
@@ -90,11 +95,29 @@ pub struct StrokeStyle {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct StrokeTemplate {
     sort_rank: i16,
+    class_id: u32,
     casing: Option<StrokePassStyle>,
     center: StrokePassStyle,
     /// Lowest render bucket this rule draws at (carto hides paths and small
     /// waterways well before roads).
     min_zoom: f32,
+}
+
+/// Theme-stable identity of a styling rule: FNV over its source class and
+/// normalized kind. Kinds are semantic ("motorway", "residential") and by
+/// contract identical across the light/dark/circuit themes — themes may
+/// only recolor, never regroup or resize (a geometry change falls back to
+/// the runtime cascade via the bake signature).
+pub fn style_class_id(source: &str, kind: &str) -> u32 {
+    let mut h = 0x811c_9dc5u32;
+    for b in source
+        .bytes()
+        .chain([b':'])
+        .chain(kind.trim().to_ascii_lowercase().bytes())
+    {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -483,6 +506,44 @@ impl MapThemeStyle {
                 compiled.road_rules.insert(kind, template);
             }
         }
+        // Alias identically-styled road rules to ONE class id: kinds a theme
+        // paints the same (residential + unclassified) must union as one
+        // surface tier, exactly as the old color-keyed grouping merged them.
+        // Canonical id = min over the equal-styling group, so the aliasing
+        // is order-independent; recolor-only themes preserve the styling
+        // coincidences and therefore the aliasing, keeping one faces bake
+        // valid for all of them.
+        {
+            let strip = |template: &StrokeTemplate| {
+                let mut t = *template;
+                t.class_id = 0;
+                t.min_zoom = 0.0;
+                t
+            };
+            let mut pool: Vec<StrokeTemplate> =
+                compiled.road_rules.values().copied().collect();
+            if let Some(default) = compiled.road_default {
+                pool.push(default);
+            }
+            let canonical = |template: &StrokeTemplate, pool: &[StrokeTemplate]| {
+                let key = strip(template);
+                pool.iter()
+                    .filter(|other| strip(other) == key)
+                    .map(|other| other.class_id)
+                    .fold(template.class_id, u32::min)
+            };
+            let ids: Vec<(String, u32)> = compiled
+                .road_rules
+                .iter()
+                .map(|(kind, template)| (kind.clone(), canonical(template, &pool)))
+                .collect();
+            for (kind, id) in ids {
+                compiled.road_rules.get_mut(&kind).unwrap().class_id = id;
+            }
+            if let Some(default) = compiled.road_default.as_mut() {
+                default.class_id = canonical(&default.clone(), &pool);
+            }
+        }
 
         for rule in &self.waterway_rules {
             let kind = rule.kind.trim().to_ascii_lowercase();
@@ -505,6 +566,7 @@ impl MapThemeStyle {
 fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
     StrokeTemplate {
         sort_rank: clamp_u32_to_i16(rule.sort_rank),
+        class_id: style_class_id("road", &rule.kind),
         casing: if rule.casing_width > 0.0 {
             Some(StrokePassStyle { deck_m: 0.0,
                 color: vec4_to_rgb_hex(rule.casing_color),
@@ -532,6 +594,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
 fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate {
     StrokeTemplate {
         sort_rank: clamp_u32_to_i16(rule.sort_rank),
+        class_id: style_class_id("waterway", &rule.kind),
         casing: if rule.casing_width > 0.0 {
             Some(StrokePassStyle { deck_m: 0.0,
                 color: vec4_to_rgb_hex(rule.casing_color),
@@ -559,6 +622,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
 fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
     StrokeTemplate {
         sort_rank: clamp_u32_to_i16(rule.sort_rank),
+        class_id: style_class_id("rail", ""),
         casing: if rule.casing_width > 0.0 {
             Some(StrokePassStyle { deck_m: 0.0,
                 color: vec4_to_rgb_hex(rule.casing_color),
@@ -912,6 +976,7 @@ fn scaled_style(template: StrokeTemplate, rank_bias: i16, width_scale: f32) -> S
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     StrokeStyle {
         sort_rank: rank,
+        class_id: template.class_id,
         casing: template.casing.map(|casing| StrokePassStyle {
             width: casing.width * width_scale,
             ..casing
@@ -946,6 +1011,7 @@ pub fn stroke_style_for_tags(
                 .unwrap_or(0xc2bfba);
             return Some(StrokeStyle {
                 sort_rank: 135,
+                class_id: style_class_id("line", "ped_edge"),
                 casing: None,
                 center: StrokePassStyle { deck_m: 0.0,
                     color: edge,
@@ -986,6 +1052,7 @@ pub fn stroke_style_for_tags(
         };
         return Some(StrokeStyle {
             sort_rank: 155,
+            class_id: style_class_id("line", "barrier"),
             casing: None,
             center: StrokePassStyle { deck_m: 0.0,
                 color,
@@ -1001,6 +1068,7 @@ pub fn stroke_style_for_tags(
     if layer == "tourism_boundary" {
         return Some(StrokeStyle {
             sort_rank: 150,
+            class_id: style_class_id("line", "tourism_boundary"),
             casing: None,
             center: StrokePassStyle { deck_m: 0.0,
                 color: 0xa383a3,
@@ -1039,6 +1107,7 @@ pub fn stroke_style_for_tags(
             };
             return Some(StrokeStyle {
                 sort_rank: 730,
+                class_id: style_class_id("line", "transit"),
                 casing: Some(StrokePassStyle { deck_m: 0.0,
                     color: 0xffffff,
                     width: (width + 2.0) * px_to_units,
@@ -1060,6 +1129,7 @@ pub fn stroke_style_for_tags(
         "natura2000" | "wetlands" => {
             return Some(StrokeStyle {
                 sort_rank: 240,
+                class_id: style_class_id("line", "nature_boundary"),
                 casing: None,
                 center: StrokePassStyle { deck_m: 0.0,
                     color: 0x2e8b57,
@@ -1085,6 +1155,7 @@ pub fn stroke_style_for_tags(
             let width: f32 = width;
             return Some(StrokeStyle {
                 sort_rank: 380,
+                class_id: style_class_id("line", "admin_boundary"),
                 casing: None,
                 center: StrokePassStyle { deck_m: 0.0,
                     color: 0x8a4e9e,
@@ -1106,6 +1177,7 @@ pub fn stroke_style_for_tags(
             .unwrap_or(0x9a938b);
         return Some(StrokeStyle {
             sort_rank: 140,
+            class_id: style_class_id("line", "platform_edge"),
             casing: None,
             center: StrokePassStyle { deck_m: 0.0,
                 color: edge,
@@ -1502,6 +1574,11 @@ pub fn probe_compiled_theme() -> CompiledMapTheme {
         }
     }
     let mut style = MapThemeStyle::default();
+    // Match the live app themes: they run with baked building/deck shadows
+    // on. The probe shipped with this OFF for weeks, which made every
+    // headless profile skip the per-tile shadow silhouette dissolve — the
+    // buildings stage measured 11ms while the app paid 340ms+.
+    style.shiny.bake_shadows = true;
     style.fill_rules = vec![
         fill("building", "", 0xd9d0c9),
         fill("building_outline", "", 0xb5aa9b),
@@ -1657,4 +1734,43 @@ mod tests {
             (configured_width * thin_scale * 3.0).to_bits()
         );
     }
+}
+
+/// Test lever for theme independence: the probe theme with EVERY resolved
+/// color rewritten — a stand-in for the dark/circuit themes, which by
+/// contract differ from light only in colors. Baking a tile under this
+/// theme must produce the exact signature and regions the light bake does.
+pub fn probe_compiled_theme_recolored() -> CompiledMapTheme {
+    fn recolor(color: u32) -> u32 {
+        color ^ 0x5a3c7e
+    }
+    fn recolor_pass(pass: &mut StrokePassStyle) {
+        pass.color = recolor(pass.color);
+    }
+    fn recolor_template(template: &mut StrokeTemplate) {
+        recolor_pass(&mut template.center);
+        if let Some(casing) = template.casing.as_mut() {
+            recolor_pass(casing);
+        }
+    }
+    let mut theme = probe_compiled_theme();
+    for template in theme.road_rules.values_mut() {
+        recolor_template(template);
+    }
+    if let Some(template) = theme.road_default.as_mut() {
+        recolor_template(template);
+    }
+    for template in theme.waterway_rules.values_mut() {
+        recolor_template(template);
+    }
+    if let Some(template) = theme.waterway_default.as_mut() {
+        recolor_template(template);
+    }
+    if let Some(template) = theme.railway_rule.as_mut() {
+        recolor_template(template);
+    }
+    theme.street_area_fill = theme.street_area_fill.map(recolor);
+    theme.bridge_area_fill = theme.bridge_area_fill.map(recolor);
+    theme.building_fill = theme.building_fill.map(recolor);
+    theme
 }

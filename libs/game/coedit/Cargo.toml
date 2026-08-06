@@ -1,0 +1,8 @@
+[package]
+name = "makepad-game-coedit"
+version = "0.1.0"
+edition = "2021"
+description = "Host-serialized collaborative editing for Makepad Arcade (see game.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

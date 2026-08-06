@@ -409,6 +409,13 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        // Safety flush: if a previous repaint batched offscreen passes but
+        // no window pass followed (texture-only frame), commit that work
+        // now so it is never stranded.
+        if let Some(shared) = metal_cx.frame_command_buffer.take() {
+            let () = unsafe { msg_send![shared, commit] };
+            let () = unsafe { msg_send![shared, release] };
+        }
         let time_now = with_macos_app(|app| app.time_now() as f32);
         for draw_pass_id in &passes_todo {
             match self.passes[*draw_pass_id].parent.clone() {
@@ -428,7 +435,15 @@ impl Cx {
                         // the next timer beat retries with the pool drained
                         // and event handling never stalls behind vsync.
                         use std::sync::atomic::Ordering;
-                        if metal_window.in_flight_presents.load(Ordering::Acquire) >= 2 {
+                        // Gate at 3 (true triple buffering): the pool holds
+                        // three drawables, so acquiring with <=2 in flight
+                        // never blocks. The old >=2 gate was effectively
+                        // single-buffered — with GPU frames over one beat it
+                        // locked into a 50ms submit-wait-submit resonance
+                        // (20fps at 0.6ms CPU). Presented-handlers fire at
+                        // glass time, so in-flight includes queued vsync
+                        // slots; two outstanding is the classic pipeline.
+                        if metal_window.in_flight_presents.load(Ordering::Acquire) >= 3 {
                             self.repaint_pass(*draw_pass_id);
                             continue;
                         }

@@ -155,7 +155,12 @@ impl ScriptThread {
     pub fn free_unreffed_scopes(&mut self, bases: &StackBases, heap: &mut ScriptHeap) {
         while self.scopes.len() > bases.scope {
             let scope = self.scopes.pop().unwrap();
-            heap.free_object_if_unreffed(scope); // DISABLED: investigating RootObject already freed
+            // Eager scope reclamation at call/loop exit. Safe: a scope
+            // captured by a closure became that closure's proto (REFFED in
+            // new_with_proto), a host-held scope is REFFED via
+            // new_object_ref, and a scope stored as a value went through the
+            // escape barrier — all three make this a no-op and defer to GC.
+            heap.free_object_if_unreffed(scope);
         }
     }
 

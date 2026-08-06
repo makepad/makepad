@@ -2,6 +2,89 @@ use makepad_svg::path::{LineCap, LineJoin, VectorPath};
 use makepad_svg::tessellate::{compute_clip_radii, Tessellator, VVertex};
 
 pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
+/// Packed GPU layout: see `pack_vector_record` / VectorVertexPacked.
+pub const VECTOR_PACKED_FLOATS_PER_VERTEX: usize = 12;
+
+#[inline]
+fn f16_bits(value: f32) -> u32 {
+    // IEEE 754 binary16 encode (round-to-nearest-even, clamps to inf).
+    let bits = value.to_bits();
+    let sign = (bits >> 16) & 0x8000;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let frac = bits & 0x007f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if frac != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let frac = frac | 0x0080_0000;
+        let shift = (14 - e) as u32;
+        let half = frac >> shift;
+        let rem = frac & ((1 << shift) - 1);
+        let round = (rem > (1 << (shift - 1)))
+            || (rem == (1 << (shift - 1)) && (half & 1) != 0);
+        return sign | (half + round as u32);
+    }
+    let half = ((e as u32) << 10) | (frac >> 13);
+    let rem = frac & 0x1fff;
+    let round = (rem > 0x1000) || (rem == 0x1000 && (half & 1) != 0);
+    sign | (half + round as u32)
+}
+
+/// Two floats into one f32 slot as an f16 pair; unpacked in-shader with
+/// `unpack2f16`. Public so other packed vertex layouts reuse this rounding
+/// rather than growing a second, subtly different implementation.
+#[inline]
+pub fn pack_pair_f16(a: f32, b: f32) -> f32 {
+    f32::from_bits(f16_bits(a) | (f16_bits(b) << 16))
+}
+
+/// Four 0..1 channels into one f32 slot as unorm8x4; unpacked in-shader
+/// with `unpack4u8`.
+#[inline]
+pub fn pack_unorm8x4(r: f32, g: f32, b: f32, a: f32) -> f32 {
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    f32::from_bits(q(r) | (q(g) << 8) | (q(b) << 16) | (q(a) << 24))
+}
+
+/// One 19-float logical record -> the 12-slot packed layout.
+#[inline]
+pub fn pack_vector_record(record: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PER_VERTEX] {
+    [
+        record[0],
+        record[1],
+        pack_pair_f16(record[2], record[3]),
+        pack_unorm8x4(record[4], record[5], record[6], record[7]),
+        record[8],
+        // stroke_dist stays f32: multi-km merged roads exceed f16 range
+        // (inf -> NaN varyings) and dash phase needs the precision.
+        record[9],
+        pack_pair_f16(record[11], record[10]),
+        pack_pair_f16(record[12], record[13]),
+        // clip_radius clamped into f16 range: huge radii mean "never
+        // clipped" either way.
+        pack_pair_f16(record[14], record[17].min(60000.0)),
+        record[15],
+        record[16],
+        record[18],
+    ]
+}
+
+/// Pack a whole 19-stride vertex buffer for GPU upload.
+pub fn pack_vector_vertices(vertices: &[f32]) -> Vec<f32> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * VECTOR_PACKED_FLOATS_PER_VERTEX);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        out.extend_from_slice(&pack_vector_record(record));
+    }
+    out
+}
 pub const VECTOR_ZBIAS_STEP: f32 = 0.000001;
 /// Selects DrawVector's signed-coordinate analytic fill fringe. Ordinary
 /// fills use `1e6`; a distinct sentinel lets the same vertex format carry a
@@ -174,22 +257,21 @@ pub fn append_expanded_stroke_geometry(
     let ramp = (total_dist * 0.35).min(96.0).max(1e-3);
 
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for (vi, (v, anchor)) in verts.iter().zip(anchors).enumerate() {
-        acc_verts.push(anchor[0]);
-        acc_verts.push(anchor[1]);
-        acc_verts.push(v.u);
-        acc_verts.push(v.v);
-        acc_verts.push(params.color[0]);
-        acc_verts.push(params.color[1]);
-        acc_verts.push(params.color[2]);
-        acc_verts.push(params.color[3]);
-        acc_verts.push(params.stroke_mult);
-        acc_verts.push(v.stroke_dist);
-        acc_verts.push(params.shape_id + EXPAND_STROKE_SHAPE_OFFSET);
-        acc_verts.push(params.params[0]);
-        acc_verts.push(v.x - anchor[0]);
-        acc_verts.push(v.y - anchor[1]);
-        acc_verts.push(expand_class);
+    let start = acc_verts.len();
+    let floats = verts.len() * VECTOR_FLOATS_PER_VERTEX;
+    // One resize + slot writes into the zeroed tail: the per-vertex
+    // extend_from_slice of a stack array still re-checked capacity and
+    // copied through a temporary 19 floats at a time — measurable on the
+    // face/fringe path that now routes every morphable surface here.
+    acc_verts.resize(start + floats, 0.0);
+    let shape_id = params.shape_id + EXPAND_STROKE_SHAPE_OFFSET;
+    let decked = deck_m > 0.0 || deck_override.is_some();
+    for (vi, ((v, anchor), record)) in verts
+        .iter()
+        .zip(anchors)
+        .zip(acc_verts[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX))
+        .enumerate()
+    {
         let deck_v = if let Some(decks) = deck_override {
             decks.get(vi).copied().unwrap_or(0.0)
         } else if deck_m > 0.0 {
@@ -199,22 +281,36 @@ pub fn append_expanded_stroke_geometry(
         } else {
             params.params[4]
         };
-        acc_verts.push(deck_v);
         // A lifted deck is semantically ABOVE whatever it crosses: bump its
         // tilt micro-depth with the lift, or high-rank strokes underneath
         // (rail over secondary) still depth-win near the crossing.
-        acc_verts.push(if deck_m > 0.0 || deck_override.is_some() {
+        let param5 = if decked {
             params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
         } else {
             params.params[5]
-        });
-        acc_verts.push(v.clip_radius);
-        acc_verts.push(params.zbias);
+        };
+        record[0] = anchor[0];
+        record[1] = anchor[1];
+        record[2] = v.u;
+        record[3] = v.v;
+        record[4] = params.color[0];
+        record[5] = params.color[1];
+        record[6] = params.color[2];
+        record[7] = params.color[3];
+        record[8] = params.stroke_mult;
+        record[9] = v.stroke_dist;
+        record[10] = shape_id;
+        record[11] = params.params[0];
+        record[12] = v.x - anchor[0];
+        record[13] = v.y - anchor[1];
+        record[14] = expand_class;
+        record[15] = deck_v;
+        record[16] = param5;
+        record[17] = v.clip_radius;
+        record[18] = params.zbias;
     }
 
-    for &idx in indices {
-        acc_indices.push(base + idx);
-    }
+    acc_indices.extend(indices.iter().map(|&idx| base + idx));
 }
 
 pub fn append_tessellated_geometry(
@@ -244,37 +340,39 @@ pub fn append_tessellated_geometry_decked(
     }
 
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    acc_verts.reserve(verts.len() * VECTOR_FLOATS_PER_VERTEX);
     for (vi, v) in verts.iter().enumerate() {
         let deck_v = match deck_override {
             Some(decks) => decks.get(vi).copied().unwrap_or(0.0),
             None => params.params[4],
         };
-        acc_verts.push(v.x);
-        acc_verts.push(v.y);
-        acc_verts.push(v.u);
-        acc_verts.push(v.v);
-        acc_verts.push(params.color[0]);
-        acc_verts.push(params.color[1]);
-        acc_verts.push(params.color[2]);
-        acc_verts.push(params.color[3]);
-        acc_verts.push(params.stroke_mult);
-        acc_verts.push(v.stroke_dist);
-        acc_verts.push(params.shape_id);
-        acc_verts.push(params.params[0]);
-        acc_verts.push(params.params[1]);
-        acc_verts.push(params.params[2]);
-        acc_verts.push(params.params[3]);
-        acc_verts.push(deck_v);
-        acc_verts.push(if deck_v > 0.0 {
+        let param5 = if deck_v > 0.0 {
             params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
         } else {
             params.params[5]
-        });
-        acc_verts.push(v.clip_radius);
-        acc_verts.push(params.zbias);
+        };
+        acc_verts.extend_from_slice(&[
+            v.x,
+            v.y,
+            v.u,
+            v.v,
+            params.color[0],
+            params.color[1],
+            params.color[2],
+            params.color[3],
+            params.stroke_mult,
+            v.stroke_dist,
+            params.shape_id,
+            params.params[0],
+            params.params[1],
+            params.params[2],
+            params.params[3],
+            deck_v,
+            param5,
+            v.clip_radius,
+            params.zbias,
+        ]);
     }
 
-    for &idx in indices {
-        acc_indices.push(base + idx);
-    }
+    acc_indices.extend(indices.iter().map(|&idx| base + idx));
 }

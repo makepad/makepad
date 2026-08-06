@@ -809,7 +809,39 @@ impl Cx {
             }
         }
 
-        let command_buffer: ObjcId = unsafe { msg_send![metal_cx.command_queue, commandBuffer] };
+        // Frame batching: offscreen texture passes share one retained
+        // command buffer; window modes flush it. Profiling mode keeps the
+        // one-buffer-per-pass behavior so per-pass GPU spans stay real.
+        // Frame batching regressed badly at large window sizes (3fps —
+        // suspicion: hazard-serialized encoders on one buffer defeating
+        // per-pass parallelism). Opt-in until understood.
+        static BATCH_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let batch_enabled =
+            *BATCH_ON.get_or_init(|| std::env::var_os("MAKEPAD_BATCH_PASSES").is_some());
+        let batch_this_pass = batch_enabled
+            && !Self::gpu_profile_enabled()
+            && matches!(mode, DrawPassMode::Texture);
+        if !batch_this_pass {
+            // Entering a present-bound pass: commit the batched offscreen
+            // work NOW so the GPU pipelines it under this pass's CPU encode.
+            if let Some(shared) = metal_cx.frame_command_buffer.take() {
+                let () = unsafe { msg_send![shared, commit] };
+                let () = unsafe { msg_send![shared, release] };
+            }
+        }
+        let command_buffer: ObjcId = if batch_this_pass {
+            if let Some(buffer) = metal_cx.frame_command_buffer {
+                buffer
+            } else {
+                let buffer: ObjcId =
+                    unsafe { msg_send![metal_cx.command_queue, commandBuffer] };
+                let buffer: ObjcId = unsafe { msg_send![buffer, retain] };
+                metal_cx.frame_command_buffer = Some(buffer);
+                buffer
+            }
+        } else {
+            unsafe { msg_send![metal_cx.command_queue, commandBuffer] }
+        };
         let encoder: ObjcId = unsafe {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
@@ -843,6 +875,14 @@ impl Cx {
             encoder,
             &metal_cx,
         );
+        let gpu_profile_label = Self::gpu_profile_enabled().then(|| {
+            let name = &self.passes[draw_pass_id].debug_name;
+            if name.is_empty() {
+                format!("pass{:?}", draw_pass_id)
+            } else {
+                name.clone()
+            }
+        });
         let gpu_counters = GpuSampleCounters {
             draw_calls: self.os.draw_calls_done as u64,
             instances: self.os.instances_done,
@@ -912,18 +952,24 @@ impl Cx {
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
+                    gpu_profile_label.clone(),
                     command_buffer,
                 );
             }
             DrawPassMode::Texture => {
-                self.commit_command_buffer(
-                    None,
-                    None,
-                    gpu_frame_group_key,
-                    false,
-                    gpu_counters,
-                    command_buffer,
-                );
+                if !batch_this_pass {
+                    self.commit_command_buffer(
+                        None,
+                        None,
+                        gpu_frame_group_key,
+                        false,
+                        gpu_counters,
+                        gpu_profile_label.clone(),
+                        command_buffer,
+                    );
+                }
+                // Batched: encoder already ended; the shared buffer commits
+                // with the window pass.
             }
             DrawPassMode::StdinTexture => {
                 self.commit_command_buffer(
@@ -932,6 +978,7 @@ impl Cx {
                     gpu_frame_group_key,
                     false,
                     gpu_counters,
+                    gpu_profile_label.clone(),
                     command_buffer,
                 );
             }
@@ -957,6 +1004,7 @@ impl Cx {
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
+                    gpu_profile_label.clone(),
                     command_buffer,
                 );
             }
@@ -978,6 +1026,7 @@ impl Cx {
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
+                    gpu_profile_label.clone(),
                     command_buffer,
                 );
             }
@@ -998,6 +1047,7 @@ impl Cx {
                     gpu_frame_group_key,
                     true,
                     gpu_counters,
+                    gpu_profile_label.clone(),
                     command_buffer,
                 );
                 let () = unsafe { msg_send![command_buffer, waitUntilScheduled] };
@@ -1063,6 +1113,11 @@ impl Cx {
         None
     }
 
+    fn gpu_profile_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("MAKEPAD_GPU_PROFILE").is_some())
+    }
+
     fn commit_command_buffer(
         &self,
         screenshot_info: Option<ScreenshotInfo>,
@@ -1070,6 +1125,7 @@ impl Cx {
         gpu_frame_group_key: Option<u64>,
         flush_gpu_frame_group: bool,
         gpu_counters: GpuSampleCounters,
+        gpu_profile_label: Option<String>,
         command_buffer: ObjcId,
     ) {
         let screenshot_info = Mutex::new(screenshot_info);
@@ -1120,6 +1176,9 @@ impl Cx {
 
                     let raw_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
                     let raw_end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                    if let Some(label) = &gpu_profile_label {
+                        gpu_profile_accumulate(label, raw_end - raw_start, &gpu_counters);
+                    }
                     if let Some(_stdin_frame) = stdin_frame {
                         #[cfg(target_os = "macos")]
                         Self::stdin_send_draw_complete(_stdin_frame);
@@ -1374,6 +1433,13 @@ pub struct MetalCx {
     /// MTLTexture. Prevents Metal command-buffer aborts on iOS where sampling
     /// from nil is a GPU fault.
     fallback_texture: ObjcId,
+    /// Frame-batched command buffer: offscreen texture passes append their
+    /// encoders here instead of committing one buffer each — a 12-pass
+    /// blur pyramid was paying ~1ms commit/schedule latency PER PASS. The
+    /// final window pass presents and commits it. Retained (see retain in
+    /// draw_pass); None outside a frame or when MAKEPAD_GPU_PROFILE=1
+    /// (profiling keeps per-pass buffers for per-pass GPU spans).
+    pub frame_command_buffer: Option<ObjcId>,
 }
 
 #[derive(Clone, Default)]
@@ -1431,6 +1497,7 @@ impl MetalCx {
             command_queue: unsafe { msg_send![device, newCommandQueue] },
             device,
             fallback_texture,
+            frame_command_buffer: None,
         }
     }
 }
@@ -1652,6 +1719,18 @@ impl CxOsDrawShader {
         mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
+        // Generated shader source is what an author — increasingly an AI —
+        // actually has to debug, and it is otherwise invisible. Dumping it is
+        // opt-in and costs nothing when the var is unset.
+        if let Ok(dir) = std::env::var("MAKEPAD_SHADER_DUMP") {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&mtlsl, &mut hasher);
+            let name = format!("{}/shader_{:016x}.metal", dir, std::hash::Hasher::finish(&hasher));
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&name, mtlsl.as_bytes());
+        }
+        let _mp_t0 = std::time::Instant::now();
+        let _mp_src_len = mtlsl.len();
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
         unsafe {
             let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
@@ -1681,6 +1760,8 @@ impl CxOsDrawShader {
             },
         );
 
+        let _mp_lib_ms = _mp_t0.elapsed().as_secs_f64() * 1000.0;
+        let _mp_t1 = std::time::Instant::now();
         let descriptor = RcObjcId::from_owned(
             NonNull::new(unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] }).unwrap(),
         );
@@ -1724,6 +1805,13 @@ impl CxOsDrawShader {
             ]
         }).unwrap());
 
+        // Opt-in: shader compile timing is only interesting when someone is
+        // measuring it, and every boot compiles dozens of shaders.
+        if std::env::var("MAKEPAD_SHADER_BENCH").is_ok() {
+            crate::log!("MPSHADERBENCH src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
+                _mp_src_len, _mp_lib_ms, _mp_t1.elapsed().as_secs_f64()*1000.0,
+                _mp_t0.elapsed().as_secs_f64()*1000.0);
+        }
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
             .get_by_type_name(id!(DrawCallUniforms))
@@ -2962,5 +3050,61 @@ impl EaglRenderBridge {
 
             (gl_texture_id, metal_texture)
         }
+    }
+}
+
+/// MAKEPAD_GPU_PROFILE=1: per-pass GPU-time + geometry table, printed once
+/// a second from the command-buffer completion threads. Names are the
+/// passes' debug names; ms are summed GPU intervals over the window.
+fn gpu_profile_accumulate(
+    label: &str,
+    gpu_seconds: f64,
+    counters: &GpuSampleCounters,
+) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    #[derive(Default, Clone)]
+    struct Slot {
+        gpu_s: f64,
+        buffers: u64,
+        draws: u64,
+        verts: u64,
+        instances: u64,
+        instance_bytes: u64,
+    }
+    static TABLE: Mutex<Option<(std::time::Instant, HashMap<String, Slot>)>> = Mutex::new(None);
+    let Ok(mut guard) = TABLE.lock() else { return };
+    let (started, table) =
+        guard.get_or_insert_with(|| (std::time::Instant::now(), HashMap::new()));
+    let slot = table.entry(label.to_string()).or_default();
+    if gpu_seconds.is_finite() && gpu_seconds > 0.0 {
+        slot.gpu_s += gpu_seconds;
+    }
+    slot.buffers += 1;
+    slot.draws += counters.draw_calls;
+    slot.verts += counters.vertices;
+    slot.instances += counters.instances;
+    slot.instance_bytes += counters.instance_bytes;
+    if started.elapsed().as_secs_f64() >= 1.0 {
+        let window = started.elapsed().as_secs_f64();
+        let mut rows: Vec<(String, Slot)> =
+            table.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        rows.sort_by(|a, b| b.1.gpu_s.total_cmp(&a.1.gpu_s));
+        let mut out = format!("GPUPROF {:.2}s window\n", window);
+        for (name, s) in rows {
+            out.push_str(&format!(
+                "  {:<24} gpu:{:>7.2}ms/s ({:>5.2}ms/buf) bufs:{:<4} draws:{:<6} verts:{:<9} inst:{:<8} instMB:{:.1}\n",
+                name,
+                s.gpu_s * 1000.0 / window,
+                if s.buffers > 0 { s.gpu_s * 1000.0 / s.buffers as f64 } else { 0.0 },
+                s.buffers,
+                s.draws,
+                s.verts,
+                s.instances,
+                s.instance_bytes as f64 / 1e6,
+            ));
+        }
+        crate::log!("{}", out);
+        *guard = None;
     }
 }

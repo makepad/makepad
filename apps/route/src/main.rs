@@ -100,7 +100,7 @@ script_mod! {
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.inner_size: vec2(1280, 840)
+                window.inner_size: vec2(3400, 2050)
                 pass.clear_color: vec4(0.08, 0.10, 0.12, 1.0)
                 body +: {
                     View{
@@ -111,12 +111,15 @@ script_mod! {
                         map := MapView{
                             width: Fill
                             height: Fill
+                            // GPU-opt benchmark scene: AMS side view at the
+                            // lowest zoom that shows 3D geometry.
                             center_lon: 4.8952
                             center_lat: 52.3702
-                            zoom: 13.0
+                            zoom: 15.6
+                            tilt: 60.0
                             min_zoom: 3.0
-                            mbtiles_path: "local/maps/europe-shortbread.mbtiles"
-                            detail_mbtiles_path: "local/maps/europe-osm-detail.mbtiles"
+                            mbtiles_path: "local/maps/world.mkmap"
+                            detail_mbtiles_path: "local/maps/world.mkmap"
                             bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
                             buildings_3d: true
                         }
@@ -790,6 +793,30 @@ pub struct App {
     /// Last nav banner instruction spoken, so each maneuver is announced once.
     #[rust]
     last_spoken_banner: String,
+    /// In-flight dispatcher prompt, for user-override cancellation.
+    #[rust]
+    current_prompt: Option<PromptId>,
+    /// Tool calls executed for the current prompt (loop budget).
+    #[rust]
+    tool_rounds: usize,
+    /// Previous (name, args) this turn — breaks identical-call loops.
+    #[rust]
+    last_tool_call: Option<(String, String)>,
+}
+
+/// Pull "ctx USED/MAX" out of the local timing status line.
+fn parse_ctx_usage(timing: &str) -> Option<(usize, usize)> {
+    let at = timing.rfind("ctx ")?;
+    let rest = &timing[at + 4..];
+    let (used, max) = rest.trim().split_once('/')?;
+    Some((
+        used.trim().parse().ok()?,
+        max.trim()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()?,
+    ))
 }
 
 fn read_secret(name: &str) -> Option<String> {
@@ -846,6 +873,12 @@ impl App {
     /// dispatcher instead. Claude, when a key exists, otherwise serves as
     /// the cloud_ask escalation tool.
     fn init_agent(&mut self, cx: &mut Cx) {
+        // AI on by default again (perf campaign over); MAKEPAD_NO_AI=1
+        // keeps the GPU clear of the 9B/4B/whisper chain when profiling
+        // the map renderer.
+        if std::env::var_os("MAKEPAD_NO_AI").is_some() {
+            return;
+        }
         let api_key = read_secret("ANTHROPIC_API_KEY");
         let cloud_dispatch = std::env::var("MAKEPAD_ROUTE_CLOUD").is_ok() && api_key.is_some();
 
@@ -1013,7 +1046,11 @@ impl App {
             self.push_line(cx, "⚠ no agent available");
             return;
         }
-        // A new turn obsoletes whatever the voice was still saying.
+        // A new turn obsoletes whatever the voice was still saying — and a
+        // typed command while the dispatcher runs is always an override.
+        if self.busy {
+            self.interrupt_turn(cx);
+        }
         if let Some(speech) = &mut self.speech {
             speech.stop();
         }
@@ -1035,9 +1072,62 @@ impl App {
             self.trip.digest()
         );
         let (agent, session) = (self.agent.as_mut().unwrap(), self.session.unwrap());
-        agent.send_prompt(cx, session, &prompt);
+        let prompt_id = agent.send_prompt(cx, session, &prompt);
+        self.current_prompt = Some(prompt_id);
+        self.tool_rounds = 0;
+        self.last_tool_call = None;
         self.busy = true;
         self.set_status(cx, "thinking…");
+    }
+
+    /// User override: cancel the in-flight dispatcher turn NOW. The worker
+    /// stops per-token, closes the assistant turn and drops its tool calls.
+    fn interrupt_turn(&mut self, cx: &mut Cx) {
+        if !self.busy {
+            return;
+        }
+        if let (Some(agent), Some(prompt_id)) = (self.agent.as_mut(), self.current_prompt) {
+            agent.cancel_prompt(cx, prompt_id);
+        }
+        self.busy = false;
+        self.voice_queue.clear();
+        if let Some(speech) = &mut self.speech {
+            speech.stop();
+        }
+        self.push_entry(cx, EntryKind::Info, "⏹ interrupted");
+        self.set_status(cx, "ready");
+    }
+
+    /// Does this utterance override the current activity? Only the LEADING
+    /// words count — "add a charging stop" must not match on "stop".
+    fn is_override_command(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .take(2)
+            .any(|w| {
+                matches!(
+                    w,
+                    "stop" | "cancel" | "nevermind" | "never" | "forget" | "wait" | "actually"
+                )
+            })
+    }
+
+    /// "stop" / "nevermind" with no follow-up command: just halt.
+    fn is_pure_stop(text: &str) -> bool {
+        let words: Vec<&str> = text
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        words.len() <= 3
+            && words.iter().all(|w| {
+                matches!(
+                    w.to_lowercase().as_str(),
+                    "ok" | "okay" | "no" | "stop" | "cancel" | "nevermind" | "never" | "mind"
+                        | "it" | "that" | "forget" | "computer"
+                )
+            })
     }
 
     fn on_agent_event(&mut self, cx: &mut Cx, event: AgentEvent) {
@@ -1080,17 +1170,35 @@ impl App {
                     speech.flush();
                 }
                 self.busy = false;
+                self.current_prompt = None;
                 let timing = self
                     .local_timing
                     .as_ref()
                     .and_then(|t| t.lock().ok().map(|s| s.clone()))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "ready".to_string());
+                // The session is append-only: once the context is nearly
+                // full it cannot recover — restart with a fresh session
+                // (mmap makes the reload cheap; chat history stays in the
+                // transcript, the model just loses conversational memory).
+                if let Some((used, max)) = parse_ctx_usage(&timing) {
+                    if used * 10 > max * 9 {
+                        self.push_entry(
+                            cx,
+                            EntryKind::Info,
+                            &format!("⚠ context {used}/{max} — restarting local session"),
+                        );
+                        self.agent = None;
+                        self.session = None;
+                        self.init_agent(cx);
+                    }
+                }
                 self.set_status(cx, &timing);
             }
             AgentEvent::PromptError { error, .. } => {
                 self.commit_pending(cx);
                 self.busy = false;
+                self.current_prompt = None;
                 self.push_line(cx, &format!("⚠ {error}"));
                 self.set_status(cx, "error — try again");
             }
@@ -1396,9 +1504,21 @@ impl App {
             GateResult::Send { raw, instruction } => {
                 let _ = &raw;
                 self.push_entry(cx, EntryKind::Info, "→ directed");
-                if self.busy {
+                if self.busy && Self::is_override_command(&instruction) {
+                    // "ok nevermind, stop, go do X now" — cancel the turn;
+                    // send the rest unless it was a bare stop.
+                    self.interrupt_turn(cx);
+                    if !Self::is_pure_stop(&instruction) {
+                        self.send_user_prompt(cx, &instruction);
+                    }
+                } else if self.busy {
                     self.push_entry(cx, EntryKind::Info, "(queued until current turn ends)");
                     self.voice_queue.push(instruction);
+                } else if Self::is_pure_stop(&instruction) {
+                    // Nothing running — just quiet the voice.
+                    if let Some(speech) = &mut self.speech {
+                        speech.stop();
+                    }
                 } else {
                     self.send_user_prompt(cx, &instruction);
                 }
@@ -1441,6 +1561,28 @@ impl App {
     fn run_tool(&mut self, cx: &mut Cx, tool_use_id: &str, name: &str, input: &str) {
         let compact: String = input.chars().take(120).collect();
         self.push_entry(cx, EntryKind::Tool, &format!("⚙ {name} {compact}"));
+        // Loop breakers: greedy decoding can wedge the dispatcher into
+        // re-issuing the same call forever (seen: identical geo_search
+        // spam). Repeats and over-budget turns get a corrective tool
+        // result instead of execution.
+        self.tool_rounds += 1;
+        let this_call = (name.to_string(), input.to_string());
+        let repeated = self.last_tool_call.as_ref() == Some(&this_call);
+        self.last_tool_call = Some(this_call);
+        if repeated || self.tool_rounds > 10 {
+            let nudge = if repeated {
+                "Error: identical tool call repeated — you already have this result. \
+                 Do NOT call this tool again; answer the user now with what you know."
+            } else {
+                "Error: tool budget for this request is exhausted. \
+                 Stop calling tools and answer the user now with what you have."
+            };
+            self.push_entry(cx, EntryKind::Info, "⛔ tool loop broken");
+            if let (Some(agent), Some(session)) = (self.agent.as_mut(), self.session) {
+                agent.send_tool_result(cx, session, tool_use_id, nudge, true);
+            }
+            return;
+        }
         // images_search runs async over cx.http_request; the tool result is
         // sent when the thumbnails land.
         if name == "images_search" {

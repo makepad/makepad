@@ -51,6 +51,44 @@ pub struct VectorVertex {
     pub zbias: f32,
 }
 
+/// Packed VectorVertex: 12 f32 slots carrying the 19 logical fields —
+/// f16 pairs / unorm8x4 bitcast into single slots, unpacked in the vertex
+/// shader (unpack2f16/unpack4u8). Halves vertex fetch bandwidth; the
+/// precision-critical slots (positions, stroke_mult sentinels, param4
+/// icon-floor composite, param5 depth ladder, zbias 1e-6 steps) stay f32.
+#[derive(Clone, Script, ScriptHook)]
+pub struct VectorVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// f16(u) | f16(v)
+    #[live]
+    pub uv: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+    #[live]
+    pub stroke_mult: f32,
+    #[live]
+    pub stroke_dist: f32,
+    /// f16(param0) | f16(shape_id)
+    #[live]
+    pub p0s: f32,
+    /// f16(param1) | f16(param2)
+    #[live]
+    pub p12: f32,
+    /// f16(param3) | f16(clip_radius, clamped)
+    #[live]
+    pub p3c: f32,
+    #[live]
+    pub param4: f32,
+    #[live]
+    pub param5: f32,
+    #[live]
+    pub zbias: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct PbrVertex {
     #[live]
@@ -61,6 +99,37 @@ pub struct PbrVertex {
     pub color: Vec4f, // rgba
     #[live]
     pub tangent: Vec4f, // tangent xyz + handedness
+}
+
+/// Packed mesh vertex: 6 f32 slots instead of PbrVertex's 16, for streams
+/// where fetch bandwidth matters more than the last bit of precision —
+/// CPU-skinned characters (re-uploaded every frame), terrain, shadow meshes.
+///
+/// Same idea as [`VectorVertexPacked`]: position stays f32 because it is
+/// precision-critical, everything else is an f16 pair or a unorm8 quad
+/// bitcast into one slot and unpacked in the vertex shader
+/// (`unpack2f16` / `unpack4u8`). Normals are octahedral-encoded, which is
+/// what lets a 3-component unit vector fit in two f16 lanes.
+#[derive(Clone, Script, ScriptHook)]
+pub struct GameMeshVertex {
+    // Flat f32 fields, not a Vec3f: std140 pads a vec3 to 16 bytes, which
+    // would not match the Rust repr(C) size. VectorVertexPacked does the
+    // same for the same reason.
+    #[live]
+    pub px: f32,
+    #[live]
+    pub py: f32,
+    #[live]
+    pub pz: f32,
+    /// f16(oct.x) | f16(oct.y) — octahedral unit normal.
+    #[live]
+    pub nrm: f32,
+    /// f16(u) | f16(v)
+    #[live]
+    pub uv: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
 }
 
 #[derive(Clone, Script, ScriptHook)]
@@ -119,10 +188,17 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.VectorVertex);
     let vgen = shared(vm, id!(VectorGeom), GeometryGen::from_triangle_2d);
     set_script_value!(vm, geom.VectorGeom = vgen);
+    set_script_value_to_pod!(vm, geom.VectorVertexPacked);
+    let vpgen = shared(vm, id!(VectorGeomPacked), GeometryGen::from_triangle_2d_packed);
+    set_script_value!(vm, geom.VectorGeomPacked = vpgen);
     // PBR geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.PbrVertex);
     let pgen = shared(vm, id!(PbrGeom), GeometryGen::from_triangle_pbr);
     set_script_value!(vm, geom.PbrGeom = pgen);
+    // Packed game mesh geometry: 6-slot vertex for bandwidth-bound streams.
+    set_script_value_to_pod!(vm, geom.GameMeshVertex);
+    let gmgen = shared(vm, id!(GameMeshGeom), GeometryGen::from_triangle_game_mesh);
+    set_script_value!(vm, geom.GameMeshGeom = gmgen);
     // Cube geometry: unit cube in the old geom_pos/geom_normal/geom_uv layout.
     set_script_value_to_pod!(vm, geom.CubeVertex);
     let cgen = shared(vm, id!(CubeGeom), || {
@@ -165,6 +241,22 @@ impl GeometryGen {
     }
 
     /// Placeholder single-triangle geometry for vector drawing (overridden at draw time)
+    pub fn from_triangle_2d_packed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&crate::vector::pack_vector_record(&[
+                0.0, 0.0, 0.5, 1.0,
+                1.0, 1.0, 1.0, 1.0,
+                1e6, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0,
+                0.0,
+            ]));
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
     pub fn from_triangle_2d() -> GeometryGen {
         let mut g = Self::default();
         // 3 vertices with full VectorVertex stride (23 floats each)
@@ -200,6 +292,18 @@ impl GeometryGen {
                 1.0, 1.0, 1.0, 1.0, // color r, g, b, a
                 1.0, 0.0, 0.0, 1.0, // tx, ty, tz, tw
             ]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single triangle in the packed GameMeshVertex stride.
+    pub fn from_triangle_game_mesh() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            // pos, nrm(oct 0,0 = +y), uv, color(white)
+            g.vertices
+                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(u32::MAX)]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

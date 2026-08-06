@@ -44,49 +44,54 @@ script_mod! {
             // final anchor so turtle alignment can move it like DrawQuad.
             let transformed_local = self.transform_svg_point(pos * self.svg_scale + self.svg_offset);
             let transformed = transformed_local + self.rect_pos;
-            self.v_tcoord = vec2(self.geom.u, self.geom.v);
-            self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
+            let g_uv = unpack2f16(self.geom.uv)
+            let g_color = unpack4u8(self.geom.color)
+            let g_p0s = unpack2f16(self.geom.p0s)
+            let g_p12 = unpack2f16(self.geom.p12)
+            let g_p3c = unpack2f16(self.geom.p3c)
+            self.v_tcoord = g_uv;
+            self.v_color = g_color;
             self.v_stroke_mult = self.geom.stroke_mult;
             self.v_stroke_dist = self.geom.stroke_dist;
-            self.v_shape_id = self.geom.shape_id;
-            self.v_param0 = self.geom.param0;
+            self.v_shape_id = g_p0s.y;
+            self.v_param0 = g_p0s.x;
             self.v_param5 = self.geom.param5;
             // Transform gradient geometry params by svg_scale/svg_offset and custom hook
-            let grad_type = self.geom.param0;
+            let grad_type = g_p0s.x;
             if grad_type > 0.5 && grad_type < 1.5 {
                 // Linear gradient: p1,p2 = start point, p3,p4 = end point
-                let p0 = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
-                let p1 = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let p0 = self.transform_svg_point(g_p12 * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let p1 = self.transform_svg_point(vec2(g_p3c.x, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = p0.x;
                 self.v_param2 = p0.y;
                 self.v_param3 = p1.x;
                 self.v_param4 = p1.y;
             } else if grad_type > 1.5 {
                 // Radial gradient: p1,p2 = center, p3,p4 = rx, ry
-                let center = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let center = self.transform_svg_point(g_p12 * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = center.x;
                 self.v_param2 = center.y;
-                self.v_param3 = self.geom.param3 * self.svg_scale.x;
+                self.v_param3 = g_p3c.x * self.svg_scale.x;
                 self.v_param4 = self.geom.param4 * self.svg_scale.y;
-            } else if self.geom.shape_id > 0.5 {
+            } else if g_p0s.y > 0.5 {
                 // Effect shape with bbox in params: transform bbox by svg_scale/svg_offset
-                let bbox_min = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
-                let bbox_max = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let bbox_min = self.transform_svg_point(g_p12 * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let bbox_max = self.transform_svg_point(vec2(g_p3c.x, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = bbox_min.x;
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
                 self.v_param4 = bbox_max.y;
             } else {
-                self.v_param1 = self.geom.param1;
-                self.v_param2 = self.geom.param2;
-                self.v_param3 = self.geom.param3;
+                self.v_param1 = g_p12.x;
+                self.v_param2 = g_p12.y;
+                self.v_param3 = g_p3c.x;
                 self.v_param4 = self.geom.param4;
             }
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
             // Early clip rejection in final draw space.
-            let cr = self.geom.clip_radius * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
+            let cr = g_p3c.y * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
                 let clip = vec4(

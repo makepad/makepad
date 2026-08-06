@@ -870,69 +870,254 @@ pub fn corridor_deck_at_point(px: f32, py: f32, corridors: &[BridgeCorridor]) ->
     deck
 }
 
+/// Uniform grid over corridor segments, built once per tile build. Each
+/// segment lands in every cell its bbox expanded by that corridor's
+/// fade-zero reach overlaps, so a point query visits exactly the segments
+/// that could produce a non-zero deck — matcher results stay bit-identical
+/// to the full scan while dense own-profile tiles stop paying
+/// O(verts x segments).
+pub struct CorridorGrid {
+    min_x: f32,
+    min_y: f32,
+    inv_cell: f32,
+    nx: i32,
+    ny: i32,
+    /// (corridor index, first point index of the segment)
+    cells: Vec<Vec<(u32, u32)>>,
+}
+
+impl CorridorGrid {
+    const CELL: f32 = 16.0;
+
+    pub fn build(corridors: &[BridgeCorridor]) -> CorridorGrid {
+        let empty = CorridorGrid {
+            min_x: 0.0,
+            min_y: 0.0,
+            inv_cell: 1.0 / Self::CELL,
+            nx: 0,
+            ny: 0,
+            cells: Vec::new(),
+        };
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut max_reach = 0.0f32;
+        for c in corridors {
+            for &(x, y) in &c.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            max_reach = max_reach.max(corridor_reach(c));
+        }
+        if min_x > max_x {
+            return empty;
+        }
+        min_x -= max_reach;
+        min_y -= max_reach;
+        max_x += max_reach;
+        max_y += max_reach;
+        let nx = ((max_x - min_x) / Self::CELL).ceil().max(1.0) as i32;
+        let ny = ((max_y - min_y) / Self::CELL).ceil().max(1.0) as i32;
+        let mut grid = CorridorGrid {
+            min_x,
+            min_y,
+            inv_cell: 1.0 / Self::CELL,
+            nx,
+            ny,
+            cells: vec![Vec::new(); (nx * ny) as usize],
+        };
+        for (ci, c) in corridors.iter().enumerate() {
+            let reach = corridor_reach(c) + 0.001;
+            for si in 0..c.points.len().saturating_sub(1) {
+                let (ax, ay) = c.points[si];
+                let (bx, by) = c.points[si + 1];
+                let x0 = ((ax.min(bx) - reach - min_x) * grid.inv_cell) as i32;
+                let x1 = ((ax.max(bx) + reach - min_x) * grid.inv_cell) as i32;
+                let y0 = ((ay.min(by) - reach - min_y) * grid.inv_cell) as i32;
+                let y1 = ((ay.max(by) + reach - min_y) * grid.inv_cell) as i32;
+                for cy in y0.max(0)..=y1.min(ny - 1) {
+                    for cx in x0.max(0)..=x1.min(nx - 1) {
+                        grid.cells[(cy * nx + cx) as usize].push((ci as u32, si as u32));
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// Segments whose reach can cover (x, y). Points outside the padded
+    /// bounds are beyond every segment's reach by construction.
+    fn entries(&self, x: f32, y: f32) -> &[(u32, u32)] {
+        let cx = ((x - self.min_x) * self.inv_cell) as i32;
+        let cy = ((y - self.min_y) * self.inv_cell) as i32;
+        if cx < 0 || cy < 0 || cx >= self.nx || cy >= self.ny {
+            return &[];
+        }
+        &self.cells[(cy * self.nx + cx) as usize]
+    }
+}
+
+/// Distance beyond which a corridor's fade is exactly zero.
+fn corridor_reach(c: &BridgeCorridor) -> f32 {
+    if c.solved {
+        SOLVED_REACH_ZERO
+    } else {
+        c.half_width + CORRIDOR_FEATHER
+    }
+}
+
+/// Corridor set + its grid, borrowed together into the stroke emitter.
+#[derive(Clone, Copy)]
+pub struct CorridorGridQuery<'a> {
+    pub corridors: &'a [BridgeCorridor],
+    pub grid: &'a CorridorGrid,
+}
+
+/// One corridor segment against one anchored vertex: the shared core of
+/// the grid and brute matchers. Returns the faded deck contribution.
+#[inline]
+fn probe_corridor_segment(
+    c: &BridgeCorridor,
+    si: usize,
+    a: &[f32; 2],
+    dx: f32,
+    dy: f32,
+    dl: f32,
+) -> f32 {
+    let (ax, ay) = c.points[si];
+    let (bx, by) = c.points[si + 1];
+    let (ex, ey) = (bx - ax, by - ay);
+    let el = (ex * ex + ey * ey).sqrt().max(1e-6);
+    // Direction gate (~35 deg): ways passing UNDER the
+    // bridge cross the corridor and must stay grounded.
+    // Offset-degenerate vertices (caps) skip the gate.
+    if dl > 0.0 && ((dx * ex + dy * ey) / (dl * el)).abs() < 0.82 {
+        return 0.0;
+    }
+    let t = (((a[0] - ax) * ex + (a[1] - ay) * ey) / (el * el)).clamp(0.0, 1.0);
+    let (px, py) = (ax + ex * t - a[0], ay + ey * t - a[1]);
+    let dist = (px * px + py * py).sqrt();
+    let fade = if c.solved {
+        ((SOLVED_REACH_ZERO - dist) / (SOLVED_REACH_ZERO - SOLVED_REACH_FULL)).clamp(0.0, 1.0)
+    } else {
+        ((c.half_width + CORRIDOR_FEATHER - dist) / CORRIDOR_FEATHER).clamp(0.0, 1.0)
+    };
+    let deck_at = c.decks[si] * (1.0 - t) + c.decks[si + 1] * t;
+    deck_at * fade
+}
+
+/// Full-scan deck for one anchored vertex — the verify-mode reference.
+fn brute_deck(corridors: &[BridgeCorridor], v: &VVertex, a: &[f32; 2]) -> f32 {
+    let (ox, oy) = (v.x - a[0], v.y - a[1]);
+    let ol = (ox * ox + oy * oy).sqrt();
+    let (dx, dy, dl) = if ol > 0.02 {
+        (-oy, ox, ol)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    let mut deck = 0.0f32;
+    for c in corridors {
+        for si in 0..c.points.len().saturating_sub(1) {
+            let d = probe_corridor_segment(c, si, a, dx, dy, dl);
+            if d > deck {
+                deck = d;
+            }
+        }
+    }
+    deck
+}
+
 /// Per-anchor deck heights for a stroke run: the attribute path (deck on
 /// the style) wins; otherwise corridor matching by distance + direction.
 fn corridor_deck_overrides(
     verts: &[VVertex],
     anchors: &[[f32; 2]],
-    corridors: &[&BridgeCorridor],
+    q: CorridorGridQuery,
 ) -> Option<Vec<f32>> {
-    if corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
+    if q.corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
         return None;
     }
-    let mut any = false;
-    let out: Vec<f32> = verts
-        .iter()
-        .zip(anchors)
-        .map(|(v, a)| {
-            // Stroke direction per vertex: the width offset (vertex minus
-            // its centerline anchor) is perpendicular to the line. Neighbor
-            // anchors are useless — the stream is left/right pairs. The
-            // degenerate threshold must sit below the thinnest half-width
-            // in 256-unit tile space or thin strokes (rails) skip the gate
-            // and tent up wherever a corridor crosses them.
-            let (ox, oy) = (v.x - a[0], v.y - a[1]);
-            let ol = (ox * ox + oy * oy).sqrt();
-            let (dx, dy, dl) = if ol > 0.02 {
-                (-oy, ox, ol)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            let mut deck = 0.0f32;
-            for c in corridors {
-                for (ci, w) in c.points.windows(2).enumerate() {
-                    let (ax, ay) = w[0];
-                    let (bx, by) = w[1];
-                    let (ex, ey) = (bx - ax, by - ay);
-                    let el = (ex * ex + ey * ey).sqrt().max(1e-6);
-                    // Direction gate (~35 deg): ways passing UNDER the
-                    // bridge cross the corridor and must stay grounded.
-                    // Offset-degenerate vertices (caps) skip the gate.
-                    if dl > 0.0 && ((dx * ex + dy * ey) / (dl * el)).abs() < 0.82 {
-                        continue;
-                    }
-                    let t = (((a[0] - ax) * ex + (a[1] - ay) * ey) / (el * el)).clamp(0.0, 1.0);
-                    let (px, py) = (ax + ex * t - a[0], ay + ey * t - a[1]);
-                    let dist = (px * px + py * py).sqrt();
-                    let fade = if c.solved {
-                        ((SOLVED_REACH_ZERO - dist) / (SOLVED_REACH_ZERO - SOLVED_REACH_FULL))
-                            .clamp(0.0, 1.0)
-                    } else {
-                        ((c.half_width + CORRIDOR_FEATHER - dist) / CORRIDOR_FEATHER)
-                            .clamp(0.0, 1.0)
-                    };
-                    let deck_at = c.decks[ci] * (1.0 - t) + c.decks[ci + 1] * t;
-                    let d = deck_at * fade;
+    // MAKEPAD_CORRIDOR_BRUTE=1: the pre-grid full scan, kept as the
+    // bit-identity oracle. MAKEPAD_CORRIDOR_VERIFY=1: run BOTH paths per
+    // vertex and panic on any bit difference.
+    static BRUTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let brute = *BRUTE.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_BRUTE").is_some());
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let verify = *VERIFY.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_VERIFY").is_some());
+    let mut deck_max = 0.0f32;
+    let mut out: Vec<f32> = Vec::with_capacity(verts.len());
+    let mut prev: Option<(usize, f32)> = None;
+    for (vi, (v, a)) in verts.iter().zip(anchors).enumerate() {
+        // Stroke direction per vertex: the width offset (vertex minus
+        // its centerline anchor) is perpendicular to the line. Neighbor
+        // anchors are useless — the stream is left/right pairs. The
+        // degenerate threshold must sit below the thinnest half-width
+        // in 256-unit tile space or thin strokes (rails) skip the gate
+        // and tent up wherever a corridor crosses them.
+        let (ox, oy) = (v.x - a[0], v.y - a[1]);
+        // The mirrored partner of the previous vertex (same anchor,
+        // negated offset) matches identically: the direction gate is
+        // side-blind. Ribbon streams alternate left/right, so this halves
+        // the matcher's work without touching its output.
+        if let Some((pi, pd)) = prev {
+            let (px_o, py_o) = (verts[pi].x - anchors[pi][0], verts[pi].y - anchors[pi][1]);
+            if !brute
+                && *a == anchors[pi]
+                && ((ox == px_o && oy == py_o) || (ox == -px_o && oy == -py_o))
+            {
+                if verify {
+                    let bd = brute_deck(q.corridors, v, a);
+                    assert!(
+                        pd.to_bits() == bd.to_bits(),
+                        "corridor pair-reuse mismatch: reused {pd} vs brute {bd}"
+                    );
+                }
+                out.push(pd);
+                continue;
+            }
+        }
+        let ol = (ox * ox + oy * oy).sqrt();
+        let (dx, dy, dl) = if ol > 0.02 {
+            (-oy, ox, ol)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let mut deck = 0.0f32;
+        if brute {
+            for c in q.corridors {
+                for si in 0..c.points.len().saturating_sub(1) {
+                    let d = probe_corridor_segment(c, si, a, dx, dy, dl);
                     if d > deck {
                         deck = d;
-                        any = true;
                     }
                 }
             }
-            deck
-        })
-        .collect();
-    any.then_some(out)
+        } else {
+            for &(ci, si) in q.grid.entries(a[0], a[1]) {
+                let d =
+                    probe_corridor_segment(&q.corridors[ci as usize], si as usize, a, dx, dy, dl);
+                if d > deck {
+                    deck = d;
+                }
+            }
+            if verify {
+                let bd = brute_deck(q.corridors, v, a);
+                assert!(
+                    deck.to_bits() == bd.to_bits(),
+                    "corridor grid mismatch at anchor {a:?}: grid {deck} vs brute {bd}"
+                );
+            }
+        }
+        if deck > deck_max {
+            deck_max = deck;
+        }
+        prev = Some((vi, deck));
+        out.push(deck);
+    }
+    (deck_max > 0.0).then_some(out)
 }
 
 /// One road polyline feeding a tier union: raw way points (collector
@@ -1143,11 +1328,42 @@ pub fn stroke_pass_param5(pass: &StrokePassStyle) -> f32 {
     (if pass.deck_m < 0.0 { 0.05 } else { 0.22 }) + pass.depth_micro
 }
 
+/// Always-on per-thread accumulator splitting `append_stroke_pass` cost:
+/// fuels the emit-stage profiler line the same way the subdiv/sample
+/// counters do. `take()` resets, so each tile build reads its own window.
+#[derive(Default, Clone, Copy)]
+pub struct StrokeProf {
+    pub densify_ms: f64,
+    pub tess_ms: f64,
+    pub deck_ms: f64,
+    pub expand_ms: f64,
+    pub calls: u32,
+    pub verts: u32,
+}
+
+thread_local! {
+    static STROKE_PROF: std::cell::Cell<StrokeProf> = const { std::cell::Cell::new(StrokeProf {
+        densify_ms: 0.0, tess_ms: 0.0, deck_ms: 0.0, expand_ms: 0.0, calls: 0, verts: 0,
+    }) };
+}
+
+pub fn stroke_prof_take() -> StrokeProf {
+    STROKE_PROF.with(|p| p.replace(StrokeProf::default()))
+}
+
+fn stroke_prof_add(f: impl FnOnce(&mut StrokeProf)) {
+    STROKE_PROF.with(|p| {
+        let mut v = p.get();
+        f(&mut v);
+        p.set(v);
+    });
+}
+
 pub fn append_stroke_pass(
     path: &mut VectorPath,
     points: &[(f32, f32)],
     closed: bool,
-    corridors: Option<&[&BridgeCorridor]>,
+    corridors: Option<CorridorGridQuery>,
     tess: &mut Tessellator,
     tess_verts: &mut Vec<VVertex>,
     tess_indices: &mut Vec<u32>,
@@ -1178,7 +1394,8 @@ pub fn append_stroke_pass(
     // deck_m < 0 is the "never deck" sentinel (tunnels): no attribute deck
     // and no corridor matching.
     let deck_possible = pass.deck_m > 0.0
-        || (pass.deck_m == 0.0 && corridors.is_some_and(|c| !c.is_empty()));
+        || (pass.deck_m == 0.0 && corridors.is_some_and(|q| !q.corridors.is_empty()));
+    let clock = std::time::Instant::now();
     let mut dense: Vec<(f32, f32)> = Vec::new();
     let points = if deck_possible && points.len() >= 2 {
         const MAX_SEG: f32 = 3.0;
@@ -1197,6 +1414,8 @@ pub fn append_stroke_pass(
     } else {
         points
     };
+    let t_densify = clock.elapsed().as_secs_f64() * 1000.0;
+    let clock = std::time::Instant::now();
     emit_path(path, points, closed);
     STROKE_ANCHORS.with(|anchors| {
         let mut anchors = anchors.borrow_mut();
@@ -1214,11 +1433,15 @@ pub fn append_stroke_pass(
             aa,
             tolerance,
         );
+        let t_tess = clock.elapsed().as_secs_f64() * 1000.0;
+        let clock = std::time::Instant::now();
         let deck_override = if pass.deck_m == 0.0 {
-            corridors.and_then(|c| corridor_deck_overrides(tess_verts, &anchors, c))
+            corridors.and_then(|q| corridor_deck_overrides(tess_verts, &anchors, q))
         } else {
             None
         };
+        let t_deck = clock.elapsed().as_secs_f64() * 1000.0;
+        let clock = std::time::Instant::now();
         append_expanded_stroke_geometry(
             tess_verts,
             &anchors,
@@ -1236,6 +1459,15 @@ pub fn append_stroke_pass(
             pass.deck_m,
             deck_override.as_deref(),
         );
+        let vert_count = tess_verts.len() as u32;
+        stroke_prof_add(|p| {
+            p.densify_ms += t_densify;
+            p.tess_ms += t_tess;
+            p.deck_ms += t_deck;
+            p.expand_ms += clock.elapsed().as_secs_f64() * 1000.0;
+            p.calls += 1;
+            p.verts += vert_count;
+        });
     });
     *stroke_zbias += VECTOR_ZBIAS_STEP;
 }
@@ -1573,6 +1805,14 @@ pub struct PaintFace {
     /// Closes the ramp-displacement crescents and reads as deck volume.
     pub skirt_verts: Vec<VVertex>,
     pub skirt_indices: Vec<u32>,
+    /// GPU-morph offsets parallel to `verts` (and `morph_fringe_offsets`
+    /// to `fringe_verts`): outward miter normal x the group's keyframe
+    /// half-width, or zero for pinned vertices (junction blends,
+    /// translucent groups, unmatched tessellator output). Emitted through
+    /// the expandable-stroke vertex layout so the live zoom re-widths the
+    /// face per frame — the "no buckets" morph.
+    pub morph_offsets: Vec<[f32; 2]>,
+    pub morph_fringe_offsets: Vec<[f32; 2]>,
 }
 
 /// Boolean outlines inherit straight edges from the padded tile clip. They
@@ -1770,17 +2010,44 @@ fn append_ring_fringe(
 /// faces whose flat rendering is pixel-identical to painting the groups in
 /// order — and whose depth order is therefore irrelevant, which is the
 /// whole point for tilt/3D.
+/// One group's visible boolean output: (group index, main-level shapes,
+/// sunk shapes, lifted outline shapes for skirt walls). Shapes are the
+/// f64 snapped rings straight from the cascade — the deterministic,
+/// bakeable part of the painter-order unifier.
+#[derive(Clone)]
+pub struct VisibleRegions {
+    pub group_index: usize,
+    pub main: Vec<Vec<Vec<[f64; 2]>>>,
+    pub sunk: Vec<Vec<Vec<[f64; 2]>>>,
+    pub lifted_outlines: Vec<Vec<Vec<[f64; 2]>>>,
+}
+
 pub fn overlay_paint_groups(
     groups: &[PaintGroup],
     tess: &mut Tessellator,
     tolerance: f32,
     aa: f32,
 ) -> Vec<PaintFace> {
+    let regions = compute_visible_regions(groups);
+    build_paint_faces(groups, &regions, tess, tolerance, aa)
+}
+
+/// The boolean half of the painter-order unifier: per-group dissolves plus
+/// the top-down cover cascade. Deterministic for a given (tile, bucket)
+/// input — this is what the per-bucket face bake captures offline.
+pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
     use i_overlay::core::fill_rule::FillRule as IoFillRule;
     use i_overlay::core::overlay_rule::OverlayRule;
     use i_overlay::float::simplify::SimplifyShape;
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
+
+    // Env-gated sub-stage timing (MAKEPAD_TILE_STAGES / MP_TILE_PROFILE):
+    // where the "boolean" lap actually goes.
+    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
+        || std::env::var_os("MP_TILE_PROFILE").is_some();
+    let prof_dissolve: f64;
+    let prof_cascade: f64;
 
     // Boolean input hygiene — the runaway fix. The extraction stage of the
     // boolean solver can spin forever chasing a contour cycle fed by
@@ -1955,6 +2222,7 @@ pub fn overlay_paint_groups(
             .collect();
         (shapes, flat)
     };
+    let prof_t_dissolve = std::time::Instant::now();
     let outlines: Vec<GroupOutline> = groups
         .iter()
         .map(|group| {
@@ -2023,6 +2291,8 @@ pub fn overlay_paint_groups(
         })
         .collect();
 
+    prof_dissolve = prof_t_dissolve.elapsed().as_secs_f64() * 1e3;
+    let prof_t_cascade = std::time::Instant::now();
     // Incremental cascade per level, all operands dissolved outlines.
     // LIFTED content never enters an accumulated cover: two decks at
     // different heights (a viaduct over a bridge) must not cut each other
@@ -2157,27 +2427,175 @@ pub fn overlay_paint_groups(
         }
     }
 
+    prof_cascade = prof_t_cascade.elapsed().as_secs_f64() * 1e3;
+    if prof_on {
+        eprintln!(
+            "MPPROF boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms groups={}",
+            groups.len()
+        );
+    }
+    // Snap OUTPUT rings to the same 1/64 grid as the boolean inputs: the
+    // solver's intersection vertices land off-grid, and the per-bucket face
+    // bake stores coordinates as x64 fixed point. Snapping here (for BOTH
+    // the runtime and the bake path) makes that encoding exact, so baked
+    // and runtime tiles are bit-identical. Half-grid shifts are below the
+    // input snap the cascade already applies.
+    let snap_shapes = |shapes: &mut Vec<Vec<Vec<[f64; 2]>>>| {
+        for shape in shapes.iter_mut() {
+            for ring in shape.iter_mut() {
+                for p in ring.iter_mut() {
+                    // `+ 0.0` normalizes -0.0 (the varint fixed-point
+                    // roundtrip cannot represent the zero sign).
+                    p[0] = (p[0] * SNAP).round() / SNAP + 0.0;
+                    p[1] = (p[1] * SNAP).round() / SNAP + 0.0;
+                }
+                // Canonical start: rotate to the lexicographic minimum
+                // point (winding preserved). The boolean solver's output
+                // order is nondeterministic run-to-run; canonical form
+                // makes builds reproducible and the face bake verifiable.
+                if let Some(min_at) = ring
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                {
+                    ring.rotate_left(min_at);
+                }
+            }
+            // Outer ring stays first; holes sort by start point.
+            if shape.len() > 2 {
+                shape[1..].sort_by(|a, b| {
+                    a.first()
+                        .partial_cmp(&b.first())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+        shapes.sort_by(|a, b| {
+            let ka = a.first().and_then(|r| r.first());
+            let kb = b.first().and_then(|r| r.first());
+            ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    };
+    groups
+        .iter()
+        .zip(visibles)
+        .zip(outlines.into_iter())
+        .enumerate()
+        .map(|(group_index, ((_group, (main, sunk)), outline))| {
+            let mut regions = VisibleRegions {
+                group_index,
+                main,
+                sunk,
+                lifted_outlines: outline.lifted_shapes,
+            };
+            snap_shapes(&mut regions.main);
+            snap_shapes(&mut regions.sunk);
+            snap_shapes(&mut regions.lifted_outlines);
+            regions
+        })
+        .collect()
+}
+
+/// The tessellation half of the painter-order unifier: visible regions
+/// (runtime cascade OR decoded from the per-bucket bake) become styled
+/// PaintFaces with AA fringe and skirt walls. Group styling (color, rank,
+/// depth) is applied HERE, at runtime — the regions carry only geometry.
+pub fn build_paint_faces(
+    groups: &[PaintGroup],
+    regions: &[VisibleRegions],
+    tess: &mut Tessellator,
+    tolerance: f32,
+    aa: f32,
+) -> Vec<PaintFace> {
+    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
+        || std::env::var_os("MP_TILE_PROFILE").is_some();
+    let prof_t_facetess = std::time::Instant::now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
     let mut tess_indices: Vec<u32> = Vec::new();
-    for ((group, (visible_main, visible_sunk)), outline) in
-        groups.iter().zip(visibles).zip(outlines.iter())
-    {
-        for (part_index, visible) in [visible_main, visible_sunk].into_iter().enumerate() {
+    for region in regions {
+        let group = &groups[region.group_index];
+        for (part_index, visible) in [&region.main, &region.sunk].into_iter().enumerate() {
             let level: i8 = if part_index == 1 { -1 } else { 0 };
             // Walls hang from the deck's TRUE outer boundary (the lifted
             // outline), attached to the unified main face.
-            let lifted = part_index == 0 && !outline.lifted_shapes.is_empty();
+            let lifted = part_index == 0 && !region.lifted_outlines.is_empty();
             if visible.is_empty() {
                 continue;
             }
             // Each shape = outer ring + holes; contours are crossing-free,
             // so even-odd (no explicit winding) fills holes correctly.
-            for shape in &visible {
+            // Morph map: exact f32 coordinate -> outward miter normal for
+            // every outline vertex. Tessellator/fringe output that came
+            // from a ring vertex keeps its exact bits, so lookups match
+            // 1:1; anything else (clip cuts, carrier outer edges) stays
+            // pinned at zero. Translucent groups must not self-overlap
+            // under widening — pinned wholesale.
+            // Road casings/centers only (phase > 0): plaza rings are
+            // verbatim polygon geometry (zoom-independent), and emissive
+            // groups need the fragment params band 100 zeroes out.
+            let morphable = group.phase > 0
+                && group.color[3] > 0.999
+                && group.emissive <= 0.001
+                && group.half_width > 0.05;
+            let mut normal_map: CellMap<[f32; 2]> = CellMap::default();
+            let normal_key =
+                |x: f32, y: f32| (x.to_bits() as i32, y.to_bits() as i32);
+            for shape in visible.iter() {
                 for ring in shape {
                     if ring.len() < 3 {
                         continue;
+                    }
+                    if morphable {
+                        // Scale to the keyframe half-width, then smooth the
+                        // offset VECTORS along the ring (circular 1-2-1
+                        // kernel, 3 passes). At the keyframe corr is exactly
+                        // 1 and offsets cancel, so smoothing costs zero
+                        // fidelity there — it only straightens the morph
+                        // path, killing the sawtooth where junction
+                        // wrap-arounds swing the miter direction per vertex.
+                        let mut offs: Vec<[f32; 2]> = ring_outward_normals(ring)
+                            .into_iter()
+                            .map(|n| [n[0] * group.half_width, n[1] * group.half_width])
+                            .collect();
+                        let n = offs.len();
+                        if n >= 3 {
+                            for _ in 0..3 {
+                                let prev = offs.clone();
+                                for i in 0..n {
+                                    let a = prev[(i + n - 1) % n];
+                                    let b = prev[i];
+                                    let c = prev[(i + 1) % n];
+                                    offs[i] = [
+                                        (a[0] + 2.0 * b[0] + c[0]) * 0.25,
+                                        (a[1] + 2.0 * b[1] + c[1]) * 0.25,
+                                    ];
+                                }
+                            }
+                            // Direction-only smoothing: renormalize to the
+                            // full half-width so the displaced edge keeps
+                            // CONSTANT width along curves (magnitude decay
+                            // at bends read as casing pinch/swell).
+                            for off in offs.iter_mut() {
+                                let len = (off[0] * off[0] + off[1] * off[1]).sqrt();
+                                *off = if len > 1e-4 {
+                                    [
+                                        off[0] / len * group.half_width,
+                                        off[1] / len * group.half_width,
+                                    ]
+                                } else {
+                                    [0.0, 0.0]
+                                };
+                            }
+                        }
+                        for (point, off) in ring.iter().zip(offs) {
+                            normal_map.insert(
+                                normal_key(point[0] as f32, point[1] as f32),
+                                off,
+                            );
+                        }
                     }
                     path.move_to(ring[0][0] as f32, ring[0][1] as f32);
                     for point in ring.iter().skip(1) {
@@ -2204,7 +2622,7 @@ pub fn overlay_paint_groups(
             let mut fringe_indices: Vec<u32> = Vec::new();
             let mut skirt_verts: Vec<VVertex> = Vec::new();
             let mut skirt_indices: Vec<u32> = Vec::new();
-            for shape in &visible {
+            for shape in visible.iter() {
                 for ring in shape {
                     if aa > 0.0 {
                         append_ring_fringe(
@@ -2218,7 +2636,7 @@ pub fn overlay_paint_groups(
                 }
             }
             if lifted {
-                for shape in &outline.lifted_shapes {
+                for shape in &region.lifted_outlines {
                     for ring in shape {
                         append_ring_skirt(
                             ring,
@@ -2237,6 +2655,34 @@ pub fn overlay_paint_groups(
             // conservative per-vertex span from the actual index buffers.
             compute_clip_radii(&mut fringe_verts, &fringe_indices);
             compute_clip_radii(&mut skirt_verts, &skirt_indices);
+            // Offset = miter normal x keyframe half-width: at the keyframe
+            // zoom the shader's correction is exactly 1 and the face is
+            // bit-identical to today; at other zooms it re-widths per
+            // frame. Unmatched verts stay [0,0] (pinned).
+            let offsets_for = |verts: &[VVertex]| -> Vec<[f32; 2]> {
+                if !morphable {
+                    return vec![[0.0, 0.0]; verts.len()];
+                }
+                verts
+                    .iter()
+                    .map(|v| {
+                        normal_map
+                            .get(&normal_key(v.x, v.y))
+                            .copied()
+                            .unwrap_or([0.0, 0.0])
+                    })
+                    .collect()
+            };
+            let morph_offsets = offsets_for(&tess_verts);
+            // Fringe verts are [boundary, outer-carrier] pairs: the carrier
+            // must translate RIGIDLY with its boundary partner or the
+            // one-pixel AA band inflates into a smear at corr > 1 (the
+            // dirty road edges mid-band). Copy the boundary offset onto
+            // the outer partner.
+            let mut morph_fringe_offsets = offsets_for(&fringe_verts);
+            for pair in morph_fringe_offsets.chunks_exact_mut(2) {
+                pair[1] = pair[0];
+            }
             faces.push(PaintFace {
                 color: group.color,
                 emissive: group.emissive,
@@ -2251,8 +2697,17 @@ pub fn overlay_paint_groups(
                 level,
                 skirt_verts,
                 skirt_indices,
+                morph_offsets,
+                morph_fringe_offsets,
             });
         }
+    }
+    if prof_on {
+        eprintln!(
+            "MPPROF facetess {:.1}ms faces={}",
+            prof_t_facetess.elapsed().as_secs_f64() * 1e3,
+            faces.len()
+        );
     }
     faces
 }
@@ -2264,12 +2719,37 @@ pub fn overlay_paint_groups(
 /// problem), while the whole cross-section of the deck itself, edge to
 /// edge, lifts uniformly. The baker's junction consensus makes way dz agree
 /// at shared nodes, so nearest-wins stays continuous across junctions.
+/// Multiply-rotate hasher for small integer cell keys: these maps are
+/// lookup-only (never iterated), and SipHash dominated `DzField::sample`
+/// profiles at ~114k samples per 3D tile.
+#[derive(Default)]
+pub struct CellHasher(u64);
+
+impl std::hash::Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_i32(&mut self, value: i32) {
+        self.0 = (self.0 ^ value as u32 as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(13);
+    }
+}
+
+pub type CellMap<V> = std::collections::HashMap<(i32, i32), V, std::hash::BuildHasherDefault<CellHasher>>;
+pub type CellSet = std::collections::HashSet<(i32, i32), std::hash::BuildHasherDefault<CellHasher>>;
+
 pub struct DzField {
     cell: f32,
     radius: f32,
-    grid: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    grid: CellMap<Vec<u32>>,
     /// Cells within reach of a lifted segment — the "needs subdivision" set.
-    active: std::collections::HashSet<(i32, i32)>,
+    active: CellSet,
     segs: Vec<[f32; 7]>,
 }
 
@@ -2446,7 +2926,22 @@ pub fn subdivide_face_mesh(
     max_edge: f32,
     field: &DzField,
 ) {
-    subdivide_face_mesh_impl(verts, indices, None, max_edge, field);
+    subdivide_face_mesh_impl(verts, indices, None, None, max_edge, field);
+}
+
+/// `subdivide_face_mesh` carrying the GPU-morph offset channel: edge
+/// midpoints inherit the average of their endpoints' offsets, so decked
+/// city-center faces stay morphable after dz refinement (they were the
+/// pinned-wide roads at deep zoom).
+pub fn subdivide_face_mesh_morph(
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+    offsets: &mut Vec<[f32; 2]>,
+    max_edge: f32,
+    field: &DzField,
+) {
+    assert_eq!(verts.len(), offsets.len());
+    subdivide_face_mesh_impl(verts, indices, None, Some(offsets), max_edge, field);
 }
 
 /// `subdivide_face_mesh` with a scalar channel riding on every generated
@@ -2461,13 +2956,14 @@ pub fn subdivide_face_mesh_decked(
     field: &DzField,
 ) {
     assert_eq!(verts.len(), decks.len());
-    subdivide_face_mesh_impl(verts, indices, Some(decks), max_edge, field);
+    subdivide_face_mesh_impl(verts, indices, Some(decks), None, max_edge, field);
 }
 
 fn subdivide_face_mesh_impl(
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
     mut values: Option<&mut Vec<f32>>,
+    mut offsets: Option<&mut Vec<[f32; 2]>>,
     max_edge: f32,
     field: &DzField,
 ) {
@@ -2521,6 +3017,13 @@ fn subdivide_face_mesh_impl(
                     return midpoint;
                 }
                 let (vi, vj) = (verts[i as usize], verts[j as usize]);
+                let offset = offsets
+                    .as_deref()
+                    .map(|offsets| {
+                        let a = offsets[i as usize];
+                        let b = offsets[j as usize];
+                        [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+                    });
                 let value = values
                     .as_deref()
                     .map(|values| (values[i as usize] + values[j as usize]) * 0.5);
@@ -2534,6 +3037,9 @@ fn subdivide_face_mesh_impl(
                 });
                 if let Some(value) = value {
                     values.as_deref_mut().unwrap().push(value);
+                }
+                if let Some(offset) = offset {
+                    offsets.as_deref_mut().unwrap().push(offset);
                 }
                 let midpoint = (verts.len() - 1) as u32;
                 midpoints.insert(key, midpoint);
@@ -3113,5 +3619,82 @@ mod boolean_repro_tests {
             clock.elapsed().as_secs_f64() * 1000.0,
             result.len()
         );
+    }
+}
+
+/// Per-vertex outward unit normals for a closed outline ring (morphable
+/// faces): miter of the two adjacent edge normals, pointing OUT of the
+/// polygon per its winding. Length is the miter reciprocal (1/cos of the
+/// half-angle, clamped) so displacing by `n * dw` keeps parallel edges
+/// parallel through corners. Degenerate edges contribute nothing; a fully
+/// degenerate vertex gets a zero normal (it will not morph).
+pub fn ring_outward_normals(ring: &[[f64; 2]]) -> Vec<[f32; 2]> {
+    let n = ring.len();
+    if n < 3 {
+        return vec![[0.0, 0.0]; n];
+    }
+    // Signed area decides which perpendicular points outward.
+    let mut area = 0.0f64;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    let out_sign = if area >= 0.0 { 1.0f64 } else { -1.0 };
+    const MITER_LIMIT: f64 = 2.0;
+    (0..n)
+        .map(|i| {
+            let p = ring[(i + n - 1) % n];
+            let c = ring[i];
+            let q = ring[(i + 1) % n];
+            let edge_normal = |a: [f64; 2], b: [f64; 2]| -> Option<[f64; 2]> {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = (dx * dx + dy * dy).sqrt();
+                (len > 1e-9).then(|| [out_sign * dy / len, -out_sign * dx / len])
+            };
+            let na = edge_normal(p, c);
+            let nb = edge_normal(c, q);
+            let m = match (na, nb) {
+                (Some(a), Some(b)) => {
+                    let (mx, my) = (a[0] + b[0], a[1] + b[1]);
+                    let ml = (mx * mx + my * my).sqrt();
+                    if ml < 1e-6 {
+                        // 180-degree spike: no stable outward direction.
+                        [0.0, 0.0]
+                    } else {
+                        // Miter scale = 1 / cos(half angle), capped.
+                        let cos_half = (ml * 0.5).min(1.0);
+                        let scale = (1.0 / cos_half.max(1.0 / MITER_LIMIT)).min(MITER_LIMIT);
+                        [mx / ml * scale, my / ml * scale]
+                    }
+                }
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => [0.0, 0.0],
+            };
+            [m[0] as f32, m[1] as f32]
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod morph_tests {
+    use super::ring_outward_normals;
+
+    #[test]
+    fn square_normals_point_outward_both_windings() {
+        let ccw = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let cw: Vec<[f64; 2]> = ccw.iter().rev().copied().collect();
+        for ring in [ccw.to_vec(), cw] {
+            let normals = ring_outward_normals(&ring);
+            for (v, nm) in ring.iter().zip(&normals) {
+                // Displacing outward must move AWAY from the centroid (5,5).
+                let (cx, cy) = (v[0] - 5.0, v[1] - 5.0);
+                let dot = cx * nm[0] as f64 + cy * nm[1] as f64;
+                assert!(dot > 0.5, "normal points inward: v={v:?} n={nm:?}");
+                // Square corner miter = sqrt(2).
+                let len = (nm[0] * nm[0] + nm[1] * nm[1]).sqrt();
+                assert!((len - std::f32::consts::SQRT_2).abs() < 1e-3);
+            }
+        }
     }
 }

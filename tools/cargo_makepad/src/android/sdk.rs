@@ -434,8 +434,13 @@ pub fn expand_sdk(
                     source = fallback;
                 }
             }
-            let copy_fn = if full_ndk { shell::cp_all } else { shell::cp };
-            copy_fn(&source, &sdk_dir.join(dest_path), *exec)?;
+            if source.is_dir() {
+                shell::cp_all(&source, &sdk_dir.join(dest_path), *exec)?;
+            } else if full_ndk {
+                shell::cp_all(&source, &sdk_dir.join(dest_path), *exec)?;
+            } else {
+                shell::cp(&source, &sdk_dir.join(dest_path), *exec)?;
+            }
         }
         shell(sdk_dir, "umount", &[mount_point.to_str().unwrap()])?;
         Ok(())

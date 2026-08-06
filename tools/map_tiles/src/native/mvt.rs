@@ -17,6 +17,16 @@ pub enum Layer {
     /// bridge-bake output keyed to BASE tile features: per-vertex dz for
     /// the exact geometry the renderer draws (L/F/P join, no matching).
     BaseDz = 7,
+    /// pbf-base output: renderer-compatible shortbread-style base layers.
+    BaseStreets = 8,
+    BaseWaterPolygons = 9,
+    BaseWaterLines = 10,
+    BaseLand = 11,
+    BaseBuildings = 12,
+    BaseStreetPolygons = 13,
+    BasePlaceLabels = 14,
+    BaseBoundaries = 15,
+    BasePois = 16,
 }
 
 impl Layer {
@@ -30,6 +40,15 @@ impl Layer {
             Self::OsmRelationPolygons => "osm_relation_polygons",
             Self::BridgeDz => "bridge_dz",
             Self::BaseDz => "base_dz",
+            Self::BaseStreets => "streets",
+            Self::BaseWaterPolygons => "water_polygons",
+            Self::BaseWaterLines => "water_lines",
+            Self::BaseLand => "land",
+            Self::BaseBuildings => "buildings",
+            Self::BaseStreetPolygons => "street_polygons",
+            Self::BasePlaceLabels => "place_labels",
+            Self::BaseBoundaries => "boundaries",
+            Self::BasePois => "pois",
         }
     }
 
@@ -43,8 +62,24 @@ impl Layer {
             5 => Ok(Self::OsmRelationPolygons),
             6 => Ok(Self::BridgeDz),
             7 => Ok(Self::BaseDz),
-            _ => Err(format!("unknown native tile layer {value}")),
+            8 => Ok(Self::BaseStreets),
+            9 => Ok(Self::BaseWaterPolygons),
+            10 => Ok(Self::BaseWaterLines),
+            11 => Ok(Self::BaseLand),
+            12 => Ok(Self::BaseBuildings),
+            13 => Ok(Self::BaseStreetPolygons),
+            14 => Ok(Self::BasePlaceLabels),
+            15 => Ok(Self::BaseBoundaries),
+            16 => Ok(Self::BasePois),
+        _ => Err(format!("unknown native tile layer {value}")),
         }
+    }
+
+    /// Whether MVT features in this layer carry the `__makepad_osm_*`
+    /// provenance tags. Detail/dz layers keep them (existing contract);
+    /// base layers stay lean for compression.
+    pub fn includes_osm_meta(self) -> bool {
+        (self as u8) <= Self::BaseDz as u8
     }
 }
 
@@ -298,6 +333,7 @@ enum MvtValue {
 
 struct LayerBuilder {
     name: &'static str,
+    include_osm_meta: bool,
     keys: Vec<String>,
     key_map: FastHashMap<String, u32>,
     values: Vec<MvtValue>,
@@ -309,6 +345,7 @@ impl LayerBuilder {
     fn new(layer: Layer) -> Self {
         Self {
             name: layer.name(),
+            include_osm_meta: layer.includes_osm_meta(),
             keys: Vec::new(),
             key_map: FastHashMap::default(),
             values: Vec::new(),
@@ -343,25 +380,27 @@ impl LayerBuilder {
             tags.push(self.key_index(&key));
             tags.push(self.value_index(MvtValue::String(value)));
         }
-        for (key, value) in [
-            (
-                "__makepad_osm_id",
-                MvtValue::UInt(
-                    u64::try_from(feature.id)
-                        .map_err(|_| "negative OSM feature id is unsupported".to_string())?,
+        if self.include_osm_meta {
+            for (key, value) in [
+                (
+                    "__makepad_osm_id",
+                    MvtValue::UInt(
+                        u64::try_from(feature.id)
+                            .map_err(|_| "negative OSM feature id is unsupported".to_string())?,
+                    ),
                 ),
-            ),
-            (
-                "__makepad_osm_type",
-                MvtValue::String(feature.osm_type.name().to_string()),
-            ),
-            (
-                "__makepad_osm_closed",
-                MvtValue::Bool(feature.closed),
-            ),
-        ] {
-            tags.push(self.key_index(key));
-            tags.push(self.value_index(value));
+                (
+                    "__makepad_osm_type",
+                    MvtValue::String(feature.osm_type.name().to_string()),
+                ),
+                (
+                    "__makepad_osm_closed",
+                    MvtValue::Bool(feature.closed),
+                ),
+            ] {
+                tags.push(self.key_index(key));
+                tags.push(self.value_index(value));
+            }
         }
 
         let mut message = Vec::new();

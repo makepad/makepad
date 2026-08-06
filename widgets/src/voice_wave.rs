@@ -504,6 +504,12 @@ impl VoiceWave {
         self.ensure_voice_initialized(cx);
     }
 
+    /// See [`WindowVoiceInput::set_echo_cancellation`]: arm the ducking
+    /// voice-processing path only while the app's own audio plays.
+    fn set_echo_cancellation(&mut self, cx: &mut Cx, on: bool) {
+        self.voice_input.set_echo_cancellation(cx, on);
+    }
+
     // NOTE: no ensure_voice_initialized here — initialization registers the
     // GLOBAL audio-input callback slot (last registrant wins, platform-side),
     // so a passive VoiceWave (e.g. the Window caption one) that inits on
@@ -666,6 +672,12 @@ impl VoiceWaveRef {
     pub fn prewarm(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.prewarm(cx);
+        }
+    }
+
+    pub fn set_echo_cancellation(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_echo_cancellation(cx, on);
         }
     }
 

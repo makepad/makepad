@@ -217,16 +217,36 @@ impl<'a> ScriptVm<'a> {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let previous_remaining = self.bx.threads.cur_ref().instruction_limit_remaining;
-        self.bx.threads.cur().instruction_limit_remaining = Some(
-            previous_remaining
-                .map(|remaining| remaining.min(instruction_limit))
-                .unwrap_or(instruction_limit),
-        );
+        let applied = previous_remaining
+            .map(|remaining| remaining.min(instruction_limit))
+            .unwrap_or(instruction_limit);
+        self.bx.threads.cur().instruction_limit_remaining = Some(applied);
+        // If f() runs no script at all, exit_remaining is never written —
+        // seed it so consumed reads 0 in that case.
+        self.bx.last_limit_exit_remaining = applied;
         let result = f(self);
+        // Record what this call actually charged: hosts running several
+        // calls against ONE cumulative budget (e.g. a game tick where
+        // on_tick + timers + touch events share a pool) read it back via
+        // last_limit_consumed and shrink the next call's limit accordingly.
+        // A completed run wipes the thread's remaining to None (Return/Bail
+        // in handle_trap_on), which stashes it in last_limit_exit_remaining.
+        let remaining_now = self
+            .bx
+            .threads
+            .cur_ref()
+            .instruction_limit_remaining
+            .unwrap_or(self.bx.last_limit_exit_remaining);
+        self.bx.last_limit_consumed = applied.saturating_sub(remaining_now);
         if !self.bx.threads.cur_ref().is_paused() {
             self.bx.threads.cur().instruction_limit_remaining = previous_remaining;
         }
         result
+    }
+
+    /// Instructions charged by the most recent `with_instruction_limit` call.
+    pub fn last_limit_consumed(&self) -> usize {
+        self.bx.last_limit_consumed
     }
 
     pub fn heap(&self) -> &ScriptHeap {
@@ -242,13 +262,35 @@ impl<'a> ScriptVm<'a> {
         self.bx.heap.println(value.into());
     }
 
-    /// Run garbage collection (mark and sweep), only logs if it takes >1ms.
+    /// Run garbage collection (mark and sweep). Deliberately does NOT return
+    /// backing capacity to the allocator: routine GC (paint loop, isolate
+    /// round-robin) refills the free lists at the same rate, and repeated
+    /// shrink/regrow churn costs more than the high-water memory it saves.
     pub fn gc(&mut self) {
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
         self.bx.heap.sweep(false);
-        // Return memory held purely for reuse/over-allocation after the sweep (safe: no live
-        // slot is moved or removed). gc() is itself gated by `needs_gc()`, so this is rare.
+    }
+
+    /// [`Self::gc`] plus returning over-allocated backing capacity (safe: no
+    /// live slot is moved or removed). Call after a known allocation spike —
+    /// a world teardown, an eval reset — not on the routine GC cadence.
+    pub fn gc_and_compact(&mut self) {
+        self.gc();
         self.bx.heap.shrink_to_fit();
+    }
+
+    /// Free a host-created transient value (a per-call args container, a
+    /// per-tick input object) immediately instead of leaving it for GC. Safe
+    /// by construction: if the script retained the value, the escape barrier
+    /// (`ScriptHeap::escape_value`) tagged it REFFED and this is a no-op —
+    /// normal GC handles it. Two caveats for hosts: (1) values bound as fn
+    /// args of a call that PAUSED are still live in the paused scope without
+    /// being REFFED — only release after the call completed unpaused (check
+    /// `vm.thread().is_paused()`); (2) values stored via the `*_unchecked`
+    /// heap fns bypass the barrier — releasing those is the host's own
+    /// responsibility.
+    pub fn release_transient(&mut self, v: ScriptValue) {
+        self.bx.heap.free_value_if_unreffed(v);
     }
 
     /// Run garbage collection with status logging.
@@ -349,6 +391,12 @@ impl<'a> ScriptVm<'a> {
                         Some(ScriptTrapOn::Pause)
                     ) {
                         self.bx.threads.cur().is_paused = false;
+                        // Eager-free the call scope (same contract as
+                        // handle_call_exec): a native that stored or returned
+                        // it left it REFFED / guarded.
+                        if result.as_object() != Some(scope) {
+                            self.bx.heap.free_object_if_unreffed(scope);
+                        }
                     }
                     return result;
                 }
@@ -638,7 +686,11 @@ impl<'a> ScriptVm<'a> {
         Some(match self.bx.threads.cur().trap.on.take().unwrap() {
             ScriptTrapOn::Pause | ScriptTrapOn::TimeBudgetYield => NIL,
             ScriptTrapOn::Return(value) => {
-                self.bx.threads.cur().instruction_limit_remaining = None;
+                // Preserve the remaining allowance for consumption accounting
+                // (with_instruction_limit reads it after the None wipe).
+                if let Some(rem) = self.bx.threads.cur().instruction_limit_remaining.take() {
+                    self.bx.last_limit_exit_remaining = rem;
+                }
                 value
             }
             ScriptTrapOn::Bail(value) => {
@@ -657,7 +709,9 @@ impl<'a> ScriptVm<'a> {
                         break;
                     }
                 }
-                self.bx.threads.cur().instruction_limit_remaining = None;
+                if let Some(rem) = self.bx.threads.cur().instruction_limit_remaining.take() {
+                    self.bx.last_limit_exit_remaining = rem;
+                }
                 value
             }
         })
@@ -1349,6 +1403,12 @@ pub struct ScriptVmBase {
     /// agent editing the script live).
     pub captured_errors: Option<Vec<String>>,
     pub run_budget: Option<ScriptRunBudget>,
+    /// Instructions charged by the most recent with_instruction_limit call
+    /// (see ScriptVm::last_limit_consumed).
+    pub last_limit_consumed: usize,
+    /// The thread's remaining allowance at Return/Bail, stashed because
+    /// handle_trap_on wipes instruction_limit_remaining to None on exit.
+    pub last_limit_exit_remaining: usize,
 }
 
 impl ScriptVmBase {
@@ -1364,6 +1424,8 @@ impl ScriptVmBase {
             silence_errors: false,
             captured_errors: None,
             run_budget: None,
+            last_limit_consumed: 0,
+            last_limit_exit_remaining: 0,
         }
     }
 
@@ -1397,6 +1459,8 @@ impl ScriptVmBase {
             silence_errors: false,
             captured_errors: None,
             run_budget: None,
+            last_limit_consumed: 0,
+            last_limit_exit_remaining: 0,
         }
     }
 }
