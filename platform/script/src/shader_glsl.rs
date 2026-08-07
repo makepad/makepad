@@ -43,7 +43,7 @@ impl ShaderOutput {
         // compile as `#version 300 es` for GLES 3.0 (Linux/Android/WebGL2).
         out.push_str(
             "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
-vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 255u), float((u >> 8u) & 255u), float((u >> 16u) & 255u), float(u >> 24u)) * (1.0 / 255.0); }\n",
+vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
@@ -70,7 +70,7 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         // compile as `#version 300 es` for GLES 3.0 (Linux/Android/WebGL2).
         out.push_str(
             "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
-vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 255u), float((u >> 8u) & 255u), float((u >> 16u) & 255u), float(u >> 24u)) * (1.0 / 255.0); }\n",
+vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
