@@ -366,7 +366,12 @@ impl Splash {
             return false;
         };
         cx.with_script_vm_id(self.vm_id, |vm| {
-            let fnval = vm.bx.heap.scope_value(scope, name, vm.trap());
+            // NoTrap: this is an existence probe for an OPTIONAL hook. A
+            // trapping lookup queues a NotFound into the error log even though
+            // the miss is handled right here — every host broadcast (e.g.
+            // on_app_resize) then spams "variable <raw id> not found" for
+            // every script that simply doesn't define the hook.
+            let fnval = vm.bx.heap.scope_value(scope, name, NoTrap);
             if fnval.is_nil() || fnval.is_err() {
                 return false;
             }
