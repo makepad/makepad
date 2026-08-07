@@ -46,9 +46,16 @@ use {
         collections::HashMap,
         rc::Rc,
         sync::{Arc, Mutex},
-        time::Instant,
+        time::{Duration, Instant},
     },
 };
+
+/// NSWindowOcclusionStateVisible: some part of the window is on screen.
+const NS_WINDOW_OCCLUSION_STATE_VISIBLE: usize = 1 << 1;
+
+/// Presented-handlers normally land within a few vsyncs; a gate closed this
+/// long means they were lost (occlusion, display sleep) and won't come.
+const PRESENT_GATE_STUCK_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub struct MetalWindow {
@@ -63,6 +70,9 @@ pub struct MetalWindow {
     /// when the compositor consumes frames unevenly (mirrored/scaled
     /// displays throttle in 10-25ms phases).
     pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// When the present gate started skipping beats, so a gate whose
+    /// handlers were lost can be forced back open instead of wedging.
+    gate_closed_since: Option<Instant>,
 }
 
 impl MetalWindow {
@@ -112,6 +122,7 @@ impl MetalWindow {
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
             in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            gate_closed_since: None,
         }
     }
 
@@ -159,6 +170,7 @@ impl MetalWindow {
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
             in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            gate_closed_since: None,
         }
     }
 
@@ -419,6 +431,22 @@ impl Cx {
                     {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
+                        use std::sync::atomic::Ordering;
+                        let in_flight =
+                            metal_window.in_flight_presents.load(Ordering::Acquire);
+                        // An occluded window gets no compositor vsync: presents never reach
+                        // glass and an exhausted pool would block nextDrawable forever.
+                        // Skip, keep the pass dirty; the first visible beat repaints.
+                        let occlusion: usize = unsafe {
+                            msg_send![metal_window.cocoa_window.window, occlusionState]
+                        };
+                        if occlusion & NS_WINDOW_OCCLUSION_STATE_VISIBLE == 0 {
+                            if in_flight >= 2 {
+                                metal_window.gate_closed_since.get_or_insert_with(Instant::now);
+                            }
+                            self.repaint_pass(*draw_pass_id);
+                            continue;
+                        }
                         // Present-gated pacing: with display sync on, a full
                         // drawable pool makes nextDrawable BLOCK the main
                         // thread until the compositor consumes a frame
@@ -427,11 +455,25 @@ impl Cx {
                         // glass yet, skip this beat and keep the pass dirty —
                         // the next timer beat retries with the pool drained
                         // and event handling never stalls behind vsync.
-                        use std::sync::atomic::Ordering;
-                        if metal_window.in_flight_presents.load(Ordering::Acquire) >= 2 {
-                            self.repaint_pass(*draw_pass_id);
-                            continue;
+                        if in_flight >= 2 {
+                            let now = Instant::now();
+                            let since =
+                                *metal_window.gate_closed_since.get_or_insert(now);
+                            if now.duration_since(since) < PRESENT_GATE_STUCK_TIMEOUT {
+                                self.repaint_pass(*draw_pass_id);
+                                continue;
+                            }
+                            // Handlers this overdue are lost. Nudging drawableSize rebuilds
+                            // the pool like a manual resize does, reclaiming stuck drawables
+                            // so the present below can't block on an exhausted pool.
+                            let s = metal_window.cal_size;
+                            unsafe {
+                                let () = msg_send![metal_window.ca_layer, setDrawableSize: CGSize {width: s.x, height: s.y + 1.0}];
+                                let () = msg_send![metal_window.ca_layer, setDrawableSize: CGSize {width: s.x, height: s.y}];
+                            }
+                            metal_window.in_flight_presents.store(0, Ordering::Release);
                         }
+                        metal_window.gate_closed_since = None;
                         // PerfMonitor: a presented window frame starts here;
                         // nextDrawable is where vsync/pool pressure blocks
                         // the main thread, so it gets its own channel.
