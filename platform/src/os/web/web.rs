@@ -469,7 +469,9 @@ impl Cx {
                                 biplanar: false,
                                 full_range: false,
                                 rotation_steps: 0.0,
+                            external: false,
                             },
+                        rgba_gl_2d: false,
                         },
                     ));
                     self.redraw_all();

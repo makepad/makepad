@@ -673,7 +673,6 @@ impl Cx {
                             let texture_id = texture.texture_id();
                             let cxtexture = &mut self.textures[texture_id];
                             let bind_target = match cxtexture.format {
-                                #[cfg(target_os = "android")]
                                 TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
                                 TextureFormat::VecCubeBGRAu8_32 { .. }
                                 | TextureFormat::RenderCubeBGRAu8 { .. } => {
@@ -696,12 +695,11 @@ impl Cx {
                         if let Some(gl_bind_sampler) = gl.glBindSampler {
                             // Do not bind sampler objects for OES external textures;
                             // per GL ES spec, using sampler objects with external textures
-                            // is undefined behavior. Only applies on Android where we use OES.
-                            let is_oes = cfg!(target_os = "android")
-                                && matches!(
-                                    sh.mapping.textures[i].tex_type,
-                                    TextureType::TextureVideo
-                                );
+                            // is undefined behavior.
+                            let is_oes = matches!(
+                                sh.mapping.textures[i].tex_type,
+                                TextureType::TextureVideo
+                            );
                             let sampler = if is_oes {
                                 0
                             } else {
@@ -1995,7 +1993,8 @@ impl CxOsDrawShader {
                     || ext == "GL_OES_EGL_image_external_essl3"
             });
         let is_external_texture_supported = listed_external
-            || matches!(os_type, OsType::Android(params) if !params.is_emulator);
+            || matches!(os_type, OsType::Android(params) if !params.is_emulator)
+            || matches!(os_type, OsType::LinuxWindow(_) | OsType::LinuxDirect);
 
         // Only inject OES into shaders that actually reference external samplers.
         // Blanket-injecting `#extension GL_OES_EGL_image_external_essl3` into every
@@ -2899,31 +2898,38 @@ impl CxTexture {
 
             #[cfg(not(target_os = "android"))]
             unsafe {
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+                // Desktop GLES: VideoExternal may be DMA-Buf EGLImage (OES) or RGBA upload.
+                // Prefer EXTERNAL_OES so NV12 plane zero-copy works; RGBA upload paths
+                // should use non-VideoExternal formats or I420.
+                let target = match self.format {
+                    TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
+                    _ => gl_sys::TEXTURE_2D,
+                };
+                (gl.glBindTexture)(target, self.os.gl_texture.unwrap());
 
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_WRAP_S,
                     gl_sys::CLAMP_TO_EDGE as i32,
                 );
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_WRAP_T,
                     gl_sys::CLAMP_TO_EDGE as i32,
                 );
 
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_MIN_FILTER,
                     gl_sys::LINEAR as i32,
                 );
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_MAG_FILTER,
                     gl_sys::LINEAR as i32,
                 );
 
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+                (gl.glBindTexture)(target, 0);
 
                 assert_eq!(
                     (gl.glGetError)(),

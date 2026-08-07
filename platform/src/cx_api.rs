@@ -1645,25 +1645,49 @@ impl Cx {
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
+        self.drop_pending_video_transport(video_id);
         self.platform_ops.push(CxOsOp::BeginVideoPlayback(video_id));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
+        // platform_ops are drained LIFO (`pop`). Without coalescing, a same-frame
+        // pause→resume becomes resume then pause and leaves playback stuck paused.
+        self.drop_pending_video_transport(video_id);
         self.platform_ops.push(CxOsOp::PauseVideoPlayback(video_id));
     }
 
     pub fn resume_video_playback(&mut self, video_id: LiveId) {
+        self.drop_pending_video_transport(video_id);
         self.platform_ops
             .push(CxOsOp::ResumeVideoPlayback(video_id));
     }
 
     pub fn mute_video_playback(&mut self, video_id: LiveId) {
+        self.drop_pending_video_mute(video_id);
         self.platform_ops.push(CxOsOp::MuteVideoPlayback(video_id));
     }
 
     pub fn unmute_video_playback(&mut self, video_id: LiveId) {
+        self.drop_pending_video_mute(video_id);
         self.platform_ops
             .push(CxOsOp::UnmuteVideoPlayback(video_id));
+    }
+
+    /// Keep only the latest play/pause/begin intent for `video_id`.
+    fn drop_pending_video_transport(&mut self, video_id: LiveId) {
+        self.platform_ops.retain(|op| match op {
+            CxOsOp::BeginVideoPlayback(id)
+            | CxOsOp::PauseVideoPlayback(id)
+            | CxOsOp::ResumeVideoPlayback(id) => *id != video_id,
+            _ => true,
+        });
+    }
+
+    fn drop_pending_video_mute(&mut self, video_id: LiveId) {
+        self.platform_ops.retain(|op| match op {
+            CxOsOp::MuteVideoPlayback(id) | CxOsOp::UnmuteVideoPlayback(id) => *id != video_id,
+            _ => true,
+        });
     }
 
     pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {

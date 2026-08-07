@@ -1608,7 +1608,9 @@ impl Cx {
                     biplanar: false,
                     full_range: false,
                     rotation_steps: 0.0,
+                external: false,
                 },
+            rgba_gl_2d: false,
             });
             self.call_event_handler(&e);
         }
@@ -1712,6 +1714,7 @@ impl Cx {
                                 video_id: player.video_id,
                                 current_position_ms: 0,
                                 yuv,
+                            rgba_gl_2d: false,
                             }));
                         }
                         Err(error) => {
@@ -1756,7 +1759,9 @@ impl Cx {
                         biplanar: false,
                         full_range: false,
                         rotation_steps: player.yuv_rotation_steps(),
+                    external: false,
                     },
+                rgba_gl_2d: false,
                 }));
             }
         }
@@ -1849,7 +1854,9 @@ impl Cx {
                                 biplanar: false,
                                 full_range: false,
                                 rotation_steps: 0.0,
+                            external: false,
                             },
+                        rgba_gl_2d: false,
                         }));
                         presented_oes = true;
                     }
@@ -1879,7 +1886,9 @@ impl Cx {
                             biplanar: false,
                             full_range: false,
                             rotation_steps: 0.0,
+                        external: false,
                         },
+                    rgba_gl_2d: false,
                     }));
                 }
                 // Pending take_oes_frame without a successful drain: leave markers
@@ -2737,12 +2746,7 @@ impl Cx {
                         );
                         self.os.camera_players.insert(video_id, player);
                         self.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
@@ -2806,23 +2810,13 @@ impl Cx {
                         );
                         // Notify widget so it can bind textures to shader slots
                         self.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
                     // Notify widget so it can bind textures to shader slots
                     // (needed if native decode fails and we fall back to software)
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
-                        video_id,
-                        tex_y,
-                        tex_u,
-                        tex_v,
-                    }));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
 
                     unsafe {
                         let env = attach_jni_env();

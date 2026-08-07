@@ -778,7 +778,9 @@ impl Cx {
                                         biplanar: player.yuv_biplanar() > 0.5,
                                         full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
+                                    external: false,
                                     },
+                                rgba_gl_2d: false,
                                 },
                             ));
                         }
@@ -835,7 +837,9 @@ impl Cx {
                                         biplanar: player.yuv_biplanar() > 0.5,
                                         full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
+                                    external: false,
                                     },
+                                rgba_gl_2d: false,
                                 },
                             ));
                         }
@@ -1323,12 +1327,7 @@ impl Cx {
                         );
                         self.os.camera_players.insert(video_id, player);
                         self.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
@@ -1353,12 +1352,7 @@ impl Cx {
                         should_loop,
                     );
                     self.os.video_players.insert(video_id, player);
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
-                        video_id,
-                        tex_y,
-                        tex_u,
-                        tex_v,
-                    }));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
                     if self.os.camera_players.contains_key(&video_id)

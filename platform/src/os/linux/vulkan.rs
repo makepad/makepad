@@ -4904,6 +4904,7 @@ impl CxVulkan {
                 biplanar,
                 full_range: false,
                 rotation_steps: 0.0,
+            external: false,
             });
         }
 
@@ -5156,6 +5157,7 @@ impl CxVulkan {
             biplanar: plane_layout.biplanar,
             full_range: false,
             rotation_steps: 0.0,
+        external: false,
         })
     }
 

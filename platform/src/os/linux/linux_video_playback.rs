@@ -1,9 +1,10 @@
 //! GStreamer-based video player for Linux desktop (X11/Wayland).
 //!
 //! Uses `playbin3`/`playbin` + `appsink` to decode video. Presentation paths:
-//! 1. **GLMemory** (preferred when Makepad EGL context is shared with GStreamer)
-//! 2. **DMA-Buf** (VA-API / DRM export → EGLImage → GL texture)
-//! 3. **System I420 / RGBA** CPU upload fallback
+//! 1. **DMA-Buf** — Intel: `vapostproc` → RGBA EGLImage; NVIDIA: `vah*dec` → NV12 DMA-Buf
+//! 2. **System I420 / RGBA** CPU upload fallback
+//! 3. **GLMemory** (`glupload ! glcolorconvert`) only when `MAKEPAD_GST_GLMEMORY` is set —
+//!    shared-EGL glupload often hangs or blacks out on desktop Intel/NVIDIA stacks
 
 use {
     super::egl_sys,
@@ -22,7 +23,10 @@ use {
     },
     std::{
         ffi::{c_void, CStr, CString},
-        os::fd::RawFd,
+        os::{
+            fd::RawFd,
+            raw::{c_int, c_uint},
+        },
         path::PathBuf,
         sync::Mutex,
         time::{Duration, Instant},
@@ -135,6 +139,9 @@ pub struct YuvTextureIds {
     pub tex_y_id: TextureId,
     pub tex_u_id: TextureId,
     pub tex_v_id: TextureId,
+    /// Optional EXTERNAL_OES plane textures for DMA-Buf NV12 zero-copy.
+    pub tex_y_oes_id: Option<TextureId>,
+    pub tex_u_oes_id: Option<TextureId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,7 +177,13 @@ impl VideoCapsProfile {
     fn next_fallback(self) -> Option<Self> {
         match self {
             Self::GlMemoryRgba2D => Some(Self::GlMemoryRgba),
-            Self::GlMemoryRgba => Some(Self::DmaBuf),
+            Self::GlMemoryRgba => {
+                if std::env::var_os("MAKEPAD_GST_NO_DMABUF").is_some() {
+                    Some(Self::SystemI420)
+                } else {
+                    Some(Self::DmaBuf)
+                }
+            }
             Self::DmaBuf => Some(Self::SystemI420),
             Self::SystemI420 => Some(Self::SystemRgba),
             Self::SystemRgba => None,
@@ -186,14 +199,14 @@ impl VideoCapsProfile {
         if audio_only {
             return Self::SystemRgba;
         }
-        // Disable experimental paths with MAKEPAD_GST_NO_GLMEMORY / MAKEPAD_GST_NO_DMABUF.
+        // Opt into experimental GLMemory with MAKEPAD_GST_GLMEMORY.
+        // Disable DMA with MAKEPAD_GST_NO_DMABUF.
         let force_gl = std::env::var_os("MAKEPAD_GST_GLMEMORY").is_some();
         let no_gl = std::env::var_os("MAKEPAD_GST_NO_GLMEMORY").is_some();
         let no_dmabuf = std::env::var_os("MAKEPAD_GST_NO_DMABUF").is_some();
 
-        // Network / HLS / DASH manifests: start on system memory. GLMemory and
-        // DMABuf almost never negotiate for adaptive demuxers, and each failed
-        // attempt re-downloads the playlist + first segments (often 2–4s each).
+        // Network / HLS / DASH manifests: start on system memory. Failed zero-copy
+        // probes force a full pipeline rebuild and re-fetch (often 2–4s each).
         if prefer_system_memory && !force_gl {
             crate::log!(
                 "VIDEO: adaptive stream — starting with system I420 (skip GL/DMA probes)"
@@ -201,19 +214,21 @@ impl VideoCapsProfile {
             return Self::SystemI420;
         }
 
-        let can_gl = !no_gl && has_gl_share && gst.has_gl_share_support();
+        // Prefer DMA-Buf (VA-API) over GLMemory: shared-EGL glupload frequently
+        // reaches PAUSED with black frames / stuck PLAYING on desktop Intel GLES.
+        if !no_dmabuf && gst.has_dmabuf_support() {
+            return Self::DmaBuf;
+        }
+
+        let can_gl = force_gl && !no_gl && has_gl_share && gst.has_gl_share_support();
         if can_gl {
+            crate::log!("VIDEO: MAKEPAD_GST_GLMEMORY set — trying GLMemory zero-copy first");
             return Self::GlMemoryRgba2D;
         }
-        // MAKEPAD_GST_GLMEMORY alone is not enough — sharing is required for a
-        // valid texture namespace. Log once via force flag if share is missing.
         if force_gl && !has_gl_share {
             crate::log!(
                 "VIDEO: MAKEPAD_GST_GLMEMORY set but Makepad EGL context is not shared; using system memory"
             );
-        }
-        if !no_dmabuf && gst.has_dmabuf_support() {
-            return Self::DmaBuf;
         }
         Self::SystemI420
     }
@@ -263,14 +278,27 @@ pub struct GStreamerVideoPlayer {
     tex_height: usize,
     /// Log first successful upload once per player.
     logged_first_upload: bool,
+    /// Frames presented on GLMemory path (for delayed pixel probe).
+    gl_memory_frame: u32,
+    /// True when YUV planes are sampled as EXTERNAL_OES (DMA-Buf NV12 zero-copy).
+    yuv_external_oes: bool,
+    /// After plane EXTERNAL bind fails, skip DMA-Buf present and fall back.
+    nv12_skip_egl_tex2d: bool,
     /// Current caps profile used to build the GStreamer pipeline.
     caps_profile: VideoCapsProfile,
     /// True when the pipeline was created as `playbin3` (streams-aware).
     playbin3: bool,
+    /// True when volume/mute/track GObject properties live on `playbin`.
+    uses_playbin: bool,
     /// Current YUV matrix selector for shader path (0.0 = BT.709).
     yuv_matrix: f32,
-    /// Last retained GLMemory sample. Retaining it keeps the texture alive.
+    /// Last retained present sample. Retaining it keeps the texture / DMA-Buf alive.
     retained_gl_sample: *mut GstSample,
+    /// Previous present sample (one frame behind). Keeps the on-screen texture out
+    /// of the GStreamer pool for an extra frame so 4K reuse cannot tear/ghost.
+    retained_gl_sample_prev: *mut GstSample,
+    /// Last GLMemory frame was `TEXTURE_2D` (vs `EXTERNAL_OES`).
+    gl_memory_tex_2d: bool,
     /// Last buffered ranges we reported (for change detection).
     last_buffered: Vec<(f64, f64)>,
     /// Soft mute applied while paused so residual sink audio is silenced.
@@ -319,6 +347,8 @@ struct BuiltPipeline {
     audio_volume: *mut GstElement,
     bus: *mut GstBus,
     playbin3: bool,
+    /// True when the top-level element is `playbin`/`playbin3` (not a custom parse pipeline).
+    uses_playbin: bool,
 }
 
 struct I420Layout {
@@ -334,22 +364,32 @@ fn drm_fourcc(code: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*code)
 }
 
-/// Minimal view of GStreamer `GstVideoMeta` for stride/offset reads.
-/// Layout matches 64-bit: GstMeta(16) + buffer + flags/format/id + width/height/
-/// n_planes + pad to align `gsize` + offset[4] + stride[4].
+/// Minimal view of GStreamer `GstVideoMeta` for stride/offset reads (64-bit).
+///
+/// Layout matches `GstMeta` + `GstVideoMeta` fields up through `stride[]`:
+/// `flags(u32)+pad + info* + buffer* + flags/format/id + w/h/n_planes + pad + offset[4] + stride[4]`.
 #[repr(C)]
 struct GstVideoMetaView {
-    _meta_flags: u32,
+    meta_flags: u32,
     _pad0: u32,
-    _info: *mut c_void,
-    _buffer: *mut c_void,
-    _frame_flags: i32,
-    _format: i32,
-    _id: i32,
+    info: *mut c_void,
+    buffer: *mut c_void,
+    flags: i32,
+    format: i32,
+    id: i32,
     width: u32,
     height: u32,
     n_planes: u32,
     _pad_align_gsize: u32,
+    offset: [usize; 4],
+    stride: [i32; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VideoMetaLayout {
+    width: u32,
+    height: u32,
+    n_planes: u32,
     offset: [usize; 4],
     stride: [i32; 4],
 }
@@ -414,7 +454,7 @@ fn infer_i420_layout(width: usize, height: usize, size: usize) -> Option<I420Lay
 }
 
 fn i420_layout_from_video_meta(
-    meta: &GstVideoMetaView,
+    meta: &VideoMetaLayout,
     width: usize,
     height: usize,
     size: usize,
@@ -505,44 +545,98 @@ impl GStreamerVideoPlayer {
         // Resolve the URI from the source
         let (uri, temp_file_path) = Self::uri_from_source(video_id, &source);
 
-        let mut gl_share = None;
-        if !audio_only {
-            if let Some(cx) = opengl_cx {
-                gl_share = GstGlShare::try_new(gst, cx.egl_display, cx.egl_context);
-                if gl_share.is_some() {
-                    crate::log!("VIDEO: shared Makepad EGL context with GStreamer");
-                }
-            }
-        }
-        let has_gl_share = gl_share.is_some();
         // Adaptive manifests (remote or local .m3u8/.mpd) should skip GL/DMA
         // probes — failed zero-copy caps force a full pipeline rebuild and re-fetch.
-        // Progressive network MP4/WebM can still try GL/DMA first.
         let prefer_system_memory = source.is_adaptive_manifest();
-        let caps_profile =
-            VideoCapsProfile::initial(audio_only, gst, has_gl_share, prefer_system_memory);
+        let can_share_egl = opengl_cx.is_some();
+        let caps_profile = VideoCapsProfile::initial(
+            audio_only,
+            gst,
+            can_share_egl,
+            prefer_system_memory,
+        );
         crate::log!(
             "VIDEO: starting caps profile {:?} uri={}",
             caps_profile,
             uri
         );
 
-        let Some(built) =
-            Self::build_pipeline(gst, video_id, &uri, audio_only, caps_profile, gl_share.as_ref())
-        else {
-            if let Some(mut share) = gl_share.take() {
-                share.release(gst);
+        // Only share Makepad EGL with GStreamer for GLMemory. Creating a GstGL
+        // context for DMA-Buf / VA-API paths can stall playbin preroll on Wayland.
+        let mut gl_share = None;
+        if !audio_only && caps_profile.is_gl_memory() {
+            if let Some(cx) = opengl_cx {
+                gl_share = GstGlShare::try_new(gst, cx);
+                if gl_share.is_some() {
+                    crate::log!("VIDEO: shared Makepad EGL context with GStreamer");
+                }
             }
-            return Self::null_player(
-                gst_ptr,
-                video_id,
-                texture_id,
-                yuv_ids,
-                autoplay,
-                is_looping,
-                audio_only,
-                temp_file_path,
-            );
+        }
+
+        let mut caps_profile = caps_profile;
+        let built = match Self::build_pipeline(
+            gst,
+            video_id,
+            &uri,
+            audio_only,
+            caps_profile,
+            if caps_profile.is_gl_memory() {
+                gl_share.as_ref()
+            } else {
+                None
+            },
+        ) {
+            Some(built) => built,
+            None => {
+                // Zero-copy probe can fail to construct; retry once on system memory
+                // so local playback still works (HW decode may still win inside playbin).
+                if !audio_only && (caps_profile.is_dmabuf() || caps_profile.is_gl_memory()) {
+                    crate::log!(
+                        "VIDEO: {:?} pipeline build failed; retrying SystemI420",
+                        caps_profile
+                    );
+                    caps_profile = VideoCapsProfile::SystemI420;
+                    if let Some(mut share) = gl_share.take() {
+                        share.release(gst);
+                    }
+                    match Self::build_pipeline(
+                        gst,
+                        video_id,
+                        &uri,
+                        audio_only,
+                        caps_profile,
+                        None,
+                    ) {
+                        Some(built) => built,
+                        None => {
+                            return Self::null_player(
+                                gst_ptr,
+                                video_id,
+                                texture_id,
+                                yuv_ids,
+                                autoplay,
+                                is_looping,
+                                audio_only,
+                                temp_file_path,
+                            );
+                        }
+                    }
+                } else {
+                    if let Some(mut share) = gl_share.take() {
+                        share.release(gst);
+                    }
+                    return Self::null_player(
+                        gst_ptr,
+                        video_id,
+                        texture_id,
+                        yuv_ids,
+                        autoplay,
+                        is_looping,
+                        audio_only,
+                        temp_file_path,
+                    );
+                }
+            }
         };
 
         let (egl_display_for_images, egl_destroy_image) = opengl_cx
@@ -574,10 +668,16 @@ impl GStreamerVideoPlayer {
             tex_width: 0,
             tex_height: 0,
             logged_first_upload: false,
+            gl_memory_frame: 0,
+            nv12_skip_egl_tex2d: false,
+            yuv_external_oes: false,
             caps_profile,
             playbin3: built.playbin3,
+            uses_playbin: built.uses_playbin,
             yuv_matrix: 0.0,
             retained_gl_sample: std::ptr::null_mut(),
+            retained_gl_sample_prev: std::ptr::null_mut(),
+            gl_memory_tex_2d: false,
             last_buffered: Vec::new(),
             pause_muted: false,
             user_muted: false,
@@ -604,15 +704,31 @@ impl GStreamerVideoPlayer {
         }
     }
 
-    /// Prefer `playbin3`: `hlsdemux2` / adaptive demuxers require a streams-aware
-    /// context that classic `playbin` + `decodebin` do not provide.
-    fn make_playbin(gst: &LibGStreamer) -> (*mut GstElement, bool) {
+    /// Prefer `playbin3` for adaptive streams; classic `playbin` + `decodebin`
+    /// negotiates VA DMA-Buf / GLMemory sinks more reliably for local progressive files.
+    fn make_playbin(gst: &LibGStreamer, caps_profile: VideoCapsProfile, uri: &str) -> (*mut GstElement, bool) {
+        let local = uri.starts_with("file://") || uri.starts_with("file:");
+        let prefer_classic =
+            local && (caps_profile.is_dmabuf() || caps_profile.is_gl_memory());
         unsafe {
-            for (name, is_playbin3) in [("playbin3", true), ("playbin", false)] {
+            let order: [(&str, bool); 2] = if prefer_classic {
+                [("playbin", false), ("playbin3", true)]
+            } else {
+                [("playbin3", true), ("playbin", false)]
+            };
+            for (name, is_playbin3) in order {
                 let playbin_name = CString::new(name).unwrap();
                 let pipeline =
                     (gst.gst_element_factory_make)(playbin_name.as_ptr(), std::ptr::null());
                 if !pipeline.is_null() {
+                    if prefer_classic && name == "playbin" {
+                        crate::log!(
+                            "VIDEO: using playbin for local {:?} playback",
+                            caps_profile
+                        );
+                    } else if name == "playbin3" {
+                        crate::log!("VIDEO: using playbin3");
+                    }
                     return (pipeline, is_playbin3);
                 }
             }
@@ -738,6 +854,504 @@ impl GStreamerVideoPlayer {
         }
     }
 
+    /// Build GLMemory video sink via `gst_parse_bin_from_description`.
+    ///
+    /// Matches the working gst-launch/Python shape. Manual ghost-pad bins were
+    /// less reliable with playbin's playsink wrapping.
+    ///
+    /// `videoconvert` downloads decoder output to system memory before
+    /// `glupload`. Direct DMA-Buf→GL import against a wrapped Makepad EGL
+    /// share group hangs on NVIDIA (`DirectDmabufExternal`).
+    fn make_gl_video_sink_bin(
+        gst: &LibGStreamer,
+        video_id: LiveId,
+        caps_profile: VideoCapsProfile,
+        gl_share: Option<&GstGlShare>,
+    ) -> Option<(*mut GstElement, *mut GstElement)> {
+        let Some(parse_bin) = gst.gst_parse_bin_from_description else {
+            error!(
+                "gst_parse_bin_from_description unavailable for GLMemory video {:?}",
+                video_id
+            );
+            return None;
+        };
+        let Some(get_by_name) = gst.gst_bin_get_by_name else {
+            return None;
+        };
+        let caps_text = caps_profile.caps_text();
+        // ghost=true: parse_bin creates a sink ghost pad on the first element.
+        //
+        // `videoconvert ! RGBA ! glupload` (no glcolorconvert): on NVIDIA with a
+        // shared EGL share-group, `glcolorconvert`'s FBO path often leaves textures
+        // stuck at clear-green (0,255,0,255) even after sync. Uploading system RGBA
+        // via glupload still yields a share-group TEXTURE_2D we can sample zero-copy.
+        // appsink sync=false for negotiate; enable clock sync after prepare.
+        // max-buffers=4: we retain current+previous samples for tear-free present.
+        let desc = format!(
+            "videoconvert ! video/x-raw,format=RGBA ! glupload name=glupload ! \
+             appsink name=videosink caps=\"{caps}\" max-buffers=4 drop=true sync=false qos=true",
+            caps = caps_text
+        );
+        let desc_c = CString::new(desc).unwrap();
+        unsafe {
+            let mut error: *mut GError = std::ptr::null_mut();
+            let bin = parse_bin(desc_c.as_ptr(), 1, &mut error);
+            if !error.is_null() {
+                let msg = if !(*error).message.is_null() {
+                    CStr::from_ptr((*error).message)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    "unknown".into()
+                };
+                crate::log!("VIDEO: parse GL sink bin failed: {}", msg);
+                (gst.g_error_free)(error);
+            }
+            if bin.is_null() {
+                return None;
+            }
+            let appsink_name = CString::new("videosink").unwrap();
+            let appsink = get_by_name(bin, appsink_name.as_ptr());
+            if appsink.is_null() {
+                (gst.gst_object_unref)(bin as *mut c_void);
+                error!("GL sink bin missing appsink for video {:?}", video_id);
+                return None;
+            }
+            // get_by_name returns a ref; keep it for the player.
+            if let Some(share) = gl_share {
+                share.apply_to_element(gst, bin);
+                let glupload_name = CString::new("glupload").unwrap();
+                let glupload = get_by_name(bin, glupload_name.as_ptr());
+                if !glupload.is_null() {
+                    share.apply_to_element(gst, glupload);
+                    (gst.gst_object_unref)(glupload as *mut c_void);
+                }
+            }
+            crate::log!(
+                "VIDEO: video sink = bin(videoconvert ! RGBA ! glupload ! appsink) caps={}",
+                caps_text
+            );
+            Some((bin, appsink))
+        }
+    }
+
+    /// Build `vapostproc ! appsink` (or `vaapipostproc`) so playbin can negotiate
+    /// DMA-Buf. Bare appsink + DMABuf caps fails: decodebin will not insert the
+    /// VA postproc (rank `none`) on its own.
+    fn make_dmabuf_video_sink_bin(
+        gst: &LibGStreamer,
+        video_id: LiveId,
+        _caps_profile: VideoCapsProfile,
+    ) -> Option<(*mut GstElement, *mut GstElement)> {
+        unsafe {
+            let (
+                Some(bin_new),
+                Some(bin_add),
+                Some(link),
+                Some(static_pad),
+                Some(ghost_new),
+                Some(add_pad),
+            ) = (
+                gst.gst_bin_new,
+                gst.gst_bin_add,
+                gst.gst_element_link,
+                gst.gst_element_get_static_pad,
+                gst.gst_ghost_pad_new,
+                gst.gst_element_add_pad,
+            )
+            else {
+                return None;
+            };
+
+            let appsink_type = CString::new("appsink").unwrap();
+            let appsink_name = CString::new("videosink").unwrap();
+            let appsink =
+                (gst.gst_element_factory_make)(appsink_type.as_ptr(), appsink_name.as_ptr());
+            if appsink.is_null() {
+                error!("Failed to create appsink for DMA-Buf sink {:?}", video_id);
+                return None;
+            }
+
+            let mut postproc: *mut GstElement = std::ptr::null_mut();
+            let mut postproc_name = "";
+            // Only modern `vapostproc` is trusted for DMA-Buf export. Legacy
+            // `vaapipostproc` (nvidia-vaapi) cannot negotiate `memory:DMABuf`.
+            if gst.has_modern_va_postproc() {
+                let ty = CString::new("vapostproc").unwrap();
+                let el = (gst.gst_element_factory_make)(ty.as_ptr(), std::ptr::null());
+                if !el.is_null() {
+                    postproc = el;
+                    postproc_name = "vapostproc";
+                }
+            }
+
+            // Caps: RGBA when postproc can convert; otherwise NV12 from decoder-direct DMA-Buf.
+            let caps_text = if postproc.is_null() {
+                "video/x-raw(memory:DMABuf),format=NV12"
+            } else {
+                "video/x-raw(memory:DMABuf),format=RGBA"
+            };
+            let caps_str = CString::new(caps_text).unwrap();
+            let caps = (gst.gst_caps_from_string)(caps_str.as_ptr());
+            if !caps.is_null() {
+                (gst.gst_app_sink_set_caps)(appsink, caps);
+                (gst.gst_caps_unref)(caps);
+            }
+            let max_buffers_prop = CString::new("max-buffers").unwrap();
+            (gst.g_object_set_int)(appsink, max_buffers_prop.as_ptr(), 4, std::ptr::null());
+            let drop_prop = CString::new("drop").unwrap();
+            (gst.g_object_set_int)(appsink, drop_prop.as_ptr(), 1, std::ptr::null());
+            let sync_prop = CString::new("sync").unwrap();
+            // Clock-sync so DMA-Buf NV12 zero-copy stays locked to audio (see GL path).
+            (gst.g_object_set_int)(appsink, sync_prop.as_ptr(), 1, std::ptr::null());
+            let qos_prop = CString::new("qos").unwrap();
+            (gst.g_object_set_int)(appsink, qos_prop.as_ptr(), 1, std::ptr::null());
+
+            if postproc.is_null() {
+                // Give playbin the appsink directly — wrapping in a ghost-pad bin is
+                // unnecessary and has been a source of DMA-Buf negotiation flakes.
+                crate::log!(
+                    "VIDEO: video sink = appsink caps={} (no vapostproc)",
+                    caps_text
+                );
+                return Some((appsink, appsink));
+            }
+
+            if link(postproc, appsink) == 0 {
+                (gst.gst_object_unref)(postproc as *mut c_void);
+                (gst.gst_object_unref)(appsink as *mut c_void);
+                error!("Failed to link DMA-Buf video sink bin for video {:?}", video_id);
+                return None;
+            }
+
+            let bin_name = CString::new("makepad-dmabuf-video-sink").unwrap();
+            let bin = bin_new(bin_name.as_ptr());
+            if bin.is_null() {
+                (gst.gst_object_unref)(postproc as *mut c_void);
+                (gst.gst_object_unref)(appsink as *mut c_void);
+                return None;
+            }
+
+            bin_add(bin, postproc);
+            bin_add(bin, appsink);
+            (gst.gst_object_ref)(appsink as *mut c_void);
+
+            let sink_pad_name = CString::new("sink").unwrap();
+            let target = static_pad(postproc, sink_pad_name.as_ptr());
+            let ghost = if target.is_null() {
+                std::ptr::null_mut()
+            } else {
+                let ghost = ghost_new(sink_pad_name.as_ptr(), target);
+                (gst.gst_object_unref)(target as *mut c_void);
+                ghost
+            };
+            if ghost.is_null() {
+                (gst.gst_object_unref)(appsink as *mut c_void);
+                (gst.gst_object_unref)(bin as *mut c_void);
+                error!(
+                    "Failed to ghost-pad DMA-Buf video sink bin for video {:?}",
+                    video_id
+                );
+                return None;
+            }
+            add_pad(bin, ghost);
+
+            crate::log!(
+                "VIDEO: video sink = bin({} ! appsink) caps={}",
+                postproc_name,
+                caps_text
+            );
+            Some((bin, appsink))
+        }
+    }
+
+    fn drain_gl_need_context(&self, gst: &LibGStreamer) {
+        if self.bus.is_null() {
+            return;
+        }
+        if let Some(share) = self.gl_share.as_ref() {
+            unsafe {
+                loop {
+                    let msg =
+                        (gst.gst_bus_pop_filtered)(self.bus, GST_MESSAGE_NEED_CONTEXT);
+                    if msg.is_null() {
+                        break;
+                    }
+                    share.handle_need_context_message(gst, msg, self.pipeline);
+                    (gst.gst_mini_object_unref)(msg as *mut GstMiniObject);
+                }
+            }
+        }
+    }
+
+    /// Block until playbin reaches PAUSED or the deadline passes. Without this,
+    /// `gst_element_get_state(..., 0)` polling from the UI thread never completes
+    /// async preroll when no GLib main loop is running.
+    fn wait_for_zero_copy_preroll(
+        gst: &LibGStreamer,
+        pipeline: *mut GstElement,
+        bus: *mut GstBus,
+        gl_share: Option<&GstGlShare>,
+        caps_profile: VideoCapsProfile,
+    ) {
+        Self::wait_for_zero_copy_preroll_deadline(
+            gst,
+            pipeline,
+            bus,
+            gl_share,
+            caps_profile,
+            Duration::from_secs(8),
+        );
+    }
+
+    fn wait_for_zero_copy_preroll_deadline(
+        gst: &LibGStreamer,
+        pipeline: *mut GstElement,
+        bus: *mut GstBus,
+        gl_share: Option<&GstGlShare>,
+        caps_profile: VideoCapsProfile,
+        max_wait: Duration,
+    ) {
+        if !caps_profile.is_dmabuf() && !caps_profile.is_gl_memory() {
+            return;
+        }
+        let deadline = Instant::now() + max_wait;
+        if caps_profile.is_gl_memory() {
+            if let Some(share) = gl_share {
+                share.release_makepad_current();
+            }
+        }
+        unsafe {
+            // One long wait (matches gst-launch / Python get_state). Short
+            // 100ms polls + main-context pumping can stall GstGL's thread while
+            // it tries to activate a shared EGL context on NVIDIA.
+            let timeout_ns = max_wait.as_nanos().min(u64::MAX as u128) as u64;
+            let mut state: u32 = 0;
+            let mut pending: u32 = 0;
+            let mut ret = (gst.gst_element_get_state)(
+                pipeline,
+                &mut state,
+                &mut pending,
+                timeout_ns,
+            );
+            // Still answer NEED_CONTEXT if we timed out mid-negotiate.
+            let mut spins = 0;
+            while (state < GST_STATE_PAUSED || pending != 0)
+                && ret != GST_STATE_CHANGE_FAILURE
+                && Instant::now() < deadline
+                && spins < 50
+            {
+                spins += 1;
+                gst.pump_default_main_context();
+                Self::drain_gl_need_context_on_bus(gst, bus, pipeline, gl_share);
+                ret = (gst.gst_element_get_state)(
+                    pipeline,
+                    &mut state,
+                    &mut pending,
+                    200_000_000,
+                );
+            }
+            if state < GST_STATE_PAUSED || pending != 0 {
+                crate::log!(
+                    "VIDEO: zero-copy preroll wait ended state={} pending={} ret={}",
+                    state,
+                    pending,
+                    ret
+                );
+            }
+        }
+        if caps_profile.is_gl_memory() {
+            if let Some(share) = gl_share {
+                share.restore_makepad_current();
+            }
+        }
+    }
+
+    fn drain_gl_need_context_on_bus(
+        gst: &LibGStreamer,
+        bus: *mut GstBus,
+        pipeline: *mut GstElement,
+        gl_share: Option<&GstGlShare>,
+    ) {
+        if bus.is_null() {
+            return;
+        }
+        if let Some(share) = gl_share {
+            unsafe {
+                loop {
+                    let msg =
+                        (gst.gst_bus_pop_filtered)(bus, GST_MESSAGE_NEED_CONTEXT);
+                    if msg.is_null() {
+                        break;
+                    }
+                    share.handle_need_context_message(gst, msg, pipeline);
+                    (gst.gst_mini_object_unref)(msg as *mut GstMiniObject);
+                }
+            }
+        }
+    }
+
+    fn build_dmabuf_uri_parse_pipeline(
+        gst: &LibGStreamer,
+        video_id: LiveId,
+        uri: &str,
+    ) -> Option<BuiltPipeline> {
+        if gst.gst_parse_launch.is_none() || gst.gst_bin_get_by_name.is_none() {
+            crate::log!("VIDEO: gst_parse_launch/gst_bin_get_by_name unavailable");
+            return None;
+        }
+
+        // Intel/Mesa: vapostproc can convert to DMA-Buf RGBA for single-plane OES.
+        if gst.has_modern_va_postproc() {
+            if let Some(built) = Self::build_dmabuf_parse_desc(
+                gst,
+                video_id,
+                &format!(
+                    "uridecodebin uri=\"{uri}\" name=dec \
+                     dec. ! queue max-size-buffers=2 leaky=downstream ! vapostproc ! \
+                     video/x-raw(memory:DMABuf),format=RGBA ! appsink name=videosink sync=true drop=true max-buffers=2 qos=true \
+                     dec. ! queue ! audioconvert ! audioresample ! volume name=makepad-volume ! \
+                     pulsesink buffer-time=20000000 latency-time=10000000"
+                ),
+                "uridecodebin ! vapostproc ! DMA-Buf RGBA",
+            ) {
+                return Some(built);
+            }
+            crate::log!("VIDEO: vapostproc DMA-Buf RGBA path failed; trying decoder-direct NV12");
+        }
+
+        // NVIDIA / no modern vapostproc: decoder-direct qtdemux parse is flaky with
+        // pulsesink (often sticks at READY). Classic playbin + DMA-Buf NV12 appsink
+        // negotiates `vah*dec` reliably once ranks are bumped — defer to that path.
+        if let Some(path) = Self::file_uri_to_path(uri) {
+            crate::log!(
+                "VIDEO: no vapostproc — deferring DMA-Buf to playbin (vah*dec NV12) for {}",
+                path
+            );
+        } else {
+            crate::log!("VIDEO: no vapostproc — deferring DMA-Buf to playbin (could not decode file URI)");
+        }
+        None
+    }
+
+    fn build_dmabuf_parse_desc(
+        gst: &LibGStreamer,
+        video_id: LiveId,
+        desc: &str,
+        log_label: &str,
+    ) -> Option<BuiltPipeline> {
+        let (Some(parse_launch), Some(get_by_name)) =
+            (gst.gst_parse_launch, gst.gst_bin_get_by_name)
+        else {
+            return None;
+        };
+        unsafe {
+            let desc_c = match CString::new(desc) {
+                Ok(c) => c,
+                Err(_) => {
+                    crate::log!(
+                        "VIDEO: DMA-Buf parse desc has interior NUL ({}) for {:?}",
+                        log_label,
+                        video_id
+                    );
+                    return None;
+                }
+            };
+            let mut error: *mut GError = std::ptr::null_mut();
+            let pipeline = parse_launch(desc_c.as_ptr(), &mut error);
+            if pipeline.is_null() {
+                if !error.is_null() {
+                    let msg_ptr = (*error).message;
+                    let err_str = if !msg_ptr.is_null() {
+                        CStr::from_ptr(msg_ptr).to_string_lossy().to_string()
+                    } else {
+                        "gst_parse_launch failed".to_string()
+                    };
+                    (gst.g_error_free)(error);
+                    crate::log!(
+                        "VIDEO: DMA-Buf parse failed ({}) for {:?}: {}",
+                        log_label,
+                        video_id,
+                        err_str
+                    );
+                }
+                return None;
+            }
+            if !error.is_null() {
+                (gst.g_error_free)(error);
+            }
+
+            let appsink_name = CString::new("videosink").unwrap();
+            let video_sink = get_by_name(pipeline, appsink_name.as_ptr());
+            if video_sink.is_null() {
+                (gst.gst_object_unref)(pipeline as *mut c_void);
+                crate::log!(
+                    "VIDEO: DMA-Buf parse missing videosink ({}) for {:?}",
+                    log_label,
+                    video_id
+                );
+                return None;
+            }
+            (gst.gst_object_ref)(video_sink as *mut c_void);
+
+            let vol_name = CString::new("makepad-volume").unwrap();
+            let audio_volume = get_by_name(pipeline, vol_name.as_ptr());
+            let audio_volume = if audio_volume.is_null() {
+                std::ptr::null_mut()
+            } else {
+                (gst.gst_object_ref)(audio_volume as *mut c_void);
+                audio_volume
+            };
+
+            crate::log!("VIDEO: pipeline = {} (local file)", log_label);
+
+            let bus = (gst.gst_element_get_bus)(pipeline);
+            (gst.gst_element_set_state)(pipeline, GST_STATE_PAUSED);
+            // Probe attempts should fail fast; a stuck READY must not burn 8s × N codecs.
+            Self::wait_for_zero_copy_preroll_deadline(
+                gst,
+                pipeline,
+                bus,
+                None,
+                VideoCapsProfile::DmaBuf,
+                Duration::from_millis(2500),
+            );
+
+            let mut state: u32 = 0;
+            let mut pending: u32 = 0;
+            let ret = (gst.gst_element_get_state)(pipeline, &mut state, &mut pending, 0);
+            if state < GST_STATE_PAUSED || ret == GST_STATE_CHANGE_FAILURE {
+                crate::log!(
+                    "VIDEO: DMA-Buf preroll incomplete ({}) state={} pending={} ret={} — discarding",
+                    log_label,
+                    state,
+                    pending,
+                    ret
+                );
+                (gst.gst_element_set_state)(pipeline, GST_STATE_NULL);
+                if !audio_volume.is_null() {
+                    (gst.gst_object_unref)(audio_volume as *mut c_void);
+                }
+                (gst.gst_object_unref)(video_sink as *mut c_void);
+                if !bus.is_null() {
+                    (gst.gst_object_unref)(bus as *mut c_void);
+                }
+                (gst.gst_object_unref)(pipeline as *mut c_void);
+                return None;
+            }
+
+            Some(BuiltPipeline {
+                pipeline,
+                video_sink,
+                audio_sink: std::ptr::null_mut(),
+                audio_volume,
+                bus,
+                playbin3: false,
+                uses_playbin: false,
+            })
+        }
+    }
+
     fn build_pipeline(
         gst: &LibGStreamer,
         video_id: LiveId,
@@ -746,8 +1360,18 @@ impl GStreamerVideoPlayer {
         caps_profile: VideoCapsProfile,
         gl_share: Option<&GstGlShare>,
     ) -> Option<BuiltPipeline> {
+        super::gst_gl_share::bump_va_decoder_ranks(gst);
+        if caps_profile.is_dmabuf()
+            && !audio_only
+            && (uri.starts_with("file://") || uri.starts_with("file:"))
+        {
+            if let Some(built) = Self::build_dmabuf_uri_parse_pipeline(gst, video_id, uri) {
+                return Some(built);
+            }
+            crate::log!("VIDEO: parse DMA-Buf path unavailable; trying playbin");
+        }
         unsafe {
-            let (pipeline, playbin3) = Self::make_playbin(gst);
+            let (pipeline, playbin3) = Self::make_playbin(gst, caps_profile, uri);
             if pipeline.is_null() {
                 error!(
                     "Failed to create GStreamer playbin/playbin3 for video {:?}",
@@ -821,53 +1445,121 @@ impl GStreamerVideoPlayer {
                 }
                 std::ptr::null_mut()
             } else {
-                let appsink_type = CString::new("appsink").unwrap();
-                let appsink_name = CString::new("videosink").unwrap();
-                let video_sink =
-                    (gst.gst_element_factory_make)(appsink_type.as_ptr(), appsink_name.as_ptr());
-                if video_sink.is_null() {
-                    error!(
-                        "Failed to create GStreamer appsink for video {:?}",
-                        video_id
+                let (video_sink_bin, appsink) = if caps_profile.is_gl_memory() {
+                    match Self::make_gl_video_sink_bin(gst, video_id, caps_profile, gl_share) {
+                        Some(pair) => pair,
+                        None => {
+                            (gst.gst_object_unref)(pipeline as *mut c_void);
+                            return None;
+                        }
+                    }
+                } else if caps_profile.is_dmabuf() {
+                    match Self::make_dmabuf_video_sink_bin(gst, video_id, caps_profile) {
+                        Some(pair) => pair,
+                        None => {
+                            (gst.gst_object_unref)(pipeline as *mut c_void);
+                            return None;
+                        }
+                    }
+                } else {
+                    let appsink_type = CString::new("appsink").unwrap();
+                    let appsink_name = CString::new("videosink").unwrap();
+                    let appsink = (gst.gst_element_factory_make)(
+                        appsink_type.as_ptr(),
+                        appsink_name.as_ptr(),
                     );
-                    (gst.gst_object_unref)(pipeline as *mut c_void);
-                    return None;
-                }
+                    if appsink.is_null() {
+                        error!(
+                            "Failed to create GStreamer appsink for video {:?}",
+                            video_id
+                        );
+                        (gst.gst_object_unref)(pipeline as *mut c_void);
+                        return None;
+                    }
 
-                let caps_text = caps_profile.caps_text();
-                let caps_str = CString::new(caps_text).unwrap();
-                let caps = (gst.gst_caps_from_string)(caps_str.as_ptr());
-                if !caps.is_null() {
-                    (gst.gst_app_sink_set_caps)(video_sink, caps);
-                    (gst.gst_caps_unref)(caps);
-                }
+                    let caps_text = caps_profile.caps_text();
+                    let caps_str = CString::new(caps_text).unwrap();
+                    let caps = (gst.gst_caps_from_string)(caps_str.as_ptr());
+                    if !caps.is_null() {
+                        (gst.gst_app_sink_set_caps)(appsink, caps);
+                        (gst.gst_caps_unref)(caps);
+                    }
 
-                // Present on Makepad's timer (~8ms), not by blocking appsink on the
-                // pipeline clock. Measured on HLS: sync=true reaches PAUSED instantly
-                // on pause; sync=false leaves PLAYING→PAUSED ASYNC for seconds.
-                // Audio (pulsesink sync=true) remains the clock provider for A/V sync;
-                // appsink still timestamps frames, we just do not wait on them here.
-                let max_buffers_prop = CString::new("max-buffers").unwrap();
-                (gst.g_object_set_int)(video_sink, max_buffers_prop.as_ptr(), 2, std::ptr::null());
-                let drop_prop = CString::new("drop").unwrap();
-                (gst.g_object_set_int)(video_sink, drop_prop.as_ptr(), 1, std::ptr::null());
-                let sync_prop = CString::new("sync").unwrap();
-                (gst.g_object_set_int)(video_sink, sync_prop.as_ptr(), 1, std::ptr::null());
-                let qos_prop = CString::new("qos").unwrap();
-                (gst.g_object_set_int)(video_sink, qos_prop.as_ptr(), 1, std::ptr::null());
+                    let max_buffers_prop = CString::new("max-buffers").unwrap();
+                    (gst.g_object_set_int)(
+                        appsink,
+                        max_buffers_prop.as_ptr(),
+                        2,
+                        std::ptr::null(),
+                    );
+                    let drop_prop = CString::new("drop").unwrap();
+                    (gst.g_object_set_int)(appsink, drop_prop.as_ptr(), 1, std::ptr::null());
+                    let sync_prop = CString::new("sync").unwrap();
+                    (gst.g_object_set_int)(appsink, sync_prop.as_ptr(), 1, std::ptr::null());
+                    let qos_prop = CString::new("qos").unwrap();
+                    (gst.g_object_set_int)(appsink, qos_prop.as_ptr(), 1, std::ptr::null());
+
+                    (appsink, appsink)
+                };
 
                 let video_sink_prop = CString::new("video-sink").unwrap();
                 (gst.g_object_set_ptr)(
                     pipeline,
                     video_sink_prop.as_ptr(),
-                    video_sink as *mut c_void,
+                    video_sink_bin as *mut c_void,
                     std::ptr::null(),
                 );
-                video_sink
+                appsink
             };
 
             let bus = (gst.gst_element_get_bus)(pipeline);
+            if caps_profile.is_gl_memory() {
+                if let Some(share) = gl_share {
+                    share.release_makepad_current();
+                }
+            }
             (gst.gst_element_set_state)(pipeline, GST_STATE_PAUSED);
+            Self::drain_gl_need_context_on_bus(gst, bus, pipeline, gl_share);
+            Self::wait_for_zero_copy_preroll(gst, pipeline, bus, gl_share, caps_profile);
+            if caps_profile.is_gl_memory() {
+                if let Some(share) = gl_share {
+                    share.restore_makepad_current();
+                }
+            }
+
+            if caps_profile.is_dmabuf() || caps_profile.is_gl_memory() {
+                let mut state: u32 = 0;
+                let mut pending: u32 = 0;
+                let ret = (gst.gst_element_get_state)(pipeline, &mut state, &mut pending, 0);
+                if state < GST_STATE_PAUSED || ret == GST_STATE_CHANGE_FAILURE {
+                    crate::log!(
+                        "VIDEO: playbin zero-copy preroll incomplete state={} pending={} ret={}",
+                        state,
+                        pending,
+                        ret
+                    );
+                    (gst.gst_element_set_state)(pipeline, GST_STATE_NULL);
+                    if !audio_volume.is_null() {
+                        (gst.gst_object_unref)(audio_volume as *mut c_void);
+                    }
+                    if !audio_sink_element.is_null() {
+                        (gst.gst_object_unref)(audio_sink_element as *mut c_void);
+                    }
+                    if !bus.is_null() {
+                        (gst.gst_object_unref)(bus as *mut c_void);
+                    }
+                    (gst.gst_object_unref)(pipeline as *mut c_void);
+                    return None;
+                }
+                if caps_profile.is_gl_memory() {
+                    crate::log!(
+                        "VIDEO: GLMemory build reached PAUSED state={} ret={}",
+                        state,
+                        ret
+                    );
+                }
+            }
+
             Some(BuiltPipeline {
                 pipeline,
                 video_sink,
@@ -875,6 +1567,7 @@ impl GStreamerVideoPlayer {
                 audio_volume,
                 bus,
                 playbin3,
+                uses_playbin: true,
             })
         }
     }
@@ -882,11 +1575,17 @@ impl GStreamerVideoPlayer {
     fn destroy_pipeline(&mut self) {
         // Drop present-side keep-alives before tearing down the pipeline so we
         // never sample a GL/DMA texture whose GstBuffer is already gone.
-        if !self.retained_gl_sample.is_null() {
+        if !self.retained_gl_sample.is_null() || !self.retained_gl_sample_prev.is_null() {
             unsafe {
                 let gst = &*self.gst;
-                (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
+                if !self.retained_gl_sample_prev.is_null() {
+                    (gst.gst_mini_object_unref)(self.retained_gl_sample_prev as *mut GstMiniObject);
+                }
+                if !self.retained_gl_sample.is_null() {
+                    (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
+                }
             }
+            self.retained_gl_sample_prev = std::ptr::null_mut();
             self.retained_gl_sample = std::ptr::null_mut();
         }
         self.release_egl_images();
@@ -948,6 +1647,27 @@ impl GStreamerVideoPlayer {
         self.retained_egl_images.clear();
     }
 
+    /// Keep current + previous present samples so the on-screen texture cannot be
+    /// recycled by GStreamer's pool while the compositor still samples it (4K tear/ghost).
+    unsafe fn retain_present_sample(&mut self, gst: &LibGStreamer, sample: *mut GstSample) {
+        if !self.retained_gl_sample_prev.is_null() {
+            (gst.gst_mini_object_unref)(self.retained_gl_sample_prev as *mut GstMiniObject);
+        }
+        self.retained_gl_sample_prev = self.retained_gl_sample;
+        self.retained_gl_sample = sample;
+    }
+
+    unsafe fn clear_retained_present_samples(&mut self, gst: &LibGStreamer) {
+        if !self.retained_gl_sample_prev.is_null() {
+            (gst.gst_mini_object_unref)(self.retained_gl_sample_prev as *mut GstMiniObject);
+            self.retained_gl_sample_prev = std::ptr::null_mut();
+        }
+        if !self.retained_gl_sample.is_null() {
+            (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
+            self.retained_gl_sample = std::ptr::null_mut();
+        }
+    }
+
     fn null_player(
         gst: *const LibGStreamer,
         video_id: LiveId,
@@ -983,10 +1703,16 @@ impl GStreamerVideoPlayer {
             tex_width: 0,
             tex_height: 0,
             logged_first_upload: false,
+            gl_memory_frame: 0,
+            nv12_skip_egl_tex2d: false,
+            yuv_external_oes: false,
             caps_profile: VideoCapsProfile::SystemI420,
             playbin3: false,
+            uses_playbin: false,
             yuv_matrix: 0.0,
             retained_gl_sample: std::ptr::null_mut(),
+            retained_gl_sample_prev: std::ptr::null_mut(),
+            gl_memory_tex_2d: false,
             last_buffered: Vec::new(),
             pause_muted: false,
             user_muted: false,
@@ -1059,6 +1785,52 @@ impl GStreamerVideoPlayer {
             }
         }
         out
+    }
+
+    fn file_uri_to_path(uri: &str) -> Option<String> {
+        let rest = uri.strip_prefix("file://").or_else(|| uri.strip_prefix("file:"))?;
+        // Skip optional authority empty host (`file:///path` → `/path`).
+        let path_enc = if rest.starts_with('/') {
+            rest
+        } else if let Some(idx) = rest.find('/') {
+            &rest[idx..]
+        } else {
+            return None;
+        };
+        let bytes = path_enc.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if i + 2 < bytes.len() => {
+                    let h = |c: u8| -> Option<u8> {
+                        match c {
+                            b'0'..=b'9' => Some(c - b'0'),
+                            b'a'..=b'f' => Some(c - b'a' + 10),
+                            b'A'..=b'F' => Some(c - b'A' + 10),
+                            _ => None,
+                        }
+                    };
+                    if let (Some(hi), Some(lo)) = (h(bytes[i + 1]), h(bytes[i + 2])) {
+                        out.push((hi << 4) | lo);
+                        i += 3;
+                        continue;
+                    }
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+                b'+' => {
+                    // Prefer literal '+' in paths; space is %20 in our encoder.
+                    out.push(b'+');
+                    i += 1;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).ok()
     }
 
     fn sniff_container_extension(data: &[u8]) -> &'static str {
@@ -1140,6 +1912,102 @@ impl GStreamerVideoPlayer {
         }
     }
 
+    fn try_rebuild_with_caps_fallback(&mut self, gst: &LibGStreamer, reason: &str) -> bool {
+        let Some(mut next_profile) = self.caps_profile.next_fallback() else {
+            return false;
+        };
+        crate::log!(
+            "VIDEO: caps {:?} failed ({}); falling back to {:?}",
+            self.caps_profile,
+            reason,
+            next_profile
+        );
+        if self.caps_profile.is_gl_memory() && next_profile == VideoCapsProfile::SystemI420 {
+            crate::log!(
+                "VIDEO: GL zero-copy unavailable on this GPU/driver; using CPU I420."
+            );
+        }
+        self.destroy_pipeline();
+        while next_profile.is_dmabuf() && !gst.has_hardware_dmabuf_decoder() {
+            let Some(skipped) = next_profile.next_fallback() else {
+                return false;
+            };
+            crate::log!(
+                "VIDEO: skipping {:?} — no VA-API/NVDEC decoder registered (try: gst-inspect-1.0 vaapih264dec). \
+                 gstreamer1.0-vaapi alone is not enough; install a VA driver (e.g. mesa-va-drivers) and verify with vainfo.",
+                next_profile
+            );
+            next_profile = skipped;
+        }
+        if has_pending_gstreamer_teardowns() {
+            while next_profile.is_gl_memory() || next_profile.is_dmabuf() {
+                match next_profile.next_fallback() {
+                    Some(n) => {
+                        crate::log!(
+                            "VIDEO: pending teardown — skipping {:?} until NULL completes",
+                            next_profile
+                        );
+                        next_profile = n;
+                    }
+                    None => return false,
+                }
+            }
+        }
+        let gl_for_rebuild = if next_profile.is_gl_memory() {
+            self.gl_share.as_ref()
+        } else {
+            None
+        };
+        let Some(built) = Self::build_pipeline(
+            gst,
+            self.video_id,
+            &self.source_uri,
+            self.audio_only,
+            next_profile,
+            gl_for_rebuild,
+        ) else {
+            return false;
+        };
+        self.pipeline = built.pipeline;
+        self.video_sink = built.video_sink;
+        self.audio_sink = built.audio_sink;
+        self.audio_volume = built.audio_volume;
+        self.bus = built.bus;
+        self.caps_profile = next_profile;
+        self.playbin3 = built.playbin3;
+        self.uses_playbin = built.uses_playbin;
+        self.prepare_started = Instant::now();
+        self.dmabuf_yuv_mode = false;
+        self.yuv_biplanar = false;
+        self.nv12_skip_egl_tex2d = false;
+        self.yuv_external_oes = false;
+        self.logged_first_upload = false;
+        true
+    }
+
+    fn is_caps_fallback_error(err_str: &str, debug_str: &str, profile: VideoCapsProfile) -> bool {
+        err_str.contains("not-negotiated")
+            || err_str.contains("negotiation")
+            || err_str.contains("Failed to upload buffer")
+            || debug_str.contains("not-negotiated")
+            || debug_str.contains("not negotiated")
+            || debug_str.contains("Failed to upload buffer")
+            || (debug_str.contains("caps")
+                && (debug_str.contains("not") || debug_str.contains("fail")))
+            || ((err_str.contains("Internal data stream error")
+                || err_str.contains("streaming stopped, reason error"))
+                && (profile.is_gl_memory() || profile.is_dmabuf())
+                // qtdemux posts this for many root causes; only treat as caps
+                // fallback when debug points at negotiation / DMA-Buf, or when
+                // there is no debug (probe clearly dead).
+                && (debug_str.is_empty()
+                    || debug_str.contains("not-negotiated")
+                    || debug_str.contains("not negotiated")
+                    || debug_str.contains("DMABuf")
+                    || debug_str.contains("dmabuf")
+                    || debug_str.contains("caps")))
+    }
+
     /// Check if the player has finished prerolling and is ready to play.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
     pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
@@ -1149,6 +2017,9 @@ impl GStreamerVideoPlayer {
         }
 
         let gst = unsafe { &*self.gst };
+
+        gst.pump_default_main_context();
+        self.drain_gl_need_context(gst);
 
         unsafe {
             // Check for errors on the bus
@@ -1179,71 +2050,13 @@ impl GStreamerVideoPlayer {
                 }
                 (gst.gst_mini_object_unref)(msg as *mut GstMiniObject);
 
-                // Only retry caps profiles for negotiation / format mismatches.
-                // Missing plugins and pure network failures should fail immediately.
-                // HLS/GLMemory failures often surface as "Internal data stream error"
-                // with "not-negotiated" only in the debug string — treat those as
-                // caps fallbacks too, otherwise we burn 2–4s per doomed profile
-                // and then hard-fail without trying system memory.
-                let negotiation_error = err_str.contains("not-negotiated")
-                    || err_str.contains("negotiation")
-                    || debug_str.contains("not-negotiated")
-                    || debug_str.contains("not negotiated")
-                    || (debug_str.contains("caps")
-                        && (debug_str.contains("not") || debug_str.contains("fail")))
-                    || (err_str.contains("Internal data stream error")
-                        && (self.caps_profile.is_gl_memory() || self.caps_profile.is_dmabuf()));
-                if negotiation_error {
-                    if let Some(mut next_profile) = self.caps_profile.next_fallback() {
-                        crate::log!(
-                            "VIDEO: caps {:?} failed ({}); falling back to {:?}",
-                            self.caps_profile,
-                            err_str,
-                            next_profile
-                        );
-                        self.destroy_pipeline();
-                        // Avoid sharing Makepad's EGL context with a pipeline that
-                        // is still asynchronously leaving NULL.
-                        if has_pending_gstreamer_teardowns() {
-                            while next_profile.is_gl_memory() || next_profile.is_dmabuf() {
-                                match next_profile.next_fallback() {
-                                    Some(n) => {
-                                        crate::log!(
-                                            "VIDEO: pending teardown — skipping {:?} until NULL completes",
-                                            next_profile
-                                        );
-                                        next_profile = n;
-                                    }
-                                    None => break,
-                                }
-                            }
-                        }
-                        let gl_for_rebuild = if next_profile.is_gl_memory() {
-                            self.gl_share.as_ref()
-                        } else {
-                            None
-                        };
-                        if let Some(built) = Self::build_pipeline(
-                            gst,
-                            self.video_id,
-                            &self.source_uri,
-                            self.audio_only,
-                            next_profile,
-                            gl_for_rebuild,
-                        ) {
-                            self.pipeline = built.pipeline;
-                            self.video_sink = built.video_sink;
-                            self.audio_sink = built.audio_sink;
-                            self.audio_volume = built.audio_volume;
-                            self.bus = built.bus;
-                            self.caps_profile = next_profile;
-                            self.playbin3 = built.playbin3;
-                            self.prepare_started = Instant::now();
-                            self.dmabuf_yuv_mode = false;
-                            self.yuv_biplanar = false;
-                            return None;
-                        }
-                    }
+                let negotiation_error = Self::is_caps_fallback_error(
+                    &err_str,
+                    &debug_str,
+                    self.caps_profile,
+                );
+                if negotiation_error && self.try_rebuild_with_caps_fallback(gst, &err_str) {
+                    return None;
                 }
 
                 if debug_str.is_empty() {
@@ -1269,31 +2082,61 @@ impl GStreamerVideoPlayer {
                 return Some(Err(format!("{err_str}{hint}")));
             }
 
-            // Non-blocking state check
+            // Short wait so async playbin/decodebin state changes can complete
+            // without a GLib main loop (timeout 0 returns immediately and can
+            // leave zero-copy pipelines stuck in ASYNC forever).
             let mut state: u32 = 0;
             let mut pending: u32 = 0;
-            let ret = (gst.gst_element_get_state)(self.pipeline, &mut state, &mut pending, 0);
+            let state_wait_ns: u64 = if self.caps_profile.is_gl_memory()
+                || self.caps_profile.is_dmabuf()
+            {
+                50_000_000
+            } else {
+                0
+            };
+            let ret = (gst.gst_element_get_state)(
+                self.pipeline,
+                &mut state,
+                &mut pending,
+                state_wait_ns,
+            );
 
             if ret == GST_STATE_CHANGE_FAILURE {
+                if (self.caps_profile.is_gl_memory() || self.caps_profile.is_dmabuf())
+                    && self.try_rebuild_with_caps_fallback(
+                        gst,
+                        "GStreamer pipeline failed to reach PAUSED (state-change failure)",
+                    )
+                {
+                    return None;
+                }
                 self.prepare_notified = true;
                 return Some(Err(
                     "GStreamer pipeline failed to reach PAUSED (state-change failure)".into(),
                 ));
             }
 
-            // Also answer GL NEED_CONTEXT during prepare so GLMemory can negotiate.
-            if let Some(share) = self.gl_share.as_ref() {
-                loop {
-                    let msg = (gst.gst_bus_pop_filtered)(self.bus, GST_MESSAGE_NEED_CONTEXT);
-                    if msg.is_null() {
-                        break;
-                    }
-                    if share.is_gl_need_context_message(gst, msg) {
-                        share.apply_to_element(gst, self.pipeline);
-                    }
-                    (gst.gst_mini_object_unref)(msg as *mut GstMiniObject);
-                }
+            // GST_STATE_CHANGE_ASYNC while still below PAUSED: zero-copy paths can
+            // stall here without posting ERROR (shared-EGL glupload). Fall back.
+            let zero_copy_prepare_timeout = if self.caps_profile.is_dmabuf() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(2)
+            };
+            if ret == GST_STATE_CHANGE_ASYNC
+                && state < GST_STATE_PAUSED
+                && (self.caps_profile.is_gl_memory() || self.caps_profile.is_dmabuf())
+                && self.prepare_started.elapsed() >= zero_copy_prepare_timeout
+                && self.try_rebuild_with_caps_fallback(
+                    gst,
+                    "timed out waiting for zero-copy PAUSED",
+                )
+            {
+                return None;
             }
+
+            // Also answer GL NEED_CONTEXT during prepare so GLMemory can negotiate.
+            self.drain_gl_need_context(gst);
 
             // Need at least PAUSED for preroll to be done
             if state < GST_STATE_PAUSED || self.is_prepared {
@@ -1303,7 +2146,22 @@ impl GStreamerVideoPlayer {
             // Pull the preroll sample to get video dimensions.
             // try_pull_preroll works in PAUSED state (try_pull_sample does NOT).
             if !self.video_sink.is_null() {
-                let sample = (gst.gst_app_sink_try_pull_preroll)(self.video_sink, 0);
+                // GLMemory upload may still be finishing on the GstGL thread after
+                // the pipeline reports PAUSED — wait briefly for the preroll buffer.
+                let pull_ns: u64 = if self.caps_profile.is_gl_memory() {
+                    if let Some(share) = self.gl_share.as_ref() {
+                        share.release_makepad_current();
+                    }
+                    200_000_000 // 200ms
+                } else {
+                    0
+                };
+                let sample = (gst.gst_app_sink_try_pull_preroll)(self.video_sink, pull_ns);
+                if self.caps_profile.is_gl_memory() {
+                    if let Some(share) = self.gl_share.as_ref() {
+                        share.restore_makepad_current();
+                    }
+                }
                 if !sample.is_null() {
                     self.extract_dims_from_sample(gst, sample);
                     (gst.gst_mini_object_unref)(sample as *mut GstMiniObject);
@@ -1311,8 +2169,25 @@ impl GStreamerVideoPlayer {
             }
 
             // Wait for real dimensions instead of inventing 1920x1080.
+            // Zero-copy probes can hang in ASYNC without ERROR (black screen);
+            // fail them over to the next caps profile quickly.
             if !self.audio_only && (self.video_width == 0 || self.video_height == 0) {
-                if self.prepare_started.elapsed().as_secs() >= 15 {
+                let timeout = if self.caps_profile.is_dmabuf() {
+                    Duration::from_secs(5)
+                } else if self.caps_profile.is_gl_memory() {
+                    Duration::from_secs(8)
+                } else {
+                    Duration::from_secs(15)
+                };
+                if self.prepare_started.elapsed() >= timeout {
+                    if (self.caps_profile.is_gl_memory() || self.caps_profile.is_dmabuf())
+                        && self.try_rebuild_with_caps_fallback(
+                            gst,
+                            "timed out waiting for zero-copy preroll",
+                        )
+                    {
+                        return None;
+                    }
                     self.prepare_notified = true;
                     return Some(Err(
                         "Timed out waiting for video dimensions from GStreamer preroll".into(),
@@ -1323,6 +2198,13 @@ impl GStreamerVideoPlayer {
 
             self.is_prepared = true;
             self.prepare_notified = true;
+
+            // GLMemory negotiate uses appsink sync=false; turn sync on for PLAYING
+            // so video tracks the pipeline clock with audio.
+            if self.caps_profile.is_gl_memory() && !self.video_sink.is_null() {
+                let sync_prop = CString::new("sync").unwrap();
+                (gst.g_object_set_int)(self.video_sink, sync_prop.as_ptr(), 1, std::ptr::null());
+            }
 
             // Query duration
             let mut duration_ns: i64 = 0;
@@ -1380,7 +2262,8 @@ impl GStreamerVideoPlayer {
         };
         let audio_fallback = vec!["audio".to_string()];
 
-        if self.playbin3 || self.pipeline.is_null() {
+        // `playbin3` has no `n-video` / `n-audio`; use stream-collection labels or fallbacks.
+        if !self.uses_playbin || self.playbin3 || self.pipeline.is_null() {
             return (video_fallback, audio_fallback);
         }
 
@@ -1561,13 +2444,15 @@ impl GStreamerVideoPlayer {
                 crate::log!("VIDEO: select_video_track({}) SELECT_STREAMS failed", index);
             }
             ok
-        } else {
+        } else if self.uses_playbin {
             unsafe {
                 let prop = CString::new("current-video").unwrap();
                 (gst.g_object_set_int)(self.pipeline, prop.as_ptr(), index as i32, std::ptr::null());
             }
             self.selected_video_idx = index;
             true
+        } else {
+            false
         }
     }
 
@@ -1600,13 +2485,15 @@ impl GStreamerVideoPlayer {
                 crate::log!("VIDEO: select_audio_track({}) SELECT_STREAMS failed", index);
             }
             ok
-        } else {
+        } else if self.uses_playbin {
             unsafe {
                 let prop = CString::new("current-audio").unwrap();
                 (gst.g_object_set_int)(self.pipeline, prop.as_ptr(), index as i32, std::ptr::null());
             }
             self.selected_audio_idx = index;
             true
+        } else {
+            false
         }
     }
 
@@ -1694,20 +2581,7 @@ impl GStreamerVideoPlayer {
         let gst = unsafe { &*self.gst };
 
         // Satisfy GL NEED_CONTEXT while the pipeline is running.
-        if let Some(share) = self.gl_share.as_ref() {
-            unsafe {
-                loop {
-                    let msg = (gst.gst_bus_pop_filtered)(self.bus, GST_MESSAGE_NEED_CONTEXT);
-                    if msg.is_null() {
-                        break;
-                    }
-                    if share.is_gl_need_context_message(gst, msg) {
-                        share.apply_to_element(gst, self.pipeline);
-                    }
-                    (gst.gst_mini_object_unref)(msg as *mut GstMiniObject);
-                }
-            }
-        }
+        self.drain_gl_need_context(gst);
 
         // Do not gate frame pulls on gst_element_get_state(timeout=0):
         // PLAYING transitions are asynchronous and can stay in PAUSED/ASYNC while
@@ -1748,48 +2622,8 @@ impl GStreamerVideoPlayer {
             // Zero-copy paths: on failure, drop the sample and wait — do NOT
             // reinterpret GLMemory/DMABuf as system RGBA (that produces garbage).
             if self.caps_profile.is_gl_memory() {
-                if let (Some(is_gl_memory), Some(get_gl_texture_id)) =
-                    (gst.gst_is_gl_memory, gst.gst_gl_memory_get_texture_id)
-                {
-                    let memory = (gst.gst_buffer_peek_memory)(buffer, 0);
-                    if !memory.is_null() && is_gl_memory(memory) != 0 {
-                        let gl_texture = get_gl_texture_id(memory);
-                        if gl_texture != 0 {
-                            let cxtexture = &mut textures[self.texture_id];
-
-                            if let Some(old) = cxtexture.os.gl_texture {
-                                if old != gl_texture && cxtexture.os.gl_texture_owned {
-                                    (gl.glDeleteTextures)(1, &old);
-                                }
-                            }
-
-                            cxtexture.os.gl_texture = Some(gl_texture);
-                            cxtexture.os.gl_texture_owned = false;
-                            cxtexture.format = crate::texture::TextureFormat::VideoExternal;
-                            cxtexture.alloc = Some(TextureAlloc {
-                                width: 0,
-                                height: 0,
-                                pixel: TexturePixel::VideoExternal,
-                                category: TextureCategory::Video,
-                            });
-
-                            if !self.retained_gl_sample.is_null() {
-                                (gst.gst_mini_object_unref)(
-                                    self.retained_gl_sample as *mut GstMiniObject,
-                                );
-                            }
-                            self.retained_gl_sample = sample;
-                            self.dmabuf_yuv_mode = false;
-                            self.yuv_biplanar = false;
-
-                            if !self.logged_first_upload {
-                                self.logged_first_upload = true;
-                                crate::log!("VIDEO: presenting via GLMemory zero-copy");
-                            }
-
-                            return true;
-                        }
-                    }
+                if self.try_present_gl_memory(gst, gl, textures, opengl_cx, sample, buffer) {
+                    return true;
                 }
                 (gst.gst_mini_object_unref)(sample as *mut GstMiniObject);
                 return false;
@@ -1802,14 +2636,20 @@ impl GStreamerVideoPlayer {
                     }
                 }
                 (gst.gst_mini_object_unref)(sample as *mut GstMiniObject);
+                // NVIDIA often rejects DMA-Buf → TEXTURE_2D and cannot CPU-map the
+                // buffer either. Drop to SystemI420 once so playback is not stuck
+                // with black/garbage frames and per-frame present failures.
+                if self.nv12_skip_egl_tex2d {
+                    let _ = self.try_rebuild_with_caps_fallback(
+                        gst,
+                        "DMA-Buf NV12 EGL import failed (EXTERNAL_OES and plane-split)",
+                    );
+                }
                 return false;
             }
 
             // System-memory fallback path: map buffer and upload I420 or RGBA.
-            if !self.retained_gl_sample.is_null() {
-                (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
-                self.retained_gl_sample = std::ptr::null_mut();
-            }
+            self.clear_retained_present_samples(gst);
             self.release_egl_images();
             let mut map_info = GstMapInfo::default();
             if (gst.gst_buffer_map)(buffer, &mut map_info, GST_MAP_READ) == 0 {
@@ -1835,6 +2675,7 @@ impl GStreamerVideoPlayer {
 
                 let meta = Self::read_video_meta(gst, buffer);
                 let Some(layout) = meta
+                    .as_ref()
                     .and_then(|m| i420_layout_from_video_meta(m, width, height, map_info.size))
                     .or_else(|| infer_i420_layout(width, height, map_info.size))
                 else {
@@ -2015,6 +2856,405 @@ impl GStreamerVideoPlayer {
         }
     }
 
+    /// Adopt a GStreamer GLMemory texture into Makepad's share group (true zero-copy —
+    /// no blit, no CPU download of the frame into Makepad).
+    ///
+    /// `glupload` leaves `NEED_UPLOAD` until the buffer is mapped with `GST_MAP_GL` on
+    /// **GStreamer's** GL thread. Mapping on the UI thread asserts; we marshal via
+    /// `gst_gl_context_thread_add` on the memory's own context. After map we
+    /// `glFinish` (+ optional `GstGLSyncMeta` fence) so Makepad's share-group context
+    /// cannot sample a 4K upload mid-write (tear / portrait ghosting).
+    unsafe fn try_present_gl_memory(
+        &mut self,
+        gst: &LibGStreamer,
+        gl: &LibGl,
+        textures: &mut CxTexturePool,
+        opengl_cx: Option<&OpenglCx>,
+        sample: *mut GstSample,
+        buffer: *mut GstBuffer,
+    ) -> bool {
+        let (Some(is_gl_memory), Some(get_gl_texture_id)) =
+            (gst.gst_is_gl_memory, gst.gst_gl_memory_get_texture_id)
+        else {
+            return false;
+        };
+        let Some(thread_add) = gst.gst_gl_context_thread_add else {
+            if !self.logged_first_upload {
+                crate::log!("VIDEO: gst_gl_context_thread_add unavailable — cannot MAP_GL");
+            }
+            return false;
+        };
+        let memory = (gst.gst_buffer_peek_memory)(buffer, 0);
+        if memory.is_null() || is_gl_memory(memory) == 0 {
+            return false;
+        }
+
+        // GstGLBaseMemory.context sits immediately after GstMemory (size 112 here).
+        let gst_gl_ctx = {
+            const CONTEXT_OFF: usize = 112;
+            *((memory as *const u8).add(CONTEXT_OFF) as *const *mut GstGLContext)
+        };
+        if gst_gl_ctx.is_null() {
+            return false;
+        }
+
+        struct GlMapJob {
+            map_fn: unsafe extern "C" fn(*mut GstBuffer, *mut GstMapInfo, c_uint) -> c_int,
+            unmap_fn: unsafe extern "C" fn(*mut GstBuffer, *mut GstMapInfo),
+            buffer: *mut GstBuffer,
+            info: GstMapInfo,
+            mapped: bool,
+            gl_finish: Option<unsafe extern "C" fn()>,
+            set_sync_point: Option<unsafe extern "C" fn(*mut GstGLSyncMeta, *mut GstGLContext)>,
+            get_meta: Option<unsafe extern "C" fn(*mut GstBuffer, GType) -> *mut c_void>,
+            sync_api: Option<unsafe extern "C" fn() -> GType>,
+            gst_gl_ctx: *mut GstGLContext,
+            sync_meta: *mut GstGLSyncMeta,
+        }
+        unsafe extern "C" fn map_on_gst_gl(_ctx: *mut GstGLContext, data: *mut c_void) {
+            let job = &mut *(data as *mut GlMapJob);
+            job.mapped =
+                (job.map_fn)(job.buffer, &mut job.info, GST_MAP_READ | GST_MAP_GL) != 0;
+            if !job.mapped {
+                return;
+            }
+            // Ensure the upload GPU commands complete before any share-group context
+            // samples this texture. Without this, 4K frames commonly tear/ghost.
+            if let Some(finish) = job.gl_finish {
+                finish();
+            }
+            if let (Some(get_meta), Some(api_type), Some(set_sync)) =
+                (job.get_meta, job.sync_api, job.set_sync_point)
+            {
+                let sync = get_meta(job.buffer, api_type()) as *mut GstGLSyncMeta;
+                if !sync.is_null() {
+                    set_sync(sync, job.gst_gl_ctx);
+                    job.sync_meta = sync;
+                }
+            }
+        }
+        unsafe extern "C" fn unmap_on_gst_gl(_ctx: *mut GstGLContext, data: *mut c_void) {
+            let job = &mut *(data as *mut GlMapJob);
+            if job.mapped {
+                (job.unmap_fn)(job.buffer, &mut job.info);
+                job.mapped = false;
+            }
+        }
+
+        let mut job = GlMapJob {
+            map_fn: gst.gst_buffer_map,
+            unmap_fn: gst.gst_buffer_unmap,
+            buffer,
+            info: GstMapInfo::default(),
+            mapped: false,
+            gl_finish: Some(gl.glFinish),
+            set_sync_point: gst.gst_gl_sync_meta_set_sync_point,
+            get_meta: gst.gst_buffer_get_meta,
+            sync_api: gst.gst_gl_sync_meta_api_get_type,
+            gst_gl_ctx,
+            sync_meta: std::ptr::null_mut(),
+        };
+        // Release Makepad current so the Gst GL thread can makeCurrent its context.
+        if let Some(share) = self.gl_share.as_ref() {
+            share.release_makepad_current();
+        } else if let Some(cx) = opengl_cx {
+            cx.clear_current();
+        }
+        thread_add(gst_gl_ctx, Some(map_on_gst_gl), &mut job as *mut _ as *mut c_void);
+        if !job.mapped {
+            if let Some(cx) = opengl_cx {
+                cx.make_current();
+            }
+            if !self.logged_first_upload {
+                crate::log!("VIDEO: GLMemory GST_MAP_GL on Gst GL thread failed");
+            }
+            return false;
+        }
+
+        let gl_texture = get_gl_texture_id(memory);
+        let tex_target = gst
+            .gst_gl_memory_get_texture_target
+            .map(|f| f(memory))
+            .unwrap_or(GST_GL_TEXTURE_TARGET_2D);
+        let tex_format = gst
+            .gst_gl_memory_get_texture_format
+            .map(|f| f(memory))
+            .unwrap_or(0);
+
+        thread_add(gst_gl_ctx, Some(unmap_on_gst_gl), &mut job as *mut _ as *mut c_void);
+        if let Some(cx) = opengl_cx {
+            cx.make_current();
+        }
+
+        // Consumer-side wait: prefer GstGLSyncMeta, then raw glWaitSync if present.
+        if !job.sync_meta.is_null() {
+            if let Some(wait_cpu) = gst.gst_gl_sync_meta_wait_cpu {
+                wait_cpu(job.sync_meta, gst_gl_ctx);
+            } else if let Some(wait) = gst.gst_gl_sync_meta_wait {
+                wait(job.sync_meta, gst_gl_ctx);
+            }
+        } else {
+            let fence = if let (Some(get_meta), Some(api_type)) =
+                (gst.gst_buffer_get_meta, gst.gst_gl_sync_meta_api_get_type)
+            {
+                let sync = get_meta(buffer, api_type());
+                if sync.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    #[repr(C)]
+                    struct GstGLSyncMetaHead {
+                        flags: u32,
+                        _pad: u32,
+                        info: *const c_void,
+                        context: *mut c_void,
+                        data: *mut c_void,
+                    }
+                    (*(sync as *const GstGLSyncMetaHead)).data
+                }
+            } else {
+                std::ptr::null_mut()
+            };
+            if !fence.is_null() && fence as usize > 0x1000 {
+                if let Some(wait_sync) = gl.glWaitSync {
+                    wait_sync(fence, 0, u64::MAX);
+                }
+            } else if !self.logged_first_upload {
+                crate::log!(
+                    "VIDEO: GLMemory sync via glFinish (no GstGLSyncMeta fence={:?})",
+                    fence
+                );
+            }
+        }
+
+        if gl_texture == 0 {
+            return false;
+        }
+
+        let use_tex_2d = tex_target == GST_GL_TEXTURE_TARGET_2D;
+        let use_oes = tex_target == GST_GL_TEXTURE_TARGET_EXTERNAL_OES;
+        if !use_tex_2d && !use_oes {
+            if !self.logged_first_upload {
+                crate::log!(
+                    "VIDEO: GLMemory unsupported texture-target={} format=0x{:x}",
+                    tex_target,
+                    tex_format
+                );
+            }
+            return false;
+        }
+
+        let cxtexture = &mut textures[self.texture_id];
+        if let Some(old) = cxtexture.os.gl_texture {
+            if old != gl_texture && cxtexture.os.gl_texture_owned {
+                (gl.glDeleteTextures)(1, &old);
+            }
+        }
+
+        let bind_target = if use_oes {
+            gl_sys::TEXTURE_EXTERNAL_OES
+        } else {
+            gl_sys::TEXTURE_2D
+        };
+        (gl.glBindTexture)(bind_target, gl_texture);
+        // Probe whether the Gst texture is visible in Makepad's share group.
+        if !self.logged_first_upload {
+            let is_tex = gl
+                .glIsTexture
+                .map(|f| f(gl_texture) != 0)
+                .unwrap_or(false);
+            let mut tw: i32 = -1;
+            let mut th: i32 = -1;
+            if use_tex_2d {
+                (gl.glGetTexLevelParameteriv)(bind_target, 0, gl_sys::TEXTURE_WIDTH, &mut tw);
+                (gl.glGetTexLevelParameteriv)(bind_target, 0, gl_sys::TEXTURE_HEIGHT, &mut th);
+            }
+            let err = (gl.glGetError)();
+            crate::log!(
+                "VIDEO: GLMemory share probe tex={} is_texture={} size={}x{} video={}x{} err=0x{:x}",
+                gl_texture,
+                is_tex,
+                tw,
+                th,
+                self.video_width,
+                self.video_height,
+                err
+            );
+            if use_tex_2d && tw > 0 && th > 0 {
+                let mut fbo = 0u32;
+                (gl.glGenFramebuffers)(1, &mut fbo);
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, fbo);
+                (gl.glFramebufferTexture2D)(
+                    gl_sys::FRAMEBUFFER,
+                    gl_sys::COLOR_ATTACHMENT0,
+                    bind_target,
+                    gl_texture,
+                    0,
+                );
+                let mut px = [0u8; 4];
+                (gl.glReadPixels)(
+                    tw / 2,
+                    th / 2,
+                    1,
+                    1,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    px.as_mut_ptr() as *mut _,
+                );
+                let read_err = (gl.glGetError)();
+                crate::log!(
+                    "VIDEO: GLMemory center pixel RGBA=({},{},{},{}) read_err=0x{:x}",
+                    px[0],
+                    px[1],
+                    px[2],
+                    px[3],
+                    read_err
+                );
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+                (gl.glDeleteFramebuffers)(1, &fbo);
+            }
+        }
+        (gl.glTexParameteri)(
+            bind_target,
+            gl_sys::TEXTURE_MIN_FILTER,
+            gl_sys::LINEAR as i32,
+        );
+        (gl.glTexParameteri)(
+            bind_target,
+            gl_sys::TEXTURE_MAG_FILTER,
+            gl_sys::LINEAR as i32,
+        );
+        (gl.glTexParameteri)(
+            bind_target,
+            gl_sys::TEXTURE_WRAP_S,
+            gl_sys::CLAMP_TO_EDGE as i32,
+        );
+        (gl.glTexParameteri)(
+            bind_target,
+            gl_sys::TEXTURE_WRAP_T,
+            gl_sys::CLAMP_TO_EDGE as i32,
+        );
+        (gl.glBindTexture)(bind_target, 0);
+
+        cxtexture.os.gl_texture = Some(gl_texture);
+        cxtexture.os.gl_texture_owned = false;
+        if use_tex_2d {
+            cxtexture.format = crate::texture::TextureFormat::VideoGlMemoryRgba;
+            cxtexture.alloc = Some(TextureAlloc {
+                width: self.video_width as usize,
+                height: self.video_height as usize,
+                pixel: TexturePixel::VideoGlMemoryRgba,
+                category: TextureCategory::Video,
+            });
+        } else {
+            cxtexture.format = crate::texture::TextureFormat::VideoExternal;
+            cxtexture.alloc = Some(TextureAlloc {
+                width: self.video_width as usize,
+                height: self.video_height as usize,
+                pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            });
+        }
+
+        self.retain_present_sample(gst, sample);
+        self.gl_memory_tex_2d = use_tex_2d;
+        self.dmabuf_yuv_mode = false;
+        self.yuv_biplanar = false;
+        self.yuv_external_oes = false;
+        self.gl_memory_frame = self.gl_memory_frame.saturating_add(1);
+
+        if self.gl_memory_frame == 45 && use_tex_2d {
+            (gl.glBindTexture)(bind_target, gl_texture);
+            let mut tw = 0i32;
+            let mut th = 0i32;
+            (gl.glGetTexLevelParameteriv)(bind_target, 0, gl_sys::TEXTURE_WIDTH, &mut tw);
+            (gl.glGetTexLevelParameteriv)(bind_target, 0, gl_sys::TEXTURE_HEIGHT, &mut th);
+            if tw > 0 && th > 0 {
+                let mut fbo = 0u32;
+                (gl.glGenFramebuffers)(1, &mut fbo);
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, fbo);
+                (gl.glFramebufferTexture2D)(
+                    gl_sys::FRAMEBUFFER,
+                    gl_sys::COLOR_ATTACHMENT0,
+                    bind_target,
+                    gl_texture,
+                    0,
+                );
+                let mut px = [0u8; 4];
+                (gl.glReadPixels)(
+                    tw / 2,
+                    th / 2,
+                    1,
+                    1,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    px.as_mut_ptr() as *mut _,
+                );
+                crate::log!(
+                    "VIDEO: GLMemory frame45 center pixel RGBA=({},{},{},{})",
+                    px[0],
+                    px[1],
+                    px[2],
+                    px[3]
+                );
+                (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+                (gl.glDeleteFramebuffers)(1, &fbo);
+            }
+            (gl.glBindTexture)(bind_target, 0);
+        }
+
+        if !self.logged_first_upload {
+            self.logged_first_upload = true;
+            let caps_fmt = {
+                let caps = (gst.gst_sample_get_caps)(sample);
+                if caps.is_null() {
+                    "unknown".into()
+                } else {
+                    let st = (gst.gst_caps_get_structure)(caps, 0);
+                    let format_key = CString::new("format").unwrap();
+                    let target_key = CString::new("texture-target").unwrap();
+                    let fmt = if st.is_null() {
+                        None
+                    } else {
+                        let p = (gst.gst_structure_get_string)(st, format_key.as_ptr());
+                        if p.is_null() {
+                            None
+                        } else {
+                            Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+                        }
+                    };
+                    let tgt = if st.is_null() {
+                        None
+                    } else {
+                        let p = (gst.gst_structure_get_string)(st, target_key.as_ptr());
+                        if p.is_null() {
+                            None
+                        } else {
+                            Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+                        }
+                    };
+                    format!(
+                        "format={} texture-target={} gl_target={} gl_format=0x{:x}",
+                        fmt.as_deref().unwrap_or("?"),
+                        tgt.as_deref().unwrap_or("?"),
+                        if use_tex_2d { "2D" } else { "EXTERNAL_OES" },
+                        tex_format
+                    )
+                }
+            };
+            crate::log!(
+                "VIDEO: presenting via GLMemory zero-copy ({}) {}",
+                if use_tex_2d {
+                    "TEXTURE_2D RGBA"
+                } else {
+                    "EXTERNAL_OES"
+                },
+                caps_fmt
+            );
+        }
+
+        true
+    }
+
     /// Import a DMA-Buf sample via EGLImage. Returns true on success (and retains
     /// `sample`). On failure the caller should drop the sample (no CPU reinterpret).
     unsafe fn try_present_dmabuf(
@@ -2078,11 +3318,38 @@ impl GStreamerVideoPlayer {
                     .unwrap_or(false));
 
         if is_nv12 {
-            let Some(yuv_ids) = self.yuv_ids else {
+            let (y_plane, uv_plane) =
+                Self::nv12_plane_layouts(width, height, fds.len(), fourcc, modifier, meta.as_ref());
+
+            if self.nv12_skip_egl_tex2d {
+                return false;
+            }
+
+            // Caps often omit drm-format (modifier=0 / LINEAR). NVIDIA NVDEC
+            // surfaces are block-linear — probe VA for the real modifier.
+            let mut modifier = modifier;
+            if modifier == 0 {
+                if let Some(probed) = super::va_dmabuf_modifier::probe_nv12_modifier(
+                    self.video_width,
+                    self.video_height,
+                ) {
+                    modifier = probed;
+                }
+            }
+
+            // True zero-copy: Y/UV planes as TEXTURE_EXTERNAL_OES (NVIDIA rejects
+            // TEXTURE_2D for these). Video shader samples tex_y_oes/tex_u_oes and
+            // converts BT.709 — no GPU blit, no CPU upload.
+            let (Some(y_oes_id), Some(uv_oes_id)) = (
+                self.yuv_ids.and_then(|y| y.tex_y_oes_id),
+                self.yuv_ids.and_then(|y| y.tex_u_oes_id),
+            ) else {
+                if !self.logged_first_upload {
+                    crate::log!("VIDEO: DMA-Buf NV12 OES plane textures not allocated");
+                }
+                self.nv12_skip_egl_tex2d = true;
                 return false;
             };
-            let (y_plane, uv_plane) =
-                Self::nv12_plane_layouts(width, height, fds.len(), fourcc, modifier, meta);
 
             let y_image = Self::egl_image_from_dmabuf(
                 opengl_cx,
@@ -2107,6 +3374,19 @@ impl GStreamerVideoPlayer {
                 modifier,
             );
             if y_image.is_null() || uv_image.is_null() {
+                if !self.logged_first_upload {
+                    let err = opengl_cx
+                        .libegl
+                        .eglGetError
+                        .map(|f| unsafe { f() })
+                        .unwrap_or(0);
+                    crate::log!(
+                        "VIDEO: DMA-Buf NV12 plane EGLImages failed (y_null={} uv_null={} egl=0x{:x})",
+                        y_image.is_null(),
+                        uv_image.is_null(),
+                        err,
+                    );
+                }
                 if !y_image.is_null() {
                     if let Some(destroy) = opengl_cx.libegl.eglDestroyImageKHR {
                         destroy(opengl_cx.egl_display, y_image);
@@ -2117,61 +3397,71 @@ impl GStreamerVideoPlayer {
                         destroy(opengl_cx.egl_display, uv_image);
                     }
                 }
+                self.nv12_skip_egl_tex2d = true;
                 return false;
             }
 
-            self.bind_egl_image_to_texture(
+            let y_ok = self.bind_egl_image_to_texture(
                 gl,
                 textures,
-                yuv_ids.tex_y_id,
+                y_oes_id,
                 y_image,
                 target_tex,
-                y_plane.width as usize,
-                y_plane.height as usize,
-                TexturePixel::Ru8,
+                self.video_width as usize,
+                self.video_height as usize,
+                TexturePixel::VideoExternal,
             );
-            self.bind_egl_image_to_texture(
-                gl,
-                textures,
-                yuv_ids.tex_u_id,
-                uv_image,
-                target_tex,
-                uv_plane.width as usize,
-                uv_plane.height as usize,
-                TexturePixel::RGu8,
-            );
-            // Biplanar shaders sample UV from tex_u (RG); mirror into V for
-            // shaders that still bind three slots.
-            {
-                let u_tex = textures[yuv_ids.tex_u_id].os.gl_texture;
-                let u_alloc = textures[yuv_ids.tex_u_id].alloc.clone();
-                let tex_v = &mut textures[yuv_ids.tex_v_id];
-                tex_v.format = crate::texture::TextureFormat::VideoYuvPlane;
-                tex_v.os.gl_texture = u_tex;
-                tex_v.os.gl_texture_owned = false;
-                tex_v.alloc = u_alloc;
+            let uv_ok = y_ok
+                && self.bind_egl_image_to_texture(
+                    gl,
+                    textures,
+                    uv_oes_id,
+                    uv_image,
+                    target_tex,
+                    self.video_width.div_ceil(2) as usize,
+                    self.video_height.div_ceil(2) as usize,
+                    TexturePixel::VideoExternal,
+                );
+            if !uv_ok {
+                if let Some(destroy) = opengl_cx.libegl.eglDestroyImageKHR {
+                    destroy(opengl_cx.egl_display, y_image);
+                    destroy(opengl_cx.egl_display, uv_image);
+                }
+                self.nv12_skip_egl_tex2d = true;
+                if !self.logged_first_upload {
+                    crate::log!(
+                        "VIDEO: DMA-Buf NV12 → TEXTURE_EXTERNAL_OES plane bind failed; \
+                         falling back to SystemI420"
+                    );
+                }
+                return false;
             }
 
             self.release_egl_images();
             self.retained_egl_images = vec![y_image, uv_image];
             self.egl_display_for_images = opengl_cx.egl_display;
             self.egl_destroy_image = opengl_cx.libegl.eglDestroyImageKHR;
-
-            if !self.retained_gl_sample.is_null() {
-                (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
-            }
-            self.retained_gl_sample = sample;
+            self.retain_present_sample(gst, sample);
             self.dmabuf_yuv_mode = true;
             self.yuv_biplanar = true;
+            self.yuv_external_oes = true;
             if !self.logged_first_upload {
                 self.logged_first_upload = true;
-                crate::log!("VIDEO: presenting via DMA-Buf NV12 import");
+                crate::log!(
+                    "VIDEO: presenting via DMA-Buf NV12 zero-copy (EXTERNAL_OES planes) \
+                     {}x{} pitch_y={} pitch_uv={} mod=0x{:x}",
+                    width,
+                    height,
+                    y_plane.pitch,
+                    uv_plane.pitch,
+                    modifier
+                );
             }
             return true;
         }
 
         // Single-plane RGBA/BGRA style DRM fourcc → VideoExternal.
-        let plane = Self::rgba_plane_layout(width, height, fourcc, meta);
+        let plane = Self::rgba_plane_layout(width, height, fourcc, meta.as_ref());
         let image = Self::egl_image_from_dmabuf(
             opengl_cx,
             create_image,
@@ -2187,7 +3477,7 @@ impl GStreamerVideoPlayer {
             return false;
         }
 
-        self.bind_egl_image_to_texture(
+        if !self.bind_egl_image_to_texture(
             gl,
             textures,
             self.texture_id,
@@ -2196,7 +3486,12 @@ impl GStreamerVideoPlayer {
             width,
             height,
             TexturePixel::VideoExternal,
-        );
+        ) {
+            if let Some(destroy) = opengl_cx.libegl.eglDestroyImageKHR {
+                destroy(opengl_cx.egl_display, image);
+            }
+            return false;
+        }
         textures[self.texture_id].format = crate::texture::TextureFormat::VideoExternal;
 
         self.release_egl_images();
@@ -2204,15 +3499,20 @@ impl GStreamerVideoPlayer {
         self.egl_display_for_images = opengl_cx.egl_display;
         self.egl_destroy_image = opengl_cx.libegl.eglDestroyImageKHR;
 
-        if !self.retained_gl_sample.is_null() {
-            (gst.gst_mini_object_unref)(self.retained_gl_sample as *mut GstMiniObject);
-        }
-        self.retained_gl_sample = sample;
+        self.retain_present_sample(gst, sample);
         self.dmabuf_yuv_mode = false;
         self.yuv_biplanar = false;
         if !self.logged_first_upload {
             self.logged_first_upload = true;
-            crate::log!("VIDEO: presenting via DMA-Buf RGBA import");
+            crate::log!(
+                "VIDEO: presenting via DMA-Buf RGBA import fmt={} fourcc=0x{:08x} {}x{} pitch={} mod=0x{:x}",
+                format_name,
+                plane.fourcc,
+                plane.width,
+                plane.height,
+                plane.pitch,
+                modifier
+            );
         }
         true
     }
@@ -2220,32 +3520,40 @@ impl GStreamerVideoPlayer {
     unsafe fn read_video_meta(
         gst: &LibGStreamer,
         buffer: *mut GstBuffer,
-    ) -> Option<&'static GstVideoMetaView> {
+    ) -> Option<VideoMetaLayout> {
         let get_meta = gst.gst_buffer_get_video_meta?;
         let meta = get_meta(buffer);
         if meta.is_null() {
             return None;
         }
         let view = &*(meta as *const GstVideoMetaView);
-        // Cross-check the hand-rolled ABI view against libgstvideo helpers when
-        // available — reject clearly-corrupt layouts instead of uploading garbage.
-        if let Some(plane_height) = gst.gst_video_meta_get_plane_height {
-            if view.n_planes == 0 || view.n_planes > 4 {
-                return None;
-            }
-            for plane in 0..view.n_planes {
-                let mut h: u32 = 0;
-                if plane_height(meta, plane, &mut h) == 0 || h == 0 {
-                    return None;
-                }
-                if view.stride[plane as usize] <= 0 {
-                    return None;
-                }
-            }
-        } else if view.n_planes == 0 || view.n_planes > 4 || view.stride[0] <= 0 {
+        if view.n_planes == 0 || view.n_planes > 4 || view.stride[0] <= 0 {
             return None;
         }
-        Some(view)
+        let mut plane_height = [0u32; 4];
+        if let Some(get_plane_height) = gst.gst_video_meta_get_plane_height {
+            if get_plane_height(meta, plane_height.as_mut_ptr()) == 0 {
+                return None;
+            }
+            for plane in 0..view.n_planes as usize {
+                if plane_height[plane] == 0 || view.stride[plane] <= 0 {
+                    return None;
+                }
+            }
+        } else {
+            for plane in 0..view.n_planes as usize {
+                if view.stride[plane] <= 0 {
+                    return None;
+                }
+            }
+        }
+        Some(VideoMetaLayout {
+            width: view.width,
+            height: view.height,
+            n_planes: view.n_planes,
+            offset: view.offset,
+            stride: view.stride,
+        })
     }
 
     fn nv12_plane_layouts(
@@ -2254,32 +3562,37 @@ impl GStreamerVideoPlayer {
         n_fds: usize,
         _fourcc: u32,
         _modifier: u64,
-        meta: Option<&GstVideoMetaView>,
+        meta: Option<&VideoMetaLayout>,
     ) -> (DmaPlaneLayout, DmaPlaneLayout) {
         let cw = width.div_ceil(2) as u32;
         let ch = height.div_ceil(2) as u32;
         if let Some(m) = meta {
             if m.n_planes >= 2 && m.stride[0] > 0 && m.stride[1] > 0 {
+                let y_w = if m.width > 0 { m.width } else { width as u32 };
+                let y_h = if m.height > 0 { m.height } else { height as u32 };
+                let uv_w = y_w.div_ceil(2);
+                let uv_h = y_h.div_ceil(2);
                 let y = DmaPlaneLayout {
                     fd_index: 0,
                     offset: m.offset[0] as u32,
                     pitch: m.stride[0] as u32,
-                    width: width as u32,
-                    height: height as u32,
+                    width: y_w,
+                    height: y_h,
                     fourcc: drm_fourcc(b"R8  "),
                 };
                 let uv = DmaPlaneLayout {
                     fd_index: if n_fds >= 2 { 1 } else { 0 },
                     offset: m.offset[1] as u32,
                     pitch: m.stride[1] as u32,
-                    width: cw,
-                    height: ch,
-                    fourcc: drm_fourcc(b"GR88"),
+                    width: uv_w,
+                    height: uv_h,
+                    fourcc: drm_fourcc(b"RG88"),
                 };
                 return (y, uv);
             }
         }
-        let pitch_y = width as u32;
+        // Intel VA often pads rows to 64; guessing width-as-pitch fails EGL import.
+        let pitch_y = ((width + 63) & !63) as u32;
         (
             DmaPlaneLayout {
                 fd_index: 0,
@@ -2299,7 +3612,7 @@ impl GStreamerVideoPlayer {
                 pitch: pitch_y,
                 width: cw,
                 height: ch,
-                fourcc: drm_fourcc(b"GR88"),
+                fourcc: drm_fourcc(b"RG88"),
             },
         )
     }
@@ -2308,7 +3621,7 @@ impl GStreamerVideoPlayer {
         width: usize,
         height: usize,
         fourcc: u32,
-        meta: Option<&GstVideoMetaView>,
+        meta: Option<&VideoMetaLayout>,
     ) -> DmaPlaneLayout {
         let fourcc = if fourcc != 0 {
             fourcc
@@ -2317,12 +3630,14 @@ impl GStreamerVideoPlayer {
         };
         if let Some(m) = meta {
             if m.n_planes >= 1 && m.stride[0] > 0 {
+                let w = if m.width > 0 { m.width } else { width as u32 };
+                let h = if m.height > 0 { m.height } else { height as u32 };
                 return DmaPlaneLayout {
                     fd_index: 0,
                     offset: m.offset[0] as u32,
                     pitch: m.stride[0] as u32,
-                    width: width as u32,
-                    height: height as u32,
+                    width: w,
+                    height: h,
                     fourcc,
                 };
             }
@@ -2354,25 +3669,28 @@ impl GStreamerVideoPlayer {
         fourcc: u32,
         modifier: u64,
     ) -> *mut c_void {
-        let attribs = [
-            egl_sys::EGL_LINUX_DRM_FOURCC_EXT,
-            fourcc,
-            egl_sys::EGL_WIDTH,
-            width,
-            egl_sys::EGL_HEIGHT,
-            height,
-            egl_sys::EGL_DMA_BUF_PLANE0_FD_EXT,
-            fd as u32,
-            egl_sys::EGL_DMA_BUF_PLANE0_OFFSET_EXT,
-            offset,
-            egl_sys::EGL_DMA_BUF_PLANE0_PITCH_EXT,
-            pitch,
-            egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
-            modifier as u32,
-            egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
-            (modifier >> 32) as u32,
-            egl_sys::EGL_NONE,
+        let use_modifier = Self::dmabuf_should_pass_modifier(modifier);
+        let mut attribs: Vec<i32> = vec![
+            egl_sys::EGL_LINUX_DRM_FOURCC_EXT as i32,
+            fourcc as i32,
+            egl_sys::EGL_WIDTH as i32,
+            width as i32,
+            egl_sys::EGL_HEIGHT as i32,
+            height as i32,
+            egl_sys::EGL_DMA_BUF_PLANE0_FD_EXT as i32,
+            fd as i32,
+            egl_sys::EGL_DMA_BUF_PLANE0_OFFSET_EXT as i32,
+            offset as i32,
+            egl_sys::EGL_DMA_BUF_PLANE0_PITCH_EXT as i32,
+            pitch as i32,
         ];
+        if use_modifier {
+            attribs.push(egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT as i32);
+            attribs.push(modifier as i32);
+            attribs.push(egl_sys::EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT as i32);
+            attribs.push((modifier >> 32) as i32);
+        }
+        attribs.push(egl_sys::EGL_NONE as i32);
         create_image(
             opengl_cx.egl_display,
             std::ptr::null_mut(),
@@ -2392,42 +3710,56 @@ impl GStreamerVideoPlayer {
         width: usize,
         height: usize,
         pixel: TexturePixel,
-    ) {
+    ) -> bool {
         let cxtexture = &mut textures[texture_id];
-        if cxtexture.os.gl_texture.is_some() && cxtexture.os.gl_texture_owned {
-            if let Some(old) = cxtexture.os.gl_texture.take() {
-                (gl.glDeleteTextures)(1, &old);
-            }
-        }
+        // Reuse the existing GL texture name. Deleting/recreating every frame breaks
+        // TextureHandleReady and can detach EGLImage bindings on NVIDIA.
         let gl_texture = cxtexture.os.gl_texture.get_or_insert_with(|| {
             let mut t = std::mem::MaybeUninit::uninit();
             (gl.glGenTextures)(1, t.as_mut_ptr());
             t.assume_init()
         });
         cxtexture.os.gl_texture_owned = true; // we own the GL name; EGLImage is separate
-        (gl.glBindTexture)(gl_sys::TEXTURE_2D, *gl_texture);
+        // VideoExternal is sampled as samplerExternalOES on GLES (including desktop
+        // Mesa). Binding the EGLImage to TEXTURE_2D while the shader samples
+        // EXTERNAL_OES produces garbage / 花屏.
+        //
+        // YUV plane slots (`tex_y`/`tex_u`) are `texture_2d` in the Video widget, so
+        // they must stay on TEXTURE_2D. NVIDIA often rejects DMA-Buf → TEXTURE_2D;
+        // prefer a single DRM_FORMAT_NV12 image on TEXTURE_EXTERNAL_OES instead.
+        let target = if matches!(pixel, TexturePixel::VideoExternal) {
+            gl_sys::TEXTURE_EXTERNAL_OES
+        } else {
+            gl_sys::TEXTURE_2D
+        };
+        while (gl.glGetError)() != 0 {}
+        (gl.glBindTexture)(target, *gl_texture);
         (gl.glTexParameteri)(
-            gl_sys::TEXTURE_2D,
+            target,
             gl_sys::TEXTURE_WRAP_S,
             gl_sys::CLAMP_TO_EDGE as i32,
         );
         (gl.glTexParameteri)(
-            gl_sys::TEXTURE_2D,
+            target,
             gl_sys::TEXTURE_WRAP_T,
             gl_sys::CLAMP_TO_EDGE as i32,
         );
         (gl.glTexParameteri)(
-            gl_sys::TEXTURE_2D,
+            target,
             gl_sys::TEXTURE_MIN_FILTER,
             gl_sys::LINEAR as i32,
         );
         (gl.glTexParameteri)(
-            gl_sys::TEXTURE_2D,
+            target,
             gl_sys::TEXTURE_MAG_FILTER,
             gl_sys::LINEAR as i32,
         );
-        target_tex(gl_sys::TEXTURE_2D, egl_image);
-        (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+        target_tex(target, egl_image);
+        let err = (gl.glGetError)();
+        (gl.glBindTexture)(target, 0);
+        if err != 0 {
+            return false;
+        }
 
         let format = if matches!(pixel, TexturePixel::VideoExternal) {
             crate::texture::TextureFormat::VideoExternal
@@ -2435,12 +3767,23 @@ impl GStreamerVideoPlayer {
             crate::texture::TextureFormat::VideoYuvPlane
         };
         cxtexture.format = format;
-        cxtexture.alloc = Some(TextureAlloc {
-            width,
-            height,
-            pixel,
-            category: TextureCategory::Video,
-        });
+        // Keep pixel-type identity for alloc_video(); dimensions are informational.
+        if matches!(pixel, TexturePixel::VideoExternal) {
+            cxtexture.alloc = Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel,
+                category: TextureCategory::Video,
+            });
+        } else {
+            cxtexture.alloc = Some(TextureAlloc {
+                width,
+                height,
+                pixel,
+                category: TextureCategory::Video,
+            });
+        }
+        true
     }
 
     fn dmabuf_format_from_caps(
@@ -2473,8 +3816,27 @@ impl GStreamerVideoPlayer {
                     format_name = CStr::from_ptr(dptr).to_string_lossy().to_string();
                 }
             }
+            if fourcc == 0 {
+                // Map common GStreamer pixel formats to DRM fourccs when
+                // `drm-format` is absent (typical for vapostproc DMABuf RGBA).
+                fourcc = match format_name.to_ascii_uppercase().as_str() {
+                    "RGBA" | "RGBx" => drm_fourcc(b"AB24"),
+                    "BGRA" | "BGRx" => drm_fourcc(b"AR24"),
+                    "ARGB" => drm_fourcc(b"BA24"),
+                    "NV12" => drm_fourcc(b"NV12"),
+                    _ => 0,
+                };
+            }
+            // vah*dec NV12 DMABuf caps usually omit drm-format. Leave modifier=0
+            // here; the NV12 present path probes VA for the real tiling modifier.
             (fourcc, modifier, format_name)
         }
+    }
+
+    /// Pass modifiers to `eglCreateImage` unless the buffer is explicitly linear.
+    fn dmabuf_should_pass_modifier(modifier: u64) -> bool {
+        const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+        modifier != DRM_FORMAT_MOD_LINEAR
     }
 
     /// Check if this player has reached end of stream (non-looping only).
@@ -2658,6 +4020,13 @@ impl GStreamerVideoPlayer {
         self.caps_profile == VideoCapsProfile::SystemI420 || self.dmabuf_yuv_mode
     }
 
+    /// True while presenting GStreamer GLMemory RGBA as TEXTURE_2D (not OES).
+    pub fn is_gl_memory_rgba(&self) -> bool {
+        self.caps_profile.is_gl_memory()
+            && !self.retained_gl_sample.is_null()
+            && self.gl_memory_tex_2d
+    }
+
     pub fn yuv_biplanar(&self) -> bool {
         self.yuv_biplanar
     }
@@ -2673,6 +4042,7 @@ impl GStreamerVideoPlayer {
             biplanar: self.yuv_biplanar,
             full_range: self.yuv_full_range,
             rotation_steps: 0.0,
+            external: self.yuv_external_oes,
         }
     }
 
@@ -2732,21 +4102,40 @@ impl GStreamerVideoPlayer {
     }
 
     /// Kick playbin back to PLAYING after pause. Never block on `get_state` here:
-    /// we are called from the UI thread (paint / input) and blocking waits can
-    /// deadlock GStreamer's async state machine so resume appears "stuck".
+    /// we are called from the UI thread and blocking waits can deadlock GStreamer's
+    /// async state machine so resume appears "stuck".
     fn request_playing(&mut self) {
         if self.pipeline.is_null() {
             return;
         }
+        let interrupted_pause = self.pending_state_target == GST_STATE_PAUSED;
         self.pending_state_target = GST_STATE_PLAYING;
         self.pending_state_since = Some(Instant::now());
         unsafe {
             let gst = &*self.gst;
             let ret = (gst.gst_element_set_state)(self.pipeline, GST_STATE_PLAYING);
-            if ret != GST_STATE_CHANGE_FAILURE {
+            if ret != GST_STATE_CHANGE_FAILURE && !interrupted_pause {
                 return;
             }
-            crate::log!("VIDEO: PLAYING failed after pause — recovering with in-place seek");
+            // Only recover when PLAYING failed or we interrupted an in-flight
+            // PAUSED transition. Use ACCURATE (not KEY_UNIT) so resume does not
+            // visibly jump backward to the previous keyframe.
+            let mut current: c_uint = 0;
+            let mut pending: c_uint = 0;
+            (gst.gst_element_get_state)(self.pipeline, &mut current, &mut pending, 0);
+            let heading_playing =
+                current == GST_STATE_PLAYING || pending == GST_STATE_PLAYING;
+            if ret != GST_STATE_CHANGE_FAILURE && heading_playing {
+                return;
+            }
+            crate::log!(
+                "VIDEO: PLAYING recover after pause (ret={} current={} pending={})",
+                ret,
+                current,
+                pending
+            );
+            // Unpin keep-alives so the buffer pool can preroll PLAYING.
+            self.release_present_keepalives(gst);
             let pos = if self.resume_position_ns >= 0 {
                 self.resume_position_ns
             } else {
@@ -2756,12 +4145,18 @@ impl GStreamerVideoPlayer {
                 (gst.gst_element_seek_simple)(
                     self.pipeline,
                     GST_FORMAT_TIME,
-                    GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT,
+                    GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE,
                     pos,
                 );
             }
             (gst.gst_element_set_state)(self.pipeline, GST_STATE_PLAYING);
         }
+    }
+
+    /// Unpin present keep-alives so DMA/GL buffer pools can allocate again.
+    unsafe fn release_present_keepalives(&mut self, gst: &LibGStreamer) {
+        self.clear_retained_present_samples(gst);
+        self.release_egl_images();
     }
 
     fn apply_mute_state(&self) {
@@ -2798,18 +4193,20 @@ impl GStreamerVideoPlayer {
             }
 
             // Keep playbin in sync so app-visible volume/mute stay correct.
-            (gst.g_object_set_int)(
-                self.pipeline,
-                mute_prop.as_ptr(),
-                if mute { 1 } else { 0 },
-                std::ptr::null(),
-            );
-            (gst.g_object_set_double)(
-                self.pipeline,
-                vol_prop.as_ptr(),
-                volume,
-                std::ptr::null(),
-            );
+            if self.uses_playbin {
+                (gst.g_object_set_int)(
+                    self.pipeline,
+                    mute_prop.as_ptr(),
+                    if mute { 1 } else { 0 },
+                    std::ptr::null(),
+                );
+                (gst.g_object_set_double)(
+                    self.pipeline,
+                    vol_prop.as_ptr(),
+                    volume,
+                    std::ptr::null(),
+                );
+            }
         }
     }
 
@@ -2821,6 +4218,8 @@ impl GStreamerVideoPlayer {
         self.user_paused = false;
         self.pause_muted = false;
         self.apply_mute_state();
+        // Do not seek on normal resume — KEY_UNIT/soft-pause seek caused a visible
+        // rewind. Pipeline PAUSED→PLAYING continues from the freeze point.
         self.request_playing();
     }
 
@@ -2836,6 +4235,16 @@ impl GStreamerVideoPlayer {
         self.user_paused = true;
         self.pause_muted = true;
         self.apply_mute_state();
+        // Drop the extra present pin so only one sample is held across PAUSED.
+        // Holding current+prev across PAUSED→PLAYING can starve DMA/GL pools and
+        // leave rapid resume unable to preroll.
+        unsafe {
+            let gst = &*self.gst;
+            if !self.retained_gl_sample_prev.is_null() {
+                (gst.gst_mini_object_unref)(self.retained_gl_sample_prev as *mut GstMiniObject);
+                self.retained_gl_sample_prev = std::ptr::null_mut();
+            }
+        }
         self.pending_state_target = GST_STATE_PAUSED;
         self.pending_state_since = Some(Instant::now());
         unsafe {

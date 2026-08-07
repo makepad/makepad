@@ -801,7 +801,8 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             TextureType::TextureDepth => "sampler2D",
             TextureType::TextureDepthArray => "sampler2DArray",
             TextureType::TextureVideo => {
-                if cfg!(target_os = "android") && !self.use_vulkan {
+                // Android SurfaceTexture and Linux DMA-Buf NV12 planes use EXTERNAL_OES.
+                if cfg!(any(target_os = "android", target_os = "linux")) && !self.use_vulkan {
                     "samplerExternalOES"
                 } else {
                     "sampler2D"

@@ -869,7 +869,9 @@ impl Cx {
                                         biplanar: player.yuv_biplanar() > 0.5,
                                         full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
+                                    external: false,
                                     },
+                                rgba_gl_2d: false,
                                 },
                             ));
                         }
@@ -1502,12 +1504,7 @@ impl Cx {
                     );
                     self.os.video_players.insert(video_id, player);
                     // Notify widget so it can bind textures to shader slots
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
-                        video_id,
-                        tex_y,
-                        tex_u,
-                        tex_v,
-                    }));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
                     // Keep timer alive so we can poll for video frames
                     self.ensure_timer0_started();
                 }

@@ -876,12 +876,7 @@ impl WaylandCx {
                             .video_players
                             .insert(video_id, LinuxVideoPlayer::Camera(player));
                         cx.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
@@ -904,12 +899,8 @@ impl WaylandCx {
                             cx.os.video_players.insert(video_id, player);
                             if let Some(yuv) = yuv {
                                 cx.call_event_handler(&Event::VideoYuvTexturesReady(
-                                    VideoYuvTexturesReady {
-                                        video_id,
-                                        tex_y: yuv.tex_y,
-                                        tex_u: yuv.tex_u,
-                                        tex_v: yuv.tex_v,
-                                    },
+                                    VideoYuvTexturesReady::planes(video_id, yuv.tex_y, yuv.tex_u, yuv.tex_v)
+                                        .with_external_opt(yuv.tex_y_oes, yuv.tex_u_oes),
                                 ));
                             }
                         }

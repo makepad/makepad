@@ -31,6 +31,8 @@ pub struct YuvTextureSet {
     pub tex_y: Texture,
     pub tex_u: Texture,
     pub tex_v: Texture,
+    pub tex_y_oes: Option<Texture>,
+    pub tex_u_oes: Option<Texture>,
     pub ids: YuvTextureIds,
 }
 
@@ -41,11 +43,23 @@ impl YuvTextureSet {
                 tex_y_id: tex_y.texture_id(),
                 tex_u_id: tex_u.texture_id(),
                 tex_v_id: tex_v.texture_id(),
+                tex_y_oes_id: None,
+                tex_u_oes_id: None,
             },
             tex_y,
             tex_u,
             tex_v,
+            tex_y_oes: None,
+            tex_u_oes: None,
         }
+    }
+
+    pub fn with_oes(mut self, tex_y_oes: Texture, tex_u_oes: Texture) -> Self {
+        self.ids.tex_y_oes_id = Some(tex_y_oes.texture_id());
+        self.ids.tex_u_oes_id = Some(tex_u_oes.texture_id());
+        self.tex_y_oes = Some(tex_y_oes);
+        self.tex_u_oes = Some(tex_u_oes);
+        self
     }
 }
 
@@ -136,6 +150,10 @@ pub fn prepare_desktop_linux_video(
                 textures.alloc(TextureFormat::VideoYuvPlane),
                 textures.alloc(TextureFormat::VideoYuvPlane),
                 textures.alloc(TextureFormat::VideoYuvPlane),
+            )
+            .with_oes(
+                textures.alloc(TextureFormat::VideoExternal),
+                textures.alloc(TextureFormat::VideoExternal),
             );
             let player = GStreamerVideoPlayer::new(
                 gst,
@@ -419,6 +437,13 @@ impl LinuxVideoPlayer {
         }
     }
 
+    pub fn is_gl_memory_rgba(&self) -> bool {
+        match self {
+            LinuxVideoPlayer::GStreamer { player, .. } => player.is_gl_memory_rgba(),
+            _ => false,
+        }
+    }
+
     pub fn yuv_texture_set(&self) -> Option<&YuvTextureSet> {
         match self {
             LinuxVideoPlayer::GStreamer { yuv: Some(yuv), .. } => Some(yuv),
@@ -445,6 +470,7 @@ impl LinuxVideoPlayer {
                     biplanar: false,
                     full_range: false,
                     rotation_steps: 0.0,
+                external: false,
                 }
             }
             LinuxVideoPlayer::Camera(_) => crate::event::video_playback::VideoYuvMetadata {
@@ -453,6 +479,7 @@ impl LinuxVideoPlayer {
                 biplanar: false,
                 full_range: false,
                 rotation_steps: 0.0,
+            external: false,
             },
         }
     }
@@ -548,6 +575,7 @@ pub fn collect_linux_video_player_events(
             video_id: player.video_id(),
             current_position_ms: player.current_position_ms(),
             yuv: player.yuv_metadata(),
+            rgba_gl_2d: player.is_gl_memory_rgba(),
         }));
     }
     if player.check_eos() {

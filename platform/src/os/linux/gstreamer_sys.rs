@@ -4,7 +4,7 @@
 //! and video playback is gracefully unavailable.
 
 use super::module_loader::ModuleLoader;
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong};
 
 // Opaque GStreamer types
@@ -84,6 +84,16 @@ pub const GST_STREAM_TYPE_TEXT: c_uint = 1 << 4;
 
 // GstMapFlags
 pub const GST_MAP_READ: c_uint = 1 << 0;
+/// Map the GL texture/object instead of system memory (`GST_MAP_FLAG_LAST << 1`).
+pub const GST_MAP_GL: c_uint = 1 << 17;
+
+/// `GstGLTextureTarget` (gstgl_enums.h)
+pub const GST_GL_TEXTURE_TARGET_NONE: c_uint = 0;
+pub const GST_GL_TEXTURE_TARGET_2D: c_uint = 1;
+pub const GST_GL_TEXTURE_TARGET_RECTANGLE: c_uint = 2;
+pub const GST_GL_TEXTURE_TARGET_EXTERNAL_OES: c_uint = 3;
+
+pub type GstGLSyncMeta = c_void;
 
 // GstMapInfo — sized struct we need to pass by pointer
 #[repr(C)]
@@ -140,6 +150,13 @@ pub struct LibGStreamer {
     pub gst_ghost_pad_new:
         Option<unsafe extern "C" fn(*const c_char, *mut GstPad) -> *mut GstPad>,
     pub gst_element_add_pad: Option<unsafe extern "C" fn(*mut GstElement, *mut GstPad) -> c_int>,
+    pub gst_parse_launch:
+        Option<unsafe extern "C" fn(*const c_char, *mut *mut GError) -> *mut GstElement>,
+    pub gst_parse_bin_from_description: Option<
+        unsafe extern "C" fn(*const c_char, c_int, *mut *mut GError) -> *mut GstElement,
+    >,
+    pub gst_bin_get_by_name:
+        Option<unsafe extern "C" fn(*mut GstElement, *const c_char) -> *mut GstElement>,
     pub gst_query_new_seeking: unsafe extern "C" fn(c_int) -> *mut c_void,
     pub gst_query_parse_seeking:
         unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int, *mut i64, *mut i64),
@@ -157,6 +174,7 @@ pub struct LibGStreamer {
         Option<unsafe extern "C" fn(*mut GstMessage, *mut c_int)>,
     pub gst_message_parse_context_type:
         Option<unsafe extern "C" fn(*mut GstMessage, *mut *const c_char)>,
+    pub gst_message_get_src: Option<unsafe extern "C" fn(*mut GstMessage) -> *mut c_void>,
     pub gst_message_parse_stream_collection:
         Option<unsafe extern "C" fn(*mut GstMessage, *mut *mut GstStreamCollection)>,
     pub gst_object_unref: unsafe extern "C" fn(*mut c_void),
@@ -216,13 +234,36 @@ pub struct LibGStreamer {
     // libgstgl-1.0.so.0 (optional)
     pub gst_is_gl_memory: Option<unsafe extern "C" fn(*mut GstMemory) -> c_int>,
     pub gst_gl_memory_get_texture_id: Option<unsafe extern "C" fn(*mut GstMemory) -> u32>,
+    pub gst_gl_memory_get_texture_target: Option<unsafe extern "C" fn(*mut GstMemory) -> c_uint>,
+    pub gst_gl_memory_get_texture_format: Option<unsafe extern "C" fn(*mut GstMemory) -> c_uint>,
+    pub gst_buffer_get_meta: Option<unsafe extern "C" fn(*mut GstBuffer, GType) -> *mut c_void>,
+    pub gst_gl_sync_meta_api_get_type: Option<unsafe extern "C" fn() -> GType>,
+    pub gst_gl_sync_meta_set_sync_point:
+        Option<unsafe extern "C" fn(*mut GstGLSyncMeta, *mut GstGLContext)>,
+    pub gst_gl_sync_meta_wait:
+        Option<unsafe extern "C" fn(*mut GstGLSyncMeta, *mut GstGLContext)>,
+    pub gst_gl_sync_meta_wait_cpu:
+        Option<unsafe extern "C" fn(*mut GstGLSyncMeta, *mut GstGLContext)>,
+    pub gst_gl_context_thread_add: Option<
+        unsafe extern "C" fn(
+            *mut GstGLContext,
+            Option<unsafe extern "C" fn(*mut GstGLContext, *mut c_void)>,
+            *mut c_void,
+        ),
+    >,
     pub gst_gl_display_egl_new_with_egl_display:
+        Option<unsafe extern "C" fn(*mut c_void) -> *mut GstGLDisplay>,
+    pub gst_gl_display_wayland_new_with_display:
         Option<unsafe extern "C" fn(*mut c_void) -> *mut GstGLDisplay>,
     pub gst_gl_context_new_wrapped: Option<
         unsafe extern "C" fn(*mut GstGLDisplay, usize, c_uint, c_uint) -> *mut GstGLContext,
     >,
     pub gst_gl_context_activate: Option<unsafe extern "C" fn(*mut GstGLContext, c_int) -> c_int>,
+    pub gst_gl_context_fill_info:
+        Option<unsafe extern "C" fn(*mut GstGLContext, *mut *mut GError) -> c_int>,
     pub gst_gl_display_filter_gl_api: Option<unsafe extern "C" fn(*mut GstGLDisplay, c_uint)>,
+    pub gst_gl_display_add_context:
+        Option<unsafe extern "C" fn(*mut GstGLDisplay, *mut GstGLContext) -> c_int>,
     pub gst_context_set_gl_display:
         Option<unsafe extern "C" fn(*mut GstContext, *mut GstGLDisplay)>,
     pub gst_gl_context_get_type: Option<unsafe extern "C" fn() -> GType>,
@@ -236,8 +277,10 @@ pub struct LibGStreamer {
         unsafe extern "C" fn(*const c_char, *mut u64) -> u32,
     >,
     pub gst_buffer_get_video_meta: Option<unsafe extern "C" fn(*mut GstBuffer) -> *mut c_void>,
+    /// Fills `plane_height[GST_VIDEO_MAX_PLANES]` (4). GStreamer 1.18+ ABI —
+    /// not `(meta, plane_index, &height)`.
     pub gst_video_meta_get_plane_height:
-        Option<unsafe extern "C" fn(*mut c_void, c_uint, *mut c_uint) -> c_int>,
+        Option<unsafe extern "C" fn(*mut c_void, *mut c_uint) -> c_int>,
 
     // libgobject-2.0.so.0  — variadic, we load it once and cast to different signatures
     pub g_object_set_string:
@@ -258,6 +301,8 @@ pub struct LibGStreamer {
     pub g_list_append: Option<unsafe extern "C" fn(*mut GList, *mut c_void) -> *mut GList>,
     pub g_list_free: Option<unsafe extern "C" fn(*mut GList)>,
     pub g_strcmp0: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> c_int>,
+    pub g_main_context_default: Option<unsafe extern "C" fn() -> *mut c_void>,
+    pub g_main_context_iteration: Option<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>,
 }
 
 impl LibGStreamer {
@@ -288,6 +333,9 @@ impl LibGStreamer {
             gst_element_get_static_pad: gst.get_symbol("gst_element_get_static_pad").ok(),
             gst_ghost_pad_new: gst.get_symbol("gst_ghost_pad_new").ok(),
             gst_element_add_pad: gst.get_symbol("gst_element_add_pad").ok(),
+            gst_parse_launch: gst.get_symbol("gst_parse_launch").ok(),
+            gst_parse_bin_from_description: gst.get_symbol("gst_parse_bin_from_description").ok(),
+            gst_bin_get_by_name: gst.get_symbol("gst_bin_get_by_name").ok(),
             gst_query_new_seeking: gst.get_symbol("gst_query_new_seeking").ok()?,
             gst_query_parse_seeking: gst.get_symbol("gst_query_parse_seeking").ok()?,
             gst_query_new_buffering: gst.get_symbol("gst_query_new_buffering").ok()?,
@@ -303,6 +351,7 @@ impl LibGStreamer {
             gst_message_parse_warning: gst.get_symbol("gst_message_parse_warning").ok()?,
             gst_message_parse_buffering: gst.get_symbol("gst_message_parse_buffering").ok(),
             gst_message_parse_context_type: gst.get_symbol("gst_message_parse_context_type").ok(),
+            gst_message_get_src: gst.get_symbol("gst_message_get_src").ok(),
             gst_message_parse_stream_collection: gst
                 .get_symbol("gst_message_parse_stream_collection")
                 .ok(),
@@ -350,18 +399,49 @@ impl LibGStreamer {
             gst_gl_memory_get_texture_id: gstgl
                 .as_ref()
                 .and_then(|m| m.get_symbol("gst_gl_memory_get_texture_id").ok()),
+            gst_gl_memory_get_texture_target: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_memory_get_texture_target").ok()),
+            gst_gl_memory_get_texture_format: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_memory_get_texture_format").ok()),
+            gst_buffer_get_meta: gst.get_symbol("gst_buffer_get_meta").ok(),
+            gst_gl_sync_meta_api_get_type: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_sync_meta_api_get_type").ok()),
+            gst_gl_sync_meta_set_sync_point: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_sync_meta_set_sync_point").ok()),
+            gst_gl_sync_meta_wait: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_sync_meta_wait").ok()),
+            gst_gl_sync_meta_wait_cpu: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_sync_meta_wait_cpu").ok()),
+            gst_gl_context_thread_add: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_context_thread_add").ok()),
             gst_gl_display_egl_new_with_egl_display: gstgl
                 .as_ref()
                 .and_then(|m| m.get_symbol("gst_gl_display_egl_new_with_egl_display").ok()),
+            gst_gl_display_wayland_new_with_display: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_display_wayland_new_with_display").ok()),
             gst_gl_context_new_wrapped: gstgl
                 .as_ref()
                 .and_then(|m| m.get_symbol("gst_gl_context_new_wrapped").ok()),
             gst_gl_context_activate: gstgl
                 .as_ref()
                 .and_then(|m| m.get_symbol("gst_gl_context_activate").ok()),
+            gst_gl_context_fill_info: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_context_fill_info").ok()),
             gst_gl_display_filter_gl_api: gstgl
                 .as_ref()
                 .and_then(|m| m.get_symbol("gst_gl_display_filter_gl_api").ok()),
+            gst_gl_display_add_context: gstgl
+                .as_ref()
+                .and_then(|m| m.get_symbol("gst_gl_display_add_context").ok()),
             gst_context_set_gl_display: gstgl
                 .as_ref()
                 .and_then(|m| m.get_symbol("gst_context_set_gl_display").ok()),
@@ -399,6 +479,8 @@ impl LibGStreamer {
             g_list_append: glib.get_symbol("g_list_append").ok(),
             g_list_free: glib.get_symbol("g_list_free").ok(),
             g_strcmp0: glib.get_symbol("g_strcmp0").ok(),
+            g_main_context_default: glib.get_symbol("g_main_context_default").ok(),
+            g_main_context_iteration: glib.get_symbol("g_main_context_iteration").ok(),
 
             _gst: gst,
             _gstapp: gstapp,
@@ -411,10 +493,54 @@ impl LibGStreamer {
     }
 
     pub fn init(&self) {
+        // nvidia-vaapi-driver is not in gstreamer-vaapi's default allow-list; without
+        // this the `vaapi` plugin loads with 0 features (no vaapih264dec / vaapipostproc).
+        // Users can still override by exporting GST_VAAPI_ALL_DRIVERS=0 before launch.
+        if std::env::var_os("GST_VAAPI_ALL_DRIVERS").is_none() {
+            std::env::set_var("GST_VAAPI_ALL_DRIVERS", "1");
+        }
+        if std::env::var_os("LIBVA_DRIVER_NAME").is_none() {
+            // Prefer NVIDIA VA when the proprietary driver + nvidia-vaapi are installed.
+            // Harmless on Intel-only machines if nvidia_drv_video.so is absent (libva falls back).
+            if std::path::Path::new("/usr/lib/x86_64-linux-gnu/dri/nvidia_drv_video.so").exists()
+                || std::path::Path::new("/usr/local/lib/dri/nvidia_drv_video.so").exists()
+            {
+                std::env::set_var("LIBVA_DRIVER_NAME", "nvidia");
+                if std::env::var_os("NVD_BACKEND").is_none() {
+                    std::env::set_var("NVD_BACKEND", "direct");
+                }
+            }
+        }
+        // Prefer modern `va` decoders over software/legacy (see bump_va_decoder_ranks).
+        // Numeric ranks beat `avdec_*` PRIMARY so decodebin actually picks NVDEC/VA.
+        std::env::set_var(
+            "GST_PLUGIN_FEATURE_RANK",
+            "vah264dec:320,vah265dec:320,vavp9dec:320,vavp8dec:320,vaav1dec:320,\
+             vapostproc:320,vaapipostproc:256,\
+             vaapih264dec:0,vaapih265dec:0,vaapidecodebin:0,\
+             avdec_h264:0,avdec_h265:0,avdec_hev1:0",
+        );
         unsafe {
             (self.gst_init)(std::ptr::null_mut(), std::ptr::null_mut());
         }
         super::gst_gl_share::bump_va_decoder_ranks(self);
+    }
+
+    /// Drive the default GLib main context so GStreamer can finish async work
+    /// when the app does not run a global `g_main_loop`.
+    pub fn pump_default_main_context(&self) {
+        let (Some(default_ctx), Some(iterate)) =
+            (self.g_main_context_default, self.g_main_context_iteration)
+        else {
+            return;
+        };
+        unsafe {
+            let ctx = default_ctx();
+            if ctx.is_null() {
+                return;
+            }
+            while iterate(ctx, 0) != 0 {}
+        }
     }
 
     pub fn has_gl_share_support(&self) -> bool {
@@ -425,7 +551,76 @@ impl LibGStreamer {
     }
 
     pub fn has_dmabuf_support(&self) -> bool {
-        self.gst_is_dmabuf_memory.is_some() && self.gst_dmabuf_memory_get_fd.is_some()
+        // DMA-Buf can come from `vapostproc` (Intel) *or* directly from modern
+        // `vah*dec` (NVIDIA nvidia-vaapi). Do not require `vaapipostproc` — on
+        // NVIDIA it cannot export `memory:DMABuf`.
+        self.gst_is_dmabuf_memory.is_some()
+            && self.gst_dmabuf_memory_get_fd.is_some()
+            && self.has_hardware_dmabuf_decoder()
+    }
+
+    /// `vapostproc` (gst `va` plugin) can usually export DMA-Buf RGBA on Intel/AMD.
+    /// Legacy `vaapipostproc` on nvidia-vaapi typically cannot — do not treat it as enough.
+    pub fn has_modern_va_postproc(&self) -> bool {
+        self.has_element("vapostproc")
+    }
+
+    /// True when any VA postprocessor element exists (modern or legacy).
+    pub fn has_va_postproc(&self) -> bool {
+        self.has_element("vapostproc") || self.has_element("vaapipostproc")
+    }
+
+    pub fn has_element(&self, name: &str) -> bool {
+        let Ok(cname) = CString::new(name) else {
+            return false;
+        };
+        unsafe {
+            let el = (self.gst_element_factory_make)(cname.as_ptr(), std::ptr::null());
+            if el.is_null() {
+                false
+            } else {
+                (self.gst_object_unref)(el as *mut c_void);
+                true
+            }
+        }
+    }
+
+    /// True when a decoder that can output DMA-Buf memory is registered.
+    pub fn has_hardware_dmabuf_decoder(&self) -> bool {
+        let (Some(get_registry), Some(lookup)) =
+            (self.gst_registry_get, self.gst_registry_lookup_feature)
+        else {
+            return false;
+        };
+        unsafe {
+            let registry = get_registry();
+            if registry.is_null() {
+                return false;
+            }
+            for name in [
+                "vah264dec",
+                "vah265dec",
+                "vavp9dec",
+                "vavp8dec",
+                "vaav1dec",
+                "vaapih264dec",
+                "vaapih265dec",
+                "vaapivp8dec",
+                "vaapivp9dec",
+                "nvh264dec",
+                "nvh265dec",
+                "nvdec",
+                "nvv4l2decoder",
+            ] {
+                let cname = CString::new(name).unwrap();
+                let feature = lookup(registry, cname.as_ptr());
+                if !feature.is_null() {
+                    (self.gst_object_unref)(feature as *mut c_void);
+                    return true;
+                }
+            }
+            false
+        }
     }
 }
 
