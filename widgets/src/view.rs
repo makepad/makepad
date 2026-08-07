@@ -788,8 +788,31 @@ impl Widget for View {
             return;
         };
 
-        if call.method() == id!(render) && !result.is_err() {
+        if call.method() == id!(render) {
+            if result.is_err() {
+                // An error mid-closure abandons every child emitted before it
+                // and used to do so with ZERO diagnostics — the "on_render
+                // silently renders nothing" family cost days to bisect. Say
+                // what happened.
+                let msg = vm.bx.heap.temp_string_with(|heap, out| {
+                    heap.cast_to_string(result, out);
+                    out.to_string()
+                });
+                error!("on_render closure failed; discarding its output: {msg}");
+                return;
+            }
             if let Some(me_obj) = call.me().as_object() {
+                // The closure's FINAL statement becomes its return value (the
+                // parser converts the last commit into a RETURN), so a widget
+                // emitted last would otherwise vanish. Commit it as the last
+                // child; non-widget values are skipped downstream anyway.
+                if let Some(ret_obj) = result.as_object() {
+                    if ret_obj != me_obj {
+                        // Unchecked: `me` is this render's own throwaway
+                        // object (make_render_me), never frozen.
+                        vm.bx.heap.vec_push_unchecked(me_obj, NIL, result);
+                    }
+                }
                 // `#[source]` is reassigned by any non-eval script apply, so this Reload
                 // would leave `source` pointing at `me`. Keep it on the declaration object:
                 // the next `make_render_me` protos off it (see there), and `me` is a
