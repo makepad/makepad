@@ -23,7 +23,7 @@
 //! |----------|----------------|
 //! | Windows  | [`Cx::d3d11_device`], [`Texture::adopt_d3d11_bgra`], [`Texture::adopt_d3d11_plane`] |
 //! | Android  | [`Cx::with_gl`], [`Texture::adopt_oes_texture`], [`Texture::adopt_gl_texture_2d`] |
-//! | Linux    | [`Cx::with_gl`], [`Texture::adopt_gl_texture_2d`], [`Texture::adopt_gl_video_external`], [`Texture::adopt_gl_r8_plane`], [`Texture::adopt_gl_rg8_plane`] |
+//! | Linux    | [`Cx::with_gl`], [`Texture::adopt_gl_texture_2d`], [`Texture::adopt_gl_video_external`], [`Texture::adopt_gl_r8_plane`], [`Texture::adopt_gl_rg8_plane`], [`crate::os::linux::linux_video_gpu`] (DMA-Buf NV12 / GLMemory) |
 //! | macOS/iOS | [`Cx::metal_device`], [`Texture::adopt_metal_r8_plane`], [`Texture::adopt_metal_rg8_plane`], [`adopt_metal_nv12_biplanar`] |
 //!
 //! Other platforms can be added later; unsupported targets compile these
@@ -1145,6 +1145,13 @@ mod linux_api {
         Ok(())
     }
 }
+
+#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+pub use crate::os::linux::linux_video_gpu::{
+    present_dmabuf_nv12, present_gl_memory_rgba, LinuxDmabufNv12Frame, LinuxDmabufPlane,
+    LinuxDmabufPresentCache, LinuxGlMemoryPresentCache, LinuxGlMemoryRgbaFrame,
+    LinuxGlTextureTarget, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_NV12, DRM_FORMAT_R8, DRM_FORMAT_RG88,
+};
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple_api {

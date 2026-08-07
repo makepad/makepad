@@ -5,6 +5,10 @@ use {
     super::gl_sys::LibGl,
     super::gl_video_upload::upload_yuv_to_gl,
     super::gstreamer_sys::LibGStreamer,
+    super::linux_video_gpu::{
+        present_dmabuf_nv12, present_gl_memory_rgba, LinuxDmabufPresentCache,
+        LinuxGlMemoryPresentCache, LinuxGlTextureTarget,
+    },
     super::linux_video_playback::{
         poll_pending_gstreamer_teardowns, GStreamerVideoPlayer, GstRuntimeEvent, YuvTextureIds,
     },
@@ -188,10 +192,16 @@ pub fn prepare_desktop_linux_video(
     }
 
     if use_software {
+        // Allocate OES Y/UV slots so MediaPlugin DMA-Buf NV12 zero-copy can present
+        // without a reopen (same layout as the GStreamer path).
         let yuv = YuvTextureSet::new(
             textures.alloc(TextureFormat::VideoYuvPlane),
             textures.alloc(TextureFormat::VideoYuvPlane),
             textures.alloc(TextureFormat::VideoYuvPlane),
+        )
+        .with_oes(
+            textures.alloc(TextureFormat::VideoExternal),
+            textures.alloc(TextureFormat::VideoExternal),
         );
         let player = PlaybackSessionHandle::new(
             video_id,
@@ -204,7 +214,13 @@ pub fn prepare_desktop_linux_video(
             player: LinuxVideoPlayer::Software {
                 player,
                 yuv: yuv.clone(),
+                texture_id,
                 yuv_matrix: 0.0,
+                yuv_biplanar: false,
+                yuv_external: false,
+                rgba_gl_2d: false,
+                dmabuf_cache: LinuxDmabufPresentCache::default(),
+                gl_memory_cache: LinuxGlMemoryPresentCache::default(),
             },
             yuv: Some(yuv),
         };
@@ -221,7 +237,14 @@ pub enum LinuxVideoPlayer {
     Software {
         player: PlaybackSessionHandle,
         yuv: YuvTextureSet,
+        /// Main `Video` texture (RGBA / GLMemory adopt target).
+        texture_id: TextureId,
         yuv_matrix: f32,
+        yuv_biplanar: bool,
+        yuv_external: bool,
+        rgba_gl_2d: bool,
+        dmabuf_cache: LinuxDmabufPresentCache,
+        gl_memory_cache: LinuxGlMemoryPresentCache,
     },
     Camera(V4l2CameraPlayer),
 }
@@ -256,13 +279,71 @@ impl LinuxVideoPlayer {
             LinuxVideoPlayer::Software {
                 player: p,
                 yuv,
+                texture_id,
                 yuv_matrix,
+                yuv_biplanar,
+                yuv_external,
+                rgba_gl_2d,
+                dmabuf_cache,
+                gl_memory_cache,
             } => {
                 if !p.poll_frame() {
                     return false;
                 }
+
+                // Prefer DMA-Buf NV12 zero-copy when the MediaPlugin supplies it.
+                if let (Some(y_oes), Some(u_oes), Some(cx)) = (
+                    yuv.ids.tex_y_oes_id,
+                    yuv.ids.tex_u_oes_id,
+                    opengl_cx,
+                ) {
+                    if let Some(gpu) = p.take_linux_dmabuf_nv12_frame() {
+                        match present_dmabuf_nv12(
+                            cx,
+                            gl,
+                            textures,
+                            y_oes,
+                            u_oes,
+                            &gpu,
+                            dmabuf_cache,
+                        ) {
+                            Ok(()) => {
+                                *yuv_matrix = gpu.matrix.as_f32();
+                                *yuv_biplanar = true;
+                                *yuv_external = true;
+                                *rgba_gl_2d = false;
+                                return true;
+                            }
+                            Err(err) => {
+                                crate::error!("VIDEO: MediaPlugin DMA-Buf NV12 present failed: {err}");
+                            }
+                        }
+                    }
+                }
+
+                // GStreamer GLMemory / share-group RGBA texture.
+                if let Some(gpu) = p.take_linux_gl_memory_rgba_frame() {
+                    match present_gl_memory_rgba(gl, textures, *texture_id, &gpu, gl_memory_cache)
+                    {
+                        Ok(()) => {
+                            *yuv_external = false;
+                            *yuv_biplanar = false;
+                            *rgba_gl_2d = matches!(gpu.target, LinuxGlTextureTarget::Texture2D);
+                            // YUV disabled — RGBA external path.
+                            *yuv_matrix = 0.0;
+                            return true;
+                        }
+                        Err(err) => {
+                            crate::error!("VIDEO: MediaPlugin GLMemory present failed: {err}");
+                        }
+                    }
+                }
+
                 if let Some(planes) = p.take_yuv_frame() {
                     *yuv_matrix = planes.matrix.as_f32();
+                    *yuv_biplanar = false;
+                    *yuv_external = false;
+                    *rgba_gl_2d = false;
                     upload_yuv_to_gl(
                         gl,
                         textures,
@@ -432,7 +513,10 @@ impl LinuxVideoPlayer {
     pub fn is_yuv_mode(&self) -> bool {
         match self {
             LinuxVideoPlayer::GStreamer { player, .. } => player.is_yuv_mode(),
-            LinuxVideoPlayer::Software { .. } => true,
+            LinuxVideoPlayer::Software {
+                rgba_gl_2d,
+                ..
+            } => !*rgba_gl_2d,
             LinuxVideoPlayer::Camera(_) => true,
         }
     }
@@ -440,6 +524,7 @@ impl LinuxVideoPlayer {
     pub fn is_gl_memory_rgba(&self) -> bool {
         match self {
             LinuxVideoPlayer::GStreamer { player, .. } => player.is_gl_memory_rgba(),
+            LinuxVideoPlayer::Software { rgba_gl_2d, .. } => *rgba_gl_2d,
             _ => false,
         }
     }
@@ -463,14 +548,24 @@ impl LinuxVideoPlayer {
     pub fn yuv_metadata(&self) -> crate::event::video_playback::VideoYuvMetadata {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.yuv_metadata(),
-            LinuxVideoPlayer::Software { yuv_matrix, .. } => {
-                crate::event::video_playback::VideoYuvMetadata {
-                    enabled: true,
-                    matrix: *yuv_matrix,
-                    biplanar: false,
-                    full_range: false,
-                    rotation_steps: 0.0,
-                external: false,
+            LinuxVideoPlayer::Software {
+                yuv_matrix,
+                yuv_biplanar,
+                yuv_external,
+                rgba_gl_2d,
+                ..
+            } => {
+                if *rgba_gl_2d {
+                    crate::event::video_playback::VideoYuvMetadata::disabled()
+                } else {
+                    crate::event::video_playback::VideoYuvMetadata {
+                        enabled: true,
+                        matrix: *yuv_matrix,
+                        biplanar: *yuv_biplanar,
+                        full_range: false,
+                        rotation_steps: 0.0,
+                        external: *yuv_external,
+                    }
                 }
             }
             LinuxVideoPlayer::Camera(_) => crate::event::video_playback::VideoYuvMetadata {
@@ -479,7 +574,7 @@ impl LinuxVideoPlayer {
                 biplanar: false,
                 full_range: false,
                 rotation_steps: 0.0,
-            external: false,
+                external: false,
             },
         }
     }

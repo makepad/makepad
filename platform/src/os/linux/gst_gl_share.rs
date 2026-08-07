@@ -397,3 +397,57 @@ pub fn bump_va_decoder_ranks(gst: &LibGStreamer) {
         }
     }
 }
+
+/// App / MediaPlugin helpers for wiring custom GStreamer GLMemory pipelines into
+/// Makepad's EGL share group (same sibling-context approach as the platform player).
+impl crate::Cx {
+    /// Load GStreamer into `CxOs` if needed and create a [`GstGlShare`] for the
+    /// current Makepad EGL context.
+    ///
+    /// Use the returned share to answer `gst.gl.GLDisplay` / `gst.gl.app_context`
+    /// `NEED_CONTEXT` messages and to release Makepad's current context around
+    /// `gst_gl_context_thread_add` + `GST_MAP_GL` (see platform GStreamer player).
+    ///
+    /// Returns `None` when GStreamer is missing, EGL is not ready, or share-group
+    /// setup fails.
+    pub fn create_gst_gl_share(&mut self) -> Option<GstGlShare> {
+        if self.os.gstreamer.is_none() {
+            match LibGStreamer::try_load() {
+                Some(gst) => {
+                    gst.init();
+                    bump_va_decoder_ranks(&gst);
+                    self.os.gstreamer = Some(gst);
+                }
+                None => {
+                    crate::log!("VIDEO: create_gst_gl_share — GStreamer unavailable");
+                    return None;
+                }
+            }
+        }
+        let gst = self.os.gstreamer.as_ref()?;
+        let opengl_cx = self.os.opengl_cx.as_ref()?;
+        GstGlShare::try_new(gst, opengl_cx)
+    }
+
+    /// Borrow the process-wide [`LibGStreamer`] loaded into `CxOs`, if any.
+    pub fn gstreamer_lib(&self) -> Option<&LibGStreamer> {
+        self.os.gstreamer.as_ref()
+    }
+
+    /// Ensure GStreamer is loaded into `CxOs` (idempotent). Returns `false` if
+    /// dynamic load fails.
+    pub fn ensure_gstreamer(&mut self) -> bool {
+        if self.os.gstreamer.is_some() {
+            return true;
+        }
+        match LibGStreamer::try_load() {
+            Some(gst) => {
+                gst.init();
+                bump_va_decoder_ranks(&gst);
+                self.os.gstreamer = Some(gst);
+                true
+            }
+            None => false,
+        }
+    }
+}

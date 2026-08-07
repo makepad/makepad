@@ -80,6 +80,24 @@ impl PlaybackSessionHandle {
             .and_then(|p| p.take_metal_nv12_frame())
     }
 
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    pub fn take_linux_dmabuf_nv12_frame(
+        &mut self,
+    ) -> Option<crate::os::linux::linux_video_gpu::LinuxDmabufNv12Frame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_linux_dmabuf_nv12_frame())
+    }
+
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    pub fn take_linux_gl_memory_rgba_frame(
+        &mut self,
+    ) -> Option<crate::os::linux::linux_video_gpu::LinuxGlMemoryRgbaFrame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_linux_gl_memory_rgba_frame())
+    }
+
     pub fn check_eos(&mut self) -> bool {
         self.inner.as_mut().map(|p| p.check_eos()).unwrap_or(false)
     }
