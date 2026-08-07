@@ -129,38 +129,40 @@ fn if_else_followed_by_more_statements() {
 #[test]
 fn elif_chain_values() {
     let vm = &mut test_vm();
-    // Results read through `let out = r` — a bare ident line straight after a
-    // `}`-ending line is consumed by a separate, pre-existing do-call glue
-    // quirk that is out of this fix's scope.
+    // Results read through `echo(r)` — a call closes cleanly as the final
+    // statement. A bare ident there is consumed by a pre-existing do-call
+    // glue quirk, and `let out = r\nout` only ever worked because auto_close
+    // used to DROP the trailing let (fixed now: the let binds, so the idiom
+    // returns nil).
     for (name, code, expect) in [
         (
             "t_t",
-            "let r = 0\nif true { r = 1 } elif true { r = 2 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nif true { r = 1 } elif true { r = 2 }\necho(r)",
             1.0,
         ),
         (
             "f_t",
-            "let r = 0\nif false { r = 1 } elif true { r = 2 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nif false { r = 1 } elif true { r = 2 }\necho(r)",
             2.0,
         ),
         (
             "f_f",
-            "let r = 0\nif false { r = 1 } elif false { r = 2 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nif false { r = 1 } elif false { r = 2 }\necho(r)",
             0.0,
         ),
         (
             "f_t_else",
-            "let r = 0\nif false { r = 1 } elif true { r = 2 } else { r = 3 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nif false { r = 1 } elif true { r = 2 } else { r = 3 }\necho(r)",
             2.0,
         ),
         (
             "f_f_else",
-            "let r = 0\nif false { r = 1 } elif false { r = 2 } else { r = 3 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nif false { r = 1 } elif false { r = 2 } else { r = 3 }\necho(r)",
             3.0,
         ),
         (
             "chain",
-            "let r = 0\nif false { r = 1 } elif false { r = 2 } elif true { r = 3 } else { r = 4 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nif false { r = 1 } elif false { r = 2 } elif true { r = 3 } else { r = 4 }\necho(r)",
             3.0,
         ),
     ] {
@@ -175,7 +177,7 @@ fn elif_as_expression_value() {
     let v = eval_str(
         vm,
         "elif_expr",
-        "let x = if false { 1 } elif true { 2 } else { 3 }\nx",
+        "fn echo(v){ v }\nlet x = if false { 1 } elif true { 2 } else { 3 }\necho(x)",
     );
     assert_eq!(v.as_number(), Some(2.0), "got {v:?}");
 }
@@ -273,11 +275,11 @@ fn for_in_non_iterable_errors() {
     for (name, code) in [
         (
             "for_string",
-            "let r = 0\nfor x in \"abc\" { r = 1 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nfor x in \"abc\" { r = 1 }\necho(r)",
         ),
         (
             "for_bool",
-            "let r = 0\nfor x in true { r = 1 }\nlet out = r\nout",
+            "fn echo(x){ x }\nlet r = 0\nfor x in true { r = 1 }\necho(r)",
         ),
     ] {
         // The error is reported through the trap (the loop body is skipped
@@ -299,19 +301,19 @@ fn for_in_nil_and_empty_are_silent() {
     let v = eval_str(
         vm,
         "for_nil",
-        "let r = 0\nfor x in nil { r = 1 }\nlet out = r\nout",
+        "fn echo(x){ x }\nlet r = 0\nfor x in nil { r = 1 }\necho(r)",
     );
     assert_eq!(v.as_number(), Some(0.0), "nil: got {v:?}");
     let v = eval_str(
         vm,
         "for_empty",
-        "let r = 0\nlet xs = []\nfor x in xs { r = 1 }\nlet out = r\nout",
+        "fn echo(x){ x }\nlet r = 0\nlet xs = []\nfor x in xs { r = 1 }\necho(r)",
     );
     assert_eq!(v.as_number(), Some(0.0), "empty: got {v:?}");
     let v = eval_str(
         vm,
         "for_zero",
-        "let r = 0\nfor x in 0 { r = 1 }\nlet out = r\nout",
+        "fn echo(x){ x }\nlet r = 0\nfor x in 0 { r = 1 }\necho(r)",
     );
     assert_eq!(v.as_number(), Some(0.0), "zero count: got {v:?}");
 }
@@ -324,13 +326,13 @@ fn for_two_vars_over_number_binds_index_and_value() {
     let v = eval_str(
         vm,
         "for_kv_num",
-        "let xs = []\nfor k v in 3 { xs.push(k) xs.push(v) }\nlet out = xs.len()\nout",
+        "fn echo(x){ x }\nlet xs = []\nfor k v in 3 { xs.push(k) xs.push(v) }\necho(xs.len())",
     );
     assert_eq!(v.as_number(), Some(6.0), "got {v:?}");
     let v = eval_str(
         vm,
         "for_kv_num_sum",
-        "let s = 0\nfor k v in 3 { s = s * 10 + k }\nlet out = s\nout",
+        "fn echo(x){ x }\nlet s = 0\nfor k v in 3 { s = s * 10 + k }\necho(s)",
     );
     assert_eq!(v.as_number(), Some(12.0), "keys should be 0,1,2: got {v:?}");
 }
@@ -361,13 +363,13 @@ fn same_line_proto_instantiation_still_works() {
     let v = eval_str(
         vm,
         "same_line_proto",
-        "let p = {a: 1}\nlet q = p{b: 2}\nlet out = q.b\nout",
+        "fn echo(x){ x }\nlet p = {a: 1}\nlet q = p{b: 2}\necho(q.b)",
     );
     assert_eq!(v.as_number(), Some(2.0), "got {v:?}");
     let v = eval_str(
         vm,
         "proto_field",
-        "let p = {a: 1}\nlet q = p{b: 2}\nlet out = q.a\nout",
+        "fn echo(x){ x }\nlet p = {a: 1}\nlet q = p{b: 2}\necho(q.a)",
     );
     assert_eq!(v.as_number(), Some(1.0), "proto chain: got {v:?}");
 }

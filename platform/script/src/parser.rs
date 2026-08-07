@@ -4143,6 +4143,7 @@ impl ScriptParser {
 
         // Auto-close any unclosed proto/object states left on the stack
         // This happens when input is truncated mid-object (e.g. streaming)
+        let mut let_closed = false;
         let last_index = self.index.saturating_sub(1);
         // set_pop_to_me() reads self.index for source map entries, so point it
         // at the last valid token rather than one-past-end.
@@ -4169,7 +4170,13 @@ impl ScriptParser {
                     self.push_code(Opcode::INDEX_INHERIT_WRITE.into(), last_index);
                 }
                 State::EndStmt { .. } => {
-                    self.set_pop_to_me();
+                    // The EndStmt of an auto-closed `let` must NOT mark a
+                    // statement value: LET consumed it, the final RETURN
+                    // would pop an empty stack.
+                    if !let_closed {
+                        self.set_pop_to_me();
+                    }
+                    let_closed = false;
                 }
                 State::EmitOp { what_op, index } => {
                     self.push_code(State::operator_to_opcode(what_op), index);
@@ -4192,6 +4199,49 @@ impl ScriptParser {
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
                     self.last_jump_target = self.code_len();
+                }
+                // A fn/lambda body still open at end of source: close it the
+                // same way the live states do — without this, the body's
+                // jump-over stays 0 (FN_BODY_DYN re-runs, finds its me gone,
+                // and execution FALLS INTO the body at definition time) and
+                // any pending `let` below never binds.
+                State::EndFnExpr { fn_slot, index } => {
+                    self.push_code(Opcode::RETURN.into(), index);
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EndFnBlock {
+                    fn_slot,
+                    last_was_sep,
+                    index,
+                } => {
+                    if !last_was_sep && self.has_pop_to_me() {
+                        self.clear_pop_to_me();
+                        self.push_code(Opcode::RETURN.into(), index);
+                    } else {
+                        self.push_code(
+                            ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
+                            index,
+                        );
+                    }
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EmitLetDyn { index } => {
+                    self.push_code(Opcode::LET_DYN.into(), index);
+                    // A let statement leaves no value: without this, the
+                    // trailing RETURN pops the value LET just consumed.
+                    self.clear_pop_to_me();
+                    let_closed = true;
+                }
+                State::EmitLetTyped { index } => {
+                    self.push_code(Opcode::LET_TYPED.into(), index);
+                    self.clear_pop_to_me();
+                    let_closed = true;
                 }
                 _ => {
                     // Other states (EndExpr, BeginStmt, etc.) - just drop them
@@ -4351,6 +4401,7 @@ impl ScriptParser {
         // Use the last consumed token index for synthetic auto-close source map entries,
         // same as the regular parse() method. Clamp to max_token_index for safety.
         let last_index = self.index.saturating_sub(1).min(max_token_index);
+        let mut let_closed = false;
         // set_pop_to_me() reads self.index for source map entries, so point it
         // at the last valid token rather than one-past-end.
         self.index = last_index;
@@ -4376,7 +4427,13 @@ impl ScriptParser {
                     self.push_code(Opcode::INDEX_INHERIT_WRITE.into(), last_index);
                 }
                 State::EndStmt { .. } => {
-                    self.set_pop_to_me();
+                    // The EndStmt of an auto-closed `let` must NOT mark a
+                    // statement value: LET consumed it, the final RETURN
+                    // would pop an empty stack.
+                    if !let_closed {
+                        self.set_pop_to_me();
+                    }
+                    let_closed = false;
                 }
                 State::EmitOp { what_op, index } => {
                     self.push_code(State::operator_to_opcode(what_op), index);
@@ -4400,6 +4457,49 @@ impl ScriptParser {
                     // taken test doesn't land on a stale zero offset.
                     self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
                     self.last_jump_target = self.code_len();
+                }
+                // A fn/lambda body still open at end of source: close it the
+                // same way the live states do — without this, the body's
+                // jump-over stays 0 (FN_BODY_DYN re-runs, finds its me gone,
+                // and execution FALLS INTO the body at definition time) and
+                // any pending `let` below never binds.
+                State::EndFnExpr { fn_slot, index } => {
+                    self.push_code(Opcode::RETURN.into(), index);
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EndFnBlock {
+                    fn_slot,
+                    last_was_sep,
+                    index,
+                } => {
+                    if !last_was_sep && self.has_pop_to_me() {
+                        self.clear_pop_to_me();
+                        self.push_code(Opcode::RETURN.into(), index);
+                    } else {
+                        self.push_code(
+                            ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
+                            index,
+                        );
+                    }
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EmitLetDyn { index } => {
+                    self.push_code(Opcode::LET_DYN.into(), index);
+                    // A let statement leaves no value: without this, the
+                    // trailing RETURN pops the value LET just consumed.
+                    self.clear_pop_to_me();
+                    let_closed = true;
+                }
+                State::EmitLetTyped { index } => {
+                    self.push_code(Opcode::LET_TYPED.into(), index);
+                    self.clear_pop_to_me();
+                    let_closed = true;
                 }
                 _ => {}
             }
