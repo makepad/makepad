@@ -211,6 +211,7 @@ impl Cx {
                     let mut players = std::mem::take(&mut self.os.video_players);
                     let mut video_events = Vec::new();
                     for (_id, player) in players.iter_mut() {
+                        player.sync_worker();
                         match player.check_prepared() {
                             Some(Ok(crate::media_plugin::PlaybackPrepared {
                                 width,
@@ -248,12 +249,13 @@ impl Cx {
                                     video_id: player.video_id,
                                     current_position_ms: player.current_position_ms(),
                                     yuv: crate::event::video_playback::VideoYuvMetadata {
-                                        enabled: player.is_software_mode(),
+                                        enabled: player.uses_yuv(),
                                         matrix: player.yuv_matrix(),
                                         biplanar: player.yuv_biplanar(),
-                                        full_range: false,
+                                        full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
-                                    external: false,
+                                        external: false,
+                                        array: player.yuv_array(),
                                     },
                                 rgba_gl_2d: false,
                                 },

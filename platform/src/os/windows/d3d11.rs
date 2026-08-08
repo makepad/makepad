@@ -94,7 +94,11 @@ use crate::{
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
-            System::Threading::WaitForSingleObject,
+            System::{
+                Com::CoTaskMemFree,
+                Threading::WaitForSingleObject,
+            },
+            UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
         },
     },
 };
@@ -2248,10 +2252,6 @@ impl DrawVars {
 
 fn shader_cache_dir() -> Option<&'static std::path::Path> {
     use std::sync::OnceLock;
-    use windows::Win32::{
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT},
-    };
 
     static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {

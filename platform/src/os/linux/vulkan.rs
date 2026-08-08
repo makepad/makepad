@@ -4905,6 +4905,7 @@ impl CxVulkan {
                 full_range: false,
                 rotation_steps: 0.0,
             external: false,
+            array: false,
             });
         }
 
@@ -5158,6 +5159,7 @@ impl CxVulkan {
             full_range: false,
             rotation_steps: 0.0,
         external: false,
+        array: false,
         })
     }
 

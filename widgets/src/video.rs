@@ -29,17 +29,23 @@ script_mod! {
             tex_u: texture_2d(float)
             tex_v: texture_2d(float)
             // Linux DMA-Buf NV12: planes bound as TEXTURE_EXTERNAL_OES (NVIDIA rejects
-            // plane→TEXTURE_2D). Selected when yuv_external > 0.5.
+            // plane→TEXTURE_2D). Selected when yuv_sample_mode ≈ 1.
             tex_y_oes: texture_video()
             tex_u_oes: texture_video()
             // Linux GLMemory RGBA is TEXTURE_2D (glupload texture-target=2D).
             // Keep at the end so existing texture slot indices stay stable.
             video_texture_2d: texture_2d(float)
+            // Windows D3D11VA true zero-copy: NV12 plane SRVs on Texture2DArray.
+            // Slots after video_texture_2d so 0..7 stay stable.
+            // Selected when yuv_sample_mode ≈ 2.
+            tex_y_arr: texture_2d_array(float)
+            tex_u_arr: texture_2d_array(float)
             show_thumbnail: uniform(0.0)
             yuv_type: uniform(0.0)
             yuv_enabled: uniform(0.0)
             yuv_biplanar: uniform(0.0)
-            yuv_external: uniform(0.0)
+            // 0 = texture_2d planes, 1 = OES/external, 2 = texture_2d_array (Windows ZC)
+            yuv_sample_mode: uniform(0.0)
             video_rgba_2d: uniform(0.0)
             // 0 = limited/video range (TV), 1 = full range (JPEG/PC)
             yuv_full_range: uniform(0.0)
@@ -84,7 +90,14 @@ script_mod! {
                 let mut y_val = 0.0
                 let mut u_val = 0.0
                 let mut v_val = 0.0
-                if self.yuv_external > 0.5 {
+                if self.yuv_sample_mode > 1.5 {
+                    // D3D11VA: sample one array slice via float3(uv, layer).
+                    let arr_coord = vec3(sample_coord.x, sample_coord.y, 0.0)
+                    y_val = self.tex_y_arr.sample(arr_coord).x
+                    let uv_sample = self.tex_u_arr.sample(arr_coord)
+                    u_val = uv_sample.x
+                    v_val = uv_sample.y
+                } else if self.yuv_sample_mode > 0.5 {
                     y_val = self.tex_y_oes.sample_video(sample_coord).x
                     let uv_sample = self.tex_u_oes.sample_video(sample_coord)
                     u_val = uv_sample.x
@@ -1028,7 +1041,7 @@ impl Widget for Video {
                     self.draw_bg
                         .set_uniform(cx, id!(yuv_biplanar), &[event.yuv.shader_biplanar()]);
                     self.draw_bg
-                        .set_uniform(cx, id!(yuv_external), &[event.yuv.shader_external()]);
+                        .set_uniform(cx, id!(yuv_sample_mode), &[event.yuv.shader_sample_mode()]);
                     self.draw_bg.set_uniform(
                         cx,
                         id!(video_rgba_2d),
@@ -1052,19 +1065,46 @@ impl Widget for Video {
                         if let Some(tex) = self.tex_u_oes.as_ref() {
                             self.draw_bg.draw_vars.set_texture(6, tex);
                         }
-                    } else if event.rgba_gl_2d {
-                        // Slot 7 = video_texture_2d (declared after OES planes).
-                        if let Some(tex) = self.video_texture.as_ref() {
-                            self.draw_bg.draw_vars.set_texture(7, tex);
+                    } else if event.yuv.array {
+                        // Slots 8/9 = tex_y_arr / tex_u_arr (after video_texture_2d).
+                        // Array SRVs must not stay bound to texture_2d slots 2/3.
+                        if let Some(tex) = self.tex_y.as_ref() {
+                            self.draw_bg.draw_vars.set_texture(8, tex);
                         }
-                        // OES slot 0 still needs a live EXTERNAL_OES texture when the
-                        // shader declares samplerExternalOES (even if unused this frame).
-                        if self.oes_dummy.is_none() {
-                            self.oes_dummy =
-                                Some(Texture::new_with_format(cx, TextureFormat::VideoExternal));
+                        if let Some(tex) = self.tex_u.as_ref() {
+                            self.draw_bg.draw_vars.set_texture(9, tex);
                         }
-                        if let Some(tex) = self.oes_dummy.as_ref() {
-                            self.draw_bg.draw_vars.set_texture(0, tex);
+                        self.draw_bg.draw_vars.empty_texture(2);
+                        self.draw_bg.draw_vars.empty_texture(3);
+                    } else {
+                        // Blit / CPU YUV: Texture2D plane SRVs on slots 2/3/4.
+                        if let Some(tex) = self.tex_y.as_ref() {
+                            self.draw_bg.draw_vars.set_texture(2, tex);
+                        }
+                        if let Some(tex) = self.tex_u.as_ref() {
+                            self.draw_bg.draw_vars.set_texture(3, tex);
+                        }
+                        if let Some(tex) = self.tex_v.as_ref() {
+                            self.draw_bg.draw_vars.set_texture(4, tex);
+                        }
+                        self.draw_bg.draw_vars.empty_texture(8);
+                        self.draw_bg.draw_vars.empty_texture(9);
+                        if event.rgba_gl_2d {
+                            // Slot 7 = video_texture_2d (declared after OES planes).
+                            if let Some(tex) = self.video_texture.as_ref() {
+                                self.draw_bg.draw_vars.set_texture(7, tex);
+                            }
+                            // OES slot 0 still needs a live EXTERNAL_OES texture when the
+                            // shader declares samplerExternalOES (even if unused this frame).
+                            if self.oes_dummy.is_none() {
+                                self.oes_dummy = Some(Texture::new_with_format(
+                                    cx,
+                                    TextureFormat::VideoExternal,
+                                ));
+                            }
+                            if let Some(tex) = self.oes_dummy.as_ref() {
+                                self.draw_bg.draw_vars.set_texture(0, tex);
+                            }
                         }
                     }
                     // Android-only: pull ST matrix from texture OS state (set on

@@ -1586,40 +1586,100 @@ impl ShaderFnCompiler {
                     match output.backend {
                         ShaderBackend::Metal => {
                             if let Some(lod) = lod {
-                                write!(
-                                    s,
-                                    "{}.sample(_s{}, {}, level({}))",
-                                    texture_expr, sampler_idx, coord, lod
-                                )
-                                .ok();
+                                match tex_type {
+                                    TextureType::Texture2dArray
+                                    | TextureType::TextureDepthArray
+                                    | TextureType::Texture1dArray => {
+                                        // Array sample: coord is float3(uv, layer) or float2 + layer 0.
+                                        write!(
+                                            s,
+                                            "{}.sample(_s{}, ({}).xy, uint(({}).z + 0.5), level({}))",
+                                            texture_expr, sampler_idx, coord, coord, lod
+                                        )
+                                        .ok();
+                                    }
+                                    _ => {
+                                        write!(
+                                            s,
+                                            "{}.sample(_s{}, {}, level({}))",
+                                            texture_expr, sampler_idx, coord, lod
+                                        )
+                                        .ok();
+                                    }
+                                }
                             } else {
-                                // Metal: texture.sample(sampler, coord)
-                                write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord)
-                                    .ok();
+                                match tex_type {
+                                    TextureType::Texture2dArray
+                                    | TextureType::TextureDepthArray
+                                    | TextureType::Texture1dArray => {
+                                        write!(
+                                            s,
+                                            "{}.sample(_s{}, ({}).xy, uint(({}).z + 0.5))",
+                                            texture_expr, sampler_idx, coord, coord
+                                        )
+                                        .ok();
+                                    }
+                                    _ => {
+                                        write!(
+                                            s,
+                                            "{}.sample(_s{}, {})",
+                                            texture_expr, sampler_idx, coord
+                                        )
+                                        .ok();
+                                    }
+                                }
                             }
                         }
                         ShaderBackend::Wgsl => {
                             if let Some(lod) = lod {
-                                write!(
-                                    s,
-                                    "textureSampleLevel({}, _s{}, {}, {})",
-                                    texture_expr, sampler_idx, coord, lod
-                                )
-                                .ok();
+                                match tex_type {
+                                    TextureType::Texture2dArray
+                                    | TextureType::TextureDepthArray
+                                    | TextureType::Texture1dArray => {
+                                        write!(
+                                            s,
+                                            "textureSampleLevel({}, _s{}, ({}).xy, i32(({}).z), {})",
+                                            texture_expr, sampler_idx, coord, coord, lod
+                                        )
+                                        .ok();
+                                    }
+                                    _ => {
+                                        write!(
+                                            s,
+                                            "textureSampleLevel({}, _s{}, {}, {})",
+                                            texture_expr, sampler_idx, coord, lod
+                                        )
+                                        .ok();
+                                    }
+                                }
                             } else {
-                                // WGSL: textureSample(texture, sampler, coord)
-                                write!(
-                                    s,
-                                    "textureSample({}, _s{}, {})",
-                                    texture_expr, sampler_idx, coord
-                                )
-                                .ok();
+                                match tex_type {
+                                    TextureType::Texture2dArray
+                                    | TextureType::TextureDepthArray
+                                    | TextureType::Texture1dArray => {
+                                        write!(
+                                            s,
+                                            "textureSample({}, _s{}, ({}).xy, i32(({}).z))",
+                                            texture_expr, sampler_idx, coord, coord
+                                        )
+                                        .ok();
+                                    }
+                                    _ => {
+                                        write!(
+                                            s,
+                                            "textureSample({}, _s{}, {})",
+                                            texture_expr, sampler_idx, coord
+                                        )
+                                        .ok();
+                                    }
+                                }
                             }
                         }
                         ShaderBackend::Hlsl => {
                             // D3D11 uses DXGI_FORMAT_B8G8R8A8_UNORM, so the GPU already
                             // interprets BGRA data as RGBA when sampling. No swizzle needed
                             // for sample_as_bgra (same as Metal).
+                            // Texture2DArray.SampleLevel expects float3(uv, array_index).
                             let lod_expr = lod.map_or("0.0", |lod| lod.as_str());
                             write!(
                                 s,
@@ -1647,6 +1707,21 @@ impl ShaderFnCompiler {
                                             .ok();
                                     } else {
                                         write!(s, "samplecube({}, {})", texture_expr, coord).ok();
+                                    }
+                                }
+                                TextureType::Texture2dArray
+                                | TextureType::TextureDepthArray
+                                | TextureType::Texture1dArray => {
+                                    // sampler2DArray takes vec3(uv, layer).
+                                    if let Some(lod) = lod {
+                                        write!(
+                                            s,
+                                            "textureLod({}, {}, {})",
+                                            texture_expr, coord, lod
+                                        )
+                                        .ok();
+                                    } else {
+                                        write!(s, "texture({}, {})", texture_expr, coord).ok();
                                     }
                                 }
                                 _ => {

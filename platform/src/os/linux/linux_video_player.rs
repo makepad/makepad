@@ -565,6 +565,7 @@ impl LinuxVideoPlayer {
                         full_range: false,
                         rotation_steps: 0.0,
                         external: *yuv_external,
+                    array: false,
                     }
                 }
             }
@@ -575,6 +576,7 @@ impl LinuxVideoPlayer {
                 full_range: false,
                 rotation_steps: 0.0,
                 external: false,
+            array: false,
             },
         }
     }

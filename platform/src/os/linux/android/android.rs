@@ -1609,6 +1609,7 @@ impl Cx {
                     full_range: false,
                     rotation_steps: 0.0,
                 external: false,
+                array: false,
                 },
             rgba_gl_2d: false,
             });
@@ -1760,6 +1761,7 @@ impl Cx {
                         full_range: false,
                         rotation_steps: player.yuv_rotation_steps(),
                     external: false,
+                    array: false,
                     },
                 rgba_gl_2d: false,
                 }));
@@ -1855,6 +1857,7 @@ impl Cx {
                                 full_range: false,
                                 rotation_steps: 0.0,
                             external: false,
+                            array: false,
                             },
                         rgba_gl_2d: false,
                         }));
@@ -1887,6 +1890,7 @@ impl Cx {
                             full_range: false,
                             rotation_steps: 0.0,
                         external: false,
+                        array: false,
                         },
                     rgba_gl_2d: false,
                     }));

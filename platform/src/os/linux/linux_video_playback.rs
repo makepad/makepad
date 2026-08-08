@@ -4043,6 +4043,7 @@ impl GStreamerVideoPlayer {
             full_range: self.yuv_full_range,
             rotation_steps: 0.0,
             external: self.yuv_external_oes,
+        array: false,
         }
     }
 

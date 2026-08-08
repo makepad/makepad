@@ -202,7 +202,8 @@ pub trait MediaPlaybackSession {
     fn poll_frame(&mut self) -> bool;
     fn take_yuv_frame(&mut self) -> Option<YuvPlaneData>;
     /// Optional Windows zero-copy present: NV12 `ID3D11Texture2D` from hard decode.
-    /// When `Some`, the platform poll path adopts Y/UV plane SRVs and skips CPU upload.
+    /// When `Some`, the platform poll path adopts Y/UV plane SRVs (Texture2DArray
+    /// true zero-copy when possible, else GPU blit) and skips CPU upload.
     #[cfg(target_os = "windows")]
     fn take_d3d11_nv12_frame(&mut self) -> Option<crate::gpu_texture::D3d11Nv12Frame> {
         None

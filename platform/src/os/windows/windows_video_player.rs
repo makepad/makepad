@@ -1,5 +1,8 @@
 use {
-    super::windows_video_playback::WindowsVideoPlayer,
+    super::{
+        windows_mf_source_reader::WindowsMfSourceReaderPlayer,
+        windows_video_playback::WindowsVideoPlayer,
+    },
     crate::{
         event::video_playback::VideoSource,
         gpu_texture::with_media_d3d11_lock,
@@ -226,6 +229,9 @@ pub struct WindowsUnifiedVideoPlayer {
     tex_v_id: TextureId,
     yuv_matrix: f32,
     yuv_biplanar: bool,
+    /// True when the last NV12 frame used Texture2DArray zero-copy SRVs.
+    yuv_array: bool,
+    yuv_full_range: bool,
     #[cfg(target_os = "windows")]
     gpu_frame_keep_alive: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
     /// Ping-pong ArraySize=1 NV12 targets for D3D11VA Texture2DArray present.
@@ -239,9 +245,14 @@ pub struct WindowsUnifiedVideoPlayer {
     is_looping: bool,
     mode: WindowsPlayerMode,
     prepare_resolved: bool,
+    /// After mid-playback SourceReader→MediaEngine fallback, seek once prepared.
+    pending_fallback_seek_ms: Option<u64>,
 }
 
 enum WindowsPlayerMode {
+    /// Progressive files: Source Reader + DXGI NV12 (true zero-copy when possible).
+    SourceReader(WindowsMfSourceReaderPlayer),
+    /// Adaptive / fallback: MediaEngine Transfer present.
     Native(WindowsVideoPlayer),
     Software(PlaybackSessionHandle),
 }
@@ -268,10 +279,23 @@ impl WindowsUnifiedVideoPlayer {
                 autoplay,
                 is_looping,
             ))
+        } else if let Some(reader) = WindowsMfSourceReaderPlayer::try_new(
+            d3d11_device,
+            video_id,
+            tex_y_id,
+            tex_u_id,
+            source.clone(),
+            autoplay,
+            is_looping,
+        ) {
+            crate::log!("VIDEO: using MF SourceReader DXGI path (scheme A)");
+            WindowsPlayerMode::SourceReader(reader)
         } else if let Some(native) = WindowsVideoPlayer::new(
             d3d11_device,
             video_id,
             texture_id,
+            tex_y_id,
+            tex_u_id,
             source.clone(),
             autoplay,
             is_looping,
@@ -301,6 +325,8 @@ impl WindowsUnifiedVideoPlayer {
             tex_v_id,
             yuv_matrix: 0.0,
             yuv_biplanar: false,
+            yuv_array: false,
+            yuv_full_range: false,
             gpu_frame_keep_alive: None,
             nv12_present: crate::gpu_texture::D3d11Nv12PresentCache::default(),
             yuv_cpu_cache: D3d11YuvCpuCache {
@@ -315,6 +341,36 @@ impl WindowsUnifiedVideoPlayer {
             is_looping,
             mode,
             prepare_resolved: false,
+            pending_fallback_seek_ms: None,
+        }
+    }
+
+    fn switch_to_media_engine(&mut self, reason: &str) {
+        let resume_ms = self.current_position_ms() as u64;
+        crate::log!(
+            "VIDEO: SourceReader failed, falling back to MediaEngine: {}",
+            reason
+        );
+        self.yuv_biplanar = false;
+        self.yuv_array = false;
+        self.yuv_full_range = false;
+        self.gpu_frame_keep_alive = None;
+        if let Some(native) = WindowsVideoPlayer::new(
+            &self.d3d11_device,
+            self.video_id,
+            self.texture_id,
+            self.tex_y_id,
+            self.tex_u_id,
+            self.source.clone(),
+            self.autoplay,
+            self.is_looping,
+        ) {
+            self.mode = WindowsPlayerMode::Native(native);
+            if resume_ms > 0 {
+                self.pending_fallback_seek_ms = Some(resume_ms);
+            }
+        } else {
+            self.switch_to_software("MediaEngine unavailable after SourceReader failure");
         }
     }
 
@@ -323,6 +379,11 @@ impl WindowsUnifiedVideoPlayer {
             "VIDEO: Windows native playback failed, falling back to software video decoder: {}",
             reason
         );
+        self.yuv_biplanar = false;
+        self.yuv_array = false;
+        self.yuv_full_range = false;
+        self.gpu_frame_keep_alive = None;
+        self.pending_fallback_seek_ms = None;
         self.mode = WindowsPlayerMode::Software(PlaybackSessionHandle::new(
             self.video_id,
             self.texture_id,
@@ -332,8 +393,39 @@ impl WindowsUnifiedVideoPlayer {
         ));
     }
 
+    /// Pump the active native worker once per UI paint (coalesces Tick).
+    pub fn sync_worker(&mut self) {
+        match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.sync_worker(),
+            WindowsPlayerMode::Native(player) => player.sync_worker(),
+            WindowsPlayerMode::Software(_) => {}
+        }
+        // Mid-playback SourceReader fatal → MediaEngine (prepare-time uses check_prepared).
+        if let WindowsPlayerMode::SourceReader(player) = &mut self.mode {
+            if let Some(err) = player.take_runtime_error() {
+                self.switch_to_media_engine(&err);
+                self.prepare_resolved = false;
+                if let WindowsPlayerMode::Native(native) = &mut self.mode {
+                    native.sync_worker();
+                }
+            }
+        }
+    }
+
     pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
         let out = match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => match player.check_prepared() {
+                Some(Err(err)) => {
+                    self.switch_to_media_engine(&err);
+                    self.prepare_resolved = false;
+                    match &mut self.mode {
+                        WindowsPlayerMode::Native(native) => native.check_prepared(),
+                        WindowsPlayerMode::Software(software) => software.check_prepared(),
+                        WindowsPlayerMode::SourceReader(_) => Some(Err(err)),
+                    }
+                }
+                other => other,
+            },
             WindowsPlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {
                     self.switch_to_software(&err);
@@ -348,7 +440,15 @@ impl WindowsUnifiedVideoPlayer {
             },
             WindowsPlayerMode::Software(player) => player.check_prepared(),
         };
-        if out.is_some() {
+        if let Some(Ok(_)) = &out {
+            self.prepare_resolved = true;
+            if let Some(ms) = self.pending_fallback_seek_ms.take() {
+                self.seek_to(ms);
+                if self.autoplay {
+                    self.play();
+                }
+            }
+        } else if out.is_some() {
             self.prepare_resolved = true;
         }
         out
@@ -356,9 +456,19 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => {
+                let ok = player.poll_frame(textures);
+                self.yuv_biplanar = player.presents_nv12();
+                self.yuv_array = player.yuv_array();
+                self.yuv_matrix = player.yuv_matrix();
+                self.yuv_full_range = player.yuv_full_range();
+                ok
+            }
             WindowsPlayerMode::Native(player) => {
-                self.yuv_biplanar = false;
-                player.poll_frame(textures)
+                let ok = player.poll_frame(textures);
+                self.yuv_biplanar = player.presents_nv12();
+                self.yuv_array = false;
+                ok
             }
             WindowsPlayerMode::Software(player) => {
                 if !player.poll_frame() {
@@ -375,22 +485,24 @@ impl WindowsUnifiedVideoPlayer {
                         &gpu,
                         &mut self.nv12_present,
                     ) {
-                        Ok(()) => {
-                            // Blit already copied pixels into present textures — release the
-                            // D3D11VA surface immediately. Holding AVFrames (queue + keep_alive)
-                            // exhausts the decoder pool → "Failed to add bitstream buffer".
-                            self.gpu_frame_keep_alive = None;
-                            drop(gpu);
-                            static LOGGED: std::sync::atomic::AtomicBool =
-                                std::sync::atomic::AtomicBool::new(false);
-                            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                crate::log!("VIDEO: D3D11 NV12 adopt ok (surface released after blit)");
+                        Ok(zero_copy) => {
+                            self.yuv_array = zero_copy;
+                            if zero_copy {
+                                // Decoder surface must stay alive while Texture2DArray SRVs sample it.
+                                self.gpu_frame_keep_alive = Some(gpu.keep_alive.clone());
+                            } else {
+                                // Blit copied pixels into present textures — release the
+                                // D3D11VA surface immediately. Holding AVFrames (queue + keep_alive)
+                                // exhausts the decoder pool → "Failed to add bitstream buffer".
+                                self.gpu_frame_keep_alive = None;
+                                drop(gpu);
                             }
                             true
                         }
                         Err(err) => {
                             crate::error!("VIDEO: adopt D3D11 NV12 failed: {err}");
                             self.gpu_frame_keep_alive = None;
+                            self.yuv_array = false;
                             // Fall back to CPU YUV if the plugin also queued one.
                             if let Some(planes) = player.take_yuv_frame() {
                                 self.yuv_matrix = planes.matrix.as_f32();
@@ -405,6 +517,7 @@ impl WindowsUnifiedVideoPlayer {
                 } else if let Some(planes) = player.take_yuv_frame() {
                     self.yuv_matrix = planes.matrix.as_f32();
                     self.yuv_biplanar = false;
+                    self.yuv_array = false;
                     self.gpu_frame_keep_alive = None;
                     self.upload_yuv_to_d3d11(textures, &planes);
                     true
@@ -453,6 +566,13 @@ impl WindowsUnifiedVideoPlayer {
         matches!(self.mode, WindowsPlayerMode::Software(_))
     }
 
+    /// YUV shader path: software decode, SourceReader DXGI NV12, or MF Transfer NV12.
+    pub fn uses_yuv(&self) -> bool {
+        self.is_software_mode()
+            || matches!(self.mode, WindowsPlayerMode::SourceReader(_))
+            || self.yuv_biplanar
+    }
+
     pub fn yuv_matrix(&self) -> f32 {
         self.yuv_matrix
     }
@@ -461,8 +581,17 @@ impl WindowsUnifiedVideoPlayer {
         self.yuv_biplanar
     }
 
+    pub fn yuv_array(&self) -> bool {
+        self.yuv_array
+    }
+
+    pub fn yuv_full_range(&self) -> bool {
+        self.yuv_full_range
+    }
+
     pub fn check_eos(&mut self) -> bool {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.check_eos(),
             WindowsPlayerMode::Native(player) => player.check_eos(),
             WindowsPlayerMode::Software(player) => player.check_eos(),
         }
@@ -470,6 +599,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn is_playing(&self) -> bool {
         match &self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.is_playing(),
             WindowsPlayerMode::Native(player) => player.is_playing(),
             WindowsPlayerMode::Software(player) => player.is_playing(),
         }
@@ -478,6 +608,7 @@ impl WindowsUnifiedVideoPlayer {
     /// Keep Poll while Media Foundation is still buffering, or while playing.
     pub fn keep_polling(&self) -> bool {
         match &self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.keep_polling(),
             WindowsPlayerMode::Native(player) => player.keep_polling(),
             WindowsPlayerMode::Software(player) => !self.prepare_resolved || player.is_playing(),
         }
@@ -485,6 +616,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn play(&mut self) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.play(),
             WindowsPlayerMode::Native(player) => player.play(),
             WindowsPlayerMode::Software(player) => player.play(),
         }
@@ -492,6 +624,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn pause(&mut self) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.pause(),
             WindowsPlayerMode::Native(player) => player.pause(),
             WindowsPlayerMode::Software(player) => player.pause(),
         }
@@ -499,6 +632,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn resume(&mut self) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.resume(),
             WindowsPlayerMode::Native(player) => player.resume(),
             WindowsPlayerMode::Software(player) => player.resume(),
         }
@@ -506,6 +640,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn mute(&mut self) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.mute(),
             WindowsPlayerMode::Native(player) => player.mute(),
             WindowsPlayerMode::Software(player) => player.mute(),
         }
@@ -513,6 +648,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn unmute(&mut self) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.unmute(),
             WindowsPlayerMode::Native(player) => player.unmute(),
             WindowsPlayerMode::Software(player) => player.unmute(),
         }
@@ -520,6 +656,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn seek_to(&mut self, position_ms: u64) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.seek_to(position_ms),
             WindowsPlayerMode::Native(player) => player.seek_to(position_ms),
             WindowsPlayerMode::Software(player) => player.seek_to(position_ms),
         }
@@ -527,6 +664,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn set_volume(&mut self, volume: f64) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.set_volume(volume),
             WindowsPlayerMode::Native(player) => player.set_volume(volume),
             WindowsPlayerMode::Software(player) => player.set_volume(volume),
         }
@@ -534,6 +672,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn set_playback_rate(&mut self, rate: f64) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.set_playback_rate(rate),
             WindowsPlayerMode::Native(player) => player.set_playback_rate(rate),
             WindowsPlayerMode::Software(player) => player.set_playback_rate(rate),
         }
@@ -541,6 +680,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn current_position_ms(&self) -> u128 {
         match &self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.current_position_ms(),
             WindowsPlayerMode::Native(player) => player.current_position_ms(),
             WindowsPlayerMode::Software(player) => player.current_position_ms(),
         }
@@ -548,6 +688,7 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn cleanup(&mut self) {
         match &mut self.mode {
+            WindowsPlayerMode::SourceReader(player) => player.cleanup(),
             WindowsPlayerMode::Native(player) => player.cleanup(),
             WindowsPlayerMode::Software(player) => player.cleanup(),
         }

@@ -34,6 +34,9 @@ pub struct VideoYuvMetadata {
     /// When true, sample EXTERNAL_OES Y/UV (`VideoYuvExternalTextures`) instead of
     /// the standard `tex_y`/`tex_u` (`sampler2D`) planes.
     pub external: bool,
+    /// When true, sample Windows D3D11VA NV12 via `texture_2d_array` (`tex_y_arr` /
+    /// `tex_u_arr`) — true zero-copy plane SRVs on the decoder Texture2DArray.
+    pub array: bool,
 }
 
 impl VideoYuvMetadata {
@@ -65,8 +68,14 @@ impl VideoYuvMetadata {
         }
     }
 
-    pub fn shader_external(self) -> f32 {
-        if self.external {
+    /// Shared YUV plane sample path for the Video widget shader:
+    /// `0.0` = `texture_2d` planes, `1.0` = EXTERNAL_OES / `texture_video`,
+    /// `2.0` = Windows D3D11VA `texture_2d_array`.
+    /// Linux `external` and Windows `array` are mutually exclusive.
+    pub fn shader_sample_mode(self) -> f32 {
+        if self.array {
+            2.0
+        } else if self.external {
             1.0
         } else {
             0.0

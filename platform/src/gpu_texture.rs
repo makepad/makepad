@@ -127,8 +127,10 @@ pub struct D3d11Nv12Frame {
 
 /// Ping-pong NV12 present targets for hardware-decoded frames.
 ///
-/// Y and UV use **separate** NV12 textures (each with its own plane SRV). Binding
-/// R8 + R8G8 views of the *same* NV12 resource in one draw TDRs some GPUs
+/// Used when true zero-copy is unavailable (no SRV bind on decoder surfaces,
+/// AMD Texture2DArray quirks, or `MAKEPAD_D3D11_NV12_BLIT`). Y and UV use
+/// **separate** NV12 textures (each with its own plane SRV). Binding R8 + R8G8
+/// views of the *same* NV12 resource in one draw TDRs some GPUs
 /// (`DXGI_ERROR_DEVICE_REMOVED`).
 #[cfg(target_os = "windows")]
 #[derive(Default)]
@@ -138,6 +140,8 @@ pub struct D3d11Nv12PresentCache {
     width: u32,
     height: u32,
     idx: usize,
+    /// Last successful present used Texture2DArray SRVs on the decoder surface.
+    pub zero_copy: bool,
 }
 
 /// Zero-copy OES frame for Android `sample_video` present.
@@ -308,7 +312,8 @@ mod windows_api {
                 ID3D11Device, ID3D11Resource, ID3D11ShaderResourceView,
                 ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
                 D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-                D3D11_TEX2D_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                D3D11_TEX2D_ARRAY_SRV, D3D11_TEX2D_SRV, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_DEFAULT,
             },
             Dxgi::Common::{
                 DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
@@ -317,8 +322,10 @@ mod windows_api {
         },
     };
 
-    /// Makepad video shaders bind `Texture2D` (not `Texture2DArray`). Always use this.
+    /// Makepad blit / CPU paths bind `Texture2D`.
     const SRV_DIMENSION_TEXTURE2D: D3D_SRV_DIMENSION = D3D_SRV_DIMENSION(4);
+    /// D3D11VA decoder pools are Texture2DArray — true zero-copy uses this.
+    const SRV_DIMENSION_TEXTURE2DARRAY: D3D_SRV_DIMENSION = D3D_SRV_DIMENSION(5);
 
     impl Cx {
         /// Makepad's shared D3D11 device (same device used for UI rendering).
@@ -521,8 +528,6 @@ mod windows_api {
             .cast()
             .map_err(|e| format!("NV12 plane SRV: cast failed: {e}"))?;
 
-        // Must be TEXTURE2D — Makepad `texture_2d` shaders cannot sample Texture2DArray SRVs
-        // (binding an array view caused STATUS_ACCESS_VIOLATION on first present).
         let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
             Format: format,
             ViewDimension: SRV_DIMENSION_TEXTURE2D,
@@ -541,6 +546,74 @@ mod windows_api {
                 .map_err(|e| format!("NV12 plane SRV: CreateShaderResourceView failed: {e:?}"))?;
         }
         out.ok_or_else(|| "NV12 plane SRV: null".into())
+    }
+
+    /// Plane SRV over one slice of a D3D11VA NV12 Texture2DArray (true zero-copy).
+    /// Video widget samples these via `texture_2d_array` (`yuv_sample_mode ≈ 2`).
+    fn make_plane_srv_array(
+        device: &ID3D11Device,
+        texture: &ID3D11Texture2D,
+        format: DXGI_FORMAT,
+        array_slice: u32,
+    ) -> Result<ID3D11ShaderResourceView, String> {
+        let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut tex_desc);
+        }
+        if tex_desc.Format != DXGI_FORMAT_NV12 {
+            return Err(format!(
+                "NV12 array SRV: expected DXGI_FORMAT_NV12, got {:?}",
+                tex_desc.Format
+            ));
+        }
+        if (tex_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE.0 as u32) == 0 {
+            return Err(
+                "NV12 array SRV: texture missing D3D11_BIND_SHADER_RESOURCE (cannot sample)"
+                    .into(),
+            );
+        }
+        if array_slice >= tex_desc.ArraySize {
+            return Err(format!(
+                "NV12 array SRV: array_slice {array_slice} >= ArraySize {}",
+                tex_desc.ArraySize
+            ));
+        }
+
+        let resource: ID3D11Resource = texture
+            .cast()
+            .map_err(|e| format!("NV12 array SRV: cast failed: {e}"))?;
+
+        let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+            Format: format,
+            ViewDimension: SRV_DIMENSION_TEXTURE2DARRAY,
+            Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2DArray: D3D11_TEX2D_ARRAY_SRV {
+                    MostDetailedMip: 0,
+                    MipLevels: 1,
+                    FirstArraySlice: array_slice,
+                    ArraySize: 1,
+                },
+            },
+        };
+
+        let mut out: Option<ID3D11ShaderResourceView> = None;
+        unsafe {
+            device
+                .CreateShaderResourceView(&resource, Some(&desc), Some(&mut out))
+                .map_err(|e| {
+                    format!("NV12 array SRV: CreateShaderResourceView failed: {e:?}")
+                })?;
+        }
+        out.ok_or_else(|| "NV12 array SRV: null".into())
+    }
+
+    fn prefer_nv12_zero_copy(_device: &ID3D11Device) -> bool {
+        if std::env::var_os("MAKEPAD_D3D11_NV12_BLIT").is_some() {
+            return false;
+        }
+        // Default: try Texture2DArray zero-copy. Force blit with MAKEPAD_D3D11_NV12_BLIT=1
+        // (some AMD drivers historically mishandled NV12 array sampling — VLC disabled it).
+        true
     }
 
     fn ensure_nv12_present_tex(
@@ -672,8 +745,37 @@ mod windows_api {
         Ok((y_tex, uv_tex))
     }
 
-    /// Adopt an NV12 `ID3D11Texture2D` as biplanar Y + UV into two YUV plane slots.
-    pub(crate) fn adopt_d3d11_nv12_biplanar(
+    fn adopt_nv12_zero_copy(
+        device: &ID3D11Device,
+        textures: &mut CxTexturePool,
+        tex_y: TextureId,
+        tex_u: TextureId,
+        frame: &D3d11Nv12Frame,
+    ) -> Result<(), String> {
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+
+        let y_srv = make_plane_srv_array(
+            device,
+            &frame.texture,
+            DXGI_FORMAT_R8_UNORM,
+            frame.array_slice,
+        )?;
+        let uv_srv = make_plane_srv_array(
+            device,
+            &frame.texture,
+            DXGI_FORMAT_R8G8_UNORM,
+            frame.array_slice,
+        )?;
+
+        adopt_d3d11_plane_raw(textures, tex_y, frame.texture.clone(), y_srv, w, h)?;
+        adopt_d3d11_plane_raw(textures, tex_u, frame.texture.clone(), uv_srv, cw, ch)?;
+        Ok(())
+    }
+
+    fn adopt_nv12_blit(
         device: &ID3D11Device,
         textures: &mut CxTexturePool,
         tex_y: TextureId,
@@ -702,13 +804,102 @@ mod windows_api {
         adopt_d3d11_plane_raw(textures, tex_u, uv_tex, uv_srv, cw, ch)?;
         Ok(())
     }
+
+    /// Adopt an NV12 `ID3D11Texture2D` as biplanar Y + UV into two YUV plane slots.
+    ///
+    /// Prefers true zero-copy (`Texture2DArray` plane SRVs on the decoder surface).
+    /// Falls back to GPU blit into ArraySize=1 present textures when ZC is disabled
+    /// or fails. Returns `Ok(true)` for zero-copy, `Ok(false)` for blit.
+    pub(crate) fn adopt_d3d11_nv12_biplanar(
+        device: &ID3D11Device,
+        textures: &mut CxTexturePool,
+        tex_y: TextureId,
+        tex_u: TextureId,
+        frame: &D3d11Nv12Frame,
+        present_cache: &mut D3d11Nv12PresentCache,
+    ) -> Result<bool, String> {
+        if prefer_nv12_zero_copy(device) {
+            match adopt_nv12_zero_copy(device, textures, tex_y, tex_u, frame) {
+                Ok(()) => {
+                    present_cache.zero_copy = true;
+                    static LOGGED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        crate::log!(
+                            "VIDEO: D3D11 NV12 true zero-copy (Texture2DArray plane SRVs)"
+                        );
+                    }
+                    return Ok(true);
+                }
+                Err(err) => {
+                    static LOGGED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        crate::log!(
+                            "VIDEO: D3D11 NV12 zero-copy unavailable ({err}); using GPU blit"
+                        );
+                    }
+                }
+            }
+        }
+
+        adopt_nv12_blit(device, textures, tex_y, tex_u, frame, present_cache)?;
+        present_cache.zero_copy = false;
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::log!("VIDEO: D3D11 NV12 present via GPU blit (ArraySize=1 copies)");
+        }
+        Ok(false)
+    }
+
+    /// Adopt an ArraySize=1 NV12 texture (e.g. Media Engine `TransferVideoFrame`
+    /// destination) via **separate** Y/UV present targets. Same-resource dual
+    /// plane SRVs can TDR some GPUs; always blit into the present cache.
+    pub(crate) fn adopt_d3d11_nv12_texture2d_biplanar(
+        device: &ID3D11Device,
+        textures: &mut CxTexturePool,
+        tex_y: TextureId,
+        tex_u: TextureId,
+        texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+        present_cache: &mut D3d11Nv12PresentCache,
+    ) -> Result<(), String> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut desc);
+        }
+        if desc.Format != DXGI_FORMAT_NV12 {
+            return Err(format!(
+                "MF NV12 adopt: expected DXGI_FORMAT_NV12, got {:?}",
+                desc.Format
+            ));
+        }
+        if desc.ArraySize != 1 {
+            return Err(format!(
+                "MF NV12 adopt: expected ArraySize 1, got {}",
+                desc.ArraySize
+            ));
+        }
+        let frame = D3d11Nv12Frame {
+            texture: texture.clone(),
+            array_slice: 0,
+            width,
+            height,
+            matrix: crate::video_decode::yuv::YuvColorMatrix::BT709,
+            keep_alive: std::sync::Arc::new(()),
+        };
+        adopt_nv12_blit(device, textures, tex_y, tex_u, &frame, present_cache)?;
+        present_cache.zero_copy = false;
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]
 pub use windows_api::media_d3d11_device;
 
 #[cfg(target_os = "windows")]
-pub(crate) use windows_api::adopt_d3d11_nv12_biplanar;
+pub(crate) use windows_api::{adopt_d3d11_nv12_biplanar, adopt_d3d11_nv12_texture2d_biplanar};
 
 #[cfg(target_os = "android")]
 mod android_api {

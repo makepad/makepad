@@ -12,6 +12,7 @@ pub mod win32_event;
 pub mod win32_window;
 pub mod windows_media;
 pub mod windows_media_engine_notify;
+pub mod windows_mf_source_reader;
 pub mod windows_video_playback;
 pub mod windows_video_player;
 pub mod winrt_midi;

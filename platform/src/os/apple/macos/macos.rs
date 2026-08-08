@@ -870,6 +870,7 @@ impl Cx {
                                         full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
                                     external: false,
+                                    array: false,
                                     },
                                 rgba_gl_2d: false,
                                 },
