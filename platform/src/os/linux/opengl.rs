@@ -2083,6 +2083,17 @@ impl CxOsDrawShader {
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
             vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             ";
+        // GLSL ES 3.00 does not give samplers a default precision. Desktop GL and
+        // some lenient GLES drivers accept bare `uniform sampler2DArray ...`, but
+        // Mesa/virgl (and other strict ES implementations) reject it with
+        // "No precision specified ... sampler2DArray". Video declares
+        // texture_2d_array slots for Windows ZC even on Linux, so every Video
+        // shader hits this on ES-only hosts.
+        let sampler_precision = "
+            precision highp sampler2D;
+            precision highp sampler2DArray;
+            precision highp samplerCube;
+            ";
 
         // `#extension` must come immediately after `#version` (before `#define`).
         let vertex_window = format!(
@@ -2090,6 +2101,7 @@ impl CxOsDrawShader {
             {tex_ext_import_vw}#define VIEW_ID 0
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
             {tex_ext_sampler_vw}
             {in_vertex_window}\0",
@@ -2100,6 +2112,7 @@ impl CxOsDrawShader {
             #define VIEW_ID 0
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
             {tex_ext_sampler_pw}
             {in_pixel_window}
@@ -2113,6 +2126,7 @@ impl CxOsDrawShader {
             layout(num_views=2) in;
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
             {tex_ext_sampler_vx}
             {in_vertex}\0",
@@ -2128,6 +2142,7 @@ impl CxOsDrawShader {
             #define VIEW_ID gl_ViewID_OVR
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
             {tex_ext_sampler_px}
             {in_pixel}
