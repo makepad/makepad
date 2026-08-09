@@ -17,6 +17,7 @@ import java.io.FileInputStream;
 import java.io.File;
 
 import android.net.Uri;
+import android.media.PlaybackParams;
 
 import dev.makepad.android.MakepadNative;
 
@@ -105,6 +106,9 @@ public class VideoPlayer {
                     }
                     
                     mIsPrepared = true;
+                    if (Math.abs(mPlaybackRate - 1.0f) > 0.02f) {
+                        applyPlaybackRate(mPlaybackRate);
+                    }
                     if (mAutoplay) {
                         mp.start();
                     }
@@ -167,6 +171,40 @@ public class VideoPlayer {
     public void unmute() {
         if (mMediaPlayer != null) {
             mMediaPlayer.setVolume(1, 1);
+        }
+    }
+
+    /** Pitch-preserving tempo via {@link PlaybackParams} (API 23+). */
+    public void setPlaybackRate(double rate) {
+        float clamped = (float) Math.max(0.05, rate);
+        mPlaybackRate = clamped;
+        if (mMediaPlayer == null || !mIsPrepared) {
+            return;
+        }
+        applyPlaybackRate(clamped);
+    }
+
+    private void applyPlaybackRate(float rate) {
+        if (mMediaPlayer == null) {
+            return;
+        }
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) {
+            Log.w("MakepadVideoPlayer", "setPlaybackRate requires API 23+; ignored rate=" + rate);
+            return;
+        }
+        try {
+            boolean wasPlaying = mMediaPlayer.isPlaying();
+            PlaybackParams params = mMediaPlayer.getPlaybackParams();
+            // Speed without chipmunk pitch (UI steps are 0.5×–2.0×).
+            params.setSpeed(rate);
+            params.setPitch(1.0f);
+            mMediaPlayer.setPlaybackParams(params);
+            // Some devices pause when params change — resume if we were playing.
+            if (wasPlaying && !mMediaPlayer.isPlaying()) {
+                mMediaPlayer.start();
+            }
+        } catch (Exception e) {
+            Log.e("MakepadVideoPlayer", "setPlaybackRate failed rate=" + rate + ": " + e);
         }
     }
 
@@ -251,6 +289,7 @@ public class VideoPlayer {
     // playback
     private boolean mAutoplay = false;
     private boolean mShouldLoop = false;
+    private float mPlaybackRate = 1.0f;
     
     // context
     private WeakReference<Activity> mActivityReference;

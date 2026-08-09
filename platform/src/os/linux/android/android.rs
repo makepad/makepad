@@ -2974,6 +2974,11 @@ impl Cx {
                     }
                     if let Some(asp) = self.os.software_video_players.get(&video_id) {
                         asp.player.set_playback_rate(rate);
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_set_video_playback_rate(env, video_id, rate);
+                        }
                     }
                 }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {

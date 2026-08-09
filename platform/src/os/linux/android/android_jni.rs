@@ -1962,6 +1962,21 @@ pub unsafe fn to_java_unmute_video_playback(env: *mut jni_sys::JNIEnv, video_id:
     ndk_utils::call_void_method!(env, get_activity(), "unmuteVideoPlayback", "(J)V", video_id);
 }
 
+pub unsafe fn to_java_set_video_playback_rate(
+    env: *mut jni_sys::JNIEnv,
+    video_id: LiveId,
+    rate: f64,
+) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setVideoPlaybackRate",
+        "(JD)V",
+        video_id,
+        rate as jni_sys::jdouble
+    );
+}
+
 pub unsafe fn to_java_seek_video_playback(
     env: *mut jni_sys::JNIEnv,
     video_id: LiveId,

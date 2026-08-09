@@ -2860,6 +2860,13 @@ public class MakepadActivity
         }
     }
 
+    public void setVideoPlaybackRate(long videoId, double rate) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.setPlaybackRate(rate);
+        }
+    }
+
     public void seekVideoPlayback(long videoId, long positionMs) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
         if(runnable != null) {
