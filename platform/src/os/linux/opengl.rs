@@ -673,7 +673,6 @@ impl Cx {
                             let texture_id = texture.texture_id();
                             let cxtexture = &mut self.textures[texture_id];
                             let bind_target = match cxtexture.format {
-                                #[cfg(target_os = "android")]
                                 TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
                                 TextureFormat::VecCubeBGRAu8_32 { .. }
                                 | TextureFormat::RenderCubeBGRAu8 { .. } => {
@@ -696,12 +695,11 @@ impl Cx {
                         if let Some(gl_bind_sampler) = gl.glBindSampler {
                             // Do not bind sampler objects for OES external textures;
                             // per GL ES spec, using sampler objects with external textures
-                            // is undefined behavior. Only applies on Android where we use OES.
-                            let is_oes = cfg!(target_os = "android")
-                                && matches!(
-                                    sh.mapping.textures[i].tex_type,
-                                    TextureType::TextureVideo
-                                );
+                            // is undefined behavior.
+                            let is_oes = matches!(
+                                sh.mapping.textures[i].tex_type,
+                                TextureType::TextureVideo
+                            );
                             let sampler = if is_oes {
                                 0
                             } else {
@@ -1975,36 +1973,67 @@ impl CxOsDrawShader {
     }
 
     pub fn new(gl: &LibGl, in_vertex: &str, in_pixel: &str, os_type: &OsType) -> Self {
-        // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
-        let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
-        let is_external_texture_supported = available_extensions
-            .split_whitespace()
-            .any(|ext| ext == "GL_OES_EGL_image_external");
-
         // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
-        // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
+        // Because there's no bullet-proof way to check the emulator host at runtime, we're currently
+        // disabling external texture support on all emulators.
         let is_emulator = match os_type {
             OsType::Android(params) => params.is_emulator,
             OsType::OpenHarmony(_) => true, // TODO FIXME: detect whether we're running on an OHOS emulator
             _ => false,
         };
 
-        // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions.
-        // This seems like a driver bug (no confirmation from Qualcomm yet).
-        // Therefore we're disabling the external texture support for Adreno until this is fixed.
-        let is_vendor_adreno = get_gl_string(gl, gl_sys::RENDERER).contains("Adreno");
+        // GLES 3.0+ deprecates glGetString(GL_EXTENSIONS) (often returns null), so we cannot
+        // rely on that query alone. VideoExternal shaders always declare samplerExternalOES;
+        // without `#extension GL_OES_EGL_image_external_essl3` they panic on Adreno ES 3.2.
+        // Real Android devices expose OES external textures for SurfaceTexture/MediaCodec.
+        let listed_external = get_gl_string(gl, gl_sys::EXTENSIONS)
+            .split_whitespace()
+            .any(|ext| {
+                ext == "GL_OES_EGL_image_external"
+                    || ext == "GL_OES_EGL_image_external_essl3"
+            });
+        let is_external_texture_supported = listed_external
+            || matches!(os_type, OsType::Android(params) if !params.is_emulator)
+            || matches!(os_type, OsType::LinuxWindow(_) | OsType::LinuxDirect);
 
-        let (tex_ext_import, tex_ext_sampler) = if is_external_texture_supported
-            && !is_vendor_adreno
-            && !is_emulator
-        {
-            (
-            "#extension GL_OES_EGL_image_external_essl3 : require\n",
-            "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){ return texture(sampler, vec2(pos.x, pos.y));}"
-        )
-        } else {
-            ("", "")
+        // Only inject OES into shaders that actually reference external samplers.
+        // Blanket-injecting `#extension GL_OES_EGL_image_external_essl3` into every
+        // shader triggers Adreno ICEs ("array indexing out of boundary") on otherwise
+        // unrelated vertex programs (e.g. plain DrawQuad).
+        //
+        // Use ESSL3 `texture()` + essl3 extension. An older Adreno workaround disabled
+        // OES entirely for GLES2 `texture2D(samplerExternalOES)`; that does not apply
+        // here, but VideoExternal shaders still need the extension when they declare
+        // `samplerExternalOES`.
+        let oes_ok = is_external_texture_supported && !is_emulator;
+        let oes_prelude = |src: &str| -> (&'static str, &'static str) {
+            let needs = src.contains("samplerExternalOES") || src.contains("sample2dOES");
+            if !needs {
+                ("", "")
+            } else if oes_ok {
+                // Adreno ICE if samplerExternalOES is a *function* parameter
+                // ("array indexing out of boundary"). Use a macro instead (same
+                // workaround as Firefox/AVPro).
+                (
+                    "#extension GL_OES_EGL_image_external_essl3 : require\n",
+                    "#define sample2dOES(sampler, pos) (texture((sampler), vec2((pos).x, (pos).y)))\n",
+                )
+            } else {
+                // Emulator / missing OES: keep Video shaders compiling as sampler2D.
+                (
+                    "#define samplerExternalOES sampler2D\n",
+                    "#define sample2dOES(sampler, pos) (texture((sampler), vec2((pos).x, (pos).y)))\n",
+                )
+            }
         };
+        // Adreno ICE: `samplerExternalOES` + `foo[int(VIEW_ID)]` with `#define VIEW_ID 0`.
+        // Window path can use a literal index; XR keeps `int(gl_ViewID_OVR)`.
+        let in_vertex_window = in_vertex.replace("[int(VIEW_ID)]", "[0]");
+        let in_pixel_window = in_pixel.replace("[int(VIEW_ID)]", "[0]");
+        let (tex_ext_import_vw, tex_ext_sampler_vw) = oes_prelude(&in_vertex_window);
+        let (tex_ext_import_pw, tex_ext_sampler_pw) = oes_prelude(&in_pixel_window);
+        let (tex_ext_import_vx, tex_ext_sampler_vx) = oes_prelude(in_vertex);
+        let (tex_ext_import_px, tex_ext_sampler_px) = oes_prelude(in_pixel);
 
         // Currently, these shaders are only compatible with `#version 100` through `#version 300 es`.
         // Version 310 and later have removed/deprecated some features that we currently use:
@@ -2054,40 +2083,52 @@ impl CxOsDrawShader {
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
             vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             ";
+        // GLSL ES 3.00 does not give samplers a default precision. Desktop GL and
+        // some lenient GLES drivers accept bare `uniform sampler2DArray ...`, but
+        // Mesa/virgl (and other strict ES implementations) reject it with
+        // "No precision specified ... sampler2DArray". Video declares
+        // texture_2d_array slots for Windows ZC even on Linux, so every Video
+        // shader hits this on ES-only hosts.
+        let sampler_precision = "
+            precision highp sampler2D;
+            precision highp sampler2DArray;
+            precision highp samplerCube;
+            ";
 
+        // `#extension` must come immediately after `#version` (before `#define`).
         let vertex_window = format!(
             "#version 300 es
-            #define VIEW_ID 0
-            {tex_ext_import}
+            {tex_ext_import_vw}#define VIEW_ID 0
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
-            {tex_ext_sampler}
-            {in_vertex}\0",
+            {tex_ext_sampler_vw}
+            {in_vertex_window}\0",
         );
         let pixel_window = format!(
             "#version 300 es
+            {tex_ext_import_pw}#extension GL_OES_standard_derivatives : enable
             #define VIEW_ID 0
-            {tex_ext_import}
-            #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
-            {tex_ext_sampler}
-            {in_pixel}
+            {tex_ext_sampler_pw}
+            {in_pixel_window}
             {nop_depth_clip}
             \0",
         );
         let vertex_xr = format!(
             "#version 300 es
+            {tex_ext_import_vx}#extension GL_OVR_multiview2 : require
             #define VIEW_ID gl_ViewID_OVR
-            #extension GL_OVR_multiview2 : require
             layout(num_views=2) in;
-            {tex_ext_import}
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
-            {tex_ext_sampler}
+            {tex_ext_sampler_vx}
             {in_vertex}\0",
         );
         #[cfg(all(target_os = "android", not(use_vulkan)))]
@@ -2096,14 +2137,14 @@ impl CxOsDrawShader {
         let xr_depth_clip = depth_clip;
         let pixel_xr = format!(
             "#version 300 es
-            #define VIEW_ID gl_ViewID_OVR
-            #extension GL_OVR_multiview2 : require
-            {tex_ext_import}
+            {tex_ext_import_px}#extension GL_OVR_multiview2 : require
             #extension GL_OES_standard_derivatives : enable
+            #define VIEW_ID gl_ViewID_OVR
             precision highp float;
             precision highp int;
+            {sampler_precision}
             {sampler_helpers}
-            {tex_ext_sampler}
+            {tex_ext_sampler_px}
             {in_pixel}
             {xr_depth_clip}
             \0",
@@ -2242,6 +2283,12 @@ pub struct CxOsUniformBuffer {
     pub buffer: OpenglBuffer,
 }
 
+/// Column-major identity 4x4 — default SurfaceTexture UV transform (Android OES).
+#[cfg(target_os = "android")]
+pub const OES_ST_IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
 #[derive(Clone)]
 pub struct CxOsTexture {
     pub gl_texture: Option<u32>,
@@ -2260,6 +2307,11 @@ pub struct CxOsTexture {
     /// for pure appends (rows at/after this frontier), never overwriting rows an in-flight frame may
     /// still be sampling — overwriting the SDF atlas mid-frame can tear the per-glyph curve data.
     gl_uploaded_height: usize,
+    /// Latest SurfaceTexture `getTransformMatrix` for this OES texture (Android only).
+    /// Written after each successful `updateTexImage` drain; Video applies it via
+    /// `oes_st_c0..c3` before `sample_video`. Identity when not OES / not drained.
+    #[cfg(target_os = "android")]
+    pub oes_st_matrix: [f32; 16],
 }
 
 impl Default for CxOsTexture {
@@ -2272,6 +2324,8 @@ impl Default for CxOsTexture {
             gl_cap_height: 0,
             gl_cap_internal_format: 0,
             gl_uploaded_height: 0,
+            #[cfg(target_os = "android")]
+            oes_st_matrix: OES_ST_IDENTITY,
         }
     }
 }
@@ -2823,13 +2877,6 @@ impl CxTexture {
 
             #[cfg(target_os = "android")]
             unsafe {
-                let gpu_renderer = get_gl_string(gl, gl_sys::RENDERER);
-                if gpu_renderer.contains("Adreno") {
-                    crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
-                    OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
-                    This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
-                }
-
                 (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
 
                 (gl.glTexParameteri)(
@@ -2866,31 +2913,38 @@ impl CxTexture {
 
             #[cfg(not(target_os = "android"))]
             unsafe {
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+                // Desktop GLES: VideoExternal may be DMA-Buf EGLImage (OES) or RGBA upload.
+                // Prefer EXTERNAL_OES so NV12 plane zero-copy works; RGBA upload paths
+                // should use non-VideoExternal formats or I420.
+                let target = match self.format {
+                    TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
+                    _ => gl_sys::TEXTURE_2D,
+                };
+                (gl.glBindTexture)(target, self.os.gl_texture.unwrap());
 
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_WRAP_S,
                     gl_sys::CLAMP_TO_EDGE as i32,
                 );
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_WRAP_T,
                     gl_sys::CLAMP_TO_EDGE as i32,
                 );
 
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_MIN_FILTER,
                     gl_sys::LINEAR as i32,
                 );
                 (gl.glTexParameteri)(
-                    gl_sys::TEXTURE_2D,
+                    target,
                     gl_sys::TEXTURE_MAG_FILTER,
                     gl_sys::LINEAR as i32,
                 );
 
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+                (gl.glBindTexture)(target, 0);
 
                 assert_eq!(
                     (gl.glGetError)(),

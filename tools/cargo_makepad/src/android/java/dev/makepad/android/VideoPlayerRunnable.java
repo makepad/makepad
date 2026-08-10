@@ -38,6 +38,10 @@ public class VideoPlayerRunnable implements Runnable {
         mVideoPlayer.unmute();
     }
 
+    public void setPlaybackRate(double rate) {
+        mVideoPlayer.setPlaybackRate(rate);
+    }
+
     public void seekToPosition(long positionMs) {
         mVideoPlayer.seekToPosition(positionMs);
     }

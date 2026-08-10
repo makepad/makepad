@@ -22,6 +22,9 @@ pub use makepad_widgets;
 
 use makepad_widgets::*;
 
+mod picker;
+use picker::{pick_local_video, PickedMediaAction};
+
 app_main!(App);
 
 // A public HLS (m3u8) adaptive-bitrate stream. The Video widget's backend plays HLS natively
@@ -134,7 +137,13 @@ script_mod! {
                     width: 64
                     height: Fit
                     text: "Pause"
-                    show_bg: true
+                    draw_bg.color: #x00000099
+                }
+
+                open_button := Button{
+                    width: 56
+                    height: Fit
+                    text: "Open"
                     draw_bg.color: #x00000099
                 }
 
@@ -215,7 +224,6 @@ script_mod! {
                     width: 52
                     height: Fit
                     text: "1.0x"
-                    show_bg: true
                     draw_bg.color: #x00000099
                 }
 
@@ -223,7 +231,6 @@ script_mod! {
                     width: 56
                     height: Fit
                     text: "Full"
-                    show_bg: true
                     draw_bg.color: #x00000099
                 }
             }
@@ -301,6 +308,8 @@ pub struct VideoPlayer {
     tick_started: bool,
     #[rust(false)]
     media_started: bool,
+    #[rust]
+    pending_source: Option<String>,
 }
 
 impl Widget for VideoPlayer {
@@ -324,6 +333,7 @@ impl Widget for VideoPlayer {
             // "no gesture -> hide" rule takes over (armed from show_controls_bar / gesture paths).
         }
         if self.tick_timer.is_event(event).is_some() {
+            self.try_open_pending(cx);
             self.refresh_progress(cx);
         }
         if self.hud_timer.is_event(event).is_some() {
@@ -623,6 +633,39 @@ impl VideoPlayer {
         self.view(cx, ids!(hud)).set_visible(cx, false);
         self.redraw(cx);
     }
+
+    /// Open a new path, URL, or `content://` URI (e.g. from the system picker).
+    fn request_open_media(&mut self, cx: &mut Cx, src: &str) {
+        let src = src.trim();
+        if src.is_empty() {
+            return;
+        }
+        let video = self.video(cx, ids!(video));
+        if video.is_unprepared() {
+            play_media(cx, &video, src);
+            self.paused = false;
+            self.button(cx, ids!(play_button)).set_text(cx, "Pause");
+            self.show_controls_bar(cx);
+            return;
+        }
+        self.pending_source = Some(src.to_string());
+        video.stop_and_cleanup_resources(cx);
+        self.show_controls_bar(cx);
+    }
+
+    fn try_open_pending(&mut self, cx: &mut Cx) {
+        let Some(src) = self.pending_source.clone() else {
+            return;
+        };
+        let video = self.video(cx, ids!(video));
+        if !video.is_unprepared() {
+            return;
+        }
+        self.pending_source = None;
+        play_media(cx, &video, &src);
+        self.paused = false;
+        self.button(cx, ids!(play_button)).set_text(cx, "Pause");
+    }
 }
 
 /// Points a [`Video`] widget at a media source given as a plain string, auto-detecting:
@@ -634,19 +677,16 @@ impl VideoPlayer {
 /// This is the "plugin" entry point: callers just pass a path or URL and the right
 /// [`VideoDataSource`] is chosen and applied.
 fn play_media(cx: &mut Cx, video: &VideoRef, src: &str) {
-    let lower_path = src.split(['?', '#']).next().unwrap_or(src).to_ascii_lowercase();
+    let Some((path, is_network)) = parse_media_ref(src) else {
+        return;
+    };
+    let lower_path = path.split(['?', '#']).next().unwrap_or(&path).to_ascii_lowercase();
     let is_manifest = lower_path.ends_with(".m3u8") || lower_path.ends_with(".mpd");
 
-    let is_network = src.starts_with("http://")
-        || src.starts_with("https://")
-        || src.starts_with("file://");
-
-    // Both HLS/DASH manifests and progressive files go through Network when given a URL; a local
-    // path uses Filesystem. (Local .m3u8 is unusual and not handled specially here.)
     let source = if is_network {
-        VideoDataSource::Network { url: src.to_string() }
+        VideoDataSource::Network { url: path }
     } else {
-        VideoDataSource::Filesystem { path: src.to_string() }
+        VideoDataSource::Filesystem { path }
     };
 
     let kind = if is_manifest { "HLS/DASH manifest" } else { "progressive file" };
@@ -655,6 +695,30 @@ fn play_media(cx: &mut Cx, video: &VideoRef, src: &str) {
 
     video.set_source(source);
     video.begin_playback(cx);
+}
+
+/// Parse a filesystem path, `file://` / `content://` URI, or `http(s)://` URL.
+fn parse_media_ref(src: &str) -> Option<(String, bool)> {
+    let src = src.trim();
+    if src.is_empty() {
+        return None;
+    }
+    let is_network = src.starts_with("http://") || src.starts_with("https://");
+    if let Some(rest) = src.strip_prefix("file://") {
+        let rest = rest
+            .strip_prefix('/')
+            .filter(|r| r.as_bytes().get(1) == Some(&b':'))
+            .unwrap_or(rest);
+        return Some((rest.to_string(), false));
+    }
+    if src.starts_with("content://") {
+        return Some((src.to_string(), false));
+    }
+    if is_network {
+        Some((src.to_string(), true))
+    } else {
+        Some((src.to_string(), false))
+    }
 }
 
 /// Computes the target scrub position for a horizontal seek drag.
@@ -700,6 +764,20 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            if let Some(picked) = action.downcast_ref::<PickedMediaAction>() {
+                if let Some(err) = picked.error.as_ref() {
+                    error!("video_player: open file failed: {err}");
+                    continue;
+                }
+                let Some(path) = picked.path_or_uri.as_ref() else {
+                    continue;
+                };
+                if let Some(mut vp) = self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>() {
+                    vp.request_open_media(cx, path);
+                }
+            }
+        }
         if self.ui.button(cx, ids!(play_button)).clicked(actions) {
             if let Some(mut vp) = self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>() {
                 vp.toggle_play_pause(cx);
@@ -709,6 +787,12 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(speed_button)).clicked(actions) {
             if let Some(mut vp) = self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>() {
                 vp.cycle_speed(cx);
+                vp.show_controls_bar(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(open_button)).clicked(actions) {
+            pick_local_video();
+            if let Some(mut vp) = self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>() {
                 vp.show_controls_bar(cx);
             }
         }
@@ -736,6 +820,18 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Drop(drop) = event {
+            for item in drop.items.iter() {
+                if let DragItem::FilePath { path, .. } = item {
+                    if let Some(mut vp) =
+                        self.ui.widget(cx, ids!(player)).borrow_mut::<VideoPlayer>()
+                    {
+                        vp.request_open_media(cx, path);
+                    }
+                    break;
+                }
+            }
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
@@ -798,5 +894,21 @@ mod tests {
         assert_eq!(scrub_target_ms(10_000, -w * 10.0, w, total), 0);
         // Zero duration is a no-op.
         assert_eq!(scrub_target_ms(5_000, w, w, 0), 0);
+    }
+
+    #[test]
+    fn parse_media_ref_handles_content_and_file_urls() {
+        assert_eq!(
+            parse_media_ref("content://media/external/video/media/42"),
+            Some(("content://media/external/video/media/42".into(), false))
+        );
+        assert_eq!(
+            parse_media_ref("file:///C:/Videos/clip.mp4"),
+            Some(("C:/Videos/clip.mp4".into(), false))
+        );
+        assert_eq!(
+            parse_media_ref("https://example.com/x.m3u8"),
+            Some(("https://example.com/x.m3u8".into(), true))
+        );
     }
 }

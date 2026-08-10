@@ -93,6 +93,24 @@ pub fn with_ios_app<R>(f: impl FnOnce(&mut IosApp) -> R) -> R {
     IOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
 }
 
+/// Safe Metal device lookup before/during `IOS_APP` init, or under re-entrant borrow.
+///
+/// Returns `None` when the app global is not ready, the device is null, or the
+/// `RefCell` is already borrowed (avoids panicking from [`with_ios_app`]).
+pub fn try_metal_device() -> Option<ObjcId> {
+    IOS_APP.with(|cell| {
+        let Ok(app) = cell.try_borrow() else {
+            return None;
+        };
+        let device = app.as_ref()?.metal_device();
+        if device.is_null() {
+            None
+        } else {
+            Some(device)
+        }
+    })
+}
+
 pub fn init_ios_app_global(
     metal_device: ObjcId,
     event_callback: Box<dyn FnMut(IosEvent) -> EventFlow>,

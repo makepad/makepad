@@ -94,6 +94,9 @@ mod tests {
                     height: 2,
                     layout: YuvLayout::I420,
                     matrix: YuvColorMatrix::BT709,
+                    y_stride: 0,
+                    u_stride: 0,
+                    v_stride: 0,
                 },
             }]
         }
