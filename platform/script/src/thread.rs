@@ -23,6 +23,11 @@ pub struct LoopValues {
     pub index_id: Option<LiveId>,
     pub source: ScriptValue,
     pub index: f64,
+    /// (end, step) captured at loop entry for range sources the script can
+    /// no longer reach (un-REFFED range literals like `for i in 0..n`) —
+    /// skips two proto-chain lookups per iteration. REFFED ranges keep the
+    /// live per-iteration lookups since script code could mutate them.
+    pub range_cache: Option<(f64, f64)>,
 }
 
 #[derive(Debug)]
@@ -131,7 +136,7 @@ impl ScriptThread {
     }
 
     pub fn pause(&mut self) -> ScriptThreadId {
-        self.trap.on.set(Some(ScriptTrapOn::Pause));
+        self.trap.set_on(Some(ScriptTrapOn::Pause));
         self.is_paused = true;
         self.thread_id
     }
