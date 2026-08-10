@@ -243,6 +243,7 @@ pub enum Event {
     VideoYuvTexturesReady(VideoYuvTexturesReady),
     VideoSeekableRanges(VideoSeekableRangesEvent),
     VideoBufferedRanges(VideoBufferedRangesEvent),
+    VideoTracksChanged(VideoTracksChangedEvent),
 
     /// The "go back" navigational button or gesture was performed.
     ///
@@ -341,6 +342,7 @@ impl Event {
             63 => "VideoSeekableRanges",
             64 => "VideoBufferedRanges",
             65 => "VideoYuvTexturesReady",
+            71 => "VideoTracksChanged",
             51 => "MouseLeave",
             52 => "Actions",
             53 => "BackPressed",
@@ -432,6 +434,7 @@ impl Event {
             Self::VideoSeekableRanges(_) => 63,
             Self::VideoBufferedRanges(_) => 64,
             Self::VideoYuvTexturesReady(_) => 65,
+            Self::VideoTracksChanged(_) => 71,
             Self::MouseLeave(_) => 51,
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,

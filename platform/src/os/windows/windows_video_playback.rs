@@ -1,8 +1,17 @@
 //! Windows video playback using IMFMediaEngine (Media Foundation).
 //!
-//! IMFMediaEngine is the Windows equivalent of AVPlayer (macOS/iOS) or
-//! GStreamer playbin (Linux) — a high-level platform video player that
-//! handles audio, video decoding, and A/V sync natively.
+//! All Media Foundation COM calls run on a long-lived MTA worker thread.
+//! Makepad's UI thread is STA (`OleInitialize`); calling MF from STA while
+//! buffering (especially HLS) hangs the message pump. The UI only posts
+//! commands and drains results — never calls into `IMFMediaEngine` directly.
+//!
+//! # Present path
+//!
+//! Default: `MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT = NV12`, then
+//! `TransferVideoFrame` into an ArraySize=1 NV12 DXGI texture and sample Y/UV
+//! plane SRVs (skips BGRA convert). Media Engine frame-server mode cannot
+//! expose the decoder surface itself — this is DXGI NV12 present, not
+//! decoder-pool zero-copy. Force BGRA with `MAKEPAD_MF_BGRA=1`.
 
 use {
     crate::{
@@ -13,745 +22,1246 @@ use {
         texture::{
             CxTexturePool, TextureAlloc, TextureCategory, TextureFormat, TextureId, TexturePixel,
         },
+        gpu_texture::with_media_d3d11_lock,
+        thread::SignalToUI,
         windows::{
-            core::{IUnknown, Interface, GUID, HRESULT},
-            Win32::Graphics::{
-                Direct3D11::{
-                    ID3D11Device, ID3D11Resource, ID3D11ShaderResourceView, ID3D11Texture2D,
-                    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
-                    D3D11_USAGE_DEFAULT,
+            core::{Interface, BSTR, IUnknown},
+            Win32::{
+                Foundation::RECT,
+                Graphics::{
+                    Direct3D11::{
+                        ID3D11Device, ID3D11Multithread, ID3D11Resource, ID3D11ShaderResourceView,
+                        ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+                        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                    },
+                    Dxgi::Common::{
+                        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
+                    },
                 },
-                Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                Media::MediaFoundation::{
+                    IMFDXGIDeviceManager, IMFMediaEngine, IMFMediaEngineClassFactory,
+                    MFARGB, MFCreateAttributes, MFCreateDXGIDeviceManager,
+                    MFShutdown, MFStartup, CLSID_MFMediaEngineClassFactory, MFSTARTUP_FULL,
+                    MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER,
+                    MF_MEDIA_ENGINE_EVENT_CANPLAY, MF_MEDIA_ENGINE_EVENT_ENDED,
+                    MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_EVENT_FORMATCHANGE,
+                    MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION,
+                },
+                System::Com::{
+                    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+                },
             },
-            Win32::Media::MediaFoundation::{IMFAttributes, MFCreateAttributes},
         },
     },
     std::{
-        ffi::c_void,
+        collections::HashMap,
         path::PathBuf,
-        sync::atomic::{AtomicU32, Ordering},
-        sync::Mutex,
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            mpsc::{self, Receiver, Sender},
+            Mutex, OnceLock,
+        },
     },
 };
 
-// ── GUIDs ──────────────────────────────────────────────────────────────────────
-// Values below come from Windows SDK `mfmediaengine.h` definitions.
-
-const CLSID_MF_MEDIA_ENGINE_CLASS_FACTORY: GUID =
-    GUID::from_u128(0xB44392DA_499B_446B_A4CB_005FEAD0E6D5);
-const IID_IMF_MEDIA_ENGINE_CLASS_FACTORY: GUID =
-    GUID::from_u128(0x4D645ACE_26AA_4688_9be1_df3516990b93);
-const IID_IMF_MEDIA_ENGINE_NOTIFY: GUID = GUID::from_u128(0xFEE7C112_E776_42B5_9BBF_0048524E2BD5);
-
-const MF_MEDIA_ENGINE_CALLBACK: GUID = GUID::from_u128(0xC60381B8_83A4_41F8_A3D0_DE05076849A9);
-const MF_MEDIA_ENGINE_DXGI_MANAGER: GUID = GUID::from_u128(0x065702da_1094_486d_8617_ee7cc4ee4648);
-const MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT: GUID =
-    GUID::from_u128(0x5066893c_8cf9_42bc_8b8a_472212e52726);
-
-// Media Engine event constants
-const ME_EVENT_ERROR: u32 = 5;
-const ME_EVENT_CANPLAY: u32 = 14;
-const ME_EVENT_ENDED: u32 = 19;
-const ME_EVENT_FORMATCHANGE: u32 = 1000;
-
-// ── Raw FFI ────────────────────────────────────────────────────────────────────
-
-#[link(name = "mfplat")]
-extern "system" {
-    fn MFStartup(version: u32, flags: u32) -> HRESULT;
-    fn MFShutdown() -> HRESULT;
-    fn MFCreateDXGIDeviceManager(
-        reset_token: *mut u32,
-        pp_device_manager: *mut *mut c_void,
-    ) -> HRESULT;
-}
-
-#[link(name = "ole32")]
-extern "system" {
-    fn CoInitializeEx(pv_reserved: *mut c_void, dw_co_init: u32) -> HRESULT;
-    fn CoCreateInstance(
-        rclsid: *const GUID,
-        punk_outer: *mut c_void,
-        cls_context: u32,
-        riid: *const GUID,
-        ppv: *mut *mut c_void,
-    ) -> HRESULT;
-}
-
-#[link(name = "oleaut32")]
-extern "system" {
-    fn SysAllocString(psz: *const u16) -> *mut u16;
-    fn SysFreeString(bstr: *mut u16);
-}
-
-const MF_API_VERSION: u32 = 0x0070;
-const MF_VERSION: u32 = (0x0002 << 16) | MF_API_VERSION;
-const CLSCTX_INPROC_SERVER: u32 = 0x1;
-
-// ── COM vtable definitions ─────────────────────────────────────────────────────
-
-#[repr(C)]
-#[allow(non_snake_case)]
-struct IMFMediaEngineVtbl {
-    // IUnknown
-    QueryInterface:
-        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-    AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
-    Release: unsafe extern "system" fn(*mut c_void) -> u32,
-    // IMFMediaEngine
-    GetError: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-    SetErrorCode: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
-    SetSourceElements: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
-    SetSource: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT,
-    GetCurrentSource: unsafe extern "system" fn(*mut c_void, *mut *mut u16) -> HRESULT,
-    GetNetworkState: unsafe extern "system" fn(*mut c_void) -> u16,
-    GetPreload: unsafe extern "system" fn(*mut c_void) -> u32,
-    SetPreload: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
-    GetBuffered: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-    Load: unsafe extern "system" fn(*mut c_void) -> HRESULT,
-    CanPlayType: unsafe extern "system" fn(*mut c_void, *const u16, *mut u32) -> HRESULT,
-    GetReadyState: unsafe extern "system" fn(*mut c_void) -> u16,
-    IsSeeking: unsafe extern "system" fn(*mut c_void) -> i32,
-    GetCurrentTime: unsafe extern "system" fn(*mut c_void) -> f64,
-    SetCurrentTime: unsafe extern "system" fn(*mut c_void, f64) -> HRESULT,
-    GetStartTime: unsafe extern "system" fn(*mut c_void) -> f64,
-    GetDuration: unsafe extern "system" fn(*mut c_void) -> f64,
-    IsPaused: unsafe extern "system" fn(*mut c_void) -> i32,
-    GetDefaultPlaybackRate: unsafe extern "system" fn(*mut c_void) -> f64,
-    SetDefaultPlaybackRate: unsafe extern "system" fn(*mut c_void, f64) -> HRESULT,
-    GetPlaybackRate: unsafe extern "system" fn(*mut c_void) -> f64,
-    SetPlaybackRate: unsafe extern "system" fn(*mut c_void, f64) -> HRESULT,
-    GetPlayed: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-    GetSeekable: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-    IsEnded: unsafe extern "system" fn(*mut c_void) -> i32,
-    GetAutoPlay: unsafe extern "system" fn(*mut c_void) -> i32,
-    SetAutoPlay: unsafe extern "system" fn(*mut c_void, i32) -> HRESULT,
-    GetLoop: unsafe extern "system" fn(*mut c_void) -> i32,
-    SetLoop: unsafe extern "system" fn(*mut c_void, i32) -> HRESULT,
-    Play: unsafe extern "system" fn(*mut c_void) -> HRESULT,
-    Pause: unsafe extern "system" fn(*mut c_void) -> HRESULT,
-    GetMuted: unsafe extern "system" fn(*mut c_void) -> i32,
-    SetMuted: unsafe extern "system" fn(*mut c_void, i32) -> HRESULT,
-    GetVolume: unsafe extern "system" fn(*mut c_void) -> f64,
-    SetVolume: unsafe extern "system" fn(*mut c_void, f64) -> HRESULT,
-    HasVideo: unsafe extern "system" fn(*mut c_void) -> i32,
-    HasAudio: unsafe extern "system" fn(*mut c_void) -> i32,
-    GetNativeVideoSize: unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32) -> HRESULT,
-    GetVideoAspectRatio: unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32) -> HRESULT,
-    Shutdown: unsafe extern "system" fn(*mut c_void) -> HRESULT,
-    TransferVideoFrame: unsafe extern "system" fn(
-        *mut c_void,
-        *mut c_void,
-        *const MFVideoNormalizedRect,
-        *const RECT,
-        *const MFARGB,
-    ) -> HRESULT,
-    OnVideoStreamTick: unsafe extern "system" fn(*mut c_void, *mut i64) -> HRESULT,
-}
-
-#[repr(C)]
-#[allow(non_snake_case)]
-struct IMFMediaEngineClassFactoryVtbl {
-    QueryInterface:
-        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-    AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
-    Release: unsafe extern "system" fn(*mut c_void) -> u32,
-    CreateInstance:
-        unsafe extern "system" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> HRESULT,
-    CreateTimeRange: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-    CreateError: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-}
-
-#[repr(C)]
-#[allow(non_snake_case)]
-struct IMFDXGIDeviceManagerVtbl {
-    QueryInterface:
-        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-    AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
-    Release: unsafe extern "system" fn(*mut c_void) -> u32,
-    CloseDeviceHandle: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
-    GetVideoService: unsafe extern "system" fn(
-        *mut c_void,
-        *mut c_void,
-        *const GUID,
-        *mut *mut c_void,
-    ) -> HRESULT,
-    LockDevice: unsafe extern "system" fn(
-        *mut c_void,
-        *mut c_void,
-        *const GUID,
-        *mut *mut c_void,
-        i32,
-    ) -> HRESULT,
-    OpenDeviceHandle: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
-    ResetDevice: unsafe extern "system" fn(*mut c_void, *mut c_void, u32) -> HRESULT,
-    TestDevice: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
-    UnlockDevice: unsafe extern "system" fn(*mut c_void, *mut c_void, i32) -> HRESULT,
-}
-
-// ── TransferVideoFrame helper structs ──────────────────────────────────────────
-
-#[repr(C)]
-#[derive(Default)]
-struct MFVideoNormalizedRect {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct RECT {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct MFARGB {
-    blue: u8,
-    green: u8,
-    red: u8,
-    alpha: u8,
-}
-
-// ── IMFMediaEngineNotify callback ──────────────────────────────────────────────
-
-#[repr(C)]
-#[allow(non_snake_case)]
-struct MediaEngineNotifyVtbl {
-    QueryInterface:
-        unsafe extern "system" fn(*mut MediaEngineNotify, *const GUID, *mut *mut c_void) -> HRESULT,
-    AddRef: unsafe extern "system" fn(*mut MediaEngineNotify) -> u32,
-    Release: unsafe extern "system" fn(*mut MediaEngineNotify) -> u32,
-    EventNotify: unsafe extern "system" fn(*mut MediaEngineNotify, u32, usize, u32) -> HRESULT,
-}
-
-#[repr(C)]
-struct MediaEngineNotify {
-    vtbl: *const MediaEngineNotifyVtbl,
-    ref_count: AtomicU32,
-    events: Mutex<Vec<u32>>,
-}
-
-static NOTIFY_VTBL: MediaEngineNotifyVtbl = MediaEngineNotifyVtbl {
-    QueryInterface: notify_query_interface,
-    AddRef: notify_add_ref,
-    Release: notify_release,
-    EventNotify: notify_event_notify,
+use super::windows_media_engine_notify::{
+    drain_notify_events, new_media_engine_notify, MediaEngineNotifyState,
 };
 
-const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+// ── MTA worker command / event protocol ───────────────────────────────────────
 
-unsafe extern "system" fn notify_query_interface(
-    this: *mut MediaEngineNotify,
-    riid: *const GUID,
-    ppv: *mut *mut c_void,
-) -> HRESULT {
-    if riid.is_null() || ppv.is_null() {
-        return HRESULT(-2147467261); // E_POINTER
-    }
-    let iid = *riid;
-    if iid == IID_IUNKNOWN || iid == IID_IMF_MEDIA_ENGINE_NOTIFY {
-        (*this).ref_count.fetch_add(1, Ordering::SeqCst);
-        *ppv = this as *mut c_void;
-        HRESULT(0)
-    } else {
-        *ppv = std::ptr::null_mut();
-        HRESULT(-2147467262) // E_NOINTERFACE
-    }
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+static CMD_TX: OnceLock<Sender<MfCmd>> = OnceLock::new();
+static EVENTS: Mutex<Vec<MfEvent>> = Mutex::new(Vec::new());
+static SESSION_BOOTSTRAP: OnceLock<Mutex<HashMap<u64, SessionBootstrap>>> = OnceLock::new();
+
+fn session_bootstrap_map() -> &'static Mutex<HashMap<u64, SessionBootstrap>> {
+    SESSION_BOOTSTRAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-unsafe extern "system" fn notify_add_ref(this: *mut MediaEngineNotify) -> u32 {
-    (*this).ref_count.fetch_add(1, Ordering::SeqCst) + 1
+/// Commands that arrive before `Create` finishes on the worker.
+#[derive(Default)]
+struct SessionBootstrap {
+    /// `None` = keep Create's `autoplay`; `Some` = last Play/Pause before ready.
+    want_play: Option<bool>,
+    pending_seek_ms: Option<u64>,
+    pending_mute: Option<bool>,
+    pending_volume: Option<f64>,
+    pending_playback_rate: Option<f64>,
 }
 
-unsafe extern "system" fn notify_release(this: *mut MediaEngineNotify) -> u32 {
-    let prev = (*this).ref_count.fetch_sub(1, Ordering::SeqCst);
-    if prev == 1 {
-        drop(Box::from_raw(this));
-    }
-    prev - 1
+fn take_bootstrap(session: u64) -> SessionBootstrap {
+    session_bootstrap_map()
+        .lock()
+        .unwrap()
+        .remove(&session)
+        .unwrap_or_default()
 }
 
-unsafe extern "system" fn notify_event_notify(
-    this: *mut MediaEngineNotify,
-    event: u32,
-    _param1: usize,
-    _param2: u32,
-) -> HRESULT {
-    if let Ok(mut events) = (*this).events.lock() {
-        events.push(event);
-    }
-    HRESULT(0)
+fn with_bootstrap<F: FnOnce(&mut SessionBootstrap)>(session: u64, f: F) {
+    let mut map = session_bootstrap_map().lock().unwrap();
+    f(map.entry(session).or_default());
 }
 
-impl MediaEngineNotify {
-    fn create() -> *mut Self {
-        Box::into_raw(Box::new(Self {
-            vtbl: &NOTIFY_VTBL,
-            ref_count: AtomicU32::new(1),
-            events: Mutex::new(Vec::new()),
-        }))
-    }
-
-    unsafe fn drain_events(ptr: *mut Self) -> Vec<u32> {
-        if let Ok(mut events) = (*ptr).events.lock() {
-            std::mem::take(&mut *events)
-        } else {
-            Vec::new()
-        }
-    }
+enum CreateSource {
+    Url {
+        url: String,
+        /// Optional staged temp file to delete when the session ends.
+        cleanup: Option<PathBuf>,
+    },
+    Memory { bytes: Vec<u8>, video_id: u64 },
 }
 
-// ── Helper: raw COM Release ────────────────────────────────────────────────────
-
-unsafe fn com_release(ptr: *mut c_void) {
-    if !ptr.is_null() {
-        let vtbl = *(ptr as *const *const usize);
-        let release: unsafe extern "system" fn(*mut c_void) -> u32 =
-            std::mem::transmute(*vtbl.add(2));
-        release(ptr);
-    }
-}
-
-// ── Engine creation on MTA thread ──────────────────────────────────────────────
-// IMFMediaEngine requires MTA. Makepad's UI thread is STA.
-// We create the engine on a temporary MTA thread, then use it from the main
-// thread via raw vtable pointers (no COM marshalling needed).
-
-unsafe fn create_engine_on_mta(
-    device_raw: usize,
-    notify_raw: usize,
-    is_looping: bool,
-    wide_url: Vec<u16>,
-) -> Option<(usize, usize)> {
-    let hr = CoInitializeEx(std::ptr::null_mut(), 0x0); // COINIT_MULTITHREADED
-    if hr.0 < 0 {
-        error!("VIDEO: CoInitializeEx(MTA) failed: {:?}", hr);
-        return None;
-    }
-
-    let hr = MFStartup(MF_VERSION, 0);
-    if hr.is_err() {
-        error!("VIDEO: MFStartup failed: {:?}", hr);
-        return None;
-    }
-
-    // Create DXGI device manager for hardware-accelerated decode
-    let mut reset_token: u32 = 0;
-    let mut dxgi_manager: *mut c_void = std::ptr::null_mut();
-    let hr = MFCreateDXGIDeviceManager(&mut reset_token, &mut dxgi_manager);
-    if hr.is_err() || dxgi_manager.is_null() {
-        error!("VIDEO: MFCreateDXGIDeviceManager failed: {:?}", hr);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    // Enable multithread protection on the D3D11 device (required when sharing
-    // a device between the app's render thread and MF's internal worker threads)
-    let device = device_raw as *mut c_void;
-    let iid_multithread = GUID::from_u128(0x9B7E4E00_342C_4106_A19F_4F2704F689F0u128);
-    let mut mt: *mut c_void = std::ptr::null_mut();
-    let vtbl = *(device as *const *const usize);
-    let qi: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtbl);
-    let hr = qi(device, &iid_multithread, &mut mt);
-    if hr.is_ok() && !mt.is_null() {
-        // ID3D10Multithread::SetMultithreadProtected is at vtable index 4
-        let mt_vtbl = *(mt as *const *const usize);
-        let set_protected: unsafe extern "system" fn(*mut c_void, i32) -> i32 =
-            std::mem::transmute(*mt_vtbl.add(4));
-        set_protected(mt, 1);
-        com_release(mt);
-    }
-
-    // Bind D3D11 device to DXGI manager
-    let mgr_vtbl = *(dxgi_manager as *const *const IMFDXGIDeviceManagerVtbl);
-    let hr = ((*mgr_vtbl).ResetDevice)(dxgi_manager, device, reset_token);
-    if hr.is_err() {
-        error!("VIDEO: ResetDevice failed: {:?}", hr);
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    // Set up attributes for engine creation
-    let mut attrs: Option<IMFAttributes> = None;
-    if let Err(e) = MFCreateAttributes(&mut attrs, 4) {
-        error!("VIDEO: MFCreateAttributes failed: {:?}", e);
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-    let attributes = attrs.unwrap();
-
-    // Set notification callback
-    let notify = notify_raw as *mut MediaEngineNotify;
-    notify_add_ref(notify);
-    let notify_unk: IUnknown = IUnknown::from_raw(notify as *mut c_void);
-    if let Err(e) = attributes.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify_unk) {
-        error!("VIDEO: SetUnknown(CALLBACK) failed: {:?}", e);
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    // Set DXGI device manager
-    ((*mgr_vtbl).AddRef)(dxgi_manager);
-    let mgr_unk: IUnknown = IUnknown::from_raw(dxgi_manager);
-    if let Err(e) = attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, &mgr_unk) {
-        error!("VIDEO: SetUnknown(DXGI_MANAGER) failed: {:?}", e);
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    // Set output format
-    let _ = attributes.SetUINT32(
-        &MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
-        DXGI_FORMAT_B8G8R8A8_UNORM.0 as u32,
-    );
-
-    // Media Foundation class factory is provided as an in-proc COM server.
-    let mut factory: *mut c_void = std::ptr::null_mut();
-    let hr = CoCreateInstance(
-        &CLSID_MF_MEDIA_ENGINE_CLASS_FACTORY,
-        std::ptr::null_mut(),
-        CLSCTX_INPROC_SERVER,
-        &IID_IMF_MEDIA_ENGINE_CLASS_FACTORY,
-        &mut factory,
-    );
-    if hr.is_err() || factory.is_null() {
-        let hr_code = hr.0 as u32;
-        if hr_code == 0x80040111 {
-            error!("VIDEO: CoCreateInstance(MFMediaEngineClassFactory) failed: {:?} (0x{:08X}, CLASS_E_CLASSNOTAVAILABLE). \
-                Media Foundation class factory is unavailable. \
-                Check: Settings > Apps > Optional features > Media Feature Pack", hr, hr_code);
-        } else {
-            error!(
-                "VIDEO: CoCreateInstance(MFMediaEngineClassFactory) failed: {:?} (0x{:08X}). \
-                This typically means Media Foundation is not properly installed. \
-                Check: Settings > Apps > Optional features > Media Feature Pack",
-                hr, hr_code
-            );
-        }
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    // Create engine instance
-    let factory_vtbl = *(factory as *const *const IMFMediaEngineClassFactoryVtbl);
-    let mut engine: *mut c_void = std::ptr::null_mut();
-    let hr = ((*factory_vtbl).CreateInstance)(
-        factory,
-        0,
-        Interface::as_raw(&attributes) as *mut c_void,
-        &mut engine,
-    );
-    com_release(factory);
-
-    if hr.is_err() || engine.is_null() {
-        error!("VIDEO: CreateInstance(engine) failed: {:?}", hr);
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    // Configure looping and set source
-    let engine_vtbl = *(engine as *const *const IMFMediaEngineVtbl);
-    let _ = ((*engine_vtbl).SetLoop)(engine, if is_looping { 1 } else { 0 });
-
-    let bstr = SysAllocString(wide_url.as_ptr());
-    let hr = ((*engine_vtbl).SetSource)(engine, bstr);
-    SysFreeString(bstr);
-
-    if hr.is_err() {
-        error!("VIDEO: SetSource failed: {:?}", hr);
-        let _ = ((*engine_vtbl).Shutdown)(engine);
-        com_release(engine);
-        com_release(dxgi_manager);
-        let _ = MFShutdown();
-        return None;
-    }
-
-    Some((engine as usize, dxgi_manager as usize))
-}
-
-// ── WindowsVideoPlayer ────────────────────────────────────────────────────────
-
-pub struct WindowsVideoPlayer {
-    engine: *mut c_void,
-    notify: *mut MediaEngineNotify,
-    dxgi_manager: *mut c_void,
-    d3d11_device: ID3D11Device,
-    render_texture: Option<ID3D11Texture2D>,
-    render_srv: Option<ID3D11ShaderResourceView>,
-    #[allow(unused)]
-    pub(crate) video_id: LiveId,
-    texture_id: TextureId,
-    is_prepared: bool,
-    prepare_notified: bool,
-    prepare_error: Option<String>,
-    is_eos: bool,
-    eos_notified: bool,
-    autoplay: bool,
-    video_width: u32,
-    video_height: u32,
-    temp_file_path: Option<PathBuf>,
-}
-
-impl WindowsVideoPlayer {
-    fn path_to_file_url(path: &str) -> String {
-        if path.starts_with("file://") {
-            return path.to_string();
-        }
-        // IMFMediaEngine::SetSource expects a URL. Normalize Windows paths.
-        let normalized = path.replace('\\', "/");
-        if normalized.starts_with('/') {
-            format!("file://{}", normalized)
-        } else {
-            format!("file:///{}", normalized)
-        }
-    }
-
-    pub fn new(
-        d3d11_device: &ID3D11Device,
-        video_id: LiveId,
-        texture_id: TextureId,
-        source: VideoSource,
-        autoplay: bool,
+enum MfCmd {
+    Create {
+        session: u64,
+        device: ID3D11Device,
+        source: CreateSource,
         is_looping: bool,
-    ) -> Option<Self> {
-        let (wide_url, temp_file_path) = Self::source_to_wide_url(video_id, &source);
+        autoplay: bool,
+    },
+    Play(u64),
+    Pause(u64),
+    Seek { session: u64, position_ms: u64 },
+    Mute { session: u64, muted: bool },
+    SetVolume { session: u64, volume: f64 },
+    SetPlaybackRate { session: u64, rate: f64 },
+    /// Process notify queue + optionally transfer a video frame.
+    Tick(u64),
+    Destroy(u64),
+}
 
-        let notify = MediaEngineNotify::create();
-        let device_raw = Interface::as_raw(d3d11_device) as usize;
-        let notify_raw = notify as usize;
+enum MfEvent {
+    CreateFailed {
+        session: u64,
+        error: String,
+    },
+    Prepared {
+        session: u64,
+        width: u32,
+        height: u32,
+        duration_ms: u128,
+        has_audio: bool,
+    },
+    Error {
+        session: u64,
+        error: String,
+    },
+    Eos {
+        session: u64,
+    },
+    Playing {
+        session: u64,
+        playing: bool,
+    },
+    Frame {
+        session: u64,
+        texture: ID3D11Texture2D,
+        /// Present for BGRA `VideoExternal`; unused (`None`) for NV12 plane path.
+        srv: Option<ID3D11ShaderResourceView>,
+        /// When true, UI adopts Y/UV plane SRVs into `tex_y`/`tex_u` (no BGRA).
+        nv12: bool,
+        width: u32,
+        height: u32,
+        position_ms: u128,
+    },
+}
 
-        // Create engine on MTA thread (IMFMediaEngine requires MTA, Makepad UI is STA)
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result =
-                unsafe { create_engine_on_mta(device_raw, notify_raw, is_looping, wide_url) };
-            let _ = tx.send(result);
-        });
+fn push_event(ev: MfEvent) {
+    let mut q = EVENTS.lock().unwrap();
+    if matches!(&ev, MfEvent::Frame { .. }) {
+        let sid = match &ev {
+            MfEvent::Frame { session, .. } => *session,
+            _ => unreachable!(),
+        };
+        q.retain(|e| !matches!(e, MfEvent::Frame { session, .. } if *session == sid));
+    }
+    q.push(ev);
+    SignalToUI::set_ui_signal();
+}
 
-        let ptrs = match rx.recv() {
-            Ok(Some(ptrs)) => ptrs,
-            _ => {
-                error!("VIDEO: failed to create IMFMediaEngine for {:?}", video_id);
-                unsafe { notify_release(notify) };
-                return None;
+fn drain_events_for(session: u64) -> Vec<MfEvent> {
+    let mut all = EVENTS.lock().unwrap();
+    let mut kept = Vec::new();
+    let mut ours = Vec::new();
+    for ev in all.drain(..) {
+        let sid = match &ev {
+            MfEvent::CreateFailed { session, .. }
+            | MfEvent::Prepared { session, .. }
+            | MfEvent::Error { session, .. }
+            | MfEvent::Eos { session }
+            | MfEvent::Playing { session, .. }
+            | MfEvent::Frame { session, .. } => *session,
+        };
+        if sid == session {
+            ours.push(ev);
+        } else {
+            kept.push(ev);
+        }
+    }
+    *all = kept;
+    ours
+}
+
+fn ensure_worker() -> Sender<MfCmd> {
+    CMD_TX
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<MfCmd>();
+            std::thread::Builder::new()
+                .name("makepad-mf-mta".into())
+                .spawn(move || mf_worker_main(rx))
+                .expect("failed to spawn MF MTA worker");
+            tx
+        })
+        .clone()
+}
+
+fn post(cmd: MfCmd) {
+    if let Err(send_err) = ensure_worker().send(cmd) {
+        if let MfCmd::Create { session, .. } = send_err.0 {
+            push_event(MfEvent::CreateFailed {
+                session,
+                error: "MF video worker unavailable".to_string(),
+            });
+        }
+    }
+}
+
+struct WorkerSession {
+    engine: IMFMediaEngine,
+    _notify: windows::core::ComObject<MediaEngineNotifyState>,
+    _dxgi_manager: IMFDXGIDeviceManager,
+    device: ID3D11Device,
+    /// Prefer NV12 `TransferVideoFrame` + plane SRV sampling (skips BGRA convert).
+    /// Falls back to BGRA when disabled or NV12 Transfer fails at runtime.
+    output_nv12: bool,
+    /// URL / file URL used to recreate the engine on NV12→BGRA fallback.
+    source_url: String,
+    /// Triple-buffer present targets so Transfer cannot overwrite a texture
+    /// still sampled by an in-flight GPU frame (double-buffer is not enough).
+    /// NV12: texture only. BGRA: texture + SRV.
+    render_textures: [Option<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)>; 3],
+    write_index: usize,
+    width: u32,
+    height: u32,
+    is_looping: bool,
+    autoplay: bool,
+    prepared: bool,
+    prepare_sent: bool,
+    last_pts: Option<i64>,
+    temp_file: Option<PathBuf>,
+    want_play: bool,
+    pending_seek_ms: Option<u64>,
+    pending_mute: Option<bool>,
+    pending_volume: Option<f64>,
+    pending_playback_rate: Option<f64>,
+}
+
+// Safety: notify pointer is only touched on the MTA worker thread.
+unsafe impl Send for WorkerSession {}
+
+fn init_media_foundation_on_worker() -> Result<(), String> {
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if hr.is_err() {
+        return Err(format!("CoInitializeEx(MTA) failed: {:?}", hr));
+    }
+    unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
+        .map_err(|e| format!("MFStartup failed: {e:?}"))
+}
+
+fn drain_worker_after_init_failure(rx: Receiver<MfCmd>, error: String) {
+    while let Ok(cmd) = rx.recv() {
+        if let MfCmd::Create { session, .. } = cmd {
+            push_event(MfEvent::CreateFailed {
+                session,
+                error: error.clone(),
+            });
+        }
+    }
+}
+
+fn apply_session_bootstrap(s: &mut WorkerSession, boot: SessionBootstrap) {
+    if let Some(want) = boot.want_play {
+        s.want_play = want;
+        s.autoplay = want;
+    }
+    if boot.pending_seek_ms.is_some() {
+        s.pending_seek_ms = boot.pending_seek_ms;
+    }
+    if boot.pending_mute.is_some() {
+        s.pending_mute = boot.pending_mute;
+    }
+    if boot.pending_volume.is_some() {
+        s.pending_volume = boot.pending_volume;
+    }
+    if boot.pending_playback_rate.is_some() {
+        s.pending_playback_rate = boot.pending_playback_rate;
+    }
+}
+
+fn stop_playback_intent(s: &mut WorkerSession) {
+    s.want_play = false;
+    s.autoplay = false;
+    let _ = unsafe { s.engine.Pause() };
+}
+
+fn apply_pending_controls(s: &mut WorkerSession) {
+    if let Some(ms) = s.pending_seek_ms.take() {
+        s.last_pts = None;
+        let _ = unsafe { s.engine.SetCurrentTime(ms as f64 / 1000.0) };
+    }
+    if let Some(muted) = s.pending_mute.take() {
+        let _ = unsafe { s.engine.SetMuted(muted) };
+    }
+    if let Some(volume) = s.pending_volume.take() {
+        let _ = unsafe { s.engine.SetVolume(volume) };
+    }
+    if let Some(rate) = s.pending_playback_rate.take() {
+        let _ = unsafe { s.engine.SetPlaybackRate(rate) };
+    }
+}
+
+fn mf_worker_main(rx: Receiver<MfCmd>) {
+    if let Err(error) = init_media_foundation_on_worker() {
+        error!("VIDEO: {error}");
+        drain_worker_after_init_failure(rx, error);
+        return;
+    }
+
+    let mut sessions: HashMap<u64, WorkerSession> = HashMap::new();
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            MfCmd::Create {
+                session,
+                device,
+                source,
+                is_looping,
+                autoplay,
+            } => {
+                let boot = take_bootstrap(session);
+                // Last Play/Pause before Create wins over the Create autoplay flag.
+                let want_play = boot.want_play.unwrap_or(autoplay);
+                match create_session(device, source, is_looping, want_play) {
+                    Ok(mut sess) => {
+                        apply_session_bootstrap(&mut sess, boot);
+                        sessions.insert(session, sess);
+                    }
+                    Err(error) => {
+                        push_event(MfEvent::CreateFailed { session, error });
+                    }
+                }
+            }
+            MfCmd::Play(session) => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    s.want_play = true;
+                    s.autoplay = true;
+                    if s.prepared {
+                        let _ = unsafe { s.engine.Play() };
+                        push_event(MfEvent::Playing {
+                            session,
+                            playing: true,
+                        });
+                    }
+                } else {
+                    with_bootstrap(session, |b| b.want_play = Some(true));
+                }
+            }
+            MfCmd::Pause(session) => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    stop_playback_intent(s);
+                    push_event(MfEvent::Playing {
+                        session,
+                        playing: false,
+                    });
+                } else {
+                    with_bootstrap(session, |b| b.want_play = Some(false));
+                }
+            }
+            MfCmd::Seek {
+                session,
+                position_ms,
+            } => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    if s.prepared {
+                        s.last_pts = None;
+                        let _ = unsafe { s.engine.SetCurrentTime(position_ms as f64 / 1000.0) };
+                    } else {
+                        s.pending_seek_ms = Some(position_ms);
+                    }
+                } else {
+                    with_bootstrap(session, |b| b.pending_seek_ms = Some(position_ms));
+                }
+            }
+            MfCmd::Mute { session, muted } => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    if s.prepared {
+                        let _ = unsafe { s.engine.SetMuted(muted) };
+                    } else {
+                        s.pending_mute = Some(muted);
+                    }
+                } else {
+                    with_bootstrap(session, |b| b.pending_mute = Some(muted));
+                }
+            }
+            MfCmd::SetVolume { session, volume } => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    if s.prepared {
+                        let _ = unsafe { s.engine.SetVolume(volume) };
+                    } else {
+                        s.pending_volume = Some(volume);
+                    }
+                } else {
+                    with_bootstrap(session, |b| b.pending_volume = Some(volume));
+                }
+            }
+            MfCmd::SetPlaybackRate { session, rate } => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    if s.prepared {
+                        let _ = unsafe { s.engine.SetPlaybackRate(rate) };
+                    } else {
+                        s.pending_playback_rate = Some(rate);
+                    }
+                } else {
+                    with_bootstrap(session, |b| b.pending_playback_rate = Some(rate));
+                }
+            }
+            MfCmd::Tick(session) => {
+                if let Some(s) = sessions.get_mut(&session) {
+                    tick_session(session, s);
+                }
+            }
+            MfCmd::Destroy(session) => {
+                let _ = take_bootstrap(session);
+                if let Some(mut s) = sessions.remove(&session) {
+                    destroy_session(&mut s);
+                }
+            }
+        }
+    }
+
+    for (_, mut s) in sessions.drain() {
+        destroy_session(&mut s);
+    }
+    let _ = unsafe { MFShutdown() };
+}
+
+fn enable_d3d11_multithread(device: &ID3D11Device) {
+    if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+        let _ = unsafe { mt.SetMultithreadProtected(true) };
+    }
+}
+
+fn create_session(
+    device: ID3D11Device,
+    source: CreateSource,
+    is_looping: bool,
+    autoplay: bool,
+) -> Result<WorkerSession, String> {
+    enable_d3d11_multithread(&device);
+
+    let mut temp_file: Option<PathBuf> = None;
+    let result = (|| {
+        let url = match source {
+            CreateSource::Url { url, cleanup } => {
+                if cleanup.is_some() {
+                    temp_file = cleanup;
+                }
+                url
+            }
+            CreateSource::Memory { bytes, video_id } => {
+                let ext = detect_container_extension(&bytes);
+                let tmp_path =
+                    std::env::temp_dir().join(format!("makepad_video_{video_id}.{ext}"));
+                std::fs::write(&tmp_path, &bytes)
+                    .map_err(|e| format!("temp write failed: {e}"))?;
+                temp_file = Some(tmp_path.clone());
+                path_to_file_url(&tmp_path.to_string_lossy())
             }
         };
 
-        Some(Self {
-            engine: ptrs.0 as *mut c_void,
-            dxgi_manager: ptrs.1 as *mut c_void,
-            notify,
-            d3d11_device: d3d11_device.clone(),
-            render_texture: None,
-            render_srv: None,
-            video_id,
-            texture_id,
-            is_prepared: false,
-            prepare_notified: false,
-            prepare_error: None,
-            is_eos: false,
-            eos_notified: false,
+        let mut reset_token = 0u32;
+        let mut dxgi_manager = None;
+        unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut dxgi_manager) }
+            .map_err(|e| format!("MFCreateDXGIDeviceManager: {e:?}"))?;
+        let dxgi_manager = dxgi_manager.ok_or_else(|| "null DXGI manager".to_string())?;
+        unsafe { dxgi_manager.ResetDevice(&device, reset_token) }
+            .map_err(|e| format!("ResetDevice: {e:?}"))?;
+
+        let mut attrs = None;
+        unsafe { MFCreateAttributes(&mut attrs, 4) }
+            .map_err(|e| format!("MFCreateAttributes: {e:?}"))?;
+        let attributes = attrs.ok_or_else(|| "null attributes".to_string())?;
+
+        let notify_com = new_media_engine_notify();
+        let notify_unk: IUnknown = notify_com.clone().into_interface();
+        unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify_unk) }
+            .map_err(|e| format!("SetUnknown(CALLBACK): {e:?}"))?;
+        unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, &dxgi_manager) }
+            .map_err(|e| format!("SetUnknown(DXGI_MANAGER): {e:?}"))?;
+
+        // Prefer NV12 Transfer so UI can sample Y/UV planes (skip BGRA convert).
+        // Media Engine still blits into our surface (frame-server API); this is
+        // DXGI NV12 present, not decoder-surface zero-copy.
+        let force_bgra = std::env::var_os("MAKEPAD_MF_BGRA").is_some();
+        let output_nv12 = !force_bgra;
+        let output_format = if output_nv12 {
+            DXGI_FORMAT_NV12.0 as u32
+        } else {
+            DXGI_FORMAT_B8G8R8A8_UNORM.0 as u32
+        };
+        let _ = unsafe {
+            attributes.SetUINT32(&MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, output_format)
+        };
+
+        let factory: IMFMediaEngineClassFactory = unsafe {
+            CoCreateInstance(
+                &CLSID_MFMediaEngineClassFactory,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+        }
+        .map_err(|e| {
+            format!(
+                "CoCreateInstance(MFMediaEngineClassFactory): {e:?}. \
+                 Check Optional features > Media Feature Pack"
+            )
+        })?;
+
+        let engine = unsafe { factory.CreateInstance(0, &attributes) }
+            .map_err(|e| format!("CreateInstance(engine): {e:?}"))?;
+        let _ = unsafe { engine.SetLoop(is_looping) };
+
+        let bstr = BSTR::from(url.as_str());
+        unsafe { engine.SetSource(&bstr) }.map_err(|e| format!("SetSource: {e:?}"))?;
+
+        if output_nv12 {
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                log!("VIDEO: MF MediaEngine output format NV12 (plane SRV present)");
+            }
+        }
+
+        Ok(WorkerSession {
+            engine,
+            _notify: notify_com,
+            _dxgi_manager: dxgi_manager,
+            device,
+            output_nv12,
+            source_url: url,
+            render_textures: [None, None, None],
+            write_index: 0,
+            width: 0,
+            height: 0,
+            is_looping,
+            prepared: false,
+            prepare_sent: false,
+            last_pts: None,
+            temp_file: temp_file.take(),
+            want_play: autoplay,
             autoplay,
-            video_width: 0,
-            video_height: 0,
-            temp_file_path,
+            pending_seek_ms: None,
+            pending_mute: None,
+            pending_volume: None,
+            pending_playback_rate: None,
         })
-    }
+    })();
 
-    fn source_to_wide_url(video_id: LiveId, source: &VideoSource) -> (Vec<u16>, Option<PathBuf>) {
-        match source {
-            VideoSource::Network(url) => {
-                let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-                (wide, None)
-            }
-            VideoSource::Filesystem(path) => {
-                let file_url = Self::path_to_file_url(path);
-                let wide: Vec<u16> = file_url.encode_utf16().chain(std::iter::once(0)).collect();
-                (wide, None)
-            }
-            VideoSource::InMemory(data) => {
-                let tmp_path =
-                    std::env::temp_dir().join(format!("makepad_video_{}.mp4", video_id.0));
-                if let Err(e) = std::fs::write(&tmp_path, data.as_ref()) {
-                    error!("VIDEO: failed to write temp file: {}", e);
-                }
-                let path_str = tmp_path.to_string_lossy().to_string();
-                let file_url = Self::path_to_file_url(&path_str);
-                let wide: Vec<u16> = file_url.encode_utf16().chain(std::iter::once(0)).collect();
-                (wide, Some(tmp_path))
-            }
-            VideoSource::Camera(..) => {
-                error!("VIDEO: Camera source not supported on Windows");
-                (vec![0], None)
-            }
-            VideoSource::PlaybackSession(..) | VideoSource::Session(..) => {
-                error!("VIDEO: session sources are handled by the software video player");
-                (vec![0], None)
-            }
+    if result.is_err() {
+        if let Some(path) = temp_file.take() {
+            let _ = std::fs::remove_file(path);
         }
     }
+    result
+}
 
-    #[inline]
-    unsafe fn vtbl(&self) -> &'static IMFMediaEngineVtbl {
-        &**(self.engine as *const *const IMFMediaEngineVtbl)
-    }
-
-    fn process_events(&mut self) {
-        let events = unsafe { MediaEngineNotify::drain_events(self.notify) };
-        for event in events {
-            match event {
-                ME_EVENT_CANPLAY => {
-                    if !self.is_prepared {
-                        self.is_prepared = true;
-                    }
-                }
-                ME_EVENT_ENDED => {
-                    self.is_eos = true;
-                }
-                ME_EVENT_FORMATCHANGE => unsafe {
-                    let vtbl = self.vtbl();
-                    let mut w: u32 = 0;
-                    let mut h: u32 = 0;
-                    let hr = (vtbl.GetNativeVideoSize)(self.engine, &mut w, &mut h);
-                    if hr.is_ok()
-                        && w > 0
-                        && h > 0
-                        && (w != self.video_width || h != self.video_height)
-                    {
-                        self.video_width = w;
-                        self.video_height = h;
-                        self.render_texture = None;
-                        self.render_srv = None;
-                    }
-                },
-                ME_EVENT_ERROR => {
-                    let message = "MediaEngine error event".to_string();
-                    self.prepare_error = Some(message.clone());
-                    error!("VIDEO: {}", message);
-                }
-                _ => {}
+fn push_file_url_char(out: &mut String, ch: char) {
+    match ch {
+        '/' | '-' | '_' | '.' | '~' | '(' | ')' | '!' | '*' | '\'' => out.push(ch),
+        'A'..='Z' | 'a'..='z' | '0'..='9' => out.push(ch),
+        ' ' => out.push_str("%20"),
+        _ if ch.is_ascii() => {
+            for byte in ch.to_string().as_bytes() {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", byte);
             }
         }
+        // Media Foundation expects Unicode file URLs as UTF-16 in the BSTR, not
+        // percent-encoded UTF-8 byte sequences.
+        _ => out.push(ch),
+    }
+}
+
+fn encode_windows_file_url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 8);
+    let mut rest = path;
+    if let Some(stripped) = rest.strip_prefix('/') {
+        out.push('/');
+        rest = stripped;
     }
 
-    fn ensure_render_texture(&mut self) {
-        if self.render_texture.is_some() || self.video_width == 0 || self.video_height == 0 {
-            return;
+    let path_tail: String = if rest.len() >= 2 {
+        let mut chars = rest.chars();
+        let a = chars.next().unwrap();
+        let b = chars.next().unwrap();
+        if a.is_ascii_alphabetic() && b == ':' {
+            out.push(a);
+            out.push(':');
+            let tail: String = chars.collect();
+            if let Some(tail) = tail.strip_prefix('/') {
+                out.push('/');
+                tail.to_string()
+            } else {
+                tail
+            }
+        } else {
+            rest.to_string()
         }
-        unsafe {
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: self.video_width,
-                Height: self.video_height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
+    } else {
+        rest.to_string()
+    };
+
+    for ch in path_tail.chars() {
+        push_file_url_char(&mut out, ch);
+    }
+    out
+}
+
+/// Detect container format from magic bytes for InMemory temp-file staging.
+pub(crate) fn detect_container_extension(data: &[u8]) -> &'static str {
+    if data.len() < 12 {
+        return "mp4";
+    }
+    if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return "webm";
+    }
+    if data.starts_with(b"OggS") {
+        return "ogg";
+    }
+    if data.starts_with(b"RIFF") {
+        if data.len() >= 12 && &data[8..12] == b"AVI " {
+            return "avi";
+        }
+        return "wav";
+    }
+    if data.starts_with(b"fLaC") {
+        return "flac";
+    }
+    if data.starts_with(b"ID3") || (data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+        return "mp3";
+    }
+    if &data[4..8] == b"ftyp" {
+        let brand = &data[8..12];
+        if brand == b"qt  " {
+            return "mov";
+        }
+        return "mp4";
+    }
+    // ASF / WMV / WMA: 30 26 B2 75 8E 66 CF 11 ...
+    if data.starts_with(&[0x30, 0x26, 0xB2, 0x75]) {
+        return "wmv";
+    }
+    "mp4"
+}
+
+pub(crate) fn path_to_file_url(path: &str) -> String {
+    if path.starts_with("file://") {
+        return path.to_string();
+    }
+    let normalized = path.replace('\\', "/");
+    let encoded = encode_windows_file_url_path(&normalized);
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    }
+}
+
+fn destroy_session(s: &mut WorkerSession) {
+    let _ = unsafe { s.engine.Shutdown() };
+    s.render_textures = [None, None, None];
+    s.write_index = 0;
+    if let Some(path) = s.temp_file.take() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn create_bgra_render_target(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> Option<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    if unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.is_err() {
+        return None;
+    }
+    let texture = texture?;
+    let resource = texture.cast::<ID3D11Resource>().ok()?;
+    let mut srv = None;
+    if unsafe {
+        device.CreateShaderResourceView(&resource, None, Some(&mut srv))
+    }
+    .is_err()
+    {
+        return None;
+    }
+    Some((texture, Some(srv?)))
+}
+
+fn create_nv12_render_target(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> Option<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
+    // Media Engine TransferVideoFrame into NV12; plane SRVs are created on the UI
+    // thread (default SRV on NV12 is invalid).
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    if unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.is_err() {
+        // Some drivers reject RT|SRV on NV12; try SRV-only.
+        let desc_srv_only = D3D11_TEXTURE2D_DESC {
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..desc
+        };
+        if unsafe { device.CreateTexture2D(&desc_srv_only, None, Some(&mut texture)) }.is_err() {
+            return None;
+        }
+    }
+    Some((texture?, None))
+}
+
+fn ensure_render_textures(s: &mut WorkerSession) {
+    if s.width == 0 || s.height == 0 {
+        return;
+    }
+    for slot in &mut s.render_textures {
+        if slot.is_none() {
+            *slot = if s.output_nv12 {
+                create_nv12_render_target(&s.device, s.width, s.height)
+            } else {
+                create_bgra_render_target(&s.device, s.width, s.height)
             };
-            let mut texture: Option<ID3D11Texture2D> = None;
-            if let Err(e) = self
-                .d3d11_device
-                .CreateTexture2D(&desc, None, Some(&mut texture))
-            {
-                error!("VIDEO: CreateTexture2D failed: {:?}", e);
-                return;
+        }
+    }
+}
+
+fn media_engine_error_message(engine: &IMFMediaEngine) -> String {
+    match unsafe { engine.GetError() } {
+        Ok(err) => {
+            let code = unsafe { err.GetErrorCode() };
+            let label = match code {
+                1 => "aborted",
+                2 => "network",
+                3 => "decode",
+                4 => "src_not_supported",
+                5 => "encrypted",
+                _ => "unknown",
+            };
+            format!("MediaEngine error: {label} (code {code})")
+        }
+        Err(e) => format!("MediaEngine error event ({e:?})"),
+    }
+}
+
+fn tick_session(session: u64, s: &mut WorkerSession) {
+    let events = drain_notify_events(s._notify.get());
+    for event in events {
+        if event == MF_MEDIA_ENGINE_EVENT_CANPLAY.0 as u32 {
+            s.prepared = true;
+        } else if event == MF_MEDIA_ENGINE_EVENT_ENDED.0 as u32 {
+            if !s.is_looping {
+                stop_playback_intent(s);
+                push_event(MfEvent::Eos { session });
+                push_event(MfEvent::Playing {
+                    session,
+                    playing: false,
+                });
             }
-            let texture = texture.unwrap();
-            let resource: ID3D11Resource = texture.cast().unwrap();
-            let mut srv: Option<ID3D11ShaderResourceView> = None;
-            if let Err(e) =
-                self.d3d11_device
-                    .CreateShaderResourceView(&resource, None, Some(&mut srv))
+        } else if event == MF_MEDIA_ENGINE_EVENT_ERROR.0 as u32 {
+            let message = media_engine_error_message(&s.engine);
+            error!("VIDEO: {message}");
+            stop_playback_intent(s);
+            push_event(MfEvent::Playing {
+                session,
+                playing: false,
+            });
+            push_event(MfEvent::Error {
+                session,
+                error: message,
+            });
+        } else if event == MF_MEDIA_ENGINE_EVENT_FORMATCHANGE.0 as u32 {
+            let mut w = 0u32;
+            let mut h = 0u32;
+            if unsafe { s.engine.GetNativeVideoSize(Some(&mut w), Some(&mut h)) }.is_ok()
+                && w > 0
+                && h > 0
+                && (w != s.width || h != s.height)
             {
-                error!("VIDEO: CreateShaderResourceView failed: {:?}", e);
-                return;
+                s.width = w;
+                s.height = h;
+                s.render_textures = [None, None, None];
+                s.write_index = 0;
             }
-            self.render_texture = Some(texture);
-            self.render_srv = srv;
         }
     }
 
-    // ── Public API ─────────────────────────────────────────────────────────────
-
-    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
-        if self.prepare_notified {
-            return None;
-        }
-        self.process_events();
-        if let Some(err) = self.prepare_error.take() {
-            self.prepare_notified = true;
-            return Some(Err(err));
-        }
-        if !self.is_prepared {
-            return None;
-        }
-        unsafe {
-            let vtbl = self.vtbl();
-            let mut w: u32 = 0;
-            let mut h: u32 = 0;
-            let hr = (vtbl.GetNativeVideoSize)(self.engine, &mut w, &mut h);
-            if hr.is_err() || w == 0 || h == 0 {
-                self.is_prepared = false;
-                return None;
-            }
-            self.video_width = w;
-            self.video_height = h;
-            let dur = (vtbl.GetDuration)(self.engine);
+    if s.prepared && !s.prepare_sent {
+        let mut w = 0u32;
+        let mut h = 0u32;
+        let size_ok = unsafe { s.engine.GetNativeVideoSize(Some(&mut w), Some(&mut h)) }.is_ok();
+        if size_ok && w > 0 && h > 0 {
+            s.width = w;
+            s.height = h;
+            let dur = unsafe { s.engine.GetDuration() };
             let duration_ms = if dur.is_finite() && dur > 0.0 {
                 (dur * 1000.0) as u128
             } else {
                 0
             };
-            self.prepare_notified = true;
-            if self.autoplay {
-                let _ = (vtbl.Play)(self.engine);
+            s.prepare_sent = true;
+            apply_pending_controls(s);
+            if s.autoplay || s.want_play {
+                let _ = unsafe { s.engine.Play() };
+                push_event(MfEvent::Playing {
+                    session,
+                    playing: true,
+                });
             }
-            let is_seekable = duration_ms > 0;
-            let video_tracks = if w > 0 && h > 0 {
-                vec!["video".to_string()]
-            } else {
-                vec![]
-            };
-            let audio_tracks = vec!["audio".to_string()];
-            Some(Ok(PlaybackPrepared::new(
-                w,
-                h,
+            push_event(MfEvent::Prepared {
+                session,
+                width: w,
+                height: h,
                 duration_ms,
-                is_seekable,
-                video_tracks,
-                audio_tracks,
-            )))
+                has_audio: unsafe {
+                    (Interface::vtable(&s.engine).HasAudio)(Interface::as_raw(&s.engine))
+                }
+                .as_bool(),
+            });
+        } else {
+            // CANPLAY without size yet — keep waiting.
+            s.prepared = false;
         }
     }
 
-    pub fn set_volume(&self, _volume: f64) {
-        // TODO: implement via IMFMediaEngine::SetVolume
+    if !s.prepared || !s.want_play {
+        return;
+    }
+    if unsafe { s.engine.IsPaused() }.as_bool() {
+        return;
     }
 
-    pub fn set_playback_rate(&self, _rate: f64) {
-        // TODO: implement via IMFMediaEngine::SetPlaybackRate
+    let pts = match unsafe { s.engine.OnVideoStreamTick() } {
+        Ok(pts) => pts,
+        Err(_) => return,
+    };
+    if s.last_pts == Some(pts) {
+        return;
+    }
+    s.last_pts = Some(pts);
+
+    with_media_d3d11_lock(|| {
+        ensure_render_textures(s);
+        let write_index = s.write_index;
+        let Some((texture, srv)) = s.render_textures[write_index].clone() else {
+            return;
+        };
+
+        let dst = RECT {
+            left: 0,
+            top: 0,
+            right: s.width as i32,
+            bottom: s.height as i32,
+        };
+        let border = MFARGB {
+            rgbBlue: 0,
+            rgbGreen: 0,
+            rgbRed: 0,
+            rgbAlpha: 0,
+        };
+        let unk: IUnknown = texture.cast().unwrap();
+        if unsafe {
+            s.engine
+                .TransferVideoFrame(&unk, None, &dst, Some(&border))
+        }
+        .is_err()
+        {
+            if s.output_nv12 {
+                error!(
+                    "VIDEO: MF TransferVideoFrame(NV12) failed — falling back to BGRA engine"
+                );
+                let _ = fallback_session_to_bgra(s);
+            }
+            return;
+        }
+
+        s.write_index = (write_index + 1) % s.render_textures.len();
+
+        let position_ms = {
+            let secs = unsafe { s.engine.GetCurrentTime() };
+            if secs.is_finite() && secs >= 0.0 {
+                (secs * 1000.0) as u128
+            } else {
+                0
+            }
+        };
+
+        push_event(MfEvent::Frame {
+            session,
+            texture,
+            srv,
+            nv12: s.output_nv12,
+            width: s.width,
+            height: s.height,
+            position_ms,
+        });
+    });
+}
+
+/// Rebuild Media Engine with BGRA output after NV12 Transfer proves unusable.
+fn fallback_session_to_bgra(s: &mut WorkerSession) -> Result<(), String> {
+    let _ = unsafe { s.engine.Shutdown() };
+    s.render_textures = [None, None, None];
+    s.write_index = 0;
+    s.last_pts = None;
+    s.output_nv12 = false;
+
+    let mut reset_token = 0u32;
+    let mut dxgi_manager = None;
+    unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut dxgi_manager) }
+        .map_err(|e| format!("MFCreateDXGIDeviceManager: {e:?}"))?;
+    let dxgi_manager = dxgi_manager.ok_or_else(|| "null DXGI manager".to_string())?;
+    unsafe { dxgi_manager.ResetDevice(&s.device, reset_token) }
+        .map_err(|e| format!("ResetDevice: {e:?}"))?;
+
+    let mut attrs = None;
+    unsafe { MFCreateAttributes(&mut attrs, 4) }.map_err(|e| format!("MFCreateAttributes: {e:?}"))?;
+    let attributes = attrs.ok_or_else(|| "null attributes".to_string())?;
+    let notify_com = new_media_engine_notify();
+    let notify_unk: IUnknown = notify_com.clone().into_interface();
+    unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify_unk) }
+        .map_err(|e| format!("SetUnknown(CALLBACK): {e:?}"))?;
+    unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, &dxgi_manager) }
+        .map_err(|e| format!("SetUnknown(DXGI_MANAGER): {e:?}"))?;
+    let _ = unsafe {
+        attributes.SetUINT32(
+            &MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+            DXGI_FORMAT_B8G8R8A8_UNORM.0 as u32,
+        )
+    };
+
+    let factory: IMFMediaEngineClassFactory = unsafe {
+        CoCreateInstance(
+            &CLSID_MFMediaEngineClassFactory,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+    }
+    .map_err(|e| format!("CoCreateInstance(MFMediaEngineClassFactory): {e:?}"))?;
+    let engine = unsafe { factory.CreateInstance(0, &attributes) }
+        .map_err(|e| format!("CreateInstance(engine): {e:?}"))?;
+    let _ = unsafe { engine.SetLoop(s.is_looping) };
+    let bstr = BSTR::from(s.source_url.as_str());
+    unsafe { engine.SetSource(&bstr) }.map_err(|e| format!("SetSource: {e:?}"))?;
+
+    s.engine = engine;
+    s._notify = notify_com;
+    s._dxgi_manager = dxgi_manager;
+    s.prepared = false;
+    s.prepare_sent = false;
+    log!("VIDEO: MF MediaEngine fallback to BGRA Transfer present");
+    Ok(())
+}
+
+// ── UI-side player (no MF calls) ──────────────────────────────────────────────
+
+struct PendingFrame {
+    texture: ID3D11Texture2D,
+    srv: Option<ID3D11ShaderResourceView>,
+    nv12: bool,
+    width: u32,
+    height: u32,
+    position_ms: u128,
+}
+
+pub struct WindowsVideoPlayer {
+    session: u64,
+    #[allow(unused)]
+    pub(crate) video_id: LiveId,
+    texture_id: TextureId,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    d3d11_device: ID3D11Device,
+    /// Separate Y/UV present targets (avoids same-resource dual plane TDR).
+    nv12_present: crate::gpu_texture::D3d11Nv12PresentCache,
+    /// Last presented frame used NV12 plane SRVs (YUV shader path).
+    presents_nv12: bool,
+    prepare_notified: bool,
+    prepare_result: Option<Result<PlaybackPrepared, String>>,
+    pending_eos: bool,
+    eos_notified: bool,
+    pending_frame: Option<PendingFrame>,
+    position_ms: u128,
+    playing: AtomicBool,
+    preparing: AtomicBool,
+    alive: bool,
+}
+
+impl WindowsVideoPlayer {
+    pub fn new(
+        d3d11_device: &ID3D11Device,
+        video_id: LiveId,
+        texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        source: VideoSource,
+        autoplay: bool,
+        is_looping: bool,
+    ) -> Option<Self> {
+        let create_source = match &source {
+            VideoSource::Network(url) => CreateSource::Url {
+                url: url.clone(),
+                cleanup: None,
+            },
+            VideoSource::Filesystem(path) => {
+                // MediaEngine SetSource is less tolerant of some Unicode paths
+                // than Source Reader; stage a unique ASCII temp copy.
+                if path.chars().any(|c| !c.is_ascii()) {
+                    let ext = std::path::Path::new(path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .filter(|e| {
+                            matches!(
+                                e.to_ascii_lowercase().as_str(),
+                                "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi" | "wmv" | "asf"
+                                    | "wma" | "mp3" | "wav" | "flac" | "ogg"
+                            )
+                        })
+                        .unwrap_or("mp4");
+                    let tmp = std::env::temp_dir().join(format!(
+                        "makepad_me_video_{}_{}.{ext}",
+                        video_id.0,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0),
+                    ));
+                    match std::fs::copy(path, &tmp) {
+                        Ok(_) => {
+                            crate::log!(
+                                "VIDEO: MediaEngine staged Unicode path -> {}",
+                                tmp.display()
+                            );
+                            CreateSource::Url {
+                                url: path_to_file_url(&tmp.to_string_lossy()),
+                                cleanup: Some(tmp),
+                            }
+                        }
+                        Err(e) => {
+                            error!("VIDEO: failed to stage Unicode path for MediaEngine: {e}");
+                            CreateSource::Url {
+                                url: path_to_file_url(path),
+                                cleanup: None,
+                            }
+                        }
+                    }
+                } else {
+                    CreateSource::Url {
+                        url: path_to_file_url(path),
+                        cleanup: None,
+                    }
+                }
+            }
+            VideoSource::InMemory(data) => CreateSource::Memory {
+                bytes: data.as_ref().clone(),
+                video_id: video_id.0,
+            },
+            VideoSource::Camera(..) => {
+                error!("VIDEO: Camera source not supported on Windows");
+                return None;
+            }
+            VideoSource::PlaybackSession(..) | VideoSource::Session(..) => {
+                error!("VIDEO: session sources are handled by the software video player");
+                return None;
+            }
+        };
+
+        let session = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        post(MfCmd::Create {
+            session,
+            device: d3d11_device.clone(),
+            source: create_source,
+            is_looping,
+            autoplay,
+        });
+
+        Some(Self {
+            session,
+            video_id,
+            texture_id,
+            tex_y_id,
+            tex_u_id,
+            d3d11_device: d3d11_device.clone(),
+            nv12_present: Default::default(),
+            presents_nv12: false,
+            prepare_notified: false,
+            prepare_result: None,
+            pending_eos: false,
+            eos_notified: false,
+            pending_frame: None,
+            position_ms: 0,
+            playing: AtomicBool::new(false),
+            preparing: AtomicBool::new(true),
+            alive: true,
+        })
     }
 
-    /// Returns the canPlayType string for the given MIME type on Windows (Media Foundation).
+    fn drain_worker_events(&mut self) {
+        for ev in drain_events_for(self.session) {
+            match ev {
+                MfEvent::CreateFailed { error, .. } => {
+                    self.preparing.store(false, Ordering::Relaxed);
+                    if !self.prepare_notified {
+                        self.prepare_result = Some(Err(error));
+                    }
+                }
+                MfEvent::Prepared {
+                    width,
+                    height,
+                    duration_ms,
+                    has_audio,
+                    ..
+                } => {
+                    self.preparing.store(false, Ordering::Relaxed);
+                    if !self.prepare_notified {
+                        let is_seekable = duration_ms > 0;
+                        let video_tracks = if width > 0 && height > 0 {
+                            vec!["video".to_string()]
+                        } else {
+                            vec![]
+                        };
+                        let audio_tracks = if has_audio {
+                            vec!["audio".to_string()]
+                        } else {
+                            vec![]
+                        };
+                        self.prepare_result = Some(Ok(PlaybackPrepared::new(
+                            width,
+                            height,
+                            duration_ms,
+                            is_seekable,
+                            video_tracks,
+                            audio_tracks,
+                        )));
+                    }
+                }
+                MfEvent::Error { error, .. } => {
+                    self.preparing.store(false, Ordering::Relaxed);
+                    self.playing.store(false, Ordering::Relaxed);
+                    if !self.prepare_notified {
+                        self.prepare_result = Some(Err(error));
+                    } else {
+                        error!("VIDEO: {}", error);
+                    }
+                }
+                MfEvent::Eos { .. } => {
+                    self.pending_eos = true;
+                    self.playing.store(false, Ordering::Relaxed);
+                }
+                MfEvent::Playing { playing, .. } => {
+                    self.playing.store(playing, Ordering::Relaxed);
+                }
+                MfEvent::Frame {
+                    texture,
+                    srv,
+                    nv12,
+                    width,
+                    height,
+                    position_ms,
+                    ..
+                } => {
+                    self.position_ms = position_ms;
+                    self.pending_frame = Some(PendingFrame {
+                        texture,
+                        srv,
+                        nv12,
+                        width,
+                        height,
+                        position_ms,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Pump the MTA worker once and drain events. Call at most once per UI paint.
+    pub fn sync_worker(&mut self) {
+        post(MfCmd::Tick(self.session));
+        self.drain_worker_events();
+    }
+
+    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
+        if self.prepare_notified {
+            return None;
+        }
+        if let Some(result) = self.prepare_result.take() {
+            self.prepare_notified = true;
+            self.preparing.store(false, Ordering::Relaxed);
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_preparing(&self) -> bool {
+        self.preparing.load(Ordering::Relaxed)
+    }
+
+    pub fn keep_polling(&self) -> bool {
+        self.is_preparing() || self.is_playing()
+    }
+
+    pub fn set_volume(&self, volume: f64) {
+        post(MfCmd::SetVolume {
+            session: self.session,
+            volume,
+        });
+    }
+
+    pub fn set_playback_rate(&self, rate: f64) {
+        post(MfCmd::SetPlaybackRate {
+            session: self.session,
+            rate,
+        });
+    }
+
     pub fn can_play_type(mime: &str) -> &'static str {
         let base = mime.split(';').next().unwrap_or("").trim();
         match base {
@@ -764,155 +1274,127 @@ impl WindowsVideoPlayer {
     }
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        if !self.is_prepared {
+        let Some(frame) = self.pending_frame.take() else {
             return false;
-        }
-        self.process_events();
-
-        unsafe {
-            let vtbl = self.vtbl();
-            if (vtbl.IsPaused)(self.engine) != 0 {
-                return false;
+        };
+        self.position_ms = frame.position_ms;
+        if frame.nv12 {
+            match crate::gpu_texture::adopt_d3d11_nv12_texture2d_biplanar(
+                &self.d3d11_device,
+                textures,
+                self.tex_y_id,
+                self.tex_u_id,
+                &frame.texture,
+                frame.width,
+                frame.height,
+                &mut self.nv12_present,
+            ) {
+                Ok(()) => {
+                    self.presents_nv12 = true;
+                    static LOGGED: AtomicBool = AtomicBool::new(false);
+                    if !LOGGED.swap(true, Ordering::Relaxed) {
+                        log!(
+                            "VIDEO: MF NV12 Transfer + split-plane blit present (DXGI)"
+                        );
+                    }
+                    true
+                }
+                Err(err) => {
+                    error!("VIDEO: MF NV12 plane adopt failed: {err}");
+                    self.presents_nv12 = false;
+                    false
+                }
             }
-            let mut pts: i64 = 0;
-            let hr = (vtbl.OnVideoStreamTick)(self.engine, &mut pts);
-            if hr.0 != 0 {
+        } else {
+            let Some(srv) = frame.srv else {
+                error!("VIDEO: MF BGRA frame missing SRV");
+                self.presents_nv12 = false;
                 return false;
-            }
-
-            self.ensure_render_texture();
-            let texture = match &self.render_texture {
-                Some(t) => t,
-                None => return false,
             };
-
-            let dst_rect = RECT {
-                left: 0,
-                top: 0,
-                right: self.video_width as i32,
-                bottom: self.video_height as i32,
-            };
-            let border = MFARGB::default();
-            let hr = (vtbl.TransferVideoFrame)(
-                self.engine,
-                Interface::as_raw(texture) as *mut c_void,
-                std::ptr::null(),
-                &dst_rect,
-                &border,
-            );
-            if hr.is_err() {
-                return false;
-            }
-
-            // Swap texture into Makepad's texture pool
             let cxtexture = &mut textures[self.texture_id];
-            cxtexture.os.texture = self.render_texture.clone();
-            cxtexture.os.shader_resource_view = self.render_srv.clone();
+            cxtexture.os.texture = Some(frame.texture);
+            cxtexture.os.shader_resource_view = Some(srv);
             cxtexture.format = TextureFormat::VideoExternal;
             cxtexture.alloc = Some(TextureAlloc {
-                width: self.video_width as usize,
-                height: self.video_height as usize,
+                width: frame.width as usize,
+                height: frame.height as usize,
                 pixel: TexturePixel::VideoExternal,
                 category: TextureCategory::Video,
             });
+            self.presents_nv12 = false;
             true
         }
+    }
+
+    pub fn presents_nv12(&self) -> bool {
+        self.presents_nv12
     }
 
     pub fn check_eos(&mut self) -> bool {
         if self.eos_notified {
             return false;
         }
-        self.process_events();
-        if self.is_eos {
+        if self.pending_eos {
             self.eos_notified = true;
+            self.pending_eos = false;
             return true;
         }
         false
     }
 
     pub fn play(&mut self) {
-        self.is_eos = false;
         self.eos_notified = false;
-        unsafe {
-            let _ = (self.vtbl().Play)(self.engine);
-        }
+        self.pending_eos = false;
+        self.playing.store(true, Ordering::Relaxed);
+        post(MfCmd::Play(self.session));
     }
 
     pub fn is_playing(&self) -> bool {
-        if !self.is_prepared {
-            return false;
-        }
-        unsafe {
-            let vtbl = self.vtbl();
-            (vtbl.IsPaused)(self.engine) == 0 && (vtbl.IsEnded)(self.engine) == 0
-        }
+        self.playing.load(Ordering::Relaxed)
     }
 
     pub fn pause(&mut self) {
-        unsafe {
-            let _ = (self.vtbl().Pause)(self.engine);
-        }
+        self.playing.store(false, Ordering::Relaxed);
+        post(MfCmd::Pause(self.session));
     }
 
     pub fn resume(&mut self) {
-        unsafe {
-            let _ = (self.vtbl().Play)(self.engine);
-        }
+        self.play();
     }
 
     pub fn mute(&mut self) {
-        unsafe {
-            let _ = (self.vtbl().SetMuted)(self.engine, 1);
-        }
+        post(MfCmd::Mute {
+            session: self.session,
+            muted: true,
+        });
     }
 
     pub fn unmute(&mut self) {
-        unsafe {
-            let _ = (self.vtbl().SetMuted)(self.engine, 0);
-        }
+        post(MfCmd::Mute {
+            session: self.session,
+            muted: false,
+        });
     }
 
     pub fn seek_to(&mut self, position_ms: u64) {
-        self.is_eos = false;
         self.eos_notified = false;
-        let seconds = position_ms as f64 / 1000.0;
-        unsafe {
-            let _ = (self.vtbl().SetCurrentTime)(self.engine, seconds);
-        }
+        self.pending_eos = false;
+        post(MfCmd::Seek {
+            session: self.session,
+            position_ms,
+        });
     }
 
     pub fn current_position_ms(&self) -> u128 {
-        unsafe {
-            let secs = (self.vtbl().GetCurrentTime)(self.engine);
-            if secs.is_finite() && secs >= 0.0 {
-                (secs * 1000.0) as u128
-            } else {
-                0
-            }
-        }
+        self.position_ms
     }
 
     pub fn cleanup(&mut self) {
-        if !self.engine.is_null() {
-            unsafe {
-                let _ = (self.vtbl().Shutdown)(self.engine);
-                com_release(self.engine);
-            }
-            self.engine = std::ptr::null_mut();
-        }
-        if !self.notify.is_null() {
-            unsafe { notify_release(self.notify) };
-            self.notify = std::ptr::null_mut();
-        }
-        if !self.dxgi_manager.is_null() {
-            unsafe { com_release(self.dxgi_manager) };
-            self.dxgi_manager = std::ptr::null_mut();
-        }
-        self.render_texture = None;
-        self.render_srv = None;
-        if let Some(path) = self.temp_file_path.take() {
-            let _ = std::fs::remove_file(path);
+        if self.alive {
+            post(MfCmd::Destroy(self.session));
+            self.alive = false;
+            self.playing.store(false, Ordering::Relaxed);
+            self.preparing.store(false, Ordering::Relaxed);
         }
     }
 }

@@ -201,6 +201,41 @@ pub trait MediaPlaybackSession {
     fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>>;
     fn poll_frame(&mut self) -> bool;
     fn take_yuv_frame(&mut self) -> Option<YuvPlaneData>;
+    /// Optional Windows zero-copy present: NV12 `ID3D11Texture2D` from hard decode.
+    /// When `Some`, the platform poll path adopts Y/UV plane SRVs (Texture2DArray
+    /// true zero-copy when possible, else GPU blit) and skips CPU upload.
+    #[cfg(target_os = "windows")]
+    fn take_d3d11_nv12_frame(&mut self) -> Option<crate::gpu_texture::D3d11Nv12Frame> {
+        None
+    }
+    /// Optional Android zero-copy present: OES texture id for `sample_video`.
+    #[cfg(target_os = "android")]
+    fn take_oes_frame(&mut self) -> Option<crate::gpu_texture::OesFrame> {
+        None
+    }
+    /// Optional Apple zero-copy present: biplanar NV12 `CVPixelBuffer` from VideoToolbox.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
+        None
+    }
+    /// Optional Linux zero-copy present: NV12 DMA-Buf planes → `TEXTURE_EXTERNAL_OES`.
+    ///
+    /// Platform poll uses [`crate::os::linux::linux_video_gpu::present_dmabuf_nv12`].
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    fn take_linux_dmabuf_nv12_frame(
+        &mut self,
+    ) -> Option<crate::os::linux::linux_video_gpu::LinuxDmabufNv12Frame> {
+        None
+    }
+    /// Optional Linux zero-copy present: share-group GLMemory RGBA texture.
+    ///
+    /// Platform poll uses [`crate::os::linux::linux_video_gpu::present_gl_memory_rgba`].
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    fn take_linux_gl_memory_rgba_frame(
+        &mut self,
+    ) -> Option<crate::os::linux::linux_video_gpu::LinuxGlMemoryRgbaFrame> {
+        None
+    }
     fn check_eos(&mut self) -> bool;
     fn play(&mut self);
     fn pause(&mut self);

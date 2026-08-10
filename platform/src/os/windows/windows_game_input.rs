@@ -23,6 +23,10 @@ use {
         },
     },
     std::mem::size_of,
+    std::sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
 };
 
 // GUID_ConstantForce: {13541C20-8E33-11D0-9AD0-00A0C9A06E35}
@@ -108,36 +112,73 @@ pub struct WindowsGameInput {
     )>,
     pub next_wheel_id: u64,
     pub enum_timer: u64,
-    /// Which XInput slots (0..4) were connected at the last poll. Disconnected slots are only
-    /// re-probed occasionally because `XInputGetState` on an empty slot is very slow (it stalls
-    /// on device/USB enumeration) — calling it for 4 empty slots on every event-loop callback
-    /// was blocking the UI thread and causing scroll judder. A controller already plugged in at
-    /// launch is found by the one-shot full scan on the first poll; one plugged in later is found
-    /// within ~16s worst case at the 125 Hz poll rate (one empty slot re-probed per 512 polls,
-    /// round-robin over the 4 slots).
+    /// Which XInput slots (0..4) we believe hold a controller. Only these are polled from the
+    /// event loop; probing an empty slot must never happen on the UI thread (see `discovered`).
     pub xinput_connected: [bool; 4],
+    /// Device discovery results published by a background thread. Both XInput slot probing and
+    /// DirectInput `EnumDevices` stall for hundreds of milliseconds while the driver walks the
+    /// USB tree, and doing either from the event loop froze the whole UI — a playing video
+    /// visibly stopped for ~300ms every time discovery came around. The event loop now only
+    /// reads these fields and never enumerates on its own.
+    discovery: Arc<GameInputDiscovery>,
+    /// Last `discovery.di_generation` this side has enumerated for.
+    di_generation_seen: u32,
+}
+
+/// Shared with the discovery thread.
+#[derive(Default)]
+struct GameInputDiscovery {
+    /// Bitmask of XInput slots that answered.
+    xinput_mask: AtomicU32,
+    /// Bumped whenever the set of attached DirectInput controllers changes, which is the only
+    /// time the (expensive) UI-side enumeration is worth doing.
+    di_generation: AtomicU32,
+}
+
+/// A `IDirectInput8W` for the calling thread. DirectInput objects are not shared between
+/// threads, so the discovery thread makes its own.
+unsafe fn create_direct_input() -> Option<IDirectInput8W> {
+    let hinstance = GetModuleHandleW(None).ok()?;
+    let mut di_out: Option<IDirectInput8W> = None;
+    // DIRECTINPUT_VERSION is 0x0800
+    DirectInput8Create(
+        hinstance.into(),
+        0x0800,
+        &IDirectInput8W::IID,
+        &mut di_out as *mut _ as *mut _,
+        None,
+    )
+    .ok()?;
+    di_out
+}
+
+/// Instance GUIDs of the attached driving controllers, sorted so the set can be compared.
+unsafe fn attached_driving_guids(di: &IDirectInput8W) -> Vec<u128> {
+    unsafe extern "system" fn collect(
+        lpddi: *mut DIDEVICEINSTANCEW,
+        pvref: *mut std::ffi::c_void,
+    ) -> BOOL {
+        let found = &mut *(pvref as *mut Vec<u128>);
+        let instance = &*lpddi;
+        if instance.dwDevType & 0xFF == DI8DEVTYPE_DRIVING {
+            found.push(instance.guidInstance.to_u128());
+        }
+        BOOL(DIENUM_CONTINUE as i32)
+    }
+    let mut found: Vec<u128> = Vec::new();
+    let _ = di.EnumDevices(
+        DI8DEVCLASS_GAMECTRL,
+        Some(collect),
+        &mut found as *mut _ as *mut _,
+        DIEDFL_ATTACHEDONLY,
+    );
+    found.sort_unstable();
+    found
 }
 
 impl WindowsGameInput {
     pub fn new() -> Self {
-        let direct_input = unsafe {
-            let hinstance = GetModuleHandleW(None).unwrap();
-            let mut di_out: Option<IDirectInput8W> = None;
-            // DIRECTINPUT_VERSION is 0x0800
-            match DirectInput8Create(
-                hinstance.into(),
-                0x0800,
-                &IDirectInput8W::IID,
-                &mut di_out as *mut _ as *mut _,
-                None,
-            ) {
-                Ok(_) => di_out,
-                Err(_) => {
-                    // Log error or just continue without DirectInput
-                    None
-                }
-            }
-        };
+        let direct_input = unsafe { create_direct_input() };
 
         Self {
             gamepads: Vec::new(),
@@ -147,7 +188,48 @@ impl WindowsGameInput {
             next_wheel_id: 128,
             enum_timer: 0,
             xinput_connected: [false; 4],
+            discovery: Self::spawn_discovery(),
+            di_generation_seen: 0,
         }
+    }
+
+    /// Poll for attached controllers on a background thread. Publishes the XInput slot mask and
+    /// bumps a generation counter when the DirectInput device set changes, so the event loop can
+    /// do its enumeration only in response to real hot-plug rather than on a timer.
+    fn spawn_discovery() -> Arc<GameInputDiscovery> {
+        let discovery = Arc::new(GameInputDiscovery::default());
+        let out = discovery.clone();
+        std::thread::Builder::new()
+            .name("makepad-game-input-discovery".into())
+            .spawn(move || {
+                let di = unsafe { create_direct_input() };
+                let mut last_di_set = None;
+                loop {
+                    let mut mask = 0u32;
+                    for slot in 0..4u32 {
+                        let mut state = XINPUT_STATE::default();
+                        if unsafe { XInputGetState(slot, &mut state) } == 0 {
+                            mask |= 1 << slot;
+                        }
+                    }
+                    out.xinput_mask.store(mask, Ordering::Relaxed);
+
+                    if let Some(di) = &di {
+                        let set = unsafe { attached_driving_guids(di) };
+                        if last_di_set.as_ref() != Some(&set) {
+                            last_di_set = Some(set);
+                            out.di_generation.fetch_add(1, Ordering::Release);
+                        }
+                    }
+
+                    if Arc::strong_count(&out) == 1 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            })
+            .ok();
+        discovery
     }
 
     pub fn init() -> Self {
@@ -159,27 +241,17 @@ impl WindowsGameInput {
         F: FnMut(GameInputConnectedEvent),
     {
         self.enum_timer = self.enum_timer.wrapping_add(1);
-        // `XInputGetState` on a DISCONNECTED slot is pathologically slow on Windows (it stalls
-        // doing device/USB enumeration and waits on the driver). `poll()` runs on every event-loop
-        // callback, so probing 4 empty slots every callback was blocking the UI thread tens of ms
-        // at a time — the dominant cause of scroll-deceleration judder. Connected slots are still
-        // polled every call (cheap + keeps input responsive). For empty slots:
-        //   * On the very FIRST poll we do a one-shot full scan, so a controller already plugged in
-        //     at launch is detected immediately rather than up to ~16s later.
-        //   * After that we re-probe at most ONE empty slot per cycle (round-robin starting at
-        //     slot 0 / Player 1, so the primary controller is not served last), which keeps a slow
-        //     probe from being multiplied across 4 slots into a multi-slot stall during steady-state
-        //     idle. A controller plugged in at runtime is detected within ~16s worst case.
-        let full_scan = self.enum_timer == 1;
-        let probe_slot: Option<u32> = if self.enum_timer % 512 == 0 {
-            // -1 so the round-robin starts at slot 0 (enum_timer/512 is >= 1 here).
-            Some(((self.enum_timer / 512 - 1) % 4) as u32)
-        } else {
-            None
-        };
+        // Adopt whatever the discovery thread found. Polling a slot it reports as occupied is
+        // cheap; polling one it reports as empty is not, and must never happen here.
+        let discovered = self.discovery.xinput_mask.load(Ordering::Relaxed);
+        for i in 0..4 {
+            if discovered & (1 << i) != 0 {
+                self.xinput_connected[i] = true;
+            }
+        }
         // 1. Poll XInput (Xbox Controllers)
         for i in 0..4 {
-            if !self.xinput_connected[i as usize] && !full_scan && probe_slot != Some(i) {
+            if !self.xinput_connected[i as usize] {
                 continue;
             }
             let mut state = XINPUT_STATE::default();
@@ -365,13 +437,14 @@ impl WindowsGameInput {
                     BOOL(DIENUM_CONTINUE as i32)
                 }
 
-                // Enumerate attached devices. `EnumDevices` is slow (tens of ms) and blocks the UI
-                // thread — running it on every poll produces a periodic scroll hitch — so run it on
-                // the first poll (to catch a wheel already attached at launch) and then very rarely
-                // afterward; a wheel attached at runtime is picked up within ~a minute. The phase
-                // (== 256, not == 0) keeps the periodic enumeration from ever landing on the same
-                // poll as the every-512 XInput empty-slot probe, which would stack two slow probes.
-                if self.enum_timer == 1 || self.enum_timer % 8192 == 256 {
+                // `EnumDevices` blocks for a few hundred milliseconds while the driver walks the
+                // USB tree, so it must not run on a timer here: doing it periodically froze the
+                // UI (and any playing video) for ~300ms every time it came around. The discovery
+                // thread watches for hot-plug and bumps the generation; only then is a stall both
+                // necessary and unnoticeable.
+                let di_generation = self.discovery.di_generation.load(Ordering::Acquire);
+                if di_generation != self.di_generation_seen {
+                    self.di_generation_seen = di_generation;
                     let _ = di.EnumDevices(
                         DI8DEVCLASS_GAMECTRL,
                         Some(enum_callback),

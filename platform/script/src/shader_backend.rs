@@ -1183,6 +1183,8 @@ impl ShaderBackend {
                 id!(modf) => id!(fmod),
                 id!(fract) => id!(frac),
                 id!(mix) => id!(lerp),
+                id!(unpack2f16) => id!(_mp_unpack2f16),
+                id!(unpack4u8) => id!(_mp_unpack4u8),
                 x => x,
             },
             Self::Glsl => {
