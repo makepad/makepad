@@ -932,28 +932,24 @@ impl ScriptObjectData {
     }
 
     pub fn map_insert(&mut self, key: ScriptValue, value: ScriptValue) {
+        let order = self.map.len() as u32;
         if self.tag.is_tracked() {
-            let order = self.map.len() as u32;
-            match self.map.entry(key) {
-                Entry::Occupied(mut occ) => {
-                    let old = occ.get_mut();
-                    if old.value != value {
-                        old.tag.set_dirty();
-                        self.tag.set_dirty();
-                        old.value = value;
-                    }
-                    return;
+            if let Some(old) = self.map.get_mut(&key) {
+                if old.value != value {
+                    old.tag.set_dirty();
+                    self.tag.set_dirty();
+                    old.value = value;
                 }
-                Entry::Vacant(vac) => {
-                    vac.insert(ScriptMapValue {
-                        value,
-                        tag: ScriptMapTag::dirty_with_order(order),
-                    });
-                    return;
-                }
+                return;
             }
+            self.map.insert(
+                key,
+                ScriptMapValue {
+                    value,
+                    tag: ScriptMapTag::dirty_with_order(order),
+                },
+            );
         } else {
-            let order = self.map.len() as u32;
             self.map.insert(
                 key,
                 ScriptMapValue {
@@ -965,25 +961,21 @@ impl ScriptObjectData {
     }
 
     pub fn map_set_if_exist(&mut self, key: ScriptValue, value: ScriptValue) -> bool {
-        if self.tag.is_tracked() {
-            match self.map.entry(key) {
-                Entry::Occupied(mut occ) => {
-                    let old = occ.get_mut();
-                    if old.value != value {
-                        old.tag.set_dirty();
-                        self.tag.set_dirty();
-                        old.value = value;
-                    }
-                    return true;
+        let tracked = self.tag.is_tracked();
+        if let Some(old) = self.map.get_mut(&key) {
+            if tracked {
+                if old.value != value {
+                    old.tag.set_dirty();
+                    old.value = value;
+                    self.tag.set_dirty();
                 }
-                Entry::Vacant(_) => {}
+            } else {
+                old.value = value;
             }
+            true
+        } else {
+            false
         }
-        if let Some(val) = self.map.get_mut(&key) {
-            val.value = value;
-            return true;
-        }
-        false
     }
 
     pub fn map_get(&self, key: &ScriptValue) -> Option<ScriptValue> {
@@ -996,16 +988,12 @@ impl ScriptObjectData {
 
     pub fn map_get_if_dirty(&mut self, key: &ScriptValue) -> Option<ScriptValue> {
         if self.tag.is_tracked() {
-            match self.map.entry(*key) {
-                Entry::Occupied(mut occ) => {
-                    let val = occ.get_mut();
-                    if val.tag.get_and_clear_dirty() {
-                        return Some(val.value);
-                    }
-                    return None;
+            if let Some(val) = self.map.get_mut(key) {
+                if val.tag.get_and_clear_dirty() {
+                    return Some(val.value);
                 }
-                Entry::Vacant(_) => return None,
-            };
+            }
+            return None;
         }
         self.map_get(key)
     }

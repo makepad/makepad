@@ -59,8 +59,7 @@ impl<'a> ScriptVm<'a> {
                 .threads
                 .cur()
                 .trap
-                .on
-                .set(Some(ScriptTrapOn::Return(value)));
+                .set_on(Some(ScriptTrapOn::Return(value)));
         }
     }
 
@@ -86,8 +85,7 @@ impl<'a> ScriptVm<'a> {
                     .threads
                     .cur()
                     .trap
-                    .on
-                    .set(Some(ScriptTrapOn::Return(value)));
+                    .set_on(Some(ScriptTrapOn::Return(value)));
             }
             true
         } else {
