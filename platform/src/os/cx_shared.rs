@@ -860,6 +860,21 @@ impl Cx {
         }
     }
 
+    /// Requests an `Event::ClearHover` dispatch once the current event
+    /// (and its follow-up actions) finish, so every widget can drop
+    /// hover/pressed visuals an overlay kept from clearing normally.
+    pub fn queue_clear_hover(&mut self) {
+        self.clear_hover_queued = true;
+    }
+
+    pub(crate) fn handle_pending_clear_hover(&mut self) {
+        if self.clear_hover_queued {
+            self.clear_hover_queued = false;
+            self.inner_call_event_handler(&Event::ClearHover);
+            self.handle_actions();
+        }
+    }
+
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
@@ -880,6 +895,7 @@ impl Cx {
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
+        self.handle_pending_clear_hover();
     }
 
     #[allow(dead_code)]
