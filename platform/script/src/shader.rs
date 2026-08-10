@@ -507,7 +507,7 @@ impl ShaderFnCompiler {
                 }
             }
             // alright lets see if we have a trap, ifso we can log it
-            if let Some(err) = self.trap.err.borrow_mut().pop_front() {
+            if let Some(err) = self.trap.err_pop_front() {
                 output.has_errors = true;
                 if let Some(ptr) = err.value.as_err() {
                     if let Some(loc2) = vm.bx.code.ip_to_loc(ptr.ip) {
@@ -526,7 +526,7 @@ impl ShaderFnCompiler {
             // The trap handling for Return is no longer needed since we use fn_end_index
             // to determine when to stop. The trap may still be set by handle_return but
             // we ignore it and continue processing to properly close all control structures.
-            self.trap.on.take();
+            self.trap.take_on();
         }
         output.emitted_bytes += self.out.len().saturating_sub(fn_start_len);
         let value = self.mes.pop();
@@ -577,7 +577,7 @@ impl ShaderFnCompiler {
                     .bx
                     .heap
                     .scope_value(self.script_scope, id.into(), self.trap.pass());
-                if !value.is_nil() && self.trap.err.borrow().is_empty() {
+                if !value.is_nil() && self.trap.err_is_empty() {
                     // Check if this is a shader_io type
                     if let Some(value_obj) = value.as_object() {
                         if let Some(io_type) = vm.bx.heap.as_shader_io(value_obj) {
@@ -755,7 +755,7 @@ impl ShaderFnCompiler {
                 }
 
                 // Clear any error from scope_value lookup failure
-                self.trap.err.take();
+                self.trap.err_take();
                 script_err_not_found!(
                     self.trap,
                     "shader variable {:?} not found{}",

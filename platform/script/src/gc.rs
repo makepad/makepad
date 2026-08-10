@@ -449,11 +449,11 @@ impl ScriptHeap {
                     }
                 }
                 // Trap error values
-                for err in thread.trap.err.borrow().iter() {
+                for err in thread.trap.err_borrow().iter() {
                     self.mark_value(err.value);
                 }
                 // Trap return/bail values
-                match thread.trap.on.get() {
+                match thread.trap.get_on() {
                     Some(ScriptTrapOn::Return(v)) | Some(ScriptTrapOn::Bail(v)) => {
                         self.mark_value(v);
                     }

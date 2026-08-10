@@ -37,29 +37,78 @@ impl<'a> ScriptVm<'a> {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let id = self.bx.threads.cur().pop_stack_value();
         if let Some(id) = id.as_id() {
-            let old_value = self.bx.threads.cur().scope_value(&self.bx.heap, id);
-            if old_value.is_err() {
-                self.bx.threads.cur().push_stack_unchecked(old_value);
-            } else if old_value.is_string_like() || value.is_string_like() {
-                let str = self.bx.heap.new_string_with(|heap, out| {
-                    heap.cast_to_string(old_value, out);
-                    heap.cast_to_string(value, out);
-                });
-                self.bx
-                    .threads
-                    .cur()
-                    .set_scope_value(&mut self.bx.heap, id, str.into());
-                self.bx.threads.cur().push_stack_unchecked(NIL);
-            } else {
-                let ip = self.bx.threads.cur_ref().trap.ip;
-                let fa = self.bx.heap.cast_to_f64(old_value, ip);
-                let fb = self.bx.heap.cast_to_f64(value, ip);
-                let value = self.bx.threads.cur().set_scope_value(
-                    &mut self.bx.heap,
-                    id,
-                    ScriptValue::from_f64_traced_nan(fa + fb, ip),
-                );
-                self.bx.threads.cur().push_stack_unchecked(value);
+            let key: ScriptValue = id.into();
+            let Some(&scope) = self.bx.threads.cur_ref().scopes.last() else {
+                self.bail("scopes empty in handle_assign_add");
+                return;
+            };
+            // Single chain walk for the read+write pair; the two-walk path
+            // only remains for vec2-vec hits and the not-found error.
+            match self.bx.heap.scope_map_owner(scope, key) {
+                Ok((owner, old_value)) => {
+                    if old_value.is_err() {
+                        self.bx.threads.cur().push_stack_unchecked(old_value);
+                    } else if old_value.is_string_like() || value.is_string_like() {
+                        let str = self.bx.heap.new_string_with(|heap, out| {
+                            heap.cast_to_string(old_value, out);
+                            heap.cast_to_string(value, out);
+                        });
+                        self.bx.heap.scope_write_in_map(
+                            owner,
+                            key,
+                            str.into(),
+                            self.bx.threads.cur().trap.pass(),
+                        );
+                        self.bx.threads.cur().push_stack_unchecked(NIL);
+                    } else {
+                        let ip = self.bx.threads.cur_ref().trap.ip;
+                        let fa = self.bx.heap.cast_to_f64(old_value, ip);
+                        let fb = self.bx.heap.cast_to_f64(value, ip);
+                        let value = self.bx.heap.scope_write_in_map(
+                            owner,
+                            key,
+                            ScriptValue::from_f64_traced_nan(fa + fb, ip),
+                            self.bx.threads.cur().trap.pass(),
+                        );
+                        self.bx.threads.cur().push_stack_unchecked(value);
+                    }
+                }
+                Err(true) => {
+                    // visible only via a vec2 vec: preserve read-ok/write-error
+                    let old_value = self.bx.threads.cur().scope_value(&self.bx.heap, id);
+                    if old_value.is_err() {
+                        self.bx.threads.cur().push_stack_unchecked(old_value);
+                    } else if old_value.is_string_like() || value.is_string_like() {
+                        let str = self.bx.heap.new_string_with(|heap, out| {
+                            heap.cast_to_string(old_value, out);
+                            heap.cast_to_string(value, out);
+                        });
+                        self.bx
+                            .threads
+                            .cur()
+                            .set_scope_value(&mut self.bx.heap, id, str.into());
+                        self.bx.threads.cur().push_stack_unchecked(NIL);
+                    } else {
+                        let ip = self.bx.threads.cur_ref().trap.ip;
+                        let fa = self.bx.heap.cast_to_f64(old_value, ip);
+                        let fb = self.bx.heap.cast_to_f64(value, ip);
+                        let value = self.bx.threads.cur().set_scope_value(
+                            &mut self.bx.heap,
+                            id,
+                            ScriptValue::from_f64_traced_nan(fa + fb, ip),
+                        );
+                        self.bx.threads.cur().push_stack_unchecked(value);
+                    }
+                }
+                Err(false) => {
+                    let value = script_err_not_found!(
+                        self.bx.threads.cur_ref().trap,
+                        "variable {} not found in scope{}",
+                        id,
+                        crate::suggest::suggest_scope_var(&self.bx.heap, scope, id)
+                    );
+                    self.bx.threads.cur().push_stack_unchecked(value);
+                }
             }
         } else {
             let value = script_err_immutable!(
@@ -537,6 +586,63 @@ impl<'a> ScriptVm<'a> {
 
     // Generic assignment operation handlers
 
+    /// Shared fused read-modify-write for numeric compound scope assigns.
+    /// One chain walk locates the slot; the old two-walk path remains as
+    /// fallback for vec2-vec visibility and produces identical errors.
+    fn scope_rmw_numeric<F>(&mut self, value: ScriptValue, id: crate::makepad_live_id::LiveId, f: F)
+    where
+        F: FnOnce(f64, f64) -> f64,
+    {
+        let key: ScriptValue = id.into();
+        let Some(&scope) = self.bx.threads.cur_ref().scopes.last() else {
+            self.bail("scopes empty in scope_rmw_numeric");
+            return;
+        };
+        match self.bx.heap.scope_map_owner(scope, key) {
+            Ok((owner, va)) => {
+                if va.is_err() {
+                    self.bx.threads.cur().push_stack_unchecked(va);
+                } else {
+                    let ip = self.bx.threads.cur_ref().trap.ip;
+                    let fa = self.bx.heap.cast_to_f64(va, ip);
+                    let fb = self.bx.heap.cast_to_f64(value, ip);
+                    let value = self.bx.heap.scope_write_in_map(
+                        owner,
+                        key,
+                        ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
+                        self.bx.threads.cur().trap.pass(),
+                    );
+                    self.bx.threads.cur().push_stack_unchecked(value);
+                }
+            }
+            Err(true) => {
+                let va = self.bx.threads.cur().scope_value(&self.bx.heap, id);
+                if va.is_err() {
+                    self.bx.threads.cur().push_stack_unchecked(va);
+                } else {
+                    let ip = self.bx.threads.cur_ref().trap.ip;
+                    let fa = self.bx.heap.cast_to_f64(va, ip);
+                    let fb = self.bx.heap.cast_to_f64(value, ip);
+                    let value = self.bx.threads.cur().set_scope_value(
+                        &mut self.bx.heap,
+                        id,
+                        ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
+                    );
+                    self.bx.threads.cur().push_stack_unchecked(value);
+                }
+            }
+            Err(false) => {
+                let value = script_err_not_found!(
+                    self.bx.threads.cur_ref().trap,
+                    "variable {} not found in scope{}",
+                    id,
+                    crate::suggest::suggest_scope_var(&self.bx.heap, scope, id)
+                );
+                self.bx.threads.cur().push_stack_unchecked(value);
+            }
+        }
+    }
+
     pub fn handle_f64_scope_assign_op<F>(&mut self, f: F)
     where
         F: FnOnce(f64, f64) -> f64,
@@ -544,20 +650,7 @@ impl<'a> ScriptVm<'a> {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let id = self.bx.threads.cur().pop_stack_value();
         if let Some(id) = id.as_id() {
-            let va = self.bx.threads.cur().scope_value(&self.bx.heap, id);
-            if va.is_err() {
-                self.bx.threads.cur().push_stack_unchecked(va);
-            } else {
-                let ip = self.bx.threads.cur_ref().trap.ip;
-                let fa = self.bx.heap.cast_to_f64(va, ip);
-                let fb = self.bx.heap.cast_to_f64(value, ip);
-                let value = self.bx.threads.cur().set_scope_value(
-                    &mut self.bx.heap,
-                    id,
-                    ScriptValue::from_f64_traced_nan(f(fa, fb), ip),
-                );
-                self.bx.threads.cur().push_stack_unchecked(value);
-            }
+            self.scope_rmw_numeric(value, id, f);
         } else {
             let value = script_err_immutable!(
                 self.bx.threads.cur_ref().trap,
@@ -576,20 +669,7 @@ impl<'a> ScriptVm<'a> {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let id = self.bx.threads.cur().pop_stack_value();
         if let Some(id) = id.as_id() {
-            let old_value = self.bx.threads.cur().scope_value(&self.bx.heap, id);
-            if old_value.is_err() {
-                self.bx.threads.cur().push_stack_unchecked(old_value);
-            } else {
-                let ip = self.bx.threads.cur_ref().trap.ip;
-                let ua = self.bx.heap.cast_to_f64(old_value, ip) as u64;
-                let ub = self.bx.heap.cast_to_f64(value, ip) as u64;
-                let value = self.bx.threads.cur().set_scope_value(
-                    &mut self.bx.heap,
-                    id,
-                    ScriptValue::from_f64_traced_nan(f(ua, ub) as f64, ip),
-                );
-                self.bx.threads.cur().push_stack_unchecked(value);
-            }
+            self.scope_rmw_numeric(value, id, |a, b| f(a as u64, b as u64) as f64);
         } else {
             let value = script_err_immutable!(
                 self.bx.threads.cur_ref().trap,

@@ -95,7 +95,7 @@ impl<'a> ScriptVm<'a> {
 
                 // Check if call explicitly paused (via pause() which sets trap.on to Pause)
                 if matches!(
-                    self.bx.threads.cur().trap.on.get(),
+                    self.bx.threads.cur().trap.get_on(),
                     Some(ScriptTrapOn::Pause)
                 ) {
                     // Re-push the me so it can be re-executed on resume
@@ -150,7 +150,7 @@ impl<'a> ScriptVm<'a> {
 
                     // Check if native explicitly paused (via pause() which sets trap.on to Pause)
                     if matches!(
-                        self.bx.threads.cur().trap.on.get(),
+                        self.bx.threads.cur().trap.get_on(),
                         Some(ScriptTrapOn::Pause)
                     ) {
                         // Native explicitly paused, leave is_paused = true
