@@ -433,13 +433,20 @@ impl LayoutContext {
                     let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
                     if next_word.chars().all(|char| char.is_whitespace()) {
                         self.layout_directly(fitter.pop());
-                    } else if self.options.ellipsis && self.current_row_is_last_allowed() {
+                    } else if self.options.ellipsis
+                        && self.current_row_is_last_allowed()
+                        && !self.current_row_is_continuation()
+                    {
                         // The last permitted row ends in an ellipsis, so word
                         // integrity is moot: fill it to the width limit by
                         // grapheme so the ellipsis truncates at the last glyph
                         // that fits instead of at the last whole word — a word
                         // that wraps away from this row would otherwise leave
                         // it ellipsized far short of the available width.
+                        // Continuation rows are excluded: grapheme layout
+                        // force-places a grapheme wider than an empty row's
+                        // remnant past the width limit, unflagged, whereas
+                        // finishing the row truncates within bounds.
                         self.layout_by_grapheme(fitter.pop());
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
