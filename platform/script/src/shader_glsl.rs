@@ -39,13 +39,17 @@ impl ShaderOutput {
             .unwrap_or(0);
 
         out.push_str(shared_defs);
+        // Manual unpack4u8: `unpackUnorm4x8` is GLSL ES 3.10+ / GL 4.0+, but we
+        // compile as `#version 300 es` for GLES 3.0 (Linux/Android/WebGL2).
         out.push_str(
             "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
 vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
-        self.glsl_write_texture_uniforms(out);
+        // Vertex never samples video; omit TextureVideo so Adreno does not see
+        // `samplerExternalOES` + `camera_projection[int(VIEW_ID)]` (driver ICE).
+        self.glsl_write_texture_uniforms(out, /*include_video_external*/ false);
         self.glsl_write_vertex_globals(vm, out);
         self.glsl_write_vertex_input_attrs(&geometry_fields, &instance_fields, out);
         self.glsl_write_varying_interface(varying_slots, true, out);
@@ -62,13 +66,15 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             .unwrap_or(0);
 
         out.push_str(shared_defs);
+        // Manual unpack4u8: `unpackUnorm4x8` is GLSL ES 3.10+ / GL 4.0+, but we
+        // compile as `#version 300 es` for GLES 3.0 (Linux/Android/WebGL2).
         out.push_str(
             "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
 vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 0xffu), float((u >> 8u) & 0xffu), float((u >> 16u) & 0xffu), float((u >> 24u) & 0xffu)) * (1.0 / 255.0); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
-        self.glsl_write_texture_uniforms(out);
+        self.glsl_write_texture_uniforms(out, /*include_video_external*/ true);
         self.glsl_write_fragment_globals(vm, out);
         self.glsl_write_varying_interface(varying_slots, false, out);
         self.glsl_write_fragment_outputs(vm, out);
@@ -169,9 +175,12 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         true
     }
 
-    fn glsl_write_texture_uniforms(&self, out: &mut String) {
+    fn glsl_write_texture_uniforms(&self, out: &mut String, include_video_external: bool) {
         for io in &self.io {
             if let ShaderIoKind::Texture(tex_type) = io.kind {
+                if !include_video_external && matches!(tex_type, TextureType::TextureVideo) {
+                    continue;
+                }
                 let tex_name = self.backend.map_io_name(io.name);
                 writeln!(
                     out,
@@ -792,7 +801,8 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             TextureType::TextureDepth => "sampler2D",
             TextureType::TextureDepthArray => "sampler2DArray",
             TextureType::TextureVideo => {
-                if cfg!(target_os = "android") && !self.use_vulkan {
+                // Android SurfaceTexture and Linux DMA-Buf NV12 planes use EXTERNAL_OES.
+                if cfg!(any(target_os = "android", target_os = "linux")) && !self.use_vulkan {
                     "samplerExternalOES"
                 } else {
                     "sampler2D"

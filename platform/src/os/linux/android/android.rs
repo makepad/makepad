@@ -1168,6 +1168,16 @@ impl Cx {
                 }
                 if let Some(mut asp) = self.os.software_video_players.remove(&live_id) {
                     asp.player.cleanup();
+                    unsafe {
+                        let env = attach_jni_env();
+                        if let Some(surface) = asp.oes_surface.take() {
+                            crate::gpu_texture::clear_media_oes_surface(asp.oes_tex_id);
+                            (**env).DeleteGlobalRef.unwrap()(env, surface);
+                        }
+                        if let Some(bridge) = asp.oes_bridge.take() {
+                            android_jni::to_java_release_oes_decode_surface(env, bridge);
+                        }
+                    }
                 }
                 self.os.video_configs.remove(&live_id);
 
@@ -1182,11 +1192,20 @@ impl Cx {
                 let force_native = force_native_video();
                 if !force_native && !self.os.software_video_players.contains_key(&live_id) {
                     if let Some(config) = self.os.video_configs.get(&live_id).cloned() {
+                        if config.source.is_android_content_uri() {
+                            crate::log!(
+                                "VIDEO: Android native decode failed for content URI {}: {}",
+                                live_id.0,
+                                error
+                            );
+                        } else {
                         crate::log!(
                             "VIDEO: Android native decode failed for {}, falling back to software video: {}",
                             live_id.0,
                             error
                         );
+                        let (oes_bridge, oes_surface, oes_tex_id) =
+                            self.setup_mediacodec_oes_bridge(config.texture_id);
                         let asp = AndroidSoftwarePlayer {
                             player: PlaybackSessionHandle::new(
                                 live_id,
@@ -1198,11 +1217,16 @@ impl Cx {
                             tex_y_id: config.tex_y_id,
                             tex_u_id: config.tex_u_id,
                             tex_v_id: config.tex_v_id,
+                            texture_id: config.texture_id,
                             yuv_matrix: 0.0,
+                            oes_bridge,
+                            oes_surface,
+                            oes_tex_id,
                         };
                         self.os.software_video_players.insert(live_id, asp);
                         self.redraw_all();
                         return;
+                        }
                     }
                 }
 
@@ -1582,8 +1606,12 @@ impl Cx {
                     enabled: false,
                     matrix: 0.0,
                     biplanar: false,
+                    full_range: false,
                     rotation_steps: 0.0,
+                external: false,
+                array: false,
                 },
+            rgba_gl_2d: false,
             });
             self.call_event_handler(&e);
         }
@@ -1687,6 +1715,7 @@ impl Cx {
                                 video_id: player.video_id,
                                 current_position_ms: 0,
                                 yuv,
+                            rgba_gl_2d: false,
                             }));
                         }
                         Err(error) => {
@@ -1729,8 +1758,12 @@ impl Cx {
                         enabled: true,
                         matrix: 1.0,
                         biplanar: false,
+                        full_range: false,
                         rotation_steps: player.yuv_rotation_steps(),
+                    external: false,
+                    array: false,
                     },
+                rgba_gl_2d: false,
                 }));
             }
         }
@@ -1760,6 +1793,17 @@ impl Cx {
                     video_tracks,
                     audio_tracks,
                 })) => {
+                    if let Some(bridge) = asp.oes_bridge {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_oes_decode_surface_set_default_buffer_size(
+                                env,
+                                bridge,
+                                width as i32,
+                                height as i32,
+                            );
+                        }
+                    }
                     events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
                         video_id: asp.player.video_id,
                         video_width: width,
@@ -1779,8 +1823,54 @@ impl Cx {
                 None => {}
             }
 
+            // OES present: SurfaceTexture.frameAvailable is async. Drain on the GL
+            // thread every poll; only emit VideoTextureUpdated when updateTexImage
+            // actually applied a frame (never present stale OES content).
+            let mut presented_oes = false;
+            if let Some(bridge) = asp.oes_bridge {
+                let (drained, st_matrix) = unsafe {
+                    let env = attach_jni_env();
+                    android_jni::to_java_oes_decode_surface_drain(env, bridge)
+                };
+                if drained > 0 {
+                    let tex_id = if asp.oes_tex_id != 0 {
+                        asp.oes_tex_id
+                    } else {
+                        self.textures[asp.texture_id]
+                            .os
+                            .gl_texture
+                            .unwrap_or(0)
+                    };
+                    if tex_id != 0 {
+                        let tex = &mut self.textures[asp.texture_id];
+                        tex.os.gl_texture = Some(tex_id);
+                        tex.os.gl_texture_owned = false;
+                        tex.os.oes_st_matrix = st_matrix;
+                        tex.format = TextureFormat::VideoExternal;
+                        events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                            video_id: asp.player.video_id,
+                            current_position_ms: asp.player.current_position_ms(),
+                            yuv: crate::event::video_playback::VideoYuvMetadata {
+                                enabled: false,
+                                matrix: 0.0,
+                                biplanar: false,
+                                full_range: false,
+                                rotation_steps: 0.0,
+                            external: false,
+                            array: false,
+                            },
+                        rgba_gl_2d: false,
+                        }));
+                        presented_oes = true;
+                    }
+                }
+            }
+
             if asp.player.poll_frame() {
-                if let Some(planes) = asp.player.take_yuv_frame() {
+                if presented_oes {
+                    // Ack decoder-side OesFrame markers for the drained frames.
+                    while asp.player.take_oes_frame().is_some() {}
+                } else if let Some(planes) = asp.player.take_yuv_frame() {
                     asp.yuv_matrix = planes.matrix.as_f32();
                     upload_yuv_to_gl(
                         unsafe { &*gl },
@@ -1797,10 +1887,18 @@ impl Cx {
                             enabled: true,
                             matrix: asp.yuv_matrix,
                             biplanar: false,
+                            full_range: false,
                             rotation_steps: 0.0,
+                        external: false,
+                        array: false,
                         },
+                    rgba_gl_2d: false,
                     }));
                 }
+                // Pending take_oes_frame without a successful drain: leave markers
+                // in the queue until SurfaceTexture catches up on a later poll.
+            } else if presented_oes {
+                while asp.player.take_oes_frame().is_some() {}
             }
 
             if asp.player.check_eos() {
@@ -2652,12 +2750,7 @@ impl Cx {
                         );
                         self.os.camera_players.insert(video_id, player);
                         self.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
@@ -2693,6 +2786,12 @@ impl Cx {
                         } else if source.is_session() {
                             crate::log!("VIDEO: session source uses software video decoder");
                         }
+
+                        // Ensure the VideoExternal OES texture exists, then wrap it in a
+                        // SurfaceTexture+Surface for MediaCodec zero-copy present.
+                        let (oes_bridge, oes_surface, oes_tex_id) =
+                            self.setup_mediacodec_oes_bridge(texture_id);
+
                         self.os.software_video_players.insert(
                             video_id,
                             AndroidSoftwarePlayer {
@@ -2706,28 +2805,22 @@ impl Cx {
                                 tex_y_id,
                                 tex_u_id,
                                 tex_v_id,
+                                texture_id,
                                 yuv_matrix: 0.0,
+                                oes_bridge,
+                                oes_surface,
+                                oes_tex_id,
                             },
                         );
                         // Notify widget so it can bind textures to shader slots
                         self.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
                     // Notify widget so it can bind textures to shader slots
                     // (needed if native decode fails and we fall back to software)
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
-                        video_id,
-                        tex_y,
-                        tex_u,
-                        tex_v,
-                    }));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
 
                     unsafe {
                         let env = attach_jni_env();
@@ -2826,6 +2919,16 @@ impl Cx {
                     }
                     if let Some(mut asp) = self.os.software_video_players.remove(&video_id) {
                         asp.player.cleanup();
+                        unsafe {
+                            let env = attach_jni_env();
+                            if let Some(surface) = asp.oes_surface.take() {
+                                crate::gpu_texture::clear_media_oes_surface(asp.oes_tex_id);
+                                (**env).DeleteGlobalRef.unwrap()(env, surface);
+                            }
+                            if let Some(bridge) = asp.oes_bridge.take() {
+                                android_jni::to_java_release_oes_decode_surface(env, bridge);
+                            }
+                        }
                         self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
                             VideoPlaybackResourcesReleasedEvent { video_id },
                         ));
@@ -2871,6 +2974,11 @@ impl Cx {
                     }
                     if let Some(asp) = self.os.software_video_players.get(&video_id) {
                         asp.player.set_playback_rate(rate);
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_set_video_playback_rate(env, video_id, rate);
+                        }
                     }
                 }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
@@ -2878,6 +2986,8 @@ impl Cx {
                     let _ = (video_id, source, autoplay, should_loop);
                     // TODO: implement via MediaPlayer when needed
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.xr_buffer_scale_requested = self
                         .os
@@ -3292,7 +3402,52 @@ pub(crate) struct AndroidSoftwarePlayer {
     pub tex_y_id: TextureId,
     pub tex_u_id: TextureId,
     pub tex_v_id: TextureId,
+    pub texture_id: TextureId,
     pub yuv_matrix: f32,
+    /// JNI global ref to `OesDecodeSurface` when MediaCodec ZC is active.
+    pub oes_bridge: Option<jni_sys::jobject>,
+    /// JNI global ref to `android.view.Surface` published for the decoder.
+    pub oes_surface: Option<jni_sys::jobject>,
+    pub oes_tex_id: u32,
+}
+
+impl Cx {
+    /// Create VideoExternal OES tex + Java SurfaceTexture/Surface for MediaCodec ZC.
+    fn setup_mediacodec_oes_bridge(
+        &mut self,
+        texture_id: TextureId,
+    ) -> (Option<jni_sys::jobject>, Option<jni_sys::jobject>, u32) {
+        let gl = self.os.gl();
+        let cxtex = &mut self.textures[texture_id];
+        let _ = cxtex.setup_video_texture(gl);
+        let Some(tex) = cxtex.os.gl_texture else {
+            return (None, None, 0);
+        };
+        unsafe {
+            let env = attach_jni_env();
+            let Some(bridge) = android_jni::to_java_create_oes_decode_surface(env, tex) else {
+                return (None, None, tex);
+            };
+            let Some(surface_local) =
+                android_jni::to_java_oes_decode_surface_get_surface(env, bridge)
+            else {
+                android_jni::to_java_release_oes_decode_surface(env, bridge);
+                return (None, None, tex);
+            };
+            let surface_global = (**env).NewGlobalRef.unwrap()(env, surface_local);
+            (**env).DeleteLocalRef.unwrap()(env, surface_local);
+            if surface_global.is_null() {
+                android_jni::to_java_release_oes_decode_surface(env, bridge);
+                return (None, None, tex);
+            }
+            crate::gpu_texture::publish_media_oes_surface(
+                surface_global as *mut std::ffi::c_void,
+                tex,
+            );
+            crate::log!("VIDEO: MediaCodec OES surface ready tex={}", tex);
+            (Some(bridge), Some(surface_global), tex)
+        }
+    }
 }
 
 pub struct CxOs {

@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+robius-file-picker = "0.3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+robius-android-env = { version = "0.2", features = ["makepad"] }

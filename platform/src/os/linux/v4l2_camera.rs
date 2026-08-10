@@ -1,7 +1,10 @@
 use {
-    self::super::{libc_sys, v4l2_sys::*},
+    self::super::{gl_sys, libc_sys, v4l2_sys::*},
     crate::{
-        makepad_live_id::*, thread::SignalToUI, video::*,
+        makepad_live_id::*,
+        texture::{CxTexturePool, TexturePixel},
+        thread::SignalToUI,
+        video::*,
         video_encode::camera_video_encoder::VideoEncoder,
     },
     std::ffi::CStr,
@@ -632,32 +635,34 @@ impl V4l2CameraAccess {
                         *self.video_encoder_config[index].lock().unwrap(),
                         self.video_output_cb[index].lock().unwrap().is_some(),
                     ) {
-                        config.width = format.width as u32;
-                        config.height = format.height as u32;
-                        if let Some(fps) = format.frame_rate {
-                            config.fps_num = fps.max(1.0).round() as u32;
-                            config.fps_den = 1;
-                        }
-                        config.source = VideoEncodeSource::Camera {
-                            input_id: *input_id,
-                            format_id: *format_id,
-                        };
-                        let output_cb = self.video_output_cb[index].clone();
-                        let encoder = VideoEncoder::start(
-                            config,
-                            Box::new(move |packet| {
-                                if let Some(cb) = &mut *output_cb.lock().unwrap() {
-                                    cb(packet);
-                                }
-                            }),
-                        );
-                        if encoder.is_none() {
-                            crate::error!(
-                                "linux camera video encoder unavailable for slot {}",
-                                index
+                        if matches!(config.source, VideoEncodeSource::Camera { .. }) {
+                            config.width = format.width as u32;
+                            config.height = format.height as u32;
+                            if let Some(fps) = format.frame_rate {
+                                config.fps_num = fps.max(1.0).round() as u32;
+                                config.fps_den = 1;
+                            }
+                            config.source = VideoEncodeSource::Camera {
+                                input_id: *input_id,
+                                format_id: *format_id,
+                            };
+                            let output_cb = self.video_output_cb[index].clone();
+                            let encoder = VideoEncoder::start(
+                                config,
+                                Box::new(move |packet| {
+                                    if let Some(cb) = &mut *output_cb.lock().unwrap() {
+                                        cb(packet);
+                                    }
+                                }),
                             );
+                            if encoder.is_none() {
+                                crate::error!(
+                                    "linux camera video encoder unavailable for slot {}",
+                                    index
+                                );
+                            }
+                            *self.video_encoder[index].lock().unwrap() = encoder;
                         }
-                        *self.video_encoder[index].lock().unwrap() = encoder;
                     }
 
                     if let Some(session) = V4l2CaptureSession::start(
@@ -672,6 +677,159 @@ impl V4l2CameraAccess {
                 }
             }
         }
+    }
+
+    pub fn configure_video_encoder(
+        &mut self,
+        index: usize,
+        config: VideoEncoderConfig,
+        output: VideoOutputFn,
+    ) -> Result<(), VideoEncodeError> {
+        *self.video_output_cb[index].lock().unwrap() = Some(output);
+        *self.video_encoder_config[index].lock().unwrap() = Some(config);
+
+        if matches!(config.source, VideoEncodeSource::Camera { .. }) {
+            // Camera encoders are started when use_video_input opens the device.
+            return Ok(());
+        }
+
+        let output_cb = self.video_output_cb[index].clone();
+        *self.video_encoder[index].lock().unwrap() = VideoEncoder::start(
+            config,
+            Box::new(move |packet| {
+                if let Some(cb) = &mut *output_cb.lock().unwrap() {
+                    cb(packet);
+                }
+            }),
+        );
+        if self.video_encoder[index].lock().unwrap().is_none() {
+            crate::error!("linux video encoder unavailable for slot {}", index);
+            return Err(VideoEncodeError::CodecUnavailable);
+        }
+        Ok(())
+    }
+
+    pub fn video_encoder_push_frame(&mut self, index: usize, frame: CameraFrameRef<'_>) {
+        if let Some(encoder) = &*self.video_encoder[index].lock().unwrap() {
+            encoder.push_frame(frame);
+        }
+    }
+
+    pub fn video_encoder_request_keyframe(&mut self, index: usize) -> Result<(), VideoEncodeError> {
+        let guard = self.video_encoder[index].lock().unwrap();
+        let encoder = guard.as_ref().ok_or(VideoEncodeError::EncoderNotStarted)?;
+        encoder.request_keyframe()
+    }
+
+    pub fn video_encoder_capture_texture_frame(
+        &mut self,
+        index: usize,
+        timestamp_ns: u64,
+        gl: &gl_sys::LibGl,
+        textures: &mut CxTexturePool,
+    ) -> Result<(), VideoEncodeError> {
+        let config = self.video_encoder_config[index]
+            .lock()
+            .unwrap()
+            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+        let texture_id = match config.source {
+            VideoEncodeSource::Texture { texture_id } => texture_id,
+            _ => return Err(VideoEncodeError::UnsupportedSource),
+        };
+
+        let encoder_guard = self.video_encoder[index].lock().unwrap();
+        let encoder = encoder_guard
+            .as_ref()
+            .ok_or(VideoEncodeError::EncoderNotStarted)?;
+
+        let cx_texture = &mut textures[texture_id];
+        let alloc = cx_texture
+            .alloc
+            .as_ref()
+            .ok_or(VideoEncodeError::InvalidTexture)?;
+        if alloc.width == 0 || alloc.height == 0 {
+            return Err(VideoEncodeError::InvalidTextureSize);
+        }
+        if alloc.pixel != TexturePixel::BGRAu8 {
+            return Err(VideoEncodeError::UnsupportedTextureFormat);
+        }
+
+        let texture = cx_texture
+            .os
+            .gl_texture
+            .ok_or(VideoEncodeError::InvalidTexture)?;
+
+        let mut framebuffer = 0;
+        unsafe {
+            (gl.glGenFramebuffers)(1, &mut framebuffer);
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, framebuffer);
+            (gl.glFramebufferTexture2D)(
+                gl_sys::FRAMEBUFFER,
+                gl_sys::COLOR_ATTACHMENT0,
+                gl_sys::TEXTURE_2D,
+                texture,
+                0,
+            );
+        }
+
+        let mut rgba = vec![0u8; alloc.width * alloc.height * 4];
+        unsafe {
+            (gl.glReadPixels)(
+                0,
+                0,
+                alloc.width as i32,
+                alloc.height as i32,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                rgba.as_mut_ptr() as *mut _,
+            );
+            let read_err = (gl.glGetError)();
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+            (gl.glDeleteFramebuffers)(1, &framebuffer);
+            if read_err != gl_sys::NO_ERROR {
+                return Err(VideoEncodeError::InvalidTexture);
+            }
+        }
+
+        let mut frame = CameraFrameOwned::default();
+        if !convert_rgba_8888_to_i420(
+            &rgba,
+            alloc.width,
+            alloc.height,
+            timestamp_ns,
+            CameraColorMatrix::BT709,
+            &mut frame,
+        ) {
+            return Err(VideoEncodeError::UnsupportedTextureFormat);
+        }
+
+        encoder.push_frame(CameraFrameRef {
+            timestamp_ns: frame.timestamp_ns,
+            width: frame.width,
+            height: frame.height,
+            layout: frame.layout,
+            matrix: frame.matrix,
+            plane_count: frame.plane_count,
+            planes: [
+                CameraFramePlaneRef {
+                    bytes: &frame.planes[0].bytes,
+                    row_stride: frame.planes[0].row_stride,
+                    pixel_stride: frame.planes[0].pixel_stride,
+                },
+                CameraFramePlaneRef {
+                    bytes: &frame.planes[1].bytes,
+                    row_stride: frame.planes[1].row_stride,
+                    pixel_stride: frame.planes[1].pixel_stride,
+                },
+                CameraFramePlaneRef {
+                    bytes: &frame.planes[2].bytes,
+                    row_stride: frame.planes[2].row_stride,
+                    pixel_stride: frame.planes[2].pixel_stride,
+                },
+            ],
+        });
+
+        Ok(())
     }
 
     pub fn get_updated_descs(&mut self) -> Vec<VideoInputDesc> {
