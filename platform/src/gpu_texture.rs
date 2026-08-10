@@ -35,12 +35,17 @@ use std::{
 };
 
 use crate::{
-    texture::{
-        CxTexturePool, Texture, TextureAlloc, TextureCategory, TextureFormat, TextureId,
-        TexturePixel,
-    },
+    texture::{Texture, TextureAlloc, TextureCategory, TextureFormat, TexturePixel},
     Cx,
 };
+
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", not(any(target_env = "ohos", linux_direct))),
+    target_os = "macos",
+    target_os = "ios",
+))]
+use crate::texture::{CxTexturePool, TextureId};
 
 /// Serializes hard-decode / media GPU work with Makepad present copies on the
 /// shared D3D11 device. Recursive so the same thread may nest lock calls
