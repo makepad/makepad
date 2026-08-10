@@ -358,6 +358,11 @@ pub enum Base {
     #[pick]
     Full,
     Unused,
+    /// The width available on the enclosing line for inline content,
+    /// accounting for the enclosing widget's own leading geometry and
+    /// trailing insets; see [`Cx2d::find_line_available_width`]. Widths
+    /// only: as a height base this resolves to nothing.
+    Line,
 }
 
 /// Specifies how walks should be laid out with respect to each other.
@@ -817,6 +822,9 @@ impl Turtle {
         match base {
             Base::Full => self.width(),
             Base::Unused => self.unused_width(),
+            // A line bound spans the whole turtle stack, not one turtle;
+            // it is resolved by `Cx2d::find_line_available_width`.
+            Base::Line => f64::NAN,
         }
     }
 
@@ -824,6 +832,7 @@ impl Turtle {
         match base {
             Base::Full => self.height(),
             Base::Unused => self.unused_height(),
+            Base::Line => f64::NAN,
         }
     }
 
@@ -1389,6 +1398,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     pub fn find_base_width(&self, base: Base) -> Option<f64> {
+        if let Base::Line = base {
+            return self.find_line_available_width();
+        }
         self.turtles
             .iter()
             .rev()
@@ -1398,12 +1410,74 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     pub fn find_base_height(&self, base: Base) -> Option<f64> {
+        if let Base::Line = base {
+            return None;
+        }
         self.turtles
             .iter()
             .rev()
             .skip(1)
             .map(|turtle| turtle.base_height(base))
             .find(|height| !height.is_nan())
+    }
+
+    /// Returns the width available on the enclosing line for the current
+    /// turtle's content, for a [`Base::Line`] bound.
+    ///
+    /// The line is the nearest enclosing turtle with a known width; the
+    /// unresolved `Fit` turtles between it and the current one (an inline
+    /// widget's nesting levels) contribute their leading geometry and
+    /// trailing insets. The line's flow selects between two measurements,
+    /// each of which is final at the moment it is taken:
+    ///
+    /// - A wrapping line can relocate the inline widget whole onto a fresh
+    ///   row, so the bound is what a fresh row offers: the line's inner
+    ///   width minus the widget-internal lead-in before this turtle and
+    ///   the trailing insets after it. Content sized to this bound either
+    ///   fits where it is, or fits the row the widget is relocated to.
+    /// - A non-wrapping line (including one held non-wrapping by an
+    ///   inline-content clamp on the last permitted row) keeps the widget
+    ///   where it is, so the bound is the remnant: the distance from the
+    ///   pen to the line's inner right edge, minus the trailing insets.
+    ///
+    /// The current turtle's own trailing margin is left for the consumer,
+    /// which resolves a `Fit` max bound against the walk's margin box. Its
+    /// leading margin is part of the measured lead-in (the turtle's origin
+    /// lies past it), so a consumer that subtracts the full margin width
+    /// counts the leading side twice — a deliberately conservative overlap
+    /// of a few pixels that keeps a remnant-fitted walk safely inside the
+    /// line's overrun tolerance.
+    pub fn find_line_available_width(&self) -> Option<f64> {
+        let (current, outer_turtles) = self.turtles.split_last()?;
+        // Measured from the current turtle's content origin, not its pen:
+        // the bound is evaluated both before the content is laid out and
+        // again when the turtle closes (the `Fit` max clamp), and the two
+        // must agree — the origin is the content's start either way.
+        let start_x = current.origin().x + current.padding().left;
+        let mut trailing = current.padding().right;
+        // The outermost unresolved turtle inside the line so far: the
+        // inline widget's root, whose origin marks where its lead-in
+        // (icons, padding, spacing before this content) begins.
+        let mut widget_origin_x = current.origin().x;
+        let mut widget_margin_left = 0.0;
+        for turtle in outer_turtles.iter().rev() {
+            if !turtle.width().is_nan() {
+                let inner = turtle.inner_rect();
+                let available = match turtle.layout().flow {
+                    Flow::Right { wrap: false, .. } => {
+                        inner.pos.x + inner.size.x - start_x - trailing
+                    }
+                    Flow::Right { wrap: true, .. } | Flow::Down | Flow::Overlay => {
+                        inner.size.x - widget_margin_left - (start_x - widget_origin_x) - trailing
+                    }
+                };
+                return Some(available.max(0.0));
+            }
+            trailing += turtle.padding().right + turtle.walk().margin.right;
+            widget_origin_x = turtle.origin().x;
+            widget_margin_left = turtle.walk().margin.left;
+        }
+        None
     }
 
     /// Starts a root turtle.
@@ -1809,8 +1883,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     turtle = self.turtles.last_mut().unwrap();
                     if let Some(max) = max {
                         // take the margin into account when calculating a Fit bound
-                        // with a relative-to-parent max value.
-                        turtle.width = turtle.width.min(max - turtle.walk.margin.width());
+                        // with a relative-to-parent max value. The floor keeps a
+                        // bound smaller than the margins (a near-zero line
+                        // remnant) from producing a negative width and an
+                        // inverted clip.
+                        turtle.width = turtle
+                            .width
+                            .min((max - turtle.walk.margin.width()).max(0.0));
                     }
                 }
             }
