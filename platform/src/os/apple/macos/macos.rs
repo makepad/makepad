@@ -73,7 +73,9 @@ pub struct MetalWindow {
     /// paint beat instead of letting `nextDrawable` block the main thread
     /// when the compositor consumes frames unevenly (mirrored/scaled
     /// displays throttle in 10-25ms phases).
-    pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Packed: low 32 bits are the count, high 32 bits are a reset generation,
+    /// so a handler armed before a watchdog reset can't decrement a newer count.
+    pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// When the present gate started skipping beats, so a gate whose
     /// handlers were lost can be forced back open instead of wedging.
     gate_closed_since: Option<Instant>,
@@ -125,7 +127,7 @@ impl MetalWindow {
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
-            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             gate_closed_since: None,
         }
     }
@@ -173,7 +175,7 @@ impl MetalWindow {
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
-            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             gate_closed_since: None,
         }
     }
@@ -444,8 +446,8 @@ impl Cx {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
                         use std::sync::atomic::Ordering;
-                        let in_flight =
-                            metal_window.in_flight_presents.load(Ordering::Acquire);
+                        let in_flight = (metal_window.in_flight_presents.load(Ordering::Acquire)
+                            & 0xffff_ffff) as u32;
                         // An occluded window gets no compositor vsync: presents never reach
                         // glass and an exhausted pool would block nextDrawable forever.
                         // Skip, keep the pass dirty; the first visible beat repaints.
@@ -491,7 +493,13 @@ impl Cx {
                                 let () = msg_send![metal_window.ca_layer, setDrawableSize: CGSize {width: s.x, height: s.y + 1.0}];
                                 let () = msg_send![metal_window.ca_layer, setDrawableSize: CGSize {width: s.x, height: s.y}];
                             }
-                            metal_window.in_flight_presents.store(0, Ordering::Release);
+                            // Bump the generation as we zero the count, so the overdue
+                            // handlers (late, not lost) can't steal decrements from newer frames.
+                            let _ = metal_window.in_flight_presents.fetch_update(
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                |w| Some(((w >> 32).wrapping_add(1)) << 32),
+                            );
                         }
                         metal_window.gate_closed_since = None;
                         // PerfMonitor: a presented window frame starts here;
@@ -510,18 +518,21 @@ impl Cx {
                             self.repaint_pass(*draw_pass_id);
                             return;
                         }
-                        metal_window
+                        let prev = metal_window
                             .in_flight_presents
                             .fetch_add(1, Ordering::AcqRel);
+                        let generation = (prev >> 32) as u32;
                         let in_flight = metal_window.in_flight_presents.clone();
                         let () = unsafe {
                             msg_send![
                                 drawable,
                                 addPresentedHandler: &objc_block!(move | _drawable: ObjcId | {
+                                    // No-op if a watchdog reset happened since this present.
                                     let _ = in_flight.fetch_update(
                                         std::sync::atomic::Ordering::AcqRel,
                                         std::sync::atomic::Ordering::Acquire,
-                                        |count| Some(count.saturating_sub(1)),
+                                        |w| ((w >> 32) as u32 == generation && w & 0xffff_ffff != 0)
+                                            .then(|| w - 1),
                                     );
                                 })
                             ]
