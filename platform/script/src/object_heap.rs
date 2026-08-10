@@ -612,6 +612,61 @@ impl ScriptHeap {
         )
     }
 
+    /// Single chain-walk locate for compound scope assignment (`x += v`).
+    /// Returns the object whose MAP holds `key` plus the current value (the
+    /// slot both the read and the write of a compound assign target).
+    /// Returns Err(true) when the key is only visible through a vec2 vec —
+    /// the caller must take the slow read+write path to reproduce its
+    /// (read ok / write error) semantics. Err(false) means not found.
+    #[inline]
+    pub fn scope_map_owner(
+        &self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+    ) -> Result<(ScriptObject, ScriptValue), bool> {
+        let mut ptr = ptr;
+        loop {
+            let object = &self.objects[ptr];
+            if let Some(set) = object.map.get(&key) {
+                return Ok((ptr, set.value));
+            }
+            if object.tag.is_vec2() {
+                for kv in object.vec.iter().rev() {
+                    if kv.key == key {
+                        return Err(true);
+                    }
+                }
+            }
+            if let Some(next_ptr) = object.proto.as_object() {
+                ptr = next_ptr
+            } else {
+                return Err(false);
+            }
+        }
+    }
+
+    /// Write a compound-assign result into a slot located by
+    /// [`Self::scope_map_owner`]. Mirrors the write half of
+    /// `set_scope_value` (escape barrier, immutable check, in-place store).
+    #[inline]
+    pub fn scope_write_in_map(
+        &mut self,
+        owner: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+        trap: ScriptTrap,
+    ) -> ScriptValue {
+        self.escape_value(value);
+        let object = &mut self.objects[owner];
+        if object.tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot modify immutable object");
+        }
+        if let Some(set) = object.map.get_mut(&key) {
+            set.value = value;
+        }
+        NIL
+    }
+
     pub fn def_scope_value(
         &mut self,
         ptr: ScriptObject,
