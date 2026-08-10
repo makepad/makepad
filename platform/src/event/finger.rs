@@ -438,6 +438,13 @@ impl CxFingers {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
 
+    /// The area that captured the touch with the given uid, if any.
+    /// Lets a raw `Event::LongPress` handler check which widget owns the press.
+    pub fn touch_capture_area(&self, uid: u64) -> Option<Area> {
+        let digit_id: DigitId = live_id_num!(touch, uid).into();
+        self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.area)
+    }
+
     pub fn any_areas_captured(&self) -> bool {
         self.captures.len() > 0
     }
