@@ -316,6 +316,104 @@ script_mod! {
             }
             Hr{}
 
+            H4{text: "Line-bounded pill labels (Base.Line)"}
+            P{text: "Pill labels bounded by the line width actually available to the pill. A long name ellipsizes at the line edge; a mid-line pill relocates whole to the next row; a pill held on the last clamped row squeezes into the remnant and stays visible."}
+            View{
+                width: Fill, height: Fit, flow: Down, spacing: 6
+                // A long name in a narrow container: ellipsis lands near the
+                // container's right edge, not at a fixed fraction of it.
+                View{ width: 160, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    View{ width: Fit, height: Fit,
+                        View{ width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Line, factor: 1.0}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@somebody-with-a-long-name:example.org" }
+                            }
+                        }
+                    }
+                }
+                // A long-name pill mid-line in a wrapping flow: the pill
+                // relocates whole to its own row and ellipsizes at the row
+                // edge; the text before and after stays intact.
+                View{ width: 200, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    Html{ width: Fill, height: Fit, font_size: 11
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        text_style_normal +: { font_size: 11, line_spacing: 1.3 }
+                        pill := View { width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Line, factor: 1.0}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@somebody-with-a-long-name:example.org" }
+                            }
+                        }
+                        body: "hi <pill></pill> ok"
+                    }
+                }
+                // A long-name pill landing on the LAST permitted row of a
+                // clamped flow: the line clamp holds it in place, so the
+                // title squeezes into the row remnant and the pill remains
+                // visible with its own ellipsis, not hidden behind the
+                // flow's.
+                View{ width: 210, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    Html{ width: Fill, height: Fit, font_size: 11
+                        max_lines: 2
+                        text_overflow: Ellipsis
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        text_style_normal +: { font_size: 11, line_spacing: 1.3 }
+                        pill := View { width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Line, factor: 1.0}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@somebody-with-a-long-name:example.org" }
+                            }
+                        }
+                        body: "one two three four five six seven <pill></pill>"
+                    }
+                }
+                // A short name in a wide container fits fully inline: the
+                // line bound must not truncate a name the line can hold.
+                View{ width: 400, height: Fit, show_bg: true, draw_bg +: {color: #333}
+                    Html{ width: Fill, height: Fit, font_size: 11
+                        flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                        text_style_normal +: { font_size: 11, line_spacing: 1.3 }
+                        pill := View { width: Fit, height: Fit,
+                            RoundedView { width: Fit, height: Fit, flow: Right, align: Align{ y: 0.5 }, spacing: 1,
+                                padding: Inset{ left: 6, right: 4, bottom: -3, top: -3 }
+                                margin: Inset{ right: 1 }
+                                show_bg: true, draw_bg +: { color: #000, border_radius: 6.0 }
+                                RoundedView { width: 16, height: 16, show_bg: true, draw_bg +: { color: #1fc7a8, border_radius: 8.0 } }
+                                Label {
+                                    width: Fit{max: FitBound.Rel{base: Base.Line, factor: 1.0}},
+                                    max_lines: 1, text_overflow: Ellipsis,
+                                    draw_text +: { color: #f, text_style +: { font_size: 11, line_spacing: 1.0 } }
+                                    text: "@quokka:example.org" }
+                            }
+                        }
+                        body: "hi <pill></pill> ok"
+                    }
+                }
+            }
+            Hr{}
+
             H4{text: "REPRO: timeline message, pills + text, no line clamp"}
             P{text: "Rows starting with regular text after a pill-heavy row must keep the text and the pills on one center line, pill tops must never be cut, and inter-line spacing must be uniform."}
             View{
