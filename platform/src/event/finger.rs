@@ -882,6 +882,21 @@ impl Event {
             _ => (),
         }
     }
+
+    /// The area that has claimed this pointer event so far (hover, mouse press, or touch start).
+    /// Snapshot it before dispatching a subtree: a claim appearing across that dispatch came from within.
+    pub fn pointer_claimed_area(&self) -> Area {
+        match self {
+            Event::MouseMove(e) => e.handled.get(),
+            Event::MouseDown(e) => e.handled.get(),
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .find(|t| t.state == TouchState::Start)
+                .map_or(Area::Empty, |t| t.handled.get()),
+            _ => Area::Empty,
+        }
+    }
 }
 
 impl Event {
