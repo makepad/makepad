@@ -789,7 +789,9 @@ impl PulseAudioAccess {
             }
 
             Some(Arc::new(Mutex::new(PulseAudioAccess {
-                buffer_frames: 256,
+                // ~20ms at 48k. Matching the old 256 (~5ms) underran under soft
+                // decode; PipeWire-pulse is happier with a slightly larger tlength.
+                buffer_frames: 1024,
                 audio_inputs: Vec::new(),
                 audio_outputs: Vec::new(),
                 change_signal,

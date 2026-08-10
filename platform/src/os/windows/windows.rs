@@ -45,6 +45,7 @@ impl Cx {
 
         // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
         cx.borrow_mut().os.d3d11_device = Some(d3d11_cx.borrow().device.clone());
+        cx.borrow_mut().publish_d3d11_device_for_media();
 
         cx.borrow_mut().set_physical_keyboard_state(true);
         if crate::app_main::should_run_stdin_loop_from_env() {
@@ -210,6 +211,7 @@ impl Cx {
                     let mut players = std::mem::take(&mut self.os.video_players);
                     let mut video_events = Vec::new();
                     for (_id, player) in players.iter_mut() {
+                        player.sync_worker();
                         match player.check_prepared() {
                             Some(Ok(crate::media_plugin::PlaybackPrepared {
                                 width,
@@ -247,11 +249,15 @@ impl Cx {
                                     video_id: player.video_id,
                                     current_position_ms: player.current_position_ms(),
                                     yuv: crate::event::video_playback::VideoYuvMetadata {
-                                        enabled: player.is_software_mode(),
+                                        enabled: player.uses_yuv(),
                                         matrix: player.yuv_matrix(),
-                                        biplanar: false,
+                                        biplanar: player.yuv_biplanar(),
+                                        full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
+                                        external: false,
+                                        array: player.yuv_array(),
                                     },
+                                rgba_gl_2d: false,
                                 },
                             ));
                         }
@@ -263,12 +269,18 @@ impl Cx {
                             ));
                         }
                     }
-                    let needs_repaint = players.values().any(|p| p.is_playing());
+                    let needs_repaint = players.values().any(|p| p.keep_polling());
                     self.os.video_players = players;
                     for event in video_events {
                         self.call_event_handler(&event);
                     }
-                    // Keep paint loop alive while any player is actively playing
+                    // Keep the paint loop alive while preparing or playing.
+                    // Arm *before* next-frame dispatch so widgets can observe it, then
+                    // re-arm *after* — `call_next_frame_event` consumes the set, and without
+                    // a re-arm a 30fps stream on a 60Hz display drops into `EventFlow::Wait`
+                    // on the empty half of the ticks. Wait mode skips Paint on the 8ms
+                    // signal-poll timer, so the video freezes until the next mouse/input
+                    // message wakes GetMessageW.
                     if needs_repaint {
                         self.new_next_frame();
                     }
@@ -277,6 +289,9 @@ impl Cx {
                 let time_now = with_win32_app(|app| app.time_now());
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
+                }
+                if self.os.video_players.values().any(|p| p.keep_polling()) {
+                    self.new_next_frame();
                 }
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
@@ -291,8 +306,15 @@ impl Cx {
                 // dirtying a pass (e.g. a video player polling between decoded frames)
                 // would spin the loop at full speed; sleep briefly to cap that.
                 // `any_passes_dirty` also paces a popup's waitless dropped-present retry.
-                if !presented && (self.new_next_frames.len() != 0 || self.any_passes_dirty()) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                // While video is preparing/playing we keep re-arming NextFrame so Poll
+                // does not drop into Wait; pace that like the 8 ms signal-poll timer.
+                if !presented {
+                    let video_pacing = self.os.video_players.values().any(|p| p.keep_polling());
+                    if !self.new_next_frames.is_empty() || self.any_passes_dirty() || video_pacing
+                    {
+                        let ms = if video_pacing { 8 } else { 1 };
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
                 }
 
                 // Run script-VM garbage collection at a safe point after paint, matching
@@ -413,11 +435,13 @@ impl Cx {
                 self.handle_game_input_events();
 
                 // If a signal handler dirtied the UI (redraw / animation / dirty pass),
-                // resume the vsync-paced Poll loop so it paints promptly; otherwise go
-                // back to sleep in `GetMessageW`.
+                // or video is playing, resume the vsync-paced Poll loop so it paints
+                // promptly; otherwise go back to sleep in `GetMessageW`.
+                // Video must keep Poll: Wait skips Paint on signal-poll ticks.
                 if self.any_passes_dirty()
                     || self.need_redrawing()
                     || self.new_next_frames.len() != 0
+                    || self.os.video_players.values().any(|p| p.keep_polling())
                 {
                     return EventFlow::Poll;
                 }
@@ -428,13 +452,18 @@ impl Cx {
         self.handle_game_input_events();
 
         // Pace painting like macOS/Linux: spin (Poll) only while there is visible work
-        // pending — a pass is dirty, a redraw was requested, or an animation NextFrame
-        // is queued. Otherwise block (Wait) so the loop sleeps in `GetMessageW` at ~0%
-        // CPU until the next input / timer / signal. While Poll-ing, the vsync-blocking
-        // D3D11 `Present` (`handle_repaint` -> `draw_pass_to_window` -> `Present(1,..)`) is what
-        // actually paces frames to the display; this replaces the old hard-forced Poll
-        // that repainted unconditionally at the 8 ms signal-timer rate (~125 Hz).
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
+        // pending — a pass is dirty, a redraw was requested, an animation NextFrame
+        // is queued, or a video player is preparing/playing. Otherwise block (Wait) so
+        // the loop sleeps in `GetMessageW` at ~0% CPU until the next input / timer / signal.
+        // While Poll-ing, the vsync-blocking D3D11 `Present` (`handle_repaint` ->
+        // `draw_pass_to_window` -> `Present(1,..)`) is what actually paces frames to
+        // the display; this replaces the old hard-forced Poll that repainted
+        // unconditionally at the 8 ms signal-timer rate (~125 Hz).
+        if self.any_passes_dirty()
+            || self.need_redrawing()
+            || self.new_next_frames.len() != 0
+            || self.os.video_players.values().any(|p| p.keep_polling())
+        {
             EventFlow::Poll
         } else {
             EventFlow::Wait
@@ -797,12 +826,7 @@ impl Cx {
                         self.os.video_players.insert(video_id, player);
                         // Notify widget so it can bind textures to shader slots
                         self.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                     } else {
                         self.call_event_handler(&Event::VideoDecodingError(
@@ -866,6 +890,8 @@ impl Cx {
                         player.set_playback_rate(rate);
                     }
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 CxOsOp::AttachCameraNativePreview { .. }
                 | CxOsOp::UpdateCameraNativePreview { .. }
                 | CxOsOp::DetachCameraNativePreview { .. } => {

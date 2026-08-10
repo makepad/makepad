@@ -1,14 +1,65 @@
 use {
     crate::{
         event::video_playback::VideoSource,
+        gpu_texture::{
+            adopt_metal_nv12_biplanar, cv_pixel_buffer_is_biplanar_nv12,
+            detach_metal_nv12_present, MetalNv12Frame, MetalNv12PresentCache,
+        },
         makepad_error_log::*,
         makepad_live_id::LiveId,
         os::apple::apple_sys::*,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
+        video_decode::yuv::YuvColorMatrix,
         PlaybackPrepared,
     },
-    std::{ffi::c_void, ptr::NonNull},
+    std::{
+        ffi::c_void,
+        ptr::NonNull,
+        sync::{
+            atomic::{AtomicBool, AtomicU32, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
+    },
 };
+
+/// After a playing seek, AVPlayer surfaces a sync frame before decode can
+/// sustain motion. Presenting that lone keyframe before the pipeline can
+/// sustain playback is the freeze the user sees.
+///
+/// Hold the previous texture until either:
+/// - two distinct display PTS samples arrive, or
+/// - ≥1 sample and AVPlayer reports it can keep up / is already playing.
+///
+/// Same policy for local files and network streams. Hard timeout clears the
+/// gate without presenting.
+struct PostSeekGate {
+    /// Distinct post-seek display PTS samples consumed while holding.
+    new_samples: u32,
+    last_display_secs: Option<f64>,
+    started: Instant,
+}
+
+/// Escape hatch: drop the gate (keep previous texture) so playback / fallback
+/// can proceed. Must be reachable even when `hasNew` stays false.
+const POST_SEEK_HARD_TIMEOUT: Duration = Duration::from_millis(3000);
+/// Distinct display PTS samples that always count as warm.
+const POST_SEEK_MIN_SAMPLES: u32 = 2;
+const POST_SEEK_PTS_EPS: f64 = 1.0 / 240.0;
+/// Preferred forward buffer so keep-up becomes true before we present.
+const PREFERRED_FORWARD_BUFFER_SECS: f64 = 2.0;
+
+fn cmtime_secs(time: CMTime) -> Option<f64> {
+    if (time.flags & kCMTimeFlags_Valid) == 0 {
+        return None;
+    }
+    let secs = unsafe { CMTimeGetSeconds(time) };
+    if secs.is_finite() && secs >= 0.0 {
+        Some(secs)
+    } else {
+        None
+    }
+}
 
 /// Returns the canPlayType string for the given MIME type on Apple platforms (AVPlayer backend).
 /// AVFoundation supports MP4/MOV/M4V containers with H.264/H.265/AV1 video and AAC/ALAC/FLAC/MP3
@@ -47,9 +98,23 @@ pub struct AppleVideoPlayer {
     /// Tracks the most recent user/widget play-vs-pause command. `poll_frame`
     /// uses this (not `autoplay`) to decide whether a rate-0 AVPlayer should be
     /// nudged back into playing, so a user-initiated pause sticks.
-    should_play: bool,
+    should_play: AtomicBool,
+    /// Desired playback rate (1.0 = normal). Restored after seek via `setRate:`.
+    playback_rate: AtomicU32,
     is_looping: bool,
     temp_file_path: Option<std::path::PathBuf>,
+    metal_device: ObjcId,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
+    nv12_present: MetalNv12PresentCache,
+    /// Last frame was presented via NV12 Y/UV planes (not BGRA `texture_id`).
+    presents_yuv: bool,
+    yuv_full_range: bool,
+    gpu_frame_keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// When set, `poll_frame` holds the previous texture until post-seek warm-up
+    /// completes (or the hard timeout clears it).
+    post_seek_gate: Option<PostSeekGate>,
 }
 
 impl AppleVideoPlayer {
@@ -57,11 +122,16 @@ impl AppleVideoPlayer {
         metal_device: ObjcId,
         _video_id: LiveId,
         texture_id: TextureId,
+        tex_y_id: TextureId,
+        tex_u_id: TextureId,
+        tex_v_id: TextureId,
         source: VideoSource,
         autoplay: bool,
         is_looping: bool,
     ) -> Self {
         unsafe {
+            let _: () = msg_send![metal_device, retain];
+
             // Create CVMetalTextureCache
             let mut texture_cache: CVMetalTextureCacheRef = std::ptr::null_mut();
             let status = CVMetalTextureCacheCreate(
@@ -82,20 +152,9 @@ impl AppleVideoPlayer {
             let player_item: ObjcId = msg_send![class!(AVPlayerItem), playerItemWithURL: url];
             let _: () = msg_send![player_item, retain];
 
-            // Create AVPlayerItemVideoOutput with BGRA pixel format
-            let pixel_format_key: ObjcId = msg_send![
-                class!(NSNumber),
-                numberWithUnsignedInt: kCVPixelFormatType_32BGRA
-            ];
-
-            let keys: &[ObjcId] = &[kCVPixelBufferPixelFormatTypeKey as ObjcId];
-            let values: &[ObjcId] = &[pixel_format_key];
-            let pixel_attrs: ObjcId = msg_send![
-                class!(NSDictionary),
-                dictionaryWithObjects: values.as_ptr()
-                forKeys: keys.as_ptr()
-                count: 1usize
-            ];
+            // Create AVPlayerItemVideoOutput — request BGRA with Metal/IOSurface backing.
+            // iOS often delivers NV12 anyway; we handle that in `present_pixel_buffer`.
+            let pixel_attrs: ObjcId = Self::video_output_pixel_buffer_attributes();
 
             let video_output: ObjcId = msg_send![class!(AVPlayerItemVideoOutput), alloc];
             let video_output: ObjcId = msg_send![
@@ -113,6 +172,16 @@ impl AppleVideoPlayer {
             ];
             let _: () = msg_send![player, retain];
 
+            // Let AVPlayer delay playback until it can sustain the rate. With
+            // `NO`, seek snaps to a sync frame then micro-stalls — exactly the
+            // hitch we are trying to hide. Our post-seek gate holds the previous
+            // texture until samples are warm, so waiting here is the right UX.
+            let _: () = msg_send![player, setAutomaticallyWaitsToMinimizeStalling: YES];
+            let _: () = msg_send![
+                player_item,
+                setPreferredForwardBufferDuration: PREFERRED_FORWARD_BUFFER_SECS
+            ];
+
             // If source was InMemory, we created a temp file - the URL retains it
 
             Self {
@@ -125,11 +194,250 @@ impl AppleVideoPlayer {
                 is_prepared: false,
                 prepare_notified: false,
                 autoplay,
-                should_play: autoplay,
+                should_play: AtomicBool::new(autoplay),
+                playback_rate: AtomicU32::new(1.0f32.to_bits()),
                 is_looping,
                 temp_file_path,
+                metal_device,
+                tex_y_id,
+                tex_u_id,
+                tex_v_id,
+                nv12_present: MetalNv12PresentCache::new(metal_device),
+                presents_yuv: false,
+                yuv_full_range: false,
+                gpu_frame_keep_alive: None,
+                post_seek_gate: None,
             }
         }
+    }
+
+    unsafe fn video_output_pixel_buffer_attributes() -> ObjcId {
+        let dict: ObjcId = msg_send![class!(NSMutableDictionary), new];
+        let fmt: ObjcId = msg_send![
+            class!(NSNumber),
+            numberWithUnsignedInt: kCVPixelFormatType_32BGRA
+        ];
+        let _: () = msg_send![
+            dict,
+            setObject: fmt
+            forKey: kCVPixelBufferPixelFormatTypeKey as ObjcId
+        ];
+        let yes: ObjcId = msg_send![class!(NSNumber), numberWithBool: true];
+        let _: () = msg_send![
+            dict,
+            setObject: yes
+            forKey: kCVPixelBufferMetalCompatibilityKey as ObjcId
+        ];
+        let io_props: ObjcId = msg_send![class!(NSDictionary), dictionary];
+        let _: () = msg_send![
+            dict,
+            setObject: io_props
+            forKey: kCVPixelBufferIOSurfacePropertiesKey as ObjcId
+        ];
+        dict
+    }
+
+    pub fn presents_yuv(&self) -> bool {
+        self.presents_yuv
+    }
+
+    pub fn native_yuv_full_range(&self) -> bool {
+        self.yuv_full_range
+    }
+
+    pub fn take_gpu_keep_alive(&mut self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.gpu_frame_keep_alive.take()
+    }
+
+    fn clear_yuv_present(&mut self, textures: &mut CxTexturePool) {
+        detach_metal_nv12_present(
+            textures,
+            self.tex_y_id,
+            self.tex_u_id,
+            &mut self.nv12_present,
+        );
+        self.presents_yuv = false;
+        self.yuv_full_range = false;
+        self.gpu_frame_keep_alive = None;
+    }
+
+    /// Bind `pixel_buffer` into the texture pool (BGRA zero-copy/CPU or NV12 Metal).
+    /// Takes ownership of `pixel_buffer` (one `CFRelease` equivalent via keep-alive or release).
+    unsafe fn present_pixel_buffer(
+        &mut self,
+        textures: &mut CxTexturePool,
+        pixel_buffer: CVPixelBufferRef,
+    ) -> bool {
+        if pixel_buffer.is_null() {
+            return false;
+        }
+
+        let width = CVPixelBufferGetWidth(pixel_buffer);
+        let height = CVPixelBufferGetHeight(pixel_buffer);
+        if width == 0 || height == 0 {
+            CFRelease(pixel_buffer as *const c_void);
+            return false;
+        }
+
+        if cv_pixel_buffer_is_biplanar_nv12(pixel_buffer) {
+            self.clear_bgra_cv_wrap();
+            if let Some(frame) = MetalNv12Frame::from_owned_cv_pixel_buffer(
+                pixel_buffer,
+                width as u32,
+                height as u32,
+                YuvColorMatrix::BT709,
+            ) {
+                self.yuv_full_range = frame.full_range;
+                match adopt_metal_nv12_biplanar(
+                    textures,
+                    self.tex_y_id,
+                    self.tex_u_id,
+                    self.tex_v_id,
+                    &frame,
+                    &mut self.nv12_present,
+                ) {
+                    Ok(()) => {
+                        self.presents_yuv = true;
+                        self.gpu_frame_keep_alive = Some(frame.keep_alive);
+                        return true;
+                    }
+                    Err(e) => {
+                        error!("adopt_metal_nv12 (AVPlayer): {}", e);
+                    }
+                }
+            }
+            CFRelease(pixel_buffer as *const c_void);
+            return false;
+        }
+
+        self.clear_yuv_present(textures);
+
+        let mut cv_texture: CVMetalTextureRef = std::ptr::null_mut();
+        let status = CVMetalTextureCacheCreateTextureFromImage(
+            std::ptr::null_mut(),
+            self.texture_cache,
+            pixel_buffer,
+            std::ptr::null_mut(),
+            MTLPixelFormat::BGRA8Unorm as u64,
+            width,
+            height,
+            0,
+            &mut cv_texture,
+        );
+
+        if status == 0 {
+            let mtl_texture: ObjcId = CVMetalTextureGetTexture(cv_texture);
+            if !mtl_texture.is_null() {
+                let _: () = msg_send![mtl_texture, retain];
+                if !self.cv_texture.is_null() {
+                    CFRelease(self.cv_texture as *const c_void);
+                }
+                self.cv_texture = cv_texture;
+                self.presents_yuv = false;
+
+                let cxtexture = &mut textures[self.texture_id];
+                cxtexture.os.texture =
+                    Some(RcObjcId::from_owned(NonNull::new(mtl_texture).unwrap()));
+                cxtexture.format = crate::texture::TextureFormat::VideoExternal;
+                cxtexture.alloc = Some(TextureAlloc {
+                    width,
+                    height,
+                    pixel: TexturePixel::VideoExternal,
+                    category: TextureCategory::Video,
+                });
+                CFRelease(pixel_buffer as *const c_void);
+                return true;
+            }
+            CFRelease(cv_texture as *const c_void);
+        } else {
+            log!(
+                "CVMetalTextureCacheCreateTextureFromImage failed: {} — trying CPU BGRA upload",
+                status
+            );
+        }
+
+        let ok = self.upload_bgra_cpu(textures, pixel_buffer, width, height);
+        CFRelease(pixel_buffer as *const c_void);
+        if ok {
+            self.presents_yuv = false;
+        }
+        ok
+    }
+
+    unsafe fn clear_bgra_cv_wrap(&mut self) {
+        if !self.cv_texture.is_null() {
+            CFRelease(self.cv_texture as *const c_void);
+            self.cv_texture = std::ptr::null_mut();
+        }
+    }
+
+    unsafe fn upload_bgra_cpu(
+        &self,
+        textures: &mut CxTexturePool,
+        pixel_buffer: CVPixelBufferRef,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        const LOCK_READ_ONLY: CVPixelBufferLockFlags = 1;
+        if CVPixelBufferLockBaseAddress(pixel_buffer, LOCK_READ_ONLY) != 0 {
+            return false;
+        }
+        let base = CVPixelBufferGetBaseAddress(pixel_buffer);
+        let bpr = CVPixelBufferGetBytesPerRow(pixel_buffer);
+        if base.is_null() || bpr == 0 {
+            let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
+            return false;
+        }
+
+        let cxtexture = &mut textures[self.texture_id];
+        let need_alloc = cxtexture.alloc.as_ref().map_or(true, |a| {
+            a.width != width || a.height != height || !matches!(a.pixel, TexturePixel::VideoExternal)
+        }) || cxtexture.os.texture.is_none();
+
+        if need_alloc {
+            let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
+            let _: () = msg_send![descriptor, setTextureType: MTLTextureType::D2];
+            let _: () = msg_send![descriptor, setWidth: width as u64];
+            let _: () = msg_send![descriptor, setHeight: height as u64];
+            let _: () = msg_send![descriptor, setDepth: 1u64];
+            let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let _: () = msg_send![descriptor, setStorageMode: MTLStorageMode::Shared];
+            let _: () = msg_send![descriptor, setUsage: MTLTextureUsage::ShaderRead];
+            let mtl_texture: ObjcId =
+                msg_send![self.metal_device, newTextureWithDescriptor: descriptor];
+            let _: () = msg_send![descriptor, release];
+            if mtl_texture.is_null() {
+                let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
+                return false;
+            }
+            cxtexture.os.texture = Some(RcObjcId::from_owned(NonNull::new(mtl_texture).unwrap()));
+            cxtexture.format = crate::texture::TextureFormat::VideoExternal;
+            cxtexture.alloc = Some(TextureAlloc {
+                width,
+                height,
+                pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            });
+        }
+
+        let region = MTLRegion {
+            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+            size: MTLSize {
+                width: width as u64,
+                height: height as u64,
+                depth: 1,
+            },
+        };
+        let texture = cxtexture.os.texture.as_ref().unwrap().as_id();
+        let _: () = msg_send![
+            texture,
+            replaceRegion: region
+            mipmapLevel: 0u64
+            withBytes: base as *const c_void
+            bytesPerRow: bpr as u64
+        ];
+        let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
+        true
     }
 
     unsafe fn url_from_source(source: &VideoSource) -> (ObjcId, Option<std::path::PathBuf>) {
@@ -191,26 +499,72 @@ impl AppleVideoPlayer {
     }
 
     /// Check if playback reached end and loop back to start if needed.
-    /// Called during poll_frame.
-    unsafe fn check_looping(&self) {
-        if !self.is_looping || !self.is_prepared {
+    /// Called during poll_frame. Must not treat `automaticallyWaits` rate-0
+    /// buffering as end-of-media.
+    unsafe fn check_looping(&mut self) {
+        if !self.is_looping || !self.is_prepared || self.post_seek_gate.is_some() {
             return;
         }
-        // Check if player rate is 0 (paused/ended) while we expect it to be playing
-        let rate: f32 = msg_send![self.player.as_id(), rate];
-        if rate == 0.0 {
-            // Check if we're at or near the end
-            let current: CMTime = msg_send![self.player_item.as_id(), currentTime];
-            let duration: CMTime = msg_send![self.player_item.as_id(), duration];
-            let current_sec = CMTimeGetSeconds(current);
-            let duration_sec = CMTimeGetSeconds(duration);
-            if duration_sec.is_finite() && current_sec >= duration_sec - 0.1 {
-                // Seek back to beginning and play
-                let zero = CMTimeMakeWithSeconds(0.0, 600);
-                let _: () = msg_send![self.player_item.as_id(), seekToTime: zero];
-                let _: () = msg_send![self.player.as_id(), play];
-            }
+        if !self.should_play.load(Ordering::Acquire) {
+            return;
         }
+        // AVPlayerTimeControlStatus: Paused=0, WaitingToPlayAtSpecifiedRate=1, Playing=2.
+        // Waiting means buffering / stall recovery — not ended.
+        let time_control: i64 = msg_send![self.player.as_id(), timeControlStatus];
+        if time_control == 1 {
+            return;
+        }
+        let current: CMTime = msg_send![self.player_item.as_id(), currentTime];
+        let duration: CMTime = msg_send![self.player_item.as_id(), duration];
+        let current_sec = CMTimeGetSeconds(current);
+        let duration_sec = CMTimeGetSeconds(duration);
+        if !(duration_sec.is_finite()
+            && duration_sec > 0.0
+            && current_sec.is_finite()
+            && current_sec >= duration_sec - 0.05)
+        {
+            return;
+        }
+        // Natural end leaves the player paused at EOF while we still want play.
+        let rate: f32 = msg_send![self.player.as_id(), rate];
+        if rate != 0.0 && time_control == 2 {
+            return;
+        }
+        // Route through seek_to so the post-seek gate arms the same way.
+        self.seek_to(0);
+    }
+
+    /// If the post-seek gate has exceeded the hard timeout, clear it without
+    /// presenting. Returns true when the gate was cleared this call.
+    fn clear_post_seek_gate_if_timed_out(&mut self) -> bool {
+        let timed_out = self
+            .post_seek_gate
+            .as_ref()
+            .is_some_and(|g| g.started.elapsed() >= POST_SEEK_HARD_TIMEOUT);
+        if timed_out {
+            self.post_seek_gate = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Ready to present after a playing seek: two distinct PTS, or one sample
+    /// once AVPlayer can keep up / is already playing.
+    unsafe fn post_seek_ready(&self, new_samples: u32) -> bool {
+        if new_samples >= POST_SEEK_MIN_SAMPLES {
+            return true;
+        }
+        if new_samples < 1 {
+            return false;
+        }
+        let likely: bool = msg_send![self.player_item.as_id(), isPlaybackLikelyToKeepUp];
+        if likely {
+            return true;
+        }
+        // AVPlayerTimeControlStatusPlaying = 2
+        let time_control: i64 = msg_send![self.player.as_id(), timeControlStatus];
+        time_control == 2
     }
 
     /// Check if the player item has become ready to play or has failed.
@@ -369,86 +723,113 @@ impl AppleVideoPlayer {
         }
 
         unsafe {
-            // Nudge rate=0 back to playing only when the most recent command was
-            // play/resume; never when the user has paused. Using `autoplay` here
-            // ignored user pause intent and made `[AVPlayer pause]` immediately
-            // overridden by the next poll.
-            let rate: f32 = msg_send![self.player.as_id(), rate];
-            if rate == 0.0 && self.should_play {
-                let _: () = msg_send![self.player.as_id(), play];
+            // Hard timeout must run even when hasNew stays false — otherwise the
+            // gate (and software-fallback suppression) lasts forever. Clear the
+            // gate and keep the previous texture this frame; do not present the
+            // lone keyframe on the same poll.
+            if self.clear_post_seek_gate_if_timed_out() {
+                if self.should_play.load(Ordering::Acquire) {
+                    let rate: f32 = msg_send![self.player.as_id(), rate];
+                    if rate == 0.0 {
+                        self.apply_play_rate();
+                    }
+                }
+                return false;
             }
 
-            let current_time: CMTime = msg_send![self.player_item.as_id(), currentTime];
+            let gating = self.post_seek_gate.is_some();
+            // While post-seek warming, do not fight AVPlayer's temporary rate-0.
+            if !gating {
+                let rate: f32 = msg_send![self.player.as_id(), rate];
+                if rate == 0.0 && self.should_play.load(Ordering::Acquire) {
+                    self.apply_play_rate();
+                }
+            }
 
-            // Try to copy the pixel buffer directly. hasNewPixelBufferForItemTime:
-            // can return NO even when frames are available (observed with AV1 content
-            // and short videos). copyPixelBufferForItemTime: returns null when there
-            // is genuinely no frame, so it is the reliable check.
+            // Prefer the video-output's host-time mapping over player.currentTime.
+            let host_time = CACurrentMediaTime();
+            let output_time: CMTime =
+                msg_send![self.video_output.as_id(), itemTimeForHostTime: host_time];
+            let query_time = if cmtime_secs(output_time).is_some() {
+                output_time
+            } else {
+                msg_send![self.player_item.as_id(), currentTime]
+            };
+
+            // During the gate, only consume fresh samples — unless we already
+            // have ≥1 sample and are ready to present: then re-copy the current
+            // buffer without waiting for another hasNew.
+            if gating {
+                let has_new: bool = msg_send![
+                    self.video_output.as_id(),
+                    hasNewPixelBufferForItemTime: query_time
+                ];
+                let samples = self
+                    .post_seek_gate
+                    .as_ref()
+                    .map(|g| g.new_samples)
+                    .unwrap_or(0);
+                if !has_new && !self.post_seek_ready(samples) {
+                    return false;
+                }
+            }
+
+            let mut display_time = kCMTimeInvalid;
             let pixel_buffer: CVPixelBufferRef = msg_send![
                 self.video_output.as_id(),
-                copyPixelBufferForItemTime: current_time
-                itemTimeForDisplay: std::ptr::null_mut::<CMTime>()
+                copyPixelBufferForItemTime: query_time
+                itemTimeForDisplay: &mut display_time
             ];
 
             if pixel_buffer.is_null() {
+                // Timeout path already handled above; keep previous texture.
                 return false;
             }
 
-            let width = CVPixelBufferGetWidth(pixel_buffer);
-            let height = CVPixelBufferGetHeight(pixel_buffer);
+            // Display PTS only — never fall back to host-mapped query time.
+            let display_secs = cmtime_secs(display_time);
 
-            // Create CVMetalTexture from the pixel buffer (zero-copy)
-            let mut cv_texture: CVMetalTextureRef = std::ptr::null_mut();
-            let status = CVMetalTextureCacheCreateTextureFromImage(
-                std::ptr::null_mut(),
-                self.texture_cache,
-                pixel_buffer,
-                std::ptr::null_mut(),
-                MTLPixelFormat::BGRA8Unorm as u64,
-                width,
-                height,
-                0, // planeIndex
-                &mut cv_texture,
-            );
-
-            // Release the pixel buffer (CVMetalTexture retains what it needs)
-            CFRelease(pixel_buffer as *const c_void);
-
-            if status != 0 {
-                error!(
-                    "CVMetalTextureCacheCreateTextureFromImage failed: {}",
-                    status
-                );
+            let samples_after = if let Some(gate) = self.post_seek_gate.as_mut() {
+                let pts_changed = match (gate.last_display_secs, display_secs) {
+                    (None, Some(pts)) => {
+                        gate.last_display_secs = Some(pts);
+                        true
+                    }
+                    (Some(prev), Some(pts)) => {
+                        let changed = (pts - prev).abs() > POST_SEEK_PTS_EPS;
+                        if changed {
+                            gate.last_display_secs = Some(pts);
+                        }
+                        changed
+                    }
+                    // Invalid display PTS is not progress — do not count.
+                    _ => false,
+                };
+                if pts_changed {
+                    gate.new_samples = gate.new_samples.saturating_add(1);
+                }
+                Some(gate.new_samples)
+            } else {
+                None
+            };
+            let hold_post_seek = match samples_after {
+                Some(samples) => !self.post_seek_ready(samples),
+                None => false,
+            };
+            if hold_post_seek {
+                CFRelease(pixel_buffer as *const c_void);
                 return false;
             }
-
-            // Get the MTLTexture from the CVMetalTexture
-            let mtl_texture: ObjcId = CVMetalTextureGetTexture(cv_texture);
-            if mtl_texture.is_null() {
-                CFRelease(cv_texture as *const c_void);
-                return false;
+            if self.post_seek_gate.take().is_some()
+                && self.should_play.load(Ordering::Acquire)
+            {
+                let rate: f32 = msg_send![self.player.as_id(), rate];
+                if rate == 0.0 {
+                    self.apply_play_rate();
+                }
             }
 
-            // Retain the MTLTexture since CVMetalTexture owns it
-            let _: () = msg_send![mtl_texture, retain];
-
-            // Release previous CVMetalTexture
-            if !self.cv_texture.is_null() {
-                CFRelease(self.cv_texture as *const c_void);
-            }
-            self.cv_texture = cv_texture;
-
-            // Swap the backing MTLTexture in the Makepad texture pool
-            let cxtexture = &mut textures[self.texture_id];
-            cxtexture.os.texture = Some(RcObjcId::from_owned(NonNull::new(mtl_texture).unwrap()));
-            cxtexture.alloc = Some(TextureAlloc {
-                width,
-                height,
-                pixel: TexturePixel::VideoYuvPlane,
-                category: TextureCategory::Video,
-            });
-
-            true
+            self.present_pixel_buffer(textures, pixel_buffer)
         }
     }
 
@@ -464,23 +845,66 @@ impl AppleVideoPlayer {
         }
     }
 
-    pub fn seek_to(&self, position_ms: u64) {
+    pub fn seek_to(&mut self, position_ms: u64) {
         unsafe {
             let seconds = position_ms as f64 / 1000.0;
             let time = CMTimeMakeWithSeconds(seconds, 600);
-            let _: () = msg_send![self.player.as_id(), seekToTime: time];
+            // `cancelPendingSeeks` lives on AVPlayerItem, not AVPlayer.
+            let _: () = msg_send![self.player_item.as_id(), cancelPendingSeeks];
+
+            // Snap to a nearby sync frame. Avoid completionHandler/preroll gating:
+            // those paths can leave playback suppressed forever if a callback is
+            // dropped (seen as "no frames after 60 polls" → broken software fallback).
+            let _: () = msg_send![
+                self.player.as_id(),
+                seekToTime: time
+                toleranceBefore: kCMTimePositiveInfinity
+                toleranceAfter: kCMTimePositiveInfinity
+            ];
+            let _: () = msg_send![
+                self.video_output.as_id(),
+                requestNotificationOfMediaDataChangeWithAdvanceInterval: 0.0f64
+            ];
+            // Only gate while playing: paused seek should show the target frame.
+            // `play`/`setRate` once; do not keep nudging during the gate.
+            if self.should_play.load(Ordering::Acquire) {
+                self.post_seek_gate = Some(PostSeekGate {
+                    new_samples: 0,
+                    last_display_secs: None,
+                    started: Instant::now(),
+                });
+                self.apply_play_rate();
+            } else {
+                self.post_seek_gate = None;
+            }
+        }
+    }
+
+    /// True while intentionally holding the previous texture after a playing seek.
+    /// Callers must not treat these polls as "no frames" for software fallback.
+    /// After hard timeout the gate is cleared, so fallback can run again.
+    pub fn is_post_seek_holding(&self) -> bool {
+        self.post_seek_gate.is_some()
+    }
+
+    fn apply_play_rate(&self) {
+        unsafe {
+            let rate = f32::from_bits(self.playback_rate.load(Ordering::Relaxed)).max(0.05);
+            let _: () = msg_send![self.player.as_id(), setRate: rate];
         }
     }
 
     pub fn play(&mut self) {
-        self.should_play = true;
-        unsafe {
-            let _: () = msg_send![self.player.as_id(), play];
+        self.should_play.store(true, Ordering::Release);
+        // Defer setRate while post-seek warming — restores when the gate opens.
+        if self.post_seek_gate.is_none() {
+            self.apply_play_rate();
         }
     }
 
     pub fn pause(&mut self) {
-        self.should_play = false;
+        self.should_play.store(false, Ordering::Release);
+        self.post_seek_gate = None;
         unsafe {
             let _: () = msg_send![self.player.as_id(), pause];
         }
@@ -510,14 +934,21 @@ impl AppleVideoPlayer {
     }
 
     pub fn set_playback_rate(&self, rate: f64) {
-        unsafe {
-            let r = rate as f32;
-            let _: () = msg_send![self.player.as_id(), setRate: r];
+        let rate = (rate as f32).max(0.05);
+        self.playback_rate.store(rate.to_bits(), Ordering::Relaxed);
+        // Store desired rate always; apply immediately only when not warming.
+        if self.should_play.load(Ordering::Acquire) && self.post_seek_gate.is_none() {
+            unsafe {
+                let _: () = msg_send![self.player.as_id(), setRate: rate];
+            }
         }
     }
 
     pub fn cleanup(&mut self) {
         unsafe {
+            self.should_play.store(false, Ordering::Release);
+            let _: () = msg_send![self.player_item.as_id(), cancelPendingSeeks];
+
             // Pause playback
             let _: () = msg_send![self.player.as_id(), pause];
 
@@ -526,10 +957,7 @@ impl AppleVideoPlayer {
                 msg_send![self.player_item.as_id(), removeOutput: self.video_output.as_id()];
 
             // Release CVMetalTexture
-            if !self.cv_texture.is_null() {
-                CFRelease(self.cv_texture as *const c_void);
-                self.cv_texture = std::ptr::null_mut();
-            }
+            self.clear_bgra_cv_wrap();
 
             // Flush texture cache
             if !self.texture_cache.is_null() {
@@ -542,6 +970,10 @@ impl AppleVideoPlayer {
         // Clean up temp file from InMemory source
         if let Some(path) = self.temp_file_path.take() {
             let _ = std::fs::remove_file(path);
+        }
+        self.nv12_present.release_textures();
+        unsafe {
+            let _: () = msg_send![self.metal_device, release];
         }
     }
 }

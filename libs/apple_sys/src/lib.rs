@@ -349,6 +349,13 @@ pub const kCMTimeInvalid: CMTime = CMTime {
     epoch: 0,
 };
 
+pub const kCMTimePositiveInfinity: CMTime = CMTime {
+    value: 0,
+    timescale: 0,
+    flags: kCMTimeFlags_Valid | kCMTimeFlags_PositiveInfinity,
+    epoch: 0,
+};
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct CMSampleTimingInfo {
@@ -1012,10 +1019,10 @@ pub struct MTLClearColor {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum MTLPixelFormat {
-    //RGBA8Unorm = 70,
     R8Unorm = 10,
     RG8Unorm = 30,
     R32Float = 55,
+    RGBA8Unorm = 70,
     BGRA8Unorm = 80,
     RGBA16Float = 115,
     RGBA32Float = 125,

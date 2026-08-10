@@ -1,9 +1,11 @@
 use {
     self::super::super::{
         egl_sys,
-        gstreamer_sys::LibGStreamer,
-        linux_video_playback::GStreamerVideoPlayer,
-        linux_video_player::{LinuxVideoPlayer, YuvTextureSet},
+        linux_video_playback::{poll_pending_gstreamer_teardowns, GStreamerVideoPlayer},
+        linux_video_player::{
+            collect_linux_video_player_events, prepare_desktop_linux_video, LinuxPrepareResult,
+            LinuxVideoPlayer,
+        },
         opengl_cx::OpenglCx,
         v4l2_camera_player::V4l2CameraPlayer,
         x11::x11_sys,
@@ -17,9 +19,7 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             video_playback::{
-                VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackPreparedEvent,
-                VideoPlaybackResourcesReleasedEvent, VideoSeekableRangesEvent,
-                VideoTextureUpdatedEvent, VideoYuvTexturesReady,
+                VideoDecodingErrorEvent, VideoPlaybackResourcesReleasedEvent, VideoYuvTexturesReady,
             },
             *,
         },
@@ -196,6 +196,21 @@ impl X11Cx {
 
                 self.handle_repaint(opengl_windows);
 
+                {
+                    let cx = self.cx.borrow();
+                    let has_platform_ops = !cx.platform_ops.is_empty();
+                    drop(cx);
+                    if has_platform_ops {
+                        if let EventFlow::Exit =
+                            self.handle_platform_ops(opengl_windows, xlib_app)
+                        {
+                            let mut cx = self.cx.borrow_mut();
+                            cx.call_event_handler(&Event::Shutdown);
+                            return EventFlow::Exit;
+                        }
+                    }
+                }
+
                 // Run script-VM garbage collection at a safe point after paint, matching
                 // the macOS backend. Without this the script object heap grows without
                 // bound on Linux: every `eval` / `script_apply_eval!` allocates script
@@ -338,83 +353,29 @@ impl X11Cx {
                     cx.handle_networking_events();
 
                     // Poll video players on the timer tick (every ~8ms).
-                    if !cx.os.video_players.is_empty() {
+                    // Always sweep pending GStreamer teardowns so the last closed
+                    // player still finishes NULL without waiting for a new prepare.
+                    if cx.os.video_players.is_empty() {
+                        poll_pending_gstreamer_teardowns();
+                    } else {
                         cx.os.opengl_cx.as_ref().unwrap().make_current();
                         let gl: *const super::super::super::gl_sys::LibGl =
                             &cx.os.opengl_cx.as_ref().unwrap().libgl;
+                        let egl = cx
+                            .os
+                            .opengl_cx
+                            .as_ref()
+                            .map(|cx| cx as *const super::super::opengl_cx::OpenglCx);
                         let mut players = std::mem::take(&mut cx.os.video_players);
                         let mut video_events = Vec::new();
                         for (_video_id, player) in players.iter_mut() {
-                            match player.check_prepared() {
-                                Some(Ok(crate::media_plugin::PlaybackPrepared {
-                                    width,
-                                    height,
-                                    duration_ms: duration,
-                                    is_seekable,
-                                    video_tracks,
-                                    audio_tracks,
-                                })) => {
-                                    video_events.push(Event::VideoPlaybackPrepared(
-                                        VideoPlaybackPreparedEvent {
-                                            video_id: player.video_id(),
-                                            video_width: width,
-                                            video_height: height,
-                                            duration,
-                                            is_seekable,
-                                            video_tracks,
-                                            audio_tracks,
-                                        },
-                                    ));
-                                    let seekable = player.seekable_ranges();
-                                    if !seekable.is_empty() {
-                                        video_events.push(Event::VideoSeekableRanges(
-                                            VideoSeekableRangesEvent {
-                                                video_id: player.video_id(),
-                                                ranges: seekable,
-                                            },
-                                        ));
-                                    }
-                                    let buffered = player.buffered_ranges();
-                                    if !buffered.is_empty() {
-                                        video_events.push(Event::VideoBufferedRanges(
-                                            VideoBufferedRangesEvent {
-                                                video_id: player.video_id(),
-                                                ranges: buffered,
-                                            },
-                                        ));
-                                    }
-                                }
-                                Some(Err(err)) => {
-                                    video_events.push(Event::VideoDecodingError(
-                                        VideoDecodingErrorEvent {
-                                            video_id: player.video_id(),
-                                            error: err,
-                                        },
-                                    ));
-                                }
-                                None => {}
-                            }
-                            if player.poll_frame(unsafe { &*gl }, &mut cx.textures) {
-                                video_events.push(Event::VideoTextureUpdated(
-                                    VideoTextureUpdatedEvent {
-                                        video_id: player.video_id(),
-                                        current_position_ms: player.current_position_ms(),
-                                        yuv: crate::event::video_playback::VideoYuvMetadata {
-                                            enabled: player.is_yuv_mode(),
-                                            matrix: player.yuv_matrix(),
-                                            biplanar: false,
-                                            rotation_steps: 0.0,
-                                        },
-                                    },
-                                ));
-                            }
-                            if player.check_eos() {
-                                video_events.push(Event::VideoPlaybackCompleted(
-                                    crate::event::video_playback::VideoPlaybackCompletedEvent {
-                                        video_id: player.video_id(),
-                                    },
-                                ));
-                            }
+                            let opengl_cx = egl.map(|ptr| unsafe { &*ptr });
+                            video_events.extend(collect_linux_video_player_events(
+                                player,
+                                unsafe { &*gl },
+                                &mut cx.textures,
+                                opengl_cx,
+                            ));
                         }
                         cx.os.video_players = players;
                         for event in video_events {
@@ -437,6 +398,22 @@ impl X11Cx {
                     }
                 }
                 return EventFlow::Wait;
+            }
+        }
+
+        // Drain ops queued during this event (e.g. pause/resume from MouseDown).
+        // Without this, input handlers would wait until the next event's opening
+        // drain — tens of ms of audible lag for video controls.
+        {
+            let cx = self.cx.borrow();
+            let has_platform_ops = !cx.platform_ops.is_empty();
+            drop(cx);
+            if has_platform_ops {
+                if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
+                    let mut cx = self.cx.borrow_mut();
+                    cx.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
+                }
             }
         }
 
@@ -813,14 +790,13 @@ impl X11Cx {
                     autoplay,
                     should_loop,
                 ) => {
-                    // Skip if an active player already exists for this video_id
-                    if cx
-                        .os
-                        .video_players
-                        .get(&video_id)
-                        .map_or(false, |p| p.is_active())
-                    {
-                        continue;
+                    // Replacing an existing player for the same id: tear down first so
+                    // prepare is never a silent no-op (source changes, replay, etc.).
+                    if let Some(mut player) = cx.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        cx.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
                     }
                     // Camera source: use V4L2 capture player with YUV plane textures
                     if let VideoSource::Camera(input_id, format_id) = source {
@@ -844,112 +820,39 @@ impl X11Cx {
                             .video_players
                             .insert(video_id, LinuxVideoPlayer::Camera(player));
                         cx.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y,
-                                tex_u,
-                                tex_v,
-                            },
+                            VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
                         ));
                         continue;
                     }
-                    // Try GStreamer first, fall back to software rav1d
-                    let force_software_env =
-                        std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
-                    let mut use_software = force_software_env || source.is_session();
-                    if force_software_env {
-                        crate::log!(
-                            "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
-                        );
-                    } else if source.is_session() {
-                        crate::log!("VIDEO: session source uses software video decoder");
-                    }
-                    if cx.os.gstreamer.is_none() {
-                        match LibGStreamer::try_load() {
-                            Some(gst) => {
-                                gst.init();
-                                cx.os.gstreamer = Some(gst);
-                            }
-                            None => {
-                                crate::log!(
-                                    "VIDEO: GStreamer not available, using software video decoder"
-                                );
-                                use_software = true;
-                            }
-                        }
-                    }
-                    if !use_software {
-                        if cx.os.gstreamer.is_some() {
-                            let yuv = YuvTextureSet::new(
-                                cx.textures.alloc(TextureFormat::VideoYuvPlane),
-                                cx.textures.alloc(TextureFormat::VideoYuvPlane),
-                                cx.textures.alloc(TextureFormat::VideoYuvPlane),
-                            );
-                            let gst = cx.os.gstreamer.as_ref().unwrap();
-
-                            let player = GStreamerVideoPlayer::new(
-                                gst,
-                                video_id,
-                                texture_id,
-                                Some(yuv.ids),
-                                source.clone(),
-                                autoplay,
-                                should_loop,
-                            );
-                            if player.is_active() {
-                                cx.os.video_players.insert(
-                                    video_id,
-                                    LinuxVideoPlayer::GStreamer {
-                                        player,
-                                        yuv: Some(yuv.clone()),
-                                    },
-                                );
-                                cx.call_event_handler(&Event::VideoYuvTexturesReady(
-                                    VideoYuvTexturesReady {
-                                        video_id,
-                                        tex_y: yuv.tex_y,
-                                        tex_u: yuv.tex_u,
-                                        tex_v: yuv.tex_v,
-                                    },
-                                ));
-                                continue;
-                            }
-                            crate::log!("VIDEO: GStreamer pipeline failed, falling back to software video decoder");
-                            use_software = true;
-                        }
-                    }
-                    if use_software {
-                        // Allocate YUV textures internally for software decode
-                        let yuv = YuvTextureSet::new(
-                            cx.textures.alloc(TextureFormat::VideoYuvPlane),
-                            cx.textures.alloc(TextureFormat::VideoYuvPlane),
-                            cx.textures.alloc(TextureFormat::VideoYuvPlane),
-                        );
-                        let player =
-                            crate::video_decode::software_video::PlaybackSessionHandle::new(
-                                video_id,
-                                texture_id,
-                                source,
-                                autoplay,
-                                should_loop,
-                            );
-                        cx.os.video_players.insert(
+                    // Shared prepare for file/network/session sources.
+                    let prep = {
+                        let cx_ref = &mut *cx;
+                        prepare_desktop_linux_video(
+                            &mut cx_ref.os.gstreamer,
+                            &mut cx_ref.textures,
                             video_id,
-                            LinuxVideoPlayer::Software {
-                                player,
-                                yuv: yuv.clone(),
-                                yuv_matrix: 0.0,
-                            },
-                        );
-                        // Notify widget so it can bind textures to shader slots
-                        cx.call_event_handler(&Event::VideoYuvTexturesReady(
-                            VideoYuvTexturesReady {
-                                video_id,
-                                tex_y: yuv.tex_y,
-                                tex_u: yuv.tex_u,
-                                tex_v: yuv.tex_v,
-                            },
-                        ));
+                            source,
+                            texture_id,
+                            autoplay,
+                            should_loop,
+                            cx_ref.os.opengl_cx.as_ref(),
+                        )
+                    };
+                    match prep {
+                        LinuxPrepareResult::Ready { player, yuv } => {
+                            cx.os.video_players.insert(video_id, player);
+                            if let Some(yuv) = yuv {
+                                cx.call_event_handler(&Event::VideoYuvTexturesReady(
+                                    VideoYuvTexturesReady::planes(video_id, yuv.tex_y, yuv.tex_u, yuv.tex_v)
+                                        .with_external_opt(yuv.tex_y_oes, yuv.tex_u_oes),
+                                ));
+                            }
+                        }
+                        LinuxPrepareResult::Failed(error) => {
+                            cx.call_event_handler(&Event::VideoDecodingError(
+                                VideoDecodingErrorEvent { video_id, error },
+                            ));
+                        }
                     }
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
@@ -968,12 +871,12 @@ impl X11Cx {
                     }
                 }
                 CxOsOp::MuteVideoPlayback(video_id) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.mute();
                     }
                 }
                 CxOsOp::UnmuteVideoPlayback(video_id) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.unmute();
                     }
                 }
@@ -991,7 +894,7 @@ impl X11Cx {
                     }
                 }
                 CxOsOp::SetVideoVolume(video_id, volume) => {
-                    if let Some(player) = cx.os.video_players.get(&video_id) {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
                         player.set_volume(volume);
                     }
                 }
@@ -1000,19 +903,27 @@ impl X11Cx {
                         player.set_playback_rate(rate);
                     }
                 }
+                CxOsOp::SelectVideoTrack(video_id, index) => {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
+                        let _ = player.select_video_track(index);
+                    }
+                }
+                CxOsOp::SelectAudioTrack(video_id, index) => {
+                    if let Some(player) = cx.os.video_players.get_mut(&video_id) {
+                        let _ = player.select_audio_track(index);
+                    }
+                }
                 CxOsOp::AttachCameraNativePreview { .. }
                 | CxOsOp::UpdateCameraNativePreview { .. }
                 | CxOsOp::DetachCameraNativePreview { .. } => {
                     // Native camera preview is emulated via composited texture path on Linux.
                 }
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
-                    if cx
-                        .os
-                        .video_players
-                        .get(&video_id)
-                        .map_or(false, |p| p.is_active())
-                    {
-                        continue;
+                    if let Some(mut player) = cx.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        cx.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
                     }
                     if cx.os.gstreamer.is_none() {
                         match super::super::gstreamer_sys::LibGStreamer::try_load() {
