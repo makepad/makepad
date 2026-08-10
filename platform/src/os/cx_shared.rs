@@ -860,10 +860,10 @@ impl Cx {
         }
     }
 
-    /// Requests an `Event::ClearHover` dispatch once the current event
-    /// (and its follow-up actions) finish, so every widget can drop
-    /// hover/pressed visuals an overlay kept from clearing normally.
-    pub fn queue_clear_hover(&mut self) {
+    /// Clears all widgets' hover/pressed visuals by dispatching one
+    /// `Event::ClearHover` once the current event and its actions finish,
+    /// for when an overlay kept the normal hover-outs from arriving.
+    pub fn clear_all_hovers(&mut self) {
         self.clear_hover_queued = true;
     }
 
