@@ -10,6 +10,36 @@ use crate::vm::ScriptVm;
 use crate::*;
 
 impl<'a> ScriptVm<'a> {
+    /// Reset the loop iteration scope for the next pass. Fast path: the
+    /// iteration scope is the only scope above the loop base and nothing
+    /// captured it (un-REFFED) — clear it in place instead of freeing and
+    /// allocating a new one. Slow path matches the previous behavior.
+    fn reset_iteration_scope(&mut self, bases_scope: usize) -> bool {
+        if self.bx.threads.cur_ref().scopes.len() == bases_scope + 1 {
+            let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
+            let object = &mut self.bx.heap.objects[scope];
+            if object.tag.is_alloced() && !object.tag.is_reffed() {
+                object.map.clear();
+                object.vec.clear();
+                return true;
+            }
+        }
+        while self.bx.threads.cur_ref().scopes.len() > bases_scope {
+            if let Some(scope) = self.bx.threads.cur().scopes.pop() {
+                self.bx.heap.free_object_if_unreffed(scope);
+            }
+        }
+        let Some(&parent) = self.bx.threads.cur_ref().scopes.last() else {
+            return false;
+        };
+        // no_vec: loop scopes are only ever read through their map
+        // (scope_value / def_scope_value), the proto vec copy is dead weight
+        let scope = self.bx.heap.new_with_proto_no_vec(parent.into());
+        self.bx.heap.clear_object_deep(scope);
+        self.bx.threads.cur().scopes.push(scope);
+        true
+    }
+
     pub fn begin_for_loop_inner(
         &mut self,
         jump: u32,
@@ -20,6 +50,7 @@ impl<'a> ScriptVm<'a> {
         first_value: ScriptValue,
         first_index: f64,
         first_key: ScriptValue,
+        range_cache: Option<(f64, f64)>,
     ) {
         self.bx.threads.cur().trap.goto_next();
         let bases = self.bx.threads.cur_ref().new_bases();
@@ -33,6 +64,7 @@ impl<'a> ScriptVm<'a> {
                 index_id,
                 source,
                 index: first_index,
+                range_cache,
             }),
             jump,
         });
@@ -40,7 +72,7 @@ impl<'a> ScriptVm<'a> {
             self.bail("scopes empty in begin_for_loop_inner");
             return;
         };
-        let new_scope = self.bx.heap.new_with_proto(scope.into());
+        let new_scope = self.bx.heap.new_with_proto_no_vec(scope.into());
         self.bx.heap.clear_object_deep(new_scope);
 
         self.bx.threads.cur().scopes.push(new_scope);
@@ -80,7 +112,7 @@ impl<'a> ScriptVm<'a> {
             self.bail("scopes empty in begin_loop");
             return;
         };
-        let new_scope = self.bx.heap.new_with_proto(scope.into());
+        let new_scope = self.bx.heap.new_with_proto_no_vec(scope.into());
         self.bx.heap.clear_object_deep(new_scope);
         self.bx.threads.cur().scopes.push(new_scope);
     }
@@ -96,7 +128,9 @@ impl<'a> ScriptVm<'a> {
         let v0 = ScriptValue::from_f64(0.0);
         if let Some(s) = source.as_number() {
             if s >= 1.0 {
-                self.begin_for_loop_inner(jump, source, value_id, key_id, index_id, v0, 0.0, v0);
+                self.begin_for_loop_inner(
+                    jump, source, value_id, key_id, index_id, v0, 0.0, v0, None,
+                );
                 return;
             }
         } else if let Some(obj) = source.as_object() {
@@ -119,10 +153,31 @@ impl<'a> ScriptVm<'a> {
                     .value(obj, id!(end).into(), self.bx.threads.cur().trap.pass())
                     .as_number()
                     .unwrap_or(0.0);
+                // A range literal nothing else references (un-REFFED) cannot
+                // be mutated mid-loop: capture end/step once.
+                let range_cache = if !self.bx.heap.is_object_reffed(obj) {
+                    let step = self
+                        .bx
+                        .heap
+                        .value(obj, id!(step).into(), self.bx.threads.cur().trap.pass())
+                        .as_number()
+                        .unwrap_or(1.0);
+                    Some((end, step))
+                } else {
+                    None
+                };
                 let v = start.into();
                 if (start - end).abs() >= 1.0 {
                     self.begin_for_loop_inner(
-                        jump, source, value_id, index_id, key_id, v, start, v,
+                        jump,
+                        source,
+                        value_id,
+                        index_id,
+                        key_id,
+                        v,
+                        start,
+                        v,
+                        range_cache,
                     );
                     return;
                 }
@@ -133,7 +188,7 @@ impl<'a> ScriptVm<'a> {
                         .heap
                         .iter_key_value(obj, 0, self.bx.threads.cur().trap.pass());
                     self.begin_for_loop_inner(
-                        jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key,
+                        jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key, None,
                     );
                     return;
                 }
@@ -155,7 +210,7 @@ impl<'a> ScriptVm<'a> {
                     .heap
                     .array_index(arr, 0, self.bx.threads.cur().trap.pass());
                 self.begin_for_loop_inner(
-                    jump, source, value_id, index_id, key_id, value, 0.0, NIL,
+                    jump, source, value_id, index_id, key_id, value, 0.0, NIL, None,
                 );
                 return;
             }
@@ -180,41 +235,41 @@ impl<'a> ScriptVm<'a> {
                 let value_id = values.value_id;
                 let index = values.index;
                 self.bx.threads.cur().trap.goto(start_ip);
-                while self.bx.threads.cur_ref().scopes.len() > bases_scope {
-                    if let Some(scope) = self.bx.threads.cur().scopes.pop() {
-                        self.bx.heap.free_object_if_unreffed(scope);
-                    }
-                }
-                let Some(&parent) = self.bx.threads.cur_ref().scopes.last() else {
+                if !self.reset_iteration_scope(bases_scope) {
                     self.bail("scopes empty after pop in end_for_loop/number");
                     return;
-                };
-                let scope = self.bx.heap.new_with_proto(parent.into());
-                self.bx.heap.clear_object_deep(scope);
-                self.bx.threads.cur().scopes.push(scope);
+                }
+                let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
                 self.bx
                     .heap
                     .set_value_def(scope, value_id.into(), index.into());
                 return;
             } else if let Some(obj) = values.source.as_object() {
-                if self
-                    .bx
-                    .heap
-                    .has_proto(obj, self.bx.code.builtins.range.into())
+                let cached = values.range_cache;
+                if cached.is_some()
+                    || self
+                        .bx
+                        .heap
+                        .has_proto(obj, self.bx.code.builtins.range.into())
                 {
-                    // Use as_number() to handle both f64 and integer types
-                    let end = self
-                        .bx
-                        .heap
-                        .value(obj, id!(end).into(), self.bx.threads.cur().trap.pass())
-                        .as_number()
-                        .unwrap_or(0.0);
-                    let step = self
-                        .bx
-                        .heap
-                        .value(obj, id!(step).into(), self.bx.threads.cur().trap.pass())
-                        .as_number()
-                        .unwrap_or(1.0);
+                    let (end, step) = if let Some((end, step)) = cached {
+                        (end, step)
+                    } else {
+                        // Use as_number() to handle both f64 and integer types
+                        let end = self
+                            .bx
+                            .heap
+                            .value(obj, id!(end).into(), self.bx.threads.cur().trap.pass())
+                            .as_number()
+                            .unwrap_or(0.0);
+                        let step = self
+                            .bx
+                            .heap
+                            .value(obj, id!(step).into(), self.bx.threads.cur().trap.pass())
+                            .as_number()
+                            .unwrap_or(1.0);
+                        (end, step)
+                    };
                     let Some(lf) = self.bx.threads.cur().loops.last_mut() else {
                         self.bail("loops empty in end_for_loop/range");
                         return;
@@ -233,18 +288,11 @@ impl<'a> ScriptVm<'a> {
                     let value_id = values.value_id;
                     let key_id = values.key_id;
                     let index = values.index;
-                    while self.bx.threads.cur_ref().scopes.len() > bases_scope {
-                        if let Some(scope) = self.bx.threads.cur().scopes.pop() {
-                            self.bx.heap.free_object_if_unreffed(scope);
-                        }
-                    }
-                    let Some(&parent) = self.bx.threads.cur_ref().scopes.last() else {
+                    if !self.reset_iteration_scope(bases_scope) {
                         self.bail("scopes empty after pop in end_for_loop/range");
                         return;
-                    };
-                    let scope = self.bx.heap.new_with_proto(parent.into());
-                    self.bx.heap.clear_object_deep(scope);
-                    self.bx.threads.cur().scopes.push(scope);
+                    }
+                    let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
                     self.bx
                         .heap
                         .set_value_def(scope, value_id.into(), index.into());
@@ -297,18 +345,11 @@ impl<'a> ScriptVm<'a> {
                     let key_id = values.key_id;
                     let index = values.index;
 
-                    while self.bx.threads.cur_ref().scopes.len() > bases_scope {
-                        if let Some(scope) = self.bx.threads.cur().scopes.pop() {
-                            self.bx.heap.free_object_if_unreffed(scope);
-                        }
-                    }
-                    let Some(&parent) = self.bx.threads.cur_ref().scopes.last() else {
+                    if !self.reset_iteration_scope(bases_scope) {
                         self.bail("scopes empty after pop in end_for_loop/object");
                         return;
-                    };
-                    let scope = self.bx.heap.new_with_proto(parent.into());
-                    self.bx.heap.clear_object_deep(scope);
-                    self.bx.threads.cur().scopes.push(scope);
+                    }
+                    let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
                     self.bx
                         .heap
                         .set_value_def(scope, value_id.into(), kv.value.into());
@@ -352,18 +393,11 @@ impl<'a> ScriptVm<'a> {
                 let key_id = values.key_id;
                 let index = values.index;
 
-                while self.bx.threads.cur_ref().scopes.len() > bases_scope {
-                    if let Some(scope) = self.bx.threads.cur().scopes.pop() {
-                        self.bx.heap.free_object_if_unreffed(scope);
-                    }
-                }
-                let Some(&parent) = self.bx.threads.cur_ref().scopes.last() else {
+                if !self.reset_iteration_scope(bases_scope) {
                     self.bail("scopes empty after pop in end_for_loop/array");
                     return;
-                };
-                let scope = self.bx.heap.new_with_proto(parent.into());
-                self.bx.heap.clear_object_deep(scope);
-                self.bx.threads.cur().scopes.push(scope);
+                }
+                let scope = *self.bx.threads.cur_ref().scopes.last().unwrap();
 
                 self.bx
                     .heap

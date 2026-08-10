@@ -57,22 +57,24 @@ impl<'a> ScriptVm<'a> {
         };
         let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
 
-        if a.is_string_like() || b.is_string_like() {
-            let ptr = self.bx.heap.new_string_with(|heap, out| {
-                heap.cast_to_string(a, out);
-                heap.cast_to_string(b, out);
-            });
-            self.bx.threads.cur().push_stack_unchecked(ptr.into());
-            self.bx.threads.cur().trap.goto_next();
-            return;
-        }
-
+        // number + number is the hot case; string-like and number type tags
+        // are disjoint so checking numbers first is order-neutral
         if let (Some(fa), Some(fb)) = (a.as_number(), b.as_number()) {
             let ip = self.bx.threads.cur_ref().trap.ip;
             self.bx
                 .threads
                 .cur()
                 .push_stack_unchecked(ScriptValue::from_f64_traced_nan(fa + fb, ip));
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
+
+        if a.is_string_like() || b.is_string_like() {
+            let ptr = self.bx.heap.new_string_with(|heap, out| {
+                heap.cast_to_string(a, out);
+                heap.cast_to_string(b, out);
+            });
+            self.bx.threads.cur().push_stack_unchecked(ptr.into());
             self.bx.threads.cur().trap.goto_next();
             return;
         }

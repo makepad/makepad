@@ -833,7 +833,7 @@ impl ShaderFnCompiler {
                 // Look up the field value
                 let value = vm.bx.heap.value(obj, field_id.into(), self.trap.pass());
 
-                if !value.is_nil() && self.trap.err.borrow().is_empty() {
+                if !value.is_nil() && self.trap.err_is_empty() {
                     // Check if this is an object
                     if let Some(value_obj) = value.as_object() {
                         // Check if this is a shader_io type - not supported for scope objects
@@ -874,7 +874,7 @@ impl ShaderFnCompiler {
                             self.trap.pass(),
                         );
                         if !enum_value.is_nil() {
-                            self.trap.err.take(); // Clear any error
+                            self.trap.err_take(); // Clear any error
                             if let Some(f) = enum_value.as_f64() {
                                 let mut s = self.stack.new_string();
                                 match output.backend {
@@ -891,7 +891,7 @@ impl ShaderFnCompiler {
                                 return;
                             }
                         }
-                        self.trap.err.take(); // Clear any error from value lookup
+                        self.trap.err_take(); // Clear any error from value lookup
 
                         // It's a regular sub-object (like test_obj.sub_obj) - return it as ScopeObject
                         // so that further field access can continue (e.g., test_obj.sub_obj.test_p1)
@@ -963,7 +963,7 @@ impl ShaderFnCompiler {
                 }
 
                 // Value not found on prototype - try to get the type from type-check structure
-                self.trap.err.take(); // Clear any error from value lookup
+                self.trap.err_take(); // Clear any error from value lookup
                 if let Some(field_type_id) = vm.bx.heap.field_type_from_type_check(obj, field_id) {
                     // Found field type in type-check structure - convert to pod type
                     if let Some(pod_ty) = vm
@@ -1304,7 +1304,7 @@ impl ShaderFnCompiler {
 
                 // No shader IO marker found - clear any trap error from value lookup
                 // before checking RustInstance fields (which don't depend on prototype values)
-                self.trap.err.take();
+                self.trap.err_take();
 
                 // Check if this is a RustInstance field
                 // RustInstance fields are pre-collected into output.io, so just look it up there

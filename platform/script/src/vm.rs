@@ -207,8 +207,7 @@ impl<'a> ScriptVm<'a> {
             .threads
             .cur()
             .trap
-            .on
-            .set(Some(ScriptTrapOn::Bail(err)));
+            .set_on(Some(ScriptTrapOn::Bail(err)));
     }
 
     pub fn with_instruction_limit<R>(
@@ -387,7 +386,7 @@ impl<'a> ScriptVm<'a> {
                     let result = unsafe { (*func_ptr)(self, scope) };
                     // Only unpause if native didn't explicitly pause (via pause() which sets trap.on to Pause)
                     if !matches!(
-                        self.bx.threads.cur().trap.on.get(),
+                        self.bx.threads.cur().trap.get_on(),
                         Some(ScriptTrapOn::Pause)
                     ) {
                         self.bx.threads.cur().is_paused = false;
@@ -565,7 +564,7 @@ impl<'a> ScriptVm<'a> {
     pub fn take_errors(&mut self) -> Vec<String> {
         let mut out = std::mem::take(&mut self.bx.captured_errors).unwrap_or_default();
         loop {
-            let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
+            let err = self.bx.threads.cur().trap.err_pop_front();
             let Some(err) = err else {
                 break;
             };
@@ -584,7 +583,7 @@ impl<'a> ScriptVm<'a> {
     /// would otherwise be dropped as meaningless-mid-stream.
     pub fn drain_errors(&mut self) {
         loop {
-            let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
+            let err = self.bx.threads.cur().trap.err_pop_front();
             if let Some(err) = err {
                 if self.bx.captured_errors.is_some() {
                     let formatted = self.format_error(&err);
@@ -642,7 +641,7 @@ impl<'a> ScriptVm<'a> {
     fn handle_errors(&mut self) {
         if self.bx.threads.cur().call_has_try() {
             // pop all errors
-            self.bx.threads.cur().trap.err.borrow_mut().clear();
+            self.bx.threads.cur().trap.err_clear();
             let try_frame = self.bx.threads.cur().tries.pop().unwrap();
             self.bx
                 .threads
@@ -680,10 +679,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     fn handle_trap_on(&mut self) -> Option<ScriptValue> {
-        if self.bx.threads.cur().trap.on.get().is_none() {
+        if self.bx.threads.cur().trap.on_is_none() {
             return None;
         }
-        Some(match self.bx.threads.cur().trap.on.take().unwrap() {
+        Some(match self.bx.threads.cur().trap.take_on().unwrap() {
             ScriptTrapOn::Pause | ScriptTrapOn::TimeBudgetYield => NIL,
             ScriptTrapOn::Return(value) => {
                 // Preserve the remaining allowance for consumption accounting
@@ -748,8 +747,7 @@ impl<'a> ScriptVm<'a> {
                     .threads
                     .cur()
                     .trap
-                    .on
-                    .set(Some(ScriptTrapOn::Bail(err)));
+                    .set_on(Some(ScriptTrapOn::Bail(err)));
                 if let Some(value) = self.handle_trap_on() {
                     return value;
                 }
@@ -763,8 +761,7 @@ impl<'a> ScriptVm<'a> {
                             .threads
                             .cur()
                             .trap
-                            .on
-                            .set(Some(ScriptTrapOn::TimeBudgetYield));
+                            .set_on(Some(ScriptTrapOn::TimeBudgetYield));
                     }
                     ScriptRunBudgetHit::Hard => {
                         let err = script_err_limit!(
@@ -775,8 +772,7 @@ impl<'a> ScriptVm<'a> {
                             .threads
                             .cur()
                             .trap
-                            .on
-                            .set(Some(ScriptTrapOn::Bail(err)));
+                            .set_on(Some(ScriptTrapOn::Bail(err)));
                     }
                 }
                 if let Some(value) = self.handle_trap_on() {
@@ -813,12 +809,15 @@ impl<'a> ScriptVm<'a> {
 
             if let Some((opcode, args)) = opcode.as_opcode() {
                 self.opcode(opcode, args);
-                // if exception tracing - is_empty() is faster than len()>0
-                if !self.bx.threads.cur().trap.err.borrow().is_empty() {
-                    self.handle_errors();
-                }
-                if let Some(value) = self.handle_trap_on() {
-                    return value;
+                // single-load poll for both interrupt sources (errors + traps)
+                let pending = self.bx.threads.cur().trap.pending();
+                if pending != 0 {
+                    if pending & crate::trap::TRAP_PENDING_ERR != 0 {
+                        self.handle_errors();
+                    }
+                    if let Some(value) = self.handle_trap_on() {
+                        return value;
+                    }
                 }
             } else {
                 // its a direct value-to-stack
@@ -874,7 +873,7 @@ impl<'a> ScriptVm<'a> {
                 let result = unsafe { (*func_ptr)(self, obj) };
                 // Only unpause if native didn't explicitly pause
                 if !matches!(
-                    self.bx.threads.cur().trap.on.get(),
+                    self.bx.threads.cur().trap.get_on(),
                     Some(ScriptTrapOn::Pause)
                 ) {
                     self.bx.threads.cur().is_paused = false;
@@ -897,7 +896,7 @@ impl<'a> ScriptVm<'a> {
                 let result = unsafe { (*func_ptr)(self, args_obj) };
                 // Only unpause if native didn't explicitly pause
                 if !matches!(
-                    self.bx.threads.cur().trap.on.get(),
+                    self.bx.threads.cur().trap.get_on(),
                     Some(ScriptTrapOn::Pause)
                 ) {
                     self.bx.threads.cur().is_paused = false;

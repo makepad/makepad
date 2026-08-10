@@ -4472,6 +4472,63 @@ pub fn main() {
         }
     }
 
+    // Loop iteration-scope reuse + range end/step caching parity tests
+    let code = script! {
+        use mod.std.assert
+
+        // a range stored in a variable is REFFED: mid-loop mutation of end
+        // must stay live (the un-REFFED literal fast path must not apply)
+        let r = 0..10
+        let c1 = 0
+        for i in r {
+            c1 += 1
+            if i == 2 { r.end = 5 }
+        }
+        assert(c1 == 5)
+
+        // mid-loop step mutation on a REFFED range stays live too
+        let r2 = 0..10
+        let c2 = 0
+        for i in r2 {
+            c2 += 1
+            if i == 1 { r2.step = 4 }
+        }
+        assert(c2 == 4)
+
+        // a closure capturing the loop variable pins that iteration's scope:
+        // each closure must see its own value, and the loop must still work
+        let fns = []
+        for i in 4 { fns.push(|| i) }
+        assert(fns[0]() == 0)
+        assert(fns[1]() == 1)
+        assert(fns[3]() == 3)
+
+        // same via range source
+        let fns2 = []
+        for i in 0..3 { fns2.push(|| i * 10) }
+        assert(fns2[0]() == 0)
+        assert(fns2[2]() == 20)
+
+        // capture only on SOME iterations: reuse fast path must not leak
+        // values across iterations
+        let fns3 = []
+        let acc3 = 0
+        for i in 6 {
+            let double = i * 2
+            if i == 2 || i == 4 { fns3.push(|| double) }
+            acc3 += double
+        }
+        assert(acc3 == 30)
+        assert(fns3[0]() == 4)
+        assert(fns3[1]() == 8)
+
+        // compound assign through the iteration scope into the fn scope
+        let deep = 0
+        for a in 3 { for b in 3 { deep += a * 3 + b } }
+        assert(deep == 36)
+    };
+    vm.eval(code);
+
     // Final GC to verify no issues
     vm.gc();
     let code = script! {
