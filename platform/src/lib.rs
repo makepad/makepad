@@ -19,6 +19,7 @@ pub mod midi;
 pub mod script;
 pub mod thread;
 pub mod video;
+pub mod gpu_texture;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod video_decode;

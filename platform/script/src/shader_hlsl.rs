@@ -156,6 +156,24 @@ impl ShaderOutput {
 
     /// Emit HLSL helper functions that are needed by the shader
     pub fn hlsl_create_helpers(&self, _vm: &ScriptVm, out: &mut String) {
+        // Packed vertex attribute unpackers (map / vector geometry).
+        // Two f16s or four unorm8s are bitcast into one f32 geometry slot.
+        writeln!(out, "float2 _mp_unpack2f16(float x) {{").ok();
+        writeln!(out, "    uint u = asuint(x);").ok();
+        writeln!(
+            out,
+            "    return float2(f16tof32(u & 0xffff), f16tof32(u >> 16));"
+        )
+        .ok();
+        writeln!(out, "}}").ok();
+        writeln!(out, "float4 _mp_unpack4u8(float x) {{").ok();
+        writeln!(out, "    uint u = asuint(x);").ok();
+        writeln!(
+            out,
+            "    return float4(float(u & 0xff), float((u >> 8) & 0xff), float((u >> 16) & 0xff), float((u >> 24) & 0xff)) * (1.0 / 255.0);"
+        )
+        .ok();
+        writeln!(out, "}}").ok();
         if self.hlsl_needs_tex_size {
             writeln!(out, "float2 _mpTexSize2D(Texture2D tex) {{ uint w, h; tex.GetDimensions(w, h); return float2(w, h); }}").ok();
         }

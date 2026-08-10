@@ -213,23 +213,57 @@ impl CxMediaApi for Cx {
         config: VideoEncoderConfig,
         f: VideoOutputFn,
     ) -> Result<(), VideoEncodeError> {
-        match config.source {
-            VideoEncodeSource::Camera { .. } => {
-                let camera = self.os.media.v4l2_camera();
-                let camera = camera.lock().unwrap();
-                *camera.video_encoder_config[index].lock().unwrap() = Some(config);
-                *camera.video_output_cb[index].lock().unwrap() = Some(f);
-                Ok(())
-            }
-            VideoEncodeSource::Texture { .. } => {
-                crate::error!("linux video texture source is not implemented");
-                Err(VideoEncodeError::UnsupportedSource)
-            }
-            VideoEncodeSource::CpuFrames { .. } => {
-                crate::error!("linux video cpu-frame source is not implemented");
-                Err(VideoEncodeError::UnsupportedSource)
-            }
+        let result = self
+            .os
+            .media
+            .v4l2_camera()
+            .lock()
+            .unwrap()
+            .configure_video_encoder(index, config, f);
+        if let Err(err) = result {
+            crate::error!("linux video_encoder_output_box failed: {:?}", err);
         }
+        result
+    }
+
+    fn video_encoder_push_frame(&mut self, index: usize, frame: CameraFrameRef<'_>) {
+        let Some(camera) = self.os.media.v4l2_camera.as_ref() else {
+            return;
+        };
+        camera.lock().unwrap().video_encoder_push_frame(index, frame);
+    }
+
+    fn video_encoder_capture_texture_frame(
+        &mut self,
+        index: usize,
+        timestamp_ns: u64,
+    ) -> Result<(), VideoEncodeError> {
+        let Some(opengl_cx) = self.os.opengl_cx.as_ref() else {
+            return Err(VideoEncodeError::EncoderNotStarted);
+        };
+        opengl_cx.make_current();
+        let gl = self.os.gl() as *const _;
+        self.os
+            .media
+            .v4l2_camera()
+            .lock()
+            .unwrap()
+            .video_encoder_capture_texture_frame(
+                index,
+                timestamp_ns,
+                unsafe { &*gl },
+                &mut self.textures,
+            )
+    }
+
+    fn video_encoder_request_keyframe(&mut self, index: usize) -> Result<(), VideoEncodeError> {
+        let Some(camera) = self.os.media.v4l2_camera.as_ref() else {
+            return Err(VideoEncodeError::EncoderNotStarted);
+        };
+        camera
+            .lock()
+            .unwrap()
+            .video_encoder_request_keyframe(index)
     }
 
     fn video_capabilities(&self) -> VideoCapabilities {

@@ -40,4 +40,38 @@ pub struct YuvPlaneData {
     pub height: u32,
     pub layout: YuvLayout,
     pub matrix: YuvColorMatrix,
+    /// Row stride in bytes for Y. `0` means tightly packed (`== width`).
+    pub y_stride: u32,
+    /// Row stride in bytes for U. `0` means tightly packed (`== chroma_width`).
+    pub u_stride: u32,
+    /// Row stride in bytes for V. `0` means tightly packed (`== chroma_width`).
+    pub v_stride: u32,
+}
+
+impl YuvPlaneData {
+    pub fn y_bytes_per_row(&self) -> u32 {
+        if self.y_stride == 0 {
+            self.width
+        } else {
+            self.y_stride
+        }
+    }
+
+    pub fn u_bytes_per_row(&self) -> u32 {
+        let (cw, _) = self.layout.chroma_size(self.width, self.height);
+        if self.u_stride == 0 {
+            cw
+        } else {
+            self.u_stride
+        }
+    }
+
+    pub fn v_bytes_per_row(&self) -> u32 {
+        let (cw, _) = self.layout.chroma_size(self.width, self.height);
+        if self.v_stride == 0 {
+            cw
+        } else {
+            self.v_stride
+        }
+    }
 }

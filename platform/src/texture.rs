@@ -213,6 +213,9 @@ pub enum TextureFormat {
     /// normal texture upload path (e.g. Android SurfaceTexture/OES, or
     /// platform-native composited video output).
     VideoExternal,
+    /// Linux GStreamer `GLMemory` RGBA texture (`TEXTURE_2D`) shared into
+    /// Makepad's GL context via a sibling EGL share group. Not OES.
+    VideoGlMemoryRgba,
     /// Android/Vulkan camera texture backed by an imported RGBA
     /// `AHardwareBuffer`.
     VideoRgbaHardwareBuffer,
@@ -272,6 +275,7 @@ impl std::fmt::Debug for TextureFormat {
             ),
             TextureFormat::VideoYuvPlane => write!(f, "TextureFormat::VideoYuvPlane"),
             TextureFormat::VideoExternal => write!(f, "TextureFormat::VideoExternal"),
+            TextureFormat::VideoGlMemoryRgba => write!(f, "TextureFormat::VideoGlMemoryRgba"),
             TextureFormat::VideoRgbaHardwareBuffer => {
                 write!(f, "TextureFormat::VideoRgbaHardwareBuffer")
             }
@@ -431,6 +435,8 @@ pub(crate) enum TexturePixel {
     VideoYuvPlane,
     /// Opaque external video pixel type (e.g. Android OES, composited RGBA).
     VideoExternal,
+    /// Linux GStreamer GLMemory RGBA (`TEXTURE_2D`).
+    VideoGlMemoryRgba,
     /// Android/Vulkan imported RGBA hardware buffer.
     VideoRgbaHardwareBuffer,
 }
@@ -551,6 +557,23 @@ impl CxTexture {
     #[allow(unused)]
     pub(crate) fn alloc_video(&mut self) -> bool {
         if let Some(alloc) = self.format.as_video_alloc() {
+            // Video textures are sized/filled by the present path (DMA-Buf / MediaCodec).
+            // Once the pixel type matches, do not treat width/height updates as a re-alloc —
+            // that would re-init the GL texture every frame and detach EGLImages (NVIDIA
+            // black screen / corner garbage).
+            if let Some(existing) = self.alloc.as_ref() {
+                if existing.pixel == alloc.pixel
+                    && matches!(
+                        existing.pixel,
+                        TexturePixel::VideoExternal
+                            | TexturePixel::VideoYuvPlane
+                            | TexturePixel::VideoGlMemoryRgba
+                            | TexturePixel::VideoRgbaHardwareBuffer
+                    )
+                {
+                    return false;
+                }
+            }
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc {
                 self.alloc = Some(alloc);
                 return true;
@@ -601,7 +624,10 @@ impl TextureFormat {
     pub fn is_video(&self) -> bool {
         matches!(
             self,
-            Self::VideoYuvPlane | Self::VideoExternal | Self::VideoRgbaHardwareBuffer
+            Self::VideoYuvPlane
+                | Self::VideoExternal
+                | Self::VideoGlMemoryRgba
+                | Self::VideoRgbaHardwareBuffer
         )
     }
 
@@ -753,6 +779,12 @@ impl TextureFormat {
                 width: 0,
                 height: 0,
                 pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            }),
+            Self::VideoGlMemoryRgba => Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoGlMemoryRgba,
                 category: TextureCategory::Video,
             }),
             Self::VideoRgbaHardwareBuffer => Some(TextureAlloc {

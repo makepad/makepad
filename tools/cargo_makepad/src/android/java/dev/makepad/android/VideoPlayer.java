@@ -16,6 +16,9 @@ import android.media.MediaPlayer;
 import java.io.FileInputStream;
 import java.io.File;
 
+import android.net.Uri;
+import android.media.PlaybackParams;
+
 import dev.makepad.android.MakepadNative;
 
 public class VideoPlayer {
@@ -56,12 +59,19 @@ public class VideoPlayer {
                 mMediaPlayer.setDataSource(dataSource);
             } else if (mSource instanceof String) {
                 String dataString = (String) mSource;
+                Activity activity = mActivityReference.get();
                 if (dataString.startsWith("http://") || dataString.startsWith("https://")) {
                     // Source is a network URL
                     Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=network");
                     mMediaPlayer.setDataSource(dataString);
+                } else if (dataString.startsWith("content://") || dataString.startsWith("file://")) {
+                    if (activity == null) {
+                        throw new IllegalStateException("Activity unavailable for URI playback");
+                    }
+                    Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=uri " + dataString);
+                    mMediaPlayer.setDataSource(activity, Uri.parse(dataString));
                 } else {
-                    // Source is a url pointing to the local filesystem
+                    // Source is a path on the local filesystem
                     Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=file path=" + dataString);
                     mMediaPlayer.setDataSource(new FileInputStream(new File(dataString)).getFD());
                 }
@@ -96,6 +106,9 @@ public class VideoPlayer {
                     }
                     
                     mIsPrepared = true;
+                    if (Math.abs(mPlaybackRate - 1.0f) > 0.02f) {
+                        applyPlaybackRate(mPlaybackRate);
+                    }
                     if (mAutoplay) {
                         mp.start();
                     }
@@ -158,6 +171,40 @@ public class VideoPlayer {
     public void unmute() {
         if (mMediaPlayer != null) {
             mMediaPlayer.setVolume(1, 1);
+        }
+    }
+
+    /** Pitch-preserving tempo via {@link PlaybackParams} (API 23+). */
+    public void setPlaybackRate(double rate) {
+        float clamped = (float) Math.max(0.05, rate);
+        mPlaybackRate = clamped;
+        if (mMediaPlayer == null || !mIsPrepared) {
+            return;
+        }
+        applyPlaybackRate(clamped);
+    }
+
+    private void applyPlaybackRate(float rate) {
+        if (mMediaPlayer == null) {
+            return;
+        }
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) {
+            Log.w("MakepadVideoPlayer", "setPlaybackRate requires API 23+; ignored rate=" + rate);
+            return;
+        }
+        try {
+            boolean wasPlaying = mMediaPlayer.isPlaying();
+            PlaybackParams params = mMediaPlayer.getPlaybackParams();
+            // Speed without chipmunk pitch (UI steps are 0.5×–2.0×).
+            params.setSpeed(rate);
+            params.setPitch(1.0f);
+            mMediaPlayer.setPlaybackParams(params);
+            // Some devices pause when params change — resume if we were playing.
+            if (wasPlaying && !mMediaPlayer.isPlaying()) {
+                mMediaPlayer.start();
+            }
+        } catch (Exception e) {
+            Log.e("MakepadVideoPlayer", "setPlaybackRate failed rate=" + rate + ": " + e);
         }
     }
 
@@ -242,6 +289,7 @@ public class VideoPlayer {
     // playback
     private boolean mAutoplay = false;
     private boolean mShouldLoop = false;
+    private float mPlaybackRate = 1.0f;
     
     // context
     private WeakReference<Activity> mActivityReference;

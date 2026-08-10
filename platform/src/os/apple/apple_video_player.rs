@@ -4,6 +4,7 @@ use {
     super::apple_yuv_metal::AppleYuvMetal,
     crate::{
         event::video_playback::VideoSource,
+        gpu_texture::{adopt_metal_nv12_biplanar, detach_metal_nv12_present, MetalNv12PresentCache},
         makepad_live_id::LiveId,
         texture::{CxTexturePool, TextureId},
         video_decode::software_video::PlaybackSessionHandle,
@@ -19,12 +20,16 @@ pub struct AppleUnifiedVideoPlayer {
     tex_u_id: TextureId,
     tex_v_id: TextureId,
     yuv_matrix: f32,
+    yuv_biplanar: bool,
+    yuv_full_range: bool,
     source: VideoSource,
     autoplay: bool,
     is_looping: bool,
     mode: ApplePlayerMode,
     null_frame_count: u32,
     yuv_metal: AppleYuvMetal,
+    nv12_present: MetalNv12PresentCache,
+    gpu_frame_keep_alive: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 enum ApplePlayerMode {
@@ -45,6 +50,7 @@ impl AppleUnifiedVideoPlayer {
         is_looping: bool,
     ) -> Self {
         let yuv_metal = AppleYuvMetal::new(metal_device, "apple unified player");
+        let nv12_present = MetalNv12PresentCache::new(metal_device);
 
         let force_software_env = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
         let force_software = force_software_env || source.is_session();
@@ -68,6 +74,9 @@ impl AppleUnifiedVideoPlayer {
                 metal_device,
                 video_id,
                 texture_id,
+                tex_y_id,
+                tex_u_id,
+                tex_v_id,
                 source.clone(),
                 autoplay,
                 is_looping,
@@ -81,12 +90,16 @@ impl AppleUnifiedVideoPlayer {
             tex_u_id,
             tex_v_id,
             yuv_matrix: YuvColorMatrix::BT709.as_f32(),
+            yuv_biplanar: false,
+            yuv_full_range: false,
             source,
             autoplay,
             is_looping,
             mode,
             null_frame_count: 0,
             yuv_metal,
+            nv12_present,
+            gpu_frame_keep_alive: None,
         }
     }
 
@@ -127,7 +140,26 @@ impl AppleUnifiedVideoPlayer {
                 let got_frame = player.poll_frame(textures);
                 if got_frame {
                     self.null_frame_count = 0;
+                    if player.presents_yuv() {
+                        self.yuv_biplanar = true;
+                        self.yuv_full_range = player.native_yuv_full_range();
+                        self.gpu_frame_keep_alive = player.take_gpu_keep_alive();
+                    } else {
+                        self.yuv_biplanar = false;
+                        self.yuv_full_range = false;
+                        detach_metal_nv12_present(
+                            textures,
+                            self.tex_y_id,
+                            self.tex_u_id,
+                            &mut self.nv12_present,
+                        );
+                        self.gpu_frame_keep_alive = None;
+                    }
                     return true;
+                }
+                // Holding the old texture after seek is intentional — not a stall.
+                if player.is_post_seek_holding() {
+                    return false;
                 }
                 self.null_frame_count += 1;
                 // HLS/DASH network streams can take a while to buffer their first segment after
@@ -149,7 +181,7 @@ impl AppleUnifiedVideoPlayer {
     }
 
     fn poll_software_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        let yuv_planes = {
+        let (gpu, yuv_planes) = {
             let player = match &mut self.mode {
                 ApplePlayerMode::Software(p) => p,
                 _ => return false,
@@ -159,11 +191,79 @@ impl AppleUnifiedVideoPlayer {
                 return false;
             }
 
-            player.take_yuv_frame()
+            let gpu = player.take_metal_nv12_frame();
+            let yuv = if gpu.is_none() {
+                player.take_yuv_frame()
+            } else {
+                None
+            };
+            (gpu, yuv)
         };
+
+        if let Some(gpu) = gpu {
+            self.yuv_matrix = gpu.matrix.as_f32();
+            match adopt_metal_nv12_biplanar(
+                textures,
+                self.tex_y_id,
+                self.tex_u_id,
+                self.tex_v_id,
+                &gpu,
+                &mut self.nv12_present,
+            ) {
+                Ok(()) => {
+                    // Keep the CVPixelBuffer / AVFrame alive while Metal samples it.
+                    self.gpu_frame_keep_alive = Some(gpu.keep_alive.clone());
+                    self.yuv_biplanar = true;
+                    self.yuv_full_range = gpu.full_range;
+                    static LOGGED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        crate::log!("VIDEO: Metal NV12 CVPixelBuffer adopt ok (zero-copy)");
+                    }
+                    return true;
+                }
+                Err(err) => {
+                    crate::error!("VIDEO: adopt Metal NV12 failed: {err}");
+                    // Leave the previous zero-copy frame intact — adopt rolls back
+                    // on partial failure. Only detach when falling back to CPU.
+                    let player = match &mut self.mode {
+                        ApplePlayerMode::Software(p) => p,
+                        _ => return false,
+                    };
+                    if let Some(planes) = player.take_yuv_frame() {
+                        self.yuv_matrix = planes.matrix.as_f32();
+                        self.yuv_biplanar = false;
+                        // CPU I420 path: keep limited-range assumption (Apple ZC
+                        // full-range is only known from CVPixelBuffer 420f).
+                        self.yuv_full_range = false;
+                        detach_metal_nv12_present(
+                            textures,
+                            self.tex_y_id,
+                            self.tex_u_id,
+                            &mut self.nv12_present,
+                        );
+                        self.gpu_frame_keep_alive = None;
+                        self.upload_yuv_to_metal(textures, &planes);
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        }
 
         if let Some(planes) = yuv_planes {
             self.yuv_matrix = planes.matrix.as_f32();
+            self.yuv_biplanar = false;
+            self.yuv_full_range = false;
+            // Drop pool MTLTextures before CVMetal wraps / CVPixelBuffer so CPU
+            // upload cannot replaceRegion into an IOSurface-backed texture.
+            detach_metal_nv12_present(
+                textures,
+                self.tex_y_id,
+                self.tex_u_id,
+                &mut self.nv12_present,
+            );
+            self.gpu_frame_keep_alive = None;
             self.upload_yuv_to_metal(textures, &planes);
             return true;
         }
@@ -179,23 +279,45 @@ impl AppleUnifiedVideoPlayer {
             &planes.y,
             planes.width,
             planes.height,
+            planes.y_bytes_per_row(),
         );
-        self.yuv_metal
-            .upload_r8_plane(textures, self.tex_u_id, &planes.u, cw, ch);
-        self.yuv_metal
-            .upload_r8_plane(textures, self.tex_v_id, &planes.v, cw, ch);
+        self.yuv_metal.upload_r8_plane(
+            textures,
+            self.tex_u_id,
+            &planes.u,
+            cw,
+            ch,
+            planes.u_bytes_per_row(),
+        );
+        self.yuv_metal.upload_r8_plane(
+            textures,
+            self.tex_v_id,
+            &planes.v,
+            cw,
+            ch,
+            planes.v_bytes_per_row(),
+        );
     }
 
     pub fn is_software_mode(&self) -> bool {
         matches!(self.mode, ApplePlayerMode::Software(_))
     }
 
+    /// YUV shader path: software decode or native AVPlayer NV12 frames.
+    pub fn yuv_shader_enabled(&self) -> bool {
+        self.yuv_biplanar || self.is_software_mode()
+    }
+
     pub fn yuv_biplanar(&self) -> f32 {
-        if self.yuv_metal.has_biplanar_wrap() {
+        if self.yuv_biplanar {
             1.0
         } else {
             0.0
         }
+    }
+
+    pub fn yuv_full_range(&self) -> bool {
+        self.yuv_full_range
     }
 
     pub fn yuv_matrix(&self) -> f32 {
@@ -280,6 +402,9 @@ impl AppleUnifiedVideoPlayer {
     }
 
     pub fn cleanup(&mut self) {
+        // Release CVMetal wraps before dropping the CVPixelBuffer keep-alive.
+        self.nv12_present.release_textures();
+        self.gpu_frame_keep_alive = None;
         self.yuv_metal.cleanup();
         match &mut self.mode {
             ApplePlayerMode::Native(player) => player.cleanup(),

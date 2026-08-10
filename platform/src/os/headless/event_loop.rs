@@ -668,6 +668,8 @@ impl Cx {
                 CxOsOp::Quit => {
                     return false;
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 _ => {}
             }
         }

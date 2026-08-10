@@ -61,6 +61,43 @@ impl PlaybackSessionHandle {
         self.inner.as_mut().and_then(|p| p.take_yuv_frame())
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn take_d3d11_nv12_frame(&mut self) -> Option<crate::gpu_texture::D3d11Nv12Frame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_d3d11_nv12_frame())
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn take_oes_frame(&mut self) -> Option<crate::gpu_texture::OesFrame> {
+        self.inner.as_mut().and_then(|p| p.take_oes_frame())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_metal_nv12_frame())
+    }
+
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    pub fn take_linux_dmabuf_nv12_frame(
+        &mut self,
+    ) -> Option<crate::os::linux::linux_video_gpu::LinuxDmabufNv12Frame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_linux_dmabuf_nv12_frame())
+    }
+
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    pub fn take_linux_gl_memory_rgba_frame(
+        &mut self,
+    ) -> Option<crate::os::linux::linux_video_gpu::LinuxGlMemoryRgbaFrame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_linux_gl_memory_rgba_frame())
+    }
+
     pub fn check_eos(&mut self) -> bool {
         self.inner.as_mut().map(|p| p.check_eos()).unwrap_or(false)
     }

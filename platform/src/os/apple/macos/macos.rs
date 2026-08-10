@@ -364,6 +364,7 @@ impl Cx {
 
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
+        cx.borrow_mut().publish_metal_device_for_media();
 
         //let cx = Rc::new(RefCell::new(self));
         cx.borrow_mut().set_physical_keyboard_state(true);
@@ -863,11 +864,15 @@ impl Cx {
                                     video_id: player.video_id,
                                     current_position_ms: player.current_position_ms(),
                                     yuv: crate::event::video_playback::VideoYuvMetadata {
-                                        enabled: player.is_software_mode(),
+                                        enabled: player.yuv_shader_enabled(),
                                         matrix: player.yuv_matrix(),
                                         biplanar: player.yuv_biplanar() > 0.5,
+                                        full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
+                                    external: false,
+                                    array: false,
                                     },
+                                rgba_gl_2d: false,
                                 },
                             ));
                         }
@@ -1500,12 +1505,7 @@ impl Cx {
                     );
                     self.os.video_players.insert(video_id, player);
                     // Notify widget so it can bind textures to shader slots
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
-                        video_id,
-                        tex_y,
-                        tex_u,
-                        tex_v,
-                    }));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
                     // Keep timer alive so we can poll for video frames
                     self.ensure_timer0_started();
                 }
@@ -1588,6 +1588,8 @@ impl Cx {
                         player.set_playback_rate(rate);
                     }
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
                     use crate::texture::TextureId;
                     let player = AppleUnifiedVideoPlayer::new(

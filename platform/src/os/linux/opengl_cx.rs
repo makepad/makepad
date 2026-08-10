@@ -254,6 +254,19 @@ impl OpenglCx {
             );
         }
     }
+
+    /// Release the EGL context from this thread so GStreamer's GL thread can
+    /// activate shared/sibling contexts (required for GLMemory DMA-Buf upload).
+    pub fn clear_current(&self) {
+        unsafe {
+            (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                egl_sys::EGL_NO_SURFACE,
+                egl_sys::EGL_NO_SURFACE,
+                egl_sys::EGL_NO_CONTEXT,
+            );
+        }
+    }
 }
 
 impl Cx {

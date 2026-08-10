@@ -18,6 +18,7 @@ struct AlsaAudioDevice {
     device_handle: *mut snd_pcm_t,
     channel_count: usize,
     frame_count: usize,
+    sample_rate: f64,
     interleaved: Vec<f32>,
     _buffer_size: usize,
 }
@@ -328,7 +329,7 @@ impl AlsaAudioAccess {
                                 AudioInfo {
                                     device_id,
                                     time: None,
-                                    sample_rate: 48000.0,
+                                    sample_rate: device.sample_rate,
                                 },
                                 &audio_buffer,
                             );
@@ -448,7 +449,7 @@ impl AlsaAudioAccess {
                                 AudioInfo {
                                     device_id,
                                     time: None,
-                                    sample_rate: 48000.0,
+                                    sample_rate: device.sample_rate,
                                 },
                                 &mut audio_buffer,
                             );
@@ -510,6 +511,10 @@ impl AlsaAudioDevice {
                 hw_params,
                 SND_PCM_FORMAT_FLOAT_LE
             ))?;
+            // Enable ALSA/plugin resampling before committing params. Calling this
+            // after snd_pcm_hw_params() is a no-op and left us stuck with whatever
+            // rate_near picked without soft-resample fallbacks.
+            alsa_error!(snd_pcm_hw_params_set_rate_resample(handle, hw_params, 1))?;
             alsa_error!(snd_pcm_hw_params_set_rate_near(
                 handle,
                 hw_params,
@@ -517,7 +522,10 @@ impl AlsaAudioDevice {
                 0 as *mut _
             ))?;
             alsa_error!(snd_pcm_hw_params_set_channels(handle, hw_params, 2))?;
-            let mut periods = 2;
+            // ~40–80ms of buffering. The old 512-frame / 2-period setup (~5–10ms)
+            // underran constantly under soft video decode (PipeWire + VM), which
+            // surfaces as crackle / static in the FFmpeg MediaPlugin path.
+            let mut periods = 4;
             let mut dir = 0;
             alsa_error!(snd_pcm_hw_params_set_periods_near(
                 handle,
@@ -525,14 +533,13 @@ impl AlsaAudioDevice {
                 &mut periods,
                 &mut dir
             ))?;
-            let mut buffer_size = 512;
+            let mut buffer_size = 4096;
             alsa_error!(snd_pcm_hw_params_set_buffer_size_near(
                 handle,
                 hw_params,
                 &mut buffer_size
             ))?;
             alsa_error!(snd_pcm_hw_params(handle, hw_params))?;
-            alsa_error!(snd_pcm_hw_params_set_rate_resample(handle, hw_params, 1))?;
             let mut buffer_size = 0;
             alsa_error!(snd_pcm_hw_params_get_buffer_size(
                 hw_params,
@@ -549,6 +556,13 @@ impl AlsaAudioDevice {
                 &mut frame_count,
                 0 as *mut _
             ))?;
+            let mut actual_rate = 0u32;
+            // Prefer the negotiated rate; fall back to the value rate_near wrote.
+            if snd_pcm_hw_params_get_rate(hw_params, &mut actual_rate, 0 as *mut _) == 0
+                && actual_rate > 0
+            {
+                rate = actual_rate;
+            }
             snd_pcm_hw_params_free(hw_params);
 
             // alright device is prepared.
@@ -562,6 +576,7 @@ impl AlsaAudioDevice {
                     device_handle: handle,
                     channel_count: channel_count as usize,
                     frame_count: frame_count as usize,
+                    sample_rate: rate as f64,
                     _buffer_size: buffer_size as usize,
                 },
                 AlsaAudioDeviceRef {
