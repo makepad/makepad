@@ -497,6 +497,10 @@ impl Widget for Button {
             self.draw_bg.redraw(cx);
         }
 
+        if let Event::ClearHover = event {
+            self.animator_cut(cx, ids!(hover.off));
+        }
+
         // The button only handles hits when it's visible and enabled.
         // If it's not enabled, we still show the button, but we set
         // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
