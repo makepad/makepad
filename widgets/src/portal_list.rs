@@ -1758,6 +1758,10 @@ impl PortalList {
                     item_top >= 0.0 && item_top < viewport_size
                 };
                 if settled {
+                    // Same as arriving under animation: we're at the end, so follow it.
+                    if target_id + 1 >= self.range_end {
+                        self.detect_tail_in_draw = true;
+                    }
                     cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
                     return;
                 }
@@ -1837,8 +1841,6 @@ impl PortalList {
             max_items_to_show.or(Some(usize::MAX)),
             0.0,
         );
-        // Going to the end means staying there, so pick tailing back up on arrival.
-        self.detect_tail_in_draw = true;
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
@@ -2481,6 +2483,11 @@ impl Widget for PortalList {
                     } else {
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
+                        // Landing on the last item means we're following the end again,
+                        // so let the next draw pick tailing back up.
+                        if target_id + 1 >= self.range_end {
+                            self.detect_tail_in_draw = true;
+                        }
                         cx.widget_action(uid, PortalListAction::SmoothScrollReached);
                     }
                 }
