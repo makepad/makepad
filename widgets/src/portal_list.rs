@@ -1746,7 +1746,14 @@ impl PortalList {
         let item_top = self.item_top_from_height_tree(target_id);
         if viewport_size > 0.0 {
             if let Some(item_top) = item_top {
-                if item_top >= 0.0 && item_top < viewport_size {
+                // Targeting the last item means "go to the bottom", and a tall
+                // last item can have its top on screen with most of it below.
+                let settled = if target_id >= self.range_end {
+                    self.at_end
+                } else {
+                    item_top >= 0.0 && item_top < viewport_size
+                };
+                if settled {
                     cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
                     return;
                 }
@@ -1808,7 +1815,8 @@ impl PortalList {
         if self.items.is_empty() {
             return;
         }
-        let speed = speed * self.range_end as f64;
+        // `speed` is a per-frame pixel delta, so it must not scale with the item
+        // count: on a long list that lands the whole way in one frame.
         self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show, 0.0);
     }
 
