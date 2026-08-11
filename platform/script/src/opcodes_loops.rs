@@ -129,10 +129,13 @@ impl<'a> ScriptVm<'a> {
         if let Some(s) = source.as_number() {
             if s >= 1.0 {
                 self.begin_for_loop_inner(
-                    jump, source, value_id, key_id, index_id, v0, 0.0, v0, None,
+                    jump, source, value_id, index_id, key_id, v0, 0.0, v0, None,
                 );
                 return;
             }
+            // A count below one is an empty loop, like an empty array.
+            self.bx.threads.cur().trap.goto_rel(jump);
+            return;
         } else if let Some(obj) = source.as_object() {
             let has_range_proto = self
                 .bx
@@ -214,6 +217,15 @@ impl<'a> ScriptVm<'a> {
                 );
                 return;
             }
+        } else if !source.is_nil() {
+            // Not a number, object, array, or nil: this can never iterate.
+            // Erroring (instead of the old silent body-skip) makes a `for`
+            // over a bogus source as loud as the `while` it replaces.
+            let err = script_err_type_mismatch!(
+                self.bx.threads.cur().trap,
+                "for loop source is not iterable (expected number, range, object, array, or nil)"
+            );
+            self.bx.threads.cur().push_stack_unchecked(err);
         }
         self.bx.threads.cur().trap.goto_rel(jump);
     }
@@ -233,6 +245,8 @@ impl<'a> ScriptVm<'a> {
                 let start_ip = lf.start_ip;
                 let bases_scope = lf.bases.scope;
                 let value_id = values.value_id;
+                let key_id = values.key_id;
+                let index_id = values.index_id;
                 let index = values.index;
                 self.bx.threads.cur().trap.goto(start_ip);
                 if !self.reset_iteration_scope(bases_scope) {
@@ -243,6 +257,15 @@ impl<'a> ScriptVm<'a> {
                 self.bx
                     .heap
                     .set_value_def(scope, value_id.into(), index.into());
+                // Multi-var counts follow FOR_2/FOR_3 semantics (k = index):
+                // the first iteration binds these in begin_for_loop_inner, and
+                // dropping them here made `k` vanish from iteration two on.
+                if let Some(key_id) = key_id {
+                    self.bx.heap.set_value_def(scope, key_id.into(), index.into());
+                }
+                if let Some(index_id) = index_id {
+                    self.bx.heap.set_value_def(scope, index_id.into(), index.into());
+                }
                 return;
             } else if let Some(obj) = values.source.as_object() {
                 let cached = values.range_cache;

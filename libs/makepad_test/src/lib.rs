@@ -7,7 +7,8 @@ mod studio_remote;
 
 pub use error::{IntoTestResult, TestError, TestResult};
 pub use makepad_studio_protocol::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, StudioToApp, TextInputEvent, WidgetSnapshot,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
+    RemoteMouseMove, RemoteMouseUp, StudioToApp, TextInputEvent, WidgetSnapshot,
 };
 pub use makepad_test_macros::makepad_test;
 pub use runtime::{run_with_config, Locator, TestApp, TestConfig, WidgetMatch};
