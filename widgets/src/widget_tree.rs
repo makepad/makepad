@@ -1991,11 +1991,34 @@ impl WidgetTree {
             None
         };
 
+        // A widget's own visible flag isn't enough: if any ancestor is hidden, the
+        // widget is effectively hidden even though its own flag stays true. Precompute
+        // each node's own visibility, then fold in ancestors so the reported `visible`
+        // reflects what a viewer would actually see.
+        let own_visible: Vec<bool> = inner
+            .nodes
+            .iter()
+            .map(|node| node.widget.upgrade().is_some_and(|w| w.visible()))
+            .collect();
+        let effective_visible = |mut index: usize| -> bool {
+            loop {
+                if !own_visible[index] {
+                    return false;
+                }
+                let parent = inner.nodes[index].parent;
+                if parent == NONE {
+                    return true;
+                }
+                index = parent as usize;
+            }
+        };
+
         let mut widgets = Vec::new();
         for (index, node) in inner.nodes.iter().enumerate() {
             let Some(widget) = node.widget.upgrade() else {
                 continue;
             };
+            let node_visible = effective_visible(index);
             let id = live_id_token(inner.names[index]);
             let widget_type = widget
                 .widget_type_id()
@@ -2062,7 +2085,7 @@ impl WidgetTree {
                         .as_ref()
                         .map(|context| context.index)
                         .unwrap_or_default(),
-                    visible: widget.visible(),
+                    visible: node_visible,
                     enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
                     x,
                     y,
@@ -2085,7 +2108,7 @@ impl WidgetTree {
                         .as_ref()
                         .map(|context| context.index)
                         .unwrap_or_default(),
-                    visible: widget.visible(),
+                    visible: node_visible,
                     enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
                     x,
                     y,
