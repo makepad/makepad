@@ -1113,6 +1113,9 @@ impl WidgetMatchEvent for HtmlLink {
 
 impl Widget for HtmlLink {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::ClearHover = event {
+            self.animator_cut(cx, ids!(hover.off));
+        }
         if self.animator_handle_event(cx, event).must_redraw() {
             if let Some(tf) = scope.data.get_mut::<TextFlow>() {
                 tf.redraw(cx);
