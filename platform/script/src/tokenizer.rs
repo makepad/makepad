@@ -220,6 +220,10 @@ impl ScriptToken {
 pub struct ScriptTokenPos {
     pub token: ScriptToken,
     pos: usize,
+    /// True if whitespace containing a newline separated this token from the
+    /// previous one. Lets the parser keep statements newline-delimited (a
+    /// continuation token on a new line begins a new statement, Go/Swift-style).
+    pub preceded_by_newline: bool,
 }
 
 #[derive(Default, Eq, PartialEq)]
@@ -244,6 +248,9 @@ enum State {
 #[derive(Default)]
 pub struct ScriptTokenizer {
     pos: usize,
+    /// Set when a newline is consumed; stamped onto (and cleared by) the next
+    /// emitted token as `preceded_by_newline`.
+    newline_pending: bool,
     pub tokens: Vec<ScriptTokenPos>,
     pub original: String,
     unfinished: String,
@@ -259,6 +266,7 @@ pub struct ScriptLoc {
 impl ScriptTokenizer {
     pub fn clear(&mut self) {
         self.pos = 0;
+        self.newline_pending = false;
         self.tokens.clear();
         self.original.clear();
         self.unfinished.clear();
@@ -331,6 +339,20 @@ impl ScriptTokenizer {
         print!("\n");
     }
 
+    /// Emits a token, stamping whether a newline preceded it (and clearing the
+    /// pending flag). All token emission funnels through here.
+    fn push_tok(&mut self, pos: usize, token: ScriptToken) {
+        let preceded_by_newline = self.newline_pending;
+        self.newline_pending = false;
+        self.tokens.push(ScriptTokenPos { token, pos, preceded_by_newline });
+    }
+
+    /// Whether token `i` was preceded by a newline (see `preceded_by_newline`).
+    pub fn token_preceded_by_newline(&self, i: u32) -> bool {
+        self.tokens.get(i as usize).is_some_and(|t| t.preceded_by_newline)
+    }
+
+
     pub fn pos_to_loc(&self, pos: usize) -> Option<ScriptLoc> {
         let mut row = 0;
         let mut col = 0;
@@ -357,10 +379,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::RustValue(number),
-        });
+        self.push_tok(self.pos - len, ScriptToken::RustValue(number));
     }
 
     fn emit_f64(&mut self) {
@@ -371,10 +390,7 @@ impl ScriptTokenizer {
             {
                 let len = self.temp.len();
                 self.temp.clear();
-                self.tokens.push(ScriptTokenPos {
-                    pos: self.pos - len,
-                    token: ScriptToken::U40(v as u64),
-                });
+                self.push_tok(self.pos - len, ScriptToken::U40(v as u64));
                 return;
             }
             self.temp.clear();
@@ -384,10 +400,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::F64(number),
-        });
+        self.push_tok(self.pos - len, ScriptToken::F64(number));
     }
 
     fn emit_f32(&mut self) {
@@ -399,10 +412,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::F32(number),
-        });
+        self.push_tok(self.pos - len, ScriptToken::F32(number));
     }
 
     fn emit_u32(&mut self) {
@@ -414,10 +424,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::U32(number),
-        });
+        self.push_tok(self.pos - len, ScriptToken::U32(number));
     }
 
     fn emit_i32(&mut self) {
@@ -429,10 +436,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::I32(number),
-        });
+        self.push_tok(self.pos - len, ScriptToken::I32(number));
     }
 
     fn emit_f16(&mut self) {
@@ -444,10 +448,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::F16(number),
-        });
+        self.push_tok(self.pos - len, ScriptToken::F16(number));
     }
 
     fn emit_identifier(&mut self) {
@@ -463,10 +464,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::Identifier(id),
-        });
+        self.push_tok(self.pos - len, ScriptToken::Identifier(id));
     }
 
     fn emit_operator(&mut self) {
@@ -485,10 +483,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::Operator(id),
-        });
+        self.push_tok(self.pos - len, ScriptToken::Operator(id));
     }
 
     fn emit_separator(&mut self, c: char) {
@@ -508,10 +503,7 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::Separator(id),
-        });
+        self.push_tok(self.pos - len, ScriptToken::Separator(id));
     }
 
     fn emit_color(&mut self) {
@@ -521,17 +513,11 @@ impl ScriptTokenizer {
         };
         let len = self.temp.len();
         self.temp.clear();
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos - len,
-            token: ScriptToken::Color(color),
-        });
+        self.push_tok(self.pos - len, ScriptToken::Color(color));
     }
 
     fn emit_token_here(&mut self, token: ScriptToken) {
-        self.tokens.push(ScriptTokenPos {
-            pos: self.pos,
-            token,
-        })
+        self.push_tok(self.pos, token)
     }
 
     fn append_unfinished_string(&mut self, c: char) {
@@ -544,10 +530,7 @@ impl ScriptTokenizer {
         } else {
             self.unfinished.clear();
             self.unfinished.push(c);
-            self.tokens.push(ScriptTokenPos {
-                pos: self.pos,
-                token: ScriptToken::StringUnfinished,
-            });
+            self.push_tok(self.pos, ScriptToken::StringUnfinished);
         }
     }
 
@@ -576,20 +559,15 @@ impl ScriptTokenizer {
             if let Some(ScriptTokenPos {
                 token: ScriptToken::StringUnfinished,
                 pos,
+                ..
             }) = self.tokens.pop()
             {
                 let v = heap.new_string_from_str(&self.unfinished);
                 self.unfinished.clear();
-                self.tokens.push(ScriptTokenPos {
-                    token: ScriptToken::String(v),
-                    pos,
-                })
+                self.push_tok(pos, ScriptToken::String(v))
             }
         } else {
-            self.tokens.push(ScriptTokenPos {
-                token: ScriptToken::String(ScriptValue::EMPTY_STRING),
-                pos: self.pos,
-            })
+            self.push_tok(self.pos, ScriptToken::String(ScriptValue::EMPTY_STRING))
         }
     }
 
@@ -1054,6 +1032,12 @@ impl ScriptTokenizer {
                         self.state = State::Whitespace;
                     }
                 }
+            }
+            // Register the newline AFTER this char's token emission, so a token
+            // terminated BY this newline keeps whatever preceded it, and the flag
+            // attaches to the NEXT token instead.
+            if c == '\n' {
+                self.newline_pending = true;
             }
         }
         &self.tokens[start..self.tokens.len()]

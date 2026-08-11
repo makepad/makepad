@@ -241,6 +241,14 @@ impl Area {
             Area::Rect(ra) => {
                 // we need to clip this drawlist too
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
+                // Guard against a stale rect area (its draw list was rebuilt smaller,
+                // e.g. a recycled/filtered list cell) — same check the Instance arm
+                // uses — rather than indexing rect_areas out of bounds and panicking.
+                if draw_list.redraw_id != ra.redraw_id
+                    || ra.rect_id >= draw_list.rect_areas.len()
+                {
+                    return Rect::default();
+                }
                 let rect_area = &draw_list.rect_areas[ra.rect_id];
                 if draw_list.draw_list_has_clip {
                     let p3 = dvec2(
@@ -344,6 +352,11 @@ impl Area {
             }
             Area::Rect(ra) => {
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
+                if draw_list.redraw_id != ra.redraw_id
+                    || ra.rect_id >= draw_list.rect_areas.len()
+                {
+                    return abs;
+                }
                 let rect_area = &draw_list.rect_areas[ra.rect_id];
                 Vec2d {
                     x: abs.x - rect_area.rect.pos.x,
@@ -404,6 +417,11 @@ impl Area {
             }
             Area::Rect(ra) => {
                 let draw_list = &mut cx.draw_lists[ra.draw_list_id];
+                if draw_list.redraw_id != ra.redraw_id
+                    || ra.rect_id >= draw_list.rect_areas.len()
+                {
+                    return;
+                }
                 let rect_area = &mut draw_list.rect_areas[ra.rect_id];
                 rect_area.rect = *rect
             }

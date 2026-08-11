@@ -12,12 +12,30 @@ pub struct CxScriptTimer {
     pub callback: ScriptFnRef,
 }
 
+/// A hook that can claim dispatch of a firing script timer, e.g. to run the callback
+/// in the isolate VM that owns it instead of the main app VM. Returns true if it
+/// handled the timer; false falls through to the default main-VM dispatch.
+pub type CxScriptTimerDispatchHook = fn(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptValue) -> bool;
+
 #[derive(Clone, Default)]
 pub struct CxScriptTimers {
     pub timers: Vec<CxScriptTimer>,
+    pub dispatch_hooks: Vec<CxScriptTimerDispatchHook>,
 }
 
 impl Cx {
+    pub fn add_script_timer_dispatch_hook(&mut self, hook: CxScriptTimerDispatchHook) {
+        if !self
+            .script_data
+            .timers
+            .dispatch_hooks
+            .iter()
+            .any(|v| (*v as usize) == (hook as usize))
+        {
+            self.script_data.timers.dispatch_hooks.push(hook);
+        }
+    }
+
     pub(crate) fn handle_script_timer(&mut self, event: &TimerEvent) {
         if let Some(i) = self
             .script_data
@@ -26,8 +44,7 @@ impl Cx {
             .iter()
             .position(|v| v.timer.is_timer(event).is_some())
         {
-            let timer = &self.script_data.timers.timers[i];
-            let callback = timer.callback.as_object();
+            let timer = self.script_data.timers.timers[i].clone();
             if !timer.repeat {
                 self.script_data.timers.timers.remove(i);
             }
@@ -36,11 +53,46 @@ impl Cx {
             } else {
                 NIL
             };
+            // A callback minted in an isolate VM must not run against the main VM's heap;
+            // hooks (registered by the widgets crate) route those to their owning VM.
+            let hooks = self.script_data.timers.dispatch_hooks.clone();
+            for hook in hooks {
+                if hook(self, &timer, time) {
+                    return;
+                }
+            }
             self.with_vm_and_async(|vm| {
-                vm.call(callback.into(), &[time]);
+                vm.call(timer.callback.as_object().into(), &[time]);
             })
         }
     }
+}
+
+/// Local-time UTC offset in seconds, applied by `std.local_time`. The platform has no
+/// timezone database, so hosts that know the local offset (e.g. via chrono) set it here.
+static SCRIPT_LOCAL_UTC_OFFSET_SECS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+pub fn set_script_local_utc_offset_secs(offset_secs: i64) {
+    SCRIPT_LOCAL_UTC_OFFSET_SECS.store(offset_secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn script_local_utc_offset_secs() -> i64 {
+    SCRIPT_LOCAL_UTC_OFFSET_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Days-since-epoch to (year, month, day), Howard Hinnant's civil_from_days algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -110,6 +162,50 @@ pub fn script_mod(vm: &mut ScriptVm) {
         cx.script_data.random_seed = seed;
         (seed as u32 as f64).into()
     });
+
+    vm.add_method(std, id_lut!(time_now), script_args_def!(), |_vm, _args| {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        secs.into()
+    });
+
+    // Returns {year month day hour minute second weekday} in local time (weekday: 0 = Sunday).
+    // Takes an optional epoch-seconds arg, defaulting to now.
+    vm.add_method(
+        std,
+        id_lut!(local_time),
+        script_args_def!(epoch = NIL),
+        |vm, args| {
+            let epoch = script_value!(vm, args.epoch);
+            let epoch_secs = epoch.as_number().unwrap_or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0)
+            });
+            // Clamp the epoch to a sane range so an absurd script-supplied value
+            // can't overflow the offset addition or the civil-date math.
+            let epoch_i = (epoch_secs.clamp(-8.0e15, 8.0e15)) as i64;
+            let local_secs = epoch_i.saturating_add(script_local_utc_offset_secs());
+            let days = local_secs.div_euclid(86400);
+            let secs_of_day = local_secs.rem_euclid(86400);
+            let (year, month, day) = civil_from_days(days);
+            // 1970-01-01 was a Thursday (weekday 4 with Sunday = 0).
+            let weekday = (days + 4).rem_euclid(7);
+            let obj = vm.bx.heap.new_object();
+            let trap = vm.bx.threads.cur().trap.pass();
+            vm.bx.heap.set_value(obj, id!(year).into(), (year as f64).into(), trap);
+            vm.bx.heap.set_value(obj, id!(month).into(), (month as f64).into(), trap);
+            vm.bx.heap.set_value(obj, id!(day).into(), (day as f64).into(), trap);
+            vm.bx.heap.set_value(obj, id!(hour).into(), ((secs_of_day / 3600) as f64).into(), trap);
+            vm.bx.heap.set_value(obj, id!(minute).into(), ((secs_of_day / 60 % 60) as f64).into(), trap);
+            vm.bx.heap.set_value(obj, id!(second).into(), ((secs_of_day % 60) as f64).into(), trap);
+            vm.bx.heap.set_value(obj, id!(weekday).into(), (weekday as f64).into(), trap);
+            obj.into()
+        },
+    );
 
     vm.add_method(
         std,

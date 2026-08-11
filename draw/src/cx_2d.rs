@@ -14,6 +14,9 @@ pub struct Cx2d<'a, 'b> {
     pub(crate) overlay_id: Option<DrawListId>,
     pub(crate) overlay_pass_id: Option<DrawPassId>,
     pub(crate) overlay_draw_depth: usize,
+    /// Increments once per overlay sub-list begun this frame; stamped onto the
+    /// sub-list so the Overlay can composite in draw order.
+    pub(crate) overlay_seq: u64,
 
     //pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
     pub(crate) turtles: Vec<Turtle>,
@@ -46,6 +49,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             overlay_id: None,
             overlay_pass_id: None,
             overlay_draw_depth: 0,
+            overlay_seq: 0,
             cx,
             turtle_clips: Vec::with_capacity(1024),
             finished_rows: Vec::with_capacity(1024),

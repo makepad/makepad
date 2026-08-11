@@ -1,6 +1,7 @@
 use {
     crate::makepad_draw::*,
     crate::makepad_draw::makepad_platform::script::std::ScriptStd,
+    crate::makepad_draw::makepad_platform::script::timer::CxScriptTimer,
     crate::makepad_script::{script_err_not_found, ScriptFnRef, ScriptThreadId},
     crate::widget::{WidgetRef, WidgetUid},
     crate::widget_tree::CxWidgetExt,
@@ -57,7 +58,7 @@ pub(crate) fn mark_splash_isolate_dead(vm_id: SplashVmId) {
 /// could later swap into the now-missing VM (which would panic in
 /// `with_script_vm_id`) or dereference its freed heap. Cheap no-op when nothing is
 /// queued.
-pub(crate) fn gc_dead_splash_isolates(cx: &mut Cx) {
+pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     let dead: Vec<SplashVmId> = DEAD_SPLASH_ISOLATES.with(|g| {
         let mut g = g.borrow_mut();
         std::mem::take(&mut *g)
@@ -65,11 +66,37 @@ pub(crate) fn gc_dead_splash_isolates(cx: &mut Cx) {
     if dead.is_empty() {
         return;
     }
+    let dead_heaps: Vec<usize> = {
+        let state = cx.global::<CxWidgetAsync>();
+        state
+            .heap_to_vm
+            .iter()
+            .filter(|(_, v)| dead.contains(v))
+            .map(|(k, _)| *k)
+            .collect()
+    };
+    // Stop and drop script timers whose callbacks live in a dying heap. Their fn refs
+    // hold the heap's roots Rc alive, and firing one later would deref a freed heap.
+    let stale_timers: Vec<_> = cx
+        .script_data
+        .timers
+        .timers
+        .iter()
+        .filter(|t| dead_heaps.contains(&t.callback.heap_key()))
+        .map(|t| (t.id, t.timer))
+        .collect();
+    for (id, timer) in stale_timers {
+        cx.stop_timer(timer);
+        cx.script_data.timers.timers.retain(|t| t.id != id);
+    }
+    // Sandbox roots die with their isolates.
+    crate::splash_storage::gc_roots(&dead_heaps);
     let state = cx.global::<CxWidgetAsync>();
     for vm_id in dead {
         state.isolated_vms.vms.remove(&vm_id);
         state.heap_to_vm.retain(|_, v| *v != vm_id);
         state.ui_handle_types.remove(&vm_id);
+        state.vm_root_uids.remove(&vm_id);
         state.done.retain(|d| d.vm_id != vm_id);
         state.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
         state.script_to_widget_calls.retain(|r| r.vm_id != vm_id);
@@ -187,6 +214,9 @@ struct CxWidgetAsync {
     /// directly from its own `source` ref, so there are no coverage gaps for
     /// lazily-created widgets and no wrong-heap fallbacks.
     heap_to_vm: HashMap<usize, SplashVmId>,
+    /// Each isolate's own view-root uid (set by [`inject_splash_ui_handle`]). Isolate `ui`
+    /// handles are confined to this subtree so a mini-app can't reach host/sibling widgets.
+    vm_root_uids: HashMap<SplashVmId, WidgetUid>,
     isolated_vms: IsolatedScriptVms,
     current_vm_id: SplashVmId,
     /// Round-robin cursor for the per-pump isolate GC pass (last vm id serviced).
@@ -317,6 +347,25 @@ impl CxSplashVmExt for Cx {
             };
             crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
             crate::script_mod(&mut vm);
+            // Splash isolates run untrusted-ish mini-app script; strip the
+            // ambient-authority modules from the isolate's namespace entirely:
+            // filesystem access (`fs`), child processes (`run`), and the resource
+            // loader (`res`), whose handles reach BOTH the filesystem (abs_path
+            // loads) and the network (web_url/http resources) without going
+            // through the gated net runtime. Raw sockets are gated separately:
+            // the stdlib's `net.socket_stream` errors when no net runtime is
+            // configured, same as `net.http_request`.
+            let strip = crate::makepad_script::script! {
+                mod.fs = nil
+                mod.run = nil
+                mod.res = nil
+            };
+            vm.eval(strip);
+            // Re-register `fs` as the JAILED per-app storage module: inside an
+            // isolate, "the filesystem" is the app's private sandbox directory
+            // (assigned by the host via Splash::set_sandbox_dir; without one,
+            // every call errors). See splash_storage.rs for the containment.
+            crate::splash_storage::script_mod(&mut vm);
             vm.bx
         };
 
@@ -440,6 +489,10 @@ pub(crate) fn inject_splash_ui_handle(cx: &mut Cx, vm_id: SplashVmId, root_uid: 
         return;
     }
     ensure_widget_async_hooks_registered(cx);
+    // Remember this isolate's view root so its ui handles stay confined to that subtree.
+    cx.global::<CxWidgetAsync>()
+        .vm_root_uids
+        .insert(vm_id, root_uid);
     cx.with_script_vm_id(vm_id, |vm| {
         let ui_handle = vm.build_ui_handle_for_uid(root_uid);
         vm.set_injected_global(id!(ui), ui_handle);
@@ -887,8 +940,29 @@ fn register_ui_handle(vm: &mut ScriptVm) {
                 return script_err_not_found!(vm.trap(), "invalid ui handle");
             };
 
+            // Isolate VMs are confined to their own splash subtree: `ui.root` resolves to
+            // the splash's view root (never the app root), and name lookups only search
+            // within that subtree. Without this, a mini-app could reach host widgets or
+            // widgets belonging to a sibling mini-app.
+            let cur_vm_id = vm.cx_mut().global::<CxWidgetAsync>().current_vm_id;
+            let confine_root = if cur_vm_id == MAIN_SPLASH_VM_ID {
+                None
+            } else {
+                Some(
+                    vm.cx_mut()
+                        .global::<CxWidgetAsync>()
+                        .vm_root_uids
+                        .get(&cur_vm_id)
+                        .copied()
+                        .unwrap_or(target_uid),
+                )
+            };
+
             if prop == live_id!(root) {
-                let root_uid = vm.with_cx(|cx| cx.widget_tree().root_uid());
+                let root_uid = match confine_root {
+                    Some(root_uid) => root_uid,
+                    None => vm.with_cx(|cx| cx.widget_tree().root_uid()),
+                };
                 if root_uid == WidgetUid(0) {
                     return script_err_not_found!(vm.trap(), "ui root not found");
                 }
@@ -898,6 +972,16 @@ fn register_ui_handle(vm: &mut ScriptVm) {
             // Script UI handles intentionally use upward flood search semantics:
             // look in current subtree first, then expand outward through ancestors.
             let child_ref = vm.with_cx(|cx| {
+                if let Some(confine_root) = confine_root {
+                    // Confined (isolate) search: the target's subtree first, then the
+                    // splash root's subtree. Never the whole tree.
+                    let child_ref = cx.widget_tree().find_within(target_uid, &[prop]);
+                    if !child_ref.is_empty() {
+                        return child_ref;
+                    }
+                    return cx.widget_tree().find_within(confine_root, &[prop]);
+                }
+
                 let child_ref = cx.widget_tree().find_flood(target_uid, &[prop]);
                 if !child_ref.is_empty() {
                     return child_ref;
@@ -1120,6 +1204,47 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
 fn register_task_hooks(cx: &mut Cx) {
     cx.add_script_task_on_thread_completed_hook(on_widget_script_thread_completed_hook);
     cx.add_script_task_pump_hook(pump_widget_async_hook);
+    cx.add_script_timer_dispatch_hook(script_timer_dispatch_hook);
+}
+
+/// Routes a firing script timer to the isolate VM that owns its callback. Without this,
+/// `std.start_timeout`/`start_interval` called inside a Splash isolate would run their
+/// callbacks on the main VM against the wrong heap.
+fn script_timer_dispatch_hook(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptValue) -> bool {
+    let heap_key = timer.callback.heap_key();
+    if heap_key == 0 {
+        return false;
+    }
+    let vm_id = cx
+        .global::<CxWidgetAsync>()
+        .heap_to_vm
+        .get(&heap_key)
+        .copied();
+    match vm_id {
+        Some(vm_id) => {
+            // Same budget/limit as any other isolate entry, so a runaway timer callback
+            // can't hang the host.
+            cx.with_script_vm_id(vm_id, |vm| {
+                vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                    vm.call(timer.callback.as_object().into(), &[time]);
+                });
+            });
+            true
+        }
+        None => {
+            // Not a live isolate's heap. The main VM's own timers fall through to the
+            // default dispatch; anything else is a stale timer from a dead isolate.
+            let main_heap_key = cx.with_vm(|vm| vm.bx.heap.heap_key());
+            if heap_key == main_heap_key {
+                false
+            } else {
+                cx.stop_timer(timer.timer);
+                let id = timer.id;
+                cx.script_data.timers.timers.retain(|t| t.id != id);
+                true
+            }
+        }
+    }
 }
 
 fn on_widget_script_thread_completed_hook(

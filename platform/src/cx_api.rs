@@ -1104,6 +1104,23 @@ impl Cx {
         self.fingers.sweep_lock(value);
     }
 
+    /// Hand the finger currently captured by `from` over to `to` (with sweep area
+    /// `to_sweep`), so a drag begun on one widget can continue on another — e.g. a
+    /// long-pressed drawer app handing its touch to the home pager for placement.
+    /// Returns true if a live capture on `from` was found and handed over; false if
+    /// the finger was already released, so callers can avoid starting a dead drag.
+    pub fn switch_finger_capture(&mut self, from: Area, to: Area, to_sweep: Area) -> bool {
+        self.fingers.switch_capture_area(from, to, to_sweep)
+    }
+
+    /// Hand a finger grabbed by an interactive child up to `over`, a container
+    /// that already co-captures it via `capture_overload` — so `over` (e.g. the
+    /// home pager) can drive a pan/drag even when the press started on a button
+    /// inside one of its children. Returns true if a child capture was dropped.
+    pub fn promote_finger_capture_over(&mut self, over: Area) -> bool {
+        self.fingers.promote_capture_over(over)
+    }
+
     pub fn sweep_unlock(&mut self, value: Area) {
         self.fingers.sweep_unlock(value);
     }

@@ -248,6 +248,14 @@ impl DrawList2d {
             cx.draw_lists[overlay_id].store_sub_list(redraw_id, self.draw_list.id());
         }
 
+        // Stamp the draw ORDER. `store_sub_list` above only decides which slot
+        // this list occupies (first free, kept forever) — it says nothing about
+        // paint order, which is what a caller drawing one glass surface over
+        // another actually means. `Overlay::end` sorts by this.
+        cx.overlay_seq += 1;
+        let seq = cx.overlay_seq;
+        cx.draw_lists[self.draw_list.id()].overlay_order = seq;
+
         if !self.overlay_active {
             self.overlay_active = true;
             cx.overlay_draw_depth += 1;

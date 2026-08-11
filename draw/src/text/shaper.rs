@@ -253,6 +253,27 @@ impl Shaper {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Logs one warning per unique codepoint that no loaded font can render,
+    /// so ".notdef" boxes in the UI are explained in the log instead of being
+    /// silently drawn (a missing arrow/symbol glyph is otherwise very hard to
+    /// distinguish from a layout bug).
+    fn warn_missing_glyph_once(text: &str, cluster: usize) {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+        static WARNED: Mutex<Option<HashSet<char>>> = Mutex::new(None);
+        let Some(ch) = text.get(cluster..).and_then(|s| s.chars().next()) else {
+            return;
+        };
+        let mut warned = WARNED.lock().unwrap();
+        if warned.get_or_insert_with(HashSet::new).insert(ch) {
+            crate::makepad_platform::log!(
+                "no loaded font has a glyph for '{}' (U+{:04X}); rendering .notdef",
+                ch,
+                ch as u32
+            );
+        }
+    }
+
     fn shape_recursive(
         &mut self,
         text: &str,
@@ -344,6 +365,11 @@ impl Shaper {
                 }
             } else {
                 let glyph_group = glyph_groups[i];
+                if remaining_fonts.is_empty() {
+                    for glyph in glyph_group.iter().filter(|glyph| glyph.id == 0) {
+                        Self::warn_missing_glyph_once(text, glyph.cluster);
+                    }
+                }
                 // If we've exhausted all fallback fonts and still have
                 // unmapped glyphs (id == 0), use the primary font's .notdef
                 // so a visible placeholder is rendered instead of nothing.

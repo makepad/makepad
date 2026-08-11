@@ -88,13 +88,16 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
 
         tb.add("    code:").string(&s).add(".to_string(),");
         tb.add("    values:{");
-        tb.add("        let mut v = Vec::new();");
+        // Deliberately obscure name: `#(expr)` interpolations are spliced in
+        // here verbatim, so a user variable named like ours (it was `v`)
+        // would resolve to the half-built Vec instead of their value.
+        tb.add("        let mut __script_interp_vals = Vec::new();");
         for value in &values {
-            tb.add("v.push( {")
+            tb.add("__script_interp_vals.push( {")
                 .stream(Some(value.clone()))
                 .add("}.script_to_value(vm) );");
         }
-        tb.add("    v}");
+        tb.add("    __script_interp_vals}");
         tb.add("}");
     } else {
         tb.add("ScriptMod::default()");

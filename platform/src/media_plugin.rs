@@ -214,7 +214,7 @@ pub trait MediaPlaybackSession {
         None
     }
     /// Optional Apple zero-copy present: biplanar NV12 `CVPixelBuffer` from VideoToolbox.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
     fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
         None
     }

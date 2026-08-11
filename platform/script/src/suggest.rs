@@ -163,8 +163,8 @@ pub fn format_value_type(heap: &ScriptHeap, value: ScriptValue) -> String {
         return "bool".to_string();
     }
 
-    // Handle numbers (f64, f32, u32, i32, u40)
-    if value.as_f64().is_some() || value.as_u40().is_some() {
+    // Handle numbers (f64, f32, f16, u32, i32, u40)
+    if value.is_number() {
         return "number".to_string();
     }
 
