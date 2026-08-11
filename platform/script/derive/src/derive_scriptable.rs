@@ -270,7 +270,13 @@ fn derive_script_impl_inner(
 
         tb.add("    }");
 
-        // Generate script_source if there's a #[source] field
+        // Generate script_source. A struct with its own #[source] field reports
+        // that object directly. Otherwise, if it derefs to a base class (e.g. a
+        // custom widget wrapping `#[deref] view: View`), forward to the base's
+        // source so that `script_apply_eval!` on the custom widget can resolve
+        // `__script_source__` (and thus the proto scope, type names, etc.) just
+        // like it would on the bare base. Without this a custom widget's source
+        // falls back to ZERO and every eval against it fails to resolve names.
         let source_field = fields
             .iter()
             .find(|field| field.attrs.iter().any(|a| a.name == "source"));
@@ -278,6 +284,12 @@ fn derive_script_impl_inner(
             tb.add("    fn script_source(&self) -> ScriptObject {self.")
                 .ident(&source_field.name)
                 .add(".as_object()");
+            tb.add("    }");
+        } else if let Some(deref_field) = deref_field {
+            tb.add("    fn script_source(&self) -> ScriptObject {")
+                .add("ScriptApply::script_source(&self.")
+                .ident(&deref_field.name)
+                .add(")");
             tb.add("    }");
         }
 

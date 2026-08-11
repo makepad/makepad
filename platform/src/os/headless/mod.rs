@@ -151,6 +151,10 @@ impl CxMediaApi for Cx {
 }
 
 impl Cx {
+    /// No-op in headless mode; the real macOS backend raises the app's windows.
+    #[cfg(target_os = "macos")]
+    pub fn macos_activate_app(&mut self) {}
+
     #[cfg(target_os = "macos")]
     pub fn share_texture_for_presentable_image(&mut self, _texture: &crate::Texture) -> u32 {
         0

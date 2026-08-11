@@ -452,6 +452,37 @@ enum State {
 }
 
 impl State {
+    /// Whether this state is an unclosed `( )` / `[ ]` context (grouping, call
+    /// args, array literal, or index). Inside these, newlines are insignificant
+    /// and expressions continue across them (Python/Swift/JS-style).
+    fn is_round_square_container(&self) -> bool {
+        matches!(
+            self,
+            State::EndRound | State::EndCall { .. } | State::EndBareSquare | State::ArrayIndex
+        )
+    }
+
+    /// Whether this state is an unclosed `{ }` / statement-list context, where
+    /// newlines DO delimit statements (function/match/block bodies, object and
+    /// bare blocks).
+    fn is_statement_container(&self) -> bool {
+        matches!(
+            self,
+            State::EndProto
+                | State::EndProtoInherit
+                | State::EndScopeInherit
+                | State::EndFieldInherit
+                | State::EndIndexInherit
+                | State::EndBare
+                | State::EndFnBlock { .. }
+                | State::EndFnExpr { .. }
+                | State::MatchArmBody { .. }
+                | State::MatchArmBlock { .. }
+                | State::MatchWildcardBody { .. }
+                | State::MatchWildcardBlock { .. }
+        )
+    }
+
     fn is_short_circuit_op(op: LiveId) -> bool {
         op == id!(&&) || op == id!(||) || op == id!(|?)
     }
@@ -711,6 +742,18 @@ pub struct ScriptParser {
     // Temporary storage for destructuring defaults (binding_id, value_code, value_map)
     pub(crate) destruct_defaults: Vec<(LiveId, Vec<ScriptValue>, Vec<Option<u32>>)>,
 
+    /// Code position most recently patched as a forward-jump target — a
+    /// short-circuit (&&, ||, |?) landing site or a branch join (the position
+    /// every arm of an if/elif/else, match, or try/err jumps to when it
+    /// finishes). `set_pop_to_me` must not fuse the POP_TO_ME flag onto the
+    /// opcode just before this position: the fused commit would sit inside a
+    /// region some path jumps over, silently losing the value (a taken true
+    /// branch skipped the flag fused onto the else branch's tail — the
+    /// "on_render emits nothing" family of bugs). A standalone POP_TO_ME
+    /// emitted AT this position is the jump target itself, so every path
+    /// executes the commit.
+    last_jump_target: u32,
+
     // Storage for nested patterns during parsing
     // Each entry is (pattern_info). The index into this vec is encoded in the ids list.
     nested_patterns: Vec<NestedPattern>,
@@ -731,6 +774,7 @@ impl Default for ScriptParser {
             col_offset: 0,
             destruct_defaults: Default::default(),
             nested_patterns: Default::default(),
+            last_jump_target: u32::MAX,
         }
     }
 }
@@ -790,17 +834,40 @@ impl ScriptParser {
         self.source_map.push(None);
     }
 
-    fn set_pop_to_me(&mut self) {
-        if let Some(code) = self.opcodes.last_mut() {
-            if let Some((opcode, _args)) = code.as_opcode() {
-                if opcode == Opcode::RETURN {
-                    self.push_code(Opcode::POP_TO_ME.into(), self.index)
-                } else {
-                    code.set_opcode_args_pop_to_me();
-                }
-            } else {
-                self.push_code(Opcode::POP_TO_ME.into(), self.index)
+    /// Whether the parser is currently inside an unclosed `( )` / `[ ]` context
+    /// (grouping, call args, array literal, or index), where newlines do not
+    /// delimit statements. Scans the state stack for the nearest enclosing
+    /// container: round/square = inside brackets, curly/block = statement list.
+    fn inside_round_square_bracket(&self) -> bool {
+        for state in self.state.iter().rev() {
+            if state.is_round_square_container() {
+                return true;
             }
+            if state.is_statement_container() {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn set_pop_to_me(&mut self) {
+        let Some(code) = self.opcodes.last() else {
+            return;
+        };
+        let fuse = match code.as_opcode() {
+            // RETURN can't carry the flag, and fusing onto a jump-target
+            // boundary would let a taken jump skip the commit (see the
+            // last_jump_target field docs).
+            Some((opcode, _args)) => {
+                opcode != Opcode::RETURN && self.code_len() != self.last_jump_target
+            }
+            // A raw value slot can't carry the flag.
+            None => false,
+        };
+        if fuse {
+            self.opcodes.last_mut().unwrap().set_opcode_args_pop_to_me();
+        } else {
+            self.push_code(Opcode::POP_TO_ME.into(), self.index)
         }
     }
 
@@ -1143,6 +1210,7 @@ impl ScriptParser {
             } => {
                 // Wildcard body done - patch any pending IF_ELSE to jump here
                 if prev_else_start > 0 {
+                    self.last_jump_target = self.code_len();
                     self.set_opcode_args(
                         prev_else_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - prev_else_start),
@@ -1169,6 +1237,7 @@ impl ScriptParser {
 
                 // First, patch any previous arm's IF_ELSE to jump here (to current position)
                 if prev_else_start > 0 {
+                    self.last_jump_target = self.code_len();
                     self.set_opcode_args(
                         prev_else_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - prev_else_start),
@@ -1177,6 +1246,7 @@ impl ScriptParser {
 
                 if tok.is_close_curly() {
                     // End of match - no more arms, patch IF_TEST with need_nil flag
+                    self.last_jump_target = self.code_len();
                     self.set_opcode_args(
                         if_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - if_start).set_need_nil(),
@@ -2660,12 +2730,14 @@ impl ScriptParser {
             State::ShortCircuitEnd { test_slot } => {
                 // Patch the TEST opcode's jump to skip to current position (after second operand)
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                self.last_jump_target = self.code_len();
                 return 0;
             }
             State::ShortCircuitAssignEnd { test_slot, index } => {
                 // Emit ASSIGN after RHS, then patch the jump
                 self.push_code(Opcode::ASSIGN.into(), index);
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                self.last_jump_target = self.code_len();
                 return 0;
             }
             State::EmitReturn {
@@ -2924,6 +2996,7 @@ impl ScriptParser {
                 return 0;
             }
             State::TryErrExpr { err_start } => {
+                self.last_jump_target = self.code_len();
                 self.set_opcode_args(
                     err_start,
                     OpcodeArgs::from_u32(self.code_len() as u32 - err_start),
@@ -2934,6 +3007,7 @@ impl ScriptParser {
                 err_start,
                 last_was_sep,
             } => {
+                self.last_jump_target = self.code_len();
                 self.set_opcode_args(
                     err_start,
                     OpcodeArgs::from_u32(self.code_len() as u32 - err_start),
@@ -3054,16 +3128,20 @@ impl ScriptParser {
                 was_block,
             } => {
                 if id == id!(elif) {
+                    // Desugar `elif ...` as `else { if ... }`: the rest of the
+                    // chain parses as a nested if, and IfElseExpr patches this
+                    // arm's IF_ELSE to the chain's end once it completes. The
+                    // old push of IfMaybeElse{if_start} left the IF_ELSE's
+                    // jump at 0 — an infinite loop — and re-patched the
+                    // already-patched IF_TEST at the chain's end.
+                    let else_start = self.code_len() as u32;
                     self.push_code(Opcode::IF_ELSE.into(), self.index);
                     self.set_opcode_args(
                         if_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - if_start),
                     );
 
-                    self.state.push(State::IfMaybeElse {
-                        if_start,
-                        was_block,
-                    });
+                    self.state.push(State::IfElseExpr { else_start });
                     self.state.push(State::IfTest { index: self.index });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
@@ -3078,6 +3156,7 @@ impl ScriptParser {
                     self.state.push(State::IfElse { else_start });
                     return 1;
                 }
+                self.last_jump_target = self.code_len();
                 self.set_opcode_args(
                     if_start,
                     OpcodeArgs::from_u32(self.code_len() as u32 - if_start).set_need_nil(),
@@ -3104,6 +3183,7 @@ impl ScriptParser {
                 return 0;
             }
             State::IfElseExpr { else_start } => {
+                self.last_jump_target = self.code_len();
                 self.set_opcode_args(
                     else_start,
                     OpcodeArgs::from_u32(self.code_len() as u32 - else_start),
@@ -3118,12 +3198,7 @@ impl ScriptParser {
                     if !last_was_sep && self.has_pop_to_me() {
                         self.clear_pop_to_me();
                     }
-                    /*
-                    if !last_was_sep{
-                        if Some(&Opcode::POP_TO_ME.into()) == self.code_last(){
-                            self.pop_code();
-                        }
-                    }*/
+                    self.last_jump_target = self.code_len();
                     self.set_opcode_args(
                         else_start,
                         OpcodeArgs::from_u32(self.code_len() as u32 - else_start),
@@ -3321,6 +3396,14 @@ impl ScriptParser {
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
+                // NOTE on `use x.*` semantics: a glob import copies the names
+                // that exist in the target namespace AT THIS POINT in
+                // evaluation. Names registered later — including later in the
+                // SAME script_mod! block (e.g. `mod.widgets.Foo = ...` below a
+                // `use mod.widgets.*`) — are NOT visible through the import
+                // and must be referenced fully qualified (`mod.widgets.Foo`).
+                // The runtime reports such misses as "variable X not found in
+                // scope" with suggestions.
                 if id == id!(use) {
                     self.state.push(State::Use { index: self.index });
                     self.state.push(State::BeginExpr { required: true });
@@ -3453,6 +3536,34 @@ impl ScriptParser {
             }
 
             State::EndExpr => {
+                // Newline-delimited statements: a *postfix* `(` (call), `[`
+                // (index), or `{` (proto instantiation) on a new line does NOT
+                // glue onto the just-completed expression; it begins a new
+                // statement. Without this, `let h = x % 7` followed by
+                // `(h + 6) % 7` on the next line parses as calling the number 7
+                // with `(h + 6)` -- the calendar-app bug -- and a line-leading
+                // bare-object statement `{v: x}` after a value line compiled as
+                // instantiating that value as a prototype, silently mangling
+                // both statements. These three are the footgun class: each can
+                // be BOTH a postfix operator on the previous value AND the
+                // start of a fresh statement, so greedy gluing is a silent
+                // surprise.
+                //
+                // Infix operators and `.` are deliberately NOT diverted: they
+                // cannot begin a statement, so a leading one is unambiguously a
+                // continuation -- and makepad's shader DSL relies on exactly that
+                // to break long math across lines (`let c = a * k\n + (b) * j`).
+                // To continue an expression across lines, lead the new line with an
+                // operator (or trail the previous line with one).
+                //
+                // Suppressed inside `( )`/`[ ]`, where newlines are insignificant
+                // and even a `(`/`[` is part of the surrounding expression.
+                if tokenizer.token_preceded_by_newline(self.index)
+                    && (tok.is_open_round() || tok.is_open_square() || tok.is_open_curly())
+                    && !self.inside_round_square_bracket()
+                {
+                    return 0;
+                }
                 if op == id!(~) {
                     return 0;
                 }
@@ -3514,6 +3625,7 @@ impl ScriptParser {
                                 test_slot,
                                 OpcodeArgs::from_u32(self.code_len() - test_slot),
                             );
+                            self.last_jump_target = self.code_len();
                         } else {
                             break;
                         }
@@ -3826,6 +3938,9 @@ impl ScriptParser {
                     return 1;
                 }
                 if tok.is_open_round() {
+                    // (A `(` starting a new line was already diverted to a new
+                    // statement by the newline-continuation guard at the top of
+                    // EndExpr, so here it is always a same-line call.)
                     if let Some(last) = self.state.pop() {
                         if let State::EmitOp {
                             what_op: id!(.) | id!(.?),
@@ -4028,6 +4143,7 @@ impl ScriptParser {
 
         // Auto-close any unclosed proto/object states left on the stack
         // This happens when input is truncated mid-object (e.g. streaming)
+        let mut let_closed = false;
         let last_index = self.index.saturating_sub(1);
         // set_pop_to_me() reads self.index for source map entries, so point it
         // at the last valid token rather than one-past-end.
@@ -4054,13 +4170,78 @@ impl ScriptParser {
                     self.push_code(Opcode::INDEX_INHERIT_WRITE.into(), last_index);
                 }
                 State::EndStmt { .. } => {
-                    self.set_pop_to_me();
+                    // The EndStmt of an auto-closed `let` must NOT mark a
+                    // statement value: LET consumed it, the final RETURN
+                    // would pop an empty stack.
+                    if !let_closed {
+                        self.set_pop_to_me();
+                    }
+                    let_closed = false;
                 }
                 State::EmitOp { what_op, index } => {
                     self.push_code(State::operator_to_opcode(what_op), index);
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                State::CallMaybeDo { is_method, index } => {
+                    // A call as the final tokens of the source: no next token
+                    // arrived to rule out a trailing `do` block, so resolve it
+                    // as a plain call here.
+                    if is_method {
+                        self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
+                    } else {
+                        self.push_code(Opcode::CALL_EXEC.into(), index);
+                    }
+                }
+                State::ShortCircuitEnd { test_slot } => {
+                    // A short-circuit op at end of source: patch its jump so a
+                    // taken test doesn't land on a stale zero offset.
+                    self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_jump_target = self.code_len();
+                }
+                // A fn/lambda body still open at end of source: close it the
+                // same way the live states do — without this, the body's
+                // jump-over stays 0 (FN_BODY_DYN re-runs, finds its me gone,
+                // and execution FALLS INTO the body at definition time) and
+                // any pending `let` below never binds.
+                State::EndFnExpr { fn_slot, index } => {
+                    self.push_code(Opcode::RETURN.into(), index);
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EndFnBlock {
+                    fn_slot,
+                    last_was_sep,
+                    index,
+                } => {
+                    if !last_was_sep && self.has_pop_to_me() {
+                        self.clear_pop_to_me();
+                        self.push_code(Opcode::RETURN.into(), index);
+                    } else {
+                        self.push_code(
+                            ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
+                            index,
+                        );
+                    }
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EmitLetDyn { index } => {
+                    self.push_code(Opcode::LET_DYN.into(), index);
+                    // A let statement leaves no value: without this, the
+                    // trailing RETURN pops the value LET just consumed.
+                    self.clear_pop_to_me();
+                    let_closed = true;
+                }
+                State::EmitLetTyped { index } => {
+                    self.push_code(Opcode::LET_TYPED.into(), index);
+                    self.clear_pop_to_me();
+                    let_closed = true;
                 }
                 _ => {
                     // Other states (EndExpr, BeginStmt, etc.) - just drop them
@@ -4220,6 +4401,7 @@ impl ScriptParser {
         // Use the last consumed token index for synthetic auto-close source map entries,
         // same as the regular parse() method. Clamp to max_token_index for safety.
         let last_index = self.index.saturating_sub(1).min(max_token_index);
+        let mut let_closed = false;
         // set_pop_to_me() reads self.index for source map entries, so point it
         // at the last valid token rather than one-past-end.
         self.index = last_index;
@@ -4245,13 +4427,79 @@ impl ScriptParser {
                     self.push_code(Opcode::INDEX_INHERIT_WRITE.into(), last_index);
                 }
                 State::EndStmt { .. } => {
-                    self.set_pop_to_me();
+                    // The EndStmt of an auto-closed `let` must NOT mark a
+                    // statement value: LET consumed it, the final RETURN
+                    // would pop an empty stack.
+                    if !let_closed {
+                        self.set_pop_to_me();
+                    }
+                    let_closed = false;
                 }
                 State::EmitOp { what_op, index } => {
                     self.push_code(State::operator_to_opcode(what_op), index);
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                State::CallMaybeDo { is_method, index } => {
+                    // A call as the final tokens of the source: no next token
+                    // arrived to rule out a trailing `do` block, so resolve it
+                    // as a plain call here (a later streamed append restores
+                    // the checkpoint and re-parses if a `do` does arrive).
+                    if is_method {
+                        self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
+                    } else {
+                        self.push_code(Opcode::CALL_EXEC.into(), index);
+                    }
+                }
+                State::ShortCircuitEnd { test_slot } => {
+                    // A short-circuit op at end of source: patch its jump so a
+                    // taken test doesn't land on a stale zero offset.
+                    self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_jump_target = self.code_len();
+                }
+                // A fn/lambda body still open at end of source: close it the
+                // same way the live states do — without this, the body's
+                // jump-over stays 0 (FN_BODY_DYN re-runs, finds its me gone,
+                // and execution FALLS INTO the body at definition time) and
+                // any pending `let` below never binds.
+                State::EndFnExpr { fn_slot, index } => {
+                    self.push_code(Opcode::RETURN.into(), index);
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EndFnBlock {
+                    fn_slot,
+                    last_was_sep,
+                    index,
+                } => {
+                    if !last_was_sep && self.has_pop_to_me() {
+                        self.clear_pop_to_me();
+                        self.push_code(Opcode::RETURN.into(), index);
+                    } else {
+                        self.push_code(
+                            ScriptValue::from_opcode_args(Opcode::RETURN, OpcodeArgs::NIL),
+                            index,
+                        );
+                    }
+                    self.set_opcode_args(
+                        fn_slot as _,
+                        OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
+                    );
+                }
+                State::EmitLetDyn { index } => {
+                    self.push_code(Opcode::LET_DYN.into(), index);
+                    // A let statement leaves no value: without this, the
+                    // trailing RETURN pops the value LET just consumed.
+                    self.clear_pop_to_me();
+                    let_closed = true;
+                }
+                State::EmitLetTyped { index } => {
+                    self.push_code(Opcode::LET_TYPED.into(), index);
+                    self.clear_pop_to_me();
+                    let_closed = true;
                 }
                 _ => {}
             }

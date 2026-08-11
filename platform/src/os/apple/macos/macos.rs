@@ -410,6 +410,22 @@ const KEEP_ALIVE_COUNT: usize = 5;
 const TIMER0_DOWNSHIFT_IDLE_SECS: f64 = 0.2;
 
 impl Cx {
+    /// Bring this app's windows to the front, as if the user clicked its Dock icon.
+    /// Useful for test automation driving an unfocused (or occluded) instance.
+    /// `orderFrontRegardless` raises the windows even when macOS's cooperative
+    /// activation rules deny the app focus.
+    pub fn macos_activate_app(&mut self) {
+        unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+            with_macos_app(|app| {
+                for (window, _view) in &app.cocoa_windows {
+                    let () = msg_send![*window, orderFrontRegardless];
+                }
+            });
+        }
+    }
+
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
