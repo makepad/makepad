@@ -689,6 +689,13 @@ impl ScriptValueType {
             } else {
                 Self::REDUX_STRING
             }
+        } else if self.0 >= Self::F32.0 && self.0 <= Self::U40.0 {
+            // Every numeric storage subtype (f32/f16/u32/i32/u40) IS a number:
+            // collapsing them here gives ints the number bucket's methods and
+            // makes int-vs-float type checks agree — an integer literal used
+            // to fail against a float default with the absurd diagnostic
+            // "expected number, got number" (NaN keeps its own bucket).
+            Self::REDUX_NUMBER
         } else {
             ScriptTypeRedux(self.0)
         }

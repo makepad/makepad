@@ -807,6 +807,15 @@ impl<'a> ScriptVm<'a> {
             // SAFETY: opcodes_ptr is valid as long as bodies isn't mutated during execution
             let opcode = unsafe { *opcodes_ptr.add(ip_index) };
 
+            if self.bx.debug_trace {
+                let stack_len = self.bx.threads.cur_ref().stack.len();
+                if let Some((op, a)) = opcode.as_opcode() {
+                    eprintln!("TRACE b{body_index} ip{ip_index} stack{stack_len} {op:?} {a:?}");
+                } else {
+                    eprintln!("TRACE b{body_index} ip{ip_index} stack{stack_len} PUSH {opcode:?}");
+                }
+            }
+
             if let Some((opcode, args)) = opcode.as_opcode() {
                 self.opcode(opcode, args);
                 // single-load poll for both interrupt sources (errors + traps)

@@ -567,6 +567,11 @@ pub struct TextInput {
     laidout_text: Option<Rc<LaidoutText>>,
     #[rust]
     laidout_width: Option<f32>,
+    /// `draw_text.max_lines` as of the cached layout. Part of the cache key:
+    /// clamping a field to one row is a runtime change (collapse/expand), and
+    /// without this the cached multi-row layout survives it.
+    #[rust]
+    laidout_max_lines: usize,
     #[rust]
     text_area: Area,
     #[rust]
@@ -694,6 +699,90 @@ impl TextInput {
         self.scroll_x = 0.0;
         self.cached_max_scroll_x = 0.0;
         self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Clamps how many rows the field lays out; 0 means unlimited.
+    ///
+    /// Rows made by hard newlines count too, so this genuinely folds a
+    /// multi-line draft to one line rather than only disabling soft wrap —
+    /// which is what makes it usable for a composer that collapses when it
+    /// loses focus. Pair with `draw_text.text_overflow = Ellipsis` to mark the
+    /// truncation.
+    ///
+    /// Exists so callers don't have to reach for a script apply to change one
+    /// number: applying script to a TextInput resets its `#[live]` fields, and
+    /// `text` is one of them — so doing this the scripted way silently emptied
+    /// the field.
+    pub fn set_max_lines(&mut self, cx: &mut Cx, max_lines: usize) {
+        if self.draw_text.max_lines == max_lines {
+            return;
+        }
+        self.draw_text.max_lines = max_lines;
+        // Deliberately does NOT clear `laidout_text`. `max_lines` is part of
+        // the layout cache key, so the next draw re-lays out anyway — whereas
+        // dropping the layout HERE leaves the field with none for the rest of
+        // the event batch, and every cursor operation in that window fails
+        // ("can't move cursor because layout was invalidated by an earlier
+        // event") and silently returns. Since this is called from focus and
+        // blur handling, that window is exactly when the user is clicking into
+        // the field, so the click would place no caret at all.
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn max_lines(&self) -> usize {
+        self.draw_text.max_lines
+    }
+
+    /// Takes key focus AND turns the caret on.
+    ///
+    /// Use this instead of the bare `Widget::set_key_focus` whenever the app
+    /// hands focus to a field itself. The caret is drawn as
+    /// `(1.0 - blink) * focus`, and both come from the `focus`/`blink`
+    /// animators, which only move when the widget is dealt a `Hit::KeyFocus`.
+    /// Setting key focus on a field that ALREADY holds it is a no-op at the
+    /// platform level — no hit is dispatched — so a field that was focused,
+    /// then hidden (hiding doesn't clear `Cx`'s key focus) and shown again
+    /// comes back typable but with no caret and no selection highlight, its
+    /// animators still parked where the last focus-lost left them.
+    pub fn take_key_focus(&mut self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
+        // Unconditional, not gated on the focus actually changing: the whole
+        // point is to repair the visuals when it did NOT.
+        self.animator_play(cx, ids!(focus.on));
+        self.reset_blink_timer(cx);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Overrides the height this field asks its parent for.
+    ///
+    /// For a composer that folds to one line when it loses focus. Pinning the
+    /// HEIGHT is the safe way to do that — unlike clamping `max_lines`, it
+    /// leaves the laid-out text alone, and the laid-out text is what maps a
+    /// click to a caret position. Fold by re-layout and the press that
+    /// re-focuses the field resolves against the folded layout while the
+    /// expanded one is on screen, putting the caret and any drag-selection on
+    /// the wrong text. Overflow is clipped, so pick a whole number of lines or
+    /// the last one is sliced through the middle of its glyphs.
+    pub fn set_height(&mut self, cx: &mut Cx, height: Size) {
+        self.walk.height = height;
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Scrolls back to the very start of the text.
+    ///
+    /// For a field that folds down to a fixed height when it loses focus: the
+    /// scroll offset survives the blur, so a draft last edited near its end
+    /// would fold showing whichever line the caret had scrolled to rather than
+    /// its first. Deliberately leaves `laidout_text` alone — scrolling doesn't
+    /// change the layout, and dropping it here would break every cursor
+    /// operation for the rest of the event batch (see `set_max_lines`).
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        if self.scroll_x == 0.0 && self.scroll_y == 0.0 {
+            return;
+        }
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
         self.draw_bg.redraw(cx);
     }
 
@@ -900,7 +989,10 @@ impl TextInput {
         } else {
             None
         };
-        if self.laidout_text.is_some() && self.laidout_width == max_width_in_lpxs {
+        if self.laidout_text.is_some()
+            && self.laidout_width == max_width_in_lpxs
+            && self.laidout_max_lines == self.draw_text.max_lines
+        {
             return;
         }
         let text = if self.is_password {
@@ -916,6 +1008,7 @@ impl TextInput {
 
         let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_width = max_width_in_lpxs;
+        self.laidout_max_lines = self.draw_text.max_lines;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
@@ -3003,6 +3096,38 @@ impl Widget for TextInput {
 }
 
 impl TextInputRef {
+    /// See [`TextInput::set_max_lines`].
+    pub fn set_max_lines(&self, cx: &mut Cx, max_lines: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_max_lines(cx, max_lines);
+        }
+    }
+
+    pub fn max_lines(&self) -> usize {
+        self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
+    /// See [`TextInput::take_key_focus`].
+    pub fn take_key_focus(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.take_key_focus(cx);
+        }
+    }
+
+    /// See [`TextInput::set_height`].
+    pub fn set_height(&self, cx: &mut Cx, height: Size) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_height(cx, height);
+        }
+    }
+
+    /// See [`TextInput::scroll_to_top`].
+    pub fn scroll_to_top(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.scroll_to_top(cx);
+        }
+    }
+
     pub fn is_multiline(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.is_multiline()

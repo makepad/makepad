@@ -603,6 +603,14 @@ pub struct CxDrawList {
     pub draw_items: CxDrawItems,
     pub draw_item_reorder: Option<Vec<usize>>,
 
+    /// For a draw list registered as a sub-list of the window Overlay: the
+    /// position in which it was BEGUN this frame. Overlay slots are handed out
+    /// first-come and kept for the life of the process, so without this the
+    /// paint order of every glass surface is the order they were first
+    /// created rather than the order they are drawn. `Overlay::end` turns
+    /// these into `draw_item_reorder`.
+    pub overlay_order: u64,
+
     pub draw_list_uniforms: DrawListUniforms,
     pub draw_list_has_clip: bool,
 

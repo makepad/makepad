@@ -21,6 +21,12 @@ impl ScriptFnRef {
     pub fn as_object(&self) -> ScriptObject {
         self.0.as_object()
     }
+
+    /// See [`ScriptObjectRef::heap_key`]: identifies the heap that minted this fn ref,
+    /// so callers can route the call to the VM that owns it.
+    pub fn heap_key(&self) -> usize {
+        self.0.heap_key()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
