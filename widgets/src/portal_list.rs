@@ -1818,6 +1818,8 @@ impl PortalList {
         // `speed` is a per-frame pixel delta, so it must not scale with the item
         // count: on a long list that lands the whole way in one frame.
         self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show, 0.0);
+        // Going to the end means staying there, so pick tailing back up on arrival.
+        self.detect_tail_in_draw = true;
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
@@ -2876,7 +2878,10 @@ impl Widget for PortalList {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
                     }
+                    // A press that doesn't end up moving us off the end shouldn't stop
+                    // tailing, so let the next draw re-arm it like the scroll paths do.
                     self.tail_range = false;
+                    self.detect_tail_in_draw = true;
                     self.was_scrolling = match &self.scroll_state {
                         ScrollState::Drag { samples, .. } => samples.len() > 1,
                         // A press while anything moves the list (a coast, active finger
