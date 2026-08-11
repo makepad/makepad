@@ -438,6 +438,13 @@ impl CxFingers {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
 
+    /// The area that captured the touch with the given uid, if any.
+    /// Lets a raw `Event::LongPress` handler check which widget owns the press.
+    pub fn touch_capture_area(&self, uid: u64) -> Option<Area> {
+        let digit_id: DigitId = live_id_num!(touch, uid).into();
+        self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.area)
+    }
+
     pub fn any_areas_captured(&self) -> bool {
         self.captures.len() > 0
     }
@@ -873,6 +880,21 @@ impl Event {
                 cx.fingers.uncapture_area(*area);
             }
             _ => (),
+        }
+    }
+
+    /// The area that has claimed this pointer event so far (hover, mouse press, or touch start).
+    /// Snapshot it before dispatching a subtree: a claim appearing across that dispatch came from within.
+    pub fn pointer_claimed_area(&self) -> Area {
+        match self {
+            Event::MouseMove(e) => e.handled.get(),
+            Event::MouseDown(e) => e.handled.get(),
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .find(|t| t.state == TouchState::Start)
+                .map_or(Area::Empty, |t| t.handled.get()),
+            _ => Area::Empty,
         }
     }
 }
