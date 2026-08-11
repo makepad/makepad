@@ -29649,17 +29649,30 @@ pub unsafe fn DwmSetWindowAttribute(hwnd: super::super::Foundation::HWND, dwattr
     windows_core::link!("dwmapi.dll" "system" fn DwmSetWindowAttribute(hwnd : super::super::Foundation:: HWND, dwattribute : u32, pvattribute : *const core::ffi::c_void, cbattribute : u32) -> windows_core::HRESULT);
     unsafe { DwmSetWindowAttribute(hwnd, dwattribute.0 as _, pvattribute, cbattribute).ok() }
 }
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DWMNCRENDERINGPOLICY(pub i32);
+pub const DWMNCRP_ENABLED: DWMNCRENDERINGPOLICY = DWMNCRENDERINGPOLICY(2i32);
 pub const DWMSBT_MAINWINDOW: DWM_SYSTEMBACKDROP_TYPE = DWM_SYSTEMBACKDROP_TYPE(2i32);
 pub const DWMSBT_NONE: DWM_SYSTEMBACKDROP_TYPE = DWM_SYSTEMBACKDROP_TYPE(1i32);
 pub const DWMSBT_TABBEDWINDOW: DWM_SYSTEMBACKDROP_TYPE = DWM_SYSTEMBACKDROP_TYPE(4i32);
 pub const DWMSBT_TRANSIENTWINDOW: DWM_SYSTEMBACKDROP_TYPE = DWM_SYSTEMBACKDROP_TYPE(3i32);
+pub const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34i32);
+pub const DWMWA_COLOR_NONE: u32 = 4294967294u32;
+pub const DWMWA_NCRENDERING_POLICY: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(2i32);
 pub const DWMWA_SYSTEMBACKDROP_TYPE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(38i32);
+pub const DWMWA_WINDOW_CORNER_PREFERENCE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(33i32);
+pub const DWMWCP_ROUND: DWM_WINDOW_CORNER_PREFERENCE = DWM_WINDOW_CORNER_PREFERENCE(2i32);
+pub const DWMWCP_ROUNDSMALL: DWM_WINDOW_CORNER_PREFERENCE = DWM_WINDOW_CORNER_PREFERENCE(3i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DWMWINDOWATTRIBUTE(pub i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DWM_SYSTEMBACKDROP_TYPE(pub i32);
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DWM_WINDOW_CORNER_PREFERENCE(pub i32);
 }
 pub mod Dxgi{
 #[inline]
@@ -47163,24 +47176,24 @@ impl IRecordInfo_Vtbl {
 impl windows_core::RuntimeName for IRecordInfo {}
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-pub struct PARAMDESCEX {
-    pub cBytes: u32,
-    pub varDefaultValue: super::Variant::VARIANT,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PARAMDESC {
+    pub pparamdescex: *mut PARAMDESCEX,
+    pub wParamFlags: PARAMFLAGS,
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PARAMDESC {
-    pub pparamdescex: *mut PARAMDESCEX,
-    pub wParamFlags: PARAMFLAGS,
+pub struct PARAMDESCEX {
+    pub cBytes: u32,
+    pub varDefaultValue: super::Variant::VARIANT,
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Clone for PARAMDESCEX {
-    fn clone(&self) -> Self {
-        unsafe { core::mem::transmute_copy(self) }
+impl Default for PARAMDESC {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
     }
 }
 impl PARAMFLAGS {
@@ -47189,21 +47202,21 @@ impl PARAMFLAGS {
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Default for PARAMDESC {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Default for PARAMDESCEX {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
+impl Clone for PARAMDESCEX {
+    fn clone(&self) -> Self {
+        unsafe { core::mem::transmute_copy(self) }
     }
 }
 impl core::ops::BitOr for PARAMFLAGS {
     type Output = Self;
     fn bitor(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+}
+#[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
+impl Default for PARAMDESCEX {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {
@@ -48353,6 +48366,11 @@ pub struct PSC_STATE(pub i32);
 }
 pub mod WindowsAndMessaging{
 #[inline]
+pub unsafe fn AdjustWindowRectEx(lprect: *mut super::super::Foundation::RECT, dwstyle: WINDOW_STYLE, bmenu: bool, dwexstyle: WINDOW_EX_STYLE) -> windows_core::Result<()> {
+    windows_core::link!("user32.dll" "system" fn AdjustWindowRectEx(lprect : *mut super::super::Foundation:: RECT, dwstyle : WINDOW_STYLE, bmenu : windows_core::BOOL, dwexstyle : WINDOW_EX_STYLE) -> windows_core::BOOL);
+    unsafe { AdjustWindowRectEx(lprect as _, dwstyle, bmenu.into(), dwexstyle).ok() }
+}
+#[inline]
 pub unsafe fn CreateWindowExW<P1, P2>(dwexstyle: WINDOW_EX_STYLE, lpclassname: P1, lpwindowname: P2, dwstyle: WINDOW_STYLE, x: i32, y: i32, nwidth: i32, nheight: i32, hwndparent: Option<super::super::Foundation::HWND>, hmenu: Option<HMENU>, hinstance: Option<super::super::Foundation::HINSTANCE>, lpparam: Option<*const core::ffi::c_void>) -> windows_core::Result<super::super::Foundation::HWND>
 where
     P1: windows_core::Param<windows_core::PCWSTR>,
@@ -48558,6 +48576,7 @@ pub const CW_USEDEFAULT: i32 = -2147483648i32;
 pub struct GDI_IMAGE_TYPE(pub u32);
 pub const GWLP_USERDATA: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-21i32);
 pub const GWL_EXSTYLE: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-20i32);
+pub const GWL_STYLE: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(-16i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HCURSOR(pub *mut core::ffi::c_void);
@@ -48746,6 +48765,17 @@ pub struct MSG {
     pub time: u32,
     pub pt: super::super::Foundation::POINT,
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NCCALCSIZE_PARAMS {
+    pub rgrc: [super::super::Foundation::RECT; 3],
+    pub lppos: *mut WINDOWPOS,
+}
+impl Default for NCCALCSIZE_PARAMS {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PEEK_MESSAGE_REMOVE_TYPE(pub u32);
@@ -48885,6 +48915,17 @@ impl core::ops::Not for WINDOWPLACEMENT_FLAGS {
     fn not(self) -> Self {
         Self(self.0.not())
     }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WINDOWPOS {
+    pub hwnd: super::super::Foundation::HWND,
+    pub hwndInsertAfter: super::super::Foundation::HWND,
+    pub x: i32,
+    pub y: i32,
+    pub cx: i32,
+    pub cy: i32,
+    pub flags: SET_WINDOW_POS_FLAGS,
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49045,6 +49086,8 @@ impl core::ops::Not for WNDCLASS_STYLES {
     }
 }
 pub type WNDPROC = Option<unsafe extern "system" fn(param0: super::super::Foundation::HWND, param1: u32, param2: super::super::Foundation::WPARAM, param3: super::super::Foundation::LPARAM) -> super::super::Foundation::LRESULT>;
+pub const WS_BORDER: WINDOW_STYLE = WINDOW_STYLE(8388608u32);
+pub const WS_CAPTION: WINDOW_STYLE = WINDOW_STYLE(12582912u32);
 pub const WS_CLIPCHILDREN: WINDOW_STYLE = WINDOW_STYLE(33554432u32);
 pub const WS_CLIPSIBLINGS: WINDOW_STYLE = WINDOW_STYLE(67108864u32);
 pub const WS_EX_ACCEPTFILES: WINDOW_EX_STYLE = WINDOW_EX_STYLE(16u32);
@@ -49053,11 +49096,9 @@ pub const WS_EX_LAYERED: WINDOW_EX_STYLE = WINDOW_EX_STYLE(524288u32);
 pub const WS_EX_TOOLWINDOW: WINDOW_EX_STYLE = WINDOW_EX_STYLE(128u32);
 pub const WS_EX_TOPMOST: WINDOW_EX_STYLE = WINDOW_EX_STYLE(8u32);
 pub const WS_EX_WINDOWEDGE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(256u32);
-pub const WS_MAXIMIZEBOX: WINDOW_STYLE = WINDOW_STYLE(65536u32);
-pub const WS_MINIMIZEBOX: WINDOW_STYLE = WINDOW_STYLE(131072u32);
+pub const WS_OVERLAPPEDWINDOW: WINDOW_STYLE = WINDOW_STYLE(13565952u32);
 pub const WS_POPUP: WINDOW_STYLE = WINDOW_STYLE(2147483648u32);
-pub const WS_SIZEBOX: WINDOW_STYLE = WINDOW_STYLE(262144u32);
-pub const WS_SYSMENU: WINDOW_STYLE = WINDOW_STYLE(524288u32);
+pub const WS_THICKFRAME: WINDOW_STYLE = WINDOW_STYLE(262144u32);
 }
 }
 }
