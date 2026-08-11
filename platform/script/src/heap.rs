@@ -391,6 +391,12 @@ impl ScriptHeap {
         if a == b {
             return true;
         }
+        // strings are interned (inline or intern table), so string==string is
+        // exactly the bit-compare above — skip the type-check chain on the
+        // failed-compare path (hot in string-tag dispatch: a.kind == "...")
+        if a.is_string_like() && b.is_string_like() {
+            return false;
+        }
         if let Some(a) = a.as_number() {
             if let Some(b) = b.as_number() {
                 return a == b;
