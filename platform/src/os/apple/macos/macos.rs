@@ -61,6 +61,11 @@ const PRESENT_GATE_STUCK_TIMEOUT: Duration = Duration::from_millis(250);
 /// drawable pool holds three, so acquiring with fewer outstanding can't block.
 const PRESENT_GATE_IN_FLIGHT: u32 = 3;
 
+/// How long we trust `occlusionState` before presenting anyway. The flag can
+/// stick on "hidden" while the window is really on screen, which used to skip
+/// every beat forever.
+const OCCLUSION_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
 #[derive(Clone)]
 pub struct MetalWindow {
     pub window_id: WindowId,
@@ -73,10 +78,15 @@ pub struct MetalWindow {
     /// paint beat instead of letting `nextDrawable` block the main thread
     /// when the compositor consumes frames unevenly (mirrored/scaled
     /// displays throttle in 10-25ms phases).
-    pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Packed: low 32 bits are the count, high 32 bits are a reset generation,
+    /// so a handler armed before a watchdog reset can't decrement a newer count.
+    pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// When the present gate started skipping beats, so a gate whose
     /// handlers were lost can be forced back open instead of wedging.
     gate_closed_since: Option<Instant>,
+    /// When we started skipping beats because the window reported itself
+    /// hidden, so a stale `occlusionState` can't skip forever.
+    occluded_since: Option<Instant>,
 }
 
 impl MetalWindow {
@@ -125,8 +135,9 @@ impl MetalWindow {
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
-            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             gate_closed_since: None,
+            occluded_since: None,
         }
     }
 
@@ -173,8 +184,9 @@ impl MetalWindow {
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
-            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             gate_closed_since: None,
+            occluded_since: None,
         }
     }
 
@@ -186,6 +198,31 @@ impl MetalWindow {
     pub(crate) fn stop_resize(&mut self) {
         self.is_resizing = false;
         let () = unsafe { msg_send![self.ca_layer, setPresentsWithTransaction: NO] };
+    }
+
+    /// Drops and recreates the layer's drawable pool the way a real window
+    /// resize does, reclaiming drawables whose presented-handlers never fired.
+    /// Each size goes in its own committed transaction, since two writes in one
+    /// transaction coalesce to no net change and the pool survives untouched.
+    pub(crate) fn rebuild_drawable_pool(&mut self) {
+        let s = self.cal_size;
+        for height in [s.y + 1.0, s.y] {
+            unsafe {
+                let () = msg_send![class!(CATransaction), begin];
+                let () = msg_send![class!(CATransaction), setDisableActions: YES];
+                let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: s.x, height: height}];
+                let () = msg_send![class!(CATransaction), commit];
+                let () = msg_send![class!(CATransaction), flush];
+            }
+        }
+        // Bump the generation as we zero the count, so the overdue handlers
+        // (late, not lost) can't steal decrements from newer frames.
+        let _ = self.in_flight_presents.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |w| Some(((w >> 32).wrapping_add(1)) << 32),
+        );
+        self.gate_closed_since = None;
     }
 
     pub(crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
@@ -444,11 +481,12 @@ impl Cx {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
                         use std::sync::atomic::Ordering;
-                        let in_flight =
-                            metal_window.in_flight_presents.load(Ordering::Acquire);
+                        let in_flight = (metal_window.in_flight_presents.load(Ordering::Acquire)
+                            & 0xffff_ffff) as u32;
                         // An occluded window gets no compositor vsync: presents never reach
                         // glass and an exhausted pool would block nextDrawable forever.
-                        // Skip, keep the pass dirty; the first visible beat repaints.
+                        // Skip and keep the pass dirty, but only for so long, since this
+                        // flag can stick on "hidden" while the window is really on screen.
                         let occlusion: usize = unsafe {
                             msg_send![metal_window.cocoa_window.window, occlusionState]
                         };
@@ -456,25 +494,26 @@ impl Cx {
                             if in_flight >= PRESENT_GATE_IN_FLIGHT {
                                 metal_window.gate_closed_since.get_or_insert_with(Instant::now);
                             }
-                            self.repaint_pass(*draw_pass_id);
-                            continue;
+                            let now = Instant::now();
+                            let since = *metal_window.occluded_since.get_or_insert(now);
+                            if now.duration_since(since) < OCCLUSION_PROBE_INTERVAL {
+                                self.repaint_pass(*draw_pass_id);
+                                continue;
+                            }
+                            // Fall through and present anyway: if the flag is stale we
+                            // recover, and if it's honest we spent one frame to find out.
+                            // The gate below still rebuilds the pool first if it's full.
+                            metal_window.occluded_since = Some(now);
+                        } else {
+                            metal_window.occluded_since = None;
                         }
                         // Present-gated pacing: with display sync on, a full
                         // drawable pool makes nextDrawable BLOCK the main
                         // thread until the compositor consumes a frame
-                        // (10-25ms phases on mirrored/scaled displays). If
-                        // two of the three pool drawables haven't reached
-                        // glass yet, skip this beat and keep the pass dirty —
-                        // the next timer beat retries with the pool drained
-                        // and event handling never stalls behind vsync.
-                        // Gate at 3 (true triple buffering): the pool holds
-                        // three drawables, so acquiring with <=2 in flight
-                        // never blocks. The old >=2 gate was effectively
-                        // single-buffered — with GPU frames over one beat it
-                        // locked into a 50ms submit-wait-submit resonance
-                        // (20fps at 0.6ms CPU). Presented-handlers fire at
-                        // glass time, so in-flight includes queued vsync
-                        // slots; two outstanding is the classic pipeline.
+                        // (10-25ms phases on mirrored/scaled displays). Skip
+                        // this beat and keep the pass dirty; the next timer
+                        // beat retries with the pool drained and event
+                        // handling never stalls behind vsync.
                         if in_flight >= PRESENT_GATE_IN_FLIGHT {
                             let now = Instant::now();
                             let since =
@@ -483,15 +522,17 @@ impl Cx {
                                 self.repaint_pass(*draw_pass_id);
                                 continue;
                             }
-                            // Handlers this overdue are lost. Nudging drawableSize rebuilds
-                            // the pool like a manual resize does, reclaiming stuck drawables
-                            // so the present below can't block on an exhausted pool.
-                            let s = metal_window.cal_size;
-                            unsafe {
-                                let () = msg_send![metal_window.ca_layer, setDrawableSize: CGSize {width: s.x, height: s.y + 1.0}];
-                                let () = msg_send![metal_window.ca_layer, setDrawableSize: CGSize {width: s.x, height: s.y}];
+                            // Handlers this overdue are lost, so reclaim their
+                            // drawables before the present below can block on
+                            // an exhausted pool.
+                            // Quiet while hidden: the probe above trips this every time.
+                            if metal_window.occluded_since.is_none() {
+                                crate::error!(
+                                    "present gate stuck for {:?} with {} in flight, rebuilding drawable pool",
+                                    now.duration_since(since), in_flight,
+                                );
                             }
-                            metal_window.in_flight_presents.store(0, Ordering::Release);
+                            metal_window.rebuild_drawable_pool();
                         }
                         metal_window.gate_closed_since = None;
                         // PerfMonitor: a presented window frame starts here;
@@ -510,34 +551,47 @@ impl Cx {
                             self.repaint_pass(*draw_pass_id);
                             return;
                         }
-                        metal_window
+                        let prev = metal_window
                             .in_flight_presents
                             .fetch_add(1, Ordering::AcqRel);
+                        let generation = (prev >> 32) as u32;
                         let in_flight = metal_window.in_flight_presents.clone();
                         let () = unsafe {
                             msg_send![
                                 drawable,
                                 addPresentedHandler: &objc_block!(move | _drawable: ObjcId | {
+                                    // No-op if a watchdog reset happened since this present.
                                     let _ = in_flight.fetch_update(
                                         std::sync::atomic::Ordering::AcqRel,
                                         std::sync::atomic::Ordering::Acquire,
-                                        |count| Some(count.saturating_sub(1)),
+                                        |w| ((w >> 32) as u32 == generation && w & 0xffff_ffff != 0)
+                                            .then(|| w - 1),
                                     );
                                 })
                             ]
                         };
                         self.passes[*draw_pass_id].set_time(time_now);
-                        if metal_window.is_resizing {
+                        let presented = if metal_window.is_resizing {
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
                                 DrawPassMode::Resizing(drawable),
-                            );
+                            )
                         } else {
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
                                 DrawPassMode::Drawable(drawable),
+                            )
+                        };
+                        // The pass bailed before presenting, so its handler never
+                        // fires. Give the count back or the gate closes for good.
+                        if !presented {
+                            let _ = metal_window.in_flight_presents.fetch_update(
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                |w| ((w >> 32) as u32 == generation && w & 0xffff_ffff != 0)
+                                    .then(|| w - 1),
                             );
                         }
                     }

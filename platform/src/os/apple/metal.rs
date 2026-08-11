@@ -571,12 +571,14 @@ impl Cx {
         }
     }
 
+    /// Returns false if it bailed before presenting, so a caller that already
+    /// counted this frame as in flight can undo that; no handler will fire.
     pub fn draw_pass(
         &mut self,
         draw_pass_id: DrawPassId,
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
-    ) {
+    ) -> bool {
         // PerfMonitor "draw" channel: CPU-side pass encode (all passes of a
         // frame sum), separate from the nextDrawable wait timed by the caller.
         let perf_t0 = self
@@ -595,7 +597,7 @@ impl Cx {
             draw_list_id
         } else {
             crate::error!("Draw pass has no draw list!");
-            return;
+            return false;
         };
 
         let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
@@ -604,7 +606,7 @@ impl Cx {
             let descriptor: ObjcId = unsafe { msg_send![*view, currentRenderPassDescriptor] };
             if descriptor == nil {
                 let () = unsafe { msg_send![pool, release] };
-                return;
+                return false;
             }
             descriptor
         } else {
@@ -638,7 +640,7 @@ impl Cx {
                 self.passes[draw_pass_id].paint_dirty = false;
             }
             let () = unsafe { msg_send![pool, release] };
-            return;
+            return false;
         }
 
         self.passes[draw_pass_id].paint_dirty = false;
@@ -1061,6 +1063,7 @@ impl Cx {
                 t0.elapsed().as_micros() as u64,
             );
         }
+        true
     }
 
     fn build_screenshot_struct(

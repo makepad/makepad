@@ -314,11 +314,11 @@ pub fn define_macos_window_delegate() -> *const Class {
             window_did_move as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
-            sel!(windowChangedScreen:),
+            sel!(windowDidChangeScreen:),
             window_did_change_screen as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
-            sel!(windowChangedBackingProperties:),
+            sel!(windowDidChangeBackingProperties:),
             window_did_change_backing_properties as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
