@@ -854,7 +854,12 @@ pub struct D3d11Window {
     pub win32_window: Box<Win32Window>,
     pub render_target_view: Option<ID3D11RenderTargetView>,
     pub swap_texture: Option<ID3D11Texture2D>,
+    /// Logical inner size the swap-chain buffers were last allocated for.
+    /// Compared together with `alloc_dpi`: a DPI-only change (cross-monitor)
+    /// keeps logical size stable but still needs ResizeBuffers for physical pixels.
     pub alloc_size: Vec2d,
+    /// DPI factor the swap-chain buffers were last allocated for.
+    pub alloc_dpi: f64,
     pub first_draw: bool,
     pub swap_chain: IDXGISwapChain1,
     /// The DXGI frame-latency waitable object for this swap chain, used to pace
@@ -953,6 +958,7 @@ impl D3d11Window {
                 is_in_resize: false,
                 window_id: window_id,
                 alloc_size: wg.inner_size,
+                alloc_dpi: wg.dpi_factor,
                 window_geom: wg,
                 win32_window: win32_window,
                 swap_texture: Some(swap_texture),
@@ -1019,6 +1025,7 @@ impl D3d11Window {
                 is_in_resize: false,
                 window_id,
                 alloc_size: wg.inner_size,
+                alloc_dpi: wg.dpi_factor,
                 window_geom: wg,
                 win32_window,
                 swap_texture: Some(swap_texture),
@@ -1041,7 +1048,10 @@ impl D3d11Window {
     // switch back to swapchain
     pub fn stop_resize(&mut self) {
         self.is_in_resize = false;
+        // Force ResizeBuffers on the next paint (logical size and/or DPI may have
+        // changed while the user was dragging across monitors).
         self.alloc_size = Vec2d::default();
+        self.alloc_dpi = 0.0;
         // Live-resize presents without vsync and skips the frame-latency wait, but
         // every retired Present still credits the waitable semaphore. Drain the
         // accumulated credits here so the per-frame wait in draw_pass_to_window
@@ -1071,8 +1081,19 @@ impl D3d11Window {
         }
     }
 
+    fn clear_alloc_size(&mut self) {
+        self.alloc_size = Vec2d::default();
+        self.alloc_dpi = 0.0;
+    }
+
     pub fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
-        if self.alloc_size == self.window_geom.inner_size {
+        // Buffers are sized in physical pixels (inner_size * dpi_factor). A
+        // cross-monitor move can change DPI while keeping logical size the same;
+        // skipping ResizeBuffers then leaves DXGI_SCALING_NONE presenting a
+        // mismatched buffer (blank/letterboxed until something else forces resize).
+        if self.alloc_size == self.window_geom.inner_size
+            && self.alloc_dpi == self.window_geom.dpi_factor
+        {
             return;
         }
         let inner = self.window_geom.inner_size;
@@ -1081,6 +1102,7 @@ impl D3d11Window {
             return; // ResizeBuffers rejects zero dimensions.
         }
         self.alloc_size = self.window_geom.inner_size;
+        self.alloc_dpi = self.window_geom.dpi_factor;
         // ResizeBuffers requires all references to the old backbuffers released first.
         self.swap_texture = None;
         self.render_target_view = None;
@@ -1111,7 +1133,7 @@ impl D3d11Window {
                     self.resize_error_logged = true;
                     crate::error!("IDXGISwapChain::ResizeBuffers failed: {}", e);
                 }
-                self.alloc_size = Vec2d::default();
+                self.clear_alloc_size();
                 resize_ok = false;
                 // Fall through: re-acquire the old-size backbuffer so we keep presenting.
             }
@@ -1123,7 +1145,7 @@ impl D3d11Window {
                         self.resize_error_logged = true;
                         crate::error!("IDXGISwapChain::GetBuffer failed: {}", e);
                     }
-                    self.alloc_size = Vec2d::default();
+                    self.clear_alloc_size();
                     return;
                 }
             };
@@ -1137,7 +1159,7 @@ impl D3d11Window {
                     self.resize_error_logged = true;
                     crate::error!("CreateRenderTargetView failed: {}", e);
                 }
-                self.alloc_size = Vec2d::default();
+                self.clear_alloc_size();
                 return;
             }
 
