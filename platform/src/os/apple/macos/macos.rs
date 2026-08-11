@@ -464,19 +464,10 @@ impl Cx {
                         // Present-gated pacing: with display sync on, a full
                         // drawable pool makes nextDrawable BLOCK the main
                         // thread until the compositor consumes a frame
-                        // (10-25ms phases on mirrored/scaled displays). If
-                        // two of the three pool drawables haven't reached
-                        // glass yet, skip this beat and keep the pass dirty —
-                        // the next timer beat retries with the pool drained
-                        // and event handling never stalls behind vsync.
-                        // Gate at 3 (true triple buffering): the pool holds
-                        // three drawables, so acquiring with <=2 in flight
-                        // never blocks. The old >=2 gate was effectively
-                        // single-buffered — with GPU frames over one beat it
-                        // locked into a 50ms submit-wait-submit resonance
-                        // (20fps at 0.6ms CPU). Presented-handlers fire at
-                        // glass time, so in-flight includes queued vsync
-                        // slots; two outstanding is the classic pipeline.
+                        // (10-25ms phases on mirrored/scaled displays). Skip
+                        // this beat and keep the pass dirty; the next timer
+                        // beat retries with the pool drained and event
+                        // handling never stalls behind vsync.
                         if in_flight >= PRESENT_GATE_IN_FLIGHT {
                             let now = Instant::now();
                             let since =
