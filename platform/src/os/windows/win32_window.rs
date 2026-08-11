@@ -74,25 +74,24 @@ use {
                         },
                     },
                     WindowsAndMessaging::{
-                        AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                        GetClientRect, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
-                        MoveWindow, PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-                        SetWindowPos, ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE,
-                        GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT,
-                        HTLEFT, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST,
-                        HWND_TOPMOST, LWA_ALPHA, NCCALCSIZE_PARAMS, SWP_NOACTIVATE, SWP_NOMOVE,
+                        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
+                        GetWindowLongPtrW, GetWindowRect, MoveWindow, PostMessageW,
+                        SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                        CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM,
+                        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
+                        HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
+                        LWA_ALPHA, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
                         SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-                        WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY,
-                        WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE,
-                        WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
-                        WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-                        WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
-                        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-                        WM_XBUTTONDOWN, WM_XBUTTONUP, WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN,
-                        WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED,
-                        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
-                        WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME, WINDOW_EX_STYLE,
-                        WINDOW_STYLE,
+                        WA_ACTIVE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+                        WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_COMPOSITION,
+                        WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+                        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+                        WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                        WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                        WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES,
+                        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                        WS_EX_WINDOWEDGE, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+                        WINDOW_EX_STYLE, WINDOW_STYLE,
                     },
                 },
             },
@@ -258,53 +257,62 @@ impl Win32Window {
         unsafe { WINDOW_EX_STYLE(GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32) }
     }
 
-    /// Frame insets via `AdjustWindowRectEx` on a zero client rect.
+    /// Frame insets via DPI-aware `AdjustWindowRectEx*` on a zero client rect.
     /// `left`/`top` are negative; `right`/`bottom` are positive.
-    fn frame_border_thickness(style: WINDOW_STYLE, ex_style: WINDOW_EX_STYLE) -> RECT {
+    fn frame_border_thickness(&self, style: WINDOW_STYLE, ex_style: WINDOW_EX_STYLE) -> RECT {
         let mut thickness = RECT {
             left: 0,
             top: 0,
             right: 0,
             bottom: 0,
         };
-        unsafe {
-            let _ = AdjustWindowRectEx(&mut thickness, style, false, ex_style);
-        }
+        with_win32_app(|app| {
+            app.dpi_functions.adjust_window_rect_ex(
+                self.hwnd,
+                style.0,
+                ex_style.0,
+                &mut thickness,
+            );
+        });
         thickness
     }
 
-    /// Expand the client into the caption while keeping resize borders outside
-    /// the client. Mutates `NCCALCSIZE_PARAMS.rgrc[0]`.
+    /// Non-client insets for custom chrome.
+    ///
+    /// Restored (non-maximized) mains use a **fully client-sized** frame: no
+    /// thickframe strip outside the swap chain. That strip was showing as a
+    /// light/white edge while resizing because D3D only paints the client.
+    /// Resize is emulated via `WM_NCHITTEST` `HT*` returns instead.
+    ///
+    /// Maximized windows still keep border+thickframe insets so the client
+    /// matches the monitor work area.
+    fn extended_client_border_thickness(&self) -> RECT {
+        let style = self.get_style();
+        let ex_style = self.get_ex_style();
+        if (style.0 & WS_CAPTION.0) == WS_CAPTION.0 && self.get_is_maximized() {
+            // Caption is drawn into the client; keep only border+thickframe for work-area.
+            self.frame_border_thickness(
+                WINDOW_STYLE((style.0 & !WS_CAPTION.0) | WS_BORDER.0 | WS_THICKFRAME.0),
+                ex_style,
+            )
+        } else {
+            RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            }
+        }
+    }
+
+    /// Expand the client for custom chrome. Mutates `NCCALCSIZE_PARAMS.rgrc[0]`.
     unsafe fn apply_extended_client_nccalcsize(&self, lparam: LPARAM) {
         let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
         let rect = &mut params.rgrc[0];
+        let border = self.extended_client_border_thickness();
 
-        let style = self.get_style();
-        let ex_style = self.get_ex_style();
-        let maximized = self.get_is_maximized();
-
-        let border = if (style.0 & WS_CAPTION.0) == WS_CAPTION.0 {
-            if maximized {
-                // Caption is drawn into the client; keep only border+thickframe for work-area.
-                Self::frame_border_thickness(
-                    WINDOW_STYLE((style.0 & !WS_CAPTION.0) | WS_BORDER.0 | WS_THICKFRAME.0),
-                    ex_style,
-                )
-            } else {
-                let mut b = Self::frame_border_thickness(style, ex_style);
-                // Caption already includes the top border — extend client into it.
-                b.top = 0;
-                b
-            }
-        } else if (style.0 & WS_BORDER.0) != 0 {
-            Self::frame_border_thickness(style, ex_style)
-        } else {
-            Self::frame_border_thickness(style, ex_style)
-        };
-
-        // `rgrc[0]` arrives as the proposed *window* rect. `AdjustWindowRectEx` on a
-        // zero client yields negative left/top; subtracting those insets converts
-        // window → client while leaving thickframe resize borders outside.
+        // `rgrc[0]` arrives as the proposed *window* rect. Subtracting
+        // `AdjustWindowRectEx` insets converts window → client.
         rect.left -= border.left;
         rect.top -= border.top;
         rect.right -= border.right;
@@ -328,26 +336,158 @@ impl Win32Window {
     }
 
     /// Physical-pixel frame insets (left, top, right, bottom) for converting
-    /// window rect <-> client size under extended-client chrome.
+    /// window rect <-> client size under custom chrome.
     fn client_frame_insets_px(&self) -> (i32, i32, i32, i32) {
-        let style = self.get_style();
-        let ex_style = self.get_ex_style();
-        let maximized = self.get_is_maximized();
-        let border = if (style.0 & WS_CAPTION.0) == WS_CAPTION.0 {
-            if maximized {
-                Self::frame_border_thickness(
-                    WINDOW_STYLE((style.0 & !WS_CAPTION.0) | WS_BORDER.0 | WS_THICKFRAME.0),
-                    ex_style,
-                )
-            } else {
-                let mut b = Self::frame_border_thickness(style, ex_style);
-                b.top = 0;
-                b
-            }
-        } else {
-            Self::frame_border_thickness(style, ex_style)
-        };
+        let border = self.extended_client_border_thickness();
         (-border.left, -border.top, border.right, border.bottom)
+    }
+
+    /// Force a `WM_NCCALCSIZE` pass now that `GWLP_USERDATA` is set so our
+    /// extended-client handler runs (CreateWindow still used DefWindowProc).
+    fn force_frame_change(&self) {
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOACTIVATE
+                    | SWP_FRAMECHANGED,
+            );
+        }
+    }
+
+    /// Logical-pixel resize hit band for fully-client custom chrome / popups.
+    fn resize_edge_logical(&self) -> f64 {
+        // Thick enough to grab reliably; not so thick it steals caption clicks.
+        const EDGE: f64 = 8.0;
+        EDGE
+    }
+
+    /// Same geometry as `WindowGeom.window_chrome_buttons` (logical, client-relative).
+    fn chrome_buttons_rect_logical(&self) -> Rect {
+        const BUTTON_W: f64 = 46.0;
+        const BUTTON_H: f64 = 29.0;
+        const BUTTON_COUNT: f64 = 3.0;
+        let inner = self.get_inner_size();
+        Rect {
+            pos: dvec2(inner.x - BUTTON_W * BUTTON_COUNT, 0.0),
+            size: dvec2(BUTTON_W * BUTTON_COUNT, BUTTON_H),
+        }
+    }
+
+    /// `HTTOP` / `HTLEFT` / … for a fully client-sized window. Returns `None`
+    /// when the cursor is outside the resize band, over caption buttons, or
+    /// when maximized.
+    fn hit_test_client_resize_edge(&self, lparam: LPARAM) -> Option<LRESULT> {
+        if self.get_is_maximized() {
+            return None;
+        }
+        let dpi = self.get_dpi_factor();
+        let edge = self.resize_edge_logical();
+        let abs = self.get_mouse_pos_from_lparam(lparam);
+        let mut window_rect = RECT {
+            left: 0,
+            top: 0,
+            bottom: 0,
+            right: 0,
+        };
+        unsafe {
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
+        }
+        let origin = dvec2(window_rect.left as f64 / dpi, window_rect.top as f64 / dpi);
+        let size = dvec2(
+            (window_rect.right - window_rect.left) as f64 / dpi,
+            (window_rect.bottom - window_rect.top) as f64 / dpi,
+        );
+        let local = abs - origin;
+
+        // Don't steal hits from the system-style caption buttons (close/max/min).
+        if !self.is_popup && self.chrome_buttons_rect_logical().contains(local) {
+            return None;
+        }
+
+        let on_left = abs.x < origin.x + edge;
+        let on_right = abs.x > origin.x + size.x - edge;
+        let on_top = abs.y < origin.y + edge;
+        let on_bottom = abs.y > origin.y + size.y - edge;
+
+        let hit = match (on_left, on_right, on_top, on_bottom) {
+            (true, _, true, _) => HTTOPLEFT,
+            (true, _, _, true) => HTBOTTOMLEFT,
+            (_, true, true, _) => HTTOPRIGHT,
+            (_, true, _, true) => HTBOTTOMRIGHT,
+            (true, _, _, _) => HTLEFT,
+            (_, true, _, _) => HTRIGHT,
+            (_, _, true, _) => HTTOP,
+            (_, _, _, true) => HTBOTTOM,
+            _ => return None,
+        };
+        Some(LRESULT(hit as isize))
+    }
+
+    /// Caption / client hit-test for the custom-chrome client area.
+    fn hit_test_extended_client(&mut self, lparam: LPARAM) -> LRESULT {
+        let dpi = self.get_dpi_factor();
+        let mut window_rect = RECT {
+            left: 0,
+            top: 0,
+            bottom: 0,
+            right: 0,
+        };
+        unsafe {
+            GetWindowRect(self.hwnd, &mut window_rect).unwrap();
+        }
+        let origin = dvec2(window_rect.left as f64 / dpi, window_rect.top as f64 / dpi);
+
+        // Dedupe: return the cached WindowDragQuery result for a repeated cursor
+        // position (the loop is vsync-paced, so the OS sends several same-position
+        // hit-tests/frame).
+        let response_val = match self.nc_dq_cache.get() {
+            Some((lp, rv)) if lp == lparam.0 => rv,
+            _ => {
+                // Snapshot the cache generation: dispatching WindowDragQuery can
+                // reenter the window proc (nested SendMessage) and invalidate the
+                // cache mid-flight; if it does, we must NOT write our now-stale
+                // result back over that invalidation.
+                let gen = self.nc_dq_gen.get();
+                let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+                self.do_callback(Win32Event::WindowDragQuery(WindowDragQueryEvent {
+                    window_id: self.window_id,
+                    abs: self.get_mouse_pos_from_lparam(lparam) - origin,
+                    response: response.clone(),
+                }));
+                let rv = response.get();
+                if self.nc_dq_gen.get() == gen {
+                    self.nc_dq_cache.set(Some((lparam.0, rv)));
+                }
+                rv
+            }
+        };
+        match response_val {
+            WindowDragQueryResponse::Caption => {
+                with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
+                LRESULT(HTCAPTION as isize)
+            }
+            WindowDragQueryResponse::SysMenu => {
+                with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
+                LRESULT(HTSYSMENU as isize)
+            }
+            WindowDragQueryResponse::Client | WindowDragQueryResponse::NoAnswer => {
+                // Caption already restores Default above. Client must too: after
+                // HTLEFT/HTRIGHT the system size cursor sticks otherwise, and the
+                // window class cursor alone is not enough once we cleared
+                // `current_cursor` on the resize edge. Widgets re-apply Text/etc.
+                // on the following WM_MOUSEMOVE.
+                with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
+                LRESULT(HTCLIENT as isize)
+            }
+        }
     }
 
     // 2-stage initialization (new and init) to connect GWLP_USERDATA
@@ -361,8 +501,8 @@ impl Win32Window {
     ) -> Win32Window {
         let title = encode_wide(title);
 
-        // Overlapped top-level window. Client is extended into the caption via
-        // WM_NCCALCSIZE; chrome stays app-drawn.
+        // Overlapped top-level window with app-drawn chrome. Restored size is
+        // fully client-sized (WM_NCCALCSIZE); maximize keeps work-area insets.
         let style = WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
 
         let style_ex = WS_EX_WINDOWEDGE | WS_EX_APPWINDOW | WS_EX_ACCEPTFILES;
@@ -390,6 +530,8 @@ impl Win32Window {
             )
             .unwrap()
         };
+        // DWM chrome is applied in `init` after USERDATA is set (so NCCALCSIZE
+        // can use our handler). Shape/NCRP here only covers the CreateWindow gap.
         Self::apply_win11_window_shape(hwnd, false);
         Self::set_nc_rendering_enabled(hwnd);
 
@@ -476,13 +618,21 @@ impl Win32Window {
         }
     }
 
-    // initialize GWLP_USERDATA and registration of global stuff, and set inner size
+    // initialize GWLP_USERDATA and registration of global stuff, then set inner size
     pub fn init(&mut self, size: Vec2d) {
         unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *const _ as isize) };
 
         with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
         with_win32_app(|app| app.all_windows.push(self.hwnd));
-        // `size` is the desired client (inner) size from CreateWindow.
+
+        if !self.is_popup {
+            // CreateWindow ran NCCALCSIZE via DefWindowProc (no USERDATA yet).
+            // Apply DWM chrome, then force our extended-client frame before sizing.
+            self.extend_frame_for_custom_chrome();
+            self.force_frame_change();
+        }
+
+        // `size` is the app's desired client (inner) size (`create_inner_size`).
         self.set_inner_size(size);
         if self.is_fullscreen {
             self.maximize();
@@ -557,105 +707,24 @@ impl Win32Window {
                         // Popups stay fully client-sized.
                         return LRESULT(0);
                     }
-                    // Extend client into caption; keep thickframe resize borders
-                    // outside the client rect.
+                    // Custom chrome: restored = fully client-sized; maximized keeps
+                    // work-area insets. DWM extend/shape is done in init / visuals.
                     unsafe {
                         window.apply_extended_client_nccalcsize(lparam);
                     }
-                    window.extend_frame_for_custom_chrome();
                     return LRESULT(0);
                 }
             }
             WM_NCHITTEST => {
-                let abs = window.get_mouse_pos_from_lparam(lparam);
-                let mut rect = RECT {
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    right: 0,
-                };
-                const EDGE: f64 = 4.0;
-                // WM_NCHITTEST is OS-sent on every mouse move (uncoalesced); `get_dpi_factor()` is
-                // now cached so this (and the two calls inside `get_mouse_pos_from_lparam`) no
-                // longer syscall `GetDeviceCaps` per move.
-                let dpi = window.get_dpi_factor();
-                GetWindowRect(hwnd, &mut rect).unwrap();
-                let rect = Rect {
-                    pos: dvec2(rect.left as f64 / dpi, rect.top as f64 / dpi),
-                    size: dvec2(
-                        (rect.right - rect.left) as f64 / dpi,
-                        (rect.bottom - rect.top) as f64 / dpi,
-                    ),
-                };
-                if abs.x < rect.pos.x + EDGE {
-                    if abs.y < rect.pos.y + EDGE {
-                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NwseResize));
-                        return LRESULT(HTTOPLEFT as isize);
-                    }
-                    if abs.y > rect.pos.y + rect.size.y - EDGE {
-                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NeswResize));
-                        return LRESULT(HTBOTTOMLEFT as isize);
-                    }
-                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::EwResize));
-                    return LRESULT(HTLEFT as isize);
+                // Fully-client custom chrome (restored mains + popups): emulate
+                // resize borders with HT* hits. Returning system sizing codes
+                // still starts a resize drag; WM_SETCURSOR owns the cursor so we
+                // only clear our cached cursor (avoids stuck resize arrows).
+                if let Some(resize_hit) = window.hit_test_client_resize_edge(lparam) {
+                    with_win32_app(|app| app.current_cursor = None);
+                    return resize_hit;
                 }
-                if abs.x > rect.pos.x + rect.size.x - EDGE {
-                    if abs.y < rect.pos.y + EDGE {
-                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NeswResize));
-                        return LRESULT(HTTOPRIGHT as isize);
-                    }
-                    if abs.y > rect.pos.y + rect.size.y - EDGE {
-                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NwseResize));
-                        return LRESULT(HTBOTTOMRIGHT as isize);
-                    }
-                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::EwResize));
-                    return LRESULT(HTRIGHT as isize);
-                }
-                if abs.y < rect.pos.y + EDGE {
-                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NsResize));
-                    return LRESULT(HTTOP as isize);
-                }
-                if abs.y > rect.pos.y + rect.size.y - EDGE {
-                    with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NsResize));
-                    return LRESULT(HTBOTTOM as isize);
-                }
-                // Dedupe: return the cached WindowDragQuery result for a repeated cursor position
-                // (the loop is vsync-paced, so the OS sends several same-position hit-tests/frame).
-                let response_val = match window.nc_dq_cache.get() {
-                    Some((lp, rv)) if lp == lparam.0 => rv,
-                    _ => {
-                        // Snapshot the cache generation: dispatching WindowDragQuery can reenter the
-                        // window proc (nested SendMessage) and invalidate the cache mid-flight; if it
-                        // does, we must NOT write our now-stale result back over that invalidation.
-                        let gen = window.nc_dq_gen.get();
-                        let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
-                        window.do_callback(Win32Event::WindowDragQuery(WindowDragQueryEvent {
-                            window_id: window.window_id,
-                            abs: window.get_mouse_pos_from_lparam(lparam) - rect.pos,
-                            response: response.clone(),
-                        }));
-                        let rv = response.get();
-                        if window.nc_dq_gen.get() == gen {
-                            window.nc_dq_cache.set(Some((lparam.0, rv)));
-                        }
-                        rv
-                    }
-                };
-                match response_val {
-                    WindowDragQueryResponse::Client => {
-                        return LRESULT(HTCLIENT as isize);
-                    }
-                    WindowDragQueryResponse::Caption => {
-                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
-                        return LRESULT(HTCAPTION as isize);
-                    }
-                    WindowDragQueryResponse::SysMenu => {
-                        with_win32_app(|app| app.set_mouse_cursor(MouseCursor::Default));
-                        return LRESULT(HTSYSMENU as isize);
-                    }
-                    _ => (),
-                }
-                return LRESULT(HTCLIENT as isize);
+                return window.hit_test_extended_client(lparam);
             }
             WM_ERASEBKGND => return LRESULT(1),
             WM_MOUSEMOVE => {
@@ -1257,16 +1326,10 @@ impl Win32Window {
     }
 
     pub fn get_is_maximized(&self) -> bool {
-        unsafe {
-            let wp: mem::MaybeUninit<WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
-            let mut wp = wp.assume_init();
-            wp.length = mem::size_of::<WINDOWPLACEMENT>() as u32;
-            GetWindowPlacement(self.hwnd, &mut wp).unwrap();
-            if wp.showCmd == SW_MAXIMIZE.0 as u32 {
-                return true;
-            }
-            return false;
-        }
+        // Prefer the live WS_MAXIMIZE style bit — more accurate during
+        // WM_NCCALCSIZE than WINDOWPLACEMENT while maximize/restore is in flight.
+        const WS_MAXIMIZE: u32 = 0x0100_0000;
+        (self.get_style().0 & WS_MAXIMIZE) != 0
     }
 
     pub fn time_now(&self) -> f64 {
@@ -1466,24 +1529,17 @@ impl Win32Window {
                 right: 0,
             };
             GetWindowRect(self.hwnd, &mut window_rect).unwrap();
-            let mut client_rect = RECT {
-                left: 0,
-                top: 0,
-                bottom: 0,
-                right: 0,
-            };
-            GetClientRect(self.hwnd, &mut client_rect).unwrap();
             let dpi = self.get_dpi_factor();
+            // Use the same inset model as WM_NCCALCSIZE / send_sizing_event so
+            // we do not depend on the current client rect (which may still be
+            // DefWindowProc-sized before the first FRAMECHANGED).
+            let (l, t, r, b) = self.client_frame_insets_px();
             MoveWindow(
                 self.hwnd,
                 window_rect.left,
                 window_rect.top,
-                (size.x * dpi) as i32
-                    + ((window_rect.right - window_rect.left)
-                        - (client_rect.right - client_rect.left)),
-                (size.y * dpi) as i32
-                    + ((window_rect.bottom - window_rect.top)
-                        - (client_rect.bottom - client_rect.top)),
+                (size.x * dpi) as i32 + l + r,
+                (size.y * dpi) as i32 + t + b,
                 false,
             )
             .unwrap();
