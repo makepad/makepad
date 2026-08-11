@@ -156,6 +156,7 @@ pub struct Cx {
 
     /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
+    pub(crate) clear_hover_queued: bool,
 
     pub debug: Debug,
 
@@ -501,6 +502,7 @@ impl Cx {
             pending_script_reapply: false,
             pending_live_edit_request: false,
             pending_window_geom_changes: Default::default(),
+            clear_hover_queued: false,
 
             widget_tree_dump_requests: Default::default(),
             widget_snapshot_requests: Default::default(),

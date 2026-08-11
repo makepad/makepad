@@ -791,6 +791,12 @@ impl Widget for View {
                 return;
             }
         }
+        if let Event::ClearHover = event {
+            if self.animator.is_defined {
+                self.animator_play(cx, ids!(hover.off));
+                self.animator_play(cx, ids!(down.off));
+            }
+        }
         // A press that catches an in-progress momentum fling stops the scroll and is consumed:
         // it must not also activate a child widget under the finger, as on iOS, Android, and
         // macOS. So when the scroll bars report a caught fling, skip dispatching this press to

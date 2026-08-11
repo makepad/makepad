@@ -199,6 +199,10 @@ impl Widget for CalloutTooltip {
             }
         }
 
+        if let Event::ClearHover = event {
+            self.hide(cx);
+        }
+
         // Auto-process `TooltipAction`s emitted by other widgets in the
         // action batch via the `WidgetMatchEvent` impl below.
         self.widget_match_event(cx, event, scope);

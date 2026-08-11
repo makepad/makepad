@@ -162,6 +162,9 @@ pub enum Event {
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
+    /// Clear all hover/pressed visual state, e.g. after an overlay that
+    /// swallowed the hover-outs (a context menu) has closed.
+    ClearHover,
 
     /// The raw event that occurs when the user presses a mouse button down.
     ///
@@ -300,6 +303,7 @@ impl Event {
             17 => "WindowGeomChange",
             18 => "VirtualKeyboard",
             19 => "ClearAtlasses",
+            72 => "ClearHover",
 
             20 => "MouseDown",
             21 => "MouseMove",
@@ -389,6 +393,7 @@ impl Event {
             Self::WindowGeomChange(_) => 17,
             Self::VirtualKeyboard(_) => 18,
             Self::ClearAtlasses => 19,
+            Self::ClearHover => 72,
             Self::PopupDismissed(_) => 61,
 
             Self::MouseDown(_) => 20,
