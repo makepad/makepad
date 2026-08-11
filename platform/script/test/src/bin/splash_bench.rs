@@ -282,6 +282,29 @@ fn main() {
         },
     ));
 
+    // 9b. String-tag dispatch: mostly-failing string compares, the sandbox3d
+    // brain-selector pattern (a.kind == "villager" / "critter" / ...).
+    results.push(bench_call(
+        vm,
+        "string_cmp",
+        100_000.0,
+        5,
+        1,
+        script! {
+            let kinds = ["villager", "critter", "nightmarehuggy", "guardian"]
+            let f = || {
+                let c = 0.0
+                for r in 25000 {
+                    for k in kinds {
+                        if k == "guardian" { c += 1 }
+                    }
+                }
+                c
+            }
+            f
+        },
+    ));
+
     // 10. Composite: sandbox3d-style game tick. 40 actors in an array,
     // string-kind brain dispatch, field math, an N^2 neighbor scan for one
     // kind, and native "verb" calls (mod.bench.nudge) like game.* verbs.
@@ -343,7 +366,49 @@ fn main() {
         },
     ));
 
-    // 11. Host -> script call overhead: trivial fn called from Rust.
+    // 11. Same loop as for_range_arith but executed the way the game host
+    // runs scripts: instruction limit + wall-clock run budget installed.
+    // The delta vs for_range_arith is the per-instruction accounting cost.
+    if std::env::var("BENCH_ONLY").is_err() {
+        let f = vm.eval(script! {
+            let f = || {
+                let acc = 0.0
+                for i in 100000 {
+                    acc += i * 0.5
+                }
+                acc
+            }
+            f
+        });
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let start = Instant::now();
+            // long deadlines: we want the per-instruction sampling cost, not
+            // actual trips (a loaded machine can deschedule us past 64ms)
+            vm.bx.run_budget = Some(ScriptRunBudget::from_durations(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(10),
+                512,
+            ));
+            let check = vm.with_instruction_limit(1_000_000_000, |vm| vm.call(f, &[]));
+            vm.bx.run_budget = None;
+            let el = start.elapsed().as_secs_f64();
+            assert!(!check.is_err());
+            let ns = el * 1e9 / 100_000.0;
+            if ns < best {
+                best = ns;
+            }
+            vm.gc();
+        }
+        results.push(BenchResult {
+            name: "arith_hostmode",
+            ns_per_op: best,
+            ops: 100_000.0,
+            check: NIL,
+        });
+    }
+
+    // 12. Host -> script call overhead: trivial fn called from Rust.
     {
         let f = vm.eval(script! {
             let f = |x| x
