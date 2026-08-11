@@ -571,17 +571,27 @@ impl Cx {
                             ]
                         };
                         self.passes[*draw_pass_id].set_time(time_now);
-                        if metal_window.is_resizing {
+                        let presented = if metal_window.is_resizing {
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
                                 DrawPassMode::Resizing(drawable),
-                            );
+                            )
                         } else {
                             self.draw_pass(
                                 *draw_pass_id,
                                 metal_cx,
                                 DrawPassMode::Drawable(drawable),
+                            )
+                        };
+                        // The pass bailed before presenting, so its handler never
+                        // fires. Give the count back or the gate closes for good.
+                        if !presented {
+                            let _ = metal_window.in_flight_presents.fetch_update(
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                                |w| ((w >> 32) as u32 == generation && w & 0xffff_ffff != 0)
+                                    .then(|| w - 1),
                             );
                         }
                     }
