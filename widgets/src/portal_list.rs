@@ -38,6 +38,10 @@ script_mod! {
 /// The maximum number of items that will be shown as part of a smooth scroll animation.
 const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 
+/// How many frames a `smooth_scroll_to_end` animation takes, whatever the
+/// distance, so a long list doesn't crawl at a fixed pixels-per-frame rate.
+const SMOOTH_SCROLL_TO_END_FRAMES: f64 = 24.0;
+
 enum ScrollState {
     Stopped,
     Drag {
@@ -1746,7 +1750,18 @@ impl PortalList {
         let item_top = self.item_top_from_height_tree(target_id);
         if viewport_size > 0.0 {
             if let Some(item_top) = item_top {
-                if item_top >= 0.0 && item_top < viewport_size {
+                // Targeting the last item means "go to the bottom", and a tall
+                // last item can have its top on screen with most of it below.
+                let settled = if target_id + 1 >= self.range_end {
+                    self.at_end
+                } else {
+                    item_top >= 0.0 && item_top < viewport_size
+                };
+                if settled {
+                    // Same as arriving under animation: we're at the end, so follow it.
+                    if target_id + 1 >= self.range_end {
+                        self.detect_tail_in_draw = true;
+                    }
                     cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
                     return;
                 }
@@ -1808,8 +1823,24 @@ impl PortalList {
         if self.items.is_empty() {
             return;
         }
-        let speed = speed * self.range_end as f64;
-        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show, 0.0);
+        // `range_end` is exclusive, so the last item is one before it.
+        let target_id = self.range_end.saturating_sub(1);
+        // `speed` is a per-frame pixel delta. Scale it to the distance so the
+        // animation takes the same time from anywhere in the list.
+        let speed = match self.item_top_from_height_tree(target_id) {
+            Some(item_top) => (item_top.abs() / SMOOTH_SCROLL_TO_END_FRAMES).max(speed),
+            None => speed,
+        };
+        // Pass an unbounded window so `smooth_scroll_to` doesn't teleport the anchor
+        // to the last few items first; that jump is most of the travel, and it's why
+        // this only looked smooth when you were already near the bottom.
+        self.smooth_scroll_to(
+            cx,
+            target_id,
+            speed,
+            max_items_to_show.or(Some(usize::MAX)),
+            0.0,
+        );
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
@@ -2452,6 +2483,11 @@ impl Widget for PortalList {
                     } else {
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
+                        // Landing on the last item means we're following the end again,
+                        // so let the next draw pick tailing back up.
+                        if target_id + 1 >= self.range_end {
+                            self.detect_tail_in_draw = true;
+                        }
                         cx.widget_action(uid, PortalListAction::SmoothScrollReached);
                     }
                 }
@@ -2868,7 +2904,10 @@ impl Widget for PortalList {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
                     }
+                    // A press that doesn't end up moving us off the end shouldn't stop
+                    // tailing, so let the next draw re-arm it like the scroll paths do.
                     self.tail_range = false;
+                    self.detect_tail_in_draw = true;
                     self.was_scrolling = match &self.scroll_state {
                         ScrollState::Drag { samples, .. } => samples.len() > 1,
                         // A press while anything moves the list (a coast, active finger
