@@ -1078,6 +1078,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
             if !script_has_proto!(vm, options, net.SocketStreamOptions) {
                 return script_err_type_mismatch!(vm.trap(), "invalid socket_stream arg type");
             }
+            // Raw sockets obey the same gate as http_request/web_socket, so a sandboxed
+            // VM without a net runtime can't open TCP connections.
+            if vm.std_mut::<ScriptStd>().net.is_none() {
+                return script_err_io!(vm.trap(), "script net runtime is not configured");
+            }
             let options = SocketStreamOptions::script_from_value(vm, options);
             if options.host.is_empty() || options.port.is_empty() {
                 return script_err_invalid_args!(

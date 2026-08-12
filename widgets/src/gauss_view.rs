@@ -97,6 +97,15 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
     entry.snapshot.clone()
 }
 
+// DRAW-ORDER RULE FOR GLASS SURFACES
+// -----------------------------------
+// Gauss/lens surfaces render their refraction overlay in a LATER pass that
+// composites above anything the *parent* widget drew after this child in the
+// main pass. Consequence for widget authors: any chrome that must appear on
+// top of a glass surface (badges, resize grips, selection outlines) must be a
+// CHILD of the glass view - quads drawn by the parent after the child will be
+// covered by the lens overlay even though they were drawn "later".
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
@@ -284,15 +293,29 @@ script_mod! {
                 return vec2(0.0, 1.0)
             }
 
+            // Effective refraction band width: never wider than ~35% of the
+            // surface's smaller side. Past that the whole surface becomes edge
+            // distortion, which renders small discs (< ~32px) as smeared blobs.
+            eff_lensing_width: fn() -> float {
+                let cap = max(min(self.sdf_rect_size.x, self.sdf_rect_size.y) * 0.35, 1.0)
+                return min(max(self.lensing_width, 1.0), cap)
+            }
+
+            // Scale factor for lensing strength when the band was capped, so
+            // small surfaces also refract proportionally less.
+            eff_lensing_scale: fn() -> float {
+                return self.eff_lensing_width() / max(self.lensing_width, 1.0)
+            }
+
             rounded_edge_lens: fn(shape: float) -> float {
-                let edge = clamp(1.0 - abs(shape) / max(self.lensing_width, 1.0), 0.0, 1.0)
+                let edge = clamp(1.0 - abs(shape) / self.eff_lensing_width(), 0.0, 1.0)
                 return pow(edge, 1.45) * clamp(self.lensing_effect, 0.0, 1.0)
             }
 
             lensed_uv: fn(uv: vec2, shape: float) -> vec2 {
                 let normal = self.rounded_edge_normal(shape)
                 let lens = self.rounded_edge_lens(shape)
-                let offset = normal * (lens * self.lensing_strength) / max(self.source_size, vec2(1.0, 1.0))
+                let offset = normal * (lens * self.lensing_strength * self.eff_lensing_scale()) / max(self.source_size, vec2(1.0, 1.0))
                 return clamp(uv + offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
             }
 
@@ -406,7 +429,7 @@ script_mod! {
                 let lens = self.rounded_edge_lens(sdf.shape) * lens_depth
                 let normal = self.rounded_edge_normal(sdf.shape)
                 let water_offset = ripple_dir * (ripple_surface * 22.0) / max(self.source_size, vec2(1.0, 1.0))
-                let base_offset = normal * (lens * self.lensing_strength) / max(self.source_size, vec2(1.0, 1.0)) + water_offset
+                let base_offset = normal * (lens * self.lensing_strength * self.eff_lensing_scale()) / max(self.source_size, vec2(1.0, 1.0)) + water_offset
                 let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / max(self.source_size, vec2(1.0, 1.0))
                     + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 4.5) / max(self.source_size, vec2(1.0, 1.0))
                 let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))

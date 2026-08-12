@@ -31,6 +31,7 @@ impl Overlay {
         // mark our overlay_id on cx
         cx.overlay_id = Some(self.draw_list.id());
         cx.overlay_pass_id = None;
+        cx.overlay_seq = 0;
         // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
     }
 
@@ -38,6 +39,7 @@ impl Overlay {
         // mark our overlay_id on cx
         cx.overlay_id = Some(self.draw_list.id());
         cx.overlay_pass_id = Some(pass_id);
+        cx.overlay_seq = 0;
         // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
     }
 
@@ -80,5 +82,32 @@ impl Overlay {
                 }
             }
         }
+
+        // Composite in DRAW order, not slot order.
+        //
+        // A glass surface keeps whichever overlay slot it first claimed
+        // (`store_sub_list` takes the first free one and never moves it), so
+        // slot order is really creation order — a home widget rebuilt after a
+        // layout change, or a panel opened later, lands wherever there happens
+        // to be a hole. That is why glass appeared on top of things drawn after
+        // it. Each sub-list was stamped with its draw position in
+        // `begin_overlay_inner`; ordering by that stamp makes glass obey the
+        // same rule as everything else: later drawn, later painted.
+        let list_id = self.draw_list.id();
+        let len = cx.draw_lists[list_id].draw_items.len();
+        let mut keys: Vec<u64> = Vec::with_capacity(len);
+        for i in 0..len {
+            let sub = cx.draw_lists[list_id].draw_items[i].sub_list();
+            let order = sub
+                .and_then(|sub_id| cx.draw_lists.checked_index(sub_id))
+                .map(|sub_list| sub_list.overlay_order)
+                .unwrap_or(0);
+            keys.push(order);
+        }
+        let mut order: Vec<usize> = (0..len).collect();
+        // Stable, so entries that didn't draw this frame keep their relative
+        // positions instead of shuffling.
+        order.sort_by_key(|&i| keys[i]);
+        cx.draw_lists[list_id].draw_item_reorder = Some(order);
     }
 }

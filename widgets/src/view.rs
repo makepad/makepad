@@ -4,7 +4,7 @@ use {
         animator::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        makepad_script::ScriptFnRef,
+        makepad_script::{script_err_wrong_value, ScriptFnRef},
         scroll_bars::ScrollBars,
         widget::*,
         widget_async::{
@@ -750,6 +750,36 @@ impl Widget for View {
                 )
             });
         }
+        if method == live_id!(set_visible) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let visible = value
+                    .as_bool()
+                    .or_else(|| value.as_number().map(|n| n != 0.0));
+                match visible {
+                    Some(visible) => {
+                        vm.with_cx_mut(|cx| {
+                            if self.visible != visible {
+                                self.visible = visible;
+                                self.redraw(cx);
+                            }
+                        });
+                    }
+                    // Never guess on a bad argument: a silent default (especially
+                    // `true`) turns script bugs into invisible misbehavior. Keep
+                    // the current visibility and surface an error instead.
+                    None => {
+                        return ScriptAsyncResult::Return(script_err_wrong_value!(
+                            vm.trap(),
+                            "set_visible expects a bool (or number), got {:?}",
+                            value.value_type()
+                        ));
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
         ScriptAsyncResult::MethodNotFound
     }
 
@@ -758,8 +788,31 @@ impl Widget for View {
             return;
         };
 
-        if call.method() == id!(render) && !result.is_err() {
+        if call.method() == id!(render) {
+            if result.is_err() {
+                // An error mid-closure abandons every child emitted before it
+                // and used to do so with ZERO diagnostics — the "on_render
+                // silently renders nothing" family cost days to bisect. Say
+                // what happened.
+                let msg = vm.bx.heap.temp_string_with(|heap, out| {
+                    heap.cast_to_string(result, out);
+                    out.to_string()
+                });
+                error!("on_render closure failed; discarding its output: {msg}");
+                return;
+            }
             if let Some(me_obj) = call.me().as_object() {
+                // The closure's FINAL statement becomes its return value (the
+                // parser converts the last commit into a RETURN), so a widget
+                // emitted last would otherwise vanish. Commit it as the last
+                // child; non-widget values are skipped downstream anyway.
+                if let Some(ret_obj) = result.as_object() {
+                    if ret_obj != me_obj {
+                        // Unchecked: `me` is this render's own throwaway
+                        // object (make_render_me), never frozen.
+                        vm.bx.heap.vec_push_unchecked(me_obj, NIL, result);
+                    }
+                }
                 // `#[source]` is reassigned by any non-eval script apply, so this Reload
                 // would leave `source` pointing at `me`. Keep it on the declaration object:
                 // the next `make_render_me` protos off it (see there), and `me` is a
