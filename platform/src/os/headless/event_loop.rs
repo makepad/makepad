@@ -21,6 +21,19 @@ use std::{
     time::Instant,
 };
 
+/// Backing-store scale for a headless window. Retina by default, because a
+/// screenshot is expected to match what a real display would show. Rendering is
+/// a software rasteriser here, so the cost is per PIXEL: a suite that only
+/// asserts on logical geometry can set `MAKEPAD_HEADLESS_DPI=1` and do a
+/// quarter of the work.
+fn configured_headless_dpi() -> f64 {
+    std::env::var("MAKEPAD_HEADLESS_DPI")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|dpi| *dpi > 0.0)
+        .unwrap_or(2.0)
+}
+
 #[derive(Default)]
 struct HeadlessWindowState {
     created: bool,
@@ -580,7 +593,7 @@ impl Cx {
                         .create_inner_size
                         .unwrap_or_else(|| dvec2(1920.0, 1080.0));
                     let position = window.create_position.unwrap_or_else(|| dvec2(0.0, 0.0));
-                    let dpi_factor = 2.0;
+                    let dpi_factor = configured_headless_dpi();
 
                     let state = &mut windows[window_id.id()];
                     state.created = true;
