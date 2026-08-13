@@ -28,6 +28,7 @@ pub mod egl_sys;
 #[macro_use]
 pub mod gl_sys;
 pub(crate) mod gl_video_upload;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub(crate) mod va_dmabuf_modifier;
 pub mod libc_sys;
 pub mod module_loader;
