@@ -171,11 +171,14 @@ impl Cx {
     pub(crate) fn openxr_handle_repaint(
         &mut self,
         frame: &CxOpenXrFrame,
+        #[cfg_attr(not(use_vulkan), allow(unused_variables))]
         xr_cpu: &mut XrFrameCpuBreakdown,
     ) {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
+        #[cfg(use_vulkan)]
         let mut xr_render_cpu_ms = 0.0f64;
+        #[cfg(use_vulkan)]
         let mut saw_xr_vulkan_pass = false;
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -240,7 +243,14 @@ impl Cx {
                 }
             }
         }
-        self.os.xr_render_cpu_time_ms = saw_xr_vulkan_pass.then_some(xr_render_cpu_ms);
+        #[cfg(use_vulkan)]
+        {
+            self.os.xr_render_cpu_time_ms = saw_xr_vulkan_pass.then_some(xr_render_cpu_ms);
+        }
+        #[cfg(not(use_vulkan))]
+        {
+            self.os.xr_render_cpu_time_ms = None;
+        }
     }
 
     pub(crate) fn openxr_handle_drawing(&mut self) {
