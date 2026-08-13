@@ -753,8 +753,8 @@ fn rust_build(
 
 /// Builds the `RUSTFLAGS` value for an Android `cargo rustc` invocation.
 ///
-/// `prefer_dynamic`: APK/dev builds pass `true` (dynamically linked `std`
-/// keeps incremental relinks fast). AAB builds pass `false` — `prefer-dynamic`
+/// `prefer_dynamic`: debug builds pass `true` (dynamically linked `std` keeps
+/// incremental relinks fast). Release and AAB builds pass `false` — `prefer-dynamic`
 /// makes Rust ship `std` as a separate `libstd-<hash>.so`, and the toolchain's
 /// prebuilt copy of that library is only 4 KB-page aligned, which fails Google
 /// Play's 16 KB page-size requirement for apps targeting Android 15+. Static
@@ -2754,8 +2754,9 @@ pub fn build(
         android_targets,
         variant,
         urls,
-        // APK/dev builds keep `-C prefer-dynamic` for faster incremental relinks.
-        true,
+        // Only debug builds keep `-C prefer-dynamic`, for faster incremental
+        // relinks. Nobody ships a debug apk, and anything else might be shipped.
+        get_profile_from_args(args) == "debug",
     )?;
     // For APK builds, debuggable matches the cargo profile: release -> false,
     // anything else -> true (matches the historical behavior of `cargo makepad
