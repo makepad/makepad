@@ -255,6 +255,7 @@ impl Win32App {
             hInstance: unsafe { GetModuleHandleW(None).unwrap().into() },
             hIcon: hicon_big,
             hIconSm: hicon_small,
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
             lpszClassName: PCWSTR(window_class_name.as_ptr()),
             hbrBackground: unsafe { CreateSolidBrush(COLORREF(0x3f3f3f3f)) },
             ..Default::default()
@@ -758,6 +759,13 @@ type SetProcessDpiAwareness = unsafe extern "system" fn(value: PROCESS_DPI_AWARE
 type SetProcessDpiAwarenessContext =
     unsafe extern "system" fn(value: DPI_AWARENESS_CONTEXT) -> BOOL;
 type GetDpiForWindow = unsafe extern "system" fn(hwnd: HWND) -> u32;
+type AdjustWindowRectExForDpi = unsafe extern "system" fn(
+    lp_rect: *mut crate::windows::Win32::Foundation::RECT,
+    dw_style: u32,
+    b_menu: BOOL,
+    dw_ex_style: u32,
+    dpi: u32,
+) -> BOOL;
 type GetDpiForMonitor = unsafe extern "system" fn(
     hmonitor: HMONITOR,
     dpi_type: MONITOR_DPI_TYPE,
@@ -812,6 +820,7 @@ pub fn post_signal_to_hwnd(hwnd:HWND, signal:Signal){
 */
 pub struct DpiFunctions {
     get_dpi_for_window: Option<GetDpiForWindow>,
+    adjust_window_rect_ex_for_dpi: Option<AdjustWindowRectExForDpi>,
     get_dpi_for_monitor: Option<GetDpiForMonitor>,
     enable_nonclient_dpi_scaling: Option<EnableNonClientDpiScaling>,
     set_process_dpi_awareness_context: Option<SetProcessDpiAwarenessContext>,
@@ -825,6 +834,7 @@ impl DpiFunctions {
     fn new() -> DpiFunctions {
         DpiFunctions {
             get_dpi_for_window: get_function!("user32.dll", GetDpiForWindow),
+            adjust_window_rect_ex_for_dpi: get_function!("user32.dll", AdjustWindowRectExForDpi),
             get_dpi_for_monitor: get_function!("shcore.dll", GetDpiForMonitor),
             enable_nonclient_dpi_scaling: get_function!("user32.dll", EnableNonClientDpiScaling),
             set_process_dpi_awareness_context: get_function!(
@@ -864,6 +874,36 @@ impl DpiFunctions {
             if let Some(enable_nonclient_dpi_scaling) = self.enable_nonclient_dpi_scaling {
                 let _ = enable_nonclient_dpi_scaling(hwnd);
             }
+        }
+    }
+
+    /// DPI-aware frame insets for a zero client rect when available (Win10 1607+).
+    /// Falls back to `AdjustWindowRectEx` on older systems.
+    pub fn adjust_window_rect_ex(
+        &self,
+        hwnd: HWND,
+        style: u32,
+        ex_style: u32,
+        rect: &mut crate::windows::Win32::Foundation::RECT,
+    ) {
+        unsafe {
+            if let (Some(adjust), Some(get_dpi)) = (
+                self.adjust_window_rect_ex_for_dpi,
+                self.get_dpi_for_window,
+            ) {
+                let dpi = match get_dpi(hwnd) {
+                    0 => BASE_DPI,
+                    d => d,
+                };
+                let _ = adjust(rect, style, FALSE, ex_style, dpi);
+                return;
+            }
+            let _ = crate::windows::Win32::UI::WindowsAndMessaging::AdjustWindowRectEx(
+                rect,
+                crate::windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(style),
+                false,
+                crate::windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(ex_style),
+            );
         }
     }
 

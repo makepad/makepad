@@ -35,12 +35,17 @@ use std::{
 };
 
 use crate::{
-    texture::{
-        CxTexturePool, Texture, TextureAlloc, TextureCategory, TextureFormat, TextureId,
-        TexturePixel,
-    },
+    texture::{Texture, TextureAlloc, TextureCategory, TextureFormat, TexturePixel},
     Cx,
 };
+
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", not(any(target_env = "ohos", linux_direct))),
+    target_os = "macos",
+    target_os = "ios",
+))]
+use crate::texture::{CxTexturePool, TextureId};
 
 /// Serializes hard-decode / media GPU work with Makepad present copies on the
 /// shared D3D11 device. Recursive so the same thread may nest lock calls
@@ -304,6 +309,7 @@ impl Drop for MetalNv12PresentCache {
 #[cfg(target_os = "windows")]
 mod windows_api {
     use super::*;
+    use crate::os::windows::d3d11_texture;
     use windows::{
         core::Interface,
         Win32::Graphics::{
@@ -419,11 +425,15 @@ mod windows_api {
                         .map_err(|e| format!("adopt_d3d11_bgra: cast to resource failed: {e}"))?;
                     let mut out: Option<ID3D11ShaderResourceView> = None;
                     unsafe {
-                        device
-                            .CreateShaderResourceView(&resource, None, Some(&mut out))
-                            .map_err(|e| {
-                                format!("adopt_d3d11_bgra: CreateShaderResourceView failed: {e:?}")
-                            })?;
+                        d3d11_texture::create_shader_resource_view(
+                            &device,
+                            &resource,
+                            None,
+                            Some(&mut out),
+                        )
+                        .map_err(|e| {
+                            format!("adopt_d3d11_bgra: CreateShaderResourceView failed: {e:?}")
+                        })?;
                     }
                     out.ok_or_else(|| {
                         "adopt_d3d11_bgra: CreateShaderResourceView returned null".to_string()
@@ -503,7 +513,7 @@ mod windows_api {
     ) -> Result<ID3D11ShaderResourceView, String> {
         let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            texture.GetDesc(&mut tex_desc);
+            d3d11_texture::texture2d_get_desc(texture, &mut tex_desc);
         }
         if tex_desc.Format != DXGI_FORMAT_NV12 {
             return Err(format!(
@@ -541,9 +551,13 @@ mod windows_api {
 
         let mut out: Option<ID3D11ShaderResourceView> = None;
         unsafe {
-            device
-                .CreateShaderResourceView(&resource, Some(&desc), Some(&mut out))
-                .map_err(|e| format!("NV12 plane SRV: CreateShaderResourceView failed: {e:?}"))?;
+            d3d11_texture::create_shader_resource_view(
+                device,
+                &resource,
+                Some(&desc),
+                Some(&mut out),
+            )
+            .map_err(|e| format!("NV12 plane SRV: CreateShaderResourceView failed: {e:?}"))?;
         }
         out.ok_or_else(|| "NV12 plane SRV: null".into())
     }
@@ -558,7 +572,7 @@ mod windows_api {
     ) -> Result<ID3D11ShaderResourceView, String> {
         let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            texture.GetDesc(&mut tex_desc);
+            d3d11_texture::texture2d_get_desc(texture, &mut tex_desc);
         }
         if tex_desc.Format != DXGI_FORMAT_NV12 {
             return Err(format!(
@@ -598,11 +612,13 @@ mod windows_api {
 
         let mut out: Option<ID3D11ShaderResourceView> = None;
         unsafe {
-            device
-                .CreateShaderResourceView(&resource, Some(&desc), Some(&mut out))
-                .map_err(|e| {
-                    format!("NV12 array SRV: CreateShaderResourceView failed: {e:?}")
-                })?;
+            d3d11_texture::create_shader_resource_view(
+                device,
+                &resource,
+                Some(&desc),
+                Some(&mut out),
+            )
+            .map_err(|e| format!("NV12 array SRV: CreateShaderResourceView failed: {e:?}"))?;
         }
         out.ok_or_else(|| "NV12 array SRV: null".into())
     }
@@ -640,8 +656,7 @@ mod windows_api {
             };
             let mut tex: Option<ID3D11Texture2D> = None;
             unsafe {
-                device
-                    .CreateTexture2D(&desc, None, Some(&mut tex))
+                d3d11_texture::create_texture_2d(device, &desc, None, Some(&mut tex))
                     .map_err(|e| format!("NV12 present: CreateTexture2D failed: {e:?}"))?;
             }
             *slot = Some(tex.ok_or_else(|| "NV12 present: null texture".to_string())?);
@@ -663,7 +678,7 @@ mod windows_api {
     ) -> Result<(ID3D11Texture2D, ID3D11Texture2D), String> {
         let mut src_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            src.GetDesc(&mut src_desc);
+            d3d11_texture::texture2d_get_desc(src, &mut src_desc);
         }
         if src_desc.Format != DXGI_FORMAT_NV12 {
             return Err(format!(
@@ -697,7 +712,7 @@ mod windows_api {
         let y_tex = ensure_nv12_present_tex(device, &mut present.y_slots[write], copy_w, copy_h)?;
         let uv_tex = ensure_nv12_present_tex(device, &mut present.uv_slots[write], copy_w, copy_h)?;
 
-        let context = unsafe { device.GetImmediateContext() }
+        let context = unsafe { d3d11_texture::device_get_immediate_context(device) }
             .map_err(|e| format!("NV12 present: GetImmediateContext failed: {e:?}"))?;
 
         let src_res: ID3D11Resource = src
@@ -721,7 +736,8 @@ mod windows_api {
         let src_sub = array_slice;
         // Hold the shared media lock so present copies do not race decoder GPU work.
         with_media_d3d11_lock(|| unsafe {
-            context.CopySubresourceRegion(
+            d3d11_texture::copy_subresource_region(
+                &context,
                 &y_res,
                 0,
                 0,
@@ -731,7 +747,8 @@ mod windows_api {
                 src_sub,
                 Some(&src_box as *const _),
             );
-            context.CopySubresourceRegion(
+            d3d11_texture::copy_subresource_region(
+                &context,
                 &uv_res,
                 0,
                 0,
@@ -867,7 +884,7 @@ mod windows_api {
     ) -> Result<(), String> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            texture.GetDesc(&mut desc);
+            d3d11_texture::texture2d_get_desc(texture, &mut desc);
         }
         if desc.Format != DXGI_FORMAT_NV12 {
             return Err(format!(
