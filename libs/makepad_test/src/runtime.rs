@@ -529,7 +529,7 @@ impl TestApp {
     }
 
     fn try_pump_ui(&self) -> TestResult<()> {
-        self.try_forward((0..PUMP_TICKS).map(|_| StudioToApp::Tick).collect())
+        self.try_forward((0..pump_ticks()).map(|_| StudioToApp::Tick).collect())
     }
 
     fn wait_for_reply<T, F>(&self, timeout: Duration, mut matcher: F) -> TestResult<T>
@@ -1090,10 +1090,15 @@ where
     F: FnOnce(TestApp) -> R,
     R: IntoTestResult,
 {
-    let test_lock = TEST_MUTEX.get_or_init(|| Mutex::new(()));
-    let _guard = test_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Tests are serialised by default: each one drives a whole app process, so
+    // running several at once oversubscribes the machine and makes timing-
+    // sensitive assertions flaky. A suite whose app is cheap enough can opt out.
+    let _guard = (!parallel_tests_enabled()).then(|| {
+        TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    });
 
     let app = TestApp::start(config)?;
     let result = catch_unwind(AssertUnwindSafe(|| test(app.clone()).into_test_result()));
@@ -1453,6 +1458,20 @@ fn snapshot_summary(widget: &WidgetSnapshot) -> String {
         fields.push(format!("selected={selected:?}"));
     }
     fields.join(" ")
+}
+
+/// Ticks forwarded before each query. Every one of them costs the app a full
+/// rendered frame when anything is dirty, so this is the multiplier on the cost
+/// of a snapshot — worth lowering for a suite whose app renders slowly.
+fn pump_ticks() -> usize {
+    std::env::var("MAKEPAD_TEST_PUMP_TICKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(PUMP_TICKS)
+}
+
+fn parallel_tests_enabled() -> bool {
+    env_truthy("MAKEPAD_TEST_PARALLEL")
 }
 
 fn visible_mode_enabled() -> bool {
