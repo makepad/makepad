@@ -69,6 +69,11 @@ pub struct CxOs {
     pub(crate) draw_cycles: Option<usize>,
     pub(crate) render_pool: Option<MessageThreadPool<()>>,
     pub(crate) render_pool_threads: usize,
+    /// BGRA -> RGBAf32 conversions of sampled textures, kept ACROSS frames.
+    /// Rebuilding this per frame re-converted the whole glyph atlas on every
+    /// draw, which cost more than rasterising the window did. Entries carry a
+    /// signature and are redone when the texture reports pending updates.
+    pub(crate) texture_conversions: crate::os::headless::raster::TextureConversionCache,
 }
 
 impl Default for CxOs {
@@ -83,6 +88,7 @@ impl Default for CxOs {
             draw_cycles: None,
             render_pool: None,
             render_pool_threads: 0,
+            texture_conversions: Default::default(),
         }
     }
 }

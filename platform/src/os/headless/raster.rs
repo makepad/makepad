@@ -123,12 +123,12 @@ struct TextureConversionSignature {
     data_len: usize,
 }
 
-struct CachedTextureConversion {
+pub(crate) struct CachedTextureConversion {
     signature: TextureConversionSignature,
     rgba: Vec<f32>,
 }
 
-type TextureConversionCache = HashMap<usize, CachedTextureConversion>;
+pub(crate) type TextureConversionCache = HashMap<usize, CachedTextureConversion>;
 
 fn headless_texture_info(
     texture_index: usize,
@@ -329,6 +329,7 @@ struct RenderProfile {
     total_triangles: usize,
     vertex_ms: f64,
     raster_ms: f64,
+    texture_ms: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -617,7 +618,7 @@ impl Cx {
         self.headless_ensure_render_pool(render_threads);
 
         let mut results = Vec::new();
-        let mut texture_cache = TextureConversionCache::new();
+        let mut texture_cache = std::mem::take(&mut self.os.texture_conversions);
 
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].paint_dirty = false;
@@ -664,6 +665,9 @@ impl Cx {
             }
         }
 
+        // Hand the conversions back for the next frame to reuse.
+        self.os.texture_conversions = texture_cache;
+
         let elapsed = frame_start.elapsed();
         if profile_enabled {
             crate::log!(
@@ -673,14 +677,15 @@ impl Cx {
         }
         if profile_enabled {
             crate::log!(
-                "[headless][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms",
+                "[headless][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms texture={:.1}ms",
                 profile.draw_calls,
                 profile.serial_draw_calls,
                 profile.parallel_draw_calls,
                 profile.total_instances,
                 profile.total_triangles,
                 profile.vertex_ms,
-                profile.raster_ms
+                profile.raster_ms,
+                profile.texture_ms
             );
         }
 
@@ -899,8 +904,12 @@ impl Cx {
                 if let Some(texture) = &draw_call.texture_slots[tex_idx] {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
-                    if let Some(info) =
-                        headless_texture_info(texture_id.0, cxtexture, texture_cache)
+                    let __tex_t0 = std::time::Instant::now();
+                    let __info = headless_texture_info(texture_id.0, cxtexture, texture_cache);
+                    if let Some(p) = profile.as_deref_mut() {
+                        p.texture_ms += __tex_t0.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    if let Some(info) = __info
                     {
                         tex_infos.push(info);
                     } else {
