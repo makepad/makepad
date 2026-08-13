@@ -39,6 +39,28 @@ impl HeadlessShaderJit {
         source: &str,
     ) -> Result<HeadlessJitOutput, String> {
         let shader_dir = self.root_dir.join(format!("shader_{source_hash:016x}"));
+        let cached_path =
+            shader_dir.join(format!("shader_{source_hash:016x}.{}", dylib_extension()));
+
+        // The dylib is content-addressed by the hash of the source that made it,
+        // so one left by an earlier run is exactly what rustc would produce now.
+        // Reuse it: this compiles EVERY shader with `rustc -O` at startup, which
+        // costs tens of seconds per process — and a headless test suite starts a
+        // fresh process for every test. Anything unloadable (truncated by a killed
+        // run, built by a different toolchain) just falls through and recompiles.
+        if cached_path.is_file() {
+            if let Ok(loaded) = HeadlessLoadedModule::load(&cached_path) {
+                if let Ok(version) = loaded.shader_version() {
+                    return Ok(HeadlessJitOutput {
+                        dylib_path: cached_path,
+                        module: Some(loaded),
+                        shader_version: Some(version),
+                        load_error: None,
+                    });
+                }
+            }
+        }
+
         std::fs::create_dir_all(&shader_dir).map_err(|err| {
             format!(
                 "failed to create headless shader output dir `{}`: {err}",
@@ -54,8 +76,15 @@ impl HeadlessShaderJit {
             )
         })?;
 
-        let dylib_path =
-            shader_dir.join(format!("shader_{source_hash:016x}.{}", dylib_extension()));
+        let dylib_path = cached_path;
+        // Compile to a private path and rename into place, so a crashed or
+        // killed run can never leave a half-written dylib for the next one to
+        // find (and so two processes building the same shader can't interleave).
+        let staging_path = shader_dir.join(format!(
+            "shader_{source_hash:016x}.{}.{}",
+            std::process::id(),
+            dylib_extension()
+        ));
 
         let crate_name = format!("makepad_headless_shader_{source_hash:016x}");
         let output = Command::new("rustc")
@@ -67,13 +96,14 @@ impl HeadlessShaderJit {
             .arg("-O")
             .arg(&source_path)
             .arg("-o")
-            .arg(&dylib_path)
+            .arg(&staging_path)
             .output()
             .map_err(|err| {
                 format!("failed to run rustc for headless shader JIT `{crate_name}`: {err}")
             })?;
 
         if !output.status.success() {
+            let _ = std::fs::remove_file(&staging_path);
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
                 "headless shader JIT compile failed for `{}`:\n{}",
@@ -81,6 +111,13 @@ impl HeadlessShaderJit {
                 stderr.trim()
             ));
         }
+
+        std::fs::rename(&staging_path, &dylib_path).map_err(|err| {
+            format!(
+                "failed to publish headless shader dylib `{}`: {err}",
+                dylib_path.display()
+            )
+        })?;
 
         let mut load_error = None;
         let mut shader_version = None;
