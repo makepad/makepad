@@ -13,11 +13,14 @@
 //!
 //! ```text
 //! let id = host.request("location.get", {}, fn(r) {
-//!     if r.ok { use_it(r.data) } else { show(r.error) }
+//!     if r.is_ok { use_it(r.data) } else { show(r.error) }
 //! })
 //! host.capabilities()   // host-pushed grant list, for adapting UI
 //! host.has("location")  // membership test on the same list
 //! ```
+//!
+//! The success field is `is_ok`, NOT `ok`: `ok` is a script keyword (the
+//! ok-test operator), so `r.ok` doesn't parse as a field access.
 //!
 //! Mechanics mirror the storage jail (splash_storage.rs): all state lives
 //! host-side in thread-locals keyed by the isolate's heap, where script code
@@ -51,12 +54,19 @@ pub struct SplashHostRequest {
     pub service: String,
     /// The request's args value serialized to JSON (`"null"` when absent).
     pub args_json: String,
+    /// Whether this isolate's surface may raise user prompts (host-assigned,
+    /// like the tag). Background surfaces — home-screen widget tiles — set
+    /// this false so a permission-needing request FAILS instead of popping a
+    /// consent dialog nobody asked for.
+    pub may_prompt: bool,
 }
 
 #[derive(Default)]
 struct HostBridge {
     /// heap key -> host-assigned app tag.
     tags: HashMap<usize, String>,
+    /// heap keys whose surface must NOT raise prompts (absent = may prompt).
+    no_prompt: std::collections::HashSet<usize>,
     /// heap key -> granted-capability names, for `host.capabilities()`.
     /// Informational only; enforcement happens host-side per request.
     caps: HashMap<usize, Vec<String>>,
@@ -94,6 +104,18 @@ pub(crate) fn set_caps_for_heap(heap_key: usize, caps: Vec<String>) {
     });
 }
 
+/// Marks whether this isolate's surface may raise user prompts.
+pub(crate) fn set_prompts_for_heap(heap_key: usize, may_prompt: bool) {
+    BRIDGE.with(|b| {
+        let mut b = b.borrow_mut();
+        if may_prompt {
+            b.no_prompt.remove(&heap_key);
+        } else {
+            b.no_prompt.insert(heap_key);
+        }
+    });
+}
+
 /// Drops all bridge state for reclaimed isolates (called from the isolate GC).
 pub(crate) fn gc_bridge(dead_heaps: &[usize]) {
     BRIDGE.with(|b| {
@@ -101,6 +123,7 @@ pub(crate) fn gc_bridge(dead_heaps: &[usize]) {
         for heap in dead_heaps {
             b.tags.remove(heap);
             b.caps.remove(heap);
+            b.no_prompt.remove(heap);
         }
         b.queue.retain(|r| !dead_heaps.contains(&r.heap_key));
         b.callbacks.retain(|(heap, _), _| !dead_heaps.contains(heap));
@@ -114,13 +137,20 @@ pub fn take_splash_host_requests() -> Vec<SplashHostRequest> {
 }
 
 /// Answers one request: `Ok(json)` becomes `{ok: true, data: <parsed>}`,
-/// `Err(msg)` becomes `{ok: false, error: msg}`. A no-op (beyond dropping the
-/// stored callback) when the isolate died or the script passed no callback.
-pub fn splash_host_respond(cx: &mut Cx, heap_key: usize, req_id: u64, result: Result<&str, &str>) {
+/// `Err(msg)` becomes `{ok: false, error: msg}`. Returns what happened, so a
+/// host can log undeliverable answers instead of wondering why an app hangs.
+pub fn splash_host_respond(
+    cx: &mut Cx,
+    heap_key: usize,
+    req_id: u64,
+    result: Result<&str, &str>,
+) -> SplashRespondOutcome {
     let callback = BRIDGE.with(|b| b.borrow_mut().callbacks.remove(&(heap_key, req_id)));
-    let Some(callback) = callback else { return };
+    let Some(callback) = callback else {
+        return SplashRespondOutcome::NoCallback;
+    };
     let Some(vm_id) = crate::widget_async::vm_for_heap(cx, heap_key) else {
-        return;
+        return SplashRespondOutcome::IsolateGone;
     };
     cx.with_script_vm_id(vm_id, |vm| {
         let (ok, data, error) = match result {
@@ -133,13 +163,28 @@ pub fn splash_host_respond(cx: &mut Cx, heap_key: usize, req_id: u64, result: Re
         };
         let obj = vm.bx.heap.new_object();
         let trap = vm.bx.threads.cur().trap.pass();
-        vm.bx.heap.set_value(obj, id!(ok).into(), ok.into(), trap);
+        // `is_ok`, never `ok`: `ok` is a script keyword and unusable as a field.
+        vm.bx.heap.set_value(obj, id!(is_ok).into(), ok.into(), trap);
         vm.bx.heap.set_value(obj, id!(data).into(), data, trap);
         vm.bx.heap.set_value(obj, id!(error).into(), error, trap);
         vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
     });
+    SplashRespondOutcome::Delivered
+}
+
+/// What [`splash_host_respond`] managed to do with an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplashRespondOutcome {
+    /// The script callback ran (or at least was invoked; script errors are
+    /// the script's own and land in the log).
+    Delivered,
+    /// The request carried no callback (fire-and-forget) — or was already
+    /// answered once.
+    NoCallback,
+    /// The isolate died between asking and answering.
+    IsolateGone,
 }
 
 /// Registers the `host` bridge module into an isolate VM.
@@ -181,12 +226,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     b.callbacks.insert((heap_key, req_id), callback);
                 }
                 let app_tag = b.tags.get(&heap_key).cloned().unwrap_or_default();
+                let may_prompt = !b.no_prompt.contains(&heap_key);
                 b.queue.push(SplashHostRequest {
                     app_tag,
                     heap_key,
                     req_id,
                     service,
                     args_json,
+                    may_prompt,
                 });
                 req_id
             });
@@ -245,6 +292,7 @@ mod tests {
                 req_id,
                 service: service.to_string(),
                 args_json: "null".to_string(),
+                may_prompt: true,
             })
         });
     }

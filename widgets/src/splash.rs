@@ -54,6 +54,11 @@ pub struct Splash {
     /// for the script's UI; enforcement is the host's per-request decision.
     #[rust]
     host_caps: Vec<String>,
+    /// Whether this isolate's surface may raise user prompts (true for a
+    /// foreground app host, false for background surfaces like home-screen
+    /// widget tiles). Rides on every host.request as `may_prompt`.
+    #[rust(true)]
+    host_prompts: bool,
     /// What to call this script in error messages. Set by the host to the
     /// mini-app's id; empty for previews and one-off evals.
     ///
@@ -139,6 +144,7 @@ impl Splash {
         crate::splash_storage::set_root_for_heap(heap_key, self.sandbox_dir.clone());
         crate::splash_host::set_tag_for_heap(heap_key, self.host_tag.clone());
         crate::splash_host::set_caps_for_heap(heap_key, self.host_caps.clone());
+        crate::splash_host::set_prompts_for_heap(heap_key, self.host_prompts);
 
         let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
@@ -463,6 +469,27 @@ impl Splash {
         }
     }
 
+    /// Marks whether this isolate's surface may raise user prompts; see
+    /// `SplashHostRequest::may_prompt`. Defaults true.
+    pub fn set_host_prompts(&mut self, cx: &mut Cx, may_prompt: bool) {
+        self.host_prompts = may_prompt;
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_host::set_prompts_for_heap(heap_key, may_prompt);
+        }
+    }
+
+    /// This Splash's live isolate heap identity (None while stopped) — the
+    /// same key `SplashHostRequest::heap_key` carries, so hosts can relate a
+    /// request to a specific widget (e.g. to skip an IPC sender's own isolate
+    /// when fanning a message out).
+    pub fn isolate_heap_key(&mut self, cx: &mut Cx) -> Option<usize> {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return None;
+        }
+        Some(cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key()))
+    }
+
     /// Sets (or replaces) a global visible to this Splash's script, like the
     /// injected `ui` handle. Useful for handing scripts host-provided context
     /// (configuration, sizes, capabilities) without re-evaluating the body.
@@ -524,6 +551,22 @@ impl SplashRef {
     pub fn set_host_caps(&self, cx: &mut Cx, caps: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_host_caps(cx, caps);
+        }
+    }
+
+    /// See [`Splash::set_host_prompts`].
+    pub fn set_host_prompts(&self, cx: &mut Cx, may_prompt: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_host_prompts(cx, may_prompt);
+        }
+    }
+
+    /// See [`Splash::isolate_heap_key`].
+    pub fn isolate_heap_key(&self, cx: &mut Cx) -> Option<usize> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.isolate_heap_key(cx)
+        } else {
+            None
         }
     }
 

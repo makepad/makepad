@@ -726,6 +726,19 @@ impl ScriptHeap {
     }
 
     pub fn to_json_inner(&self, value: ScriptValue, out: &mut String) {
+        self.to_json_depth(value, out, 0);
+    }
+
+    fn to_json_depth(&self, value: ScriptValue, out: &mut String, depth: usize) {
+        // A cyclic object/array graph recurses forever here (scripts can
+        // build one, and hosts serialize script-supplied values); a depth cap
+        // turns both cycles and absurd nesting into a null leaf instead of a
+        // host stack overflow.
+        const MAX_JSON_DEPTH: usize = 24;
+        if depth > MAX_JSON_DEPTH {
+            out.push_str("null");
+            return;
+        }
         fn escape_str(inp: &str, out: &mut String) {
             for c in inp.chars() {
                 match c {
@@ -733,8 +746,12 @@ impl ScriptHeap {
                     '\x0c' => out.push_str("\\f"),
                     '\n' => out.push_str("\\n"),
                     '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
                     '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\"),
+                    '\\' => out.push_str("\\\\"),
+                    c if (c as u32) < 0x20 => {
+                        write!(out, "\\u{:04x}", c as u32).ok();
+                    }
                     c => {
                         out.push(c);
                     }
@@ -752,9 +769,9 @@ impl ScriptHeap {
                     if !first {
                         out.push(',')
                     }
-                    self.to_json_inner(key, out);
+                    self.to_json_depth(key, out, depth + 1);
                     out.push(':');
-                    self.to_json_inner(value, out);
+                    self.to_json_depth(value, out, depth + 1);
                     first = false;
                 });
                 for kv in object.vec.iter() {
@@ -762,9 +779,9 @@ impl ScriptHeap {
                         out.push(',')
                     }
                     first = false;
-                    self.to_json_inner(kv.key, out);
+                    self.to_json_depth(kv.key, out, depth + 1);
                     out.push(':');
-                    self.to_json_inner(kv.value, out);
+                    self.to_json_depth(kv.value, out, depth + 1);
                 }
                 if let Some(next_ptr) = object.proto.as_object() {
                     ptr = next_ptr
@@ -784,7 +801,7 @@ impl ScriptHeap {
                         out.push(',')
                     }
                     first = false;
-                    self.to_json_inner(value, out);
+                    self.to_json_depth(value, out, depth + 1);
                 }
             }
             out.push(']');
@@ -823,7 +840,9 @@ impl ScriptHeap {
         } else if let Some(v) = value.as_number() {
             write!(out, "{}", v).ok();
         } else if let Some(v) = value.as_handle() {
-            write!(out, "Handle{:?}", v).ok();
+            // A handle has no JSON form; null is honest and stays parseable.
+            let _ = v;
+            out.push_str("null");
         } else {
             out.push_str("null");
         }
