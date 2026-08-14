@@ -45,6 +45,14 @@ impl ScriptRefOptionExt for Option<ScriptFnRef> {
     }
 }
 
+/// The `index`-th DECLARED parameter of a fn/scope object: its named vec
+/// entries, in order. NIL-keyed entries are varargs (`unnamed_fn_arg`) — a
+/// closure captures the scope it was minted in, so those can appear ahead of
+/// real parameters and must never be mistaken for one.
+fn declared_arg(object: &ScriptObjectData, index: usize) -> Option<&ScriptVecValue> {
+    object.vec.iter().filter(|kv| !kv.key.is_nil()).nth(index)
+}
+
 impl ScriptHeap {
     // Functions
 
@@ -95,9 +103,10 @@ impl ScriptHeap {
 
         if let Some(ptr) = object.proto.as_object() {
             let proto_object = &self.objects[ptr];
-            if let Some(kv) = proto_object.vec.get(index) {
+            // Declared parameters only, same reason as `push_all_fn_args`.
+            if let Some(kv) = declared_arg(proto_object, index) {
                 let key = kv.key;
-                if let Some(def) = object.vec.get(index) {
+                if let Some(def) = declared_arg(&self.objects[top_ptr], index) {
                     if !def.value.is_nil()
                         && def.value.value_type().to_redux() != value.value_type().to_redux()
                     {
@@ -170,22 +179,28 @@ impl ScriptHeap {
         if let Some(ptr) = object.proto.as_object() {
             for (index, value) in args.iter().enumerate() {
                 let object = &self.objects[ptr];
-                if let Some(v1) = object.vec.get(index) {
+                // Positional args bind to the DECLARED parameters in order.
+                // Skip NIL-keyed entries: those are varargs (see
+                // `unnamed_fn_arg`), and a closure minted inside a call
+                // captures its scope — including any varargs that call
+                // received. Indexing the raw vec let such a leftover shadow
+                // the closure's own first parameter, so a timer handing a
+                // time to a `||` closure broke every callback created in it
+                // (typecheck against the leftover, then a bind under its NIL
+                // key that left the real parameter unset).
+                if let Some(v1) = declared_arg(object, index) {
                     let key = v1.key;
-                    // typecheck against default arg
-                    if let Some(def) = object.vec.get(index) {
-                        if !def.value.is_nil()
-                            && def.value.value_type().to_redux() != value.value_type().to_redux()
-                        {
-                            return script_err_type_mismatch!(
-                                trap,
-                                "arg {} ({:?}) type mismatch: expected {}, got {}",
-                                index,
-                                key,
-                                format_value_type(self, def.value),
-                                format_value_type(self, *value)
-                            );
-                        }
+                    if !v1.value.is_nil()
+                        && v1.value.value_type().to_redux() != value.value_type().to_redux()
+                    {
+                        return script_err_type_mismatch!(
+                            trap,
+                            "arg {} ({:?}) type mismatch: expected {}, got {}",
+                            index,
+                            key,
+                            format_value_type(self, v1.value),
+                            format_value_type(self, *value)
+                        );
                     }
                     self.objects[top_ptr].map_insert(key, *value);
                 } else {
