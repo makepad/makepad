@@ -52,6 +52,7 @@ use {
     std::{
         cell::RefCell,
         collections::HashMap,
+        panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
         rc::Rc,
         sync::{
             mpsc::{channel, Receiver, Sender},
@@ -419,8 +420,47 @@ impl Drop for IosNativeCameraPreview {
     }
 }
 
+fn ios_panic_summary(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = if let Some(payload) = info.payload().downcast_ref::<&str>() {
+        (*payload).to_string()
+    } else if let Some(payload) = info.payload().downcast_ref::<String>() {
+        payload.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    let location = info
+        .location()
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        })
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("<unnamed>");
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    format!(
+        "iOS panic hook: thread={thread_name} location={location} payload={payload}\n{backtrace}"
+    )
+}
+
+/// The default hook writes to stderr, which goes nowhere on a device, so route
+/// panics through `error!` (NSLog) while the panicking frame is still on the stack.
+fn install_ios_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        crate::error!("{}", ios_panic_summary(info));
+        previous_hook(info);
+    }));
+}
+
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        install_ios_panic_hook();
+
         let data_path = IosApp::get_ios_directory_paths();
 
         // Get device info
@@ -459,9 +499,15 @@ impl Cx {
                     let event_flow = cx_ref.ios_event_callback(event, &mut metal_cx);
                     let executor = cx_ref.executor.take().unwrap();
                     drop(cx_ref);
-                    executor.run_until_stalled();
+                    // Put the executor back even if a spawned task panics, so
+                    // the `take` above can't hand a `None` to the next event.
+                    let stalled = catch_unwind(AssertUnwindSafe(|| executor.run_until_stalled()));
                     let mut cx_ref = cx.borrow_mut();
                     cx_ref.executor = Some(executor);
+                    drop(cx_ref);
+                    if let Err(payload) = stalled {
+                        resume_unwind(payload);
+                    }
                     event_flow
                 }
             }),
