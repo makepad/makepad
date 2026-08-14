@@ -14,6 +14,7 @@ use {
         cell::{Cell, RefCell},
         collections::HashMap,
         ffi::c_void,
+        panic::{catch_unwind, AssertUnwindSafe},
         rc::Rc,
         time::Instant,
     },
@@ -1097,7 +1098,13 @@ impl IosApp {
     pub fn do_callback(event: IosEvent) -> bool {
         let cb = with_ios_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
-            let event_flow = callback(event);
+            // Every caller of this reaches us from an ObjC callback, so a panic
+            // escaping the app would unwind across `extern "C"` and abort.
+            let event_flow = catch_unwind(AssertUnwindSafe(|| callback(event)))
+                .unwrap_or_else(|_| {
+                    crate::error!("Caught a panic while handling an iOS event, dropped it.");
+                    EventFlow::Poll
+                });
             let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
             with_ios_app(|app| app.event_flow = event_flow);
 
