@@ -733,6 +733,12 @@ pub struct ScriptParser {
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
     pub had_error: bool,
+    /// Formatted parse errors, mirroring what `report_error` logged. Parse
+    /// errors never reach the VM's trap queue (the parser recovers and the
+    /// module still runs), so hosts capturing diagnostics (validation, AI
+    /// repair loops) read them from here — the eval paths drain this into
+    /// `ScriptVmBase::captured_errors` when a sink is installed.
+    pub errors: Vec<String>,
 
     state: Vec<State>,
     pub file: String,
@@ -766,6 +772,7 @@ impl Default for ScriptParser {
             opcodes: Default::default(),
             source_map: Default::default(),
             had_error: false,
+            errors: Default::default(),
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -800,6 +807,13 @@ impl ScriptParser {
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
+        self.errors.push(format!(
+            "{}:{}:{} - {}",
+            self.file,
+            line as u32 + self.line_offset as u32,
+            col as u32 + self.col_offset as u32,
+            msg
+        ));
         log_with_level(
             &self.file,
             line as u32 + self.line_offset as u32,
