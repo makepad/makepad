@@ -15,6 +15,13 @@ pub struct FontFace {
     /// Same lifetime considerations as `ParsedFontFace::face` — the rustybuzz
     /// face borrows from the same stable heap-allocated font data.
     cached_rb_face: RefCell<Option<rustybuzz::Face<'static>>>,
+    /// Lazily-built CoreText fallback for glyph outlines ttf_parser cannot
+    /// read (`hvgl`-only Apple system fonts). Outer `None` = not attempted
+    /// yet; inner `None` = attempted and unavailable (never retried).
+    /// Invalidated when `set_variations` is called, since the CTFont carries
+    /// the variation coordinates.
+    #[cfg(target_os = "macos")]
+    cached_coretext_face: RefCell<Option<Option<super::coretext::CoreTextFace>>>,
 }
 
 struct ParsedFontFace {
@@ -30,6 +37,8 @@ impl Clone for FontFace {
             variations: self.variations.clone(),
             cached_ttf_face: RefCell::new(None),
             cached_rb_face: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            cached_coretext_face: RefCell::new(None),
         }
     }
 }
@@ -73,6 +82,8 @@ impl FontFace {
             variations: Vec::new(),
             cached_ttf_face: RefCell::new(None),
             cached_rb_face: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            cached_coretext_face: RefCell::new(None),
         })
     }
 
@@ -126,5 +137,41 @@ impl FontFace {
         *self.cached_ttf_face.borrow_mut() = None;
         // Invalidate the cached rustybuzz face since variations affect shaping.
         *self.cached_rb_face.borrow_mut() = None;
+        // The CoreText fallback carries variation coordinates on its CTFont.
+        #[cfg(target_os = "macos")]
+        {
+            *self.cached_coretext_face.borrow_mut() = None;
+        }
+    }
+
+    /// Outline a glyph via the CoreText fallback. Used only when ttf_parser
+    /// finds no outline (fonts whose outlines live in Apple's proprietary
+    /// `hvgl` table, e.g. PingFang on macOS 26+). The CTFont is built lazily
+    /// from the same face bytes, so glyph IDs are consistent with the
+    /// ttf_parser/rustybuzz view of this face; a failed attempt is remembered
+    /// and never retried.
+    #[cfg(target_os = "macos")]
+    pub(super) fn coretext_glyph_outline(
+        &self,
+        glyph_id: u16,
+        units_per_em: f32,
+    ) -> Option<super::glyph_outline::GlyphOutline> {
+        {
+            let mut cache = self.cached_coretext_face.borrow_mut();
+            if cache.is_none() {
+                *cache = Some(super::coretext::CoreTextFace::new(
+                    self.parsed.data.as_slice(),
+                    self.parsed.index,
+                    units_per_em,
+                    &self.variations,
+                ));
+            }
+        }
+        let cache = self.cached_coretext_face.borrow();
+        cache
+            .as_ref()
+            .unwrap()
+            .as_ref()?
+            .glyph_outline(glyph_id, units_per_em)
     }
 }

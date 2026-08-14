@@ -3452,11 +3452,21 @@ impl FontFamily {
     fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts) {
         let mut font_ids = Vec::new();
 
+        let font_dbg = std::env::var("MAKEPAD_FONT_DEBUG").is_ok();
         for member in &self.members {
             let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes(member.handle);
+                if font_dbg {
+                    eprintln!(
+                        "FONTDBG family={:?} member handle={:?} path={:?} bytes={:?}",
+                        self.id.0,
+                        member.handle,
+                        cx.get_resource_abs_path(member.handle),
+                        font_data.as_ref().map(|d| d.as_slice().len()),
+                    );
+                }
 
                 if let Some(data) = font_data {
                     fonts.define_font(
@@ -3478,6 +3488,14 @@ impl FontFamily {
             }
         }
 
+        if font_dbg {
+            eprintln!(
+                "FONTDBG family={:?} defined with {}/{} members",
+                self.id.0,
+                font_ids.len(),
+                self.members.len(),
+            );
+        }
         fonts.set_font_family_definition(
             self.to_font_family_id(),
             FontFamilyDefinition {
@@ -3586,6 +3604,11 @@ impl ScriptHook for FontFamily {
                     desc: member.desc,
                     weight: member.weight,
                 });
+            } else if std::env::var("MAKEPAD_FONT_DEBUG").is_ok() {
+                eprintln!(
+                    "FONTDBG family={:?} member {} DROPPED: res is None",
+                    self.id.0, i
+                );
             }
         }
 
