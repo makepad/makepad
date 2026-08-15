@@ -602,7 +602,7 @@ impl Cx {
     }
 
     fn handle_platform_ops(&mut self) {
-        while let Some(op) = self.platform_ops.pop() {
+        while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let title = {

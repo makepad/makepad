@@ -30,6 +30,7 @@ use {
     },
     std::{
         any::{Any, TypeId},
+        collections::VecDeque,
         ops::Range,
         rc::Rc,
     },
@@ -104,14 +105,14 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn spawn(&mut self, url: &str) {
-        self.cx.platform_ops.push(CxOsOp::SpawnSystemBrowser {
+        self.cx.platform_ops.push_back(CxOsOp::SpawnSystemBrowser {
             browser_id: self.id.0,
             url: url.to_string(),
         });
     }
 
     pub fn update(&mut self, area: Area, visible: bool) {
-        self.cx.platform_ops.push(CxOsOp::UpdateSystemBrowser {
+        self.cx.platform_ops.push_back(CxOsOp::UpdateSystemBrowser {
             browser_id: self.id.0,
             area,
             visible,
@@ -119,13 +120,13 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn detach(&mut self) {
-        self.cx.platform_ops.push(CxOsOp::DetachSystemBrowser {
+        self.cx.platform_ops.push_back(CxOsOp::DetachSystemBrowser {
             browser_id: self.id.0,
         });
     }
 
     pub fn set_url(&mut self, url: &str, replace: bool) {
-        self.cx.platform_ops.push(CxOsOp::SetSystemBrowserUrl {
+        self.cx.platform_ops.push_back(CxOsOp::SetSystemBrowserUrl {
             browser_id: self.id.0,
             url: url.to_string(),
             replace,
@@ -133,14 +134,14 @@ impl<'a> CxSystemBrowser<'a> {
     }
 
     pub fn history_go(&mut self, delta: i32) {
-        self.cx.platform_ops.push(CxOsOp::SystemBrowserHistoryGo {
+        self.cx.platform_ops.push_back(CxOsOp::SystemBrowserHistoryGo {
             browser_id: self.id.0,
             delta,
         });
     }
 
     pub fn close(&mut self) {
-        self.cx.platform_ops.push(CxOsOp::CloseSystemBrowser {
+        self.cx.platform_ops.push_back(CxOsOp::CloseSystemBrowser {
             browser_id: self.id.0,
         });
     }
@@ -501,6 +502,15 @@ impl std::fmt::Debug for CxOsOp {
         }
     }
 }
+
+/// Requeue an OS op that cannot run yet. FIFO: append so remaining already-queued
+/// ops still run first. Returns `true` if the drain should continue (`len() > 1`);
+/// `false` if this is the only op left — break and retry on the next event.
+pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp) -> bool {
+    platform_ops.push_back(op);
+    platform_ops.len() > 1
+}
+
 impl Cx {
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
@@ -816,35 +826,35 @@ impl Cx {
     }
 
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
-        self.platform_ops.push(CxOsOp::UpdateMacosMenu(menu));
+        self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
     }
 
     pub fn xr_start_presenting(&mut self) {
-        self.platform_ops.push(CxOsOp::XrStartPresenting);
+        self.platform_ops.push_back(CxOsOp::XrStartPresenting);
     }
 
     pub fn xr_set_render_scale(&mut self, scale: f32) {
-        self.platform_ops.push(CxOsOp::XrSetRenderScale(scale));
+        self.platform_ops.push_back(CxOsOp::XrSetRenderScale(scale));
     }
 
     pub fn xr_advertise_anchor(&mut self, anchor: XrAnchor) {
-        self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(anchor));
+        self.platform_ops.push_back(CxOsOp::XrAdvertiseAnchor(anchor));
     }
 
     pub fn xr_set_local_anchor(&mut self, anchor: XrAnchor) {
-        self.platform_ops.push(CxOsOp::XrSetLocalAnchor(anchor));
+        self.platform_ops.push_back(CxOsOp::XrSetLocalAnchor(anchor));
     }
 
     pub fn xr_set_local_floor(&mut self, floor_y: f32) {
-        self.platform_ops.push(CxOsOp::XrSetLocalFloor(floor_y));
+        self.platform_ops.push_back(CxOsOp::XrSetLocalFloor(floor_y));
     }
 
     pub fn xr_discover_anchor(&mut self, id: u8) {
-        self.platform_ops.push(CxOsOp::XrDiscoverAnchor(id));
+        self.platform_ops.push_back(CxOsOp::XrDiscoverAnchor(id));
     }
 
     pub fn quit(&mut self) {
-        self.platform_ops.push(CxOsOp::Quit);
+        self.platform_ops.push_back(CxOsOp::Quit);
     }
 
     pub fn request_quit(&mut self, reason: QuitReason) -> bool {
@@ -886,7 +896,7 @@ impl Cx {
     // Determines whether to show your application in the dock when it runs. The default value is true.
     // You can remove the dock icon by setting this value to false.
     pub fn show_in_dock(&mut self, show: bool) {
-        self.platform_ops.push(CxOsOp::ShowInDock(show));
+        self.platform_ops.push_back(CxOsOp::ShowInDock(show));
     }
 
     /// Controls how the system bars (status bar and navigation bar) icons and
@@ -905,8 +915,17 @@ impl Cx {
     }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
-            self.platform_ops.push(op);
+            self.platform_ops.push_back(op);
         }
+    }
+
+    /// Requeue an OS op that cannot run yet (typical case: `SetTopmost` before
+    /// any native window exists). FIFO: append so remaining already-queued ops
+    /// still run first in this drain. Returns `true` if the drain should
+    /// continue (`len() > 1`); `false` if this is the only op left — break and
+    /// retry on the next event instead of spinning.
+    pub(crate) fn defer_platform_op(&mut self, op: CxOsOp) -> bool {
+        defer_platform_op(&mut self.platform_ops, op)
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
@@ -931,7 +950,7 @@ impl Cx {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
             self.platform_ops
-                .push(CxOsOp::ShowTextIME(area, cursor_rect, config));
+                .push_back(CxOsOp::ShowTextIME(area, cursor_rect, config));
         }
     }
 
@@ -941,7 +960,7 @@ impl Cx {
         selection: Range<CharOffset>,
         composition: Option<Range<CharOffset>>,
     ) {
-        self.platform_ops.push(CxOsOp::SyncImeState {
+        self.platform_ops.push_back(CxOsOp::SyncImeState {
             text,
             selection,
             composition,
@@ -950,12 +969,12 @@ impl Cx {
 
     pub fn hide_text_ime(&mut self) {
         self.keyboard.reset_text_ime_dismissed();
-        self.platform_ops.push(CxOsOp::HideTextIME);
+        self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 
     pub fn text_ime_was_dismissed(&mut self) {
         self.keyboard.set_text_ime_dismissed();
-        self.platform_ops.push(CxOsOp::HideTextIME);
+        self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 
     /// Set or clear a window's `dpi_override` at runtime.
@@ -1024,7 +1043,7 @@ impl Cx {
     /// the text selection from Rust directly. The `has_selection` parameter is only
     /// used to determine which menu items to show, not for the operations themselves.
     pub fn show_clipboard_actions(&mut self, has_selection: bool, rect: Rect, keyboard_shift: f64) {
-        self.platform_ops.push(CxOsOp::ShowClipboardActions {
+        self.platform_ops.push_back(CxOsOp::ShowClipboardActions {
             has_selection,
             rect,
             keyboard_shift,
@@ -1033,7 +1052,7 @@ impl Cx {
 
     /// Hides the clipboard actions menu
     pub fn hide_clipboard_actions(&mut self) {
-        self.platform_ops.push(CxOsOp::HideClipboardActions);
+        self.platform_ops.push_back(CxOsOp::HideClipboardActions);
     }
 
     /// Copies the given string to the clipboard.
@@ -1041,14 +1060,14 @@ impl Cx {
     /// Due to lack of platform clipboard support, it does not work on Web or tvOS.
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops
-            .push(CxOsOp::CopyToClipboard(content.to_owned()));
+            .push_back(CxOsOp::CopyToClipboard(content.to_owned()));
     }
 
     /// Sets the primary selection (Linux middle-click paste).
     /// No-op on non-Linux platforms.
     pub fn set_primary_selection(&mut self, content: &str) {
         self.platform_ops
-            .push(CxOsOp::SetPrimarySelection(content.to_owned()));
+            .push_back(CxOsOp::SetPrimarySelection(content.to_owned()));
     }
 
     /// Forward an accessibility tree update to the platform adapter.
@@ -1057,7 +1076,7 @@ impl Cx {
     /// downcast it when an accessibility adapter is active.
     pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
         self.platform_ops
-            .push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
+            .push_back(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
                 update,
             )));
     }
@@ -1065,18 +1084,18 @@ impl Cx {
     /// Show native selection handles at the given start and end positions (mobile).
     pub fn show_selection_handles(&mut self, start: Vec2d, end: Vec2d) {
         self.platform_ops
-            .push(CxOsOp::ShowSelectionHandles { start, end });
+            .push_back(CxOsOp::ShowSelectionHandles { start, end });
     }
 
     /// Update positions of visible selection handles (mobile).
     pub fn update_selection_handles(&mut self, start: Vec2d, end: Vec2d) {
         self.platform_ops
-            .push(CxOsOp::UpdateSelectionHandles { start, end });
+            .push_back(CxOsOp::UpdateSelectionHandles { start, end });
     }
 
     /// Hide selection handles (mobile).
     pub fn hide_selection_handles(&mut self) {
-        self.platform_ops.push(CxOsOp::HideSelectionHandles);
+        self.platform_ops.push_back(CxOsOp::HideSelectionHandles);
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
@@ -1085,7 +1104,7 @@ impl Cx {
                 panic!("start drag twice");
             }
         });
-        self.platform_ops.push(CxOsOp::StartDragging(items));
+        self.platform_ops.push_back(CxOsOp::StartDragging(items));
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
@@ -1096,7 +1115,7 @@ impl Cx {
         }) {
             *p = CxOsOp::SetCursor(cursor)
         } else {
-            self.platform_ops.push(CxOsOp::SetCursor(cursor))
+            self.platform_ops.push_back(CxOsOp::SetCursor(cursor))
         }
     }
 
@@ -1153,7 +1172,7 @@ impl Cx {
 
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
-        self.platform_ops.push(CxOsOp::StartTimer {
+        self.platform_ops.push_back(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval: delay,
             repeats: false,
@@ -1163,7 +1182,7 @@ impl Cx {
 
     pub fn start_interval(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
-        self.platform_ops.push(CxOsOp::StartTimer {
+        self.platform_ops.push_back(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
             repeats: true,
@@ -1173,13 +1192,13 @@ impl Cx {
 
     pub fn stop_timer(&mut self, timer: Timer) {
         if timer.0 != 0 {
-            self.platform_ops.push(CxOsOp::StopTimer(timer.0));
+            self.platform_ops.push_back(CxOsOp::StopTimer(timer.0));
         }
     }
 
     pub fn request_permission(&mut self, permission: crate::permission::Permission) -> i32 {
         self.permissions_request_id += 1;
-        self.platform_ops.push(CxOsOp::RequestPermission {
+        self.platform_ops.push_back(CxOsOp::RequestPermission {
             request_id: self.permissions_request_id,
             permission,
         });
@@ -1188,7 +1207,7 @@ impl Cx {
 
     pub fn check_permission(&mut self, permission: crate::permission::Permission) -> i32 {
         self.permissions_request_id += 1;
-        self.platform_ops.push(CxOsOp::CheckPermission {
+        self.platform_ops.push_back(CxOsOp::CheckPermission {
             request_id: self.permissions_request_id,
             permission,
         });
@@ -1202,12 +1221,12 @@ impl Cx {
     /// platform, failures arrive as [`Event::LocationError`]. Platforms
     /// without a location service log an error and stay silent.
     pub fn start_location_updates(&mut self) {
-        self.platform_ops.push(CxOsOp::StartLocationUpdates);
+        self.platform_ops.push_back(CxOsOp::StartLocationUpdates);
     }
 
     /// Stop streaming position fixes.
     pub fn stop_location_updates(&mut self) {
-        self.platform_ops.push(CxOsOp::StopLocationUpdates);
+        self.platform_ops.push_back(CxOsOp::StopLocationUpdates);
     }
 
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
@@ -1504,14 +1523,14 @@ impl Cx {
     }
     /*
         pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest) {
-            self.platform_ops.push(CxOsOp::WebSocketOpen{
+            self.platform_ops.push_back(CxOsOp::WebSocketOpen{
                 request,
                 request_id,
             });
         }
 
         pub fn web_socket_send_binary(&mut self, request_id: LiveId, data: Vec<u8>) {
-            self.platform_ops.push(CxOsOp::WebSocketSendBinary{
+            self.platform_ops.push_back(CxOsOp::WebSocketSendBinary{
                 request_id,
                 data,
             });
@@ -1587,7 +1606,7 @@ impl Cx {
             let _request_id = self.request_permission(permission);
             return;
         }
-        self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
+        self.platform_ops.push_back(CxOsOp::PrepareVideoPlayback(
             video_id,
             source,
             camera_preview_mode,
@@ -1616,7 +1635,7 @@ impl Cx {
             }
             match result.status {
                 crate::permission::PermissionStatus::Granted => {
-                    self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
+                    self.platform_ops.push_back(CxOsOp::PrepareVideoPlayback(
                         p.video_id,
                         p.source,
                         p.camera_preview_mode,
@@ -1645,11 +1664,11 @@ impl Cx {
 
     pub fn attach_camera_native_preview(&mut self, video_id: LiveId, area: Area) {
         self.platform_ops
-            .push(CxOsOp::AttachCameraNativePreview { video_id, area });
+            .push_back(CxOsOp::AttachCameraNativePreview { video_id, area });
     }
 
     pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
-        self.platform_ops.push(CxOsOp::UpdateCameraNativePreview {
+        self.platform_ops.push_back(CxOsOp::UpdateCameraNativePreview {
             video_id,
             area,
             visible,
@@ -1658,36 +1677,36 @@ impl Cx {
 
     pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
         self.platform_ops
-            .push(CxOsOp::DetachCameraNativePreview { video_id });
+            .push_back(CxOsOp::DetachCameraNativePreview { video_id });
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_transport(video_id);
-        self.platform_ops.push(CxOsOp::BeginVideoPlayback(video_id));
+        self.platform_ops.push_back(CxOsOp::BeginVideoPlayback(video_id));
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
-        // platform_ops are drained LIFO (`pop`). Without coalescing, a same-frame
-        // pause→resume becomes resume then pause and leaves playback stuck paused.
+        // Last-wins coalescing: one frame should apply a single play/pause
+        // intent even though the queue is FIFO.
         self.drop_pending_video_transport(video_id);
-        self.platform_ops.push(CxOsOp::PauseVideoPlayback(video_id));
+        self.platform_ops.push_back(CxOsOp::PauseVideoPlayback(video_id));
     }
 
     pub fn resume_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_transport(video_id);
         self.platform_ops
-            .push(CxOsOp::ResumeVideoPlayback(video_id));
+            .push_back(CxOsOp::ResumeVideoPlayback(video_id));
     }
 
     pub fn mute_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_mute(video_id);
-        self.platform_ops.push(CxOsOp::MuteVideoPlayback(video_id));
+        self.platform_ops.push_back(CxOsOp::MuteVideoPlayback(video_id));
     }
 
     pub fn unmute_video_playback(&mut self, video_id: LiveId) {
         self.drop_pending_video_mute(video_id);
         self.platform_ops
-            .push(CxOsOp::UnmuteVideoPlayback(video_id));
+            .push_back(CxOsOp::UnmuteVideoPlayback(video_id));
     }
 
     /// Keep only the latest play/pause/begin intent for `video_id`.
@@ -1709,7 +1728,7 @@ impl Cx {
 
     pub fn cleanup_video_playback_resources(&mut self, video_id: LiveId) {
         self.platform_ops
-            .push(CxOsOp::CleanupVideoPlaybackResources(video_id));
+            .push_back(CxOsOp::CleanupVideoPlaybackResources(video_id));
     }
 
     pub fn cancel_pending_camera_playback(&mut self, video_id: LiveId) {
@@ -1719,27 +1738,27 @@ impl Cx {
 
     pub fn seek_video_playback(&mut self, video_id: LiveId, position_ms: u64) {
         self.platform_ops
-            .push(CxOsOp::SeekVideoPlayback(video_id, position_ms));
+            .push_back(CxOsOp::SeekVideoPlayback(video_id, position_ms));
     }
 
     pub fn set_video_volume(&mut self, video_id: LiveId, volume: f64) {
         self.platform_ops
-            .push(CxOsOp::SetVideoVolume(video_id, volume));
+            .push_back(CxOsOp::SetVideoVolume(video_id, volume));
     }
 
     pub fn set_video_playback_rate(&mut self, video_id: LiveId, rate: f64) {
         self.platform_ops
-            .push(CxOsOp::SetVideoPlaybackRate(video_id, rate));
+            .push_back(CxOsOp::SetVideoPlaybackRate(video_id, rate));
     }
 
     pub fn select_video_track(&mut self, video_id: LiveId, index: usize) {
         self.platform_ops
-            .push(CxOsOp::SelectVideoTrack(video_id, index));
+            .push_back(CxOsOp::SelectVideoTrack(video_id, index));
     }
 
     pub fn select_audio_track(&mut self, video_id: LiveId, index: usize) {
         self.platform_ops
-            .push(CxOsOp::SelectAudioTrack(video_id, index));
+            .push_back(CxOsOp::SelectAudioTrack(video_id, index));
     }
 
     pub fn prepare_audio_playback(
@@ -1749,7 +1768,7 @@ impl Cx {
         autoplay: bool,
         should_loop: bool,
     ) {
-        self.platform_ops.push(CxOsOp::PrepareAudioPlayback(
+        self.platform_ops.push_back(CxOsOp::PrepareAudioPlayback(
             video_id,
             source,
             autoplay,
@@ -1763,22 +1782,22 @@ impl Cx {
 
     pub fn open_system_savefile_dialog(&mut self) {
         self.platform_ops
-            .push(CxOsOp::SaveFileDialog(FileDialog::new()));
+            .push_back(CxOsOp::SaveFileDialog(FileDialog::new()));
     }
 
     pub fn open_system_openfile_dialog(&mut self) {
         self.platform_ops
-            .push(CxOsOp::SelectFileDialog(FileDialog::new()));
+            .push_back(CxOsOp::SelectFileDialog(FileDialog::new()));
     }
 
     pub fn open_system_savefolder_dialog(&mut self) {
         self.platform_ops
-            .push(CxOsOp::SaveFolderDialog(FileDialog::new()));
+            .push_back(CxOsOp::SaveFolderDialog(FileDialog::new()));
     }
 
     pub fn open_system_openfolder_dialog(&mut self) {
         self.platform_ops
-            .push(CxOsOp::SelectFolderDialog(FileDialog::new()));
+            .push_back(CxOsOp::SelectFolderDialog(FileDialog::new()));
     }
 
     pub fn event_id(&self) -> u64 {
@@ -1872,3 +1891,54 @@ macro_rules! register_component_factory {
             );
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn defer_platform_op_breaks_when_requeued_op_is_alone() {
+        let window_id = WindowId(0, 0);
+        let mut platform_ops = VecDeque::new();
+
+        assert!(!defer_platform_op(
+            &mut platform_ops,
+            CxOsOp::SetTopmost(window_id, true),
+        ));
+        assert_eq!(platform_ops, vec![CxOsOp::SetTopmost(window_id, true)]);
+    }
+
+    #[test]
+    fn defer_platform_op_appends_so_pending_ops_still_run_first() {
+        let window_id = WindowId(0, 0);
+        let mut platform_ops = VecDeque::from(vec![CxOsOp::CreateWindow(window_id)]);
+
+        assert!(defer_platform_op(
+            &mut platform_ops,
+            CxOsOp::SetTopmost(window_id, true),
+        ));
+        assert_eq!(
+            platform_ops,
+            vec![
+                CxOsOp::CreateWindow(window_id),
+                CxOsOp::SetTopmost(window_id, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn platform_ops_drain_fifo_create_window_then_set_topmost() {
+        let window_id = WindowId(0, 0);
+        let mut platform_ops = VecDeque::new();
+        platform_ops.push_back(CxOsOp::CreateWindow(window_id));
+        platform_ops.push_back(CxOsOp::SetTopmost(window_id, true));
+
+        let first = platform_ops.pop_front().unwrap();
+        let second = platform_ops.pop_front().unwrap();
+        assert!(matches!(first, CxOsOp::CreateWindow(_)));
+        assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
+        assert!(platform_ops.is_empty());
+    }
+}
+

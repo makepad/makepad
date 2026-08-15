@@ -343,7 +343,7 @@ impl WindowHandle {
         cxwindow.popup_size = None;
         cxwindow.popup_grab_keyboard = true;
         cx.platform_ops
-            .push(CxOsOp::CreateWindow(window.window_id()));
+            .push_back(CxOsOp::CreateWindow(window.window_id()));
         window
     }
 
@@ -370,7 +370,7 @@ impl WindowHandle {
             cxwindow.popup_grab_keyboard = true;
             cxwindow.popup_grab_keyboard
         };
-        cx.platform_ops.push(CxOsOp::CreatePopupWindow {
+        cx.platform_ops.push_back(CxOsOp::CreatePopupWindow {
             window_id,
             parent_window_id: parent,
             position,
@@ -1219,5 +1219,18 @@ mod tests {
 
         assert_eq!(cx.platform_ops.len(), 1);
         assert!(matches!(cx.platform_ops[0], CxOsOp::SetTopmost(_, true)));
+    }
+
+    #[test]
+    fn create_window_then_set_topmost_queues_fifo() {
+        let mut cx = test_cx();
+        let mut window = WindowHandle::new(&mut cx);
+        window.set_topmost(&mut cx, true);
+
+        let first = cx.platform_ops.pop_front().unwrap();
+        let second = cx.platform_ops.pop_front().unwrap();
+        assert!(matches!(first, CxOsOp::CreateWindow(_)));
+        assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
+        assert!(cx.platform_ops.is_empty());
     }
 }

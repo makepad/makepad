@@ -243,11 +243,6 @@ impl MetalWindow {
     }
 }
 
-fn defer_platform_op(platform_ops: &mut Vec<CxOsOp>, op: CxOsOp) -> bool {
-    platform_ops.insert(0, op);
-    platform_ops.len() > 1
-}
-
 pub(crate) struct MacosNativeCameraPreview {
     input_id: crate::video::VideoInputId,
     format_id: crate::video::VideoFormatId,
@@ -1157,7 +1152,7 @@ impl Cx {
         metal_windows: &mut Vec<MetalWindow>,
         metal_cx: &MetalCx,
     ) -> EventFlow {
-        while let Some(op) = self.platform_ops.pop() {
+        while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
@@ -1292,10 +1287,7 @@ impl Cx {
                 }
                 CxOsOp::SetTopmost(window_id, is_topmost) => {
                     if metal_windows.is_empty() {
-                        if defer_platform_op(
-                            &mut self.platform_ops,
-                            CxOsOp::SetTopmost(window_id, is_topmost),
-                        ) {
+                        if self.defer_platform_op(CxOsOp::SetTopmost(window_id, is_topmost)) {
                             continue;
                         }
                         break;
@@ -1861,41 +1853,6 @@ impl Cx {
                 msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
             let () = msg_send![main_queue, addOperation: block_operation];
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defer_platform_op_breaks_when_requeued_op_is_alone() {
-        let window_id = WindowId(0, 0);
-        let mut platform_ops = Vec::new();
-
-        assert!(!defer_platform_op(
-            &mut platform_ops,
-            CxOsOp::SetTopmost(window_id, true),
-        ));
-        assert_eq!(platform_ops, vec![CxOsOp::SetTopmost(window_id, true)]);
-    }
-
-    #[test]
-    fn defer_platform_op_continues_when_other_ops_are_pending() {
-        let window_id = WindowId(0, 0);
-        let mut platform_ops = vec![CxOsOp::CreateWindow(window_id)];
-
-        assert!(defer_platform_op(
-            &mut platform_ops,
-            CxOsOp::SetTopmost(window_id, true),
-        ));
-        assert_eq!(
-            platform_ops,
-            vec![
-                CxOsOp::SetTopmost(window_id, true),
-                CxOsOp::CreateWindow(window_id)
-            ]
-        );
     }
 }
 
