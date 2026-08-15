@@ -59,6 +59,10 @@ pub struct Splash {
     /// widget tiles). Rides on every host.request as `may_prompt`.
     #[rust(true)]
     host_prompts: bool,
+    /// Whole-jail byte cap when the host has granted this app extra room.
+    /// None leaves the storage default.
+    #[rust]
+    storage_quota: Option<u64>,
     /// What to call this script in error messages. Set by the host to the
     /// mini-app's id; empty for previews and one-off evals.
     ///
@@ -145,6 +149,7 @@ impl Splash {
         crate::splash_host::set_tag_for_heap(heap_key, self.host_tag.clone());
         crate::splash_host::set_caps_for_heap(heap_key, self.host_caps.clone());
         crate::splash_host::set_prompts_for_heap(heap_key, self.host_prompts);
+        crate::splash_storage::set_quota_for_heap(heap_key, self.storage_quota);
 
         let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
@@ -469,6 +474,17 @@ impl Splash {
         }
     }
 
+    /// Raises this app's whole-jail storage cap (None = the default). Takes
+    /// effect immediately; a lowered cap refuses further growth rather than
+    /// deleting anything the app already wrote.
+    pub fn set_storage_quota(&mut self, cx: &mut Cx, total_bytes: Option<u64>) {
+        self.storage_quota = total_bytes;
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_storage::set_quota_for_heap(heap_key, total_bytes);
+        }
+    }
+
     /// Marks whether this isolate's surface may raise user prompts; see
     /// `SplashHostRequest::may_prompt`. Defaults true.
     pub fn set_host_prompts(&mut self, cx: &mut Cx, may_prompt: bool) {
@@ -551,6 +567,13 @@ impl SplashRef {
     pub fn set_host_caps(&self, cx: &mut Cx, caps: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_host_caps(cx, caps);
+        }
+    }
+
+    /// See [`Splash::set_storage_quota`].
+    pub fn set_storage_quota(&self, cx: &mut Cx, total_bytes: Option<u64>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_storage_quota(cx, total_bytes);
         }
     }
 
