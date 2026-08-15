@@ -195,7 +195,7 @@ impl Cx {
     }
 
     fn handle_platform_ops(&mut self, _metal_cx: &MetalCx) {
-        while let Some(op) = self.platform_ops.pop() {
+        while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];

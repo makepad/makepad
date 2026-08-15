@@ -38,7 +38,7 @@ use {
     std::{
         any::{Any, TypeId},
         cell::RefCell,
-        collections::{HashMap, HashSet},
+        collections::{HashMap, HashSet, VecDeque},
         rc::Rc,
         sync::Arc,
     },
@@ -104,7 +104,7 @@ pub struct Cx {
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
 
-    pub(crate) platform_ops: Vec<CxOsOp>,
+    pub(crate) platform_ops: VecDeque<CxOsOp>,
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,

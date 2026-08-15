@@ -621,7 +621,7 @@ impl WaylandCx {
         if cx.platform_ops.is_empty() {
             return EventFlow::Poll;
         }
-        while let Some(op) = cx.platform_ops.pop() {
+        while let Some(op) = cx.platform_ops.pop_front() {
             match op {
                 CxOsOp::SetCursor(_) | CxOsOp::StartTimer { .. } | CxOsOp::StopTimer(_) => {}
                 _ => {

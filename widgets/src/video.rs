@@ -2124,11 +2124,11 @@ impl Video {
                 }
             }
             PlaybackState::Completed => {
-                // platform_ops is LIFO (`pop`). Transport ops are coalesced, but
-                // seek is separate — push resume *before* seek so drain order is
-                // seek → resume (not resume-from-EOS then seek).
-                cx.resume_video_playback(self.id);
+                // Seek is not coalesced with transport ops. Queue seek then
+                // resume so FIFO drain is seek → resume (not resume-from-EOS
+                // then seek).
                 cx.seek_video_playback(self.id, 0);
+                cx.resume_video_playback(self.id);
                 self.current_position_ms = 0;
                 self.seek_cooldown = 5;
                 self.playback_state = PlaybackState::Playing;
