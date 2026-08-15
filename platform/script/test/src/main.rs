@@ -3857,6 +3857,33 @@ pub fn main() {
         shader.test_compile_draw(gpu_stage_4l)
         assert(shader.test_compile_draw_rust_contains(gpu_stage_4l, "c.x, c.y, c.z"))
 
+        let gpu_stage_4m = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            cutoff: shader.uniform(0.5)
+
+            side_effect: fn(v) {
+                return v * 2.0
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                // A bare `if` statement whose last body statement is a non-void
+                // call: nothing consumes the value, but it must still be emitted.
+                if self.cutoff > 0.0 {
+                    self.side_effect(7.0)
+                }
+                self.pixel = vec4(self.v_uv, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4m)
+        assert(shader.test_compile_draw_contains(gpu_stage_4m, "side_effect(_io, _iof, 7.0)"))
+
         println("Runtime vector methods + lerp + TAU (value-level, not shader)")
         assert(vec3(3.0, 4.0, 0.0).length() == 5.0)
         let n = vec3(0.0, 2.0, 0.0).normalized()

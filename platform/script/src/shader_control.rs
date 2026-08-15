@@ -226,8 +226,12 @@ impl ShaderFnCompiler {
                         if let Some(outer_phi) = outer_phi {
                             // Assign to the outer phi (flag is already set by find_and_mark_outer_phi)
                             self.out.push_str(&format!("{} = {};\n", outer_phi, val));
+                        } else if !val.is_empty() {
+                            // Nothing consumes the value, but the expression can still
+                            // have side effects, so keep it as a statement in the branch.
+                            self.out.push_str(&val);
+                            self.out.push_str(";\n");
                         }
-                        // If no outer phi, the value is discarded (this shouldn't happen in well-formed code)
                     }
                     self.stack.free_string(val);
                 } else if let Some(ref phi) = phi {
