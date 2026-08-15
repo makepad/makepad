@@ -545,7 +545,7 @@ impl X11Cx {
     ) -> EventFlow {
         let mut ret = EventFlow::Poll;
         let mut cx = self.cx.borrow_mut();
-        while let Some(op) = cx.platform_ops.pop() {
+        while let Some(op) = cx.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
