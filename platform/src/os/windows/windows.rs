@@ -559,7 +559,7 @@ impl Cx {
     ) -> EventFlow {
         let mut ret = EventFlow::Poll;
         let mut geom_changes = Vec::new();
-        while let Some(op) = self.platform_ops.pop() {
+        while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
@@ -694,9 +694,10 @@ impl Cx {
                 CxOsOp::Quit => ret = EventFlow::Exit,
                 CxOsOp::SetTopmost(window_id, is_topmost) => {
                     if d3d11_windows.len() == 0 {
-                        self.platform_ops
-                            .insert(0, CxOsOp::SetTopmost(window_id, is_topmost));
-                        continue;
+                        if self.defer_platform_op(CxOsOp::SetTopmost(window_id, is_topmost)) {
+                            continue;
+                        }
+                        break;
                     }
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
