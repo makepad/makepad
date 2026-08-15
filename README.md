@@ -4,10 +4,10 @@
 
 - Discord: https://discord.gg/adqBRq7Ece
 - Rik Arends: https://twitter.com/rikarends
-- Eddy Bruel: -
-- Sebastian Michailidis: https://bsky.app/profile/okpokpokp.bsky.social
 
-Makepad is an AI-accelerated application development environment for Rust. It combines a high-performance UI runtime, a live-editable design language, and a fast iteration loop so you can build native and web apps with a tight feedback cycle.
+Makepad is an AI-accelerated application and game development environment for Rust. It combines a high-performance UI runtime, a live-editable design language, and a fast iteration loop so you can build native and web apps with a tight feedback cycle.
+
+It also has a large set of AI backends integrated for embedding llms or generative AI models inside applications or run them easily on local hardware
 
 This repository contains the core engine, widgets, tools, and examples.
 
@@ -17,6 +17,7 @@ This repository contains the core engine, widgets, tools, and examples.
 - A Rust-first framework with a scriptable UI DSL.
 - A studio app for running, inspecting, and iterating on examples and projects.
 - An AI-accelerated workflow: structure and tooling aimed at making code generation, refactoring, and iteration faster and safer.
+- Simple forward 3D renderer for making games on Quest and all other supported platforms
 
 ## Features
 
