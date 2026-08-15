@@ -581,7 +581,7 @@ impl Cx {
         windows: &mut Vec<HeadlessWindowState>,
         send_protocol: bool,
     ) -> bool {
-        while let Some(op) = self.platform_ops.pop() {
+        while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     while window_id.id() >= windows.len() {

@@ -543,7 +543,7 @@ impl Cx {
     }
 
     fn stdin_handle_platform_ops(&mut self, stdin_windows: &mut Vec<StdinWindow>) {
-        while let Some(op) = self.platform_ops.pop() {
+        while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     while window_id.id() >= stdin_windows.len() {
