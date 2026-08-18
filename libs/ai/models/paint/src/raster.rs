@@ -203,6 +203,23 @@ fn to_u8(v: f32) -> u8 {
 
 /// World-normal conditioning image: rgb = n * 0.5 + 0.5 (the upstream
 /// `use_abs_coor=True` world-space normal map).
+/// Same as [`normal_map_rgb8`] with the normal negated (upstream's
+/// reflected-frame cross-product shading normals point inward).
+pub fn normal_map_rgb8_negated(gbuf: &GBuffer, background: [u8; 3]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(gbuf.width * gbuf.height * 3);
+    for i in 0..gbuf.width * gbuf.height {
+        if gbuf.face_index[i] < 0 {
+            out.extend_from_slice(&background);
+        } else {
+            let n = gbuf.normal[i];
+            out.push(to_u8(-n[0] * 0.5 + 0.5));
+            out.push(to_u8(-n[1] * 0.5 + 0.5));
+            out.push(to_u8(-n[2] * 0.5 + 0.5));
+        }
+    }
+    out
+}
+
 pub fn normal_map_rgb8(gbuf: &GBuffer, background: [u8; 3]) -> Vec<u8> {
     let mut out = Vec::with_capacity(gbuf.width * gbuf.height * 3);
     for i in 0..gbuf.width * gbuf.height {
