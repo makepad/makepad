@@ -13,3 +13,7 @@ pub mod quant;
 
 pub use driver::*;
 pub use launch::*;
+// Both modules export `is_available`. Prefer the driver probe (device
+// count) at the crate root so `crate::is_available()` is unambiguous on
+// linux/windows where launch.rs is not an empty stub.
+pub use driver::is_available;
