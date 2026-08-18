@@ -326,6 +326,54 @@ impl TriMesh {
         }
         scale as f32
     }
+
+    /// The upstream renderer's mesh frame change (MeshRender.py `set_mesh`):
+    /// `vtx[:, [0,1]] = -vtx[:, [0,1]]; vtx[:, [1,2]] = vtx[:, [2,1]]`, i.e.
+    /// `(x, y, z) -> (-x, z, -y)` — glTF Y-up into the Z-up world the paint
+    /// cameras orbit. Without it every "azimuth ring" view renders the mesh
+    /// top-down and the diffusion conditioning contradicts the reference.
+    /// Normals transform by the same orthogonal map.
+    pub fn apply_paint_frame(&mut self) {
+        for p in &mut self.positions {
+            *p = [-p[0], p[2], -p[1]];
+        }
+        for n in &mut self.normals {
+            *n = [-n[0], n[2], -n[1]];
+        }
+    }
+
+    /// The upstream renderer's normalization (MeshRender.py `set_mesh`,
+    /// `auto_center=True`): center on the bbox midpoint, then scale by
+    /// `scale_factor / (2 * max ||v - center||)` so the largest radial
+    /// distance becomes `scale_factor / 2` (upstream default 1.15). Position
+    /// conditioning then encodes `0.5 - p / scale_factor` into [0, 1].
+    pub fn normalize_paint_radial(&mut self, scale_factor: f32) -> f32 {
+        let (min, max) = self.bbox();
+        let center = [
+            0.5 * (min[0] as f64 + max[0] as f64),
+            0.5 * (min[1] as f64 + max[1] as f64),
+            0.5 * (min[2] as f64 + max[2] as f64),
+        ];
+        let mut max_norm_sq = 0.0f64;
+        for p in &self.positions {
+            let dx = p[0] as f64 - center[0];
+            let dy = p[1] as f64 - center[1];
+            let dz = p[2] as f64 - center[2];
+            max_norm_sq = max_norm_sq.max(dx * dx + dy * dy + dz * dz);
+        }
+        let diameter = 2.0 * max_norm_sq.sqrt();
+        let scale = if diameter > 1e-20 {
+            scale_factor as f64 / diameter
+        } else {
+            1.0
+        };
+        for p in &mut self.positions {
+            for axis in 0..3 {
+                p[axis] = ((p[axis] as f64 - center[axis]) * scale) as f32;
+            }
+        }
+        scale as f32
+    }
 }
 
 #[cfg(test)]
