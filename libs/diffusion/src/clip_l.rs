@@ -45,6 +45,13 @@ pub struct LoadedClipLWeights {
     pub config: ClipLModelConfig,
     pub path: PathBuf,
     graph_extra_bytes: usize,
+    weight_scope: ClipLWeightScope,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClipLWeightScope {
+    All,
+    TextModel,
 }
 
 #[derive(Clone, Debug)]
@@ -115,16 +122,62 @@ impl LoadedClipLWeights {
     }
 
     pub fn load_with_extra(path: impl AsRef<Path>, extra_bytes: usize) -> Result<Self> {
+        Self::load_with_scope(path, extra_bytes, ClipLWeightScope::All)
+    }
+
+    /// Load only `text_model.*` tensors from a complete HuggingFace
+    /// `CLIPModel` checkpoint. This accepts the released CLIP-L/14 bundle
+    /// without allocating or attempting to reinterpret its rank-4 vision
+    /// convolution weights.
+    pub fn load_text_model(path: impl AsRef<Path>) -> Result<Self> {
+        Self::load_text_model_with_extra(path, DEFAULT_GRAPH_EXTRA_BYTES)
+    }
+
+    pub fn load_text_model_with_extra(
+        path: impl AsRef<Path>,
+        extra_bytes: usize,
+    ) -> Result<Self> {
+        Self::load_with_scope(path, extra_bytes, ClipLWeightScope::TextModel)
+    }
+
+    /// Load the clip_l component of a combined single-file checkpoint: the
+    /// `prefix` scope (e.g. `text_encoders.clip_l.transformer.`) exposes
+    /// exactly the standalone clip_l.safetensors naming (`text_model.*` +
+    /// `text_projection.weight`), so everything downstream is unchanged and
+    /// the weights keep the combined file's path as their cache identity.
+    pub fn load_component(path: impl AsRef<Path>, prefix: Option<&str>) -> Result<Self> {
+        match prefix {
+            None => Self::load(path),
+            Some(prefix) => {
+                let header = MlxSafetensorsHeader::load(path.as_ref())?.scoped_to_prefix(prefix)?;
+                Self::load_with_scope_header(header, DEFAULT_GRAPH_EXTRA_BYTES, ClipLWeightScope::All)
+            }
+        }
+    }
+
+    fn load_with_scope(
+        path: impl AsRef<Path>,
+        extra_bytes: usize,
+        weight_scope: ClipLWeightScope,
+    ) -> Result<Self> {
         let header = MlxSafetensorsHeader::load(path.as_ref())?;
+        Self::load_with_scope_header(header, extra_bytes, weight_scope)
+    }
+
+    fn load_with_scope_header(
+        header: MlxSafetensorsHeader,
+        extra_bytes: usize,
+        weight_scope: ClipLWeightScope,
+    ) -> Result<Self> {
         let inspect = ClipLTextEncoderConfig::from_header(&header)?;
         let config = clip_model_config_from_inspection(&inspect)?;
-        let total_bytes = clip_weight_total_bytes(&header, extra_bytes)?;
+        let total_bytes = clip_weight_total_bytes(&header, extra_bytes, weight_scope)?;
         let mut ctx = Context::new(InitParams {
             mem_size: total_bytes,
             mem_buffer: None,
             no_alloc: false,
         });
-        let tensor_ids = allocate_clip_weight_tensors(&mut ctx, &header)?;
+        let tensor_ids = allocate_clip_weight_tensors(&mut ctx, &header, weight_scope)?;
         load_clip_weight_bytes(&mut ctx, &header, &tensor_ids)?;
 
         Ok(Self {
@@ -133,6 +186,7 @@ impl LoadedClipLWeights {
             config,
             path: header.path,
             graph_extra_bytes: extra_bytes,
+            weight_scope,
         })
     }
 
@@ -201,8 +255,11 @@ impl CompiledClipL {
                 Ok(graph) => graph,
                 Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
                     let next_extra = next_graph_reserve_bytes(weights)?;
-                    *weights =
-                        LoadedClipLWeights::load_with_extra(weights.path.clone(), next_extra)?;
+                    *weights = LoadedClipLWeights::load_with_scope(
+                        weights.path.clone(),
+                        next_extra,
+                        weights.weight_scope,
+                    )?;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -1147,8 +1204,15 @@ fn add_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     RowsTensor::new(lhs.rows, lhs.cols, output)
 }
 
-fn clip_cache_namespace(weights: &LoadedClipLWeights) -> String {
+pub(crate) fn clip_cache_namespace(weights: &LoadedClipLWeights) -> String {
     format!("clip_l:{}", weights.path.display())
+}
+
+/// Drops every device weight-cache entry belonging to these clip weights.
+/// Called on a model switch — combined checkpoints key all components on
+/// the outgoing checkpoint path.
+pub(crate) fn evict_device_weight_cache(weights: &LoadedClipLWeights) -> usize {
+    crate::backend::gpu_weight_cache_evict_prefix(&clip_cache_namespace(weights)).unwrap_or(0)
 }
 
 fn clip_force_cpu_math() -> bool {
@@ -1407,9 +1471,15 @@ fn softmax_in_place(values: &mut [f32], width: usize) -> Result<()> {
 fn allocate_clip_weight_tensors(
     ctx: &mut Context,
     header: &MlxSafetensorsHeader,
+    weight_scope: ClipLWeightScope,
 ) -> Result<BTreeMap<String, TensorId>> {
     let mut tensor_ids = BTreeMap::new();
-    let mut names = header.tensors.keys().cloned().collect::<Vec<_>>();
+    let mut names = header
+        .tensors
+        .keys()
+        .filter(|name| clip_weight_in_scope(name, weight_scope))
+        .cloned()
+        .collect::<Vec<_>>();
     names.sort();
     for name in names {
         let entry = header.tensor(&name).ok_or_else(|| {
@@ -1468,9 +1538,18 @@ fn clip_model_config_from_inspection(inspect: &ClipLTextEncoderConfig) -> Result
     })
 }
 
-fn clip_weight_total_bytes(header: &MlxSafetensorsHeader, extra_bytes: usize) -> Result<usize> {
+fn clip_weight_total_bytes(
+    header: &MlxSafetensorsHeader,
+    extra_bytes: usize,
+    weight_scope: ClipLWeightScope,
+) -> Result<usize> {
     let mut total = 0usize;
-    let mut names = header.tensors.keys().cloned().collect::<Vec<_>>();
+    let mut names = header
+        .tensors
+        .keys()
+        .filter(|name| clip_weight_in_scope(name, weight_scope))
+        .cloned()
+        .collect::<Vec<_>>();
     names.sort();
     for name in names {
         let entry = header.tensor(&name).unwrap();
@@ -1485,6 +1564,15 @@ fn clip_weight_total_bytes(header: &MlxSafetensorsHeader, extra_bytes: usize) ->
     total
         .checked_add(extra_bytes)
         .ok_or_else(|| DiffusionError::model("clip_l context size overflow"))
+}
+
+fn clip_weight_in_scope(name: &str, weight_scope: ClipLWeightScope) -> bool {
+    match weight_scope {
+        ClipLWeightScope::All => true,
+        ClipLWeightScope::TextModel => {
+            name.starts_with("text_model.") && name != "text_model.embeddings.position_ids"
+        }
+    }
 }
 
 fn clip_target_nbytes(_name: &str, entry: &MlxTensorEntry) -> Result<usize> {
@@ -1694,7 +1782,7 @@ fn pooled_from_hidden_states(
 mod tests {
     use super::{
         clip_model_config_from_inspection, clip_target_extents, clip_target_tensor_type,
-        flash_attention_allowed,
+        clip_weight_in_scope, flash_attention_allowed, ClipLWeightScope,
     };
     use crate::flux::ClipLTextEncoderConfig;
     use makepad_ggml::TensorType;
@@ -1738,5 +1826,29 @@ mod tests {
         .unwrap();
         assert_eq!(config.attention_head_count, 12);
         assert_eq!(config.layer_norm_epsilon(), 1.0e-5);
+    }
+
+    #[test]
+    fn clip_text_model_scope_excludes_full_model_vision_weights() {
+        assert!(clip_weight_in_scope(
+            "text_model.encoder.layers.0.self_attn.q_proj.weight",
+            ClipLWeightScope::TextModel,
+        ));
+        assert!(!clip_weight_in_scope(
+            "vision_model.embeddings.patch_embedding.weight",
+            ClipLWeightScope::TextModel,
+        ));
+        assert!(!clip_weight_in_scope(
+            "text_projection.weight",
+            ClipLWeightScope::TextModel,
+        ));
+        assert!(!clip_weight_in_scope(
+            "text_model.embeddings.position_ids",
+            ClipLWeightScope::TextModel,
+        ));
+        assert!(clip_weight_in_scope(
+            "vision_model.embeddings.patch_embedding.weight",
+            ClipLWeightScope::All,
+        ));
     }
 }
