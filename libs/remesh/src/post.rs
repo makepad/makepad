@@ -174,6 +174,17 @@ pub fn weld_vertices(
     indices: &mut [u32],
     step: f32,
 ) -> usize {
+    weld_vertices_ctl(positions, indices, step, &mut |_, _| true)
+}
+
+/// Same as [`weld_vertices`]. `ctl(done, total)` returning false stops early
+/// and leaves `positions`/`indices` unchanged.
+pub fn weld_vertices_ctl(
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut [u32],
+    step: f32,
+    ctl: &mut impl FnMut(usize, usize) -> bool,
+) -> usize {
     use std::collections::HashMap;
     let v = positions.len();
     let eps2 = step * step;
@@ -183,7 +194,14 @@ pub fn weld_vertices(
     let mut cells: HashMap<u64, Vec<u32>> = HashMap::with_capacity(v * 2);
     let mut remap = vec![0u32; v];
     let mut kept: Vec<[f32; 3]> = Vec::with_capacity(v);
+    let tick = (v / 20).max(1);
+    if !ctl(0, v) {
+        return 0;
+    }
     for i in 0..v {
+        if i % tick == 0 && !ctl(i, v) {
+            return 0;
+        }
         let p = positions[i];
         let cx = (p[0] / step).floor() as i64;
         let cy = (p[1] / step).floor() as i64;
@@ -221,6 +239,7 @@ pub fn weld_vertices(
     }
     let welded = v - kept.len();
     *positions = kept;
+    let _ = ctl(v, v);
     welded
 }
 

@@ -764,7 +764,7 @@ mod trellis_gen {
     use makepad_diffusion::trellis_slat::T2SparseDec;
     use makepad_diffusion::trellis_vae::T2SsDec;
     use makepad_diffusion::DiffusionError;
-    use makepad_remesh::{remesh_narrow_band_dc, SurfaceBvh};
+    use makepad_remesh::{remesh_narrow_band_dc_ctl, SurfaceBvh};
     use std::path::PathBuf;
 
     /// The registry files this backend loads (tex flow + tex decoder only
@@ -1246,7 +1246,7 @@ mod trellis_gen {
             };
 
             cancel.check()?;
-            progress("surface cleanup", 0.89);
+            progress("weld surface", 0.88);
             // Keep this cleaned decoded surface alive through remesh AND
             // baking. Its BVH drives the UDF and snaps every atlas texel
             // after simplification back to the original attribute surface.
@@ -1260,13 +1260,17 @@ mod trellis_gen {
                 &mut surface_indices,
                 1.0 / 8192.0,
             );
+            cancel.check()?;
+            progress("fill holes", 0.885);
             makepad_remesh::fill_small_holes(&mut surface_indices, 64);
+            cancel.check()?;
+            progress("build BVH", 0.89);
             let surface_bvh = SurfaceBvh::build(&surface_positions, &surface_indices)
                 .map_err(trellis_err)?;
 
             cancel.check()?;
             progress("narrow-band remesh", 0.90);
-            let remeshed = remesh_narrow_band_dc(
+            let remeshed = remesh_narrow_band_dc_ctl(
                 &surface_positions,
                 &surface_indices,
                 &surface_bvh,
@@ -1277,6 +1281,13 @@ mod trellis_gen {
                 // inner and outer shells back onto a noisy decoded surface
                 // creates near-coincident geometry and dark interference.
                 0.0,
+                &mut |stage, frac| {
+                    progress(
+                        &format!("remesh {stage}"),
+                        0.90 + 0.03 * frac.clamp(0.0, 1.0),
+                    );
+                    !cancel.is_cancelled()
+                },
             )
             .map_err(trellis_err)?;
             let (mut positions, mut indices) = (remeshed.positions, remeshed.indices);
@@ -1298,7 +1309,7 @@ mod trellis_gen {
                     let done = start_faces.saturating_sub(faces) as f64 / span as f64;
                     progress(
                         &format!("decimate {}k", faces / 1000),
-                        0.91 + 0.04 * done.clamp(0.0, 1.0),
+                        0.93 + 0.03 * done.clamp(0.0, 1.0),
                     );
                     !cancel.is_cancelled()
                 },

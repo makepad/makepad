@@ -216,11 +216,36 @@ pub fn remesh_narrow_band_dc(
     band: usize,
     project_back: f32,
 ) -> Result<SurfaceMesh, String> {
+    remesh_narrow_band_dc_ctl(
+        positions,
+        indices,
+        bvh,
+        resolution,
+        band,
+        project_back,
+        &mut |_, _| true,
+    )
+}
+
+/// Same as [`remesh_narrow_band_dc`], with a cancel/progress hook.
+/// `ctl(label, 0..=1)` returning false aborts.
+pub fn remesh_narrow_band_dc_ctl(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    bvh: &SurfaceBvh<'_>,
+    resolution: usize,
+    band: usize,
+    project_back: f32,
+    ctl: &mut impl FnMut(&str, f64) -> bool,
+) -> Result<SurfaceMesh, String> {
     if indices.is_empty() || bvh.is_empty() || resolution < 8 || band == 0 {
         return Err("narrow-band remesh has invalid input".to_string());
     }
     if indices.len() % 3 != 0 {
         return Err("narrow-band remesh indices are not triangles".to_string());
+    }
+    if !ctl("voxelize", 0.02) {
+        return Err("narrow-band remesh cancelled".to_string());
     }
     let res = resolution as i32;
     let scale = (resolution + 3 * band) as f32 / resolution as f32;
@@ -237,42 +262,57 @@ pub fn remesh_narrow_band_dc(
     let dil = band as i32 + 1;
     let faces = indices.len() / 3;
     let threads = worker_count();
-    let chunk = faces.div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        for (face_base, face_rows) in indices.chunks(chunk * 3).enumerate() {
-            let words = &words;
-            scope.spawn(move || {
-                let _face_start = face_base * chunk;
-                for tri in face_rows.chunks_exact(3) {
-                    let a = positions[tri[0] as usize];
-                    let b = positions[tri[1] as usize];
-                    let c = positions[tri[2] as usize];
-                    let mut c0 = [0i32; 3];
-                    let mut c1 = [0i32; 3];
-                    for axis in 0..3 {
-                        let lo = a[axis].min(b[axis]).min(c[axis]);
-                        let hi = a[axis].max(b[axis]).max(c[axis]);
-                        c0[axis] = (((lo / scale + 0.5) * resolution as f32).floor() as i32
-                            - dil)
-                            .clamp(0, res - 1);
-                        c1[axis] = (((hi / scale + 0.5) * resolution as f32).floor() as i32
-                            + dil)
-                            .clamp(0, res - 1);
-                    }
-                    for x in c0[0]..=c1[0] {
-                        for y in c0[1]..=c1[1] {
-                            for z in c0[2]..=c1[2] {
-                                let id = ((x as usize * resolution + y as usize) * resolution
-                                    + z as usize) as u64;
-                                words[(id >> 6) as usize]
-                                    .fetch_or(1u64 << (id & 63), Ordering::Relaxed);
+    let face_waves = 8usize;
+    let faces_per_wave = faces.div_ceil(face_waves).max(1);
+    for wave in 0..face_waves {
+        let face0 = wave * faces_per_wave;
+        if face0 >= faces {
+            break;
+        }
+        let face1 = (face0 + faces_per_wave).min(faces);
+        if !ctl(
+            "voxelize",
+            0.02 + 0.10 * (wave as f64 / face_waves as f64),
+        ) {
+            return Err("narrow-band remesh cancelled".to_string());
+        }
+        let face_rows = &indices[face0 * 3..face1 * 3];
+        let chunk = (face1 - face0).div_ceil(threads).max(1);
+        std::thread::scope(|scope| {
+            for face_part in face_rows.chunks(chunk * 3) {
+                let words = &words;
+                scope.spawn(move || {
+                    for tri in face_part.chunks_exact(3) {
+                        let a = positions[tri[0] as usize];
+                        let b = positions[tri[1] as usize];
+                        let c = positions[tri[2] as usize];
+                        let mut c0 = [0i32; 3];
+                        let mut c1 = [0i32; 3];
+                        for axis in 0..3 {
+                            let lo = a[axis].min(b[axis]).min(c[axis]);
+                            let hi = a[axis].max(b[axis]).max(c[axis]);
+                            c0[axis] = (((lo / scale + 0.5) * resolution as f32).floor() as i32
+                                - dil)
+                                .clamp(0, res - 1);
+                            c1[axis] = (((hi / scale + 0.5) * resolution as f32).floor() as i32
+                                + dil)
+                                .clamp(0, res - 1);
+                        }
+                        for x in c0[0]..=c1[0] {
+                            for y in c0[1]..=c1[1] {
+                                for z in c0[2]..=c1[2] {
+                                    let id = ((x as usize * resolution + y as usize) * resolution
+                                        + z as usize) as u64;
+                                    words[(id >> 6) as usize]
+                                        .fetch_or(1u64 << (id & 63), Ordering::Relaxed);
+                                }
                             }
                         }
                     }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+    }
 
     let mut candidates = Vec::<u64>::new();
     for (word_id, word) in words.iter().enumerate() {
@@ -287,30 +327,50 @@ pub fn remesh_narrow_band_dc(
         }
     }
     drop(words);
+    if !ctl("active cells", 0.16) {
+        return Err("narrow-band remesh cancelled".to_string());
+    }
 
     let mut active = vec![0u8; candidates.len()];
-    let chunk = candidates.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        for (cells, flags) in candidates.chunks(chunk).zip(active.chunks_mut(chunk)) {
-            scope.spawn(move || {
-                for (&id, flag) in cells.iter().zip(flags) {
-                    let x = id as usize / (resolution * resolution);
-                    let y = id as usize / resolution % resolution;
-                    let z = id as usize % resolution;
-                    let p = [
-                        ((x as f32 + 0.5) / resolution as f32 - 0.5) * scale,
-                        ((y as f32 + 0.5) / resolution as f32 - 0.5) * scale,
-                        ((z as f32 + 0.5) / resolution as f32 - 0.5) * scale,
-                    ];
-                    if let Some(hit) = bvh.closest(p, eps + keep) {
-                        if (hit.dist2.sqrt() - eps).abs() < keep {
-                            *flag = 1;
+    let cell_waves = 8usize;
+    let cells_per_wave = candidates.len().div_ceil(cell_waves).max(1);
+    for wave in 0..cell_waves {
+        let start = wave * cells_per_wave;
+        if start >= candidates.len() {
+            break;
+        }
+        let end = (start + cells_per_wave).min(candidates.len());
+        if !ctl(
+            "active cells",
+            0.16 + 0.28 * (wave as f64 / cell_waves as f64),
+        ) {
+            return Err("narrow-band remesh cancelled".to_string());
+        }
+        let cells = &candidates[start..end];
+        let flags = &mut active[start..end];
+        let chunk = cells.len().div_ceil(threads).max(1);
+        std::thread::scope(|scope| {
+            for (cells, flags) in cells.chunks(chunk).zip(flags.chunks_mut(chunk)) {
+                scope.spawn(move || {
+                    for (&id, flag) in cells.iter().zip(flags) {
+                        let x = id as usize / (resolution * resolution);
+                        let y = id as usize / resolution % resolution;
+                        let z = id as usize % resolution;
+                        let p = [
+                            ((x as f32 + 0.5) / resolution as f32 - 0.5) * scale,
+                            ((y as f32 + 0.5) / resolution as f32 - 0.5) * scale,
+                            ((z as f32 + 0.5) / resolution as f32 - 0.5) * scale,
+                        ];
+                        if let Some(hit) = bvh.closest(p, eps + keep) {
+                            if (hit.dist2.sqrt() - eps).abs() < keep {
+                                *flag = 1;
+                            }
                         }
                     }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+    }
     let mut acoord = Vec::<[i32; 3]>::new();
     for (&id, &flag) in candidates.iter().zip(&active) {
         if flag == 0 {
@@ -352,25 +412,42 @@ pub fn remesh_narrow_band_dc(
         }
     }
     let mut fvert = vec![0.0f32; vcoord.len()];
-    let chunk = vcoord.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        for (coords, values) in vcoord.chunks(chunk).zip(fvert.chunks_mut(chunk)) {
-            scope.spawn(move || {
-                for (&c, value) in coords.iter().zip(values) {
-                    let p = [
-                        (c[0] as f32 / resolution as f32 - 0.5) * scale,
-                        (c[1] as f32 / resolution as f32 - 0.5) * scale,
-                        (c[2] as f32 / resolution as f32 - 0.5) * scale,
-                    ];
-                    *value = bvh
-                        .closest(p, eps + 2.0 * cell)
-                        .map(|hit| hit.dist2.sqrt())
-                        .unwrap_or(eps + 2.0 * cell)
-                        - eps;
-                }
-            });
+    let field_waves = 8usize;
+    let verts_per_wave = vcoord.len().div_ceil(field_waves).max(1);
+    for wave in 0..field_waves {
+        let start = wave * verts_per_wave;
+        if start >= vcoord.len() {
+            break;
         }
-    });
+        let end = (start + verts_per_wave).min(vcoord.len());
+        if !ctl("field", 0.48 + 0.22 * (wave as f64 / field_waves as f64)) {
+            return Err("narrow-band remesh cancelled".to_string());
+        }
+        let coords = &vcoord[start..end];
+        let values = &mut fvert[start..end];
+        let chunk = coords.len().div_ceil(threads).max(1);
+        std::thread::scope(|scope| {
+            for (coords, values) in coords.chunks(chunk).zip(values.chunks_mut(chunk)) {
+                scope.spawn(move || {
+                    for (&c, value) in coords.iter().zip(values) {
+                        let p = [
+                            (c[0] as f32 / resolution as f32 - 0.5) * scale,
+                            (c[1] as f32 / resolution as f32 - 0.5) * scale,
+                            (c[2] as f32 / resolution as f32 - 0.5) * scale,
+                        ];
+                        *value = bvh
+                            .closest(p, eps + 2.0 * cell)
+                            .map(|hit| hit.dist2.sqrt())
+                            .unwrap_or(eps + 2.0 * cell)
+                            - eps;
+                    }
+                });
+            }
+        });
+    }
+    if !ctl("contour", 0.72) {
+        return Err("narrow-band remesh cancelled".to_string());
+    }
 
     let mut dual = vec![[0.0f32; 3]; acoord.len()];
     let mut owned = vec![[0i8; 3]; acoord.len()];
@@ -474,6 +551,9 @@ pub fn remesh_narrow_band_dc(
     }
     if faces_out.is_empty() {
         return Err("narrow-band remesh produced no faces".to_string());
+    }
+    if !ctl("faces", 0.92) {
+        return Err("narrow-band remesh cancelled".to_string());
     }
     let mut remap = vec![u32::MAX; acoord.len()];
     let mut out = SurfaceMesh {
@@ -628,6 +708,25 @@ mod tests {
         assert_eq!(hit.face, 0);
         assert!((hit.dist2 - 0.25).abs() < 1e-6);
         assert_eq!(hit.point, [0.25, 0.25, 0.0]);
+    }
+
+    #[test]
+    fn narrow_band_reports_inner_stages() {
+        let (p, i) = cube();
+        let bvh = SurfaceBvh::build(&p, &i).unwrap();
+        let mut labels = Vec::new();
+        let out = remesh_narrow_band_dc_ctl(&p, &i, &bvh, 32, 1, 0.0, &mut |label, _| {
+            labels.push(label.to_string());
+            true
+        })
+        .unwrap();
+        assert!(out.ok());
+        for need in ["voxelize", "active cells", "field", "contour", "faces"] {
+            assert!(
+                labels.iter().any(|l| l == need),
+                "missing remesh stage {need} in {labels:?}"
+            );
+        }
     }
 
     #[test]
