@@ -18,6 +18,9 @@ fn main() {
             if lib_dir.join("libcublas.so").exists() {
                 println!("cargo:rustc-link-lib=dylib=cublas");
             }
+            if lib_dir.join("libcublasLt.so").exists() {
+                println!("cargo:rustc-link-lib=dylib=cublasLt");
+            }
         }
     } else if target_os == "windows" {
         let lib_dir = cuda_root.join("lib").join("x64");
@@ -26,6 +29,9 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=cudart");
             if lib_dir.join("cublas.lib").exists() {
                 println!("cargo:rustc-link-lib=dylib=cublas");
+            }
+            if lib_dir.join("cublasLt.lib").exists() {
+                println!("cargo:rustc-link-lib=dylib=cublasLt");
             }
         }
     }

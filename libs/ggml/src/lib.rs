@@ -13,6 +13,7 @@ pub use backend::{
     Backend, BackendBuffer, BackendBufferType, BackendBufferUsage, BackendDeviceCaps,
     BackendDeviceProps, BackendDeviceType, BackendEvent, BackendGraphPlan,
 };
+pub use backend::llm_ops;
 pub use backend::{BackendCapabilities, BackendInfo, BackendKind};
 pub use context::Context;
 pub use core::{

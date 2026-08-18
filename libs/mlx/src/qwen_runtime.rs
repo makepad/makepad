@@ -507,6 +507,7 @@ pub struct MlxQwen35MoeRuntimeSession {
     f32_tensor_cache: Arc<Mutex<HashMap<String, Arc<[f32]>>>>,
     conv1d_kernel_cache: Arc<Mutex<HashMap<String, Arc<[f32]>>>>,
     cuda_text_runtime: Arc<Mutex<Option<Arc<Mutex<cuda::CudaQwenTextRuntime>>>>>,
+    cuda_generation_resources: Arc<Mutex<Option<cuda::CudaQwenGenerationResources>>>,
 }
 
 impl MlxQwen35MoeRuntimeSession {
@@ -536,6 +537,7 @@ impl MlxQwen35MoeRuntimeSession {
             f32_tensor_cache: Arc::new(Mutex::new(HashMap::new())),
             conv1d_kernel_cache: Arc::new(Mutex::new(HashMap::new())),
             cuda_text_runtime: Arc::new(Mutex::new(None)),
+            cuda_generation_resources: Arc::new(Mutex::new(None)),
         }))
     }
 

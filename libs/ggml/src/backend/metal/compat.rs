@@ -2,7 +2,25 @@
 /// set GGML_METAL_TRACE=1 to enable, mirroring MAKEPAD_CUDA_TRACE.
 fn log_metal_trace() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("GGML_METAL_TRACE").is_some())
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("GGML_METAL_TRACE").is_some()
+            || std::env::var_os("MAKEPAD_MUSIC3_TRACE").is_some()
+    })
+}
+
+/// Missing-kernel fallbacks fire per matmul; print each distinct message once.
+fn log_metal_error_once(msg: impl std::fmt::Display) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let text = msg.to_string();
+    let mut seen = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if seen.insert(text.clone()) {
+        eprintln!("{text}");
+    }
 }
 
 #[allow(dead_code)]
@@ -14,12 +32,28 @@ pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
+use crate::backend::prof;
+
+fn prof_rec(cat: usize, start: std::time::Instant, f32_count: usize) {
+    prof::record(cat, start, (f32_count * 4) as u64);
+}
+
 pub fn try_matmul_nn_f32(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
-    imp::try_matmul_nn_f32(a, b, m, k, n)
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nn_f32(a, b, m, k, n);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + b.len() + v.len());
+    }
+    out
 }
 
 pub fn try_matmul_nt_f32(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
-    imp::try_matmul_nt_f32(a, bt, m, k, n)
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_f32(a, bt, m, k, n);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + bt.len() + v.len());
+    }
+    out
 }
 
 pub fn try_matmul_nt_f32_bytes(
@@ -50,7 +84,39 @@ pub fn try_matmul_nt_ggml_bytes(
     k: usize,
     n: usize,
 ) -> Option<Vec<f32>> {
-    imp::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n)
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n);
+    if let Some(v) = &out {
+        prof_rec(
+            prof::CAT_MATMUL_UNCACHED,
+            t,
+            a.len() + bt_bytes.len() / 4 + v.len(),
+        );
+    }
+    out
+}
+
+pub fn try_matmul_nt_ggml_bytes_keyed<F>(
+    a: &[f32],
+    bt_ggml_type: u32,
+    m: usize,
+    k: usize,
+    n: usize,
+    namespace: &str,
+    cache_key: &str,
+    load: F,
+) -> Option<Vec<f32>>
+where
+    F: FnOnce() -> Result<Vec<u8>, String>,
+{
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_ggml_bytes_keyed(
+        a, bt_ggml_type, m, k, n, namespace, cache_key, load,
+    );
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + v.len());
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +133,159 @@ pub fn try_matmul_nt_ggml_bytes_multi(
     matrices: &[MatmulNtGgmlBytesMatrix<'_>],
 ) -> Option<Vec<Vec<f32>>> {
     imp::try_matmul_nt_ggml_bytes_multi(a, m, k, matrices)
+}
+
+/// Same kernels as [`try_matmul_nt_ggml_bytes_keyed`], one activation upload,
+/// one wait. Weights live in the named cache — do not use the uncached multi
+/// path for AR (it re-uploads W whenever the host pointer moves).
+#[derive(Clone, Copy, Debug)]
+pub struct MatmulNtGgmlBytesKeyedMatrix<'a> {
+    pub bt_ggml_type: u32,
+    pub n: usize,
+    pub namespace: &'a str,
+    pub cache_key: &'a str,
+}
+
+pub fn try_matmul_nt_ggml_bytes_keyed_multi<F>(
+    a: &[f32],
+    m: usize,
+    k: usize,
+    matrices: &[MatmulNtGgmlBytesKeyedMatrix<'_>],
+    load: F,
+) -> Option<Vec<Vec<f32>>>
+where
+    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+{
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_ggml_bytes_keyed_multi(a, m, k, matrices, load);
+    if let Some(vs) = &out {
+        let n_out: usize = vs.iter().map(|v| v.len()).sum();
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + n_out);
+    }
+    out
+}
+
+/// Upload (optional) hidden, RMS + QKV (+ optional Q/K RMS) on GPU.
+/// Returns host q,k,v. `qk_norm` is `(q_norm, k_norm, q_key, k_key)`;
+/// pass `None` for stacks without per-head Q/K norms (Music3 RVQ).
+pub fn try_ar_pre_attn<F>(
+    hidden: Option<&[f32]>,
+    m: usize,
+    hidden_w: usize,
+    head_dim: usize,
+    in_norm: &[f32],
+    qk_norm: Option<(&[f32], &[f32], &str, &str)>,
+    in_norm_key: &str,
+    eps: f32,
+    q: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    k: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    v: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    load: F,
+) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
+where
+    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+{
+    imp::try_ar_pre_attn(
+        hidden,
+        m,
+        hidden_w,
+        head_dim,
+        in_norm,
+        qk_norm,
+        in_norm_key,
+        eps,
+        q,
+        k,
+        v,
+        load,
+    )
+}
+
+/// o_proj + residual + RMS + up/gate + SiLU*mul + down + residual. Hidden stays on GPU.
+pub fn try_ar_post_attn<F>(
+    attn: &[f32],
+    m: usize,
+    hidden_w: usize,
+    post_norm: &[f32],
+    post_norm_key: &str,
+    eps: f32,
+    o: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    up: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    gate: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    down: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    load: F,
+) -> Option<()>
+where
+    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+{
+    imp::try_ar_post_attn(
+        attn,
+        m,
+        hidden_w,
+        post_norm,
+        post_norm_key,
+        eps,
+        o,
+        up,
+        gate,
+        down,
+        load,
+    )
+}
+
+pub fn try_ar_final_rms(
+    m: usize,
+    hidden_w: usize,
+    gamma: &[f32],
+    gamma_key: &str,
+    eps: f32,
+) -> Option<Vec<f32>> {
+    imp::try_ar_final_rms(m, hidden_w, gamma, gamma_key, eps)
+}
+
+pub fn ar_resident_clear() {
+    imp::ar_resident_clear();
+}
+
+/// Drop all recycled transient buffers (keeps act/weight caches). Call at a
+/// phase edge when the previous phase used much larger shapes (e.g. after
+/// prefill, before decode) so the pool's retained giants don't sit wired
+/// through a long small-shape loop.
+pub fn transient_pool_clear() {
+    imp::transient_pool_clear();
+}
+
+pub fn try_dit_ffn_resident<F>(
+    normed: &[f32],
+    m: usize,
+    hidden_w: usize,
+    ff_dim: usize,
+    ff_in_b: &[f32],
+    ff_out_b: &[f32],
+    ff_in_b_key: &str,
+    ff_out_b_key: &str,
+    swap: bool,
+    ff_in: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    ff_out: MatmulNtGgmlBytesKeyedMatrix<'_>,
+    load: F,
+) -> Option<Vec<f32>>
+where
+    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+{
+    imp::try_dit_ffn_resident(
+        normed,
+        m,
+        hidden_w,
+        ff_dim,
+        ff_in_b,
+        ff_out_b,
+        ff_in_b_key,
+        ff_out_b_key,
+        swap,
+        ff_in,
+        ff_out,
+        load,
+    )
 }
 
 pub fn try_matmul_nt_ggml_bytes_add_bias(
@@ -109,7 +328,16 @@ pub fn try_flash_attn_f32_packed(
     d: usize,
     scale: f32,
 ) -> Option<Vec<f32>> {
-    imp::try_flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale)
+    let t = std::time::Instant::now();
+    let out = imp::try_flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale);
+    if let Some(o) = &out {
+        prof_rec(
+            prof::CAT_FLASH_ATTN,
+            t,
+            q.len() + k.len() + v.len() + o.len(),
+        );
+    }
+    out
 }
 
 pub fn clear_decoder_kv_cache() {
@@ -146,23 +374,48 @@ pub fn try_flash_attn_f32_cross_kv_cache(
 }
 
 pub fn try_add_f32(a: &[f32], a_shape: &[usize], b: &[f32], b_shape: &[usize]) -> Option<Vec<f32>> {
-    imp::try_add_f32(a, a_shape, b, b_shape)
+    let t = std::time::Instant::now();
+    let out = imp::try_add_f32(a, a_shape, b, b_shape);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_ELEMENTWISE, t, a.len() + b.len() + v.len());
+    }
+    out
 }
 
 pub fn try_mul_f32(a: &[f32], a_shape: &[usize], b: &[f32], b_shape: &[usize]) -> Option<Vec<f32>> {
-    imp::try_mul_f32(a, a_shape, b, b_shape)
+    let t = std::time::Instant::now();
+    let out = imp::try_mul_f32(a, a_shape, b, b_shape);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_ELEMENTWISE, t, a.len() + b.len() + v.len());
+    }
+    out
 }
 
 pub fn try_gelu_f32(a: &[f32], shape: &[usize]) -> Option<Vec<f32>> {
-    imp::try_gelu_f32(a, shape)
+    let t = std::time::Instant::now();
+    let out = imp::try_gelu_f32(a, shape);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_ELEMENTWISE, t, a.len() + v.len());
+    }
+    out
 }
 
 pub fn try_layer_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
-    imp::try_layer_norm_f32(x, shape, eps)
+    let t = std::time::Instant::now();
+    let out = imp::try_layer_norm_f32(x, shape, eps);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_LAYER_NORM, t, x.len() + v.len());
+    }
+    out
 }
 
 pub fn try_rms_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
-    imp::try_rms_norm_f32(x, shape, eps)
+    let t = std::time::Instant::now();
+    let out = imp::try_rms_norm_f32(x, shape, eps);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_RMS_NORM, t, x.len() + v.len());
+    }
+    out
 }
 
 pub fn try_rms_norm_mul_f32(
@@ -172,7 +425,12 @@ pub fn try_rms_norm_mul_f32(
     mul_shape: &[usize],
     eps: f32,
 ) -> Option<Vec<f32>> {
-    imp::try_rms_norm_mul_f32(x, x_shape, mul, mul_shape, eps)
+    let t = std::time::Instant::now();
+    let out = imp::try_rms_norm_mul_f32(x, x_shape, mul, mul_shape, eps);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_RMS_NORM, t, x.len() + v.len());
+    }
+    out
 }
 
 pub fn try_attention_softmax_weighted_sum_f32(
@@ -182,7 +440,17 @@ pub fn try_attention_softmax_weighted_sum_f32(
     seq_len: usize,
     head_dim: usize,
 ) -> Option<Vec<f32>> {
-    imp::try_attention_softmax_weighted_sum_f32(logits, values, query_count, seq_len, head_dim)
+    let t = std::time::Instant::now();
+    let out =
+        imp::try_attention_softmax_weighted_sum_f32(logits, values, query_count, seq_len, head_dim);
+    if let Some(v) = &out {
+        prof_rec(
+            prof::CAT_ATTN_SOFTMAX_WS,
+            t,
+            logits.len() + values.len() + v.len(),
+        );
+    }
+    out
 }
 
 pub fn try_layer_norm_mul_add_f32(
@@ -194,7 +462,12 @@ pub fn try_layer_norm_mul_add_f32(
     add_shape: &[usize],
     eps: f32,
 ) -> Option<Vec<f32>> {
-    imp::try_layer_norm_mul_add_f32(x, x_shape, mul, mul_shape, add, add_shape, eps)
+    let t = std::time::Instant::now();
+    let out = imp::try_layer_norm_mul_add_f32(x, x_shape, mul, mul_shape, add, add_shape, eps);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_LAYER_NORM, t, x.len() + v.len());
+    }
+    out
 }
 
 pub fn try_get_rows_ggml_bytes(
@@ -216,6 +489,76 @@ pub fn try_im2col_1d_f32(
     pad: usize,
 ) -> Option<Vec<f32>> {
     imp::try_im2col_1d_f32(input, ic, iw, kw, stride, pad)
+}
+
+/// Planar ([c][y][x]) stride-1 "same" conv2d for the diffusion VAE lazy path.
+/// `weights` is [out_c][in_c][kh][kw], `bias` is per out channel.
+#[allow(clippy::too_many_arguments)]
+pub fn try_conv2d_planar_f32(
+    input: &[f32],
+    width: usize,
+    height: usize,
+    in_channels: usize,
+    weights: &[f32],
+    bias: &[f32],
+    out_channels: usize,
+    kw: usize,
+    kh: usize,
+    pad_x: usize,
+    pad_y: usize,
+) -> Option<Vec<f32>> {
+    let t = std::time::Instant::now();
+    let out = imp::try_conv2d_planar_f32(
+        input,
+        width,
+        height,
+        in_channels,
+        weights,
+        bias,
+        out_channels,
+        kw,
+        kh,
+        pad_x,
+        pad_y,
+    );
+    if let Some(v) = &out {
+        prof_rec(
+            prof::CAT_CONV2D,
+            t,
+            input.len() + weights.len() + v.len(),
+        );
+    }
+    out
+}
+
+/// Group norm over planar ([c][y][x]) data with per-channel gamma/beta.
+#[allow(clippy::too_many_arguments)]
+pub fn try_group_norm_planar_f32(
+    input: &[f32],
+    width: usize,
+    height: usize,
+    channels: usize,
+    groups: usize,
+    gamma: &[f32],
+    beta: &[f32],
+    eps: f32,
+) -> Option<Vec<f32>> {
+    let t = std::time::Instant::now();
+    let out =
+        imp::try_group_norm_planar_f32(input, width, height, channels, groups, gamma, beta, eps);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_GROUP_NORM, t, input.len() + v.len());
+    }
+    out
+}
+
+pub fn try_silu_f32(a: &[f32]) -> Option<Vec<f32>> {
+    let t = std::time::Instant::now();
+    let out = imp::try_silu_f32(a);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_ELEMENTWISE, t, a.len() + v.len());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -546,12 +889,114 @@ mod imp {
         None
     }
 
+    pub(super) fn try_matmul_nt_ggml_bytes_keyed<F>(
+        _a: &[f32],
+        _bt_ggml_type: u32,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+        _namespace: &str,
+        _cache_key: &str,
+        _load: F,
+    ) -> Option<Vec<f32>>
+    where
+        F: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
     pub(super) fn try_matmul_nt_ggml_bytes_multi(
         _a: &[f32],
         _m: usize,
         _k: usize,
         _matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
     ) -> Option<Vec<Vec<f32>>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_keyed_multi<F>(
+        _a: &[f32],
+        _m: usize,
+        _k: usize,
+        _matrices: &[super::MatmulNtGgmlBytesKeyedMatrix<'_>],
+        _load: F,
+    ) -> Option<Vec<Vec<f32>>>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_ar_pre_attn<F>(
+        _hidden: Option<&[f32]>,
+        _m: usize,
+        _hidden_w: usize,
+        _head_dim: usize,
+        _in_norm: &[f32],
+        _qk_norm: Option<(&[f32], &[f32], &str, &str)>,
+        _in_norm_key: &str,
+        _eps: f32,
+        _q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _v: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _load: F,
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_ar_post_attn<F>(
+        _attn: &[f32],
+        _m: usize,
+        _hidden_w: usize,
+        _post_norm: &[f32],
+        _post_norm_key: &str,
+        _eps: f32,
+        _o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _gate: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _down: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _load: F,
+    ) -> Option<()>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_ar_final_rms(
+        _m: usize,
+        _hidden_w: usize,
+        _gamma: &[f32],
+        _gamma_key: &str,
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn ar_resident_clear() {}
+
+    pub(super) fn transient_pool_clear() {}
+
+    pub(super) fn try_dit_ffn_resident<F>(
+        _normed: &[f32],
+        _m: usize,
+        _hidden_w: usize,
+        _ff_dim: usize,
+        _ff_in_b: &[f32],
+        _ff_out_b: &[f32],
+        _ff_in_b_key: &str,
+        _ff_out_b_key: &str,
+        _swap: bool,
+        _ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _load: F,
+    ) -> Option<Vec<f32>>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
         None
     }
 
@@ -579,16 +1024,19 @@ mod imp {
     }
 
     pub(super) fn try_flash_attn_f32_packed(
-        _q: &[f32],
-        _k: &[f32],
-        _v: &[f32],
-        _n_q: usize,
-        _n_kv: usize,
-        _n_head: usize,
-        _d: usize,
-        _scale: f32,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q: usize,
+        n_kv: usize,
+        n_head: usize,
+        d: usize,
+        scale: f32,
     ) -> Option<Vec<f32>> {
-        None
+        // The CUDA kernel shares the Metal packed layout: token-major
+        // [token][head][dim], full bidirectional attention, caller-provided
+        // scale. It requires n_q == n_kv (self attention), which it checks.
+        cuda::try_flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale)
     }
 
     pub(super) fn clear_decoder_kv_cache() {}
@@ -642,7 +1090,7 @@ mod imp {
             let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
             let b_buf = cuda.load_bytes(f32s_as_bytes(b))?;
             let out_buf = cuda.alloc_f32(a.len())?;
-            cuda.add_f32(&a_buf, &b_buf, &out_buf, a.len())?;
+            cuda.add_f32_precise(&a_buf, &b_buf, &out_buf, a.len())?;
             cuda.read_f32s(&out_buf, a.len())
         })
     }
@@ -653,21 +1101,35 @@ mod imp {
         b: &[f32],
         b_shape: &[usize],
     ) -> Option<Vec<f32>> {
-        if shape_numel(a_shape)? != a.len()
-            || shape_numel(b_shape)? != b.len()
-            || a_shape != b_shape
-        {
+        if shape_numel(a_shape)? != a.len() || shape_numel(b_shape)? != b.len() {
             return None;
         }
         if a.is_empty() {
             return Some(Vec::new());
         }
 
+        if a_shape == b_shape {
+            return with_cuda_runtime(|cuda| {
+                let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+                let b_buf = cuda.load_bytes(f32s_as_bytes(b))?;
+                let out_buf = cuda.alloc_f32(a.len())?;
+                cuda.mul_f32_precise(&a_buf, &b_buf, &out_buf, a.len())?;
+                cuda.read_f32s(&out_buf, a.len())
+            });
+        }
+
+        // Row-broadcast: a is [rows, cols], b is a last-dim vector [cols]
+        // (the Metal path broadcasts modulo per dim; this covers the case
+        // the diffusion lazy path uses for gated residuals).
+        let (rows, cols) = rows_cols_for_last_dim(a_shape, a.len())?;
+        if !is_last_dim_vector(b_shape, cols, b.len()) {
+            return None;
+        }
         with_cuda_runtime(|cuda| {
             let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
             let b_buf = cuda.load_bytes(f32s_as_bytes(b))?;
             let out_buf = cuda.alloc_f32(a.len())?;
-            cuda.mul_f32(&a_buf, &b_buf, &out_buf, a.len())?;
+            cuda.mul_rows_vec_f32(&a_buf, &b_buf, &out_buf, rows, cols)?;
             cuda.read_f32s(&out_buf, a.len())
         })
     }
@@ -683,7 +1145,7 @@ mod imp {
         with_cuda_runtime(|cuda| {
             let input_buf = cuda.load_bytes(f32s_as_bytes(a))?;
             let out_buf = cuda.alloc_f32(a.len())?;
-            cuda.gelu_f32(&input_buf, &out_buf, a.len())?;
+            cuda.gelu_f32_precise(&input_buf, &out_buf, a.len())?;
             cuda.read_f32s(&out_buf, a.len())
         })
     }
@@ -701,7 +1163,7 @@ mod imp {
         with_cuda_runtime(|cuda| {
             let x_buf = cuda.load_bytes(f32s_as_bytes(x))?;
             let out_buf = cuda.alloc_f32(x.len())?;
-            cuda.rms_norm_rows_no_scale_f32(&x_buf, &out_buf, rows, cols, cols, eps)?;
+            cuda.rms_norm_rows_no_scale_f32_precise(&x_buf, &out_buf, rows, cols, cols, eps)?;
             cuda.read_f32s(&out_buf, x.len())
         })
     }
@@ -725,7 +1187,7 @@ mod imp {
             let x_buf = cuda.load_bytes(f32s_as_bytes(x))?;
             let mul_buf = cuda.load_bytes(f32s_as_bytes(mul))?;
             let out_buf = cuda.alloc_f32(x.len())?;
-            cuda.rms_norm_rows_weighted_f32_f32weights(
+            cuda.rms_norm_rows_weighted_f32_f32weights_precise(
                 &x_buf, &mul_buf, &out_buf, rows, cols, cols, eps,
             )?;
             cuda.read_f32s(&out_buf, x.len())
@@ -749,25 +1211,24 @@ mod imp {
             return Some(Vec::new());
         }
 
+        // Dense full-precision path: row softmax over the logits followed by
+        // probs @ values through cuBLAS. (The previous wiring reused a bf16
+        // KV-cache ring-buffer kernel whose value layout did not match this
+        // entry point's [seq_len][head_dim] contract.)
         with_cuda_runtime(|cuda| {
             let logits_buf = cuda.load_bytes(f32s_as_bytes(logits))?;
-            let value_words = f32s_to_bf16_words(values);
-            let values_buf = cuda.load_bytes(u16_words_as_le_bytes(&value_words))?;
+            let probs_buf = cuda.alloc_f32(logits.len())?;
+            cuda.softmax_rows_precise_f32(&logits_buf, &probs_buf, query_count, seq_len, seq_len)?;
+            let values_buf = cuda.load_bytes(f32s_as_bytes(values))?;
             let out_len = query_count
                 .checked_mul(head_dim)
                 .ok_or_else(|| "CUDA attention output length overflow".to_string())?;
             let out_buf = cuda.alloc_f32(out_len)?;
-            cuda.attention_softmax_weighted_sum_f32(
-                &logits_buf,
+            cuda.matmul_nn_f32(
+                &probs_buf,
                 &values_buf,
                 &out_buf,
                 query_count,
-                query_count,
-                head_dim,
-                head_dim,
-                seq_len,
-                0,
-                seq_len,
                 seq_len,
                 head_dim,
             )?;
@@ -776,15 +1237,32 @@ mod imp {
     }
 
     pub(super) fn try_layer_norm_mul_add_f32(
-        _x: &[f32],
-        _x_shape: &[usize],
-        _mul: &[f32],
-        _mul_shape: &[usize],
-        _add: &[f32],
-        _add_shape: &[usize],
-        _eps: f32,
+        x: &[f32],
+        x_shape: &[usize],
+        mul: &[f32],
+        mul_shape: &[usize],
+        add: &[f32],
+        add_shape: &[usize],
+        eps: f32,
     ) -> Option<Vec<f32>> {
-        None
+        let (rows, cols) = rows_cols_for_last_dim(x_shape, x.len())?;
+        if !is_last_dim_vector(mul_shape, cols, mul.len())
+            || !is_last_dim_vector(add_shape, cols, add.len())
+        {
+            return None;
+        }
+        if x.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let x_buf = cuda.load_bytes(f32s_as_bytes(x))?;
+            let mul_buf = cuda.load_bytes(f32s_as_bytes(mul))?;
+            let add_buf = cuda.load_bytes(f32s_as_bytes(add))?;
+            let out_buf = cuda.alloc_f32(x.len())?;
+            cuda.layer_norm_mul_add_f32(&x_buf, &mul_buf, &add_buf, &out_buf, rows, cols, eps)?;
+            cuda.read_f32s(&out_buf, x.len())
+        })
     }
 
     pub(super) fn try_get_rows_ggml_bytes(
@@ -806,6 +1284,108 @@ mod imp {
         _pad: usize,
     ) -> Option<Vec<f32>> {
         None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_conv2d_planar_f32(
+        input: &[f32],
+        width: usize,
+        height: usize,
+        in_channels: usize,
+        weights: &[f32],
+        bias: &[f32],
+        out_channels: usize,
+        kw: usize,
+        kh: usize,
+        pad_x: usize,
+        pad_y: usize,
+    ) -> Option<Vec<f32>> {
+        let plane = width.checked_mul(height)?;
+        if input.len() != plane.checked_mul(in_channels)?
+            || weights.len()
+                != out_channels
+                    .checked_mul(in_channels)?
+                    .checked_mul(kw.checked_mul(kh)?)?
+            || bias.len() != out_channels
+        {
+            return None;
+        }
+        let out_len = plane.checked_mul(out_channels)?;
+        if out_len == 0 {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let input_buf = cuda.load_bytes(f32s_as_bytes(input))?;
+            let weights_buf = cuda.load_bytes(f32s_as_bytes(weights))?;
+            let bias_buf = cuda.load_bytes(f32s_as_bytes(bias))?;
+            let out_buf = cuda.alloc_f32(out_len)?;
+            cuda.conv2d_planar_f32(
+                &input_buf,
+                &weights_buf,
+                &bias_buf,
+                &out_buf,
+                width,
+                height,
+                in_channels,
+                out_channels,
+                kw,
+                kh,
+                pad_x,
+                pad_y,
+            )?;
+            cuda.read_f32s(&out_buf, out_len)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_group_norm_planar_f32(
+        input: &[f32],
+        width: usize,
+        height: usize,
+        channels: usize,
+        groups: usize,
+        gamma: &[f32],
+        beta: &[f32],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        let plane = width.checked_mul(height)?;
+        if groups == 0
+            || channels % groups != 0
+            || input.len() != plane.checked_mul(channels)?
+            || gamma.len() != channels
+            || beta.len() != channels
+        {
+            return None;
+        }
+        if input.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let input_buf = cuda.load_bytes(f32s_as_bytes(input))?;
+            let gamma_buf = cuda.load_bytes(f32s_as_bytes(gamma))?;
+            let beta_buf = cuda.load_bytes(f32s_as_bytes(beta))?;
+            let stats_buf = cuda.alloc_f32(groups * 2)?;
+            let out_buf = cuda.alloc_f32(input.len())?;
+            cuda.group_norm_planar_f32(
+                &input_buf, &gamma_buf, &beta_buf, &stats_buf, &out_buf, width, height,
+                channels, groups, eps,
+            )?;
+            cuda.read_f32s(&out_buf, input.len())
+        })
+    }
+
+    pub(super) fn try_silu_f32(a: &[f32]) -> Option<Vec<f32>> {
+        if a.is_empty() {
+            return Some(Vec::new());
+        }
+        with_cuda_runtime(|cuda| {
+            let input_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+            let out_buf = cuda.alloc_f32(a.len())?;
+            cuda.silu_f32_precise(&input_buf, &out_buf, a.len())?;
+            cuda.read_f32s(&out_buf, a.len())
+        })
     }
 }
 
@@ -857,6 +1437,7 @@ mod imp {
     const OP_FLASH_ATTN_EXT_VEC_NQPSG: i32 = 1;
     const OP_FLASH_ATTN_EXT_VEC_NCPSG: i32 = 32;
     const OP_UNARY_NUM_GELU: i16 = 103;
+    const OP_UNARY_NUM_SILU: i16 = 106;
     const SCRATCH_FLASH_PAD: u8 = 1;
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
@@ -1823,12 +2404,29 @@ mod imp {
         is_private: bool,
     }
 
+    struct PoolBuf {
+        cap_bytes: usize,
+        buf: StrongId,
+    }
+
+    /// Keep at most this many bytes of recycled transient buffers. Shapes in
+    /// the decode loops repeat every layer, so the pool stays small; the cap
+    /// only matters for one-off giants (DiT prefill strips).
+    const POOL_CAP_BYTES: usize = 1280 * 1024 * 1024;
+
+    fn pool_disabled() -> bool {
+        static OFF: OnceLock<bool> = OnceLock::new();
+        *OFF.get_or_init(|| std::env::var_os("MAKEPAD_MUSIC3_NO_POOL").is_some())
+    }
+
     struct MetalContext {
         device: StrongId,
         command_queue: StrongId,
         library: StrongId,
         pipeline_cache: HashMap<String, PipelineState>,
         cached_weight_buffers: HashMap<BufferKey, StrongId>,
+        named_weight_buffers: HashMap<(String, String), StrongId>,
+        act_buffers: HashMap<String, (StrongId, usize)>,
         scratch_buffers: HashMap<u8, ScratchBuffer>,
         matmul_out_buffers: HashMap<u8, ScratchBuffer>,
         decoder_kv_layers: HashMap<usize, DecoderKvLayer>,
@@ -1837,6 +2435,8 @@ mod imp {
         batch_command_buffer: Option<StrongId>,
         batch_encoder: Option<StrongId>,
         last_command_buffer: Option<StrongId>,
+        pool_free: Vec<PoolBuf>,
+        pool_in_flight: Vec<PoolBuf>,
     }
 
     impl MetalContext {
@@ -1916,6 +2516,8 @@ mod imp {
                     library,
                     pipeline_cache: HashMap::new(),
                     cached_weight_buffers: HashMap::new(),
+                    named_weight_buffers: HashMap::new(),
+                    act_buffers: HashMap::new(),
                     scratch_buffers: HashMap::new(),
                     matmul_out_buffers: HashMap::new(),
                     decoder_kv_layers: HashMap::new(),
@@ -1924,6 +2526,8 @@ mod imp {
                     batch_command_buffer: None,
                     batch_encoder: None,
                     last_command_buffer: None,
+                    pool_free: Vec::new(),
+                    pool_in_flight: Vec::new(),
                 });
             }
 
@@ -2063,6 +2667,79 @@ mod imp {
             unsafe { StrongId::from_owned(obj) }.ok_or_else(|| {
                 format!("newBufferWithLength(private) failed for {} bytes", byte_len)
             })
+        }
+
+        /// Take a shared transient buffer (upload or GEMM dst). Exact-size
+        /// reuse: the decode loops re-issue the same shapes every layer, so
+        /// after one layer the free list serves every request without
+        /// touching the Metal allocator.
+        fn pool_take(&mut self, byte_len: usize) -> Result<StrongId, String> {
+            let need = byte_len.max(4);
+            if !pool_disabled() {
+                if let Some(i) = self
+                    .pool_free
+                    .iter()
+                    .position(|p| p.cap_bytes == need)
+                {
+                    return Ok(self.pool_free.swap_remove(i).buf);
+                }
+            }
+            self.new_buffer_with_length(need)
+        }
+
+        fn pool_take_filled(&mut self, bytes: &[u8]) -> Result<StrongId, String> {
+            let buf = self.pool_take(bytes.len())?;
+            let ptr: *mut c_void = unsafe { msg_send![buf.as_id(), contents] };
+            if ptr.is_null() {
+                return Err("pool buffer contents null".to_string());
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+            }
+            Ok(buf)
+        }
+
+        /// Park a transient buffer until the next queue wait proves the GPU
+        /// is done with it.
+        fn pool_give(&mut self, buf: StrongId) {
+            if pool_disabled() {
+                return;
+            }
+            let cap_bytes = unsafe {
+                let len: u64 = msg_send![buf.as_id(), length];
+                len as usize
+            };
+            self.pool_in_flight.push(PoolBuf { cap_bytes, buf });
+        }
+
+        /// Call only right after `wait_queue_idle` succeeded: everything the
+        /// GPU could have touched is complete, so parked buffers become
+        /// reusable.
+        fn pool_recycle(&mut self) {
+            if self.pool_in_flight.is_empty() {
+                return;
+            }
+            self.pool_free.append(&mut self.pool_in_flight);
+            let mut total: usize = self.pool_free.iter().map(|p| p.cap_bytes).sum();
+            while total > POOL_CAP_BYTES {
+                // Drop the largest first: giants are one-off strips.
+                let Some(i) = self
+                    .pool_free
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, p)| p.cap_bytes)
+                    .map(|(i, _)| i)
+                else {
+                    break;
+                };
+                total -= self.pool_free[i].cap_bytes;
+                self.pool_free.swap_remove(i);
+            }
+        }
+
+        fn pool_clear(&mut self) {
+            self.pool_free.clear();
+            self.pool_in_flight.clear();
         }
 
         fn get_or_create_scratch_buffer(
@@ -2348,6 +3025,21 @@ mod imp {
                 self.cached_weight_buffers.insert(key, buf);
             }
             Ok(self.cached_weight_buffers.get(&key).unwrap().as_id())
+        }
+
+        fn get_or_create_named_weight_buffer(
+            &mut self,
+            namespace: &str,
+            cache_key: &str,
+            load: impl FnOnce() -> Result<Vec<u8>, String>,
+        ) -> Result<ObjcId, String> {
+            let key = (namespace.to_string(), cache_key.to_string());
+            if !self.named_weight_buffers.contains_key(&key) {
+                let bytes = load()?;
+                let buf = self.new_buffer_with_bytes(&bytes)?;
+                self.named_weight_buffers.insert(key.clone(), buf);
+            }
+            Ok(self.named_weight_buffers.get(&key).unwrap().as_id())
         }
 
         fn clear_decoder_kv_cache(&mut self) {
@@ -2864,7 +3556,7 @@ mod imp {
                 "f32",
                 r1ptg
             );
-            let name = format!("{}_nsg={}_nxpsg={}", base, nsg, nxpsg);
+            let name = format!("{}_nsg={}_nxpsg={}_ne12=1_r2=1_r3=1", base, nsg, nxpsg);
 
             let constants = [
                 FunctionConstant {
@@ -2874,6 +3566,18 @@ mod imp {
                 FunctionConstant {
                     idx: FC_MUL_MV + 1,
                     value: FunctionConstantValue::Int16(nxpsg as i16),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MV + 2,
+                    value: FunctionConstantValue::Int16(1),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MV + 3,
+                    value: FunctionConstantValue::Int16(1),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MV + 4,
+                    value: FunctionConstantValue::Int16(1),
                 },
             ];
 
@@ -2958,7 +3662,10 @@ mod imp {
             let bc_out = ne0 % 64 != 0 || ne1 % 32 != 0;
 
             let base = format!("kernel_mul_mm_{}_{}", src0_type_name(src0), "f32");
-            let name = format!("{}_bci={}_bco={}", base, bc_inp as i32, bc_out as i32);
+            let name = format!(
+                "{}_bci={}_bco={}_ne12={}_ne13=1_r2=1_r3=1",
+                base, bc_inp as i32, bc_out as i32, ne12
+            );
 
             let smem = if bc_out {
                 8192usize
@@ -2973,6 +3680,22 @@ mod imp {
                 FunctionConstant {
                     idx: FC_MUL_MM + 1,
                     value: FunctionConstantValue::Bool(bc_out),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MM + 2,
+                    value: FunctionConstantValue::Int16(ne12 as i16),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MM + 3,
+                    value: FunctionConstantValue::Int16(1),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MM + 4,
+                    value: FunctionConstantValue::Int16(1),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MM + 5,
+                    value: FunctionConstantValue::Int16(1),
                 },
             ];
 
@@ -3087,11 +3810,25 @@ mod imp {
             };
 
             let base = format!("kernel_mul_mv_{}_{}{}", src0_type_name(src0), "f32", suffix);
-            let name = format!("{}_nsg={}", base, nsg);
-            let constants = [FunctionConstant {
-                idx: FC_MUL_MV + 0,
-                value: FunctionConstantValue::Int16(nsg as i16),
-            }];
+            let name = format!("{}_nsg={}_ne12=1_r2=1_r3=1", base, nsg);
+            let constants = [
+                FunctionConstant {
+                    idx: FC_MUL_MV + 0,
+                    value: FunctionConstantValue::Int16(nsg as i16),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MV + 2,
+                    value: FunctionConstantValue::Int16(1),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MV + 3,
+                    value: FunctionConstantValue::Int16(1),
+                },
+                FunctionConstant {
+                    idx: FC_MUL_MV + 4,
+                    value: FunctionConstantValue::Int16(1),
+                },
+            ];
 
             let (pipeline, _pipeline_smem, pn0, pn1, pnsg) =
                 self.get_or_compile_cached_pipeline(name, &base, &constants, smem, nr0, nr1, nsg)?;
@@ -3559,6 +4296,82 @@ mod imp {
                 };
                 let tpg = MTLSize {
                     width: 256,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+            self.end_command_encoder(encoder_handles)
+        }
+
+        fn dispatch_swiglu_packed(
+            &mut self,
+            src_id: ObjcId,
+            dst_id: ObjcId,
+            rows: usize,
+            ff_dim: usize,
+            swap: bool,
+        ) -> Result<(), String> {
+            #[repr(C)]
+            struct KArgsGluCompat {
+                ne00: i32,
+                nb01: u64,
+                ne10: i32,
+                nb11: u64,
+                ne0: i32,
+                nb1: u64,
+                i00: i32,
+                i10: i32,
+                alpha: f32,
+                limit: f32,
+            }
+            let src_w = (ff_dim * 2) as i32;
+            let row_bytes = (ff_dim * 2 * std::mem::size_of::<f32>()) as u64;
+            let dst_bytes = (ff_dim * std::mem::size_of::<f32>()) as u64;
+            let (i00, i10) = if swap {
+                (0, ff_dim as i32)
+            } else {
+                (ff_dim as i32, 0)
+            };
+            let args = KArgsGluCompat {
+                ne00: src_w,
+                nb01: row_bytes,
+                ne10: src_w,
+                nb11: row_bytes,
+                ne0: ff_dim as i32,
+                nb1: dst_bytes,
+                i00,
+                i10,
+                alpha: 0.0,
+                limit: 0.0,
+            };
+            let base = "kernel_swiglu_f32";
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(base.to_string(), base, &[], 0, 0, 0, 0)?;
+            let nth = (ff_dim as u64 / 2).max(1).min(256);
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const KArgsGluCompat as *const c_void
+                    length: std::mem::size_of::<KArgsGluCompat>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                let tgs = MTLSize {
+                    width: rows.max(1) as u64,
+                    height: 1,
+                    depth: 1,
+                };
+                let tpg = MTLSize {
+                    width: nth,
                     height: 1,
                     depth: 1,
                 };
@@ -6403,10 +7216,10 @@ mod imp {
                 ) {
                     Ok(()) => ("mul_mm", Ok(())),
                     Err(e) => ("mul_mv", {
-                        eprintln!(
+                        super::log_metal_error_once(format!(
                             "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
                             src0, e
-                        );
+                        ));
                         self.dispatch_mul_mv(
                             src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
                             nb10, nb11, ne0, ne1,
@@ -6594,6 +7407,592 @@ mod imp {
             let (dst, mr, nr) =
                 self.matmul_nt_ggml_bytes_impl(a, bt_bytes, bt_ggml_type, m, k, n, Some(tag))?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
+        }
+
+        fn matmul_nt_ggml_from_resident_src(
+            &mut self,
+            src0_id: ObjcId,
+            src1_id: ObjcId,
+            bt_ggml_type: u32,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Result<StrongId, String> {
+            let mn = m
+                .checked_mul(n)
+                .ok_or_else(|| "matmul overflow computing m*n".to_string())?;
+            let dst_bytes = mn
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "matmul overflow computing dst bytes".to_string())?;
+            let dst_buffer = self.pool_take(dst_bytes)?;
+            if m == 0 || k == 0 || n == 0 {
+                return Ok(dst_buffer);
+            }
+            self.matmul_nt_ggml_resident_into(
+                src0_id,
+                src1_id,
+                dst_buffer.as_id(),
+                bt_ggml_type,
+                m,
+                k,
+                n,
+            )?;
+            Ok(dst_buffer)
+        }
+
+        /// Same dispatch as [`Self::matmul_nt_ggml_from_resident_src`] but the
+        /// caller owns the destination buffer (act pool / recycled transient).
+        fn matmul_nt_ggml_resident_into(
+            &mut self,
+            src0_id: ObjcId,
+            src1_id: ObjcId,
+            dst_id: ObjcId,
+            bt_ggml_type: u32,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Result<(), String> {
+            if m == 0 || k == 0 || n == 0 {
+                return Ok(());
+            }
+            let src0 = src0_type_from_ggml(bt_ggml_type).ok_or_else(|| {
+                format!(
+                    "unsupported src0 ggml_type for metal matmul: {}",
+                    bt_ggml_type
+                )
+            })?;
+            let (src0_row_bytes, nb00) = src0_layout_bytes_per_row(src0, k)?;
+            let ne00 = i32::try_from(k).map_err(|_| format!("k too large: {}", k))?;
+            let ne01 = i32::try_from(n).map_err(|_| format!("n too large: {}", n))?;
+            let ne10 = ne00;
+            let ne11 = i32::try_from(m).map_err(|_| format!("m too large: {}", m))?;
+            let ne0 = ne01;
+            let ne1 = ne11;
+            let nb01 = src0_row_bytes as u64;
+            let nb10 = 4u64;
+            let nb11 = (k as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing nb11".to_string())?;
+            let used_mul_mv_ext = can_use_mul_mv_ext(src0, ne00, ne11);
+            let used_mul_mm = ne00 >= 64 && ne11 > 8;
+            if used_mul_mv_ext {
+                self.dispatch_mul_mv_ext(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                    nb11, ne0, ne1,
+                )?;
+            } else if used_mul_mm {
+                if let Err(e) = self.dispatch_mul_mm(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
+                ) {
+                    super::log_metal_error_once(format!(
+                        "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
+                        src0, e
+                    ));
+                    self.dispatch_mul_mv(
+                        src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
+                        nb10, nb11, ne0, ne1,
+                    )?;
+                }
+            } else {
+                self.dispatch_mul_mv(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                    nb11, ne0, ne1,
+                )?;
+            }
+            Ok(())
+        }
+
+        fn matmul_nt_ggml_bytes_keyed<F>(
+            &mut self,
+            a: &[f32],
+            bt_ggml_type: u32,
+            m: usize,
+            k: usize,
+            n: usize,
+            namespace: &str,
+            cache_key: &str,
+            load: F,
+        ) -> Result<Vec<f32>, String>
+        where
+            F: FnOnce() -> Result<Vec<u8>, String>,
+        {
+            let src0_id = self.get_or_create_named_weight_buffer(namespace, cache_key, load)?;
+            let mk = m
+                .checked_mul(k)
+                .ok_or_else(|| "matmul overflow computing m*k".to_string())?;
+            if a.len() != mk {
+                return Err(format!(
+                    "lhs len mismatch: got {}, expected {}",
+                    a.len(),
+                    mk
+                ));
+            }
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    a.as_ptr() as *const u8,
+                    a.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            let src1_buffer = self.pool_take_filled(a_bytes)?;
+            let dst = self.matmul_nt_ggml_from_resident_src(
+                src0_id,
+                src1_buffer.as_id(),
+                bt_ggml_type,
+                m,
+                k,
+                n,
+            )?;
+            let out = self.read_f32_buffer(dst.as_id(), m * n)?;
+            self.pool_give(src1_buffer);
+            self.pool_give(dst);
+            self.pool_recycle();
+            Ok(out)
+        }
+
+        fn matmul_nt_ggml_bytes_keyed_multi<F>(
+            &mut self,
+            a: &[f32],
+            m: usize,
+            k: usize,
+            matrices: &[super::MatmulNtGgmlBytesKeyedMatrix<'_>],
+            mut load: F,
+        ) -> Result<Vec<Vec<f32>>, String>
+        where
+            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        {
+            if matrices.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mk = m
+                .checked_mul(k)
+                .ok_or_else(|| "matmul overflow computing m*k".to_string())?;
+            if a.len() != mk {
+                return Err(format!(
+                    "lhs len mismatch: got {}, expected {}",
+                    a.len(),
+                    mk
+                ));
+            }
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    a.as_ptr() as *const u8,
+                    a.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            let src1_buffer = self.pool_take_filled(a_bytes)?;
+            let outputs = self.with_batch(|this| {
+                let mut outputs = Vec::with_capacity(matrices.len());
+                for matrix in matrices {
+                    let src0_id = this.get_or_create_named_weight_buffer(
+                        matrix.namespace,
+                        matrix.cache_key,
+                        || load(matrix.namespace, matrix.cache_key),
+                    )?;
+                    let dst = this.matmul_nt_ggml_from_resident_src(
+                        src0_id,
+                        src1_buffer.as_id(),
+                        matrix.bt_ggml_type,
+                        m,
+                        k,
+                        matrix.n,
+                    )?;
+                    outputs.push((dst, matrix.n));
+                }
+                Ok(outputs)
+            })?;
+            self.wait_queue_idle()?;
+            let mut result = Vec::with_capacity(outputs.len());
+            for (buffer, n_out) in outputs {
+                result.push(self.copy_f32_buffer_contents_readable(buffer.as_id(), m * n_out)?);
+                self.pool_give(buffer);
+            }
+            self.pool_give(src1_buffer);
+            self.pool_recycle();
+            Ok(result)
+        }
+
+        fn act_buf(&mut self, name: &str, elems: usize) -> Result<ObjcId, String> {
+            let bytes = elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "act buffer overflow".to_string())?;
+            if let Some((buf, cap)) = self.act_buffers.get(name) {
+                if *cap >= bytes {
+                    return Ok(buf.as_id());
+                }
+            }
+            let buf = self.new_buffer_with_length(bytes.max(4))?;
+            let id = buf.as_id();
+            self.act_buffers.insert(name.to_string(), (buf, bytes));
+            Ok(id)
+        }
+
+        fn act_write(&mut self, name: &str, data: &[f32]) -> Result<ObjcId, String> {
+            let id = self.act_buf(name, data.len())?;
+            let ptr: *mut c_void = unsafe { msg_send![id, contents] };
+            if ptr.is_null() {
+                return Err(format!("act {name} contents null"));
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut f32, data.len());
+            }
+            Ok(id)
+        }
+
+        fn act_read(&self, name: &str, elems: usize) -> Result<Vec<f32>, String> {
+            let (buf, cap) = self
+                .act_buffers
+                .get(name)
+                .ok_or_else(|| format!("act {name} missing"))?;
+            let need = elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "act read overflow".to_string())?;
+            if need > *cap {
+                return Err(format!("act {name} read {need} > cap {cap}"));
+            }
+            self.copy_f32_buffer_contents_readable(buf.as_id(), elems)
+        }
+
+        fn act_norm_gamma(&mut self, key: &str, gamma: &[f32]) -> Result<ObjcId, String> {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    gamma.as_ptr() as *const u8,
+                    gamma.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            self.get_or_create_named_weight_buffer("music3-act-norm", key, || Ok(bytes.to_vec()))
+        }
+
+        fn act_rms_norm_mul(
+            &mut self,
+            src: ObjcId,
+            dst: ObjcId,
+            gamma: ObjcId,
+            rows: usize,
+            width: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            let x_s = shape4_from_row_major(&[rows, width], 4)?;
+            let m_s = shape4_from_row_major(&[width], 4)?;
+            self.dispatch_rms_norm_f32(src, gamma, src, dst, &x_s, &m_s, &x_s, eps, 2)
+        }
+
+        fn act_add_inplace(
+            &mut self,
+            a: ObjcId,
+            b: ObjcId,
+            dst: ObjcId,
+            elems: usize,
+        ) -> Result<(), String> {
+            let s = shape4_from_row_major(&[elems], 4)?;
+            self.dispatch_bin_f32(0, a, b, dst, &s, &s)
+        }
+
+        fn act_silu(&mut self, src: ObjcId, dst: ObjcId, elems: usize) -> Result<(), String> {
+            let s = shape4_from_row_major(&[elems], 4)?;
+            self.dispatch_unary_f32(OP_UNARY_NUM_SILU, src, dst, &s)
+        }
+
+        fn act_mul(&mut self, a: ObjcId, b: ObjcId, dst: ObjcId, elems: usize) -> Result<(), String> {
+            let s = shape4_from_row_major(&[elems], 4)?;
+            self.dispatch_bin_f32(2, a, b, dst, &s, &s)
+        }
+
+        fn act_linear_keyed<F>(
+            &mut self,
+            src1: ObjcId,
+            dst_name: &str,
+            bt_ggml_type: u32,
+            m: usize,
+            k: usize,
+            n: usize,
+            namespace: &str,
+            cache_key: &str,
+            load: F,
+        ) -> Result<ObjcId, String>
+        where
+            F: FnOnce() -> Result<Vec<u8>, String>,
+        {
+            let src0 = self.get_or_create_named_weight_buffer(namespace, cache_key, load)?;
+            let elems = m
+                .checked_mul(n)
+                .ok_or_else(|| "act linear overflow".to_string())?;
+            let dst = self.act_buf(dst_name, elems)?;
+            self.matmul_nt_ggml_resident_into(src0, src1, dst, bt_ggml_type, m, k, n)?;
+            Ok(dst)
+        }
+
+        fn ar_pre_attn<F>(
+            &mut self,
+            hidden: Option<&[f32]>,
+            m: usize,
+            hidden_w: usize,
+            head_dim: usize,
+            in_norm: &[f32],
+            qk_norm: Option<(&[f32], &[f32], &str, &str)>,
+            in_norm_key: &str,
+            eps: f32,
+            q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            v: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            mut load: F,
+        ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>
+        where
+            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        {
+            let h_elems = m * hidden_w;
+            if let Some(h) = hidden {
+                if h.len() != h_elems {
+                    return Err("ar hidden len".to_string());
+                }
+                self.act_write("h", h)?;
+            }
+            let q_elems = m * q.n;
+            let k_elems = m * k.n;
+            let v_elems = m * v.n;
+            self.with_batch(|this| {
+                let h = this.act_buf("h", h_elems)?;
+                let n1 = this.act_buf("n1", h_elems)?;
+                let gamma = this.act_norm_gamma(in_norm_key, in_norm)?;
+                this.act_rms_norm_mul(h, n1, gamma, m, hidden_w, eps)?;
+                this.act_linear_keyed(
+                    n1,
+                    "q",
+                    q.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    q.n,
+                    q.namespace,
+                    q.cache_key,
+                    || load(q.namespace, q.cache_key),
+                )?;
+                this.act_linear_keyed(
+                    n1,
+                    "k",
+                    k.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    k.n,
+                    k.namespace,
+                    k.cache_key,
+                    || load(k.namespace, k.cache_key),
+                )?;
+                this.act_linear_keyed(
+                    n1,
+                    "v",
+                    v.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    v.n,
+                    v.namespace,
+                    v.cache_key,
+                    || load(v.namespace, v.cache_key),
+                )?;
+                if let Some((q_norm, k_norm, q_norm_key, k_norm_key)) = qk_norm {
+                    let q_id = this.act_buf("q", q_elems)?;
+                    let k_id = this.act_buf("k", k_elems)?;
+                    let qn = this.act_buf("qn", q_elems)?;
+                    let kn = this.act_buf("kn", k_elems)?;
+                    let qg = this.act_norm_gamma(q_norm_key, q_norm)?;
+                    let kg = this.act_norm_gamma(k_norm_key, k_norm)?;
+                    this.act_rms_norm_mul(q_id, qn, qg, q_elems / head_dim, head_dim, eps)?;
+                    this.act_rms_norm_mul(k_id, kn, kg, k_elems / head_dim, head_dim, eps)?;
+                }
+                Ok(())
+            })?;
+            self.wait_queue_idle()?;
+            let (q_src, k_src) = if qk_norm.is_some() {
+                ("qn", "kn")
+            } else {
+                ("q", "k")
+            };
+            let qv = self.act_read(q_src, q_elems)?;
+            let kv = self.act_read(k_src, k_elems)?;
+            let vv = self.act_read("v", v_elems)?;
+            Ok((qv, kv, vv))
+        }
+
+        fn ar_post_attn<F>(
+            &mut self,
+            attn: &[f32],
+            m: usize,
+            hidden_w: usize,
+            post_norm: &[f32],
+            post_norm_key: &str,
+            eps: f32,
+            o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            gate: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            down: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            mut load: F,
+        ) -> Result<(), String>
+        where
+            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        {
+            let h_elems = m * hidden_w;
+            let ff_elems = m * up.n;
+            if attn.len() != h_elems {
+                return Err("ar attn len".to_string());
+            }
+            self.act_write("attn", attn)?;
+            self.with_batch(|this| {
+                let attn_id = this.act_buf("attn", h_elems)?;
+                this.act_linear_keyed(
+                    attn_id,
+                    "o",
+                    o.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    o.n,
+                    o.namespace,
+                    o.cache_key,
+                    || load(o.namespace, o.cache_key),
+                )?;
+                let h = this.act_buf("h", h_elems)?;
+                let o_id = this.act_buf("o", h_elems)?;
+                let h2 = this.act_buf("h2", h_elems)?;
+                this.act_add_inplace(h, o_id, h2, h_elems)?;
+                let n2 = this.act_buf("n2", h_elems)?;
+                let pg = this.act_norm_gamma(post_norm_key, post_norm)?;
+                this.act_rms_norm_mul(h2, n2, pg, m, hidden_w, eps)?;
+                this.act_linear_keyed(
+                    n2,
+                    "up",
+                    up.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    up.n,
+                    up.namespace,
+                    up.cache_key,
+                    || load(up.namespace, up.cache_key),
+                )?;
+                this.act_linear_keyed(
+                    n2,
+                    "gate",
+                    gate.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    gate.n,
+                    gate.namespace,
+                    gate.cache_key,
+                    || load(gate.namespace, gate.cache_key),
+                )?;
+                let up_id = this.act_buf("up", ff_elems)?;
+                let gate_id = this.act_buf("gate", ff_elems)?;
+                let gs = this.act_buf("gs", ff_elems)?;
+                let ff = this.act_buf("ff", ff_elems)?;
+                this.act_silu(gate_id, gs, ff_elems)?;
+                this.act_mul(up_id, gs, ff, ff_elems)?;
+                this.act_linear_keyed(
+                    ff,
+                    "down",
+                    down.bt_ggml_type,
+                    m,
+                    up.n,
+                    down.n,
+                    down.namespace,
+                    down.cache_key,
+                    || load(down.namespace, down.cache_key),
+                )?;
+                let down_id = this.act_buf("down", h_elems)?;
+                let h3 = this.act_buf("h", h_elems)?;
+                this.act_add_inplace(h2, down_id, h3, h_elems)?;
+                Ok(())
+            })?;
+            Ok(())
+        }
+
+        fn ar_final_rms(
+            &mut self,
+            m: usize,
+            hidden_w: usize,
+            gamma: &[f32],
+            gamma_key: &str,
+            eps: f32,
+        ) -> Result<Vec<f32>, String> {
+            let h_elems = m * hidden_w;
+            self.with_batch(|this| {
+                let h = this.act_buf("h", h_elems)?;
+                let out = this.act_buf("hout", h_elems)?;
+                let g = this.act_norm_gamma(gamma_key, gamma)?;
+                this.act_rms_norm_mul(h, out, g, m, hidden_w, eps)?;
+                Ok(())
+            })?;
+            self.wait_queue_idle()?;
+            self.act_read("hout", h_elems)
+        }
+
+        fn ar_clear_acts(&mut self) {
+            self.act_buffers.clear();
+            self.pool_clear();
+        }
+
+        fn dit_ffn_resident<F>(
+            &mut self,
+            normed: &[f32],
+            m: usize,
+            hidden_w: usize,
+            ff_dim: usize,
+            ff_in_b: &[f32],
+            ff_out_b: &[f32],
+            ff_in_b_key: &str,
+            ff_out_b_key: &str,
+            swap: bool,
+            ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+            mut load: F,
+        ) -> Result<Vec<f32>, String>
+        where
+            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        {
+            if normed.len() != m * hidden_w {
+                return Err("dit ffn normed len".to_string());
+            }
+            if ff_in.n != ff_dim * 2 || ff_out.n != hidden_w {
+                return Err("dit ffn weight n".to_string());
+            }
+            self.act_write("dn", normed)?;
+            self.with_batch(|this| {
+                let dn = this.act_buf("dn", m * hidden_w)?;
+                this.act_linear_keyed(
+                    dn,
+                    "ffin",
+                    ff_in.bt_ggml_type,
+                    m,
+                    hidden_w,
+                    ff_in.n,
+                    ff_in.namespace,
+                    ff_in.cache_key,
+                    || load(ff_in.namespace, ff_in.cache_key),
+                )?;
+                let ffin = this.act_buf("ffin", m * ff_in.n)?;
+                let in_b = this.act_norm_gamma(ff_in_b_key, ff_in_b)?;
+                let ffinb = this.act_buf("ffinb", m * ff_in.n)?;
+                let x_s = shape4_from_row_major(&[m, ff_in.n], 4)?;
+                let b_s = shape4_from_row_major(&[ff_in.n], 4)?;
+                this.dispatch_bin_f32(0, ffin, in_b, ffinb, &x_s, &b_s)?;
+                let gated = this.act_buf("gated", m * ff_dim)?;
+                this.dispatch_swiglu_packed(ffinb, gated, m, ff_dim, swap)?;
+                this.act_linear_keyed(
+                    gated,
+                    "ffout",
+                    ff_out.bt_ggml_type,
+                    m,
+                    ff_dim,
+                    ff_out.n,
+                    ff_out.namespace,
+                    ff_out.cache_key,
+                    || load(ff_out.namespace, ff_out.cache_key),
+                )?;
+                let ffout = this.act_buf("ffout", m * hidden_w)?;
+                let out_b = this.act_norm_gamma(ff_out_b_key, ff_out_b)?;
+                let y = this.act_buf("ffy", m * hidden_w)?;
+                let y_s = shape4_from_row_major(&[m, hidden_w], 4)?;
+                let ob_s = shape4_from_row_major(&[hidden_w], 4)?;
+                this.dispatch_bin_f32(0, ffout, out_b, y, &y_s, &ob_s)?;
+                Ok(())
+            })?;
+            self.wait_queue_idle()?;
+            self.act_read("ffy", m * hidden_w)
         }
 
         fn matmul_nt_ggml_bytes_multi(
@@ -6826,7 +8225,10 @@ mod imp {
             match f(ctx) {
                 Ok(v) => Some(v),
                 Err(err) => {
-                    eprintln!("[ggml][metal] compute failed: {}", err);
+                    super::log_metal_error_once(format!(
+                        "[ggml][metal] compute failed: {}",
+                        err
+                    ));
                     None
                 }
             }
@@ -6884,6 +8286,24 @@ mod imp {
         with_context(|ctx| ctx.matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n))
     }
 
+    pub(super) fn try_matmul_nt_ggml_bytes_keyed<F>(
+        a: &[f32],
+        bt_ggml_type: u32,
+        m: usize,
+        k: usize,
+        n: usize,
+        namespace: &str,
+        cache_key: &str,
+        load: F,
+    ) -> Option<Vec<f32>>
+    where
+        F: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        with_context(|ctx| {
+            ctx.matmul_nt_ggml_bytes_keyed(a, bt_ggml_type, m, k, n, namespace, cache_key, load)
+        })
+    }
+
     pub(super) fn try_matmul_nt_ggml_bytes_multi(
         a: &[f32],
         m: usize,
@@ -6891,6 +8311,146 @@ mod imp {
         matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
     ) -> Option<Vec<Vec<f32>>> {
         with_context(|ctx| ctx.matmul_nt_ggml_bytes_multi(a, m, k, matrices))
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_keyed_multi<F>(
+        a: &[f32],
+        m: usize,
+        k: usize,
+        matrices: &[super::MatmulNtGgmlBytesKeyedMatrix<'_>],
+        load: F,
+    ) -> Option<Vec<Vec<f32>>>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        with_context(|ctx| ctx.matmul_nt_ggml_bytes_keyed_multi(a, m, k, matrices, load))
+    }
+
+    pub(super) fn try_ar_pre_attn<F>(
+        hidden: Option<&[f32]>,
+        m: usize,
+        hidden_w: usize,
+        head_dim: usize,
+        in_norm: &[f32],
+        qk_norm: Option<(&[f32], &[f32], &str, &str)>,
+        in_norm_key: &str,
+        eps: f32,
+        q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        v: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        load: F,
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        with_context(|ctx| {
+            ctx.ar_pre_attn(
+                hidden,
+                m,
+                hidden_w,
+                head_dim,
+                in_norm,
+                qk_norm,
+                in_norm_key,
+                eps,
+                q,
+                k,
+                v,
+                load,
+            )
+        })
+    }
+
+    pub(super) fn try_ar_post_attn<F>(
+        attn: &[f32],
+        m: usize,
+        hidden_w: usize,
+        post_norm: &[f32],
+        post_norm_key: &str,
+        eps: f32,
+        o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        gate: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        down: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        load: F,
+    ) -> Option<()>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        with_context(|ctx| {
+            ctx.ar_post_attn(
+                attn,
+                m,
+                hidden_w,
+                post_norm,
+                post_norm_key,
+                eps,
+                o,
+                up,
+                gate,
+                down,
+                load,
+            )
+        })
+    }
+
+    pub(super) fn try_ar_final_rms(
+        m: usize,
+        hidden_w: usize,
+        gamma: &[f32],
+        gamma_key: &str,
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| ctx.ar_final_rms(m, hidden_w, gamma, gamma_key, eps))
+    }
+
+    pub(super) fn ar_resident_clear() {
+        let _ = with_context(|ctx| {
+            ctx.ar_clear_acts();
+            Ok(())
+        });
+    }
+
+    pub(super) fn transient_pool_clear() {
+        let _ = with_context(|ctx| {
+            ctx.pool_clear();
+            Ok(())
+        });
+    }
+
+    pub(super) fn try_dit_ffn_resident<F>(
+        normed: &[f32],
+        m: usize,
+        hidden_w: usize,
+        ff_dim: usize,
+        ff_in_b: &[f32],
+        ff_out_b: &[f32],
+        ff_in_b_key: &str,
+        ff_out_b_key: &str,
+        swap: bool,
+        ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        load: F,
+    ) -> Option<Vec<f32>>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        with_context(|ctx| {
+            ctx.dit_ffn_resident(
+                normed,
+                m,
+                hidden_w,
+                ff_dim,
+                ff_in_b,
+                ff_out_b,
+                ff_in_b_key,
+                ff_out_b_key,
+                swap,
+                ff_in,
+                ff_out,
+                load,
+            )
+        })
     }
 
     pub(super) fn try_matmul_nt_ggml_bytes_add_bias(
@@ -7063,6 +8623,43 @@ mod imp {
         pad: usize,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| ctx.im2col_1d_f32(input, ic, iw, kw, stride, pad))
+    }
+
+    // The diffusion VAE runs through the compiled graph path on macOS, so
+    // these planar helpers only have CUDA implementations today.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_conv2d_planar_f32(
+        _input: &[f32],
+        _width: usize,
+        _height: usize,
+        _in_channels: usize,
+        _weights: &[f32],
+        _bias: &[f32],
+        _out_channels: usize,
+        _kw: usize,
+        _kh: usize,
+        _pad_x: usize,
+        _pad_y: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_group_norm_planar_f32(
+        _input: &[f32],
+        _width: usize,
+        _height: usize,
+        _channels: usize,
+        _groups: usize,
+        _gamma: &[f32],
+        _beta: &[f32],
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_silu_f32(_a: &[f32]) -> Option<Vec<f32>> {
+        None
     }
 
     #[allow(dead_code)]

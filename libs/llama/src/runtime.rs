@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use makepad_ggml::{
     backend::metal::{
         create_context_main_buffer, create_context_main_buffer_no_copy, create_context_ro_buffer,
+        warmup_affine_qmm_weights,
         execute_compiled_graph, execute_compiled_graph_in_active_batch,
         execute_compiled_graph_with_buffer_inputs, prepare_graph, try_matmul_nt_ggml_bytes,
         try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer, MetalCompiledGraph,
@@ -298,7 +299,20 @@ fn should_use_flash_attention(head_dim: u32, n_tokens: usize) -> bool {
     if std::env::var("LLAMA_NO_FLASH_ATTN").is_ok() {
         return false;
     }
-    flash_attention_supported_head_dim(head_dim) && n_tokens < 20
+    if !flash_attention_supported_head_dim(head_dim) {
+        return false;
+    }
+    // Decode-sized online-softmax flash stays for n_tokens < 20.
+    // Prefill uses llama.cpp fattn-mma-f16 (D=256, ncols 8x8) only.
+    // The naive flash was measured slower (1713 -> 1671). Rollback:
+    // MKLLM_DISABLE_FATTN_MMA=1 restores batched GEMM for large n.
+    if n_tokens < 20 {
+        return true;
+    }
+    let fattn_disabled = std::env::var_os("MKLLM_DISABLE_FATTN_MMA")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    !fattn_disabled && head_dim == 256
 }
 
 fn attention_mask_tensor_type(head_dim: u32, n_tokens: usize) -> TensorType {
@@ -896,6 +910,10 @@ pub struct HybridDecodeGraph {
     pub attention_cache_views: Vec<HybridAttentionCacheView>,
     pub moe_selected_experts: Vec<HybridMoeSelection>,
     pub state_updates: Vec<TensorId>,
+    /// Debug-only graph outputs selected by `MAKEPAD_LLAMA_TRACE_ALL`.
+    /// Keeping the ids on the shared graph makes Metal and CUDA pin and
+    /// read back the exact same intermediate tensors for parity diagnosis.
+    pub debug_outputs: Vec<TensorId>,
     pub result_hidden: TensorId,
     pub result_logits: TensorId,
 }
@@ -2238,6 +2256,7 @@ fn build_attention_decode_from_hidden(
     input_rope_positions: Option<TensorId>,
     n_tokens: usize,
     attention_key_count: usize,
+    shared_input_mask: Option<TensorId>,
     prefix: &str,
 ) -> Result<BuiltAttentionDecode> {
     let block = &spec.block;
@@ -2469,7 +2488,17 @@ fn build_attention_decode_from_hidden(
     ctx.set_tensor_name(k_norm_store, format!("{prefix}.k_norm_store"))
         .map_err(LlamaError::format)?;
 
-    let input_mask = if block.causal {
+    // llama-graph.cpp:22-35 / 2056-2057: one attn_inp_kq_mask is shared
+    // across layers. A hybrid decode passes that tensor in; standalone
+    // decode graphs still allocate a private mask.
+    let input_mask = if let Some(shared_input_mask) = shared_input_mask {
+        if !block.causal {
+            return Err(LlamaError::format(format!(
+                "{prefix} received a shared kq mask but the block is not causal"
+            )));
+        }
+        Some(shared_input_mask)
+    } else if block.causal {
         let mask = ctx
             .new_named_tensor(
                 format!("{prefix}.kq_mask"),
@@ -2846,6 +2875,7 @@ pub fn build_attention_decode_graph_with_key_count(
         input_rope_positions,
         n_tokens,
         attention_key_count,
+        None,
         "attn_decode",
     )?;
     let result_output = built.result_output;
@@ -6362,6 +6392,45 @@ fn build_hybrid_decode_graph_impl(
         None
     };
 
+    // llama-graph.cpp:22-35 / 2056-2057: one attn_inp_kq_mask (F32 host +
+    // CAST F16 in their graph). We keep the F16 device tensor but share one
+    // allocation per unique (dtype, window, n_kv, n_tokens) instead of
+    // rebuilding 16 identical masks every token.
+    let mut shared_kq_masks: BTreeMap<(u32, Option<u32>, i64, i64), TensorId> = BTreeMap::new();
+    if has_attention {
+        let n_kv = i64::try_from(attention_key_count).map_err(|_| {
+            LlamaError::format("attention decode key_count does not fit in i64")
+        })?;
+        let n_tok = i64::try_from(n_tokens)
+            .map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
+        for layer in &spec.layers {
+            let HybridLayerSpec::Attention { decode, .. } = layer else {
+                continue;
+            };
+            if !decode.block.causal {
+                continue;
+            }
+            let ty = attention_mask_tensor_type(decode.block.q_head_dim, n_tokens);
+            let key = (ty as u32, decode.block.causal_window, n_kv, n_tok);
+            if shared_kq_masks.contains_key(&key) {
+                continue;
+            }
+            let name = if shared_kq_masks.is_empty() {
+                "hybrid_decode.attn_inp_kq_mask".to_string()
+            } else {
+                format!(
+                    "hybrid_decode.attn_inp_kq_mask_{}",
+                    shared_kq_masks.len()
+                )
+            };
+            let mask = ctx
+                .new_named_tensor(name, ty, 4, &[n_kv, n_tok, 1, 1], BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            mark_input(ctx, mask)?;
+            shared_kq_masks.insert(key, mask);
+        }
+    }
+
     let mut hidden = match &spec.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
@@ -6434,6 +6503,23 @@ fn build_hybrid_decode_graph_impl(
                         layer_index
                     ))
                 })?;
+                let shared_input_mask = if decode.block.causal {
+                    let ty = attention_mask_tensor_type(decode.block.q_head_dim, n_tokens);
+                    let n_kv = i64::try_from(attention_key_count).map_err(|_| {
+                        LlamaError::format("attention decode key_count does not fit in i64")
+                    })?;
+                    let n_tok = i64::try_from(n_tokens)
+                        .map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
+                    let key = (ty as u32, decode.block.causal_window, n_kv, n_tok);
+                    Some(*shared_kq_masks.get(&key).ok_or_else(|| {
+                        LlamaError::format(format!(
+                            "attention layer {} is missing a shared kq mask",
+                            layer_index
+                        ))
+                    })?)
+                } else {
+                    None
+                };
                 let attn = build_attention_decode_from_hidden(
                     ctx,
                     tensor_ids,
@@ -6452,6 +6538,7 @@ fn build_hybrid_decode_graph_impl(
                     input_rope_positions,
                     n_tokens,
                     attention_key_count,
+                    shared_input_mask,
                     &format!("{prefix}.attn"),
                 )?;
                 if let Some(current_shared_attention) = current_shared_attention.as_mut() {
@@ -6708,6 +6795,15 @@ fn build_hybrid_decode_graph_impl(
         .build_forward_expand(ctx, result_logits)
         .map_err(LlamaError::format)?;
 
+    let debug_outputs = if std::env::var_os("MAKEPAD_LLAMA_TRACE_ALL").is_some() {
+        graph.nodes.clone()
+    } else {
+        Vec::new()
+    };
+    for &output in &debug_outputs {
+        mark_output(ctx, output)?;
+    }
+
     Ok(HybridDecodeGraph {
         graph,
         input_primary,
@@ -6720,6 +6816,7 @@ fn build_hybrid_decode_graph_impl(
         attention_cache_views,
         moe_selected_experts,
         state_updates,
+        debug_outputs,
         result_hidden,
         result_logits,
     })
@@ -6878,6 +6975,7 @@ pub fn create_metal_context_buffer_with_runtime(
         create_context_main_buffer_no_copy(runtime, ctx, BufferStorageMode::Private)
             .map_err(LlamaError::format)?
     };
+    let _ = warmup_affine_qmm_weights(runtime, ctx);
     Ok(MetalContextBuffers {
         ro_buffer,
         ro_split,
@@ -6885,10 +6983,10 @@ pub fn create_metal_context_buffer_with_runtime(
     })
 }
 
-struct ImportedHybridGraphContext {
-    ctx: Context,
-    tensor_ids: BTreeMap<String, TensorId>,
-    shared_cache: Option<HybridSharedCacheTensorIds>,
+pub(crate) struct ImportedHybridGraphContext {
+    pub(crate) ctx: Context,
+    pub(crate) tensor_ids: BTreeMap<String, TensorId>,
+    pub(crate) shared_cache: Option<HybridSharedCacheTensorIds>,
 }
 
 fn import_tensor_alias_cached(
@@ -6958,7 +7056,7 @@ fn import_hybrid_shared_cache_aliases(
     Ok(imported)
 }
 
-fn import_hybrid_graph_context(
+pub(crate) fn import_hybrid_graph_context(
     weights: &LoadedGgufWeights,
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     copy_main_buffer: bool,
@@ -7361,16 +7459,15 @@ pub fn compile_hybrid_token_generation_metal_with_shared_runtime_and_state(
     )
 }
 
-pub fn execute_prepared_hybrid_decode_metal(
-    runtime: &MetalRuntime,
-    ctx: &mut Context,
+/// Backend-neutral validation of one hybrid-decode step: exactly the checks
+/// the Metal executor has always run, in the same order, extracted so every
+/// execution backend enforces the identical contract.
+pub(crate) fn validate_hybrid_decode_layout(
+    ctx: &Context,
     spec: &HybridDecodeSpec,
     decode: &HybridDecodeGraph,
-    compiled: &MetalCompiledGraph,
-    input: LogitsProbeInput<'_>,
     layout: &HybridDecodeBatchLayout,
-    output_config: HybridDecodeOutputConfig,
-) -> Result<HybridDecodeRun> {
+) -> Result<()> {
     layout.validate()?;
     let positions = layout.positions.as_slice();
     let cache_tokens = layout.attention_key_count;
@@ -7474,7 +7571,23 @@ pub fn execute_prepared_hybrid_decode_metal(
             "hybrid decode received recurrent state rows for a graph without recurrent layers",
         ));
     }
+    Ok(())
+}
 
+/// Backend-neutral construction of every per-step input write (token ids or
+/// embeddings, output ids, KV write indices, rope positions, recurrent state
+/// rows, per-layer attention masks) as owned byte buffers keyed by tensor.
+/// This byte layout IS the execution contract; the Metal oracle consumes it
+/// directly and other backends upload the identical bytes.
+pub(crate) fn build_hybrid_decode_writes(
+    ctx: &Context,
+    spec: &HybridDecodeSpec,
+    decode: &HybridDecodeGraph,
+    input: LogitsProbeInput<'_>,
+    layout: &HybridDecodeBatchLayout,
+) -> Result<Vec<(TensorId, Vec<u8>)>> {
+    let positions = layout.positions.as_slice();
+    let cache_tokens = layout.attention_key_count;
     let input_primary = match (&spec.input, input) {
         (ProbeInputKind::TokenIds { .. }, LogitsProbeInput::TokenIds(token_ids)) => {
             if decode.input_positions.is_some() && token_ids.len() != positions.len() {
@@ -7544,25 +7657,20 @@ pub fn execute_prepared_hybrid_decode_metal(
         }
     }
 
-    let mut writes = vec![MetalGraphTensorWrite {
-        tensor_id: decode.input_primary,
-        bytes: &input_primary,
-    }];
+    let mut writes: Vec<(TensorId, Vec<u8>)> = Vec::new();
     if let Some(input_per_layer_primary) = decode.input_per_layer_primary {
-        writes.push(MetalGraphTensorWrite {
-            tensor_id: input_per_layer_primary,
-            bytes: &input_primary,
-        });
+        writes.push((input_per_layer_primary, input_primary.clone()));
     }
-    writes.push(MetalGraphTensorWrite {
-        tensor_id: decode.input_output_ids,
-        bytes: i32_slice_as_bytes(&layout.output_ids),
-    });
+    writes.insert(0, (decode.input_primary, input_primary));
+    writes.push((
+        decode.input_output_ids,
+        i32_slice_as_bytes(&layout.output_ids).to_vec(),
+    ));
     if let Some(input_attention_write_indices) = decode.input_attention_write_indices {
-        writes.push(MetalGraphTensorWrite {
-            tensor_id: input_attention_write_indices,
-            bytes: i32_slice_as_bytes(&layout.attention_write_indices),
-        });
+        writes.push((
+            input_attention_write_indices,
+            i32_slice_as_bytes(&layout.attention_write_indices).to_vec(),
+        ));
     }
     let hybrid_rope_positions = if decode.input_rope_positions.is_some() {
         let rope = spec
@@ -7585,22 +7693,26 @@ pub fn execute_prepared_hybrid_decode_metal(
         None
     };
     if let Some(input_rope_positions) = decode.input_rope_positions {
-        writes.push(MetalGraphTensorWrite {
-            tensor_id: input_rope_positions,
-            bytes: i32_slice_as_bytes(hybrid_rope_positions.as_deref().ok_or_else(|| {
+        writes.push((
+            input_rope_positions,
+            i32_slice_as_bytes(hybrid_rope_positions.as_deref().ok_or_else(|| {
                 LlamaError::format("hybrid decode rope positions were not prepared")
-            })?),
-        });
+            })?)
+            .to_vec(),
+        ));
     }
     if let Some(input_recurrent_state_rows) = decode.input_recurrent_state_rows {
-        writes.push(MetalGraphTensorWrite {
-            tensor_id: input_recurrent_state_rows,
-            bytes: i32_slice_as_bytes(&layout.recurrent_state_rows),
-        });
+        writes.push((
+            input_recurrent_state_rows,
+            i32_slice_as_bytes(&layout.recurrent_state_rows).to_vec(),
+        ));
     }
-    let mut attention_mask_bytes = Vec::new();
+    let mut written_masks = BTreeSet::new();
     for cache_view in &decode.attention_cache_views {
         if let Some(input_mask) = cache_view.input_mask {
+            if !written_masks.insert(input_mask) {
+                continue;
+            }
             let key_count = attention_mask_write_key_count(ctx, input_mask)?;
             let bytes = position_attention_mask_bytes_for_tensor(
                 ctx,
@@ -7609,47 +7721,21 @@ pub fn execute_prepared_hybrid_decode_metal(
                 positions,
                 cache_view.causal_window,
             )?;
-            attention_mask_bytes.push(bytes);
+            writes.push((input_mask, bytes));
         }
     }
-    let mut attention_mask_index = 0usize;
-    for cache_view in &decode.attention_cache_views {
-        if cache_view.input_mask.is_some() {
-            let bytes = attention_mask_bytes
-                .get(attention_mask_index)
-                .ok_or_else(|| {
-                    LlamaError::format("hybrid decode mask storage is unexpectedly empty")
-                })?;
-            attention_mask_index += 1;
-            writes.push(MetalGraphTensorWrite {
-                tensor_id: cache_view.input_mask.ok_or_else(|| {
-                    LlamaError::format(format!(
-                        "hybrid decode attention layer {} lost its input mask",
-                        cache_view.layer_index
-                    ))
-                })?,
-                bytes,
-            });
-        }
-    }
+    Ok(writes)
+}
 
-    let mut outputs = vec![decode.result_logits];
-    if output_config.capture_hidden {
-        outputs.push(decode.result_hidden);
-    }
-    if output_config.capture_selected_experts {
-        outputs.extend(
-            decode
-                .moe_selected_experts
-                .iter()
-                .map(|sel| sel.selected_experts),
-        );
-    }
-    let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &outputs)
-        .map_err(LlamaError::format)?;
-
-    let logits = execution
-        .outputs
+/// Backend-neutral readback shaping: turn per-tensor output bytes into a
+/// `HybridDecodeRun` (logits always; hidden/experts per output config).
+pub(crate) fn collect_hybrid_decode_run(
+    ctx: &Context,
+    decode: &HybridDecodeGraph,
+    output_config: HybridDecodeOutputConfig,
+    outputs: &BTreeMap<TensorId, Vec<u8>>,
+) -> Result<HybridDecodeRun> {
+    let logits = outputs
         .get(&decode.result_logits)
         .ok_or_else(|| LlamaError::format("hybrid decode did not produce logits bytes"))?;
     let logits = f32_bytes_to_vec(logits)?;
@@ -7663,8 +7749,7 @@ pub fn execute_prepared_hybrid_decode_metal(
         .ok_or_else(|| LlamaError::format("invalid hybrid decode logits shape"))?;
 
     let (hidden, hidden_size) = if output_config.capture_hidden {
-        let hidden = execution
-            .outputs
+        let hidden = outputs
             .get(&decode.result_hidden)
             .ok_or_else(|| LlamaError::format("hybrid decode did not produce hidden bytes"))?;
         let hidden = f32_bytes_to_vec(hidden)?;
@@ -7679,15 +7764,12 @@ pub fn execute_prepared_hybrid_decode_metal(
     let selected_experts = if output_config.capture_selected_experts {
         let mut selected_experts = Vec::with_capacity(decode.moe_selected_experts.len());
         for selection in &decode.moe_selected_experts {
-            let bytes = execution
-                .outputs
-                .get(&selection.selected_experts)
-                .ok_or_else(|| {
-                    LlamaError::format(format!(
-                        "hybrid decode did not produce selected experts for layer {}",
-                        selection.layer_index
-                    ))
-                })?;
+            let bytes = outputs.get(&selection.selected_experts).ok_or_else(|| {
+                LlamaError::format(format!(
+                    "hybrid decode did not produce selected experts for layer {}",
+                    selection.layer_index
+                ))
+            })?;
             let experts = bytes
                 .chunks_exact(std::mem::size_of::<i32>())
                 .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
@@ -7707,6 +7789,131 @@ pub fn execute_prepared_hybrid_decode_metal(
         vocab_size,
         selected_experts,
     })
+}
+
+/// Print compact, deterministic stats for graph intermediates selected by
+/// `MAKEPAD_LLAMA_TRACE_ALL`. This intentionally lives above either backend
+/// so a Metal/CUDA trace compares identical tensor ids, names, and bytes.
+pub(crate) fn debug_trace_outputs(
+    backend: &str,
+    ctx: &Context,
+    decode: &HybridDecodeGraph,
+    outputs: &BTreeMap<TensorId, Vec<u8>>,
+) -> Result<()> {
+    if decode.debug_outputs.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "trace.begin backend={} nodes={}",
+        backend,
+        decode.debug_outputs.len()
+    );
+    for (index, &tensor_id) in decode.debug_outputs.iter().enumerate() {
+        let tensor = ctx
+            .tensor(tensor_id)
+            .ok_or_else(|| LlamaError::format(format!("invalid trace tensor {tensor_id}")))?;
+        let bytes = outputs.get(&tensor_id).ok_or_else(|| {
+            LlamaError::format(format!("trace tensor {tensor_id} was not read back"))
+        })?;
+        let values = match tensor.desc.ty {
+            TensorType::F32 => f32_bytes_to_vec(bytes)?,
+            TensorType::F16 => bytes
+                .chunks_exact(2)
+                .map(|chunk| {
+                    makepad_ggml::quant::f16_to_f32(u16::from_le_bytes(
+                        chunk.try_into().unwrap(),
+                    ))
+                })
+                .collect(),
+            _ => {
+                eprintln!(
+                    "trace.node backend={} index={} id={} op={:?} ty={} name={} bytes={}",
+                    backend,
+                    index,
+                    tensor_id,
+                    tensor.op,
+                    tensor.desc.ty.name(),
+                    tensor.name().unwrap_or("<unnamed>"),
+                    bytes.len()
+                );
+                continue;
+            }
+        };
+        let mut sum = 0.0f64;
+        let mut abs_sum = 0.0f64;
+        let mut l2 = 0.0f64;
+        let mut max_abs = 0.0f32;
+        let mut nans = 0usize;
+        for &value in &values {
+            if value.is_nan() {
+                nans += 1;
+                continue;
+            }
+            let value64 = f64::from(value);
+            sum += value64;
+            abs_sum += value64.abs();
+            l2 += value64 * value64;
+            max_abs = max_abs.max(value.abs());
+        }
+        eprintln!(
+            "trace.node backend={} index={} id={} op={:?} name={} n={} sum={:.9e} abs={:.9e} l2={:.9e} max={:.9e} nans={} head={:?}",
+            backend,
+            index,
+            tensor_id,
+            tensor.op,
+            tensor.name().unwrap_or("<unnamed>"),
+            values.len(),
+            sum,
+            abs_sum,
+            l2.sqrt(),
+            max_abs,
+            nans,
+            &values[..values.len().min(4)]
+        );
+    }
+    eprintln!("trace.end backend={backend}");
+    Ok(())
+}
+
+pub fn execute_prepared_hybrid_decode_metal(
+    runtime: &MetalRuntime,
+    ctx: &mut Context,
+    spec: &HybridDecodeSpec,
+    decode: &HybridDecodeGraph,
+    compiled: &MetalCompiledGraph,
+    input: LogitsProbeInput<'_>,
+    layout: &HybridDecodeBatchLayout,
+    output_config: HybridDecodeOutputConfig,
+) -> Result<HybridDecodeRun> {
+    validate_hybrid_decode_layout(ctx, spec, decode, layout)?;
+    let owned_writes = build_hybrid_decode_writes(ctx, spec, decode, input, layout)?;
+    let writes = owned_writes
+        .iter()
+        .map(|(tensor_id, bytes)| MetalGraphTensorWrite {
+            tensor_id: *tensor_id,
+            bytes,
+        })
+        .collect::<Vec<_>>();
+
+    let mut outputs = vec![decode.result_logits];
+    if output_config.capture_hidden {
+        outputs.push(decode.result_hidden);
+    }
+    if output_config.capture_selected_experts {
+        outputs.extend(
+            decode
+                .moe_selected_experts
+                .iter()
+                .map(|sel| sel.selected_experts),
+        );
+    }
+    outputs.extend(decode.debug_outputs.iter().copied());
+    let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &outputs)
+        .map_err(LlamaError::format)?;
+
+    debug_trace_outputs("metal", ctx, decode, &execution.outputs)?;
+
+    collect_hybrid_decode_run(ctx, decode, output_config, &execution.outputs)
 }
 
 pub fn execute_hybrid_decode_graph_metal(

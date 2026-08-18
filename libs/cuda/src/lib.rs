@@ -1,11 +1,14 @@
 #![allow(non_camel_case_types)]
 
+pub mod cudnn;
+
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
 use std::fmt;
 use std::ptr::{self, NonNull};
 
 pub type cudaError_t = c_int;
 pub type cudaStream_t = *mut c_void;
+pub type cudaEvent_t = *mut c_void;
 pub type cudaGraph_t = *mut c_void;
 pub type cudaGraphExec_t = *mut c_void;
 pub type cudaStreamCaptureMode = c_int;
@@ -15,6 +18,33 @@ pub type cublasOperation_t = c_int;
 pub type cudaDataType = c_int;
 pub type cublasComputeType_t = c_int;
 pub type cublasGemmAlgo_t = c_int;
+pub type cublasLtHandle_t = *mut c_void;
+pub type cublasLtMatmulDesc_t = *mut c_void;
+pub type cublasLtMatrixLayout_t = *mut c_void;
+pub type cublasLtMatmulPreference_t = *mut c_void;
+pub type cublasLtMatmulDescAttributes_t = c_int;
+pub type cublasLtMatmulPreferenceAttributes_t = c_int;
+pub type cublasLtEpilogue_t = c_uint;
+
+/// cuBLASLt deliberately exposes its selected algorithm as a fixed-size,
+/// semi-opaque value. Keep this definition byte-for-byte compatible with
+/// `cublasLt.h`; callers may cache it only for the same cuBLAS version.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct cublasLtMatmulAlgo_t {
+    pub data: [u64; 8],
+}
+
+/// Result record filled by `cublasLtMatmulAlgoGetHeuristic`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct cublasLtMatmulHeuristicResult_t {
+    pub algo: cublasLtMatmulAlgo_t,
+    pub workspace_size: usize,
+    pub state: cublasStatus_t,
+    pub waves_count: f32,
+    pub reserved: [c_int; 4],
+}
 
 pub const CUDA_SUCCESS: cudaError_t = 0;
 pub const CUDA_STREAM_NON_BLOCKING: c_uint = 1;
@@ -29,13 +59,35 @@ pub const CUBLAS_STATUS_SUCCESS: cublasStatus_t = 0;
 pub const CUBLAS_OP_N: cublasOperation_t = 0;
 pub const CUBLAS_OP_T: cublasOperation_t = 1;
 pub const CUDA_R_32F: cudaDataType = 0;
+pub const CUDA_R_16F: cudaDataType = 2;
 pub const CUDA_R_16BF: cudaDataType = 14;
+pub const CUBLAS_COMPUTE_16F: cublasComputeType_t = 64;
 pub const CUBLAS_COMPUTE_32F: cublasComputeType_t = 68;
 pub const CUBLAS_COMPUTE_32F_FAST_16BF: cublasComputeType_t = 75;
 pub const CUBLAS_GEMM_DEFAULT: cublasGemmAlgo_t = -1;
+pub const CUBLAS_GEMM_DEFAULT_TENSOR_OP: cublasGemmAlgo_t = 99;
+
+// cuBLASLt descriptor constants from the CUDA 12 cublasLt.h ABI. These
+// values have remained stable since the corresponding attributes landed.
+pub const CUBLASLT_MATMUL_DESC_TRANSA: cublasLtMatmulDescAttributes_t = 3;
+pub const CUBLASLT_MATMUL_DESC_TRANSB: cublasLtMatmulDescAttributes_t = 4;
+pub const CUBLASLT_MATMUL_DESC_EPILOGUE: cublasLtMatmulDescAttributes_t = 7;
+pub const CUBLASLT_MATMUL_DESC_BIAS_POINTER: cublasLtMatmulDescAttributes_t = 8;
+pub const CUBLASLT_EPILOGUE_BIAS: cublasLtEpilogue_t = 4;
+pub const CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES:
+    cublasLtMatmulPreferenceAttributes_t = 1;
+pub const CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES:
+    cublasLtMatmulPreferenceAttributes_t = 5;
+pub const CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES:
+    cublasLtMatmulPreferenceAttributes_t = 6;
+pub const CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES:
+    cublasLtMatmulPreferenceAttributes_t = 7;
+pub const CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES:
+    cublasLtMatmulPreferenceAttributes_t = 8;
 
 unsafe extern "C" {
     pub fn cudaGetDeviceCount(count: *mut c_int) -> cudaError_t;
+    pub fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> cudaError_t;
     pub fn cudaSetDevice(device: c_int) -> cudaError_t;
     pub fn cudaGetDevice(device: *mut c_int) -> cudaError_t;
     pub fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> cudaError_t;
@@ -69,6 +121,11 @@ unsafe extern "C" {
     pub fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: c_uint) -> cudaError_t;
     pub fn cudaStreamDestroy(stream: cudaStream_t) -> cudaError_t;
     pub fn cudaStreamSynchronize(stream: cudaStream_t) -> cudaError_t;
+    pub fn cudaEventCreate(event: *mut cudaEvent_t) -> cudaError_t;
+    pub fn cudaEventDestroy(event: cudaEvent_t) -> cudaError_t;
+    pub fn cudaEventRecord(event: cudaEvent_t, stream: cudaStream_t) -> cudaError_t;
+    pub fn cudaEventSynchronize(event: cudaEvent_t) -> cudaError_t;
+    pub fn cudaEventElapsedTime(ms: *mut f32, start: cudaEvent_t, end: cudaEvent_t) -> cudaError_t;
     pub fn cudaStreamBeginCapture(stream: cudaStream_t, mode: cudaStreamCaptureMode)
         -> cudaError_t;
     pub fn cudaStreamEndCapture(stream: cudaStream_t, graph: *mut cudaGraph_t) -> cudaError_t;
@@ -131,6 +188,92 @@ unsafe extern "C" {
         batch_count: c_int,
         compute_type: cublasComputeType_t,
         algo: cublasGemmAlgo_t,
+    ) -> cublasStatus_t;
+    pub fn cublasGemmEx(
+        handle: cublasHandle_t,
+        transa: cublasOperation_t,
+        transb: cublasOperation_t,
+        m: c_int,
+        n: c_int,
+        k: c_int,
+        alpha: *const c_void,
+        a: *const c_void,
+        atype: cudaDataType,
+        lda: c_int,
+        b: *const c_void,
+        btype: cudaDataType,
+        ldb: c_int,
+        beta: *const c_void,
+        c: *mut c_void,
+        ctype: cudaDataType,
+        ldc: c_int,
+        compute_type: cublasComputeType_t,
+        algo: cublasGemmAlgo_t,
+    ) -> cublasStatus_t;
+
+    pub fn cublasLtCreate(handle: *mut cublasLtHandle_t) -> cublasStatus_t;
+    pub fn cublasLtDestroy(handle: cublasLtHandle_t) -> cublasStatus_t;
+    pub fn cublasLtMatmulDescCreate(
+        desc: *mut cublasLtMatmulDesc_t,
+        compute_type: cublasComputeType_t,
+        scale_type: cudaDataType,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatmulDescDestroy(desc: cublasLtMatmulDesc_t) -> cublasStatus_t;
+    pub fn cublasLtMatmulDescSetAttribute(
+        desc: cublasLtMatmulDesc_t,
+        attr: cublasLtMatmulDescAttributes_t,
+        value: *const c_void,
+        size_in_bytes: usize,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatrixLayoutCreate(
+        layout: *mut cublasLtMatrixLayout_t,
+        data_type: cudaDataType,
+        rows: u64,
+        cols: u64,
+        ld: i64,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatrixLayoutDestroy(layout: cublasLtMatrixLayout_t) -> cublasStatus_t;
+    pub fn cublasLtMatmulPreferenceCreate(
+        preference: *mut cublasLtMatmulPreference_t,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatmulPreferenceDestroy(
+        preference: cublasLtMatmulPreference_t,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatmulPreferenceSetAttribute(
+        preference: cublasLtMatmulPreference_t,
+        attr: cublasLtMatmulPreferenceAttributes_t,
+        value: *const c_void,
+        size_in_bytes: usize,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatmulAlgoGetHeuristic(
+        handle: cublasLtHandle_t,
+        operation_desc: cublasLtMatmulDesc_t,
+        a_desc: cublasLtMatrixLayout_t,
+        b_desc: cublasLtMatrixLayout_t,
+        c_desc: cublasLtMatrixLayout_t,
+        d_desc: cublasLtMatrixLayout_t,
+        preference: cublasLtMatmulPreference_t,
+        requested_algo_count: c_int,
+        heuristic_results: *mut cublasLtMatmulHeuristicResult_t,
+        returned_algo_count: *mut c_int,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatmul(
+        handle: cublasLtHandle_t,
+        operation_desc: cublasLtMatmulDesc_t,
+        alpha: *const c_void,
+        a: *const c_void,
+        a_desc: cublasLtMatrixLayout_t,
+        b: *const c_void,
+        b_desc: cublasLtMatrixLayout_t,
+        beta: *const c_void,
+        c: *const c_void,
+        c_desc: cublasLtMatrixLayout_t,
+        d: *mut c_void,
+        d_desc: cublasLtMatrixLayout_t,
+        algo: *const cublasLtMatmulAlgo_t,
+        workspace: *mut c_void,
+        workspace_size_in_bytes: usize,
+        stream: cudaStream_t,
     ) -> cublasStatus_t;
 }
 
@@ -212,6 +355,16 @@ pub fn is_available() -> bool {
     device_count().is_ok_and(|count| count > 0)
 }
 
+/// (free, total) device memory in bytes for the current device.
+pub fn mem_get_info() -> Result<(usize, usize), CudaError> {
+    let mut free = 0usize;
+    let mut total = 0usize;
+    unsafe {
+        check(cudaMemGetInfo(&mut free, &mut total))?;
+    }
+    Ok((free, total))
+}
+
 pub fn current_device() -> Result<i32, CudaError> {
     let mut device = 0;
     unsafe {
@@ -288,6 +441,198 @@ pub fn cublas_set_workspace(
     }
 }
 
+pub fn cublas_lt_create() -> Result<cublasLtHandle_t, CublasError> {
+    let mut handle = ptr::null_mut();
+    unsafe {
+        check_cublas(cublasLtCreate(&mut handle))?;
+    }
+    Ok(handle)
+}
+
+pub fn cublas_lt_destroy(handle: cublasLtHandle_t) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasLtDestroy(handle)) }
+}
+
+pub fn cublas_lt_matmul_desc_create(
+    compute_type: cublasComputeType_t,
+    scale_type: cudaDataType,
+) -> Result<cublasLtMatmulDesc_t, CublasError> {
+    let mut desc = ptr::null_mut();
+    unsafe {
+        check_cublas(cublasLtMatmulDescCreate(
+            &mut desc,
+            compute_type,
+            scale_type,
+        ))?;
+    }
+    Ok(desc)
+}
+
+pub fn cublas_lt_matmul_desc_destroy(
+    desc: cublasLtMatmulDesc_t,
+) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasLtMatmulDescDestroy(desc)) }
+}
+
+/// Set a cuBLASLt operation attribute using the ABI size of `T`.
+///
+/// The cuBLASLt API validates that this size matches the selected attribute;
+/// callers should use the exact documented type (`i32`, `u32`, or a device
+/// pointer). Passing a mismatched type returns `CUBLAS_STATUS_INVALID_VALUE`.
+pub fn cublas_lt_matmul_desc_set_attribute<T>(
+    desc: cublasLtMatmulDesc_t,
+    attr: cublasLtMatmulDescAttributes_t,
+    value: &T,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasLtMatmulDescSetAttribute(
+            desc,
+            attr,
+            (value as *const T).cast::<c_void>(),
+            std::mem::size_of::<T>(),
+        ))
+    }
+}
+
+pub fn cublas_lt_matrix_layout_create(
+    data_type: cudaDataType,
+    rows: u64,
+    cols: u64,
+    ld: i64,
+) -> Result<cublasLtMatrixLayout_t, CublasError> {
+    let mut layout = ptr::null_mut();
+    unsafe {
+        check_cublas(cublasLtMatrixLayoutCreate(
+            &mut layout,
+            data_type,
+            rows,
+            cols,
+            ld,
+        ))?;
+    }
+    Ok(layout)
+}
+
+pub fn cublas_lt_matrix_layout_destroy(
+    layout: cublasLtMatrixLayout_t,
+) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasLtMatrixLayoutDestroy(layout)) }
+}
+
+pub fn cublas_lt_matmul_preference_create(
+) -> Result<cublasLtMatmulPreference_t, CublasError> {
+    let mut preference = ptr::null_mut();
+    unsafe {
+        check_cublas(cublasLtMatmulPreferenceCreate(&mut preference))?;
+    }
+    Ok(preference)
+}
+
+pub fn cublas_lt_matmul_preference_destroy(
+    preference: cublasLtMatmulPreference_t,
+) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasLtMatmulPreferenceDestroy(preference)) }
+}
+
+/// Set a cuBLASLt heuristic preference using the ABI size of `T`.
+pub fn cublas_lt_matmul_preference_set_attribute<T>(
+    preference: cublasLtMatmulPreference_t,
+    attr: cublasLtMatmulPreferenceAttributes_t,
+    value: &T,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasLtMatmulPreferenceSetAttribute(
+            preference,
+            attr,
+            (value as *const T).cast::<c_void>(),
+            std::mem::size_of::<T>(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cublas_lt_matmul_algo_get_heuristic(
+    handle: cublasLtHandle_t,
+    operation_desc: cublasLtMatmulDesc_t,
+    a_desc: cublasLtMatrixLayout_t,
+    b_desc: cublasLtMatrixLayout_t,
+    c_desc: cublasLtMatrixLayout_t,
+    d_desc: cublasLtMatrixLayout_t,
+    preference: cublasLtMatmulPreference_t,
+) -> Result<Option<cublasLtMatmulHeuristicResult_t>, CublasError> {
+    let mut result = cublasLtMatmulHeuristicResult_t::default();
+    let mut returned = 0;
+    unsafe {
+        check_cublas(cublasLtMatmulAlgoGetHeuristic(
+            handle,
+            operation_desc,
+            a_desc,
+            b_desc,
+            c_desc,
+            d_desc,
+            preference,
+            1,
+            &mut result,
+            &mut returned,
+        ))?;
+    }
+    Ok((returned != 0).then_some(result))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cublas_lt_matmul(
+    handle: cublasLtHandle_t,
+    operation_desc: cublasLtMatmulDesc_t,
+    alpha: *const c_void,
+    a: *const c_void,
+    a_desc: cublasLtMatrixLayout_t,
+    b: *const c_void,
+    b_desc: cublasLtMatrixLayout_t,
+    beta: *const c_void,
+    c: *const c_void,
+    c_desc: cublasLtMatrixLayout_t,
+    d: *mut c_void,
+    d_desc: cublasLtMatrixLayout_t,
+    algo: &cublasLtMatmulAlgo_t,
+    workspace: *mut c_void,
+    workspace_size_in_bytes: usize,
+    stream: cudaStream_t,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasLtMatmul(
+            handle,
+            operation_desc,
+            alpha,
+            a,
+            a_desc,
+            b,
+            b_desc,
+            beta,
+            c,
+            c_desc,
+            d,
+            d_desc,
+            algo,
+            workspace,
+            workspace_size_in_bytes,
+            stream,
+        ))
+    }
+}
+
+/// Match PyTorch's cuBLASLt heuristic alignment calculation: report the
+/// largest power-of-two alignment up to 256 bytes for a device pointer.
+pub fn cublas_lt_pointer_alignment(pointer: *const c_void) -> u32 {
+    let address = pointer as usize;
+    let mut alignment = 256u32;
+    loop {
+        if address % alignment as usize == 0 {
+            return alignment;
+        }
+        alignment /= 2;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cublas_sgemm(
     handle: cublasHandle_t,
@@ -356,6 +701,115 @@ pub unsafe fn cublas_gemm_strided_batched_ex(
             ldb,
             stride_b,
             beta as *const f32 as *const c_void,
+            c,
+            ctype,
+            ldc,
+            stride_c,
+            batch_count,
+            compute_type,
+            algo,
+        ))
+    }
+}
+
+/// Direct `cublasGemmEx` entry point used when a framework's observable
+/// numeric contract differs from the nominally equivalent batch-count-one
+/// `cublasGemmStridedBatchedEx` call.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cublas_gemm_ex(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: i32,
+    n: i32,
+    k: i32,
+    alpha: &f32,
+    a: *const c_void,
+    atype: cudaDataType,
+    lda: i32,
+    b: *const c_void,
+    btype: cudaDataType,
+    ldb: i32,
+    beta: &f32,
+    c: *mut c_void,
+    ctype: cudaDataType,
+    ldc: i32,
+    compute_type: cublasComputeType_t,
+    algo: cublasGemmAlgo_t,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasGemmEx(
+            handle,
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha as *const f32 as *const c_void,
+            a,
+            atype,
+            lda,
+            b,
+            btype,
+            ldb,
+            beta as *const f32 as *const c_void,
+            c,
+            ctype,
+            ldc,
+            compute_type,
+            algo,
+        ))
+    }
+}
+
+/// cublasGemmStridedBatchedEx with caller-typed alpha/beta scalars: compute
+/// types whose scaling factors are not f32 (e.g. CUBLAS_COMPUTE_16F wants
+/// __half alpha/beta) need raw pointers instead of the &f32 of the wrapper
+/// above.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cublas_gemm_strided_batched_ex_raw(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: i32,
+    n: i32,
+    k: i32,
+    alpha: *const c_void,
+    a: *const c_void,
+    atype: cudaDataType,
+    lda: i32,
+    stride_a: i64,
+    b: *const c_void,
+    btype: cudaDataType,
+    ldb: i32,
+    stride_b: i64,
+    beta: *const c_void,
+    c: *mut c_void,
+    ctype: cudaDataType,
+    ldc: i32,
+    stride_c: i64,
+    batch_count: i32,
+    compute_type: cublasComputeType_t,
+    algo: cublasGemmAlgo_t,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasGemmStridedBatchedEx(
+            handle,
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha,
+            a,
+            atype,
+            lda,
+            stride_a,
+            b,
+            btype,
+            ldb,
+            stride_b,
+            beta,
             c,
             ctype,
             ldc,
@@ -475,5 +929,32 @@ impl CudaGraphExec {
 impl Drop for CudaGraphExec {
     fn drop(&mut self) {
         let _ = unsafe { check(cudaGraphExecDestroy(self.inner)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cublas_lt_abi_records_match_cuda_header() {
+        assert_eq!(std::mem::size_of::<cublasLtMatmulAlgo_t>(), 64);
+        assert_eq!(std::mem::align_of::<cublasLtMatmulAlgo_t>(), 8);
+        assert_eq!(std::mem::size_of::<cublasLtMatmulHeuristicResult_t>(), 96);
+        assert_eq!(std::mem::align_of::<cublasLtMatmulHeuristicResult_t>(), 8);
+    }
+
+    #[test]
+    fn cublas_lt_pointer_alignment_matches_pytorch_contract() {
+        assert_eq!(cublas_lt_pointer_alignment(0x1000usize as *const c_void), 256);
+        assert_eq!(cublas_lt_pointer_alignment(0x1080usize as *const c_void), 128);
+        assert_eq!(cublas_lt_pointer_alignment(0x1040usize as *const c_void), 64);
+        assert_eq!(cublas_lt_pointer_alignment(0x1002usize as *const c_void), 2);
+        assert_eq!(cublas_lt_pointer_alignment(0x1001usize as *const c_void), 1);
+    }
+
+    #[test]
+    fn cublas_default_tensor_op_matches_cuda_header() {
+        assert_eq!(CUBLAS_GEMM_DEFAULT_TENSOR_OP, 99);
     }
 }

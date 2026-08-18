@@ -1,17 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use makepad_ggml::backend::metal::{MetalContextBuffers, MetalRuntime};
 use makepad_ggml::{ggml_row_size_for_type, TensorType};
 
 use crate::error::{LlamaError, Result};
+use crate::exec::{CompiledHybridDecode, ExecContextBuffers, ExecRuntime};
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
 use crate::runtime::{
-    allocate_hybrid_shared_cache_tensors,
-    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
-    create_metal_context_buffer_with_runtime, reserve_hybrid_decode_main_buffer_size,
-    CompiledHybridDecodeMetal, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
+    allocate_hybrid_shared_cache_tensors, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
     HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridLayerSpec,
     HybridSharedCacheTensorIds, LogitsProbeInput, ProbeInputKind,
 };
@@ -28,7 +25,10 @@ const GRAPH_RESERVE_RETRY_BYTES: usize = 64 << 20;
 const MAX_GRAPH_RESERVE_RETRIES: usize = 4;
 /// Attention-graph key widths round up to this bucket, bounding the number
 /// of compiled graphs per batch shape at max_context / bucket.
-const GRAPH_KEY_BUCKET: usize = 1024;
+/// llama.cpp `llama-kv-cache.cpp:1116-1126` pads live `n_kv` to
+/// `max(n_pad, 256)` so `K.ne[1] % FATTN_KQ_STRIDE == 0` and
+/// `fattn.cu:402` can pick VEC on Ada decode (`GQA>4`, `KV<8192`).
+const GRAPH_KEY_BUCKET: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LlamaSessionConfig {
@@ -106,17 +106,14 @@ impl SessionGraphParams {
 }
 
 struct SessionGraphSet {
-    shared_runtime: MetalRuntime,
+    shared_runtime: ExecRuntime,
     shared_cache: HybridSharedCacheTensorIds,
-    shared_buffers: MetalContextBuffers,
-    compiled_by_params: BTreeMap<SessionGraphParams, CompiledHybridDecodeMetal>,
+    shared_buffers: ExecContextBuffers,
+    compiled_by_params: BTreeMap<SessionGraphParams, CompiledHybridDecode>,
 }
 
 impl SessionGraphSet {
-    fn graph_for_mut(
-        &mut self,
-        params: SessionGraphParams,
-    ) -> Option<&mut CompiledHybridDecodeMetal> {
+    fn graph_for_mut(&mut self, params: SessionGraphParams) -> Option<&mut CompiledHybridDecode> {
         self.compiled_by_params.get_mut(&params)
     }
 
@@ -124,13 +121,42 @@ impl SessionGraphSet {
         self.compiled_by_params.contains_key(&params)
     }
 
-    fn insert_graph(&mut self, params: SessionGraphParams, compiled: CompiledHybridDecodeMetal) {
+    fn insert_graph(&mut self, params: SessionGraphParams, compiled: CompiledHybridDecode) {
         self.compiled_by_params.insert(params, compiled);
     }
 
     fn evict_graphs_except(&mut self, keep: SessionGraphParams) {
         self.compiled_by_params.retain(|params, _| *params == keep);
     }
+}
+
+fn shared_cache_ranges(
+    ctx: &makepad_ggml::Context,
+    cache: &HybridSharedCacheTensorIds,
+) -> Result<Vec<(usize, usize)>> {
+    let mut tensor_ids = BTreeSet::new();
+    for ids in cache.attention.values() {
+        tensor_ids.insert(ids.k_cache);
+        tensor_ids.insert(ids.v_cache);
+    }
+    for ids in cache.recurrent.values() {
+        tensor_ids.insert(ids.r_cache);
+        tensor_ids.insert(ids.s_cache);
+    }
+
+    let mut ranges = Vec::with_capacity(tensor_ids.len());
+    for tensor_id in tensor_ids {
+        let tensor = ctx
+            .tensor(tensor_id)
+            .ok_or_else(|| LlamaError::format(format!("invalid cache tensor id {tensor_id}")))?;
+        let offset = tensor.data_offset.ok_or_else(|| {
+            LlamaError::format(format!("cache tensor {tensor_id} has no allocated data"))
+        })?;
+        ranges.push((offset, tensor.nbytes()));
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    Ok(ranges)
 }
 
 pub struct LlamaSession {
@@ -154,7 +180,16 @@ pub struct LlamaSession {
 
 impl LlamaSession {
     pub fn load(path: impl AsRef<Path>, config: LlamaSessionConfig) -> Result<Self> {
-        Self::from_owned_model(LlamaModel::load(path)?, config)
+        Self::load_with_progress(path, config, &mut |_, _| {})
+    }
+
+    pub fn load_with_progress(
+        path: impl AsRef<Path>,
+        config: LlamaSessionConfig,
+        progress: &mut dyn FnMut(&str, f64),
+    ) -> Result<Self> {
+        progress("load llm parse", 0.11);
+        Self::from_owned_model_with_progress(LlamaModel::load(path)?, config, progress)
     }
 
     pub fn from_model(model: &LlamaModel, config: LlamaSessionConfig) -> Result<Self> {
@@ -198,15 +233,12 @@ impl LlamaSession {
     }
 
     pub fn reset(&mut self) -> Result<()> {
-        let (weights, graphs) = build_runtime_state(
-            &self.model,
-            &self.plan,
-            &self.spec,
-            self.context_extra_bytes,
-            prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
+        let ranges = shared_cache_ranges(&self.weights.ctx, &self.graphs.shared_cache)?;
+        self.graphs.shared_runtime.clear_state_ranges(
+            &mut self.weights.ctx,
+            &self.graphs.shared_buffers,
+            &ranges,
         )?;
-        self.weights = weights;
-        self.graphs = graphs;
         self.token_ids.clear();
         self.rope_pos_next = 0;
         self.last_run = None;
@@ -218,16 +250,26 @@ impl LlamaSession {
     }
 
     pub fn append_tokens(&mut self, token_ids: &[i32]) -> Result<()> {
+        self.append_tokens_with_progress(token_ids, &mut |_, _| {})
+    }
+
+    pub fn append_tokens_with_progress(
+        &mut self,
+        token_ids: &[i32],
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<()> {
         if token_ids.is_empty() {
             return Ok(());
         }
         self.ensure_capacity(token_ids.len())?;
         let prefill_batch_size = self.config.prefill_batch_size.max(1);
         let mut offset = 0;
+        progress(0, token_ids.len());
         while offset < token_ids.len() {
             let batch_size = (token_ids.len() - offset).min(prefill_batch_size);
             self.append_token_batch(&token_ids[offset..offset + batch_size])?;
             offset += batch_size;
+            progress(offset, token_ids.len());
         }
         Ok(())
     }
@@ -323,6 +365,14 @@ impl LlamaSession {
     }
 
     fn from_owned_model(model: LlamaModel, config: LlamaSessionConfig) -> Result<Self> {
+        Self::from_owned_model_with_progress(model, config, &mut |_, _| {})
+    }
+
+    fn from_owned_model_with_progress(
+        model: LlamaModel,
+        config: LlamaSessionConfig,
+        progress: &mut dyn FnMut(&str, f64),
+    ) -> Result<Self> {
         model.validate_layout()?;
         if config.max_sequences == 0 {
             return Err(LlamaError::format(
@@ -386,6 +436,7 @@ impl LlamaSession {
             &spec,
             context_extra_bytes,
             prompt_batch_capacity(config.prefill_batch_size, max_context_usize),
+            progress,
         )?;
 
         Ok(Self {
@@ -623,10 +674,9 @@ impl LlamaSession {
             } else {
                 &self.spec
             };
-            match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
+            match self.graphs.shared_runtime.compile_hybrid_decode(
                 &mut self.weights,
                 spec,
-                &self.graphs.shared_runtime,
                 &self.graphs.shared_cache,
                 &self.graphs.shared_buffers,
                 params.n_tokens,
@@ -655,6 +705,7 @@ impl LlamaSession {
                         &self.spec,
                         self.context_extra_bytes,
                         prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
+                        &mut |_, _| {},
                     )?;
                     self.weights = weights;
                     self.graphs = graphs;
@@ -673,7 +724,15 @@ fn resolve_max_context(model: &LlamaModel, config: LlamaSessionConfig) -> Result
     if max_context == 0 {
         return Err(LlamaError::format("session max_context must be at least 1"));
     }
-    Ok(max_context)
+    // Official llama.cpp pads n_ctx to a multiple of 256 under flash attention
+    // (GGML_PAD in llama-context.cpp), so n_kv is always ncpsg-aligned and
+    // flash-ext never takes its kvpad path — that unaligned path page-faults
+    // on M4 at n_q >= 20. The graph-width clamps below (.min(max_context))
+    // are the only source of unaligned widths, so padding the session
+    // capacity here protects every caller, not just run_bench's pre-pad.
+    max_context
+        .checked_next_multiple_of(GRAPH_KEY_BUCKET as u32)
+        .ok_or_else(|| LlamaError::format("session max_context overflows when padded"))
 }
 
 fn build_runtime_state(
@@ -682,6 +741,7 @@ fn build_runtime_state(
     spec: &HybridDecodeSpec,
     context_extra_bytes: usize,
     prompt_batch_capacity: usize,
+    progress: &mut dyn FnMut(&str, f64),
 ) -> Result<(LoadedGgufWeights, SessionGraphSet)> {
     // Weights come from a read-only mmap of the gguf (clean file-backed
     // pages, lazy page-in) unless mapping is unavailable or disabled;
@@ -692,6 +752,7 @@ fn build_runtime_state(
     for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
         // Retries re-run this: remapping the same file is cheap, and only
         // a real mapping failure may take the owned-arena fallback.
+        progress("load llm mmap", 0.13);
         let mapped_weights = if use_mmap {
             plan.full_weights.map_and_load(&model.gguf, extra_bytes)
         } else {
@@ -703,28 +764,22 @@ fn build_runtime_state(
                 .full_weights
                 .allocate_and_load_with_extra(&model.gguf, extra_bytes)?,
         };
-        let shared_runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
+        let shared_runtime = ExecRuntime::new()?;
         let shared_cache =
             allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, spec)?;
         let prompt_batch_capacity = prompt_batch_capacity.max(1);
-        let mut required_main_buffer_size = reserve_hybrid_decode_main_buffer_size(
-            &weights,
-            spec,
-            Some(&shared_cache),
-            1,
-            1,
-            shared_runtime.features(),
-        )?;
+        let mut required_main_buffer_size = shared_runtime
+            .reserve_hybrid_decode_main_buffer_size(&weights, spec, Some(&shared_cache), 1, 1)?;
         if prompt_batch_capacity > 1 {
-            required_main_buffer_size =
-                required_main_buffer_size.max(reserve_hybrid_decode_main_buffer_size(
+            required_main_buffer_size = required_main_buffer_size.max(
+                shared_runtime.reserve_hybrid_decode_main_buffer_size(
                     &weights,
                     spec,
                     Some(&shared_cache),
                     prompt_batch_capacity,
                     1,
-                    shared_runtime.features(),
-                )?);
+                )?,
+            );
         }
         if required_main_buffer_size > weights.ctx.mem_size() {
             if attempt < MAX_GRAPH_RESERVE_RETRIES {
@@ -741,21 +796,32 @@ fn build_runtime_state(
                 required_main_buffer_size
             )));
         }
-        let shared_buffers =
-            create_metal_context_buffer_with_runtime(&shared_runtime, &weights.ctx)?;
+        progress("load llm upload", 0.18);
+        let weight_bytes = weights.ctx.ro_split().max(weights.ctx.used_mem());
+        let gb = weight_bytes as f64 / 1e9;
+        let shared_buffers = shared_runtime.create_context_buffers_with_progress(
+            &weights.ctx,
+            &mut |done, total| {
+                let denom = if total == 0 { weight_bytes.max(1) } else { total };
+                let frac = 0.18 + 0.62 * (done as f64 / denom as f64).clamp(0.0, 1.0);
+                progress(
+                    &format!("load llm gguf ({:.1}/{:.1}GB)", done as f64 / 1e9, gb.max(0.1)),
+                    frac,
+                );
+            },
+        )?;
+        progress("load llm compile", 0.85);
         let mut compiled_by_params = BTreeMap::new();
         let build_result = (|| {
-            let token_generation =
-                compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
-                    &mut weights,
-                    spec,
-                    &shared_runtime,
-                    &shared_cache,
-                    &shared_buffers,
-                    1,
-                    1,
-                    session_attention_key_count(spec)?,
-                )?;
+            let token_generation = shared_runtime.compile_hybrid_decode(
+                &mut weights,
+                spec,
+                &shared_cache,
+                &shared_buffers,
+                1,
+                1,
+                session_attention_key_count(spec)?,
+            )?;
             compiled_by_params.insert(
                 SessionGraphParams::token_generation(session_attention_key_count(spec)?),
                 token_generation,
@@ -865,12 +931,15 @@ fn attention_cache_bytes_from_spec(spec: &HybridDecodeSpec) -> Result<usize> {
 fn session_attention_key_count(spec: &HybridDecodeSpec) -> Result<usize> {
     for layer in &spec.layers {
         if let HybridLayerSpec::Attention { decode, .. } = layer {
-            return usize::try_from(decode.cache.max_context).map_err(|_| {
+            let max_context = usize::try_from(decode.cache.max_context).map_err(|_| {
                 LlamaError::format(format!(
                     "attention max_context {} does not fit in usize",
                     decode.cache.max_context
                 ))
-            });
+            })?;
+            // Precompile the first 256-wide decode graph (official min pad),
+            // not the 8192 allocation. Wider buckets compile on demand.
+            return Ok(GRAPH_KEY_BUCKET.min(max_context).max(1));
         }
     }
     Ok(1)

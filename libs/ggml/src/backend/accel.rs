@@ -1,4 +1,4 @@
-use super::{cuda, metal};
+use super::{cuda, metal, prof};
 use crate::quant::bf16_to_f32;
 
 #[derive(Clone, Copy, Debug)]
@@ -35,7 +35,16 @@ pub fn try_matmul_nt_ggml_bytes(
     if let Some(out) = metal::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n) {
         return Some(out);
     }
-    cuda::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n)
+    let t = std::time::Instant::now();
+    let out = cuda::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n);
+    if let Some(v) = &out {
+        prof::record(
+            prof::CAT_MATMUL_UNCACHED,
+            t,
+            ((a.len() + v.len()) * 4 + bt_bytes.len()) as u64,
+        );
+    }
+    out
 }
 
 pub fn try_matmul_nt_ggml_bytes_cached<F>(
@@ -52,17 +61,7 @@ where
     F: FnOnce() -> Result<Vec<u8>, String>,
 {
     if metal::is_available() {
-        let bt_bytes = match load_bt_bytes() {
-            Ok(bytes) => bytes,
-            Err(err) => return Some(Err(err)),
-        };
-        if let Some(out) = metal::try_matmul_nt_ggml_bytes(a, &bt_bytes, bt_ggml_type, m, k, n) {
-            return Some(Ok(out));
-        }
-        return None;
-    }
-    if cuda::is_available() {
-        return Some(cuda::try_matmul_nt_ggml_bytes_cached(
+        match metal::try_matmul_nt_ggml_bytes_keyed(
             a,
             bt_ggml_type,
             m,
@@ -71,7 +70,27 @@ where
             cache_namespace,
             bt_cache_key,
             load_bt_bytes,
-        ));
+        ) {
+            Some(out) => return Some(Ok(out)),
+            None => return None,
+        }
+    }
+    if cuda::is_available() {
+        let t = std::time::Instant::now();
+        let out = cuda::try_matmul_nt_ggml_bytes_cached(
+            a,
+            bt_ggml_type,
+            m,
+            k,
+            n,
+            cache_namespace,
+            bt_cache_key,
+            load_bt_bytes,
+        );
+        if out.is_ok() {
+            prof::record(prof::CAT_DENSE_TOTAL, t, ((a.len() + m * n) * 4) as u64);
+        }
+        return Some(out);
     }
     None
 }
@@ -105,7 +124,8 @@ where
         return None;
     }
     if cuda::is_available() {
-        return Some(cuda::try_matmul_nt_ggml_bytes_cached_bf16_words(
+        let t = std::time::Instant::now();
+        let out = cuda::try_matmul_nt_ggml_bytes_cached_bf16_words(
             a_bf16_words,
             bt_ggml_type,
             m,
@@ -114,7 +134,15 @@ where
             cache_namespace,
             bt_cache_key,
             load_bt_bytes,
-        ));
+        );
+        if out.is_ok() {
+            prof::record(
+                prof::CAT_DENSE_TOTAL,
+                t,
+                (a_bf16_words.len() * 2 + m * n * 4) as u64,
+            );
+        }
+        return Some(out);
     }
     None
 }

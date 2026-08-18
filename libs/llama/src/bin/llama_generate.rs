@@ -22,6 +22,8 @@ struct Args {
     dump_token_ids: bool,
     no_stream: bool,
     verify_upstream: bool,
+    bench_pp: Option<usize>,
+    bench_tg: Option<usize>,
 }
 
 fn main() {
@@ -45,6 +47,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.dump_token_ids {
         eprintln!("prompt.token_ids: {:?}", prompt_token_ids);
+    }
+
+    if args.bench_pp.is_some() || args.bench_tg.is_some() {
+        return run_bench(&model, &vocab, &args, prompt_token_ids);
     }
 
     let max_context = match args.max_context {
@@ -75,6 +81,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("MAKEPAD_LLAMA_DUMP_STATE").is_some() {
         for (name, sum, max, nans) in session.debug_cache_fingerprints() {
             eprintln!("state.{}: sum={:.3} max={:.3} nans={}", name, sum, max, nans);
+        }
+    }
+    // Cross-backend numerical comparison: exact post-prefill logits stats.
+    if std::env::var_os("MAKEPAD_LLAMA_LOGITS_STATS").is_some() {
+        if let Some(logits) = session.last_logits() {
+            let (argmax, top) = logits.iter().copied().enumerate().fold(
+                (0usize, f32::NEG_INFINITY),
+                |acc, (index, value)| if value > acc.1 { (index, value) } else { acc },
+            );
+            let l2 = logits.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+            eprintln!(
+                "logits.stats: n={} argmax={} top={:.6} l2={:.4} head={:?}",
+                logits.len(),
+                argmax,
+                top,
+                l2,
+                &logits[..8.min(logits.len())]
+            );
         }
     }
 
@@ -145,6 +169,8 @@ fn parse_args(
     let mut dump_token_ids = false;
     let mut no_stream = false;
     let mut verify_upstream = false;
+    let mut bench_pp = None;
+    let mut bench_tg = None;
 
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
@@ -195,6 +221,14 @@ fn parse_args(
             "--verify-upstream" => {
                 verify_upstream = true;
             }
+            "--bench-pp" => {
+                let value = args.next().ok_or("--bench-pp requires a value")?;
+                bench_pp = Some(value.to_string_lossy().parse()?);
+            }
+            "--bench-tg" => {
+                let value = args.next().ok_or("--bench-tg requires a value")?;
+                bench_tg = Some(value.to_string_lossy().parse()?);
+            }
             _ if model_path.is_none() => {
                 model_path = Some(PathBuf::from(arg));
             }
@@ -225,7 +259,86 @@ fn parse_args(
         dump_token_ids,
         no_stream,
         verify_upstream,
+        bench_pp,
+        bench_tg,
     })
+}
+
+fn run_bench(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    args: &Args,
+    prompt_token_ids: Vec<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pp = args.bench_pp.unwrap_or(128);
+    let tg = args.bench_tg.unwrap_or(32);
+    if pp == 0 {
+        return Err("--bench-pp must be > 0".into());
+    }
+    if tg == 0 {
+        return Err("--bench-tg must be > 0".into());
+    }
+    let pad = prompt_token_ids[0];
+    let mut tokens = prompt_token_ids;
+    if tokens.len() < pp {
+        tokens.resize(pp, pad);
+    } else {
+        tokens.truncate(pp);
+    }
+    // Official llama.cpp pads n_kv to max(n_pad, 256) so flash-ext never
+    // takes the unaligned pad path (llama-kv-cache.cpp get_n_kv). A bench
+    // context of just pp+tg (e.g. 21) compiled n_kv=21, hit flash-ext pad
+    // at n_q>=20, and page-faulted on M4.
+    const OFFICIAL_N_KV_PAD: usize = 256;
+    let max_context = args
+        .max_context
+        .unwrap_or(pp + tg)
+        .max(OFFICIAL_N_KV_PAD);
+    let prefill_batch_size = if args.prefill_batch_size == 1 {
+        pp
+    } else {
+        args.prefill_batch_size
+    };
+    let config = LlamaSessionConfig {
+        max_context: Some(u32::try_from(max_context)?),
+        prefill_batch_size,
+        ..LlamaSessionConfig::default()
+    };
+
+    // Same session for warmup + timed run so Metal pipelines/graphs stay
+    // compiled. Dropping the session (old bench) recompiled on the clock.
+    eprintln!("bench.start: pp={pp} tg={tg} batch={prefill_batch_size}");
+    let mut session = LlamaSession::from_model(model, config)?;
+    eprintln!("bench.warmup: append {pp} + 1 decode");
+    session.append_tokens(&tokens)?;
+    let _ = session.continue_greedy(1)?;
+    session.reset()?;
+    eprintln!("bench.timed: prefill");
+
+    let prefill_start = Instant::now();
+    session.append_tokens(&tokens)?;
+    let prefill_elapsed = prefill_start.elapsed();
+    eprintln!("bench.timed: decode {tg}");
+    let generation_start = Instant::now();
+    let generation = session.continue_greedy(tg)?;
+    let generation_elapsed = generation_start.elapsed();
+
+    eprintln!("bench.protocol: llama-bench -p {pp} -n {tg}");
+    eprintln!("bench.prefill_batch_size: {prefill_batch_size}");
+    eprintln!("bench.pp_tokens: {}", tokens.len());
+    eprintln!("bench.tg_tokens: {}", generation.token_ids.len());
+    eprintln!(
+        "bench.pp{pp}: {:.2} tok/s ({:.3}s)",
+        tok_per_second(tokens.len(), prefill_elapsed.as_secs_f64()),
+        prefill_elapsed.as_secs_f64()
+    );
+    eprintln!(
+        "bench.tg{tg}: {:.2} tok/s ({:.3}s)",
+        tok_per_second(generation.token_ids.len(), generation_elapsed.as_secs_f64()),
+        generation_elapsed.as_secs_f64()
+    );
+    let _ = vocab;
+    Ok(())
 }
 
 fn print_usage() {
