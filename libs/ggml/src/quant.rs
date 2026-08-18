@@ -901,84 +901,24 @@ pub const QK4_NL: usize = 32;
 pub const QK_MXFP4: usize = 32;
 pub const QK_NVFP4: usize = 64;
 
-/// GGML type constants copied from upstream `ggml.h`.
-pub const GGML_TYPE_F32: u32 = 0;
-pub const GGML_TYPE_F16: u32 = 1;
-pub const GGML_TYPE_Q4_0: u32 = 2;
-pub const GGML_TYPE_Q4_1: u32 = 3;
-pub const GGML_TYPE_Q5_0: u32 = 6;
-pub const GGML_TYPE_Q5_1: u32 = 7;
-pub const GGML_TYPE_Q8_0: u32 = 8;
-pub const GGML_TYPE_Q8_1: u32 = 9;
-pub const GGML_TYPE_Q2_K: u32 = 10;
-pub const GGML_TYPE_Q3_K: u32 = 11;
-pub const GGML_TYPE_Q4_K: u32 = 12;
-pub const GGML_TYPE_Q5_K: u32 = 13;
-pub const GGML_TYPE_Q6_K: u32 = 14;
-pub const GGML_TYPE_Q8_K: u32 = 15;
-pub const GGML_TYPE_IQ2_XXS: u32 = 16;
-pub const GGML_TYPE_IQ2_XS: u32 = 17;
-pub const GGML_TYPE_IQ3_XXS: u32 = 18;
-pub const GGML_TYPE_IQ1_S: u32 = 19;
-pub const GGML_TYPE_IQ4_NL: u32 = 20;
-pub const GGML_TYPE_IQ3_S: u32 = 21;
-pub const GGML_TYPE_IQ2_S: u32 = 22;
-pub const GGML_TYPE_IQ4_XS: u32 = 23;
-pub const GGML_TYPE_I8: u32 = 24;
-pub const GGML_TYPE_I16: u32 = 25;
-pub const GGML_TYPE_I32: u32 = 26;
-pub const GGML_TYPE_I64: u32 = 27;
-pub const GGML_TYPE_F64: u32 = 28;
-pub const GGML_TYPE_IQ1_M: u32 = 29;
-pub const GGML_TYPE_BF16: u32 = 30;
-pub const GGML_TYPE_TQ1_0: u32 = 34;
-pub const GGML_TYPE_TQ2_0: u32 = 35;
-pub const GGML_TYPE_MXFP4: u32 = 39;
-pub const GGML_TYPE_NVFP4: u32 = 40;
-/// Makepad extension (not in upstream ggml.h): scalar signed FP8 E4M3FN,
-/// 1 byte per element, implicit scale 1.0 (see [`f8_e4m3_to_f32`]).
-pub const GGML_TYPE_F8_E4M3: u32 = 41;
-pub const GGML_TYPE_COUNT: u32 = 42;
-
-pub fn ggml_type_name(ggml_type: u32) -> &'static str {
-    match ggml_type {
-        GGML_TYPE_F32 => "f32",
-        GGML_TYPE_F16 => "f16",
-        GGML_TYPE_Q4_0 => "q4_0",
-        GGML_TYPE_Q4_1 => "q4_1",
-        GGML_TYPE_Q5_0 => "q5_0",
-        GGML_TYPE_Q5_1 => "q5_1",
-        GGML_TYPE_Q8_0 => "q8_0",
-        GGML_TYPE_Q8_1 => "q8_1",
-        GGML_TYPE_Q2_K => "q2_K",
-        GGML_TYPE_Q3_K => "q3_K",
-        GGML_TYPE_Q4_K => "q4_K",
-        GGML_TYPE_Q5_K => "q5_K",
-        GGML_TYPE_Q6_K => "q6_K",
-        GGML_TYPE_Q8_K => "q8_K",
-        GGML_TYPE_IQ2_XXS => "iq2_xxs",
-        GGML_TYPE_IQ2_XS => "iq2_xs",
-        GGML_TYPE_IQ3_XXS => "iq3_xxs",
-        GGML_TYPE_IQ1_S => "iq1_s",
-        GGML_TYPE_IQ4_NL => "iq4_nl",
-        GGML_TYPE_IQ3_S => "iq3_s",
-        GGML_TYPE_IQ2_S => "iq2_s",
-        GGML_TYPE_IQ4_XS => "iq4_xs",
-        GGML_TYPE_I8 => "i8",
-        GGML_TYPE_I16 => "i16",
-        GGML_TYPE_I32 => "i32",
-        GGML_TYPE_I64 => "i64",
-        GGML_TYPE_F64 => "f64",
-        GGML_TYPE_IQ1_M => "iq1_m",
-        GGML_TYPE_BF16 => "bf16",
-        GGML_TYPE_TQ1_0 => "tq1_0",
-        GGML_TYPE_TQ2_0 => "tq2_0",
-        GGML_TYPE_MXFP4 => "mxfp4",
-        GGML_TYPE_NVFP4 => "nvfp4",
-        GGML_TYPE_F8_E4M3 => "f8_e4m3",
-        _ => "unknown",
-    }
-}
+// GGML_TYPE_* dtype ids, `ggml_type_name`, `block_size` and `block_elements`
+// moved to makepad-ai-loader (lane T2, /aiarch.md §1) alongside TensorType
+// (see tensor.rs) — loader's own formats/gguf.rs needs them and cannot
+// depend back on this crate. Re-exported here (both as external paths and,
+// via this `pub use`, as names in local scope) so the compute kernels below
+// keep resolving GGML_TYPE_*/block_size/block_elements as bare identifiers,
+// and every existing `makepad_ggml::{GGML_TYPE_*, ggml_type_name, block_size,
+// block_elements}` call site keeps compiling unchanged.
+pub use makepad_ai_loader::quant::{
+    block_elements, block_size, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_COUNT, GGML_TYPE_F16,
+    GGML_TYPE_F32, GGML_TYPE_F64, GGML_TYPE_F8_E4M3, GGML_TYPE_I16, GGML_TYPE_I32, GGML_TYPE_I64,
+    GGML_TYPE_I8, GGML_TYPE_IQ1_M, GGML_TYPE_IQ1_S, GGML_TYPE_IQ2_S, GGML_TYPE_IQ2_XS,
+    GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_XS,
+    GGML_TYPE_MXFP4, GGML_TYPE_NVFP4, GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_0,
+    GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K,
+    GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, GGML_TYPE_Q8_K, GGML_TYPE_TQ1_0,
+    GGML_TYPE_TQ2_0,
+};
 
 pub fn is_quantized_type(ggml_type: u32) -> bool {
     !matches!(
@@ -993,63 +933,6 @@ pub fn is_quantized_type(ggml_type: u32) -> bool {
             | GGML_TYPE_BF16
             | GGML_TYPE_F8_E4M3
     )
-}
-
-/// Type/block size in bytes for one ggml storage block.
-pub fn block_size(ggml_type: u32) -> usize {
-    match ggml_type {
-        GGML_TYPE_F32 => 4,
-        GGML_TYPE_F16 => 2,
-        GGML_TYPE_Q4_0 => 18,
-        GGML_TYPE_Q4_1 => 20,
-        GGML_TYPE_Q5_0 => 22,
-        GGML_TYPE_Q5_1 => 24,
-        GGML_TYPE_Q8_0 => 34,
-        GGML_TYPE_Q8_1 => 36,
-        GGML_TYPE_Q2_K => 84,
-        GGML_TYPE_Q3_K => 110,
-        GGML_TYPE_Q4_K => 144,
-        GGML_TYPE_Q5_K => 176,
-        GGML_TYPE_Q6_K => 210,
-        GGML_TYPE_Q8_K => 292,
-        GGML_TYPE_IQ2_XXS => 66,
-        GGML_TYPE_IQ2_XS => 74,
-        GGML_TYPE_IQ3_XXS => 98,
-        GGML_TYPE_IQ1_S => 50,
-        GGML_TYPE_IQ4_NL => 18,
-        GGML_TYPE_IQ3_S => 110,
-        GGML_TYPE_IQ2_S => 82,
-        GGML_TYPE_IQ4_XS => 136,
-        GGML_TYPE_I8 => 1,
-        GGML_TYPE_I16 => 2,
-        GGML_TYPE_I32 => 4,
-        GGML_TYPE_I64 => 8,
-        GGML_TYPE_F64 => 8,
-        GGML_TYPE_IQ1_M => 56,
-        GGML_TYPE_BF16 => 2,
-        GGML_TYPE_TQ1_0 => 54,
-        GGML_TYPE_TQ2_0 => 66,
-        GGML_TYPE_MXFP4 => 17,
-        GGML_TYPE_NVFP4 => 36,
-        GGML_TYPE_F8_E4M3 => 1,
-        _ => panic!("unsupported ggml type {}", ggml_type),
-    }
-}
-
-/// Number of dequantized elements represented by one storage block.
-pub fn block_elements(ggml_type: u32) -> usize {
-    match ggml_type {
-        GGML_TYPE_F32 | GGML_TYPE_F16 | GGML_TYPE_I8 | GGML_TYPE_I16 | GGML_TYPE_I32
-        | GGML_TYPE_I64 | GGML_TYPE_F64 | GGML_TYPE_BF16 | GGML_TYPE_F8_E4M3 => 1,
-        GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1 | GGML_TYPE_Q8_0
-        | GGML_TYPE_Q8_1 | GGML_TYPE_MXFP4 | GGML_TYPE_IQ4_NL => QK,
-        GGML_TYPE_NVFP4 => QK_NVFP4,
-        GGML_TYPE_Q2_K | GGML_TYPE_Q3_K | GGML_TYPE_Q4_K | GGML_TYPE_Q5_K | GGML_TYPE_Q6_K
-        | GGML_TYPE_Q8_K | GGML_TYPE_IQ2_XXS | GGML_TYPE_IQ2_XS | GGML_TYPE_IQ3_XXS
-        | GGML_TYPE_IQ1_S | GGML_TYPE_IQ3_S | GGML_TYPE_IQ2_S | GGML_TYPE_IQ4_XS
-        | GGML_TYPE_IQ1_M | GGML_TYPE_TQ1_0 | GGML_TYPE_TQ2_0 => QK_K,
-        _ => panic!("unsupported ggml type {}", ggml_type),
-    }
 }
 
 /// Quantize a row of f32 values into one Q8_0 block (32 elements -> 34 bytes).

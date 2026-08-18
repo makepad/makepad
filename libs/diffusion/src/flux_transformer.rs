@@ -24,7 +24,7 @@ use makepad_ggml::{
     Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
     UnaryOp, GGML_MEM_ALIGN, GGML_ROPE_TYPE_NORMAL,
 };
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

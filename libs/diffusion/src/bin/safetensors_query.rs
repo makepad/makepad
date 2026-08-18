@@ -1,4 +1,4 @@
-use makepad_mlx::MlxSafetensorsHeader;
+use makepad_ai_loader::MlxSafetensorsHeader;
 use std::env;
 
 fn usage() -> ! {

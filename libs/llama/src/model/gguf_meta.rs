@@ -106,7 +106,7 @@ pub(super) fn required_u32_or_first_array(gguf: &GgufFile, key: &str) -> Result<
 
 pub(super) fn required_utf8_string(gguf: &GgufFile, key: &str) -> Result<String> {
     match gguf.require_value(key)? {
-        GgufValue::String(value) => value.try_utf8().map(|s| s.to_owned()),
+        GgufValue::String(value) => Ok(value.try_utf8().map(|s| s.to_owned())?),
         other => Err(LlamaError::format(format!(
             "gguf key '{}' has type {}, expected string",
             key,
@@ -118,7 +118,7 @@ pub(super) fn required_utf8_string(gguf: &GgufFile, key: &str) -> Result<String>
 pub(super) fn optional_utf8_string(gguf: &GgufFile, key: &str) -> Result<Option<String>> {
     match gguf.get_value(key) {
         None => Ok(None),
-        Some(GgufValue::String(value)) => value.try_utf8().map(|s| Some(s.to_owned())),
+        Some(GgufValue::String(value)) => Ok(value.try_utf8().map(|s| Some(s.to_owned()))?),
         Some(other) => Err(LlamaError::format(format!(
             "gguf key '{}' has type {}, expected string",
             key,

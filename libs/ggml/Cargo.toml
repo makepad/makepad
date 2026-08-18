@@ -14,6 +14,10 @@ metal-precompile = []
 # standalone `[workspace]` (diffusion), cargo 1.92 drops target-cfg deps
 # and rustc reports `no external crate makepad_cuda`.
 makepad-cuda = { path = "../cuda" }
+# TensorType/GGML_TYPE_*/block_size/block_elements/MappedRegion live in the
+# loader now (lane T2, /aiarch.md §1); this crate re-exports them at their
+# original paths. Own `[workspace]` like ../mlx, reached via path dep.
+makepad-ai-loader = { path = "../ai/loader" }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
