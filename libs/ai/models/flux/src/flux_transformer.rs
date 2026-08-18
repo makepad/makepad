@@ -18,8 +18,8 @@ use crate::flux::{
 };
 use crate::flux_text::FluxConditioning;
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
-use makepad_ggml::backend::{try_matmul_nt_ggml_bytes, try_matmul_nt_ggml_bytes_cached};
-use makepad_ggml::{
+use makepad_ai_common::backend::{try_matmul_nt_ggml_bytes, try_matmul_nt_ggml_bytes_cached};
+use makepad_ai_common::{
     bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, ggml_pad, ggml_type_size_for_type, BufferUsage,
     Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
     UnaryOp, GGML_MEM_ALIGN, GGML_ROPE_TYPE_NORMAL,
@@ -4612,7 +4612,7 @@ fn build_attention_output(
                 BufferUsage::Activations,
             )
             .map_err(DiffusionError::model)?;
-        ctx.flash_attn_ext_set_prec(attn, makepad_ggml::Prec::F32)
+        ctx.flash_attn_ext_set_prec(attn, makepad_ai_common::Prec::F32)
             .map_err(DiffusionError::model)?;
         let attn_tensor = require_tensor(ctx, attn)?.clone();
         return ctx

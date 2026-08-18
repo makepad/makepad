@@ -907,7 +907,7 @@ pub const QK_NVFP4: usize = 64;
 // depend back on this crate. Re-exported here (both as external paths and,
 // via this `pub use`, as names in local scope) so the compute kernels below
 // keep resolving GGML_TYPE_*/block_size/block_elements as bare identifiers,
-// and every existing `makepad_ggml::{GGML_TYPE_*, ggml_type_name, block_size,
+// and every existing `makepad_ai_common::{GGML_TYPE_*, ggml_type_name, block_size,
 // block_elements}` call site keeps compiling unchanged.
 pub use makepad_ai_loader::quant::{
     block_elements, block_size, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_COUNT, GGML_TYPE_F16,

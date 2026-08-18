@@ -8,11 +8,11 @@ use crate::tensor::{
     ggml_blck_size_for_type, ggml_type_size_for_type, BufferUsage, Tensor, TensorId, TensorType,
 };
 
-use super::selector::FC_SSM_CONV;
-use super::{
-    build_graph_plan, BufferStorageMode, FunctionConstantValue, MetalBufferBindingRef,
-    MetalDeviceFeatures, MetalGraphNodePlan, MetalPipeline, MetalRuntime, MetalSize,
-    MetalStageKind,
+use crate::metal_selector::FC_SSM_CONV;
+use crate::metal_selector::{build_graph_plan, MetalGraphNodePlan, MetalStageKind};
+use makepad_ai_metal::{
+    BufferStorageMode, FunctionConstantValue, MetalBufferBindingRef, MetalDeviceFeatures,
+    MetalPipeline, MetalRuntime, MetalSize,
 };
 
 #[repr(C)]
@@ -927,7 +927,7 @@ pub struct MetalGraphTensorWrite<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct MetalGraphTensorBufferCopy<'a> {
     pub tensor_id: TensorId,
-    pub source_buffer: &'a super::MetalBuffer,
+    pub source_buffer: &'a makepad_ai_metal::MetalBuffer,
     pub source_offset_bytes: usize,
 }
 
@@ -943,7 +943,7 @@ pub struct MetalTensorBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetalPreparedStage {
     pub kind: MetalStageKind,
-    pub descriptor: super::MetalPipelineDescriptor,
+    pub descriptor: makepad_ai_metal::MetalPipelineDescriptor,
     pub c4: bool,
     pub cnt: bool,
 }
@@ -972,7 +972,7 @@ pub struct MetalPreparedGraph {
 #[derive(Clone, Debug)]
 pub struct MetalCompiledStage {
     pub kind: MetalStageKind,
-    pub descriptor: super::MetalPipelineDescriptor,
+    pub descriptor: makepad_ai_metal::MetalPipelineDescriptor,
     pub pipeline: MetalPipeline,
     pub c4: bool,
     pub cnt: bool,
@@ -994,13 +994,13 @@ pub struct MetalCompiledGraph {
     pub bindings: BTreeMap<TensorId, MetalTensorBinding>,
     pub main_buffer_size: usize,
     pub tail_buffer_size: usize,
-    pub main_buffer: super::MetalBuffer,
-    pub tail_buffer: Option<super::MetalBuffer>,
+    pub main_buffer: makepad_ai_metal::MetalBuffer,
+    pub tail_buffer: Option<makepad_ai_metal::MetalBuffer>,
     /// Read-only weight buffer serving logical offsets [0, ro_split);
     /// offsets at or above ro_split resolve into main_buffer at
     /// offset - ro_split. ro_split == 0 (no ro_buffer) keeps today's
     /// single-buffer behavior.
-    pub ro_buffer: Option<super::MetalBuffer>,
+    pub ro_buffer: Option<makepad_ai_metal::MetalBuffer>,
     pub ro_split: usize,
     /// Storage roots whose range the reuse planner recycled mid-graph.
     /// Readback of these (or views into them) errors instead of returning
@@ -1013,9 +1013,9 @@ pub struct MetalCompiledGraph {
 /// buffer covering the rest.
 #[derive(Clone, Debug)]
 pub struct MetalContextBuffers {
-    pub ro_buffer: Option<super::MetalBuffer>,
+    pub ro_buffer: Option<makepad_ai_metal::MetalBuffer>,
     pub ro_split: usize,
-    pub main_buffer: super::MetalBuffer,
+    pub main_buffer: makepad_ai_metal::MetalBuffer,
 }
 
 pub struct MetalGraphSession {
@@ -1071,7 +1071,7 @@ pub fn create_context_main_buffer(
     runtime: &MetalRuntime,
     ctx: &Context,
     storage: BufferStorageMode,
-) -> Result<super::MetalBuffer, String> {
+) -> Result<makepad_ai_metal::MetalBuffer, String> {
     // Two-region contexts: the CPU arena is only the dirty prefix. The
     // logical mem_size includes the mapped weight region and must not be
     // used as the Metal dirty-buffer length (that requested 32GiB).
@@ -1092,7 +1092,7 @@ pub fn warmup_affine_qmm_weights(
     runtime: &MetalRuntime,
     ctx: &Context,
 ) -> Result<usize, String> {
-    super::qmm::warmup_affine_qmm(runtime, ctx)
+    crate::metal_qmm::warmup_affine_qmm(runtime, ctx)
 }
 
 pub fn create_context_dirty_buffer(
@@ -1100,7 +1100,7 @@ pub fn create_context_dirty_buffer(
     ctx: &Context,
     dirty_size: usize,
     storage: BufferStorageMode,
-) -> Result<super::MetalBuffer, String> {
+) -> Result<makepad_ai_metal::MetalBuffer, String> {
     let dirty_size = dirty_size.max(1);
     let arena = ctx.mem_buffer();
     let used = if ctx.ro_split() != 0 {
@@ -1146,7 +1146,7 @@ pub fn create_context_main_buffer_no_copy(
     runtime: &MetalRuntime,
     ctx: &Context,
     fallback_storage: BufferStorageMode,
-) -> Result<super::MetalBuffer, String> {
+) -> Result<makepad_ai_metal::MetalBuffer, String> {
     let arena = ctx.mem_buffer();
     let page = os_page_size();
     let aligned = !arena.is_empty()
@@ -1173,7 +1173,7 @@ pub fn create_context_main_buffer_no_copy(
 pub fn create_context_ro_buffer(
     runtime: &MetalRuntime,
     ctx: &Context,
-) -> Result<Option<super::MetalBuffer>, String> {
+) -> Result<Option<makepad_ai_metal::MetalBuffer>, String> {
     let Some(region) = ctx.ro_region() else {
         return Ok(None);
     };
@@ -1196,9 +1196,9 @@ pub fn create_context_ro_buffer(
 fn compile_prepared_graph_from_buffers(
     runtime: &MetalRuntime,
     prepared: &MetalPreparedGraph,
-    main_buffer: super::MetalBuffer,
-    tail_buffer: Option<super::MetalBuffer>,
-    ro_buffer: Option<super::MetalBuffer>,
+    main_buffer: makepad_ai_metal::MetalBuffer,
+    tail_buffer: Option<makepad_ai_metal::MetalBuffer>,
+    ro_buffer: Option<makepad_ai_metal::MetalBuffer>,
     ro_split: usize,
 ) -> Result<MetalCompiledGraph, String> {
     let ro_split = if ro_buffer.is_some() { ro_split } else { 0 };
@@ -1288,7 +1288,7 @@ pub fn compile_prepared_graph(
 pub fn compile_prepared_graph_with_main_buffer(
     runtime: &MetalRuntime,
     prepared: &MetalPreparedGraph,
-    main_buffer: &super::MetalBuffer,
+    main_buffer: &makepad_ai_metal::MetalBuffer,
     tail_storage: BufferStorageMode,
 ) -> Result<MetalCompiledGraph, String> {
     let tail_buffer = if prepared.tail_buffer_size > 0 {
@@ -1368,7 +1368,7 @@ impl MetalGraphSession {
                 ro_split,
                 main_buffer,
             };
-            let _ = super::qmm::warmup_affine_qmm(&runtime, ctx);
+            let _ = crate::metal_qmm::warmup_affine_qmm(&runtime, ctx);
             return Self::from_runtime_with_context_buffers(
                 runtime,
                 prepared,
@@ -1377,14 +1377,14 @@ impl MetalGraphSession {
             );
         }
         let compiled = compile_prepared_graph(&runtime, ctx, prepared, main_storage, tail_storage)?;
-        let _ = super::qmm::warmup_affine_qmm(&runtime, ctx);
+        let _ = crate::metal_qmm::warmup_affine_qmm(&runtime, ctx);
         Ok(Self { runtime, compiled })
     }
 
     pub fn from_runtime_with_main_buffer(
         runtime: MetalRuntime,
         prepared: &MetalPreparedGraph,
-        main_buffer: &super::MetalBuffer,
+        main_buffer: &makepad_ai_metal::MetalBuffer,
         tail_storage: BufferStorageMode,
     ) -> Result<Self, String> {
         let compiled =
@@ -1439,7 +1439,7 @@ pub fn execute_compiled_graph_with_buffer_inputs(
     buffer_inputs: &[MetalGraphTensorBufferCopy<'_>],
     outputs: &[TensorId],
 ) -> Result<MetalGraphExecution, String> {
-    if super::qmm::affine_qmm_enabled()
+    if crate::metal_qmm::affine_qmm_enabled()
         || std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some()
     {
         runtime.reset_counters();
@@ -1473,7 +1473,7 @@ pub fn execute_compiled_graph_with_buffer_inputs(
         return Err(err);
     }
     runtime.end_command_batch()?;
-    if super::qmm::affine_qmm_enabled() {
+    if crate::metal_qmm::affine_qmm_enabled() {
         let c = runtime.counters();
         eprintln!(
             "metal: steel graph commits={} dispatches={} encoders={}->{} barriers={}",
@@ -1847,7 +1847,7 @@ fn prepared_node_from_plan(
 fn collect_tensor_bindings(
     ctx: &Context,
     graph: &Graph,
-    plan: &super::selector::MetalGraphPlan,
+    plan: &crate::metal_selector::MetalGraphPlan,
 ) -> Result<(BTreeMap<TensorId, MetalTensorBinding>, usize, BTreeSet<TensorId>), String> {
     let tensors = ctx.tensors();
     // Only tensors the fused execute list (plus host-read leafs) need a
@@ -1919,7 +1919,7 @@ fn collect_tensor_bindings(
 fn tensor_last_use_plan(
     ctx: &Context,
     graph: &Graph,
-    plan: &super::selector::MetalGraphPlan,
+    plan: &crate::metal_selector::MetalGraphPlan,
 ) -> BTreeMap<TensorId, usize> {
     let mut last_use = BTreeMap::new();
     let end = plan.nodes.len();
@@ -4192,7 +4192,7 @@ fn dispatch_mul_mat(
         let src0_bind = buffer_ref(compiled, 1, src0_id);
         let src1_bind = buffer_ref(compiled, 2, src1_id);
         let dst_bind = buffer_ref(compiled, 3, tensor.id);
-        match super::qmm::try_dispatch_affine_qmm(
+        match crate::metal_qmm::try_dispatch_affine_qmm(
             runtime,
             ctx,
             src0,
@@ -5819,7 +5819,7 @@ fn binding(
 fn resolve_buffer_offset(
     compiled: &MetalCompiledGraph,
     offset_bytes: usize,
-) -> (&super::MetalBuffer, usize) {
+) -> (&makepad_ai_metal::MetalBuffer, usize) {
     if offset_bytes < compiled.ro_split {
         if let Some(ro_buffer) = &compiled.ro_buffer {
             return (ro_buffer, offset_bytes);
@@ -5915,7 +5915,7 @@ fn tail_node_buffer_ref<'a>(
 }
 
 #[allow(dead_code)]
-fn dummy_buffer_ref<'a>(index: u64, buffer: &'a super::MetalBuffer) -> MetalBufferBindingRef<'a> {
+fn dummy_buffer_ref<'a>(index: u64, buffer: &'a makepad_ai_metal::MetalBuffer) -> MetalBufferBindingRef<'a> {
     MetalBufferBindingRef {
         index,
         buffer,
@@ -5966,7 +5966,7 @@ fn i64_dim(tensor: &Tensor, dim: usize) -> Result<i64, String> {
     Ok(tensor.ne[dim])
 }
 
-fn constant_i16(constants: &[super::FunctionConstant], idx: i32) -> Result<i16, String> {
+fn constant_i16(constants: &[makepad_ai_metal::FunctionConstant], idx: i32) -> Result<i16, String> {
     constants
         .iter()
         .find(|constant| constant.idx == idx)
@@ -5977,7 +5977,7 @@ fn constant_i16(constants: &[super::FunctionConstant], idx: i32) -> Result<i16, 
         })
 }
 
-fn constant_i32(constants: &[super::FunctionConstant], idx: i32) -> Result<i32, String> {
+fn constant_i32(constants: &[makepad_ai_metal::FunctionConstant], idx: i32) -> Result<i32, String> {
     constants
         .iter()
         .find(|constant| constant.idx == idx)

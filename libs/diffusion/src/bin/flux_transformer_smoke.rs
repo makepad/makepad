@@ -10,7 +10,7 @@ use makepad_diffusion::flux_text::{
 use makepad_diffusion::flux_transformer::{
     CompiledFluxTransformer, FluxTransformerStageOutput, LoadedFluxTransformerWeights,
 };
-use makepad_ggml::{bf16_to_f32, f16_to_f32};
+use makepad_ai_common::{bf16_to_f32, f16_to_f32};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::{env, fs, path::Path};
 

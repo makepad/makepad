@@ -6,10 +6,11 @@
 //! against it) diverges from true ggml op semantics.
 #![cfg(target_os = "macos")]
 
-use makepad_ggml::backend::metal::{
-    execute_compiled_graph, prepare_graph, BufferStorageMode, MetalGraphSession, MetalRuntime,
+use makepad_ai_llm::metal_compiled::{
+    execute_compiled_graph, prepare_graph, MetalGraphSession,
 };
-use makepad_ggml::{BufferUsage, Context, Graph, InitParams, TensorId, TensorType};
+use makepad_ai_llm::{BufferUsage, Context, Graph, InitParams, TensorId, TensorType};
+use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
 
 struct Rng(u64);
 

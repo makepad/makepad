@@ -514,8 +514,8 @@ fn tconv_tap_gemms(
     k: usize,
     n: usize,
 ) -> Option<(Vec<f32>, Vec<f32>)> {
-    use makepad_ggml::backend::metal::{try_matmul_nt_ggml_bytes_multi, MatmulNtGgmlBytesMatrix};
-    use makepad_ggml::tensor::TensorType;
+    use makepad_ai_common::backend::metal::{try_matmul_nt_ggml_bytes_multi, MatmulNtGgmlBytesMatrix};
+    use makepad_ai_common::tensor::TensorType;
 
     fn f32_bytes(v: &[f32]) -> &[u8] {
         unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
@@ -606,7 +606,7 @@ fn conv_transpose1d_scatter(input: &Plane, conv: &TConv) -> Plane {
 }
 
 use makepad_ai_sfx::sa3::F16Weight;
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_rows, gpu_download, gpu_gather_rows_colblock, gpu_linear_nt_cached,
     gpu_slice_rows, gpu_snake_cols, gpu_upload, gpu_upload_u32, GpuTensor,
 };

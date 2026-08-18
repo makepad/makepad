@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use makepad_ggml::{TensorType, UnaryOp, GGML_ROPE_TYPE_IMROPE};
+use crate::{TensorType, UnaryOp, GGML_ROPE_TYPE_IMROPE};
 
 use crate::error::{LlamaError, Result};
 use crate::model::LlamaModel;

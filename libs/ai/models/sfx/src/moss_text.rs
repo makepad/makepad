@@ -250,7 +250,7 @@ fn rms_head(head: &mut [f32], gamma: &[f32]) {
 // ---------------------------------------------------------------------------
 
 use crate::sa3::{dev_err, F16Weight};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_attention_packed_causal, gpu_concat_cols, gpu_download, gpu_linear_nt_cached,
     gpu_rms_norm_mul, gpu_rope_half, gpu_upload, GpuTensor,
 };
@@ -361,11 +361,11 @@ impl MossTextEncoder {
             .map_err(|e| dev_err("moss te input norm", e))?;
             let qkv = gpu_linear_nt_cached(&normed, "mosste", &[dev.qkv.part()], &[])
                 .map_err(|e| dev_err("moss te qkv", e))?;
-            let q = makepad_ggml::backend::cuda::gpu_slice_cols(&qkv, 0, q_heads * hd)
+            let q = makepad_ai_common::backend::cuda::gpu_slice_cols(&qkv, 0, q_heads * hd)
                 .map_err(|e| dev_err("moss te q slice", e))?;
-            let k = makepad_ggml::backend::cuda::gpu_slice_cols(&qkv, q_heads * hd, kv_heads * hd)
+            let k = makepad_ai_common::backend::cuda::gpu_slice_cols(&qkv, q_heads * hd, kv_heads * hd)
                 .map_err(|e| dev_err("moss te k slice", e))?;
-            let v = makepad_ggml::backend::cuda::gpu_slice_cols(
+            let v = makepad_ai_common::backend::cuda::gpu_slice_cols(
                 &qkv,
                 (q_heads + kv_heads) * hd,
                 kv_heads * hd,
@@ -392,11 +392,11 @@ impl MossTextEncoder {
                 for head in 0..q_heads {
                     let kv_head = head / group;
                     k_parts.push(
-                        makepad_ggml::backend::cuda::gpu_slice_cols(&k, kv_head * hd, hd)
+                        makepad_ai_common::backend::cuda::gpu_slice_cols(&k, kv_head * hd, hd)
                             .map_err(|e| dev_err("moss te k expand", e))?,
                     );
                     v_parts.push(
-                        makepad_ggml::backend::cuda::gpu_slice_cols(&v, kv_head * hd, hd)
+                        makepad_ai_common::backend::cuda::gpu_slice_cols(&v, kv_head * hd, hd)
                             .map_err(|e| dev_err("moss te v expand", e))?,
                     );
                 }
@@ -414,7 +414,7 @@ impl MossTextEncoder {
                 .map_err(|e| dev_err("moss te attention", e))?;
             let proj = gpu_linear_nt_cached(&attn, "mosste", &[dev.o.part()], &[])
                 .map_err(|e| dev_err("moss te o", e))?;
-            x = makepad_ggml::backend::cuda::gpu_add(&x, &proj)
+            x = makepad_ai_common::backend::cuda::gpu_add(&x, &proj)
                 .map_err(|e| dev_err("moss te attn residual", e))?;
 
             let normed = gpu_rms_norm_mul(
@@ -423,11 +423,11 @@ impl MossTextEncoder {
             .map_err(|e| dev_err("moss te post norm", e))?;
             let gate_up = gpu_linear_nt_cached(&normed, "mosste", &[dev.gate_up.part()], &[])
                 .map_err(|e| dev_err("moss te gate up", e))?;
-            let act = makepad_ggml::backend::cuda::gpu_swiglu_value_gate(&gate_up)
+            let act = makepad_ai_common::backend::cuda::gpu_swiglu_value_gate(&gate_up)
                 .map_err(|e| dev_err("moss te swiglu", e))?;
             let down = gpu_linear_nt_cached(&act, "mosste", &[dev.down.part()], &[])
                 .map_err(|e| dev_err("moss te down", e))?;
-            x = makepad_ggml::backend::cuda::gpu_add(&x, &down)
+            x = makepad_ai_common::backend::cuda::gpu_add(&x, &down)
                 .map_err(|e| dev_err("moss te mlp residual", e))?;
         }
         let x = gpu_rms_norm_mul(&x, h, "mosste", "final", &self.final_norm, MOSS_TE_RMS_EPS)

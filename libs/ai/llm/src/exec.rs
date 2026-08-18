@@ -1,7 +1,7 @@
 //! Backend-neutral execution seam for `LlamaSession`.
 //!
 //! The graph builders in `runtime.rs` are backend-agnostic: they produce a
-//! `makepad_ggml::Graph` over a `Context` whose tensors (weights, caches,
+//! `crate::Graph` over a `Context` whose tensors (weights, caches,
 //! activations) are byte offsets into one arena. This module is the single
 //! place that binds those graphs to a GPU execution backend:
 //!
@@ -17,8 +17,9 @@
 //! not enough memory) fails closed at `ExecRuntime::new()` or at graph
 //! compile, with the reason in the error.
 
-use makepad_ggml::backend::metal::{MetalContextBuffers, MetalDeviceFeatures, MetalRuntime};
-use makepad_ggml::Context;
+use crate::metal_compiled::MetalContextBuffers;
+use makepad_ai_metal::{MetalDeviceFeatures, MetalRuntime};
+use crate::Context;
 
 use crate::cuda_exec::{
     CompiledHybridDecodeCuda, CudaContextArena, CudaDeviceFeatures, CudaExecRuntime,

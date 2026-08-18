@@ -3,7 +3,7 @@
 //! exits non-zero and never substitutes CPU or Metal execution.
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_attention_packed_cross, gpu_concat_rows, gpu_device_available, gpu_download, gpu_gated_residual,
     gpu_gelu_erf, gpu_perf_stats, gpu_pool_clear, gpu_rope_interleaved, gpu_slice_cols,
     gpu_slice_rows, gpu_upload, GpuTensor,

@@ -194,5 +194,5 @@ pub fn moss_device_enabled() -> bool {
     if std::env::var("MOSS_DEVICE").map(|v| v == "0").unwrap_or(false) {
         return false;
     }
-    makepad_ggml::backend::cuda::gpu_device_available()
+    makepad_ai_common::backend::cuda::gpu_device_available()
 }

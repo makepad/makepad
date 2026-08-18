@@ -6,8 +6,8 @@ use crate::backend::{
 use crate::clip::ClipTokenChunk;
 use crate::flux::ClipLTextEncoderConfig;
 use crate::{DiffusionError, Result};
-use makepad_ggml::backend::{try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes_cached};
-use makepad_ggml::{
+use makepad_ai_common::backend::{try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes_cached};
+use makepad_ai_common::{
     bf16_to_f32, f16_to_f32, get_rows_ggml_bytes_cpu, ggml_pad, BufferUsage, Context, GluOp, Graph,
     InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType, GGML_MEM_ALIGN,
 };
@@ -779,7 +779,7 @@ fn build_attention_mha_output(
                 BufferUsage::Activations,
             )
             .map_err(DiffusionError::model)?;
-        ctx.flash_attn_ext_set_prec(attn, makepad_ggml::Prec::F32)
+        ctx.flash_attn_ext_set_prec(attn, makepad_ai_common::Prec::F32)
             .map_err(DiffusionError::model)?;
         let attn_tensor = require_tensor(ctx, attn)?.clone();
         return ctx
@@ -1785,7 +1785,7 @@ mod tests {
         clip_weight_in_scope, flash_attention_allowed, ClipLWeightScope,
     };
     use crate::flux::ClipLTextEncoderConfig;
-    use makepad_ggml::TensorType;
+    use makepad_ai_common::TensorType;
     use makepad_ai_loader::{MlxDType, MlxTensorEntry};
 
     #[test]

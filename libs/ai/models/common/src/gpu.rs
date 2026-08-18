@@ -1,13 +1,15 @@
-//! CUDA launch surface. The real device impl lives in `makepad-ai-cuda::launch`.
-//! This module keeps the macOS / no-kernel stub (Metal GpuTensor fallbacks)
-//! so `gpu_*` still resolve when nvcc did not run.
+//! Device-resident `gpu_*` surface.
+//!
+//! On linux/windows with compiled kernels this is `makepad-ai-cuda::launch`.
+//! Elsewhere (macOS, or a host without nvcc) the same names resolve to the
+//! Metal-backed fallback so family crates can keep a single import path.
 
-#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ggml_cuda_kernels))]
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 pub use makepad_ai_cuda::launch::*;
 
-#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ggml_cuda_kernels)))]
+#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
-    use crate::backend::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
+    use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
     pub struct CudaBuffer;
     pub struct CudaMappedHostU32Buffer;
@@ -1961,8 +1963,13 @@ mod imp {
         Err("CUDA ggml get_rows backend is unavailable".to_string())
     }
 
-    // Device-resident tensor API stubs (flux device path).
+    // Device-resident tensor API. On macOS the handle is Metal's GpuTensor
+    // so the fallbacks below type-check against `gpu_tensor::*`.
 
+    #[cfg(target_os = "macos")]
+    pub use makepad_ai_metal::{GpuLinearPart, GpuTensor};
+
+    #[cfg(not(target_os = "macos"))]
     pub struct GpuTensor {
         pub(crate) rows: usize,
         pub(crate) cols: usize,
@@ -1970,6 +1977,7 @@ mod imp {
         pub(crate) u32s: std::cell::RefCell<Vec<u32>>,
     }
 
+    #[cfg(not(target_os = "macos"))]
     impl GpuTensor {
         pub fn rows(&self) -> usize {
             self.rows
@@ -1984,6 +1992,7 @@ mod imp {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub struct GpuLinearPart<'a> {
         pub bt_ggml_type: u32,
         pub n: usize,
@@ -1996,7 +2005,7 @@ mod imp {
     pub fn gpu_device_available() -> bool {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::available();
+            return makepad_ai_metal::gpu_tensor::available();
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2015,7 +2024,7 @@ mod imp {
     pub fn gpu_upload(_values: &[f32], _rows: usize, _cols: usize) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::upload(_values, _rows, _cols);
+            return makepad_ai_metal::gpu_tensor::upload(_values, _rows, _cols);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2166,7 +2175,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2194,7 +2203,7 @@ mod imp {
     pub fn gpu_download(_tensor: &GpuTensor) -> Result<Vec<f32>, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::download(_tensor);
+            return makepad_ai_metal::gpu_tensor::download(_tensor);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2205,7 +2214,7 @@ mod imp {
     pub fn gpu_to_f32(_tensor: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::to_f32(_tensor);
+            return makepad_ai_metal::gpu_tensor::to_f32(_tensor);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2228,7 +2237,7 @@ mod imp {
     pub fn gpu_upload_into(_tensor: &GpuTensor, _values: &[f32]) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::upload_into(_tensor, _values);
+            return makepad_ai_metal::gpu_tensor::upload_into(_tensor, _values);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2239,7 +2248,7 @@ mod imp {
     pub fn gpu_copy_into(_src: &GpuTensor, _dst: &GpuTensor) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::copy_into(_src, _dst);
+            return makepad_ai_metal::gpu_tensor::copy_into(_src, _dst);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2259,7 +2268,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2275,7 +2284,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2301,7 +2310,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::layer_norm_mod(
+            return makepad_ai_metal::gpu_tensor::layer_norm_mod(
                 _x, _mods, _scale_off, _shift_off, _eps,
             );
         }
@@ -2422,7 +2431,7 @@ mod imp {
     pub fn gpu_gelu_erf(_x: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::gelu_erf(_x);
+            return makepad_ai_metal::gpu_tensor::gelu_erf(_x);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2471,7 +2480,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::gather_rows_colblock(
+            return makepad_ai_metal::gpu_tensor::gather_rows_colblock(
                 _src, _row_idx, _colblock_idx, _block_cols,
             );
         }
@@ -2484,7 +2493,7 @@ mod imp {
     pub fn gpu_gather_cols(_x: &GpuTensor, _indices: &[u32]) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::gather_cols(_x, _indices);
+            return makepad_ai_metal::gpu_tensor::gather_cols(_x, _indices);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2501,7 +2510,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::attention_packed(
+            return makepad_ai_metal::gpu_tensor::attention_packed(
                 _q, _k, _v, _head_count, _scale,
             );
         }
@@ -2514,7 +2523,7 @@ mod imp {
     pub fn gpu_reshape(_x: GpuTensor, _rows: usize, _cols: usize) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::reshape(&_x, _rows, _cols);
+            return makepad_ai_metal::gpu_tensor::reshape(&_x, _rows, _cols);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2525,7 +2534,7 @@ mod imp {
     pub fn gpu_sam3_sine_embed(_ref_points: &GpuTensor, _half: usize) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::sam3_sine_embed(_ref_points, _half);
+            return makepad_ai_metal::gpu_tensor::sam3_sine_embed(_ref_points, _half);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2540,7 +2549,7 @@ mod imp {
     ) -> Result<(GpuTensor, GpuTensor), String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::sam3_rpb_axial(_ref_points, _width, _height);
+            return makepad_ai_metal::gpu_tensor::sam3_rpb_axial(_ref_points, _width, _height);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2554,7 +2563,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::sam3_refine_boxes(_ref_points, _delta);
+            return makepad_ai_metal::gpu_tensor::sam3_refine_boxes(_ref_points, _delta);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2571,7 +2580,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::attention_packed(
+            return makepad_ai_metal::gpu_tensor::attention_packed(
                 _q, _k, _v, _head_count, _scale,
             );
         }
@@ -2591,7 +2600,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::rpb_expand(
+            return makepad_ai_metal::gpu_tensor::rpb_expand(
                 _ry, _rx, _height, _width, _queries, _heads,
             );
         }
@@ -2611,7 +2620,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::attention_packed_cross_bias(
+            return makepad_ai_metal::gpu_tensor::attention_packed_cross_bias(
                 _q, _k, _v, _head_count, _scale, _bias,
             );
         }
@@ -2682,7 +2691,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::layer_norm_mod(
+            return makepad_ai_metal::gpu_tensor::layer_norm_mod(
                 _x, _mods, _scale_off, _shift_off, _eps,
             );
         }
@@ -2713,7 +2722,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::rope_interleaved(
+            return makepad_ai_metal::gpu_tensor::rope_interleaved(
                 _x, _head_count, _cos_table, _sin_table,
             );
         }
@@ -2726,7 +2735,7 @@ mod imp {
     pub fn gpu_upload_u32(_values: &[u32]) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::upload_u32(_values);
+            return makepad_ai_metal::gpu_tensor::upload_u32(_values);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2952,7 +2961,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::linear_f32_resident(_x, _weight, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_f32_resident(_x, _weight, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3002,7 +3011,7 @@ mod imp {
     pub fn gpu_weight_cache_evict_prefix(_prefix: &str) -> Result<usize, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::evict_prefix(_prefix);
+            return makepad_ai_metal::gpu_tensor::evict_prefix(_prefix);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3027,7 +3036,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::attention_packed(
+            return makepad_ai_metal::gpu_tensor::attention_packed(
                 _q, _k, _v, _head_count, _scale,
             );
         }
@@ -3110,7 +3119,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::attention_packed(
+            return makepad_ai_metal::gpu_tensor::attention_packed(
                 _q, _k, _v, _head_count, _scale,
             );
         }
@@ -3186,7 +3195,7 @@ mod imp {
     pub fn gpu_gelu(_x: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::gelu(_x);
+            return makepad_ai_metal::gpu_tensor::gelu(_x);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3197,7 +3206,7 @@ mod imp {
     pub fn gpu_add(_a: &GpuTensor, _b: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::add(_a, _b);
+            return makepad_ai_metal::gpu_tensor::add(_a, _b);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3236,7 +3245,7 @@ mod imp {
     pub fn gpu_mul(_a: &GpuTensor, _b: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::mul(_a, _b);
+            return makepad_ai_metal::gpu_tensor::mul(_a, _b);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3296,7 +3305,7 @@ mod imp {
     pub fn gpu_silu(_x: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::silu(_x);
+            return makepad_ai_metal::gpu_tensor::silu(_x);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3525,7 +3534,7 @@ mod imp {
         #[cfg(target_os = "macos")]
         {
             let _ = (_cache_namespace, _weight_cache_key);
-            return crate::backend::metal::gpu_tensor::conv2d_planar(
+            return makepad_ai_metal::gpu_tensor::conv2d_planar(
                 _x,
                 _width,
                 _height,
@@ -3569,7 +3578,7 @@ mod imp {
     pub fn gpu_birefnet_relu(_x: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::relu(_x);
+            return makepad_ai_metal::gpu_tensor::relu(_x);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3680,7 +3689,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::resize_bilinear(
+            return makepad_ai_metal::gpu_tensor::resize_bilinear(
                 _x, _in_width, _in_height, _out_width, _out_height, _align_corners,
             );
         }
@@ -3693,7 +3702,7 @@ mod imp {
     pub fn gpu_birefnet_tokens_to_planar(_x: &GpuTensor) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::tokens_to_planar(_x);
+            return makepad_ai_metal::gpu_tensor::tokens_to_planar(_x);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3789,7 +3798,7 @@ mod imp {
         #[cfg(target_os = "macos")]
         {
             let _ = (_out_channels, _cache_namespace, _bias_cache_key, _bias);
-            return crate::backend::metal::gpu_tensor::pixel_shuffle(
+            return makepad_ai_metal::gpu_tensor::pixel_shuffle(
                 _x, _in_width, _in_height, _scale,
             );
         }
@@ -3808,7 +3817,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::image_to_patches(
+            return makepad_ai_metal::gpu_tensor::image_to_patches(
                 _image, _image_width, _image_height, _out_width, _out_height,
             );
         }
@@ -3884,7 +3893,7 @@ mod imp {
         #[cfg(target_os = "macos")]
         {
             let _ = (_cache_namespace, _cache_key);
-            return crate::backend::metal::gpu_tensor::group_norm_planar(
+            return makepad_ai_metal::gpu_tensor::group_norm_planar(
                 _x, _width, _height, _groups, _gamma, _beta, _eps,
             );
         }
@@ -3901,7 +3910,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return crate::backend::metal::gpu_tensor::upsample_nearest2x(_x, _width, _height);
+            return makepad_ai_metal::gpu_tensor::upsample_nearest2x(_x, _width, _height);
         }
         #[cfg(not(target_os = "macos"))]
         {

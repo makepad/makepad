@@ -52,7 +52,7 @@ __device__ __constant__ int8_t KVALUES_MXFP4_X2[16] = {
 };
 
 template <int WIDTH>
-static __device__ __forceinline__ float makepad_ggml_cuda_warp_reduce_sum(float x) {
+static __device__ __forceinline__ float makepad_cuda_warp_reduce_sum(float x) {
 #pragma unroll
     for (int offset = WIDTH / 2; offset > 0; offset >>= 1) {
         x += __shfl_xor_sync(0xffffffffu, x, offset, WIDTH);
@@ -61,7 +61,7 @@ static __device__ __forceinline__ float makepad_ggml_cuda_warp_reduce_sum(float 
 }
 
 template <int WIDTH>
-static __device__ __forceinline__ float makepad_ggml_cuda_warp_reduce_max(float x) {
+static __device__ __forceinline__ float makepad_cuda_warp_reduce_max(float x) {
 #pragma unroll
     for (int offset = WIDTH / 2; offset > 0; offset >>= 1) {
         x = fmaxf(x, __shfl_xor_sync(0xffffffffu, x, offset, WIDTH));
@@ -69,7 +69,7 @@ static __device__ __forceinline__ float makepad_ggml_cuda_warp_reduce_max(float 
     return x;
 }
 
-static __device__ __forceinline__ float makepad_ggml_cuda_ue4m3_to_fp32(uint8_t x) {
+static __device__ __forceinline__ float makepad_cuda_ue4m3_to_fp32(uint8_t x) {
 #if defined(MAKEPAD_GGML_CUDA_FP8_AVAILABLE)
     const uint32_t bits = x * (x != 0x7F && x != 0xFF);
     const __nv_fp8_e4m3 xf = *reinterpret_cast<const __nv_fp8_e4m3 *>(&bits);
@@ -85,7 +85,7 @@ static __device__ __forceinline__ float makepad_ggml_cuda_ue4m3_to_fp32(uint8_t 
 #endif
 }
 
-static __device__ __forceinline__ int makepad_ggml_cuda_dp4a(const int a, const int b, int c) {
+static __device__ __forceinline__ int makepad_cuda_dp4a(const int a, const int b, int c) {
 #if __CUDA_ARCH__ >= 610
     return __dp4a(a, b, c);
 #else
@@ -95,7 +95,7 @@ static __device__ __forceinline__ int makepad_ggml_cuda_dp4a(const int a, const 
 #endif
 }
 
-static __device__ __forceinline__ int2 makepad_ggml_cuda_get_int_from_table_16(
+static __device__ __forceinline__ int2 makepad_cuda_get_int_from_table_16(
         const int q4,
         const int8_t * table) {
     const uint32_t * table32 = reinterpret_cast<const uint32_t *>(table);
@@ -116,7 +116,7 @@ static __device__ __forceinline__ int2 makepad_ggml_cuda_get_int_from_table_16(
 }
 
 template <int vdr>
-static __device__ __forceinline__ float makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_impl(
+static __device__ __forceinline__ float makepad_cuda_vec_dot_q8_0_16_q8_1_impl(
         const int * v,
         const int * u,
         const float * d8_0,
@@ -129,7 +129,7 @@ static __device__ __forceinline__ float makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_i
 
 #pragma unroll
         for (int i = i0; i < i0 + QI8_0 / 2; ++i) {
-            sumi = makepad_ggml_cuda_dp4a(v[i], u[i], sumi);
+            sumi = makepad_cuda_dp4a(v[i], u[i], sumi);
         }
 
         sumf += d8_0[i0 / (QI8_0 / 2)] * static_cast<float>(sumi);
@@ -138,12 +138,12 @@ static __device__ __forceinline__ float makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_i
     return d8_1 * sumf;
 }
 
-static __host__ __device__ __forceinline__ int makepad_ggml_cuda_pad(int value, int align) {
+static __host__ __device__ __forceinline__ int makepad_cuda_pad(int value, int align) {
     return ((value + align - 1) / align) * align;
 }
 
 template <int NBYTES>
-static __device__ __forceinline__ void makepad_ggml_cuda_memcpy_1(
+static __device__ __forceinline__ void makepad_cuda_memcpy_1(
         void * __restrict__ dst,
         const void * __restrict__ src) {
 #pragma unroll
@@ -153,10 +153,10 @@ static __device__ __forceinline__ void makepad_ggml_cuda_memcpy_1(
 }
 
 template <int I, int J>
-struct makepad_ggml_cuda_mma_tile_int;
+struct makepad_cuda_mma_tile_int;
 
 template <>
-struct makepad_ggml_cuda_mma_tile_int<8, 4> {
+struct makepad_cuda_mma_tile_int<8, 4> {
     static constexpr int I_VALUE = 8;
     static constexpr int J_VALUE = 4;
     static constexpr int ne = I_VALUE * J_VALUE / WARP_SIZE;
@@ -172,7 +172,7 @@ struct makepad_ggml_cuda_mma_tile_int<8, 4> {
 };
 
 template <>
-struct makepad_ggml_cuda_mma_tile_int<16, 4> {
+struct makepad_cuda_mma_tile_int<16, 4> {
     static constexpr int I_VALUE = 16;
     static constexpr int J_VALUE = 4;
     static constexpr int ne = I_VALUE * J_VALUE / WARP_SIZE;
@@ -188,7 +188,7 @@ struct makepad_ggml_cuda_mma_tile_int<16, 4> {
 };
 
 template <>
-struct makepad_ggml_cuda_mma_tile_int<16, 8> {
+struct makepad_cuda_mma_tile_int<16, 8> {
     static constexpr int I_VALUE = 16;
     static constexpr int J_VALUE = 8;
     static constexpr int ne = I_VALUE * J_VALUE / WARP_SIZE;
@@ -204,8 +204,8 @@ struct makepad_ggml_cuda_mma_tile_int<16, 8> {
 };
 
 template <int I, int J>
-static __device__ __forceinline__ void makepad_ggml_cuda_load_generic(
-        makepad_ggml_cuda_mma_tile_int<I, J> & tile,
+static __device__ __forceinline__ void makepad_cuda_load_generic(
+        makepad_cuda_mma_tile_int<I, J> & tile,
         const int * __restrict__ src,
         int stride) {
 #pragma unroll
@@ -214,8 +214,8 @@ static __device__ __forceinline__ void makepad_ggml_cuda_load_generic(
     }
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_load_ldmatrix(
-        makepad_ggml_cuda_mma_tile_int<16, 4> & tile,
+static __device__ __forceinline__ void makepad_cuda_load_ldmatrix(
+        makepad_cuda_mma_tile_int<16, 4> & tile,
         const int * __restrict__ src,
         int stride) {
 #if __CUDA_ARCH__ >= 750
@@ -224,12 +224,12 @@ static __device__ __forceinline__ void makepad_ggml_cuda_load_ldmatrix(
         : "=r"(tile.x[0]), "=r"(tile.x[1])
         : "l"(xs));
 #else
-    makepad_ggml_cuda_load_generic(tile, src, stride);
+    makepad_cuda_load_generic(tile, src, stride);
 #endif
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_load_ldmatrix(
-        makepad_ggml_cuda_mma_tile_int<16, 8> & tile,
+static __device__ __forceinline__ void makepad_cuda_load_ldmatrix(
+        makepad_cuda_mma_tile_int<16, 8> & tile,
         const int * __restrict__ src,
         int stride) {
 #if __CUDA_ARCH__ >= 750
@@ -239,14 +239,14 @@ static __device__ __forceinline__ void makepad_ggml_cuda_load_ldmatrix(
         : "=r"(tile.x[0]), "=r"(tile.x[1]), "=r"(tile.x[2]), "=r"(tile.x[3])
         : "l"(xs));
 #else
-    makepad_ggml_cuda_load_generic(tile, src, stride);
+    makepad_cuda_load_generic(tile, src, stride);
 #endif
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_mma(
-        makepad_ggml_cuda_mma_tile_int<16, 8> & d,
-        const makepad_ggml_cuda_mma_tile_int<16, 4> & a,
-        const makepad_ggml_cuda_mma_tile_int<8, 4> & b) {
+static __device__ __forceinline__ void makepad_cuda_mma(
+        makepad_cuda_mma_tile_int<16, 8> & d,
+        const makepad_cuda_mma_tile_int<16, 4> & a,
+        const makepad_cuda_mma_tile_int<8, 4> & b) {
 #if __CUDA_ARCH__ >= 800
     asm("mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
         : "+r"(d.x[0]), "+r"(d.x[1]), "+r"(d.x[2]), "+r"(d.x[3])
@@ -261,7 +261,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_mma(
 #endif
 }
 
-static __global__ void makepad_ggml_cuda_quantize_q8_1_mmq_f32_kernel(
+static __global__ void makepad_cuda_quantize_q8_1_mmq_f32_kernel(
         const float * __restrict__ input_f32,
         block_q8_1_mmq * __restrict__ output_q8_1_mmq,
         uint32_t n_cols,
@@ -310,7 +310,7 @@ static __global__ void makepad_ggml_cuda_quantize_q8_1_mmq_f32_kernel(
 }
 
 template <bool need_check>
-static __device__ __forceinline__ void makepad_ggml_cuda_load_tiles_nvfp4(
+static __device__ __forceinline__ void makepad_cuda_load_tiles_nvfp4(
         const block_nvfp4 * __restrict__ weights_nvfp4,
         int * __restrict__ x_tile,
         const int kb0,
@@ -343,10 +343,10 @@ static __device__ __forceinline__ void makepad_ggml_cuda_load_tiles_nvfp4(
 
 #pragma unroll
         for (int sub = 0; sub < static_cast<int>(QK_NVFP4 / QK_NVFP4_SUB); ++sub) {
-            const int2 q0 = makepad_ggml_cuda_get_int_from_table_16(
+            const int2 q0 = makepad_cuda_get_int_from_table_16(
                 static_cast<int>(src_qs[2 * sub + 0]),
                 KVALUES_MXFP4_X2);
-            const int2 q1 = makepad_ggml_cuda_get_int_from_table_16(
+            const int2 q1 = makepad_cuda_get_int_from_table_16(
                 static_cast<int>(src_qs[2 * sub + 1]),
                 KVALUES_MXFP4_X2);
 
@@ -356,21 +356,21 @@ static __device__ __forceinline__ void makepad_ggml_cuda_load_tiles_nvfp4(
             x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 2] = q0.y;
             x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 3] = q1.y;
             x_df[i * MMQ_MMA_TILE_X_K_NVFP4 + ksc + sub] =
-                makepad_ggml_cuda_ue4m3_to_fp32(block->d[sub]);
+                makepad_cuda_ue4m3_to_fp32(block->d[sub]);
 #else
             x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 0] = q0.x;
             x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 1] = q1.x;
             x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 2] = q0.y;
             x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 3] = q1.y;
             x_df[i * (2 * MMQ_TILE_NE_K * 2 / QI_NVFP4) + i / (QK_NVFP4_SUB / QI_NVFP4) + ksc + sub] =
-                makepad_ggml_cuda_ue4m3_to_fp32(block->d[sub]);
+                makepad_cuda_ue4m3_to_fp32(block->d[sub]);
 #endif
         }
     }
 }
 
 template <int mmq_x>
-static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp4a(
+static __device__ __forceinline__ void makepad_cuda_vec_dot_q8_0_16_q8_1_dp4a(
         const int * __restrict__ x,
         const int * __restrict__ y,
         float * __restrict__ sum,
@@ -392,7 +392,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp
                 const int i = i0 + threadIdx.x;
 
                 sum[j0 / MMQ_NWARPS * (MMQ_Y / WARP_SIZE) + i0 / WARP_SIZE] +=
-                    makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_impl<QI8_0>(
+                    makepad_cuda_vec_dot_q8_0_16_q8_1_impl<QI8_0>(
                         &x_qs[i * (2 * MMQ_TILE_NE_K + 1) + k0],
                         &y_qs[j * MMQ_TILE_Y_K + k01],
                         &x_df[i * (2 * MMQ_TILE_NE_K * 2 / QI8_0) + i / (QI8_0 / 4) + k0 / (QI8_0 / 2)],
@@ -403,16 +403,16 @@ static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp
 }
 
 template <int mmq_x>
-static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mma(
+static __device__ __forceinline__ void makepad_cuda_vec_dot_q8_0_16_q8_1_mma(
         const int * __restrict__ x,
         const int * __restrict__ y,
         float * __restrict__ sum,
         const int k00) {
 #if __CUDA_ARCH__ >= 750
-    using tile_a = makepad_ggml_cuda_mma_tile_int<16, 4>;
-    using tile_a8 = makepad_ggml_cuda_mma_tile_int<16, 8>;
-    using tile_b = makepad_ggml_cuda_mma_tile_int<8, 4>;
-    using tile_c = makepad_ggml_cuda_mma_tile_int<16, 8>;
+    using tile_a = makepad_cuda_mma_tile_int<16, 4>;
+    using tile_a8 = makepad_cuda_mma_tile_int<16, 8>;
+    using tile_b = makepad_cuda_mma_tile_int<8, 4>;
+    using tile_c = makepad_cuda_mma_tile_int<16, 8>;
 
     constexpr int granularity = mmq_x >= 48 ? 16 : 8;
     constexpr int rows_per_warp = 2 * granularity;
@@ -434,7 +434,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mm
 #pragma unroll
         for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += 8) {
             const int k0 = k00 + k01;
-            makepad_ggml_cuda_load_ldmatrix(
+            makepad_cuda_load_ldmatrix(
                 reinterpret_cast<tile_a8 *>(a[n])[k01 / 8],
                 x_qs + (i0 + n * tile_a::I_VALUE) * MMQ_MMA_TILE_X_K_NVFP4 + k0,
                 MMQ_MMA_TILE_X_K_NVFP4);
@@ -459,11 +459,11 @@ static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mm
             tile_b b[2];
             float d_b[tile_c::ne / 2];
 
-            makepad_ggml_cuda_load_generic(
+            makepad_cuda_load_generic(
                 b[0],
                 y_qs + j0 * MMQ_TILE_Y_K + k01,
                 MMQ_TILE_Y_K);
-            makepad_ggml_cuda_load_generic(
+            makepad_cuda_load_generic(
                 b[1],
                 y_qs + j0 * MMQ_TILE_Y_K + tile_b::J_VALUE + k01,
                 MMQ_TILE_Y_K);
@@ -477,8 +477,8 @@ static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mm
 #pragma unroll
             for (int n = 0; n < ntx; ++n) {
                 tile_c c[2];
-                makepad_ggml_cuda_mma(c[0], a[n][k01 / 4 + 0], b[0]);
-                makepad_ggml_cuda_mma(c[1], a[n][k01 / 4 + 1], b[1]);
+                makepad_cuda_mma(c[0], a[n][k01 / 4 + 0], b[0]);
+                makepad_cuda_mma(c[1], a[n][k01 / 4 + 1], b[1]);
 
 #pragma unroll
                 for (int l = 0; l < tile_c::ne; ++l) {
@@ -499,7 +499,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mm
 }
 
 template <int mmq_x, bool need_check>
-static __device__ __forceinline__ void makepad_ggml_cuda_mmq_write_back(
+static __device__ __forceinline__ void makepad_cuda_mmq_write_back(
         const float * __restrict__ sum,
         float * __restrict__ dst,
         const int stride,
@@ -529,14 +529,14 @@ static __device__ __forceinline__ void makepad_ggml_cuda_mmq_write_back(
 }
 
 template <int mmq_x, bool need_check>
-static __device__ __forceinline__ void makepad_ggml_cuda_mmq_write_back_mma(
+static __device__ __forceinline__ void makepad_cuda_mmq_write_back_mma(
         const float * __restrict__ sum,
         float * __restrict__ dst,
         const int stride,
         const int i_max,
         const int j_max) {
 #if __CUDA_ARCH__ >= 750
-    using tile_c = makepad_ggml_cuda_mma_tile_int<16, 8>;
+    using tile_c = makepad_cuda_mma_tile_int<16, 8>;
 
     constexpr int granularity = mmq_x >= 48 ? 16 : 8;
     constexpr int rows_per_warp = 2 * granularity;
@@ -564,13 +564,13 @@ static __device__ __forceinline__ void makepad_ggml_cuda_mmq_write_back_mma(
         }
     }
 #else
-    makepad_ggml_cuda_mmq_write_back<mmq_x, need_check>(sum, dst, stride, i_max, j_max);
+    makepad_cuda_mmq_write_back<mmq_x, need_check>(sum, dst, stride, i_max, j_max);
 #endif
 }
 
 template <int mmq_x, bool need_check>
 __launch_bounds__(MMQ_WARP_THREADS, 1)
-static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel(
+static __global__ void makepad_cuda_nvfp4_q8_1_mmq_matmul_kernel(
         const block_nvfp4 * __restrict__ weights_nvfp4,
         const int * __restrict__ input_q8_1_mmq,
         float * __restrict__ output_f32,
@@ -586,7 +586,7 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel(
         return;
     }
 
-    const int tile_y_ints = makepad_ggml_cuda_pad(mmq_x * MMQ_TILE_Y_K, MMQ_WARP_THREADS);
+    const int tile_y_ints = makepad_cuda_pad(mmq_x * MMQ_TILE_Y_K, MMQ_WARP_THREADS);
     extern __shared__ int shared_data[];
     int * tile_y = shared_data + mmq_x;
     int * tile_x = tile_y + tile_y_ints;
@@ -604,7 +604,7 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel(
     float * dst = output_f32 + jt * mmq_x * out_rows + it * MMQ_Y;
 
     for (int kb0 = 0; kb0 < stride_row_x; kb0 += blocks_per_iter) {
-        makepad_ggml_cuda_load_tiles_nvfp4<need_check>(
+        makepad_cuda_load_tiles_nvfp4<need_check>(
             weights_nvfp4,
             tile_x,
             offset_x + kb0,
@@ -625,9 +625,9 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel(
 
         __syncthreads();
 #if __CUDA_ARCH__ >= 750
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, 0);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, 0);
 #else
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, 0);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, 0);
 #endif
         __syncthreads();
 
@@ -644,22 +644,22 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel(
 
         __syncthreads();
 #if __CUDA_ARCH__ >= 750
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 #else
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 #endif
         __syncthreads();
     }
 
 #if __CUDA_ARCH__ >= 750
-    makepad_ggml_cuda_mmq_write_back_mma<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
+    makepad_cuda_mmq_write_back_mma<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
 #else
-    makepad_ggml_cuda_mmq_write_back<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
+    makepad_cuda_mmq_write_back<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
 #endif
 }
 
 template <int mmq_x, bool need_check, bool check_y, bool fixup>
-static __device__ __forceinline__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_process_tile(
+static __device__ __forceinline__ void makepad_cuda_nvfp4_q8_1_mmq_process_tile(
         const block_nvfp4 * __restrict__ weights_nvfp4,
         const int * __restrict__ input_q8_1_mmq,
         float * __restrict__ output_f32,
@@ -677,7 +677,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_process_
         return;
     }
 
-    const int tile_y_ints = makepad_ggml_cuda_pad(mmq_x * MMQ_TILE_Y_K, MMQ_WARP_THREADS);
+    const int tile_y_ints = makepad_cuda_pad(mmq_x * MMQ_TILE_Y_K, MMQ_WARP_THREADS);
     extern __shared__ int shared_data[];
     int * tile_y = shared_data + mmq_x;
     int * tile_x = tile_y + tile_y_ints;
@@ -694,7 +694,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_process_
     const int offset_y = jt * mmq_x * BLOCK_Q8_1_MMQ_INTS;
 
     for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
-        makepad_ggml_cuda_load_tiles_nvfp4<need_check>(
+        makepad_cuda_load_tiles_nvfp4<need_check>(
             weights_nvfp4,
             tile_x,
             offset_x + kb0,
@@ -719,9 +719,9 @@ static __device__ __forceinline__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_process_
 
         __syncthreads();
 #if __CUDA_ARCH__ >= 750
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, 0);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, 0);
 #else
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, 0);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, 0);
 #endif
         __syncthreads();
 
@@ -742,23 +742,23 @@ static __device__ __forceinline__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_process_
 
         __syncthreads();
 #if __CUDA_ARCH__ >= 750
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_mma<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 #else
-        makepad_ggml_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+        makepad_cuda_vec_dot_q8_0_16_q8_1_dp4a<mmq_x>(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 #endif
         __syncthreads();
     }
 
     if constexpr (fixup) {
 #if __CUDA_ARCH__ >= 750
-        makepad_ggml_cuda_mmq_write_back_mma<mmq_x, false>(
+        makepad_cuda_mmq_write_back_mma<mmq_x, false>(
             sum,
             tmp_fixup + blockIdx.x * (mmq_x * MMQ_Y),
             MMQ_Y,
             MMQ_Y - 1,
             mmq_x - 1);
 #else
-        makepad_ggml_cuda_mmq_write_back<mmq_x, false>(
+        makepad_cuda_mmq_write_back<mmq_x, false>(
             sum,
             tmp_fixup + blockIdx.x * (mmq_x * MMQ_Y),
             MMQ_Y,
@@ -768,16 +768,16 @@ static __device__ __forceinline__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_process_
     } else {
         float * dst = output_f32 + jt * mmq_x * out_rows + it * MMQ_Y;
 #if __CUDA_ARCH__ >= 750
-        makepad_ggml_cuda_mmq_write_back_mma<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
+        makepad_cuda_mmq_write_back_mma<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
 #else
-        makepad_ggml_cuda_mmq_write_back<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
+        makepad_cuda_mmq_write_back<mmq_x, need_check>(sum, dst, out_rows, i_max, j_max);
 #endif
     }
 }
 
 template <int mmq_x, bool need_check, bool check_y>
 __launch_bounds__(MMQ_WARP_THREADS, 1)
-static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel(
+static __global__ void makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel(
         const block_nvfp4 * __restrict__ weights_nvfp4,
         const int * __restrict__ input_q8_1_mmq,
         float * __restrict__ output_f32,
@@ -808,7 +808,7 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel(
         tmp -= static_cast<int64_t>(it) * ntx * blocks_per_row;
         const int jt = static_cast<int>(tmp / blocks_per_row);
 
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_process_tile<mmq_x, need_check, check_y, false>(
+        makepad_cuda_nvfp4_q8_1_mmq_process_tile<mmq_x, need_check, check_y, false>(
             weights_nvfp4,
             input_q8_1_mmq,
             output_f32,
@@ -837,7 +837,7 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel(
     tmp -= static_cast<int64_t>(it) * ntx * blocks_per_row;
     const int jt = static_cast<int>(tmp / blocks_per_row);
 
-    makepad_ggml_cuda_nvfp4_q8_1_mmq_process_tile<mmq_x, need_check, check_y, true>(
+    makepad_cuda_nvfp4_q8_1_mmq_process_tile<mmq_x, need_check, check_y, true>(
         weights_nvfp4,
         input_q8_1_mmq,
         output_f32,
@@ -853,7 +853,7 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel(
 
 template <int mmq_x, bool need_check>
 __launch_bounds__(MMQ_WARP_THREADS, 1)
-static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel(
+static __global__ void makepad_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel(
         float * __restrict__ output_f32,
         const float * __restrict__ tmp_fixup,
         const int ncols_x,
@@ -955,13 +955,13 @@ static __global__ void makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel(
     }
 }
 
-static inline int makepad_ggml_cuda_nvfp4_mmq_shared_bytes(int mmq_x) {
-    const int tile_y_ints = makepad_ggml_cuda_pad(mmq_x * MMQ_TILE_Y_K, MMQ_WARP_THREADS);
+static inline int makepad_cuda_nvfp4_mmq_shared_bytes(int mmq_x) {
+    const int tile_y_ints = makepad_cuda_pad(mmq_x * MMQ_TILE_Y_K, MMQ_WARP_THREADS);
     const int tile_x_ints = MMQ_Y * MMQ_MMA_TILE_X_K_NVFP4;
     return (mmq_x + tile_y_ints + tile_x_ints) * static_cast<int>(sizeof(int));
 }
 
-static inline int makepad_ggml_cuda_nvfp4_mmq_max_shared_bytes() {
+static inline int makepad_cuda_nvfp4_mmq_max_shared_bytes() {
     int device = 0;
     if (cudaGetDevice(&device) != cudaSuccess) {
         return 48 * 1024;
@@ -982,7 +982,7 @@ static inline int makepad_ggml_cuda_nvfp4_mmq_max_shared_bytes() {
     return 48 * 1024;
 }
 
-static inline int makepad_ggml_cuda_select_mmq_x(
+static inline int makepad_cuda_select_mmq_x(
         uint32_t input_rows,
         int max_shared_bytes) {
     int mmq_x_best = 0;
@@ -994,7 +994,7 @@ static inline int makepad_ggml_cuda_select_mmq_x(
             continue;
         }
 
-        if (makepad_ggml_cuda_nvfp4_mmq_shared_bytes(mmq_x) > max_shared_bytes) {
+        if (makepad_cuda_nvfp4_mmq_shared_bytes(mmq_x) > max_shared_bytes) {
             continue;
         }
 
@@ -1008,7 +1008,7 @@ static inline int makepad_ggml_cuda_select_mmq_x(
     return mmq_x_best;
 }
 
-static inline cudaError_t makepad_ggml_cuda_mmq_sm_count(int * nsm) {
+static inline cudaError_t makepad_cuda_mmq_sm_count(int * nsm) {
     int device = 0;
     cudaError_t status = cudaGetDevice(&device);
     if (status != cudaSuccess) {
@@ -1022,7 +1022,7 @@ static inline cudaError_t makepad_ggml_cuda_mmq_sm_count(int * nsm) {
 }
 
 template <int mmq_x>
-static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
+static cudaError_t makepad_cuda_launch_nvfp4_q8_1_mmq_matmul(
         const uint8_t * input_q8_1_mmq_bytes,
         const uint8_t * packed_weights_nvfp4_bytes,
         float * output_f32,
@@ -1033,9 +1033,9 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
         uint32_t input_rows,
         cudaStream_t stream) {
     const dim3 block(WARP_SIZE, MMQ_NWARPS, 1);
-    const int shared_bytes = makepad_ggml_cuda_nvfp4_mmq_shared_bytes(mmq_x);
+    const int shared_bytes = makepad_cuda_nvfp4_mmq_shared_bytes(mmq_x);
     int nsm = 0;
-    cudaError_t status = makepad_ggml_cuda_mmq_sm_count(&nsm);
+    cudaError_t status = makepad_cuda_mmq_sm_count(&nsm);
     if (status != cudaSuccess) {
         return status;
     }
@@ -1049,7 +1049,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     }
 
     status = cudaFuncSetAttribute(
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel<mmq_x, false>,
+        makepad_cuda_nvfp4_q8_1_mmq_matmul_kernel<mmq_x, false>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_bytes);
     if (status != cudaSuccess) {
@@ -1057,7 +1057,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     }
 
     status = cudaFuncSetAttribute(
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul_kernel<mmq_x, true>,
+        makepad_cuda_nvfp4_q8_1_mmq_matmul_kernel<mmq_x, true>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_bytes);
     if (status != cudaSuccess) {
@@ -1065,7 +1065,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     }
 
     status = cudaFuncSetAttribute(
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, false>,
+        makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, false>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_bytes);
     if (status != cudaSuccess) {
@@ -1073,7 +1073,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     }
 
     status = cudaFuncSetAttribute(
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, true>,
+        makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, true>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_bytes);
     if (status != cudaSuccess) {
@@ -1081,7 +1081,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     }
 
     status = cudaFuncSetAttribute(
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, false>,
+        makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, false>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_bytes);
     if (status != cudaSuccess) {
@@ -1089,7 +1089,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     }
 
     status = cudaFuncSetAttribute(
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, true>,
+        makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, true>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         shared_bytes);
     if (status != cudaSuccess) {
@@ -1104,7 +1104,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
 
     if ((out_rows % MMQ_Y) == 0) {
         if (check_y) {
-            makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, true><<<grid, block, shared_bytes, stream>>>(
+            makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, true><<<grid, block, shared_bytes, stream>>>(
                 reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
                 reinterpret_cast<const int *>(input_q8_1_mmq_bytes),
                 output_f32,
@@ -1113,7 +1113,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
                 static_cast<int>(out_rows),
                 static_cast<int>(input_rows));
         } else {
-            makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, false><<<grid, block, shared_bytes, stream>>>(
+            makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, false, false><<<grid, block, shared_bytes, stream>>>(
                 reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
                 reinterpret_cast<const int *>(input_q8_1_mmq_bytes),
                 output_f32,
@@ -1126,7 +1126,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
         if (status != cudaSuccess || !fixup_needed) {
             return status;
         }
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel<mmq_x, false><<<grid, block, 0, stream>>>(
+        makepad_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel<mmq_x, false><<<grid, block, 0, stream>>>(
             output_f32,
             tmp_fixup_f32,
             static_cast<int>(ncols_x),
@@ -1134,7 +1134,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
             static_cast<int>(input_rows));
     } else {
         if (check_y) {
-            makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, true><<<grid, block, shared_bytes, stream>>>(
+            makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, true><<<grid, block, shared_bytes, stream>>>(
                 reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
                 reinterpret_cast<const int *>(input_q8_1_mmq_bytes),
                 output_f32,
@@ -1143,7 +1143,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
                 static_cast<int>(out_rows),
                 static_cast<int>(input_rows));
         } else {
-            makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, false><<<grid, block, shared_bytes, stream>>>(
+            makepad_cuda_nvfp4_q8_1_mmq_stream_k_kernel<mmq_x, true, false><<<grid, block, shared_bytes, stream>>>(
                 reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
                 reinterpret_cast<const int *>(input_q8_1_mmq_bytes),
                 output_f32,
@@ -1156,7 +1156,7 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
         if (status != cudaSuccess || !fixup_needed) {
             return status;
         }
-        makepad_ggml_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel<mmq_x, true><<<grid, block, 0, stream>>>(
+        makepad_cuda_nvfp4_q8_1_mmq_stream_k_fixup_kernel<mmq_x, true><<<grid, block, 0, stream>>>(
             output_f32,
             tmp_fixup_f32,
             static_cast<int>(ncols_x),
@@ -1167,13 +1167,13 @@ static cudaError_t makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(
+extern "C" cudaError_t makepad_cuda_nvfp4_q8_1_mmq_fixup_f32_len(
         uint32_t * len_out) {
     if (len_out == nullptr) {
         return cudaErrorInvalidValue;
     }
     int nsm = 0;
-    cudaError_t status = makepad_ggml_cuda_mmq_sm_count(&nsm);
+    cudaError_t status = makepad_cuda_mmq_sm_count(&nsm);
     if (status != cudaSuccess) {
         return status;
     }
@@ -1184,14 +1184,14 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(
     return cudaSuccess;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_quantize_q8_1_mmq_f32(
+extern "C" cudaError_t makepad_cuda_quantize_q8_1_mmq_f32(
         const float * input_f32,
         uint8_t * output_q8_1_mmq_bytes,
         uint32_t n_cols,
         uint32_t n_rows,
         cudaStream_t stream);
 
-extern "C" cudaError_t makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
+extern "C" cudaError_t makepad_cuda_quantize_q8_1_mmq_f32_padded(
         const float * input_f32,
         uint8_t * output_q8_1_mmq_bytes,
         uint32_t n_cols,
@@ -1206,7 +1206,7 @@ extern "C" cudaError_t makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
         (n_cols + 4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 grid(padded_rows, block_num_y, 1);
     const dim3 block(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
-    makepad_ggml_cuda_quantize_q8_1_mmq_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_quantize_q8_1_mmq_f32_kernel<<<grid, block, 0, stream>>>(
         input_f32,
         reinterpret_cast<block_q8_1_mmq *>(output_q8_1_mmq_bytes),
         n_cols,
@@ -1215,13 +1215,13 @@ extern "C" cudaError_t makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_quantize_q8_1_mmq_f32(
+extern "C" cudaError_t makepad_cuda_quantize_q8_1_mmq_f32(
         const float * input_f32,
         uint8_t * output_q8_1_mmq_bytes,
         uint32_t n_cols,
         uint32_t n_rows,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
+    return makepad_cuda_quantize_q8_1_mmq_f32_padded(
         input_f32,
         output_q8_1_mmq_bytes,
         n_cols,
@@ -1230,7 +1230,7 @@ extern "C" cudaError_t makepad_ggml_cuda_quantize_q8_1_mmq_f32(
         stream);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
+extern "C" cudaError_t makepad_cuda_nvfp4_q8_1_mmq_matmul(
         const uint8_t * input_q8_1_mmq_bytes,
         const uint8_t * packed_weights_nvfp4_bytes,
         float * output_f32,
@@ -1244,10 +1244,10 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
         return cudaErrorInvalidValue;
     }
 
-    const int max_shared_bytes = makepad_ggml_cuda_nvfp4_mmq_max_shared_bytes();
-    switch (makepad_ggml_cuda_select_mmq_x(input_rows, max_shared_bytes)) {
+    const int max_shared_bytes = makepad_cuda_nvfp4_mmq_max_shared_bytes();
+    switch (makepad_cuda_select_mmq_x(input_rows, max_shared_bytes)) {
         case 8:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<8>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<8>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1258,7 +1258,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 16:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<16>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<16>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1269,7 +1269,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 24:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<24>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<24>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1280,7 +1280,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 32:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<32>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<32>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1291,7 +1291,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 40:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<40>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<40>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1302,7 +1302,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 48:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<48>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<48>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1313,7 +1313,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 56:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<56>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<56>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1324,7 +1324,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 64:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<64>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<64>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1335,7 +1335,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 72:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<72>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<72>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1346,7 +1346,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 80:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<80>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<80>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1357,7 +1357,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 88:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<88>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<88>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1368,7 +1368,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 96:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<96>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<96>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1379,7 +1379,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 104:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<104>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<104>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1390,7 +1390,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 112:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<112>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<112>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1401,7 +1401,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 120:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<120>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<120>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,
@@ -1412,7 +1412,7 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
                 input_rows,
                 stream);
         case 128:
-            return makepad_ggml_cuda_launch_nvfp4_q8_1_mmq_matmul<128>(
+            return makepad_cuda_launch_nvfp4_q8_1_mmq_matmul<128>(
                 input_q8_1_mmq_bytes,
                 packed_weights_nvfp4_bytes,
                 output_f32,

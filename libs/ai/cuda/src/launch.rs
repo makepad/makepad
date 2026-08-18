@@ -17,7 +17,7 @@ mod imp {
     pub use crate::{CudaGraph, CudaGraphExec};
 
     unsafe extern "C" {
-        fn makepad_ggml_cuda_affine_qmv_bf16(
+        fn makepad_cuda_affine_qmv_bf16(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -31,7 +31,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32(
+        fn makepad_cuda_affine_qmv_f32(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -45,7 +45,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_precise(
+        fn makepad_cuda_affine_qmv_f32_precise(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -59,7 +59,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_rows_precise(
+        fn makepad_cuda_affine_qmv_f32_rows_precise(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -74,7 +74,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_q8_1_qmv_f32_precise(
+        fn makepad_cuda_affine_q8_1_qmv_f32_precise(
             input_bf16_words: *const u16,
             input_q8_1_bytes: *const u8,
             packed_weights_u32: *const u32,
@@ -89,7 +89,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
+        fn makepad_cuda_affine_qmv_f32_select_plane_precise(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -108,7 +108,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise(
+        fn makepad_cuda_affine_qmv_f32_select_plane_rows_precise(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -129,7 +129,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
+        fn makepad_cuda_affine_qmv_f32_select_planes_precise(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -148,7 +148,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_select_planes_fixed8_known_valid_precise(
+        fn makepad_cuda_affine_qmv_f32_select_planes_fixed8_known_valid_precise(
             input_bf16_words: *const u16,
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
@@ -165,7 +165,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
+        fn makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
             input_bf16_words: *const u16,
             input_words_per_slot: u32,
             packed_weights_u32: *const u32,
@@ -185,7 +185,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_fixed8_known_valid_precise(
+        fn makepad_cuda_affine_qmv_f32_select_planes_input_offsets_fixed8_known_valid_precise(
             input_bf16_words: *const u16,
             input_words_per_slot: u32,
             packed_weights_u32: *const u32,
@@ -203,7 +203,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_get_row_f32(
+        fn makepad_cuda_affine_get_row_f32(
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
             biases_bf16_words: *const u16,
@@ -215,7 +215,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_affine_get_row_f32_device_u32(
+        fn makepad_cuda_affine_get_row_f32_device_u32(
             packed_weights_u32: *const u32,
             scales_bf16_words: *const u16,
             biases_bf16_words: *const u16,
@@ -227,7 +227,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_q8_1_matvec(
+        fn makepad_cuda_nvfp4_q8_1_matvec(
             input_q8_1_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
             output_f32: *mut f32,
@@ -236,7 +236,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_q8_1_matmul(
+        fn makepad_cuda_nvfp4_q8_1_matmul(
             input_q8_1_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
             output_f32: *mut f32,
@@ -246,7 +246,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_nvfp4_matvec(
+        fn makepad_cuda_nvfp4_nvfp4_matvec(
             input_nvfp4_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
             input_scale: f32,
@@ -256,7 +256,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_nvfp4_matmul(
+        fn makepad_cuda_nvfp4_nvfp4_matmul(
             input_nvfp4_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
             input_scale: f32,
@@ -267,7 +267,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
+        fn makepad_cuda_nvfp4_q8_1_mmq_matmul(
             input_q8_1_mmq_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
             output_f32: *mut f32,
@@ -279,9 +279,9 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(len_out: *mut u32) -> cudaError_t;
+        fn makepad_cuda_nvfp4_q8_1_mmq_fixup_f32_len(len_out: *mut u32) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_get_row_f32(
+        fn makepad_cuda_nvfp4_get_row_f32(
             packed_weights_nvfp4_bytes: *const u8,
             output_f32: *mut f32,
             n_cols: u32,
@@ -289,7 +289,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_get_row_f32_device_u32(
+        fn makepad_cuda_nvfp4_get_row_f32_device_u32(
             packed_weights_nvfp4_bytes: *const u8,
             output_f32: *mut f32,
             n_cols: u32,
@@ -297,7 +297,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32(
+        fn makepad_cuda_nvfp4_get_rows_f32_device_u32(
             packed_weights_nvfp4_bytes: *const u8,
             row_indices_device_u32: *const u32,
             output_f32: *mut f32,
@@ -307,14 +307,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_quantize_q8_1_f32(
+        fn makepad_cuda_quantize_q8_1_f32(
             input_f32: *const f32,
             output_q8_1_bytes: *mut u8,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_quantize_q8_1_mmq_f32(
+        fn makepad_cuda_quantize_q8_1_mmq_f32(
             input_f32: *const f32,
             output_q8_1_mmq_bytes: *mut u8,
             n_cols: u32,
@@ -322,7 +322,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
+        fn makepad_cuda_quantize_q8_1_mmq_f32_padded(
             input_f32: *const f32,
             output_q8_1_mmq_bytes: *mut u8,
             n_cols: u32,
@@ -331,7 +331,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_quantize_nvfp4_f32(
+        fn makepad_cuda_quantize_nvfp4_f32(
             input_f32: *const f32,
             input_scale: f32,
             output_nvfp4_bytes: *mut u8,
@@ -341,28 +341,28 @@ mod imp {
 
         // kquants.cu: bulk dense dequantization into bf16 scratch for the
         // quantized H3 linear path (see gpu_linear_nt_impl).
-        fn makepad_ggml_cuda_dequant_q4_k_bf16(
+        fn makepad_cuda_dequant_q4_k_bf16(
             src_blocks: *const std::ffi::c_void,
             dst_bf16: *mut std::ffi::c_void,
             n_super_blocks: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_dequant_q6_k_bf16(
+        fn makepad_cuda_dequant_q6_k_bf16(
             src_blocks: *const std::ffi::c_void,
             dst_bf16: *mut std::ffi::c_void,
             n_super_blocks: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_dequant_q4_0_bf16(
+        fn makepad_cuda_dequant_q4_0_bf16(
             src_blocks: *const std::ffi::c_void,
             dst_bf16: *mut std::ffi::c_void,
             n_blocks: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_dequant_nvfp4_pairs_bf16(
+        fn makepad_cuda_dequant_nvfp4_pairs_bf16(
             packed_blob: *const std::ffi::c_void,
             dst_bf16: *mut std::ffi::c_void,
             rows: u32,
@@ -373,14 +373,14 @@ mod imp {
         // kquants.cu: raw signed E4M3FN scalars -> bf16 scratch (dense linear
         // dequant, exact conversion) and gathered f32 embedding rows for the
         // FLUX combined-FP8 checkpoints.
-        fn makepad_ggml_cuda_dequant_f8_e4m3_bf16(
+        fn makepad_cuda_dequant_f8_e4m3_bf16(
             src_bytes: *const std::ffi::c_void,
             dst_bf16: *mut std::ffi::c_void,
             count: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_quant_bf16_f8_e4m3(
+        fn makepad_cuda_quant_bf16_f8_e4m3(
             src_bf16: *const std::ffi::c_void,
             dst_bytes: *mut std::ffi::c_void,
             inv_scale: f32,
@@ -388,7 +388,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_get_rows_f8_e4m3_f32(
+        fn makepad_cuda_get_rows_f8_e4m3_f32(
             src_bytes: *const std::ffi::c_void,
             row_indices_i32: *const std::ffi::c_void,
             dst_f32: *mut std::ffi::c_void,
@@ -397,14 +397,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_scale_f32_inplace(
+        fn makepad_cuda_scale_f32_inplace(
             values: *mut f32,
             scale: f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_scale_f32_inplace_device_f32_index(
+        fn makepad_cuda_scale_f32_inplace_device_f32_index(
             values: *mut f32,
             scales: *const f32,
             scale_index: u32,
@@ -412,28 +412,28 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f32_to_bf16(
+        fn makepad_cuda_f32_to_bf16(
             input: *const f32,
             output: *mut u16,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_bf16_to_f32(
+        fn makepad_cuda_bf16_to_f32(
             input: *const u16,
             output: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_skintokens_michelangelo_fourier_f32(
+        fn makepad_cuda_skintokens_michelangelo_fourier_f32(
             condition: *const f32,
             output: *mut f32,
             rows: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_f32(
+        fn makepad_cuda_add_f32(
             left: *const f32,
             right: *const f32,
             out: *mut f32,
@@ -441,14 +441,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_copy_f32(
+        fn makepad_cuda_copy_f32(
             input: *const f32,
             output: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_weighted_sum_rows_f32(
+        fn makepad_cuda_weighted_sum_rows_f32(
             batched_inputs: *const f32,
             weights: *const f32,
             output: *mut f32,
@@ -457,7 +457,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_weighted_sum_rows_grouped_f32(
+        fn makepad_cuda_weighted_sum_rows_grouped_f32(
             batched_inputs: *const f32,
             weights: *const f32,
             output: *mut f32,
@@ -467,7 +467,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_scaled_rows_f32(
+        fn makepad_cuda_add_scaled_rows_f32(
             input: *const f32,
             scales: *const f32,
             output: *mut f32,
@@ -476,7 +476,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_scaled_rows_f32_indexed(
+        fn makepad_cuda_add_scaled_rows_f32_indexed(
             input: *const f32,
             scales: *const f32,
             output: *mut f32,
@@ -487,7 +487,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_mul_f32(
+        fn makepad_cuda_mul_f32(
             left: *const f32,
             right: *const f32,
             out: *mut f32,
@@ -495,14 +495,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gelu_f32(
+        fn makepad_cuda_gelu_f32(
             input: *const f32,
             out: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_geglu_split_f32(
+        fn makepad_cuda_geglu_split_f32(
             gate_up: *const f32,
             out: *mut f32,
             n: u32,
@@ -510,7 +510,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_geglu_split_f32_rows(
+        fn makepad_cuda_geglu_split_f32_rows(
             gate_up: *const f32,
             out: *mut f32,
             row_count: u32,
@@ -520,7 +520,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_ssm_conv_f32(
+        fn makepad_cuda_ssm_conv_f32(
             src0: *const f32,
             src1: *const f32,
             dst: *mut f32,
@@ -537,7 +537,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gated_delta_net_f32(
+        fn makepad_cuda_gated_delta_net_f32(
             q: *const f32,
             k: *const f32,
             v: *const f32,
@@ -564,7 +564,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_row_weighted_f32(
+        fn makepad_cuda_rms_norm_row_weighted_f32(
             input: *const f32,
             weights_bf16: *const u16,
             output: *mut f32,
@@ -573,7 +573,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+        fn makepad_cuda_rms_norm_row_weighted_f32_f32weights(
             input: *const f32,
             weights_f32: *const f32,
             output: *mut f32,
@@ -582,7 +582,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise(
+        fn makepad_cuda_rms_norm_row_weighted_f32_f32weights_precise(
             input: *const f32,
             weights_f32: *const f32,
             output: *mut f32,
@@ -591,7 +591,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_rows_weighted_f32(
+        fn makepad_cuda_rms_norm_rows_weighted_f32(
             input: *const f32,
             weights_bf16: *const u16,
             output: *mut f32,
@@ -602,7 +602,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+        fn makepad_cuda_rms_norm_rows_weighted_f32_f32weights(
             input: *const f32,
             weights_f32: *const f32,
             output: *mut f32,
@@ -613,7 +613,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
+        fn makepad_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
             input: *const f32,
             weights_f32: *const f32,
             output: *mut f32,
@@ -624,7 +624,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_qwen3(
+        fn makepad_cuda_rms_norm_qwen3(
             input: *const f32,
             weights_f32: *const f32,
             output: *mut f32,
@@ -635,7 +635,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
+        fn makepad_cuda_rms_norm_rows_no_scale_f32(
             input: *const f32,
             output: *mut f32,
             row_count: u32,
@@ -645,7 +645,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise(
+        fn makepad_cuda_rms_norm_rows_no_scale_f32_precise(
             input: *const f32,
             output: *mut f32,
             row_count: u32,
@@ -655,7 +655,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_rows_f32(
+        fn makepad_cuda_rope_rows_f32(
             input: *const f32,
             output: *mut f32,
             row_count: u32,
@@ -667,7 +667,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_rows_f32_device_u32(
+        fn makepad_cuda_rope_rows_f32_device_u32(
             input: *const f32,
             output: *mut f32,
             row_count: u32,
@@ -679,7 +679,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_kv_append_f32(
+        fn makepad_cuda_kv_append_f32(
             keys: *const f32,
             values: *const f32,
             key_cache: *mut u16,
@@ -691,7 +691,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_kv_append_f32_device_u32(
+        fn makepad_cuda_kv_append_f32_device_u32(
             keys: *const f32,
             values: *const f32,
             key_cache: *mut u16,
@@ -703,7 +703,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_qkv_norm_rope_cache_f32(
+        fn makepad_cuda_qkv_norm_rope_cache_f32(
             qkv: *const f32,
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
@@ -725,7 +725,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32(
+        fn makepad_cuda_qkv_norm_rope_cache_rows_f32(
             qkv: *const f32,
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
@@ -750,7 +750,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32(
+        fn makepad_cuda_qkv_norm_rope_cache_f32_device_u32(
             qkv: *const f32,
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
@@ -771,7 +771,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32_device_u32(
+        fn makepad_cuda_qkv_norm_rope_cache_rows_f32_device_u32(
             qkv: *const f32,
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
@@ -796,7 +796,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_logits_seq_f32(
+        fn makepad_cuda_attention_logits_seq_f32(
             q: *const f32,
             key_cache: *const u16,
             logits: *mut f32,
@@ -811,7 +811,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
+        fn makepad_cuda_attention_logits_seq_f32_device_u32(
             q: *const f32,
             key_cache: *const u16,
             logits: *mut f32,
@@ -826,7 +826,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_f32(
+        fn makepad_cuda_softmax_rows_f32(
             logits: *const f32,
             probs: *mut f32,
             row_count: u32,
@@ -835,7 +835,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_f32_device_u32(
+        fn makepad_cuda_softmax_rows_f32_device_u32(
             logits: *const f32,
             probs: *mut f32,
             row_count: u32,
@@ -844,7 +844,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_causal_f32(
+        fn makepad_cuda_softmax_rows_causal_f32(
             logits: *mut f32,
             query_count: u32,
             row_count: u32,
@@ -854,7 +854,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_causal_f32_device_u32(
+        fn makepad_cuda_softmax_rows_causal_f32_device_u32(
             logits: *mut f32,
             query_count: u32,
             row_count: u32,
@@ -864,7 +864,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_causal_bf16(
+        fn makepad_cuda_softmax_rows_causal_bf16(
             logits: *const f32,
             probs: *mut u16,
             query_count: u32,
@@ -875,7 +875,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_causal_bf16_device_u32(
+        fn makepad_cuda_softmax_rows_causal_bf16_device_u32(
             logits: *const f32,
             probs: *mut u16,
             query_count: u32,
@@ -886,7 +886,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_causal_vision_bf16(
+        fn makepad_cuda_softmax_rows_causal_vision_bf16(
             logits: *const f32,
             probs: *mut u16,
             query_count: u32,
@@ -900,7 +900,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_weighted_sum_f32(
+        fn makepad_cuda_attention_weighted_sum_f32(
             probs: *const f32,
             value_cache: *const u16,
             out: *mut f32,
@@ -916,7 +916,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
+        fn makepad_cuda_attention_softmax_weighted_sum_f32(
             logits: *const f32,
             value_cache: *const u16,
             out: *mut f32,
@@ -932,7 +932,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_weighted_sum_f32_device_u32(
+        fn makepad_cuda_attention_weighted_sum_f32_device_u32(
             probs: *const f32,
             value_cache: *const u16,
             out: *mut f32,
@@ -947,7 +947,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
+        fn makepad_cuda_attention_softmax_weighted_sum_f32_device_u32(
             logits: *const f32,
             value_cache: *const u16,
             out: *mut f32,
@@ -963,7 +963,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
+        fn makepad_cuda_attention_seq_softmax_weighted_sum_f32(
             q: *const f32,
             key_cache: *const u16,
             value_cache: *const u16,
@@ -979,7 +979,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32(
+        fn makepad_cuda_attention_seq_softmax_weighted_sum_rows_f32(
             q: *const f32,
             key_cache: *const u16,
             value_cache: *const u16,
@@ -996,7 +996,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
+        fn makepad_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
             q: *const f32,
             key_cache: *const u16,
             value_cache: *const u16,
@@ -1011,7 +1011,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+        fn makepad_cuda_attention_seq_softmax_weighted_sum_rows_f32_device_u32(
             q: *const f32,
             key_cache: *const u16,
             value_cache: *const u16,
@@ -1028,7 +1028,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attn_f32_packed(
+        fn makepad_cuda_flash_attn_f32_packed(
             q: *const f32,
             k: *const f32,
             v: *const f32,
@@ -1040,14 +1040,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_argmax_f32(
+        fn makepad_cuda_argmax_f32(
             logits: *const f32,
             out_index: *mut u32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_masked_argmax_f32(
+        fn makepad_cuda_masked_argmax_f32(
             logits: *const f32,
             disallowed_token_ids: *const u32,
             disallowed_count: u32,
@@ -1056,7 +1056,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_masked_argmax_f32_device_u32(
+        fn makepad_cuda_masked_argmax_f32_device_u32(
             logits: *const f32,
             disallowed_token_ids: *const u32,
             disallowed_count_device_u32: *const u32,
@@ -1066,7 +1066,7 @@ mod imp {
         ) -> cudaError_t;
 
         // diffusion_ops.cu — precise f32 kernels for the diffusion lazy path.
-        fn makepad_ggml_cuda_layer_norm_mul_add_f32(
+        fn makepad_cuda_layer_norm_mul_add_f32(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -1078,7 +1078,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_layer_norm_pytorch_f32(
+        fn makepad_cuda_layer_norm_pytorch_f32(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -1089,7 +1089,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gated_residual_vec_f32(
+        fn makepad_cuda_gated_residual_vec_f32(
             residual: *const f32,
             update: *const f32,
             gate: *const f32,
@@ -1099,14 +1099,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f32_to_bf16_rn_f16(
+        fn makepad_cuda_f32_to_bf16_rn_f16(
             input: *const f32,
             output: *mut u16,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gated_residual_vec_round_bf16_f32(
+        fn makepad_cuda_gated_residual_vec_round_bf16_f32(
             residual: *const f32,
             update: *const f32,
             gate: *const f32,
@@ -1116,7 +1116,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_snake_cols_f32(
+        fn makepad_cuda_snake_cols_f32(
             input: *const f32,
             alpha: *const f32,
             output: *mut f32,
@@ -1125,7 +1125,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rpb_expand_f32(
+        fn makepad_cuda_rpb_expand_f32(
             ry: *const f32,
             rx: *const f32,
             bias: *mut f32,
@@ -1136,7 +1136,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_f32_precise(
+        fn makepad_cuda_add_f32_precise(
             left: *const f32,
             right: *const f32,
             output: *mut f32,
@@ -1144,7 +1144,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_mul_f32_precise(
+        fn makepad_cuda_mul_f32_precise(
             left: *const f32,
             right: *const f32,
             output: *mut f32,
@@ -1152,7 +1152,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_mul_rows_vec_f32(
+        fn makepad_cuda_mul_rows_vec_f32(
             input: *const f32,
             vec: *const f32,
             output: *mut f32,
@@ -1161,14 +1161,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gelu_f32_precise(
+        fn makepad_cuda_gelu_f32_precise(
             input: *const f32,
             output: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_precise_f32(
+        fn makepad_cuda_softmax_rows_precise_f32(
             logits: *const f32,
             probs: *mut f32,
             row_count: u32,
@@ -1177,7 +1177,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_motion_text_f32(
+        fn makepad_cuda_softmax_rows_motion_text_f32(
             logits: *const f32,
             probs: *mut f32,
             row_count: u32,
@@ -1188,7 +1188,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softmax_rows_sliding_f32(
+        fn makepad_cuda_softmax_rows_sliding_f32(
             logits: *const f32,
             probs: *mut f32,
             row_count: u32,
@@ -1198,7 +1198,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_snake_rows_f32(
+        fn makepad_cuda_snake_rows_f32(
             input: *const f32,
             alpha: *const f32,
             inv_beta: *const f32,
@@ -1208,7 +1208,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_tconv_stitch_f32(
+        fn makepad_cuda_tconv_stitch_f32(
             y_hi: *const f32,
             y_lo: *const f32,
             output: *mut f32,
@@ -1220,14 +1220,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f32_to_f16(
+        fn makepad_cuda_f32_to_f16(
             input: *const f32,
             output: *mut u16,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_rows_vec_f32(
+        fn makepad_cuda_add_rows_vec_f32(
             input: *const f32,
             vec: *const f32,
             output: *mut f32,
@@ -1236,14 +1236,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_bf16_round_f32(
+        fn makepad_cuda_bf16_round_f32(
             input: *const f32,
             output: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16(
+        fn makepad_cuda_rms_norm_weighted_precise_round_bf16(
             input: *const f32,
             weights_f32: *const f32,
             output: *mut f32,
@@ -1254,7 +1254,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_adaln_mod_f32(
+        fn makepad_cuda_adaln_mod_f32(
             normed: *const f32,
             mods_scale: *const f32,
             mods_shift: *const f32,
@@ -1264,7 +1264,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_half_round_bf16_f32(
+        fn makepad_cuda_rope_half_round_bf16_f32(
             input: *const f32,
             cos_table: *const f32,
             sin_table: *const f32,
@@ -1276,7 +1276,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gated_residual_round_add_bf16_f32(
+        fn makepad_cuda_gated_residual_round_add_bf16_f32(
             h: *const f32,
             update: *const f32,
             gate: *const f32,
@@ -1286,7 +1286,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_silu_round_mul_round_bf16_f32(
+        fn makepad_cuda_silu_round_mul_round_bf16_f32(
             gate: *const f32,
             up: *const f32,
             output: *mut f32,
@@ -1294,14 +1294,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f32_to_bf16_rn(
+        fn makepad_cuda_f32_to_bf16_rn(
             input: *const f32,
             output: *mut u16,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_bf16_f32(
+        fn makepad_cuda_add_bf16_f32(
             left: *const f32,
             right: *const f32,
             output: *mut f32,
@@ -1309,7 +1309,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_interleaved_f32(
+        fn makepad_cuda_rope_interleaved_f32(
             input: *const f32,
             cos_table: *const f32,
             sin_table: *const f32,
@@ -1320,7 +1320,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_copy_submatrix_f32(
+        fn makepad_cuda_copy_submatrix_f32(
             src: *const f32,
             dst: *mut f32,
             src_stride: u32,
@@ -1330,7 +1330,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_perhead_f32(
+        fn makepad_cuda_rms_norm_perhead_f32(
             input: *const f32,
             weights: *const f32,
             output: *mut f32,
@@ -1341,14 +1341,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gelu_erf_f32(
+        fn makepad_cuda_gelu_erf_f32(
             input: *const f32,
             output: *mut f32,
             total: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gather_rows_colblock_f32(
+        fn makepad_cuda_gather_rows_colblock_f32(
             src: *const f32,
             row_idx: *const u32,
             colblock_idx: *const u32,
@@ -1359,7 +1359,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gather_cols_f32(
+        fn makepad_cuda_gather_cols_f32(
             src: *const f32,
             col_idx: *const u32,
             output: *mut f32,
@@ -1369,7 +1369,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_half_f32(
+        fn makepad_cuda_rope_half_f32(
             input: *const f32,
             cos_table: *const f32,
             sin_table: *const f32,
@@ -1381,7 +1381,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_half_bf16_f32(
+        fn makepad_cuda_rope_half_bf16_f32(
             input: *const f32,
             cos_table: *const f32,
             sin_table: *const f32,
@@ -1393,7 +1393,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_beam_cache_reorder_append_f32(
+        fn makepad_cuda_beam_cache_reorder_append_f32(
             prior: *const f32,
             step: *const f32,
             parents: *const u32,
@@ -1404,7 +1404,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_gqa_decode_bf16_f32(
+        fn makepad_cuda_attention_gqa_decode_bf16_f32(
             query: *const f32,
             key: *const f32,
             value: *const f32,
@@ -1418,7 +1418,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_attention_gqa_decode_pair_bf16_f32(
+        fn makepad_cuda_attention_gqa_decode_pair_bf16_f32(
             query: *const f32,
             key0: *const f32,
             value0: *const f32,
@@ -1434,7 +1434,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_geglu_tanh_value_gate_f32(
+        fn makepad_cuda_geglu_tanh_value_gate_f32(
             input: *const f32,
             output: *mut f32,
             rows: u32,
@@ -1442,7 +1442,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_dyt_f32(
+        fn makepad_cuda_dyt_f32(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -1453,7 +1453,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_softcap_addmask_f32(
+        fn makepad_cuda_softcap_addmask_f32(
             scores: *mut f32,
             key_mask: *const f32,
             rows: u32,
@@ -1462,7 +1462,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_half_f16(
+        fn makepad_cuda_rope_half_f16(
             input: *const u16,
             cos_table: *const f32,
             sin_table: *const f32,
@@ -1474,7 +1474,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_mod_indexed_f32(
+        fn makepad_cuda_rms_norm_mod_indexed_f32(
             input: *const f32,
             weight: *const f32,
             table: *const f32,
@@ -1489,7 +1489,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_mod_indexed_out16(
+        fn makepad_cuda_rms_norm_mod_indexed_out16(
             input: *const f32,
             weight: *const f32,
             table: *const f32,
@@ -1504,7 +1504,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gated_residual_indexed_f32(
+        fn makepad_cuda_gated_residual_indexed_f32(
             residual: *const f32,
             update: *const f32,
             table: *const f32,
@@ -1517,7 +1517,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_swiglu_value_gate_f32(
+        fn makepad_cuda_swiglu_value_gate_f32(
             input: *const f32,
             output: *mut f32,
             rows: u32,
@@ -1525,7 +1525,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_swiglu_value_gate_f16(
+        fn makepad_cuda_swiglu_value_gate_f16(
             input: *const u16,
             output: *mut u16,
             rows: u32,
@@ -1533,7 +1533,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16(
+        fn makepad_cuda_layer_norm_mul_add_f32_out_bf16(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -1545,7 +1545,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_bf16_slab_to_f32(
+        fn makepad_cuda_bf16_slab_to_f32(
             input: *const u16,
             output: *mut f32,
             rows: u32,
@@ -1555,7 +1555,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_swiglu_gate_first_bf16slab(
+        fn makepad_cuda_swiglu_gate_first_bf16slab(
             input: *const u16,
             output: *mut u16,
             rows: u32,
@@ -1565,7 +1565,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_concat_f32rn_bf16(
+        fn makepad_cuda_concat_f32rn_bf16(
             a: *const f32,
             b: *const u16,
             output: *mut u16,
@@ -1575,7 +1575,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_weighted_bf16slab_f32(
+        fn makepad_cuda_rms_norm_weighted_bf16slab_f32(
             input: *const u16,
             weights_f32: *const f32,
             output: *mut f32,
@@ -1588,7 +1588,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_swiglu_gate_first_strided_f32(
+        fn makepad_cuda_swiglu_gate_first_strided_f32(
             input: *const f32,
             output: *mut f32,
             rows: u32,
@@ -1598,7 +1598,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_wavenet_gate_f32(
+        fn makepad_cuda_wavenet_gate_f32(
             input: *const f32,
             output: *mut f32,
             rows: u32,
@@ -1606,7 +1606,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_alias_snake_updown2x_f32(
+        fn makepad_cuda_alias_snake_updown2x_f32(
             input: *const f32,
             params: *const f32,
             output: *mut f32,
@@ -1616,7 +1616,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_conv2d_planar_f32(
+        fn makepad_cuda_conv2d_planar_f32(
             input: *const f32,
             weights: *const f32,
             bias: *const f32,
@@ -1632,7 +1632,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_conv2d_planar_strided_f32(
+        fn makepad_cuda_conv2d_planar_strided_f32(
             input: *const f32,
             weights: *const f32,
             bias: *const f32,
@@ -1652,7 +1652,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_group_norm_planar_f32(
+        fn makepad_cuda_group_norm_planar_f32(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -1666,14 +1666,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_silu_f32_precise(
+        fn makepad_cuda_silu_f32_precise(
             input: *const f32,
             output: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_upsample2x_planar_f32(
+        fn makepad_cuda_upsample2x_planar_f32(
             src: *const f32,
             dst: *mut f32,
             width: u32,
@@ -1682,7 +1682,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_pad_planar_f32_to_f16(
+        fn makepad_cuda_pad_planar_f32_to_f16(
             src: *const f32,
             dst: *mut u16,
             width: u32,
@@ -1693,7 +1693,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_add_planes_vec_f32(
+        fn makepad_cuda_add_planes_vec_f32(
             data: *mut f32,
             vec: *const f32,
             plane: u32,
@@ -1701,7 +1701,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_conv_extract_bias_f32(
+        fn makepad_cuda_conv_extract_bias_f32(
             acc: *const f32,
             bias: *const f32,
             out: *mut f32,
@@ -1713,14 +1713,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f16_to_f32_precise(
+        fn makepad_cuda_f16_to_f32_precise(
             input: *const u16,
             output: *mut f32,
             n: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f16_bias_to_f32(
+        fn makepad_cuda_f16_bias_to_f32(
             input: *const u16,
             bias: *const f32,
             output: *mut f32,
@@ -1729,7 +1729,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention_f32(
+        fn makepad_cuda_flash_attention_f32(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1741,7 +1741,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention2_f32(
+        fn makepad_cuda_flash_attention2_f32(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1753,7 +1753,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention2_cross_f32(
+        fn makepad_cuda_flash_attention2_cross_f32(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1766,7 +1766,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention2_causal_f32(
+        fn makepad_cuda_flash_attention2_causal_f32(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1778,7 +1778,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention2_causal_bf16(
+        fn makepad_cuda_flash_attention2_causal_bf16(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1790,7 +1790,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention2_sliding_bf16(
+        fn makepad_cuda_flash_attention2_sliding_bf16(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1803,7 +1803,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention2_cross_bf16(
+        fn makepad_cuda_flash_attention2_cross_bf16(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1816,7 +1816,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_flash_attention_bf16_d64_f32(
+        fn makepad_cuda_flash_attention_bf16_d64_f32(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1829,7 +1829,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_sdpa_flash_f16_d64(
+        fn makepad_cuda_sdpa_flash_f16_d64(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1854,7 +1854,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_sdpa_flash_f16_d64v128(
+        fn makepad_cuda_sdpa_flash_f16_d64v128(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -1880,7 +1880,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gather27_f16(
+        fn makepad_cuda_gather27_f16(
             src: *const f32,
             neighbors: *const u32,
             out: *mut u16,
@@ -1891,7 +1891,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rms_norm_rows_weighted_f16(
+        fn makepad_cuda_rms_norm_rows_weighted_f16(
             input: *const u16,
             weights_f32: *const f32,
             output: *mut u16,
@@ -1902,7 +1902,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_rope_interleaved_f16(
+        fn makepad_cuda_rope_interleaved_f16(
             input: *const u16,
             cos_table: *const f32,
             sin_table: *const f32,
@@ -1913,7 +1913,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_layer_norm_mul_add_f32_out16(
+        fn makepad_cuda_layer_norm_mul_add_f32_out16(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -1925,7 +1925,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_gelu_f16(
+        fn makepad_cuda_gelu_f16(
             input: *const u16,
             bias: *const f32,
             output: *mut u16,
@@ -1934,7 +1934,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_f16_bias_inplace(
+        fn makepad_cuda_f16_bias_inplace(
             data: *mut u16,
             bias: *const f32,
             row_count: u32,
@@ -1942,7 +1942,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_im2col_planar_f32_to_f16(
+        fn makepad_cuda_im2col_planar_f32_to_f16(
             input: *const f32,
             output: *mut u16,
             width: u32,
@@ -1957,14 +1957,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_relu_f32(
+        fn makepad_cuda_birefnet_relu_f32(
             input: *const f32,
             output: *mut f32,
             n: usize,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_realesrgan_lrelu_f32(
+        fn makepad_cuda_realesrgan_lrelu_f32(
             input: *const f32,
             output: *mut f32,
             n: usize,
@@ -1972,7 +1972,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_realesrgan_scale_add_f32(
+        fn makepad_cuda_realesrgan_scale_add_f32(
             base: *const f32,
             delta: *const f32,
             output: *mut f32,
@@ -1981,7 +1981,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_realesrgan_bias_lrelu_f16(
+        fn makepad_cuda_realesrgan_bias_lrelu_f16(
             data: *mut u16,
             bias: *const f32,
             plane: usize,
@@ -1990,7 +1990,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_realesrgan_bias_lrelu_f32(
+        fn makepad_cuda_realesrgan_bias_lrelu_f32(
             data: *mut f32,
             bias: *const f32,
             plane: usize,
@@ -1999,7 +1999,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_realesrgan_spine_axpb(
+        fn makepad_cuda_realesrgan_spine_axpb(
             base: *const f32,
             delta32: *const f32,
             delta16: *const u16,
@@ -2012,14 +2012,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_realesrgan_quantize_rgb8_f32(
+        fn makepad_cuda_realesrgan_quantize_rgb8_f32(
             input: *const f32,
             output: *mut u8,
             plane: usize,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_resize_bilinear_f32(
+        fn makepad_cuda_birefnet_resize_bilinear_f32(
             input: *const f32,
             output: *mut f32,
             in_width: u32,
@@ -2031,7 +2031,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_tokens_to_planar_f32(
+        fn makepad_cuda_birefnet_tokens_to_planar_f32(
             input: *const f32,
             output: *mut f32,
             tokens: u32,
@@ -2039,7 +2039,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_transpose_f32(
+        fn makepad_cuda_paint_transpose_f32(
             input: *const f32,
             output: *mut f32,
             rows: u32,
@@ -2047,7 +2047,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_ref_attn_wide_v_f32(
+        fn makepad_cuda_paint_ref_attn_wide_v_f32(
             q: *const f32,
             k: *const f32,
             v_alb: *const f32,
@@ -2062,7 +2062,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_attn_batched_self_f32(
+        fn makepad_cuda_paint_attn_batched_self_f32(
             q: *const f32,
             k: *const f32,
             v: *const f32,
@@ -2075,7 +2075,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_scale_f32(
+        fn makepad_cuda_paint_scale_f32(
             input: *const f32,
             output: *mut f32,
             scale: f32,
@@ -2083,7 +2083,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_pose_rope_f32(
+        fn makepad_cuda_paint_pose_rope_f32(
             x: *const f32,
             xyz: *const u32,
             out: *mut f32,
@@ -2094,7 +2094,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_pack_heads_f32(
+        fn makepad_cuda_paint_pack_heads_f32(
             input: *const f32,
             output: *mut f32,
             batch: u32,
@@ -2104,7 +2104,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_unpack_heads_f32(
+        fn makepad_cuda_paint_unpack_heads_f32(
             input: *const f32,
             output: *mut f32,
             batch: u32,
@@ -2114,7 +2114,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_paint_gn_batched_f32(
+        fn makepad_cuda_paint_gn_batched_f32(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -2131,7 +2131,7 @@ mod imp {
 
 
 
-        fn makepad_ggml_cuda_pixel_shuffle_planar_f32(
+        fn makepad_cuda_pixel_shuffle_planar_f32(
             input: *const f32,
             bias: *const f32,
             output: *mut f32,
@@ -2142,7 +2142,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_image_to_patches_f32(
+        fn makepad_cuda_birefnet_image_to_patches_f32(
             input: *const f32,
             output: *mut f32,
             image_width: u32,
@@ -2153,7 +2153,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_global_avg_pool_f32(
+        fn makepad_cuda_birefnet_global_avg_pool_f32(
             input: *const f32,
             output: *mut f32,
             plane: u32,
@@ -2161,7 +2161,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_broadcast_f32(
+        fn makepad_cuda_birefnet_broadcast_f32(
             input: *const f32,
             output: *mut f32,
             plane: u32,
@@ -2169,7 +2169,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32(
+        fn makepad_cuda_birefnet_mul_sigmoid_mask_f32(
             input: *const f32,
             logits: *const f32,
             output: *mut f32,
@@ -2178,7 +2178,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16(
+        fn makepad_cuda_birefnet_deform_im2col_f32_to_f16(
             input: *const f32,
             offset: *const f32,
             modulator: *const f32,
@@ -2193,7 +2193,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_birefnet_swin_attention_f32(
+        fn makepad_cuda_birefnet_swin_attention_f32(
             q: *const f32,
             k: *const f32,
             v: *const f32,
@@ -2208,7 +2208,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_group_norm_planar_multi_f32(
+        fn makepad_cuda_group_norm_planar_multi_f32(
             input: *const f32,
             gamma: *const f32,
             beta: *const f32,
@@ -2590,7 +2590,7 @@ mod imp {
             };
 
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_bf16(
+                makepad_cuda_affine_qmv_bf16(
                     input_ptr,
                     weight_ptr,
                     scales_ptr,
@@ -2678,7 +2678,7 @@ mod imp {
 
             for row_idx in 0..spec.input_rows {
                 let status = unsafe {
-                    makepad_ggml_cuda_affine_qmv_bf16(
+                    makepad_cuda_affine_qmv_bf16(
                         input_ptr.add(row_idx * input_row_words),
                         weight_ptr,
                         scales_ptr,
@@ -2850,7 +2850,7 @@ mod imp {
             let q8_1_blocks = k / QK;
 
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_q8_1_matvec(
+                makepad_cuda_nvfp4_q8_1_matvec(
                     input_ptr,
                     weight_ptr,
                     output_ptr,
@@ -2918,7 +2918,7 @@ mod imp {
             let q8_1_blocks = k / QK;
 
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_q8_1_matvec(
+                makepad_cuda_nvfp4_q8_1_matvec(
                     input_ptr,
                     weight_ptr,
                     output_ptr,
@@ -2986,7 +2986,7 @@ mod imp {
                     ));
                 }
                 let status = unsafe {
-                    makepad_ggml_cuda_nvfp4_get_row_f32(
+                    makepad_cuda_nvfp4_get_row_f32(
                         weight_ptr,
                         output_ptr.add(row_slot * n_cols),
                         n_cols as u32,
@@ -3330,14 +3330,14 @@ mod imp {
                     .ok_or_else(|| "missing CUDA dense matmul half input buffer".to_string())?;
                 let status = unsafe {
                     if half_type == crate::CUDA_R_16BF {
-                        makepad_ggml_cuda_f32_to_bf16(
+                        makepad_cuda_f32_to_bf16(
                             input_f32.ptr.as_ptr().cast::<f32>(),
                             input_half.ptr.as_ptr().cast::<u16>(),
                             input_len as u32,
                             self.stream,
                         )
                     } else {
-                        makepad_ggml_cuda_f32_to_f16(
+                        makepad_cuda_f32_to_f16(
                             input_f32.ptr.as_ptr().cast::<f32>(),
                             input_half.ptr.as_ptr().cast::<u16>(),
                             input_len as u32,
@@ -3405,7 +3405,7 @@ mod imp {
                 let count = u32::try_from(weight_elems)
                     .map_err(|_| "f8_e4m3 dequant count exceeds u32".to_string())?;
                 let status = unsafe {
-                    makepad_ggml_cuda_dequant_f8_e4m3_bf16(
+                    makepad_cuda_dequant_f8_e4m3_bf16(
                         weight.ptr.as_ptr().cast_const(),
                         scratch.ptr.as_ptr(),
                         count,
@@ -3530,7 +3530,7 @@ mod imp {
                 .as_ref()
                 .ok_or_else(|| "missing CUDA embedding gather output buffer".to_string())?;
             let status = unsafe {
-                makepad_ggml_cuda_get_rows_f8_e4m3_f32(
+                makepad_cuda_get_rows_f8_e4m3_f32(
                     weight.ptr.as_ptr().cast_const(),
                     indices_buffer.ptr.as_ptr().cast_const(),
                     output.ptr.as_ptr(),
@@ -4314,7 +4314,7 @@ mod imp {
             backend.prepare_device()?;
             let output = GpuTensor::from_pool(condition.rows, 54)?;
             let status = unsafe {
-                makepad_ggml_cuda_skintokens_michelangelo_fourier_f32(
+                makepad_cuda_skintokens_michelangelo_fourier_f32(
                     condition.device_ptr()?,
                     output.device_ptr()?,
                     rows,
@@ -4355,7 +4355,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(tensor.rows, tensor.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_f16_to_f32_precise(
+                makepad_cuda_f16_to_f32_precise(
                     tensor.device_ptr_u16()?,
                     out.device_ptr()?,
                     (tensor.rows * tensor.cols) as u32,
@@ -4376,7 +4376,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool_half(tensor.rows, tensor.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_f32_to_f16(
+                makepad_cuda_f32_to_f16(
                     tensor.device_ptr()?,
                     out.device_ptr_u16()?,
                     (tensor.rows * tensor.cols) as u32,
@@ -4491,7 +4491,7 @@ mod imp {
                 .as_ptr();
             // RN-even straight to bf16 words (bit-identical to round-then-truncate).
             let status = unsafe {
-                makepad_ggml_cuda_f32_to_bf16_rn(
+                makepad_cuda_f32_to_bf16_rn(
                     x.device_ptr()?,
                     input_bf16_ptr.cast::<u16>(),
                     (m * k) as u32,
@@ -4530,7 +4530,7 @@ mod imp {
             }
             .map_err(|err| format!("PyTorch BF16 mm failed: m={m} k={k} n={n}: {err}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_bf16_to_f32(
+                makepad_cuda_bf16_to_f32(
                     output_bf16.ptr.as_ptr().cast::<u16>(),
                     output.device_ptr()?,
                     output_values as u32,
@@ -4630,7 +4630,7 @@ mod imp {
                 .ok_or_else(|| "missing cuBLASLt BF16 input buffer".to_string())?;
             // RN-even straight to bf16 words (bit-identical to round-then-truncate).
             let status = unsafe {
-                makepad_ggml_cuda_f32_to_bf16_rn(
+                makepad_cuda_f32_to_bf16_rn(
                     x.device_ptr()?,
                     input_bf16.ptr.as_ptr().cast::<u16>(),
                     (m * k) as u32,
@@ -4807,7 +4807,7 @@ mod imp {
                 }
                 .map_err(|error| format!("cuBLASLt BF16+bias matmul failed: {error}"))?;
                 let status = unsafe {
-                    makepad_ggml_cuda_bf16_to_f32(
+                    makepad_cuda_bf16_to_f32(
                         output_bf16.ptr.as_ptr().cast::<u16>(),
                         output.device_ptr()?,
                         output_values as u32,
@@ -5015,14 +5015,14 @@ mod imp {
                     .ok_or_else(|| "missing gpu_linear half input buffer".to_string())?;
                 let status = unsafe {
                     if half_type == crate::CUDA_R_16BF {
-                        makepad_ggml_cuda_f32_to_bf16(
+                        makepad_cuda_f32_to_bf16(
                             x_ptr,
                             input_half.ptr.as_ptr().cast::<u16>(),
                             input_len as u32,
                             backend.stream,
                         )
                     } else {
-                        makepad_ggml_cuda_f32_to_f16(
+                        makepad_cuda_f32_to_f16(
                             x_ptr,
                             input_half.ptr.as_ptr().cast::<u16>(),
                             input_len as u32,
@@ -5057,19 +5057,19 @@ mod imp {
                         let dst = scratch.ptr.as_ptr();
                         let status = unsafe {
                             match part.bt_ggml_type {
-                                GGML_TYPE_Q4_K => makepad_ggml_cuda_dequant_q4_k_bf16(
+                                GGML_TYPE_Q4_K => makepad_cuda_dequant_q4_k_bf16(
                                     src,
                                     dst,
                                     (part.n * k / 256) as u32,
                                     backend.stream,
                                 ),
-                                GGML_TYPE_Q6_K => makepad_ggml_cuda_dequant_q6_k_bf16(
+                                GGML_TYPE_Q6_K => makepad_cuda_dequant_q6_k_bf16(
                                     src,
                                     dst,
                                     (part.n * k / 256) as u32,
                                     backend.stream,
                                 ),
-                                GGML_TYPE_Q4_0 => makepad_ggml_cuda_dequant_q4_0_bf16(
+                                GGML_TYPE_Q4_0 => makepad_cuda_dequant_q4_0_bf16(
                                     src,
                                     dst,
                                     (part.n * k / 32) as u32,
@@ -5077,7 +5077,7 @@ mod imp {
                                 ),
                                 GGML_TYPE_H3_NVFP4_PAIRS
                                 | GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE => {
-                                    makepad_ggml_cuda_dequant_nvfp4_pairs_bf16(
+                                    makepad_cuda_dequant_nvfp4_pairs_bf16(
                                         src,
                                         dst,
                                         part.n as u32,
@@ -5089,7 +5089,7 @@ mod imp {
                                     let count = u32::try_from(part.n * k).map_err(|_| {
                                         "f8_e4m3 dequant count exceeds u32".to_string()
                                     })?;
-                                    makepad_ggml_cuda_dequant_f8_e4m3_bf16(
+                                    makepad_cuda_dequant_f8_e4m3_bf16(
                                         src,
                                         dst,
                                         count,
@@ -5217,7 +5217,7 @@ mod imp {
                 // The f16 C is the result; bias (if any) broadcasts in place.
                 if let Some(bias_ptr) = bias_ptr {
                     let status = unsafe {
-                        makepad_ggml_cuda_f16_bias_inplace(
+                        makepad_cuda_f16_bias_inplace(
                             c16_ptr,
                             bias_ptr,
                             m as u32,
@@ -5232,7 +5232,7 @@ mod imp {
                 // convert pass plus a read-modify-write bias pass.
                 let status = match bias_ptr {
                     Some(bias_ptr) => unsafe {
-                        makepad_ggml_cuda_f16_bias_to_f32(
+                        makepad_cuda_f16_bias_to_f32(
                             c_half.ptr.as_ptr().cast::<u16>(),
                             bias_ptr,
                             out_ptr,
@@ -5242,7 +5242,7 @@ mod imp {
                         )
                     },
                     None => unsafe {
-                        makepad_ggml_cuda_f16_to_f32_precise(
+                        makepad_cuda_f16_to_f32_precise(
                             c_half.ptr.as_ptr().cast::<u16>(),
                             out_ptr,
                             (m * n_total) as u32,
@@ -5254,7 +5254,7 @@ mod imp {
                 gpu_pool_release(c_half);
             } else if let Some(bias_ptr) = bias_ptr {
                 let status = unsafe {
-                    makepad_ggml_cuda_add_rows_vec_f32(
+                    makepad_cuda_add_rows_vec_f32(
                         out_ptr,
                         bias_ptr,
                         out_ptr,
@@ -5289,7 +5289,7 @@ mod imp {
             let add_buf = gpu_upload_small(backend, add)?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32(
+                makepad_cuda_layer_norm_mul_add_f32(
                     x.device_ptr()?,
                     mul_buf.ptr.as_ptr().cast::<f32>(),
                     add_buf.ptr.as_ptr().cast::<f32>(),
@@ -5347,7 +5347,7 @@ mod imp {
             let add_ptr = unsafe { mul_ptr.add(mul.len()) };
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32(
+                makepad_cuda_layer_norm_mul_add_f32(
                     x.device_ptr()?,
                     mul_ptr,
                     add_ptr,
@@ -5385,7 +5385,7 @@ mod imp {
             let bias_buf = gpu_upload_small(backend, bias)?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_pytorch_f32(
+                makepad_cuda_layer_norm_pytorch_f32(
                     x.device_ptr()?,
                     scale_buf.ptr.as_ptr().cast::<f32>(),
                     bias_buf.ptr.as_ptr().cast::<f32>(),
@@ -5430,7 +5430,7 @@ mod imp {
             let add_buf = gpu_upload_small(backend, add)?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32(
+                makepad_cuda_layer_norm_mul_add_f32(
                     x.device_ptr()?,
                     mul_buf.ptr.as_ptr().cast::<f32>(),
                     add_buf.ptr.as_ptr().cast::<f32>(),
@@ -5476,7 +5476,7 @@ mod imp {
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let mods_ptr = mods.device_ptr()?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32(
+                makepad_cuda_layer_norm_mul_add_f32(
                     x.device_ptr()?,
                     mods_ptr.add(scale_off),
                     mods_ptr.add(shift_off),
@@ -5513,7 +5513,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(residual.rows, residual.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gated_residual_vec_f32(
+                makepad_cuda_gated_residual_vec_f32(
                     residual.device_ptr()?,
                     update.device_ptr()?,
                     mods.device_ptr()?.add(gate_off),
@@ -5549,7 +5549,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(residual.rows, residual.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gated_residual_vec_round_bf16_f32(
+                makepad_cuda_gated_residual_vec_round_bf16_f32(
                     residual.device_ptr()?,
                     update.device_ptr()?,
                     mods.device_ptr()?.add(gate_off),
@@ -5578,7 +5578,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_snake_cols_f32(
+                makepad_cuda_snake_cols_f32(
                     x.device_ptr()?,
                     alpha.device_ptr()?,
                     out.device_ptr()?,
@@ -5629,7 +5629,7 @@ mod imp {
                 .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
             let status = if x.half {
                 unsafe {
-                    makepad_ggml_cuda_rms_norm_rows_weighted_f16(
+                    makepad_cuda_rms_norm_rows_weighted_f16(
                         x.device_ptr_u16()?,
                         scale_buf.ptr.as_ptr().cast::<f32>(),
                         out.device_ptr_u16()?,
@@ -5642,7 +5642,7 @@ mod imp {
                 }
             } else {
                 unsafe {
-                    makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
+                    makepad_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
                         x.device_ptr()?,
                         scale_buf.ptr.as_ptr().cast::<f32>(),
                         out.device_ptr()?,
@@ -5696,7 +5696,7 @@ mod imp {
                 .get(&vec_key)
                 .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16(
+                makepad_cuda_rms_norm_weighted_precise_round_bf16(
                     x.device_ptr()?,
                     scale_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -5735,7 +5735,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(normed.rows, normed.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_adaln_mod_f32(
+                makepad_cuda_adaln_mod_f32(
                     normed.device_ptr()?,
                     mods.device_ptr()?.add(scale_off),
                     mods.device_ptr()?.add(shift_off),
@@ -5774,7 +5774,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(h.rows, h.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gated_residual_round_add_bf16_f32(
+                makepad_cuda_gated_residual_round_add_bf16_f32(
                     h.device_ptr()?,
                     update.device_ptr()?,
                     mods.device_ptr()?.add(gate_off),
@@ -5811,7 +5811,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(gate.rows, gate.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_silu_round_mul_round_bf16_f32(
+                makepad_cuda_silu_round_mul_round_bf16_f32(
                     gate.device_ptr()?,
                     up.device_ptr()?,
                     out.device_ptr()?,
@@ -5861,7 +5861,7 @@ mod imp {
                 .get(&vec_key)
                 .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+                makepad_cuda_rms_norm_rows_weighted_f32_f32weights(
                     x.device_ptr()?,
                     scale_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -5911,7 +5911,7 @@ mod imp {
                 .get(&vec_key)
                 .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_qwen3(
+                makepad_cuda_rms_norm_qwen3(
                     x.device_ptr()?,
                     scale_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -5968,7 +5968,7 @@ mod imp {
                 .get(&vec_key)
                 .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_perhead_f32(
+                makepad_cuda_rms_norm_perhead_f32(
                     x.device_ptr()?,
                     scale_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -6000,7 +6000,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, n)?;
             let status = unsafe {
-                makepad_ggml_cuda_geglu_tanh_value_gate_f32(
+                makepad_cuda_geglu_tanh_value_gate_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows as u32,
@@ -6056,7 +6056,7 @@ mod imp {
                 .ok_or_else(|| format!("missing cached CUDA dyt buffer {key}"))?;
             let gamma_ptr = vec_buf.ptr.as_ptr().cast::<f32>();
             let status = unsafe {
-                makepad_ggml_cuda_dyt_f32(
+                makepad_cuda_dyt_f32(
                     x.device_ptr()?,
                     gamma_ptr,
                     gamma_ptr.add(width),
@@ -6149,7 +6149,7 @@ mod imp {
                 None => std::ptr::null(),
             };
             let status = unsafe {
-                makepad_ggml_cuda_softcap_addmask_f32(
+                makepad_cuda_softcap_addmask_f32(
                     scores_ptr,
                     mask_ptr,
                     (head_count * seq) as u32,
@@ -6160,7 +6160,7 @@ mod imp {
             };
             gpu_check(status)?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_precise_f32(
+                makepad_cuda_softmax_rows_precise_f32(
                     scores_ptr,
                     scores_ptr,
                     (head_count * seq) as u32,
@@ -6238,7 +6238,7 @@ mod imp {
                 None => std::ptr::null(),
             };
             let status = unsafe {
-                makepad_ggml_cuda_gather_rows_colblock_f32(
+                makepad_cuda_gather_rows_colblock_f32(
                     src.device_ptr()?,
                     row_idx.device_ptr()?.cast::<u32>(),
                     colblock_ptr,
@@ -6281,7 +6281,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, indices.len())?;
             let status = unsafe {
-                makepad_ggml_cuda_gather_cols_f32(
+                makepad_cuda_gather_cols_f32(
                     x.device_ptr()?,
                     idx.device_ptr()?.cast::<u32>(),
                     out.device_ptr()?,
@@ -6353,7 +6353,7 @@ mod imp {
             while r0 < n {
                 let rows = max_rows.min(n - r0);
                 let status = unsafe {
-                    makepad_ggml_cuda_gather27_f16(
+                    makepad_cuda_gather27_f16(
                         x.device_ptr()?,
                         neighbors.device_ptr()?.cast::<u32>(),
                         slab.ptr.as_ptr().cast::<u16>(),
@@ -6405,7 +6405,7 @@ mod imp {
             if !bias.is_empty() {
                 let bias_dev = gpu_upload_small(backend, bias)?;
                 let status = unsafe {
-                    makepad_ggml_cuda_add_rows_vec_f32(
+                    makepad_cuda_add_rows_vec_f32(
                         out.device_ptr()?,
                         bias_dev.ptr.as_ptr().cast::<f32>(),
                         out.device_ptr()?,
@@ -6432,7 +6432,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gelu_erf_f32(
+                makepad_cuda_gelu_erf_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     (x.rows * x.cols) as u32,
@@ -6517,7 +6517,7 @@ mod imp {
     }
 
     unsafe extern "C" {
-        fn makepad_ggml_cuda_sam3_sine_embed_f32(
+        fn makepad_cuda_sam3_sine_embed_f32(
             ref_points: *const f32,
             out: *mut f32,
             queries: u32,
@@ -6525,7 +6525,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_sam3_rpb_axial_f32(
+        fn makepad_cuda_sam3_rpb_axial_f32(
             ref_points: *const f32,
             dx: *mut f32,
             dy: *mut f32,
@@ -6535,7 +6535,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_sam3_refine_boxes_f32(
+        fn makepad_cuda_sam3_refine_boxes_f32(
             ref_points: *const f32,
             delta: *const f32,
             out: *mut f32,
@@ -6558,7 +6558,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(queries, 4 * half)?;
             let status = unsafe {
-                makepad_ggml_cuda_sam3_sine_embed_f32(
+                makepad_cuda_sam3_sine_embed_f32(
                     ref_points.device_ptr()?,
                     out.device_ptr()?,
                     queries as u32,
@@ -6590,7 +6590,7 @@ mod imp {
             let dx = GpuTensor::from_pool(queries * width, 2)?;
             let dy = GpuTensor::from_pool(queries * height, 2)?;
             let status = unsafe {
-                makepad_ggml_cuda_sam3_rpb_axial_f32(
+                makepad_cuda_sam3_rpb_axial_f32(
                     ref_points.device_ptr()?,
                     dx.device_ptr()?,
                     dy.device_ptr()?,
@@ -6622,7 +6622,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(ref_points.rows, ref_points.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_sam3_refine_boxes_f32(
+                makepad_cuda_sam3_refine_boxes_f32(
                     ref_points.device_ptr()?,
                     delta.device_ptr()?,
                     out.device_ptr()?,
@@ -6636,7 +6636,7 @@ mod imp {
     }
 
     unsafe extern "C" {
-        fn makepad_ggml_cuda_flash_attention2_d64_f32(
+        fn makepad_cuda_flash_attention2_d64_f32(
             q: *const u16,
             k: *const u16,
             v: *const u16,
@@ -6689,7 +6689,7 @@ mod imp {
                     .ok_or_else(|| "flash2_d64 input overflow".to_string())?;
                 let buffer = gpu_pool_acquire(elems * size_of::<u16>())?;
                 let status = unsafe {
-                    makepad_ggml_cuda_f32_to_f16(
+                    makepad_cuda_f32_to_f16(
                         tensor.device_ptr()?,
                         buffer.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -6706,7 +6706,7 @@ mod imp {
             let v_ptr = as_f16(v)?;
             let out = GpuTensor::from_pool(q_len, hidden)?;
             let status = unsafe {
-                makepad_ggml_cuda_flash_attention2_d64_f32(
+                makepad_cuda_flash_attention2_d64_f32(
                     q_ptr,
                     k_ptr,
                     v_ptr,
@@ -6756,7 +6756,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(heads * q1, hw)?;
             let status = unsafe {
-                makepad_ggml_cuda_rpb_expand_f32(
+                makepad_cuda_rpb_expand_f32(
                     ry.device_ptr()?,
                     rx.device_ptr()?,
                     out.device_ptr()?,
@@ -6837,7 +6837,7 @@ mod imp {
                 .map_err(|err| format!("gpu_attention_cross_bias qk gemm failed: {err}"))?;
             }
             let status = unsafe {
-                makepad_ggml_cuda_add_f32_precise(
+                makepad_cuda_add_f32_precise(
                     scores_ptr,
                     bias.device_ptr()?,
                     scores_ptr,
@@ -6847,7 +6847,7 @@ mod imp {
             };
             gpu_check(status)?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_precise_f32(
+                makepad_cuda_softmax_rows_precise_f32(
                     scores_ptr,
                     scores_ptr,
                     (head_count * q_len) as u32,
@@ -6997,7 +6997,7 @@ mod imp {
                     .ok_or_else(|| "BF16 flash attention input overflow".to_string())?;
                 let buffer = gpu_pool_acquire(elems * size_of::<u16>())?;
                 let status = unsafe {
-                    makepad_ggml_cuda_f32_to_bf16(
+                    makepad_cuda_f32_to_bf16(
                         tensor.device_ptr()?,
                         buffer.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -7014,7 +7014,7 @@ mod imp {
             let v_ptr = as_bf16(v)?;
             let out = GpuTensor::from_pool(q_len, hidden)?;
             let status = unsafe {
-                makepad_ggml_cuda_flash_attention_bf16_d64_f32(
+                makepad_cuda_flash_attention_bf16_d64_f32(
                     q_ptr,
                     k_ptr,
                     v_ptr,
@@ -7095,7 +7095,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool_half(q.rows, q.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_sdpa_flash_f16_d64(
+                makepad_cuda_sdpa_flash_f16_d64(
                     q_use.device_ptr_u16()?,
                     k_use.device_ptr_u16()?,
                     v_use.device_ptr_u16()?,
@@ -7203,7 +7203,7 @@ mod imp {
             let o_alb = GpuTensor::from_pool_half(q.rows, hidden)?;
             let o_mr = GpuTensor::from_pool_half(q.rows, hidden)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_sdpa_flash_f16_d64v128(
+                makepad_cuda_sdpa_flash_f16_d64v128(
                     q_use.device_ptr_u16()?,
                     k_use.device_ptr_u16()?,
                     v_wide.device_ptr_u16()?,
@@ -7273,7 +7273,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(q.rows, q.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_gqa_decode_bf16_f32(
+                makepad_cuda_attention_gqa_decode_bf16_f32(
                     q.device_ptr()?,
                     k.device_ptr()?,
                     v.device_ptr()?,
@@ -7345,7 +7345,7 @@ mod imp {
             let dots = GpuTensor::from_pool(2 * query_heads, dots_cols)?;
             let out = GpuTensor::from_pool(2, q.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_gqa_decode_pair_bf16_f32(
+                makepad_cuda_attention_gqa_decode_pair_bf16_f32(
                     q.device_ptr()?,
                     k_cond.device_ptr()?,
                     v_cond.device_ptr()?,
@@ -7416,7 +7416,7 @@ mod imp {
                 let elems = tensor.rows * tensor.cols;
                 let buffer = gpu_pool_acquire(elems * size_of::<u16>())?;
                 let status = unsafe {
-                    makepad_ggml_cuda_f32_to_f16(
+                    makepad_cuda_f32_to_f16(
                         tensor.device_ptr()?,
                         buffer.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -7433,7 +7433,7 @@ mod imp {
             let v_ptr = as_half(v)?;
             let out = GpuTensor::from_pool(q_len, hidden)?;
             let status = unsafe {
-                makepad_ggml_cuda_flash_attention2_cross_f32(
+                makepad_cuda_flash_attention2_cross_f32(
                     q_ptr,
                     k_ptr,
                     v_ptr,
@@ -7504,7 +7504,7 @@ mod imp {
                     (v, &v16, kv_len * hidden),
                 ] {
                     let status = unsafe {
-                        makepad_ggml_cuda_f32_to_bf16(
+                        makepad_cuda_f32_to_bf16(
                             src.device_ptr()?,
                             dst.ptr.as_ptr().cast::<u16>(),
                             elems as u32,
@@ -7565,7 +7565,7 @@ mod imp {
                     .map_err(|err| format!("gpu_attention_cross qk gemm failed: {err}"))?;
                 }
                 let status = unsafe {
-                    makepad_ggml_cuda_softmax_rows_precise_f32(
+                    makepad_cuda_softmax_rows_precise_f32(
                         scores_ptr,
                         scores_ptr,
                         (head_count * rows) as u32,
@@ -7578,7 +7578,7 @@ mod imp {
                 if let Some((_, _, v16, p16)) = &bf16 {
                     let score_elems = head_count * rows * kv_len;
                     let status = unsafe {
-                        makepad_ggml_cuda_f32_to_bf16(
+                        makepad_cuda_f32_to_bf16(
                             scores_ptr,
                             p16.ptr.as_ptr().cast::<u16>(),
                             score_elems as u32,
@@ -7692,7 +7692,7 @@ mod imp {
             };
             let status = if x.half {
                 unsafe {
-                    makepad_ggml_cuda_rope_interleaved_f16(
+                    makepad_cuda_rope_interleaved_f16(
                         x.device_ptr_u16()?,
                         cos_table.device_ptr()?,
                         sin_table.device_ptr()?,
@@ -7705,7 +7705,7 @@ mod imp {
                 }
             } else {
                 unsafe {
-                    makepad_ggml_cuda_rope_interleaved_f32(
+                    makepad_cuda_rope_interleaved_f32(
                         x.device_ptr()?,
                         cos_table.device_ptr()?,
                         sin_table.device_ptr()?,
@@ -7781,7 +7781,7 @@ mod imp {
             };
             let status = if x.half {
                 unsafe {
-                    makepad_ggml_cuda_rope_half_f16(
+                    makepad_cuda_rope_half_f16(
                         x.device_ptr_u16()?,
                         cos_table.device_ptr()?,
                         sin_table.device_ptr()?,
@@ -7795,7 +7795,7 @@ mod imp {
                 }
             } else {
                 unsafe {
-                    makepad_ggml_cuda_rope_half_f32(
+                    makepad_cuda_rope_half_f32(
                         x.device_ptr()?,
                         cos_table.device_ptr()?,
                         sin_table.device_ptr()?,
@@ -7847,7 +7847,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_rope_half_round_bf16_f32(
+                makepad_cuda_rope_half_round_bf16_f32(
                     x.device_ptr()?,
                     cos_table.device_ptr()?,
                     sin_table.device_ptr()?,
@@ -7898,7 +7898,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_rope_half_bf16_f32(
+                makepad_cuda_rope_half_bf16_f32(
                     x.device_ptr()?,
                     cos_table.device_ptr()?,
                     sin_table.device_ptr()?,
@@ -7954,7 +7954,7 @@ mod imp {
             };
             let status = if out_half {
                 unsafe {
-                    makepad_ggml_cuda_rms_norm_mod_indexed_out16(
+                    makepad_cuda_rms_norm_mod_indexed_out16(
                         x.device_ptr()?,
                         weight.device_ptr()?,
                         table.device_ptr()?,
@@ -7971,7 +7971,7 @@ mod imp {
                 }
             } else {
                 unsafe {
-                    makepad_ggml_cuda_rms_norm_mod_indexed_f32(
+                    makepad_cuda_rms_norm_mod_indexed_f32(
                         x.device_ptr()?,
                         weight.device_ptr()?,
                         table.device_ptr()?,
@@ -8017,7 +8017,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(residual.rows, residual.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gated_residual_indexed_f32(
+                makepad_cuda_gated_residual_indexed_f32(
                     residual.device_ptr()?,
                     update.device_ptr()?,
                     table.device_ptr()?,
@@ -8052,7 +8052,7 @@ mod imp {
             };
             let status = if x.half {
                 unsafe {
-                    makepad_ggml_cuda_swiglu_value_gate_f16(
+                    makepad_cuda_swiglu_value_gate_f16(
                         x.device_ptr_u16()?,
                         out.device_ptr_u16()?,
                         x.rows as u32,
@@ -8062,7 +8062,7 @@ mod imp {
                 }
             } else {
                 unsafe {
-                    makepad_ggml_cuda_swiglu_value_gate_f32(
+                    makepad_cuda_swiglu_value_gate_f32(
                         x.device_ptr()?,
                         out.device_ptr()?,
                         x.rows as u32,
@@ -8101,7 +8101,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, n)?;
             let status = unsafe {
-                makepad_ggml_cuda_swiglu_gate_first_strided_f32(
+                makepad_cuda_swiglu_gate_first_strided_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows as u32,
@@ -8181,7 +8181,7 @@ mod imp {
             }
             .map_err(|err| format!("PyTorch BF16 mm failed: m={m} k={k} n={n}: {err}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_bf16_to_f32(
+                makepad_cuda_bf16_to_f32(
                     output_bf16.ptr.as_ptr().cast::<u16>(),
                     output.device_ptr()?,
                     output_values as u32,
@@ -8602,7 +8602,7 @@ mod imp {
         let count = u32::try_from(weight_bytes)
             .map_err(|_| "f8_e4m3 dequant count exceeds u32".to_string())?;
         let status = unsafe {
-            makepad_ggml_cuda_dequant_f8_e4m3_bf16(
+            makepad_cuda_dequant_f8_e4m3_bf16(
                 weight_ptr.cast_const(),
                 scratch.ptr.as_ptr(),
                 count,
@@ -8678,7 +8678,7 @@ mod imp {
         let input_f8 = gpu_pool_acquire(input_values)?;
         let inv_input_scale = bf16_grid(1.0 / input_scale);
         let status = unsafe {
-            makepad_ggml_cuda_quant_bf16_f8_e4m3(
+            makepad_cuda_quant_bf16_f8_e4m3(
                 input_bf16_ptr,
                 input_f8.ptr.as_ptr(),
                 inv_input_scale,
@@ -8869,7 +8869,7 @@ mod imp {
             backend.prepare_device()?;
             backend.ensure_input_half(m * k * size_of::<u16>())?;
             let status = unsafe {
-                makepad_ggml_cuda_f32_to_bf16_rn(
+                makepad_cuda_f32_to_bf16_rn(
                     x.device_ptr()?,
                     backend
                         .input_half
@@ -8907,7 +8907,7 @@ mod imp {
                 output_bf16.ptr.as_ptr().cast_const(),
             )?;
             let status = unsafe {
-                makepad_ggml_cuda_bf16_to_f32(
+                makepad_cuda_bf16_to_f32(
                     output_bf16.ptr.as_ptr().cast::<u16>(),
                     output.device_ptr()?,
                     output_values as u32,
@@ -8956,7 +8956,7 @@ mod imp {
                 output_bf16.ptr.as_ptr().cast_const(),
             )?;
             let status = unsafe {
-                makepad_ggml_cuda_bf16_to_f32(
+                makepad_cuda_bf16_to_f32(
                     output_bf16.ptr.as_ptr().cast::<u16>(),
                     output.device_ptr()?,
                     output_values as u32,
@@ -9028,7 +9028,7 @@ mod imp {
             let out = GpuBf16Buf::from_pool(x.rows, x.cols)?;
             let mods_ptr = mods.device_ptr()?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16(
+                makepad_cuda_layer_norm_mul_add_f32_out_bf16(
                     x.device_ptr()?,
                     mods_ptr.add(scale_off),
                     mods_ptr.add(shift_off),
@@ -9063,7 +9063,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_bf16_slab_to_f32(
+                makepad_cuda_bf16_slab_to_f32(
                     x.device_ptr_u16()?,
                     out.device_ptr()?,
                     x.rows as u32,
@@ -9119,7 +9119,7 @@ mod imp {
                 .get(&vec_key)
                 .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_weighted_bf16slab_f32(
+                makepad_cuda_rms_norm_weighted_bf16slab_f32(
                     x.device_ptr_u16()?,
                     scale_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -9155,7 +9155,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuBf16Buf::from_pool(x.rows, n)?;
             let status = unsafe {
-                makepad_ggml_cuda_swiglu_gate_first_bf16slab(
+                makepad_cuda_swiglu_gate_first_bf16slab(
                     x.device_ptr_u16()?,
                     out.device_ptr_u16()?,
                     x.rows as u32,
@@ -9188,7 +9188,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuBf16Buf::from_pool(a.rows, a.cols + b.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_concat_f32rn_bf16(
+                makepad_cuda_concat_f32rn_bf16(
                     a.device_ptr()?,
                     b.device_ptr_u16()?,
                     out.device_ptr_u16()?,
@@ -9219,7 +9219,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, n)?;
             let status = unsafe {
-                makepad_ggml_cuda_wavenet_gate_f32(
+                makepad_cuda_wavenet_gate_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows as u32,
@@ -9259,7 +9259,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_alias_snake_updown2x_f32(
+                makepad_cuda_alias_snake_updown2x_f32(
                     x.device_ptr()?,
                     params.device_ptr()?,
                     out.device_ptr()?,
@@ -9325,7 +9325,7 @@ mod imp {
             .map_err(|err| err.to_string())?;
             if let Some(bias) = bias {
                 let status = unsafe {
-                    makepad_ggml_cuda_add_rows_vec_f32(
+                    makepad_cuda_add_rows_vec_f32(
                         out.device_ptr()?,
                         bias.device_ptr()?,
                         out.device_ptr()?,
@@ -9749,7 +9749,7 @@ mod imp {
             let v16 = gpu_pool_acquire(elems * size_of::<u16>())?;
             for (src, dst) in [(q, &q16), (k, &k16), (v, &v16)] {
                 let status = unsafe {
-                    makepad_ggml_cuda_f32_to_bf16(
+                    makepad_cuda_f32_to_bf16(
                         src.device_ptr()?,
                         dst.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -9761,7 +9761,7 @@ mod imp {
             let out = GpuTensor::from_pool(seq, hidden)?;
             let win = if window + 1 >= seq { 0 } else { window as i32 };
             let status = unsafe {
-                makepad_ggml_cuda_flash_attention2_sliding_bf16(
+                makepad_cuda_flash_attention2_sliding_bf16(
                     q16.ptr.as_ptr().cast::<u16>(),
                     k16.ptr.as_ptr().cast::<u16>(),
                     v16.ptr.as_ptr().cast::<u16>(),
@@ -9980,14 +9980,14 @@ mod imp {
                 for (src, dst) in [(q, &q16), (k, &k16), (v, &v16)] {
                     let status = unsafe {
                         if bf16 {
-                            makepad_ggml_cuda_f32_to_bf16(
+                            makepad_cuda_f32_to_bf16(
                                 src.device_ptr()?,
                                 dst.ptr.as_ptr().cast::<u16>(),
                                 elems as u32,
                                 backend.stream,
                             )
                         } else {
-                            makepad_ggml_cuda_f32_to_f16(
+                            makepad_cuda_f32_to_f16(
                                 src.device_ptr()?,
                                 dst.ptr.as_ptr().cast::<u16>(),
                                 elems as u32,
@@ -10014,7 +10014,7 @@ mod imp {
             let out = GpuTensor::from_pool(seq, hidden)?;
             let status = unsafe {
                 if bf16 {
-                    makepad_ggml_cuda_flash_attention2_causal_bf16(
+                    makepad_cuda_flash_attention2_causal_bf16(
                         q_ptr,
                         k_ptr,
                         v_ptr,
@@ -10026,7 +10026,7 @@ mod imp {
                         backend.stream,
                     )
                 } else {
-                    makepad_ggml_cuda_flash_attention2_causal_f32(
+                    makepad_cuda_flash_attention2_causal_f32(
                         q_ptr,
                         k_ptr,
                         v_ptr,
@@ -10097,14 +10097,14 @@ mod imp {
                 ] {
                     let status = unsafe {
                         if bf16 {
-                            makepad_ggml_cuda_f32_to_bf16(
+                            makepad_cuda_f32_to_bf16(
                                 src.device_ptr()?,
                                 dst.ptr.as_ptr().cast::<u16>(),
                                 elems as u32,
                                 backend.stream,
                             )
                         } else {
-                            makepad_ggml_cuda_f32_to_f16(
+                            makepad_cuda_f32_to_f16(
                                 src.device_ptr()?,
                                 dst.ptr.as_ptr().cast::<u16>(),
                                 elems as u32,
@@ -10131,7 +10131,7 @@ mod imp {
             let out = GpuTensor::from_pool(q_len, hidden)?;
             let status = unsafe {
                 if bf16 {
-                    makepad_ggml_cuda_flash_attention2_cross_bf16(
+                    makepad_cuda_flash_attention2_cross_bf16(
                         q_ptr,
                         k_ptr,
                         v_ptr,
@@ -10144,7 +10144,7 @@ mod imp {
                         backend.stream,
                     )
                 } else {
-                    makepad_ggml_cuda_flash_attention2_cross_f32(
+                    makepad_cuda_flash_attention2_cross_f32(
                         q_ptr,
                         k_ptr,
                         v_ptr,
@@ -10209,7 +10209,7 @@ mod imp {
                 (v, &v16, kv_elems),
             ] {
                 let status = unsafe {
-                    makepad_ggml_cuda_f32_to_bf16_rn(
+                    makepad_cuda_f32_to_bf16_rn(
                         src.device_ptr()?,
                         dst.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -10220,7 +10220,7 @@ mod imp {
             }
             let out = GpuTensor::from_pool(q_len, hidden)?;
             let status = unsafe {
-                makepad_ggml_cuda_flash_attention2_cross_bf16(
+                makepad_cuda_flash_attention2_cross_bf16(
                     q16.ptr.as_ptr().cast::<u16>(),
                     k16.ptr.as_ptr().cast::<u16>(),
                     v16.ptr.as_ptr().cast::<u16>(),
@@ -10285,7 +10285,7 @@ mod imp {
                 (v, &v16, kv_elems),
             ] {
                 let status = unsafe {
-                    makepad_ggml_cuda_f32_to_bf16_rn_f16(
+                    makepad_cuda_f32_to_bf16_rn_f16(
                         src.device_ptr()?,
                         dst.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -10296,7 +10296,7 @@ mod imp {
             }
             let out = GpuTensor::from_pool(q_len, hidden)?;
             let status = unsafe {
-                makepad_ggml_cuda_flash_attention2_cross_f32(
+                makepad_cuda_flash_attention2_cross_f32(
                     q16.ptr.as_ptr().cast::<u16>(),
                     k16.ptr.as_ptr().cast::<u16>(),
                     v16.ptr.as_ptr().cast::<u16>(),
@@ -10512,7 +10512,7 @@ mod imp {
                 let v16 = gpu_pool_acquire(elems * size_of::<u16>())?;
                 for (src, dst) in [(q, &q16), (k, &k16), (v, &v16)] {
                     let status = unsafe {
-                        makepad_ggml_cuda_f32_to_f16(
+                        makepad_cuda_f32_to_f16(
                             src.device_ptr()?,
                             dst.ptr.as_ptr().cast::<u16>(),
                             elems as u32,
@@ -10538,7 +10538,7 @@ mod imp {
             let out = GpuTensor::from_pool(seq, hidden)?;
             let status = if gpu_attention_mma_enabled() {
                 unsafe {
-                    makepad_ggml_cuda_flash_attention2_f32(
+                    makepad_cuda_flash_attention2_f32(
                         q_ptr,
                         k_ptr,
                         v_ptr,
@@ -10552,7 +10552,7 @@ mod imp {
                 }
             } else {
                 unsafe {
-                    makepad_ggml_cuda_flash_attention_f32(
+                    makepad_cuda_flash_attention_f32(
                         q_ptr,
                         k_ptr,
                         v_ptr,
@@ -10659,14 +10659,14 @@ mod imp {
                 for (src, dst) in [(q, &q16), (k, &k16), (v, &v16)] {
                     let status = unsafe {
                         if precision == PackedAttentionPrecision::Bf16 {
-                            makepad_ggml_cuda_f32_to_bf16(
+                            makepad_cuda_f32_to_bf16(
                                 src.device_ptr()?,
                                 dst.ptr.as_ptr().cast::<u16>(),
                                 elems as u32,
                                 backend.stream,
                             )
                         } else {
-                            makepad_ggml_cuda_f32_to_f16(
+                            makepad_cuda_f32_to_f16(
                                 src.device_ptr()?,
                                 dst.ptr.as_ptr().cast::<u16>(),
                                 elems as u32,
@@ -10729,7 +10729,7 @@ mod imp {
             }
             let status = match mask {
                 PackedAttentionMask::Causal => unsafe {
-                    makepad_ggml_cuda_softmax_rows_causal_f32(
+                    makepad_cuda_softmax_rows_causal_f32(
                         scores_ptr,
                         seq as u32,
                         (head_count * seq) as u32,
@@ -10743,7 +10743,7 @@ mod imp {
                     motion_tokens,
                     band_radius,
                 } => unsafe {
-                    makepad_ggml_cuda_softmax_rows_motion_text_f32(
+                    makepad_cuda_softmax_rows_motion_text_f32(
                         scores_ptr,
                         scores_ptr,
                         (head_count * seq) as u32,
@@ -10755,7 +10755,7 @@ mod imp {
                     )
                 },
                 PackedAttentionMask::None => unsafe {
-                    makepad_ggml_cuda_softmax_rows_precise_f32(
+                    makepad_cuda_softmax_rows_precise_f32(
                         scores_ptr,
                         scores_ptr,
                         (head_count * seq) as u32,
@@ -10765,7 +10765,7 @@ mod imp {
                     )
                 },
                 PackedAttentionMask::Sliding { window } => unsafe {
-                    makepad_ggml_cuda_softmax_rows_sliding_f32(
+                    makepad_cuda_softmax_rows_sliding_f32(
                         scores_ptr,
                         scores_ptr,
                         (head_count * seq) as u32,
@@ -10796,14 +10796,14 @@ mod imp {
                 let p16_dst: *mut u16 = p_ptr.cast_mut().cast::<u16>();
                 let status = unsafe {
                     if precision == PackedAttentionPrecision::Bf16 {
-                        makepad_ggml_cuda_f32_to_bf16(
+                        makepad_cuda_f32_to_bf16(
                             scores_ptr,
                             p16_dst,
                             scores_len as u32,
                             backend.stream,
                         )
                     } else {
-                        makepad_ggml_cuda_f32_to_f16(
+                        makepad_cuda_f32_to_f16(
                             scores_ptr,
                             p16_dst,
                             scores_len as u32,
@@ -10896,7 +10896,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gelu_f32_precise(
+                makepad_cuda_gelu_f32_precise(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     (x.rows * x.cols) as u32,
@@ -10920,7 +10920,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool_half(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_gelu_f16(
+                makepad_cuda_gelu_f16(
                     x.device_ptr_u16()?,
                     bias_ptr.unwrap_or(std::ptr::null()),
                     out.device_ptr_u16()?,
@@ -10970,7 +10970,7 @@ mod imp {
                 .cast::<f32>()
                 .cast_const();
             let status = unsafe {
-                makepad_ggml_cuda_gelu_f16(
+                makepad_cuda_gelu_f16(
                     x.device_ptr_u16()?,
                     bias_ptr,
                     out.device_ptr_u16()?,
@@ -11004,7 +11004,7 @@ mod imp {
             let out = GpuTensor::from_pool_half(x.rows, x.cols)?;
             let mods_ptr = mods.device_ptr()?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32_out16(
+                makepad_cuda_layer_norm_mul_add_f32_out16(
                     x.device_ptr()?,
                     mods_ptr.add(scale_off),
                     mods_ptr.add(shift_off),
@@ -11037,7 +11037,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(a.rows, a.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_mul_f32_precise(
+                makepad_cuda_mul_f32_precise(
                     a.device_ptr()?,
                     b.device_ptr()?,
                     out.device_ptr()?,
@@ -11083,7 +11083,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let copy_status = unsafe {
-                makepad_ggml_cuda_copy_f32(
+                makepad_cuda_copy_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     len_u32,
@@ -11092,7 +11092,7 @@ mod imp {
             };
             gpu_check(copy_status)?;
             let add_status = unsafe {
-                makepad_ggml_cuda_add_planes_vec_f32(
+                makepad_cuda_add_planes_vec_f32(
                     out.device_ptr()?,
                     row_bias.device_ptr()?,
                     cols_u32,
@@ -11119,7 +11119,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(a.rows, a.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_add_f32_precise(
+                makepad_cuda_add_f32_precise(
                     a.device_ptr()?,
                     b.device_ptr()?,
                     out.device_ptr()?,
@@ -11151,7 +11151,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_snake_rows_f32(
+                makepad_cuda_snake_rows_f32(
                     x.device_ptr()?,
                     alpha_g.device_ptr()?,
                     inv_g.device_ptr()?,
@@ -11191,7 +11191,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(out_len, out_ch)?;
             let status = unsafe {
-                makepad_ggml_cuda_tconv_stitch_f32(
+                makepad_cuda_tconv_stitch_f32(
                     y_hi.device_ptr()?,
                     y_lo.device_ptr()?,
                     out.device_ptr()?,
@@ -11248,7 +11248,7 @@ mod imp {
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_add_f32_precise(
+                makepad_cuda_add_f32_precise(
                     a.device_ptr()?,
                     b.device_ptr()?,
                     out.device_ptr()?,
@@ -11270,7 +11270,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(a.rows, a.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_add_bf16_f32(
+                makepad_cuda_add_bf16_f32(
                     a.device_ptr()?,
                     b.device_ptr()?,
                     out.device_ptr()?,
@@ -11293,7 +11293,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_bf16_round_f32(
+                makepad_cuda_bf16_round_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     (x.rows * x.cols) as u32,
@@ -11324,7 +11324,7 @@ mod imp {
             let out = GpuTensor::from_pool(residual.rows, residual.cols)?;
             let out_ptr = out.device_ptr()?;
             let status = unsafe {
-                makepad_ggml_cuda_mul_rows_vec_f32(
+                makepad_cuda_mul_rows_vec_f32(
                     update.device_ptr()?,
                     gate_buf.ptr.as_ptr().cast::<f32>(),
                     out_ptr,
@@ -11335,7 +11335,7 @@ mod imp {
             };
             gpu_check(status)?;
             let status = unsafe {
-                makepad_ggml_cuda_add_f32_precise(
+                makepad_cuda_add_f32_precise(
                     residual.device_ptr()?,
                     out_ptr,
                     out_ptr,
@@ -11380,7 +11380,7 @@ mod imp {
                 GpuTensor::from_pool(x.rows, len)?
             };
             let status = unsafe {
-                makepad_ggml_cuda_copy_submatrix_f32(
+                makepad_cuda_copy_submatrix_f32(
                     x.storage_ptr()?.add(start_u),
                     out.storage_ptr()?,
                     stride_u as u32,
@@ -11420,7 +11420,7 @@ mod imp {
             for part in parts {
                 let part_u = gpu_copy_units(half, part.cols, "gpu_concat_cols")?;
                 let status = unsafe {
-                    makepad_ggml_cuda_copy_submatrix_f32(
+                    makepad_cuda_copy_submatrix_f32(
                         part.storage_ptr()?,
                         out_ptr.add(col_off),
                         part_u as u32,
@@ -11491,7 +11491,7 @@ mod imp {
             let out_ptr = out.storage_ptr()?;
             for (part, row_off) in [(a, 0usize), (b, a.rows)] {
                 let status = unsafe {
-                    makepad_ggml_cuda_copy_submatrix_f32(
+                    makepad_cuda_copy_submatrix_f32(
                         part.storage_ptr()?,
                         out_ptr.add(row_off * cols_u),
                         cols_u as u32,
@@ -11555,7 +11555,7 @@ mod imp {
             let mut row_off = 0usize;
             for part in parts {
                 let status = unsafe {
-                    makepad_ggml_cuda_copy_submatrix_f32(
+                    makepad_cuda_copy_submatrix_f32(
                         part.storage_ptr()?,
                         out_ptr.add(row_off * cols_u),
                         cols_u as u32,
@@ -11605,7 +11605,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(parents.len() * (prior_sequence + 1), prior.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_beam_cache_reorder_append_f32(
+                makepad_cuda_beam_cache_reorder_append_f32(
                     prior.device_ptr()?,
                     step.device_ptr()?,
                     parent_gpu.device_ptr()?.cast::<u32>(),
@@ -11640,7 +11640,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             let status = unsafe {
-                makepad_ggml_cuda_silu_f32_precise(
+                makepad_cuda_silu_f32_precise(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     (x.rows * x.cols) as u32,
@@ -11764,7 +11764,7 @@ mod imp {
                 .get(&qualified_key)
                 .ok_or_else(|| format!("missing cached CUDA conv weight buffer {qualified_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_conv2d_planar_f32(
+                makepad_cuda_conv2d_planar_f32(
                     x.device_ptr()?,
                     weight.ptr.as_ptr().cast::<f32>(),
                     bias_buf.ptr.as_ptr().cast::<f32>(),
@@ -13236,7 +13236,7 @@ mod imp {
                         .get(&bias_key)
                         .ok_or_else(|| format!("missing cached CUDA conv bias buffer {bias_key}"))?;
                     gpu_check(unsafe {
-                        makepad_ggml_cuda_add_planes_vec_f32(
+                        makepad_cuda_add_planes_vec_f32(
                             out.device_ptr()?,
                             bias_buf.ptr.as_ptr().cast::<f32>(),
                             out_plane as u32,
@@ -13304,7 +13304,7 @@ mod imp {
                 .get(&qualified_key)
                 .ok_or_else(|| format!("missing cached CUDA conv weight buffer {qualified_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_conv2d_planar_strided_f32(
+                makepad_cuda_conv2d_planar_strided_f32(
                     x.device_ptr()?,
                     weight.ptr.as_ptr().cast::<f32>(),
                     bias_buf.ptr.as_ptr().cast::<f32>(),
@@ -13369,7 +13369,7 @@ mod imp {
                 .ok_or_else(|| format!("missing cached CUDA conv 1x1 buffer {qualified_key}"))?;
             let x16 = gpu_pool_acquire(in_channels * plane * size_of::<u16>())?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_f32_to_f16(
+                makepad_cuda_f32_to_f16(
                     x.device_ptr()?,
                     x16.ptr.as_ptr().cast::<u16>(),
                     (in_channels * plane) as u32,
@@ -13423,7 +13423,7 @@ mod imp {
                 .get(&bias_key)
                 .ok_or_else(|| format!("missing cached CUDA conv bias buffer {bias_key}"))?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_add_planes_vec_f32(
+                makepad_cuda_add_planes_vec_f32(
                     out.device_ptr()?,
                     bias_buf.ptr.as_ptr().cast::<f32>(),
                     plane as u32,
@@ -13605,7 +13605,7 @@ mod imp {
             while p0 < plane {
                 let m_chunk = m_chunk_cap.min(plane - p0);
                 let status = unsafe {
-                    makepad_ggml_cuda_im2col_planar_f32_to_f16(
+                    makepad_cuda_im2col_planar_f32_to_f16(
                         x.device_ptr()?,
                         slab_ptr,
                         width as u32,
@@ -13677,7 +13677,7 @@ mod imp {
                 .get(&bias_key)
                 .ok_or_else(|| format!("missing cached CUDA conv bias buffer {bias_key}"))?;
             let status = unsafe {
-                makepad_ggml_cuda_add_planes_vec_f32(
+                makepad_cuda_add_planes_vec_f32(
                     out.device_ptr()?,
                     bias_buf.ptr.as_ptr().cast::<f32>(),
                     plane as u32,
@@ -13701,7 +13701,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_relu_f32(
+                makepad_cuda_birefnet_relu_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows * x.cols,
@@ -13722,7 +13722,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_realesrgan_lrelu_f32(
+                makepad_cuda_realesrgan_lrelu_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows * x.cols,
@@ -13753,7 +13753,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(base.rows, base.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_realesrgan_scale_add_f32(
+                makepad_cuda_realesrgan_scale_add_f32(
                     base.device_ptr()?,
                     delta.device_ptr()?,
                     out.device_ptr()?,
@@ -13932,7 +13932,7 @@ mod imp {
                 .cast::<f32>();
             let data = unsafe { tensor.device_ptr_u16()?.add(row_offset * plane) };
             gpu_check(unsafe {
-                makepad_ggml_cuda_realesrgan_bias_lrelu_f16(
+                makepad_cuda_realesrgan_bias_lrelu_f16(
                     data,
                     bias_ptr,
                     plane,
@@ -14097,7 +14097,7 @@ mod imp {
                 .as_ptr()
                 .cast::<f32>();
             gpu_check(unsafe {
-                makepad_ggml_cuda_realesrgan_bias_lrelu_f32(
+                makepad_cuda_realesrgan_bias_lrelu_f32(
                     tensor.device_ptr()?,
                     bias_ptr,
                     plane,
@@ -14205,7 +14205,7 @@ mod imp {
                     Some((mirror, row)) => mirror.device_ptr_u16()?.add(row * plane),
                     None => std::ptr::null_mut(),
                 };
-                gpu_check(makepad_ggml_cuda_realesrgan_spine_axpb(
+                gpu_check(makepad_cuda_realesrgan_spine_axpb(
                     base.device_ptr()?.cast_const(),
                     delta32_ptr,
                     delta16_ptr,
@@ -14231,7 +14231,7 @@ mod imp {
             backend.prepare_device()?;
             let scratch = gpu_pool_acquire(plane * 3)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_realesrgan_quantize_rgb8_f32(
+                makepad_cuda_realesrgan_quantize_rgb8_f32(
                     x.device_ptr()?,
                     scratch.ptr.as_ptr().cast::<u8>(),
                     plane,
@@ -14261,7 +14261,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, out_width.saturating_mul(out_height))?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_resize_bilinear_f32(
+                makepad_cuda_birefnet_resize_bilinear_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     in_width as u32,
@@ -14286,7 +14286,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.cols, x.rows)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_transpose_f32(
+                makepad_cuda_paint_transpose_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows as u32,
@@ -14327,7 +14327,7 @@ mod imp {
             let o_alb = GpuTensor::from_pool(q_len, hidden)?;
             let o_mr = GpuTensor::from_pool(q_len, hidden)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_ref_attn_wide_v_f32(
+                makepad_cuda_paint_ref_attn_wide_v_f32(
                     q.device_ptr()?,
                     k.device_ptr()?,
                     v_alb.device_ptr()?,
@@ -14383,7 +14383,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(q.rows, hidden)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_attn_batched_self_f32(
+                makepad_cuda_paint_attn_batched_self_f32(
                     q.device_ptr()?,
                     k.device_ptr()?,
                     v.device_ptr()?,
@@ -14428,7 +14428,7 @@ mod imp {
                 (v, &v_pack),
             ] {
                 gpu_check(unsafe {
-                    makepad_ggml_cuda_paint_pack_heads_f32(
+                    makepad_cuda_paint_pack_heads_f32(
                         src.device_ptr()?,
                         dst.ptr.as_ptr().cast::<f32>(),
                         batch as u32,
@@ -14445,7 +14445,7 @@ mod imp {
             let p16 = gpu_pool_acquire(scores_len * size_of::<u16>())?;
             for (src, dst) in [(&q_pack, &q16), (&k_pack, &k16), (&v_pack, &v16)] {
                 gpu_check(unsafe {
-                    makepad_ggml_cuda_f32_to_f16(
+                    makepad_cuda_f32_to_f16(
                         src.ptr.as_ptr().cast::<f32>(),
                         dst.ptr.as_ptr().cast::<u16>(),
                         elems as u32,
@@ -14487,7 +14487,7 @@ mod imp {
                 .map_err(|err| format!("paint batched self qk gemm failed: {err}"))?;
             }
             gpu_check(unsafe {
-                makepad_ggml_cuda_softmax_rows_precise_f32(
+                makepad_cuda_softmax_rows_precise_f32(
                     scores_ptr,
                     scores_ptr,
                     (bh * seq) as u32,
@@ -14497,7 +14497,7 @@ mod imp {
                 )
             })?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_f32_to_f16(
+                makepad_cuda_f32_to_f16(
                     scores_ptr,
                     p16.ptr.as_ptr().cast::<u16>(),
                     scores_len as u32,
@@ -14535,7 +14535,7 @@ mod imp {
             }
             let out = GpuTensor::from_pool(q.rows, q.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_unpack_heads_f32(
+                makepad_cuda_paint_unpack_heads_f32(
                     o_pack.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
                     batch as u32,
@@ -14596,7 +14596,7 @@ mod imp {
                 .ok_or_else(|| format!("missing cached CUDA group norm buffer {vec_key}"))?;
             let gamma_ptr = vec_buf.ptr.as_ptr().cast::<f32>();
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_gn_batched_f32(
+                makepad_cuda_paint_gn_batched_f32(
                     x.device_ptr()?,
                     gamma_ptr,
                     gamma_ptr.add(channels),
@@ -14792,7 +14792,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_pose_rope_f32(
+                makepad_cuda_paint_pose_rope_f32(
                     x.device_ptr()?,
                     xyz.device_ptr()?.cast::<u32>(),
                     out.device_ptr()?,
@@ -14816,7 +14816,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_scale_f32(
+                makepad_cuda_paint_scale_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     scale,
@@ -14853,7 +14853,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_paint_pose_rope_f32(
+                makepad_cuda_paint_pose_rope_f32(
                     x.device_ptr()?,
                     xyz_g.device_ptr()?.cast::<u32>(),
                     out.device_ptr()?,
@@ -14877,7 +14877,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.cols, x.rows)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_tokens_to_planar_f32(
+                makepad_cuda_birefnet_tokens_to_planar_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.rows as u32,
@@ -14919,7 +14919,7 @@ mod imp {
             let out = GpuTensor::from_pool(out_channels, out_width * out_height)?;
             let bias_buf = gpu_upload_small(backend, bias)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_pixel_shuffle_planar_f32(
+                makepad_cuda_pixel_shuffle_planar_f32(
                     x.device_ptr()?,
                     bias_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -14981,7 +14981,7 @@ mod imp {
                 .ok_or_else(|| format!("missing cached pixel-shuffle bias {bias_key}"))?;
             let out = GpuTensor::from_pool(out_channels, out_width * out_height)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_pixel_shuffle_planar_f32(
+                makepad_cuda_pixel_shuffle_planar_f32(
                     x.device_ptr()?,
                     bias_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -15019,7 +15019,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(out_channels, out_width * out_height)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_image_to_patches_f32(
+                makepad_cuda_birefnet_image_to_patches_f32(
                     image.device_ptr()?,
                     out.device_ptr()?,
                     image_width as u32,
@@ -15042,7 +15042,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, 1)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_global_avg_pool_f32(
+                makepad_cuda_birefnet_global_avg_pool_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     x.cols as u32,
@@ -15062,7 +15062,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, plane)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_broadcast_f32(
+                makepad_cuda_birefnet_broadcast_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     plane as u32,
@@ -15085,7 +15085,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, x.cols)?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32(
+                makepad_cuda_birefnet_mul_sigmoid_mask_f32(
                     x.device_ptr()?,
                     logits.device_ptr()?,
                     out.device_ptr()?,
@@ -15155,7 +15155,7 @@ mod imp {
                 None => std::ptr::null(),
             };
             gpu_check(unsafe {
-                makepad_ggml_cuda_birefnet_swin_attention_f32(
+                makepad_cuda_birefnet_swin_attention_f32(
                     q.device_ptr()?,
                     k.device_ptr()?,
                     v.device_ptr()?,
@@ -15242,7 +15242,7 @@ mod imp {
             while p0 < plane {
                 let rows = chunk_cap.min(plane - p0);
                 gpu_check(unsafe {
-                    makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16(
+                    makepad_cuda_birefnet_deform_im2col_f32_to_f16(
                         x.device_ptr()?,
                         offset.device_ptr()?,
                         modulator.device_ptr()?,
@@ -15302,7 +15302,7 @@ mod imp {
                 .get(&bias_key)
                 .ok_or_else(|| format!("missing cached deform bias {bias_key}"))?;
             gpu_check(unsafe {
-                makepad_ggml_cuda_add_planes_vec_f32(
+                makepad_cuda_add_planes_vec_f32(
                     out.device_ptr()?,
                     bias_buffer.ptr.as_ptr().cast::<f32>(),
                     plane as u32,
@@ -15376,7 +15376,7 @@ mod imp {
             let padded_ptr =
                 conv_scratch_ptr(0, (in_channels + 1) * padded_plane * size_of::<u16>())?;
             let status = unsafe {
-                makepad_ggml_cuda_pad_planar_f32_to_f16(
+                makepad_cuda_pad_planar_f32_to_f16(
                     x.device_ptr()?,
                     padded_ptr.cast::<u16>(),
                     width as u32,
@@ -15456,7 +15456,7 @@ mod imp {
             let out = GpuTensor::from_pool(out_channels, plane)?;
             let bias_buf = gpu_upload_small(backend, bias)?;
             let status = unsafe {
-                makepad_ggml_cuda_conv_extract_bias_f32(
+                makepad_cuda_conv_extract_bias_f32(
                     acc_ptr,
                     bias_buf.ptr.as_ptr().cast::<f32>(),
                     out.device_ptr()?,
@@ -15526,7 +15526,7 @@ mod imp {
                 .ok_or_else(|| format!("missing cached CUDA group norm buffer {vec_key}"))?;
             let gamma_ptr = vec_buf.ptr.as_ptr().cast::<f32>();
             let status = unsafe {
-                makepad_ggml_cuda_group_norm_planar_multi_f32(
+                makepad_cuda_group_norm_planar_multi_f32(
                     x.device_ptr()?,
                     gamma_ptr,
                     gamma_ptr.add(channels),
@@ -15562,7 +15562,7 @@ mod imp {
             backend.prepare_device()?;
             let out = GpuTensor::from_pool(x.rows, width * height * 4)?;
             let status = unsafe {
-                makepad_ggml_cuda_upsample2x_planar_f32(
+                makepad_cuda_upsample2x_planar_f32(
                     x.device_ptr()?,
                     out.device_ptr()?,
                     width as u32,
@@ -15631,7 +15631,7 @@ mod imp {
                 .map_err(|err| format!("gpu_attention_planar qk gemm failed: {err}"))?;
             }
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_precise_f32(
+                makepad_cuda_softmax_rows_precise_f32(
                     scores_ptr,
                     scores_ptr,
                     seq as u32,
@@ -15942,7 +15942,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_get_row_f32(
+                makepad_cuda_nvfp4_get_row_f32(
                     weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
                     n_cols as u32,
@@ -15963,7 +15963,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_get_row_f32(
+                makepad_cuda_nvfp4_get_row_f32(
                     weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32
                         .inner
@@ -16003,7 +16003,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_get_row_f32_device_u32(
+                makepad_cuda_nvfp4_get_row_f32_device_u32(
                     weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
                     n_cols as u32,
@@ -16044,7 +16044,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32(
+                makepad_cuda_nvfp4_get_rows_f32_device_u32(
                     weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     row_indices_device_u32,
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
@@ -16065,7 +16065,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_quantize_q8_1_f32(
+                makepad_cuda_quantize_q8_1_f32(
                     input_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output_q8_1.inner.ptr.as_ptr().cast::<u8>(),
                     n as u32,
@@ -16084,7 +16084,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_quantize_q8_1_mmq_f32(
+                makepad_cuda_quantize_q8_1_mmq_f32(
                     input_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output_q8_1_mmq.inner.ptr.as_ptr().cast::<u8>(),
                     n_cols as u32,
@@ -16105,7 +16105,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
+                makepad_cuda_quantize_q8_1_mmq_f32_padded(
                     input_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output_q8_1_mmq.inner.ptr.as_ptr().cast::<u8>(),
                     n_cols as u32,
@@ -16120,7 +16120,7 @@ mod imp {
         pub fn nvfp4_q8_1_mmq_fixup_f32_len(&self) -> Result<usize, String> {
             self.prepare_device()?;
             let mut len = 0u32;
-            let status = unsafe { makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(&mut len) };
+            let status = unsafe { makepad_cuda_nvfp4_q8_1_mmq_fixup_f32_len(&mut len) };
             crate::check(status).map_err(|err| err.to_string())?;
             Ok(len as usize)
         }
@@ -16134,7 +16134,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_quantize_nvfp4_f32(
+                makepad_cuda_quantize_nvfp4_f32(
                     input_f32.inner.ptr.as_ptr().cast::<f32>(),
                     input_scale,
                     output_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
@@ -16155,7 +16155,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_q8_1_matvec(
+                makepad_cuda_nvfp4_q8_1_matvec(
                     input_q8_1.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
@@ -16178,7 +16178,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_q8_1_matmul(
+                makepad_cuda_nvfp4_q8_1_matmul(
                     input_q8_1.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
@@ -16202,7 +16202,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_nvfp4_matvec(
+                makepad_cuda_nvfp4_nvfp4_matvec(
                     input_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     input_scale,
@@ -16227,7 +16227,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_nvfp4_matmul(
+                makepad_cuda_nvfp4_nvfp4_matmul(
                     input_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     input_scale,
@@ -16254,7 +16254,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_nvfp4_q8_1_mmq_matmul(
+                makepad_cuda_nvfp4_q8_1_mmq_matmul(
                     input_q8_1_mmq.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
@@ -16277,7 +16277,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_scale_f32_inplace(
+                makepad_cuda_scale_f32_inplace(
                     values.inner.ptr.as_ptr().cast::<f32>(),
                     scale,
                     n as u32,
@@ -16296,7 +16296,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_scale_f32_inplace_device_f32_index(
+                makepad_cuda_scale_f32_inplace_device_f32_index(
                     values.inner.ptr.as_ptr().cast::<f32>(),
                     scales.inner.ptr.as_ptr().cast::<f32>(),
                     scale_index as u32,
@@ -16315,7 +16315,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_f32_to_bf16(
+                makepad_cuda_f32_to_bf16(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<u16>(),
                     n as u32,
@@ -16338,7 +16338,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_layer_norm_mul_add_f32(
+                makepad_cuda_layer_norm_mul_add_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     gamma.inner.ptr.as_ptr().cast::<f32>(),
                     beta.inner.ptr.as_ptr().cast::<f32>(),
@@ -16362,7 +16362,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_add_f32_precise(
+                makepad_cuda_add_f32_precise(
                     left.inner.ptr.as_ptr().cast::<f32>(),
                     right.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -16382,7 +16382,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_mul_f32_precise(
+                makepad_cuda_mul_f32_precise(
                     left.inner.ptr.as_ptr().cast::<f32>(),
                     right.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -16403,7 +16403,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_mul_rows_vec_f32(
+                makepad_cuda_mul_rows_vec_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     vec.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -16423,7 +16423,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_gelu_f32_precise(
+                makepad_cuda_gelu_f32_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
@@ -16443,7 +16443,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_precise_f32(
+                makepad_cuda_softmax_rows_precise_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     probs.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -16473,7 +16473,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_conv2d_planar_f32(
+                makepad_cuda_conv2d_planar_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights.inner.ptr.as_ptr().cast::<f32>(),
                     bias.inner.ptr.as_ptr().cast::<f32>(),
@@ -16508,7 +16508,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_group_norm_planar_f32(
+                makepad_cuda_group_norm_planar_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     gamma.inner.ptr.as_ptr().cast::<f32>(),
                     beta.inner.ptr.as_ptr().cast::<f32>(),
@@ -16533,7 +16533,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_silu_f32_precise(
+                makepad_cuda_silu_f32_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
@@ -16593,7 +16593,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32(
+                makepad_cuda_affine_qmv_f32(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32
                         .inner
@@ -16675,7 +16675,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_precise(
+                makepad_cuda_affine_qmv_f32_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32
                         .inner
@@ -16724,7 +16724,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_rows_precise(
+                makepad_cuda_affine_qmv_f32_rows_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -16762,7 +16762,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_q8_1_qmv_f32_precise(
+                makepad_cuda_affine_q8_1_qmv_f32_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     input_q8_1.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_u32
@@ -16816,7 +16816,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
+                makepad_cuda_affine_qmv_f32_select_plane_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -16861,7 +16861,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
+                makepad_cuda_affine_qmv_f32_select_plane_precise(
                     input_bf16
                         .inner
                         .ptr
@@ -16916,7 +16916,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise(
+                makepad_cuda_affine_qmv_f32_select_plane_rows_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -16964,7 +16964,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise(
+                makepad_cuda_affine_qmv_f32_select_plane_rows_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -17014,7 +17014,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
+                makepad_cuda_affine_qmv_f32_select_planes_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -17055,7 +17055,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_fixed8_known_valid_precise(
+                makepad_cuda_affine_qmv_f32_select_planes_fixed8_known_valid_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -17097,7 +17097,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
+                makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     input_words_per_slot as u32,
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
@@ -17140,7 +17140,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_fixed8_known_valid_precise(
+                makepad_cuda_affine_qmv_f32_select_planes_input_offsets_fixed8_known_valid_precise(
                     input_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     input_words_per_slot as u32,
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
@@ -17174,7 +17174,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_get_row_f32(
+                makepad_cuda_affine_get_row_f32(
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -17202,7 +17202,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_get_row_f32_device_u32(
+                makepad_cuda_affine_get_row_f32_device_u32(
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -17230,7 +17230,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_affine_get_row_f32_device_u32(
+                makepad_cuda_affine_get_row_f32_device_u32(
                     packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
                     scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -17254,7 +17254,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_add_f32(
+                makepad_cuda_add_f32(
                     left.inner.ptr.as_ptr().cast::<f32>(),
                     right.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -17275,7 +17275,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_copy_f32(
+                makepad_cuda_copy_f32(
                     input.inner.ptr.as_ptr().cast::<f32>().add(input_offset_elems),
                     output
                         .inner
@@ -17300,7 +17300,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_weighted_sum_rows_f32(
+                makepad_cuda_weighted_sum_rows_f32(
                     batched_inputs.inner.ptr.as_ptr().cast::<f32>(),
                     weights.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17323,7 +17323,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_weighted_sum_rows_grouped_f32(
+                makepad_cuda_weighted_sum_rows_grouped_f32(
                     batched_inputs.inner.ptr.as_ptr().cast::<f32>(),
                     weights.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17346,7 +17346,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_add_scaled_rows_f32(
+                makepad_cuda_add_scaled_rows_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     scales.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17370,7 +17370,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_add_scaled_rows_f32_indexed(
+                makepad_cuda_add_scaled_rows_f32_indexed(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     scales.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17393,7 +17393,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_mul_f32(
+                makepad_cuda_mul_f32(
                     left.inner.ptr.as_ptr().cast::<f32>(),
                     right.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -17412,7 +17412,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_gelu_f32(
+                makepad_cuda_gelu_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
@@ -17431,7 +17431,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_geglu_split_f32(
+                makepad_cuda_geglu_split_f32(
                     gate_up.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
@@ -17453,7 +17453,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_geglu_split_f32_rows(
+                makepad_cuda_geglu_split_f32_rows(
                     gate_up.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -17484,7 +17484,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_ssm_conv_f32(
+                makepad_cuda_ssm_conv_f32(
                     src0.inner.ptr.as_ptr().cast::<f32>(),
                     src1.inner.ptr.as_ptr().cast::<f32>(),
                     dst.inner.ptr.as_ptr().cast::<f32>(),
@@ -17533,7 +17533,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_gated_delta_net_f32(
+                makepad_cuda_gated_delta_net_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     k.inner.ptr.as_ptr().cast::<f32>(),
                     v.inner.ptr.as_ptr().cast::<f32>(),
@@ -17592,7 +17592,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_gated_delta_net_f32(
+                makepad_cuda_gated_delta_net_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     k.inner.ptr.as_ptr().cast::<f32>(),
                     v.inner.ptr.as_ptr().cast::<f32>(),
@@ -17637,7 +17637,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_row_weighted_f32(
+                makepad_cuda_rms_norm_row_weighted_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17659,7 +17659,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+                makepad_cuda_rms_norm_row_weighted_f32_f32weights(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17681,7 +17681,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise(
+                makepad_cuda_rms_norm_row_weighted_f32_f32weights_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17704,7 +17704,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_row_weighted_f32(
+                makepad_cuda_rms_norm_row_weighted_f32(
                     input
                         .inner
                         .ptr
@@ -17732,7 +17732,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+                makepad_cuda_rms_norm_row_weighted_f32_f32weights(
                     input
                         .inner
                         .ptr
@@ -17761,7 +17761,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_weighted_f32(
+                makepad_cuda_rms_norm_rows_weighted_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17787,7 +17787,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+                makepad_cuda_rms_norm_rows_weighted_f32_f32weights(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17813,7 +17813,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
+                makepad_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -17841,7 +17841,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_weighted_f32(
+                makepad_cuda_rms_norm_rows_weighted_f32(
                     input
                         .inner
                         .ptr
@@ -17879,7 +17879,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+                makepad_cuda_rms_norm_rows_weighted_f32_f32weights(
                     input
                         .inner
                         .ptr
@@ -17914,7 +17914,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
+                makepad_cuda_rms_norm_rows_no_scale_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -17938,7 +17938,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise(
+                makepad_cuda_rms_norm_rows_no_scale_f32_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -17964,7 +17964,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
+                makepad_cuda_rms_norm_rows_no_scale_f32(
                     input
                         .inner
                         .ptr
@@ -18000,7 +18000,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rope_rows_f32(
+                makepad_cuda_rope_rows_f32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -18028,7 +18028,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_rope_rows_f32_device_u32(
+                makepad_cuda_rope_rows_f32_device_u32(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -18084,7 +18084,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_kv_append_f32(
+                makepad_cuda_kv_append_f32(
                     keys.inner.ptr.as_ptr().cast::<f32>().add(key_offset_elems),
                     values
                         .inner
@@ -18117,7 +18117,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_kv_append_f32_device_u32(
+                makepad_cuda_kv_append_f32_device_u32(
                     keys.inner.ptr.as_ptr().cast::<f32>(),
                     values.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
@@ -18173,7 +18173,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_kv_append_f32_device_u32(
+                makepad_cuda_kv_append_f32_device_u32(
                     keys.inner.ptr.as_ptr().cast::<f32>().add(key_offset_elems),
                     values
                         .inner
@@ -18216,7 +18216,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_qkv_norm_rope_cache_f32(
+                makepad_cuda_qkv_norm_rope_cache_f32(
                     qkv.inner.ptr.as_ptr().cast::<f32>(),
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -18268,7 +18268,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32(
+                makepad_cuda_qkv_norm_rope_cache_rows_f32(
                     qkv.inner.ptr.as_ptr().cast::<f32>(),
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -18360,7 +18360,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32(
+                makepad_cuda_qkv_norm_rope_cache_f32_device_u32(
                     qkv.inner.ptr.as_ptr().cast::<f32>(),
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -18411,7 +18411,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32_device_u32(
+                makepad_cuda_qkv_norm_rope_cache_rows_f32_device_u32(
                     qkv.inner.ptr.as_ptr().cast::<f32>(),
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
@@ -18455,7 +18455,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_logits_seq_f32(
+                makepad_cuda_attention_logits_seq_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     logits.inner.ptr.as_ptr().cast::<f32>(),
@@ -18489,7 +18489,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
+                makepad_cuda_attention_logits_seq_f32_device_u32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     logits.inner.ptr.as_ptr().cast::<f32>(),
@@ -18524,7 +18524,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
+                makepad_cuda_attention_logits_seq_f32_device_u32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     logits.inner.ptr.as_ptr().cast::<f32>(),
@@ -18552,7 +18552,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_f32(
+                makepad_cuda_softmax_rows_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     probs.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -18574,7 +18574,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_f32_device_u32(
+                makepad_cuda_softmax_rows_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     probs.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -18597,7 +18597,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_causal_f32(
+                makepad_cuda_softmax_rows_causal_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     query_count as u32,
                     row_count as u32,
@@ -18621,7 +18621,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_causal_f32_device_u32(
+                makepad_cuda_softmax_rows_causal_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     query_count as u32,
                     row_count as u32,
@@ -18646,7 +18646,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_causal_bf16(
+                makepad_cuda_softmax_rows_causal_bf16(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     probs.inner.ptr.as_ptr().cast::<u16>(),
                     query_count as u32,
@@ -18672,7 +18672,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_causal_bf16_device_u32(
+                makepad_cuda_softmax_rows_causal_bf16_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     probs.inner.ptr.as_ptr().cast::<u16>(),
                     query_count as u32,
@@ -18702,7 +18702,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_softmax_rows_causal_vision_bf16(
+                makepad_cuda_softmax_rows_causal_vision_bf16(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     probs.inner.ptr.as_ptr().cast::<u16>(),
                     query_count as u32,
@@ -19162,7 +19162,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_weighted_sum_f32(
+                makepad_cuda_attention_weighted_sum_f32(
                     probs.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -19199,7 +19199,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_weighted_sum_f32(
+                makepad_cuda_attention_weighted_sum_f32(
                     probs.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner
@@ -19238,7 +19238,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_weighted_sum_f32_device_u32(
+                makepad_cuda_attention_weighted_sum_f32_device_u32(
                     probs.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -19273,7 +19273,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
+                makepad_cuda_attention_softmax_weighted_sum_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -19310,7 +19310,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
+                makepad_cuda_attention_softmax_weighted_sum_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner
@@ -19350,7 +19350,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
+                makepad_cuda_attention_softmax_weighted_sum_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -19387,7 +19387,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
+                makepad_cuda_attention_softmax_weighted_sum_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
@@ -19423,7 +19423,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
+                makepad_cuda_attention_seq_softmax_weighted_sum_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
@@ -19461,7 +19461,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32(
+                makepad_cuda_attention_seq_softmax_weighted_sum_rows_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
@@ -19499,7 +19499,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
+                makepad_cuda_attention_seq_softmax_weighted_sum_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
@@ -19568,7 +19568,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
+                makepad_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
@@ -19605,7 +19605,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+                makepad_cuda_attention_seq_softmax_weighted_sum_rows_f32_device_u32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
@@ -19638,7 +19638,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_flash_attn_f32_packed(
+                makepad_cuda_flash_attn_f32_packed(
                     q.inner.ptr.as_ptr().cast::<f32>(),
                     k.inner.ptr.as_ptr().cast::<f32>(),
                     v.inner.ptr.as_ptr().cast::<f32>(),
@@ -19661,7 +19661,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_argmax_f32(
+                makepad_cuda_argmax_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     out_index.inner.ptr.as_ptr().cast::<u32>(),
                     n as u32,
@@ -19679,7 +19679,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_argmax_f32(
+                makepad_cuda_argmax_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     out_index_device_u32,
                     n as u32,
@@ -19702,7 +19702,7 @@ mod imp {
             }
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_masked_argmax_f32(
+                makepad_cuda_masked_argmax_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     disallowed_token_ids.inner.ptr.as_ptr().cast::<u32>(),
                     disallowed_count as u32,
@@ -19741,7 +19741,7 @@ mod imp {
         ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
-                makepad_ggml_cuda_masked_argmax_f32_device_u32(
+                makepad_cuda_masked_argmax_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     disallowed_token_ids.inner.ptr.as_ptr().cast::<u32>(),
                     disallowed_count_device_u32,

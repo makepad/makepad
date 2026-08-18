@@ -29,7 +29,7 @@ use crate::unet_forward::{
     cfg_ddim_gpu, pack_cfg_x12_gpu, walk_extras_on_resident, write_dual_cache, ExtrasJobCtx,
     VoxelLevel, VoxelPyramid,
 };
-use makepad_ggml::backend::cuda::{gpu_concat_cols, gpu_download, gpu_upload};
+use makepad_ai_common::backend::cuda::{gpu_concat_cols, gpu_download, gpu_upload};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -167,7 +167,7 @@ impl NativeHunyuanExec {
         let p = vae
             .encode_mean(rgb01_planar, width, height)
             .map_err(PbrError::Internal)?;
-        let data = makepad_ggml::backend::cuda::gpu_download(&p.t).map_err(PbrError::Internal)?;
+        let data = makepad_ai_common::backend::cuda::gpu_download(&p.t).map_err(PbrError::Internal)?;
         Ok((data, p.width, p.height))
     }
 
@@ -297,7 +297,7 @@ impl PaintModelExec for NativeHunyuanExec {
         if let Err(detail) = required_bins_present_at(&self.bins) {
             return ExecStatus::MissingCheckpoints { detail };
         }
-        if !makepad_ggml::backend::cuda::gpu_device_available() {
+        if !makepad_ai_common::backend::cuda::gpu_device_available() {
             return ExecStatus::NoCuda {
                 detail: "CUDA device/runtime unavailable".into(),
             };
@@ -521,10 +521,10 @@ impl PaintModelExec for NativeHunyuanExec {
             .map_err(PbrError::Internal)?;
         batch.sample = parts.into_iter().flatten().collect();
         if std::env::var_os("MAKEPAD_GPU_PROF").is_some() {
-            let perf = makepad_ggml::backend::cuda::gpu_perf_stats(false);
+            let perf = makepad_ai_common::backend::cuda::gpu_perf_stats(false);
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("PBR_GPU_PROF ")
+                makepad_ai_common::backend::prof::report_and_reset("PBR_GPU_PROF ")
             );
             eprintln!(
                 "PBR_GPU_PERF evict={} stream={} stream_mb={:.1} pool_fresh={} pool_fresh_mb={:.1} oom_clears={} free_mb={:.0}",

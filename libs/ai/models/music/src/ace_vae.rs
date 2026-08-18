@@ -379,7 +379,7 @@ impl AceVaeDecoder {
     pub fn decode_device(&self, latents: &[f32], frames: usize) -> Result<(Vec<f32>, Vec<f32>)> {
         use makepad_ai_sfx::sa3::dev_err;
         use makepad_ai_sfx::sa3::F16Weight;
-        use makepad_ggml::backend::cuda::{
+        use makepad_ai_common::backend::cuda::{
             gpu_add, gpu_concat_rows, gpu_download, gpu_linear_nt_cached, gpu_slice_rows, gpu_upload,
             GpuTensor,
         };
@@ -405,7 +405,7 @@ impl AceVaeDecoder {
         ) -> Result<(GpuTensor, usize)> {
             use makepad_ai_sfx::sa3::dev_err;
             use makepad_ai_sfx::sa3::F16Weight;
-            use makepad_ggml::backend::cuda::{
+            use makepad_ai_common::backend::cuda::{
                 gpu_add, gpu_concat_rows, gpu_linear_nt_cached, gpu_slice_rows, gpu_upload,
             };
             let span = (k - 1) * dilation;
@@ -442,7 +442,7 @@ impl AceVaeDecoder {
 
         fn snake_tm(x: &GpuTensor, alpha: &[f32], inv_beta: &[f32]) -> Result<GpuTensor> {
             use makepad_ai_sfx::sa3::dev_err;
-            use makepad_ggml::backend::cuda::gpu_snake;
+            use makepad_ai_common::backend::cuda::gpu_snake;
             gpu_snake(x, alpha, inv_beta).map_err(|e| dev_err("ace vae snake", e))
         }
 
@@ -460,7 +460,7 @@ impl AceVaeDecoder {
         ) -> Result<(GpuTensor, usize)> {
             use makepad_ai_sfx::sa3::dev_err;
             use makepad_ai_sfx::sa3::F16Weight;
-            use makepad_ggml::backend::cuda::gpu_linear_nt_cached;
+            use makepad_ai_common::backend::cuda::gpu_linear_nt_cached;
             // Fallback: download, CPU tconv, upload. Last stages are huge;
             // the GEMM upsample below covers stride convs when k==2*stride.
             if k != 2 * stride {
@@ -486,7 +486,7 @@ impl AceVaeDecoder {
                 .map_err(|e| dev_err("ace vae tlo", e))?;
             let y_lo = gpu_linear_nt_cached(x, "acevae", &[hi_w.part()], &[])
                 .map_err(|e| dev_err("ace vae thi", e))?;
-            let g = makepad_ggml::backend::cuda::gpu_tconv_stitch(
+            let g = makepad_ai_common::backend::cuda::gpu_tconv_stitch(
                 &y_hi, &y_lo, len, out_ch, stride, padding, k,
             )
             .map_err(|e| dev_err("ace vae stitch", e))?;

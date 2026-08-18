@@ -19,7 +19,7 @@ use crate::skin_tokens_condition::{
     SkinTokensConditionSelection,
 };
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
 
 pub const SKIN_TOKENS_NEURAL_NAMESPACE: &str = "skin-tokens-tokenrig-bf16";

@@ -192,7 +192,7 @@ impl Flux2KleinPipeline {
         if prof {
             // Discard text-encode/VAE-encode counters so the denoise report
             // covers only the loop below.
-            let _ = makepad_ggml::backend::prof::report_and_reset("");
+            let _ = makepad_ai_common::backend::prof::report_and_reset("");
         }
         let started = std::time::Instant::now();
         let mut step_residuals = Vec::new();
@@ -224,7 +224,7 @@ impl Flux2KleinPipeline {
         if prof {
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("flux2 prof denoise ")
+                makepad_ai_common::backend::prof::report_and_reset("flux2 prof denoise ")
             );
         }
         flux2_dit_clear_pool();
@@ -237,7 +237,7 @@ impl Flux2KleinPipeline {
             eprintln!("flux2 prof vae_decode ms={decode_ms:.1}");
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("flux2 prof vae ")
+                makepad_ai_common::backend::prof::report_and_reset("flux2 prof vae ")
             );
         }
         let png_started = std::time::Instant::now();
@@ -565,7 +565,7 @@ impl Flux2DevPipeline {
 
         let prof = std::env::var_os("MAKEPAD_GPU_PROF").is_some();
         if prof {
-            let _ = makepad_ggml::backend::prof::report_and_reset("");
+            let _ = makepad_ai_common::backend::prof::report_and_reset("");
         }
         let denoise_started = std::time::Instant::now();
         let mut step_predictions = Vec::new();
@@ -599,7 +599,7 @@ impl Flux2DevPipeline {
         if prof {
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("flux2dev prof denoise ")
+                makepad_ai_common::backend::prof::report_and_reset("flux2dev prof denoise ")
             );
         }
         flux2_dit_clear_pool();
@@ -619,7 +619,7 @@ impl Flux2DevPipeline {
             eprintln!("flux2dev prof vae_decode ms={decode_ms:.1}");
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("flux2dev prof vae ")
+                makepad_ai_common::backend::prof::report_and_reset("flux2dev prof vae ")
             );
         }
         let png_started = std::time::Instant::now();

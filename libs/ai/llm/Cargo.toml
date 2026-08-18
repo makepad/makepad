@@ -8,11 +8,9 @@ license = "MIT"
 [dependencies]
 # Bake the metallib at build time. Without this, MetalRuntime::new() compiles
 # the 13k-line shader source on the GPU and can stall WindowServer.
-makepad-ggml = { path = "../../ggml", features = ["metal-precompile"] }
 makepad-ai-loader = { path = "../loader" }
-
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-cuda = { path = "../cuda" }
+makepad-ai-metal = { path = "../metal", features = ["metal-precompile"] }
 
 [[bin]]
 name = "llama-load"

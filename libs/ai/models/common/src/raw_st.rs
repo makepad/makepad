@@ -168,7 +168,7 @@ impl Flux2SafetensorsHeader {
                 .chunks_exact(2)
                 .map(|chunk| {
                     let word = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    makepad_ggml::f16_to_f32(word)
+                    crate::f16_to_f32(word)
                 })
                 .collect()),
             "F8_E4M3" => {
@@ -182,7 +182,7 @@ impl Flux2SafetensorsHeader {
                 let scale = scale.first().copied().unwrap_or(1.0);
                 Ok(bytes
                     .iter()
-                    .map(|&byte| makepad_ggml::f8_e4m3_to_f32(byte) * scale)
+                    .map(|&byte| crate::f8_e4m3_to_f32(byte) * scale)
                     .collect())
             }
             other => Err(DiffusionError::model(format!(
@@ -197,7 +197,7 @@ impl Flux2SafetensorsHeader {
         let values = self.read_f32(name)?;
         let mut out = Vec::with_capacity(values.len() * 2);
         for value in values {
-            out.extend_from_slice(&makepad_ggml::f32_to_f16(value).to_le_bytes());
+            out.extend_from_slice(&crate::f32_to_f16(value).to_le_bytes());
         }
         Ok(out)
     }

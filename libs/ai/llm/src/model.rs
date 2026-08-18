@@ -2,7 +2,7 @@ mod gguf_meta;
 mod qwen35_config;
 mod qwen35moe_config;
 
-use makepad_ggml::TensorType;
+use crate::TensorType;
 
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufFile, GgufTensorInfo};

@@ -4,7 +4,7 @@
 
 use crate::cuda_unet::f16_bytes;
 use crate::torch_bin::{self, TorchDtype};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_add_rows_broadcast, gpu_concat_cols, gpu_concat_rows, gpu_conv2d_nchw_cached,
     gpu_conv2d_nchw_packed, gpu_conv2d_planar_cached, gpu_conv2d_planar_strided, gpu_device_available,
     gpu_download, gpu_group_norm_planar, gpu_linear_f32_resident, gpu_linear_nt_cached,
@@ -15,7 +15,7 @@ use makepad_ggml::backend::cuda::{
     gpu_upload, gpu_upsample_nearest2x,
     GpuLinearPart, GpuTensor,
 };
-use makepad_ggml::quant::GGML_TYPE_F16;
+use makepad_ai_common::quant::GGML_TYPE_F16;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;

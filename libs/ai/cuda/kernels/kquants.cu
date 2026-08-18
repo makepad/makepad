@@ -98,7 +98,7 @@ static __global__ void makepad_ggml_kq_dequant_q4_k_bf16_kernel(
         d * sc2 * static_cast<float>(q >> 4u) - dmin * m2);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_dequant_q4_k_bf16(
+extern "C" cudaError_t makepad_cuda_dequant_q4_k_bf16(
         const void *src_blocks,
         void *dst_bf16,
         uint32_t n_super_blocks,
@@ -159,7 +159,7 @@ static __global__ void makepad_ggml_kq_dequant_q6_k_bf16_kernel(
     out[96] = makepad_ggml_kq_f32_to_bf16_bits(d * static_cast<float>(sc[is + 6]) * q4);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_dequant_q6_k_bf16(
+extern "C" cudaError_t makepad_cuda_dequant_q6_k_bf16(
         const void *src_blocks,
         void *dst_bf16,
         uint32_t n_super_blocks,
@@ -203,7 +203,7 @@ static __global__ void makepad_ggml_kq_dequant_q4_0_bf16_kernel(
         d * static_cast<float>(static_cast<int32_t>(q >> 4u) - 8));
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_dequant_q4_0_bf16(
+extern "C" cudaError_t makepad_cuda_dequant_q4_0_bf16(
         const void *src_blocks,
         void *dst_bf16,
         uint32_t n_blocks,
@@ -283,7 +283,7 @@ static __global__ void makepad_ggml_kq_dequant_nvfp4_pairs_bf16_kernel(
     out[1] = makepad_ggml_kq_f32_to_bf16_bits(v1);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_dequant_nvfp4_pairs_bf16(
+extern "C" cudaError_t makepad_cuda_dequant_nvfp4_pairs_bf16(
         const void *packed_blob,
         void *dst_bf16,
         uint32_t rows,
@@ -354,7 +354,7 @@ static __global__ void makepad_ggml_kq_dequant_f8_e4m3_bf16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_dequant_f8_e4m3_bf16(
+extern "C" cudaError_t makepad_cuda_dequant_f8_e4m3_bf16(
         const void *src_bytes,
         void *dst_bf16,
         uint32_t count,
@@ -399,7 +399,7 @@ static __global__ void makepad_ggml_kq_quant_bf16_f8_e4m3_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_quant_bf16_f8_e4m3(
+extern "C" cudaError_t makepad_cuda_quant_bf16_f8_e4m3(
         const void *src_bf16,
         void *dst_bytes,
         float inv_scale,
@@ -439,7 +439,7 @@ static __global__ void makepad_ggml_kq_get_rows_f8_e4m3_f32_kernel(
     dst[idx] = __uint_as_float(makepad_ggml_kq_f8_e4m3_to_f32_bits(src[src_index]));
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_get_rows_f8_e4m3_f32(
+extern "C" cudaError_t makepad_cuda_get_rows_f8_e4m3_f32(
         const void *src_bytes,
         const void *row_indices_i32,
         void *dst_f32,

@@ -13,7 +13,7 @@ use crate::flux::{
 };
 use crate::flux_transformer::LoadedFluxTransformerWeights;
 use crate::{emit_byte_progress, DiffusionError, ProgressHook, Result};
-use makepad_ggml::{
+use makepad_ai_common::{
     ggml_pad, BufferUsage, Context, MappedRegion, GGML_MEM_ALIGN,
 };
 use makepad_ai_llm::{GgufFile, GgufTensorInfo};
@@ -288,7 +288,7 @@ fn try_map_weights(
     file: &GgufFile,
     tensors: &[&GgufTensorInfo],
     dirty: usize,
-) -> Option<(Context, BTreeMap<String, makepad_ggml::TensorId>, bool)> {
+) -> Option<(Context, BTreeMap<String, makepad_ai_common::TensorId>, bool)> {
     let region = match MappedRegion::map_file(&file.path) {
         Ok(region) => Arc::new(region),
         Err(err) => {
@@ -336,7 +336,7 @@ fn load_owned_weights(
     tensors: &[&GgufTensorInfo],
     extra_bytes: usize,
     progress: &mut Option<ProgressHook>,
-) -> Result<(Context, BTreeMap<String, makepad_ggml::TensorId>, bool)> {
+) -> Result<(Context, BTreeMap<String, makepad_ai_common::TensorId>, bool)> {
     let mut total = extra_bytes;
     for tensor in tensors {
         let size = usize::try_from(tensor.size_bytes).map_err(|_| {
@@ -349,7 +349,7 @@ fn load_owned_weights(
             .checked_add(size)
             .ok_or_else(|| DiffusionError::model("flux GGUF arena overflow"))?;
     }
-    let mut ctx = Context::new(makepad_ggml::InitParams {
+    let mut ctx = Context::new(makepad_ai_common::InitParams {
         mem_size: total,
         mem_buffer: None,
         no_alloc: false,

@@ -26,7 +26,7 @@ use crate::trellis::{
 };
 use crate::{DiffusionError, Result};
 use makepad_ai_loader::MlxDType;
-use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
+use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
 
 const MOD_COLS: usize = 6 * T2_MODEL_CHANNELS; // 9216 per block
 const T_FREQ_DIM: usize = 256;

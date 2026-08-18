@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::slice;
 
-use crate::backend::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
+use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
-use super::{
+use crate::runtime::{
     BufferStorageMode, MetalBuffer, MetalBufferBindingRef, MetalPipeline, MetalPipelineDescriptor,
     MetalRuntime, MetalSize,
 };

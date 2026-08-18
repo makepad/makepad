@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use makepad_ggml::{TensorId, TensorType};
+use makepad_ai_llm::{TensorId, TensorType};
 use makepad_ai_llm::runtime::{
     allocate_hybrid_shared_cache_tensors, build_hybrid_decode_graph_with_attention_key_count,
 };

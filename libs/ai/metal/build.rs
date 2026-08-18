@@ -39,6 +39,15 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "macos" {
         build_metallib();
+    } else {
+        // env! sites in macos-only modules still need a value if rustc
+        // type-checks them. Point at this crate's shader tree.
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let metal_dir = format!("{manifest_dir}/shaders/ggml");
+        println!("cargo:rustc-env=MAKEPAD_METAL_SHADER_DIR={metal_dir}");
+        println!("cargo:rustc-env=MAKEPAD_GGML_METAL_SHADER_DIR={metal_dir}");
+        println!("cargo:rustc-env=MAKEPAD_METALLIB=/dev/null");
+        println!("cargo:rustc-env=MAKEPAD_GGML_METALLIB=/dev/null");
     }
     // non-macos targets: nothing to do, no metallib, no shader_dir line —
     // dependents see DEP_MAKEPAD_AI_METAL_METALLIB / _SHADER_DIR unset.
@@ -65,6 +74,8 @@ fn build_metallib() {
     // fallback in libs/ggml needs it regardless of whether a real metallib
     // was baked.
     println!("cargo:shader_dir={}", metal_dir);
+    println!("cargo:rustc-env=MAKEPAD_METAL_SHADER_DIR={metal_dir}");
+    println!("cargo:rustc-env=MAKEPAD_GGML_METAL_SHADER_DIR={metal_dir}");
 
     let precompile_default = env::var_os("CARGO_FEATURE_METAL_PRECOMPILE").is_some();
     let precompile_enabled = env::var("MAKEPAD_GGML_METAL_PRECOMPILE")
@@ -176,7 +187,8 @@ fn build_metallib() {
 fn emit_metallib_env(metallib_path: &str) {
     // Own crate's rustc-env: harmless (this crate has no Rust code that
     // reads it today), kept for parity/future use.
-    println!("cargo:rustc-env=MAKEPAD_GGML_METALLIB={}", metallib_path);
+    println!("cargo:rustc-env=MAKEPAD_METALLIB={metallib_path}");
+    println!("cargo:rustc-env=MAKEPAD_GGML_METALLIB={metallib_path}");
     // links-metadata handshake: flows to immediate dependents (libs/ggml)
     // as DEP_MAKEPAD_AI_METAL_METALLIB=<metallib_path>.
     println!("cargo:metallib={}", metallib_path);

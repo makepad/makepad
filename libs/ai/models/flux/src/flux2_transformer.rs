@@ -34,7 +34,7 @@ use crate::backend::{
 };
 use crate::flux2::{Flux2PosId, Flux2TransformerConfig, Flux2WeightFile};
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
+use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
 use std::path::{Path, PathBuf};
 
 pub const FLUX2_DIT_NAMESPACE: &str = "flux2-dit-bf16";
