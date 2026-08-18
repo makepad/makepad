@@ -1,0 +1,16 @@
+xatlas-oracle-v1
+pin f700c7790aaa030e794b52ba7791a05c085faf0c
+flags XA_MULTITHREADED=0 XA_DEBUG=0 NDEBUG
+width 888
+height 888
+atlasCount 1
+chartCount 1
+texelsPerUnit 445db3d7
+vertexCount 4
+v 0 0 0 445de000 445de000
+v 1 0 0 445de000 3f000000
+v 2 0 0 3f000000 3f000000
+v 3 0 0 3f000000 445de000
+indexCount 6
+f 0 1 2
+f 0 2 3

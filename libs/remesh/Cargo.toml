@@ -1,0 +1,15 @@
+[package]
+name = "makepad-remesh"
+version = "0.1.0"
+edition = "2021"
+description = "CPU port of FaithC v1.5 (Faithful Contouring): mesh <-> sparse voxel token codec / remesher"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "makepad-remesh"
+path = "src/main.rs"
+
+[dependencies]
+makepad-gltf = { path = "../gltf" }
+makepad-csg-math = { path = "../csg/csg_math", features = ["threads"] }
+makepad-xatlas = { path = "../xatlas" }
