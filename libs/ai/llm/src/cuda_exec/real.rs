@@ -19,7 +19,7 @@ use makepad_ai_cuda::{
     begin_stream_capture, end_stream_capture, cublasCreate_v2, cublasDestroy_v2, cublasGemmEx,
     cublasHandle_t, cublasSetStream_v2, cublasSgemm_v2, cudaFree, cudaGetDeviceCount,
     cudaFreeHost, cudaGetErrorString, cudaHostAlloc, cudaMalloc, cudaMemGetInfo, cudaMemcpyAsync,
-    cudaMemsetAsync, cudaSetDevice,
+    cudaDeviceSynchronize, cudaMemsetAsync, cudaSetDevice,
     cudaStreamCreateWithFlags, cudaStreamDestroy, cudaStreamSynchronize, cudaStream_t, CudaGraphExec,
     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP, CUBLAS_OP_N, CUBLAS_OP_T,
     CUBLAS_STATUS_SUCCESS, CUDA_MEMCPY_DEVICE_TO_HOST, CUDA_MEMCPY_HOST_TO_DEVICE, CUDA_R_16BF,
@@ -848,6 +848,13 @@ impl Runtime {
         ranges: &[(usize, usize)],
     ) -> Result<()> {
         unsafe {
+            // Drain EVERYTHING first. The previous run's tail (graph replays,
+            // fixup passes) can still be writing cache rows when this clear
+            // runs; a stream-local sync only orders against our own stream,
+            // so late writes land after the memset and the next prefill reads
+            // them — the reset-nondeterminism bug (identical prompts, temp 0,
+            // different logits on every post-decode run).
+            check(cudaDeviceSynchronize(), "state reset drain")?;
             for &(offset, len) in ranges {
                 if len == 0 {
                     continue;
