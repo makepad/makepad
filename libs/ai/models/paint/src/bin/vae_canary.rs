@@ -16,7 +16,7 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run() -> Result<(), String> {
-    use makepad_pbr_paint::sd_vae::{ramp_rgb_nchw, SdVae};
+    use makepad_ai_paint::sd_vae::{ramp_rgb_nchw, SdVae};
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -40,7 +40,7 @@ fn run() -> Result<(), String> {
         "PBR_VAE_ENCODE_S {:.3} latent={} digest={}",
         t0.elapsed().as_secs_f64(),
         latent.len(),
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&latent)
+        makepad_ai_paint::numerical_fixtures::digest_f32(&latent)
     );
     println!("PBR_VAE_HEAD {:?}", &latent[..16.min(latent.len())]);
     let t0 = Instant::now();
