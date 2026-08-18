@@ -59,10 +59,6 @@ pub const QUANT_Q80: i32 = 3;
 pub type Stream = *mut c_void;
 pub type CudaError = i32;
 
-/// True when makepad-ai-cuda's build compiled `kernels/llm/kernels.cu`.
-pub const CUDA_KERNELS: bool =
-    cfg!(all(any(target_os = "linux", target_os = "windows"), makepad_cuda_kernels));
-
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod ffi {
     use super::{CudaError, Stream};
