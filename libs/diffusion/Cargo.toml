@@ -6,8 +6,12 @@ description = "Diffusion pipeline scaffolding for Makepad ggml backends"
 license = "MIT"
 
 [dependencies]
-makepad-ggml = { path = "../ggml" }
+# Bake ggml-metal.metallib at build time (same as llama/tts). Without this
+# the first Metal dispatch compiles the shader source at runtime.
+makepad-ggml = { path = "../ggml", features = ["metal-precompile"] }
+makepad-llama = { path = "../llama" }
 makepad-mlx = { path = "../mlx" }
+makepad-gltf = { path = "../gltf" }
 makepad-micro-serde = { path = "../micro_serde" }
 makepad-zune-core = { path = "../zune/zune-core" }
 makepad-zune-png = { path = "../zune/zune-png" }
@@ -53,3 +57,175 @@ path = "src/bin/flux_t5_stage_compare.rs"
 [[bin]]
 name = "safetensors-query"
 path = "src/bin/safetensors_query.rs"
+
+[[bin]]
+name = "h3-validate"
+path = "src/bin/h3_validate.rs"
+
+[[bin]]
+name = "h3-vae-validate"
+path = "src/bin/h3_vae_validate.rs"
+
+[[bin]]
+name = "h3-generate"
+path = "src/bin/h3_generate.rs"
+
+[[bin]]
+name = "h3-tokenize"
+path = "src/bin/h3_tokenize.rs"
+
+[[bin]]
+name = "h3-audio-validate"
+path = "src/bin/h3_audio_validate.rs"
+
+[[bin]]
+name = "h3-vision-validate"
+path = "src/bin/h3_vision_validate.rs"
+
+[[bin]]
+name = "h3-vae-encode-validate"
+path = "src/bin/h3_vae_encode_validate.rs"
+
+[[bin]]
+name = "sa3-validate"
+path = "src/bin/sa3_validate.rs"
+
+[[bin]]
+name = "moss-validate"
+path = "src/bin/moss_validate.rs"
+
+[[bin]]
+name = "moss-generate"
+path = "src/bin/moss_generate.rs"
+
+[[bin]]
+name = "trellis-validate"
+path = "src/bin/trellis_validate.rs"
+
+[[bin]]
+name = "sa3-generate"
+path = "src/bin/sa3_generate.rs"
+
+[[bin]]
+name = "trellis-generate"
+path = "src/bin/trellis_generate.rs"
+
+[[bin]]
+name = "woosh-validate"
+path = "src/bin/woosh_validate.rs"
+
+[[bin]]
+name = "woosh-generate"
+path = "src/bin/woosh_generate.rs"
+
+[[bin]]
+name = "indextts-w2v-validate"
+path = "src/bin/indextts_w2v_validate.rs"
+
+[[bin]]
+name = "indextts-gpt-validate"
+path = "src/bin/indextts_gpt_validate.rs"
+
+[[bin]]
+name = "indextts-s2mel-validate"
+path = "src/bin/indextts_s2mel_validate.rs"
+
+[[bin]]
+name = "indextts-bigvgan-validate"
+path = "src/bin/indextts_bigvgan_validate.rs"
+
+[[bin]]
+name = "hy-motion-checkpoint"
+path = "src/bin/hy_motion_checkpoint.rs"
+
+[[bin]]
+name = "hy-motion-validate"
+path = "src/bin/hy_motion_validate.rs"
+
+[[bin]]
+name = "hy-motion-text-validate"
+path = "src/bin/hy_motion_text_validate.rs"
+
+[[bin]]
+name = "hy-motion-clip-validate"
+path = "src/bin/hy_motion_clip_validate.rs"
+
+[[bin]]
+name = "hy-motion-decode-validate"
+path = "src/bin/hy_motion_decode_validate.rs"
+
+[[bin]]
+name = "hy-motion-pipeline-validate"
+path = "src/bin/hy_motion_pipeline_validate.rs"
+
+[[bin]]
+name = "skin-tokens-validate"
+path = "src/bin/skin_tokens_validate.rs"
+
+[[bin]]
+name = "skin-tokens-qwen-validate"
+path = "src/bin/skin_tokens_qwen_validate.rs"
+
+[[bin]]
+name = "skin-tokens-beam-ops-validate"
+path = "src/bin/skin_tokens_beam_ops_validate.rs"
+
+[[bin]]
+name = "skin-tokens-output-validate"
+path = "src/bin/skin_tokens_output_validate.rs"
+
+[[bin]]
+name = "birefnet-validate"
+path = "src/bin/birefnet_validate.rs"
+
+[[bin]]
+name = "realesrgan-validate"
+path = "src/bin/realesrgan_validate.rs"
+
+[[bin]]
+name = "da3-validate"
+path = "src/bin/da3_validate.rs"
+
+[[bin]]
+name = "sam3-validate"
+path = "src/bin/sam3_validate.rs"
+
+[[bin]]
+name = "flux2-check-te"
+path = "src/bin/flux2_check_te.rs"
+
+[[bin]]
+name = "flux2-edit-validate"
+path = "src/bin/flux2_edit_validate.rs"
+
+[[bin]]
+name = "h3-gguf-validate"
+path = "src/bin/h3_gguf_validate.rs"
+
+[[bin]]
+name = "flux-gguf-inspect"
+path = "src/bin/flux_gguf_inspect.rs"
+
+[[bin]]
+name = "music3-validate"
+path = "src/bin/music3_validate.rs"
+
+[[bin]]
+name = "music3-gguf-inspect"
+path = "src/bin/music3_gguf_inspect.rs"
+
+[[bin]]
+name = "music3-gguf-generate"
+path = "src/bin/music3_gguf_generate.rs"
+
+[[bin]]
+name = "music3-generate"
+path = "src/bin/music3_generate.rs"
+
+[[bin]]
+name = "music3-native-bench"
+path = "src/bin/music3_generate.rs"
+
+[[bin]]
+name = "ace-validate"
+path = "src/bin/ace_validate.rs"

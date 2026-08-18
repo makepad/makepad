@@ -4,11 +4,23 @@ use crate::comfy::{
 };
 use crate::t5::{T5TokenizedPrompt, T5Tokenizer};
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxSafetensorsHeader, MlxTensorEntry};
+use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::path::{Path, PathBuf};
 
 pub const FLUX_CLIP_L_MAX_LENGTH: usize = 77;
 pub const FLUX_T5XXL_MAX_LENGTH: usize = 256;
+
+/// Tensor-name prefixes of the four components inside a combined single-file
+/// FLUX checkpoint (ComfyUI CheckpointLoaderSimple layout, e.g. the
+/// Comfy-Org flux1-{schnell,dev}-fp8 bundles). Scoping a component view to
+/// its prefix yields exactly the tensor naming of the standalone component
+/// files, so the per-component loaders work unchanged. The two outer
+/// `text_encoders.*.logit_scale` scalars sit outside the `transformer.`
+/// prefixes and are deliberately excluded (nothing consumes them).
+pub const FLUX_CKPT_PREFIX_DIFFUSION: &str = "model.diffusion_model.";
+pub const FLUX_CKPT_PREFIX_CLIP_L: &str = "text_encoders.clip_l.transformer.";
+pub const FLUX_CKPT_PREFIX_T5XXL: &str = "text_encoders.t5xxl.transformer.";
+pub const FLUX_CKPT_PREFIX_VAE: &str = "vae.";
 
 #[derive(Clone, Debug)]
 pub struct ComfyModelRoots {
@@ -44,6 +56,17 @@ pub struct FluxResolvedBundle {
     pub vae_path: Option<PathBuf>,
     pub clip_l_path: Option<PathBuf>,
     pub t5xxl_path: Option<PathBuf>,
+}
+
+/// Per-component tensor-name scope inside each component's file: `None` for
+/// split-model bundles (standalone files are already scoped), the ComfyUI
+/// combined-checkpoint prefixes when every path points at one checkpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FluxComponentPrefixes {
+    pub diffusion: Option<&'static str>,
+    pub clip_l: Option<&'static str>,
+    pub t5xxl: Option<&'static str>,
+    pub vae: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -314,24 +337,47 @@ pub struct FluxPromptToImagePlan {
 }
 
 impl FluxPromptToImagePlan {
+    /// Asset-server entry: resolved files + request params. No Comfy graph.
+    pub fn from_files(
+        bundle: FluxResolvedBundle,
+        prompts: FluxPrompts,
+        generation: FluxGenerationConfig,
+    ) -> Result<Self> {
+        let latent_shape =
+            FluxLatentShape::from_image_size(generation.width, generation.height)?;
+        let transformer = inspect_diffusion_config(&bundle)?;
+        Ok(Self {
+            workflow_path: bundle.diffusion_model_path.clone(),
+            kind: bundle.kind,
+            bundle,
+            prompts,
+            generation,
+            latent_shape,
+            transformer,
+        })
+    }
+
     pub fn from_workflow(workflow: &FluxWorkflow, roots: &ComfyModelRoots) -> Result<Self> {
         let bundle =
             FluxResolvedBundle::from_workflow_files(workflow.kind, &workflow.files, roots)?;
-        let latent_shape = FluxLatentShape::from_image_size(
-            workflow.generation.width,
-            workflow.generation.height,
-        )?;
-
-        Ok(Self {
-            workflow_path: workflow.path.clone(),
-            kind: workflow.kind,
-            bundle,
-            prompts: workflow.prompts.clone(),
-            generation: workflow.generation.clone(),
-            latent_shape,
-            transformer: FluxTransformerConfig::flux1_dev(),
-        })
+        Self::from_files(bundle, workflow.prompts.clone(), workflow.generation.clone())
     }
+}
+
+fn inspect_diffusion_config(bundle: &FluxResolvedBundle) -> Result<FluxTransformerConfig> {
+    let path = &bundle.diffusion_model_path;
+    if crate::flux_gguf::is_gguf_path(path) {
+        return Ok(crate::flux_gguf::inspect(path)?.transformer.config);
+    }
+    let diffusion_header = match bundle.component_prefixes().diffusion {
+        Some(prefix) => {
+            let full = MlxSafetensorsHeader::load(path)?;
+            validate_flux_combined_checkpoint(&full)?;
+            full.scoped_to_prefix(prefix)?
+        }
+        None => MlxSafetensorsHeader::load(path)?,
+    };
+    Ok(FluxTransformerInspection::from_header(&diffusion_header)?.config)
 }
 
 pub fn tokenize_flux_clip_l_prompt(prompt: &str) -> Result<ClipTokenizedPrompt> {
@@ -343,6 +389,36 @@ pub fn tokenize_flux_t5xxl_prompt(prompt: &str) -> Result<T5TokenizedPrompt> {
 }
 
 impl FluxResolvedBundle {
+    pub fn from_checkpoint(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let checkpoint = require_file(path.as_ref().to_path_buf(), "checkpoint")?;
+        Ok(Self {
+            kind: FluxWorkflowKind::Checkpoint,
+            diffusion_model_path: checkpoint.clone(),
+            vae_path: Some(checkpoint.clone()),
+            clip_l_path: Some(checkpoint.clone()),
+            t5xxl_path: Some(checkpoint),
+        })
+    }
+
+    pub fn from_split(
+        dit: impl AsRef<std::path::Path>,
+        vae: impl AsRef<std::path::Path>,
+        clip_l: Option<impl AsRef<std::path::Path>>,
+        t5xxl: Option<impl AsRef<std::path::Path>>,
+    ) -> Result<Self> {
+        Ok(Self {
+            kind: FluxWorkflowKind::SplitModel,
+            diffusion_model_path: require_file(dit.as_ref().to_path_buf(), "diffusion model")?,
+            vae_path: Some(require_file(vae.as_ref().to_path_buf(), "VAE")?),
+            clip_l_path: clip_l
+                .map(|p| require_file(p.as_ref().to_path_buf(), "clip_l"))
+                .transpose()?,
+            t5xxl_path: t5xxl
+                .map(|p| require_file(p.as_ref().to_path_buf(), "t5xxl"))
+                .transpose()?,
+        })
+    }
+
     pub fn from_workflow_files(
         kind: FluxWorkflowKind,
         files: &FluxWorkflowFiles,
@@ -376,38 +452,59 @@ impl FluxResolvedBundle {
                     "t5xxl",
                 )?),
             }),
-            FluxWorkflowKind::Checkpoint => Ok(Self {
-                kind,
-                diffusion_model_path: require_file(
+            FluxWorkflowKind::Checkpoint => {
+                // One combined file carries all four components; every path
+                // points at it so warm-reuse keys, device-cache namespaces
+                // and whole-checkpoint eviction share one identity.
+                let checkpoint = require_file(
                     roots
                         .checkpoints_dir
                         .join(require_name(&files.checkpoint_name, "ckpt_name")?),
                     "checkpoint",
-                )?,
-                vae_path: None,
-                clip_l_path: None,
-                t5xxl_path: None,
-            }),
+                )?;
+                Ok(Self {
+                    kind,
+                    diffusion_model_path: checkpoint.clone(),
+                    vae_path: Some(checkpoint.clone()),
+                    clip_l_path: Some(checkpoint.clone()),
+                    t5xxl_path: Some(checkpoint),
+                })
+            }
+        }
+    }
+
+    /// Tensor-name scoping for each component's file (see
+    /// [`FluxComponentPrefixes`]).
+    pub fn component_prefixes(&self) -> FluxComponentPrefixes {
+        match self.kind {
+            FluxWorkflowKind::SplitModel => FluxComponentPrefixes::default(),
+            FluxWorkflowKind::Checkpoint => FluxComponentPrefixes {
+                diffusion: Some(FLUX_CKPT_PREFIX_DIFFUSION),
+                clip_l: Some(FLUX_CKPT_PREFIX_CLIP_L),
+                t5xxl: Some(FLUX_CKPT_PREFIX_T5XXL),
+                vae: Some(FLUX_CKPT_PREFIX_VAE),
+            },
         }
     }
 
     pub fn inspect_headers(&self) -> Result<FluxBundleHeaders> {
+        let prefixes = self.component_prefixes();
         Ok(FluxBundleHeaders {
-            diffusion_model: MlxSafetensorsHeader::load(&self.diffusion_model_path)?,
+            diffusion_model: flux_component_header(&self.diffusion_model_path, prefixes.diffusion)?,
             vae: self
                 .vae_path
                 .as_ref()
-                .map(MlxSafetensorsHeader::load)
+                .map(|path| flux_component_header(path, prefixes.vae))
                 .transpose()?,
             clip_l: self
                 .clip_l_path
                 .as_ref()
-                .map(MlxSafetensorsHeader::load)
+                .map(|path| flux_component_header(path, prefixes.clip_l))
                 .transpose()?,
             t5xxl: self
                 .t5xxl_path
                 .as_ref()
-                .map(MlxSafetensorsHeader::load)
+                .map(|path| flux_component_header(path, prefixes.t5xxl))
                 .transpose()?,
         })
     }
@@ -628,6 +725,103 @@ impl T5TextEncoderConfig {
     }
 }
 
+/// Loads a component header: the file's own header for standalone component
+/// files, or the prefix-scoped view of a combined checkpoint (per-tensor
+/// range reads mean only that component's byte ranges are ever read).
+pub fn flux_component_header(
+    path: &Path,
+    prefix: Option<&str>,
+) -> Result<MlxSafetensorsHeader> {
+    let header = MlxSafetensorsHeader::load(path)?;
+    match prefix {
+        Some(prefix) => Ok(header.scoped_to_prefix(prefix)?),
+        None => Ok(header),
+    }
+}
+
+/// Contract audit of a combined single-file FLUX FP8 checkpoint header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FluxCombinedCheckpointAudit {
+    pub diffusion_tensors: usize,
+    pub clip_l_tensors: usize,
+    pub t5xxl_tensors: usize,
+    pub vae_tensors: usize,
+    pub diffusion_bytes: u64,
+    pub total_tensors: usize,
+}
+
+/// Validates that `header` is a complete combined FLUX FP8 checkpoint: all
+/// four component prefixes present with their expected dtype classes
+/// (diffusion + t5xxl entirely F8_E4M3, clip_l entirely F16, vae entirely
+/// F32). This is the canonical-tier contract — a split/partial file, a BF16
+/// combined file, or a mixed-precision repack all fail closed here instead
+/// of streaming weights and failing (or silently degrading) later. The two
+/// outer `text_encoders.*.logit_scale` F32 scalars are the only tensors
+/// allowed outside the four prefixes.
+pub fn validate_flux_combined_checkpoint(
+    header: &MlxSafetensorsHeader,
+) -> Result<FluxCombinedCheckpointAudit> {
+    let mut audit = FluxCombinedCheckpointAudit {
+        diffusion_tensors: 0,
+        clip_l_tensors: 0,
+        t5xxl_tensors: 0,
+        vae_tensors: 0,
+        diffusion_bytes: 0,
+        total_tensors: 0,
+    };
+    let path = header.path.display();
+    for (name, entry) in &header.tensors {
+        audit.total_tensors += 1;
+        let (component, expected, allowed): (&str, MlxDType, bool) =
+            if name.starts_with(FLUX_CKPT_PREFIX_DIFFUSION) {
+                audit.diffusion_tensors += 1;
+                audit.diffusion_bytes += entry.data_len_bytes();
+                ("diffusion model", MlxDType::F8E4M3, true)
+            } else if name.starts_with(FLUX_CKPT_PREFIX_CLIP_L) {
+                audit.clip_l_tensors += 1;
+                ("clip_l", MlxDType::F16, true)
+            } else if name.starts_with(FLUX_CKPT_PREFIX_T5XXL) {
+                audit.t5xxl_tensors += 1;
+                ("t5xxl", MlxDType::F8E4M3, true)
+            } else if name.starts_with(FLUX_CKPT_PREFIX_VAE) {
+                audit.vae_tensors += 1;
+                ("vae", MlxDType::F32, true)
+            } else if name == "text_encoders.clip_l.logit_scale"
+                || name == "text_encoders.t5xxl.logit_scale"
+            {
+                ("logit_scale", MlxDType::F32, true)
+            } else {
+                ("", MlxDType::F32, false)
+            };
+        if !allowed {
+            return Err(DiffusionError::model(format!(
+                "combined FLUX checkpoint {} has unexpected tensor '{}' outside every component prefix",
+                path, name
+            )));
+        }
+        if entry.dtype != expected {
+            return Err(DiffusionError::model(format!(
+                "combined FLUX checkpoint {} {} tensor '{}' is {:?}, the FP8 contract requires {:?}",
+                path, component, name, entry.dtype, expected
+            )));
+        }
+    }
+    for (label, count) in [
+        ("diffusion model", audit.diffusion_tensors),
+        ("clip_l", audit.clip_l_tensors),
+        ("t5xxl", audit.t5xxl_tensors),
+        ("vae", audit.vae_tensors),
+    ] {
+        if count == 0 {
+            return Err(DiffusionError::model(format!(
+                "combined FLUX checkpoint {} is missing its {} component",
+                path, label
+            )));
+        }
+    }
+    Ok(audit)
+}
+
 fn require_name<'a>(value: &'a Option<String>, field: &str) -> Result<&'a str> {
     value.as_deref().ok_or_else(|| {
         DiffusionError::workflow(format!("missing '{}' in resolved workflow", field))
@@ -786,7 +980,7 @@ fn strip_flux_prefix(name: &str) -> &str {
     name
 }
 
-fn canonical_name_recognized(name: &str) -> bool {
+pub(crate) fn canonical_name_recognized(name: &str) -> bool {
     name.starts_with("double_blocks.")
         || name.starts_with("single_blocks.")
         || name.starts_with("img_in.")
@@ -842,6 +1036,324 @@ fn shape_dim(entry: &MlxTensorEntry, index: usize) -> Option<u32> {
         .get(index)
         .copied()
         .and_then(|value| u32::try_from(value).ok())
+}
+
+#[cfg(test)]
+mod combined_fp8_tests {
+    use super::*;
+
+    /// Minimal hand-rolled safetensors writer for combined-checkpoint tests:
+    /// deterministic tensor order, exact offsets, no external JSON dep.
+    struct SafetensorsBuilder {
+        entries: Vec<(String, &'static str, Vec<u64>, Vec<u8>)>,
+    }
+
+    impl SafetensorsBuilder {
+        fn new() -> Self {
+            Self {
+                entries: Vec::new(),
+            }
+        }
+
+        fn tensor(
+            mut self,
+            name: &str,
+            dtype: &'static str,
+            shape: &[u64],
+            payload: Vec<u8>,
+        ) -> Self {
+            self.entries
+                .push((name.to_string(), dtype, shape.to_vec(), payload));
+            self
+        }
+
+        fn write(self, file_name: &str) -> std::path::PathBuf {
+            let mut header = String::from("{");
+            let mut offset = 0u64;
+            for (index, (name, dtype, shape, payload)) in self.entries.iter().enumerate() {
+                if index > 0 {
+                    header.push(',');
+                }
+                let shape_json = shape
+                    .iter()
+                    .map(|dim| dim.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let end = offset + payload.len() as u64;
+                header.push_str(&format!(
+                    "\"{}\":{{\"dtype\":\"{}\",\"shape\":[{}],\"data_offsets\":[{},{}]}}",
+                    name, dtype, shape_json, offset, end
+                ));
+                offset = end;
+            }
+            header.push('}');
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(header.as_bytes());
+            for (_, _, _, payload) in &self.entries {
+                bytes.extend_from_slice(payload);
+            }
+            let path = std::env::temp_dir().join(format!(
+                "makepad_flux_fp8_test_{}_{}",
+                std::process::id(),
+                file_name
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+
+    /// F8 payloads use golden-anchored bytes only (never 0x7f/0xff unless a
+    /// test wants the NaN rejection to fire).
+    fn tiny_combined_builder() -> SafetensorsBuilder {
+        let d = FLUX_CKPT_PREFIX_DIFFUSION;
+        let c = FLUX_CKPT_PREFIX_CLIP_L;
+        let t = FLUX_CKPT_PREFIX_T5XXL;
+        let v = FLUX_CKPT_PREFIX_VAE;
+        SafetensorsBuilder::new()
+            // Diffusion component: enough structure for config inference
+            // (hidden_size 4, context 8, in_channels 4, head_dim 2, one
+            // double + one single block, no guidance_in => schnell-class).
+            .tensor(&format!("{d}txt_in.weight"), "F8_E4M3", &[4, 8], vec![0x38; 32])
+            .tensor(&format!("{d}img_in.weight"), "F8_E4M3", &[4, 4], vec![0xB8; 16])
+            .tensor(
+                &format!("{d}vector_in.in_layer.weight"),
+                "F8_E4M3",
+                &[4, 4],
+                vec![0x40; 16],
+            )
+            .tensor(
+                &format!("{d}double_blocks.0.txt_attn.norm.key_norm.scale"),
+                "F8_E4M3",
+                &[2],
+                vec![0x38, 0xB8],
+            )
+            .tensor(
+                &format!("{d}double_blocks.0.img_attn.proj.weight"),
+                "F8_E4M3",
+                &[4, 4],
+                vec![0x44; 16],
+            )
+            .tensor(
+                &format!("{d}single_blocks.0.norm.key_norm.scale"),
+                "F8_E4M3",
+                &[2],
+                vec![0x7e, 0xfe],
+            )
+            .tensor(
+                &format!("{d}single_blocks.0.linear2.weight"),
+                "F8_E4M3",
+                &[4, 4],
+                vec![0x3c; 16],
+            )
+            .tensor(
+                &format!("{d}final_layer.linear.weight"),
+                "F8_E4M3",
+                &[4, 4],
+                vec![0x48; 16],
+            )
+            // clip_l component (F16) + outer logit_scale scalar (F32).
+            .tensor(
+                &format!("{c}text_model.embeddings.token_embedding.weight"),
+                "F16",
+                &[4, 4],
+                vec![0u8; 32],
+            )
+            .tensor("text_encoders.clip_l.logit_scale", "F32", &[], vec![0u8; 4])
+            // t5xxl component (F8) + outer logit_scale scalar.
+            .tensor(&format!("{t}shared.weight"), "F8_E4M3", &[4, 4], vec![0x50; 16])
+            .tensor("text_encoders.t5xxl.logit_scale", "F32", &[], vec![0u8; 4])
+            // vae component (F32).
+            .tensor(&format!("{v}decoder.conv_in.bias"), "F32", &[2], vec![0u8; 8])
+    }
+
+    #[test]
+    fn validates_and_scopes_combined_fp8_checkpoint() {
+        let path = tiny_combined_builder().write("valid.safetensors");
+        let header = MlxSafetensorsHeader::load(&path).unwrap();
+
+        let audit = validate_flux_combined_checkpoint(&header).unwrap();
+        assert_eq!(audit.diffusion_tensors, 8);
+        assert_eq!(audit.clip_l_tensors, 1);
+        assert_eq!(audit.t5xxl_tensors, 1);
+        assert_eq!(audit.vae_tensors, 1);
+        assert_eq!(audit.total_tensors, 13);
+        assert_eq!(audit.diffusion_bytes, 32 + 16 + 16 + 2 + 16 + 2 + 16 + 16);
+
+        // Component views strip the prefixes and read only their ranges.
+        let diffusion = header.scoped_to_prefix(FLUX_CKPT_PREFIX_DIFFUSION).unwrap();
+        assert_eq!(diffusion.tensors.len(), 8);
+        assert!(diffusion.tensor("txt_in.weight").is_some());
+        assert_eq!(
+            diffusion.read_tensor_bytes("img_in.weight").unwrap(),
+            vec![0xB8; 16]
+        );
+        let t5 = header.scoped_to_prefix(FLUX_CKPT_PREFIX_T5XXL).unwrap();
+        assert_eq!(t5.tensors.len(), 1, "outer logit_scale must be excluded");
+        assert_eq!(t5.read_tensor_bytes("shared.weight").unwrap(), vec![0x50; 16]);
+        let clip = header.scoped_to_prefix(FLUX_CKPT_PREFIX_CLIP_L).unwrap();
+        assert!(clip
+            .tensor("text_model.embeddings.token_embedding.weight")
+            .is_some());
+        let vae = header.scoped_to_prefix(FLUX_CKPT_PREFIX_VAE).unwrap();
+        assert!(vae.tensor("decoder.conv_in.bias").is_some());
+        assert!(header.scoped_to_prefix("no.such.prefix.").is_err());
+
+        // The scoped diffusion view drives config inference unchanged.
+        let inspect = FluxTransformerInspection::from_header(&diffusion).unwrap();
+        assert_eq!(inspect.config.hidden_size, 4);
+        assert_eq!(inspect.config.context_in_dim, 8);
+        assert_eq!(inspect.config.num_heads, 2);
+        assert_eq!(inspect.config.depth, 1);
+        assert_eq!(inspect.config.depth_single_blocks, 1);
+        assert!(!inspect.config.guidance_embed, "no guidance_in => schnell");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn loads_fp8_diffusion_component_with_raw_matrices_and_promoted_norms() {
+        use crate::flux_transformer::LoadedFluxTransformerWeights;
+        let path = tiny_combined_builder().write("load.safetensors");
+
+        let weights = LoadedFluxTransformerWeights::load_component_with_progress(
+            &path,
+            Some(FLUX_CKPT_PREFIX_DIFFUSION),
+            None,
+        )
+        .unwrap();
+        assert!(weights.f8_weights, "rank-2 F8 matrices must set the flag");
+        assert_eq!(weights.path, path, "cache identity is the combined file");
+        // Rank-1 F8 promotes to exact F32 on load (anchor bytes 448/-448).
+        let single_scale = weights.tensor_id("single_blocks.0.norm.key_norm.scale").unwrap();
+        let tensor = weights.ctx.tensor(single_scale).unwrap();
+        assert_eq!(tensor.desc.ty, makepad_ggml::TensorType::F32);
+        let bytes = weights.ctx.tensor_data(single_scale).unwrap();
+        let values: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![448.0, -448.0]);
+        // Rank-2 F8 stays raw 1-byte resident.
+        let txt_in = weights.tensor_id("txt_in.weight").unwrap();
+        let tensor = weights.ctx.tensor(txt_in).unwrap();
+        assert_eq!(tensor.desc.ty, makepad_ggml::TensorType::F8E4M3);
+        assert_eq!(weights.ctx.tensor_data(txt_in).unwrap(), &[0x38u8; 32][..]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_nan_bytes_mixed_dtypes_and_missing_components() {
+        use crate::flux_transformer::LoadedFluxTransformerWeights;
+
+        // A NaN byte (0x7f) inside an F8 matrix fails the load, fail-closed.
+        let mut nan_payload = vec![0x38u8; 32];
+        nan_payload[17] = 0x7f;
+        let d = FLUX_CKPT_PREFIX_DIFFUSION;
+        let nan_path = tiny_combined_builder()
+            .tensor(&format!("{d}time_in.in_layer.weight"), "F8_E4M3", &[4, 8], nan_payload)
+            .write("nan.safetensors");
+        let error = LoadedFluxTransformerWeights::load_component_with_progress(
+            &nan_path,
+            Some(FLUX_CKPT_PREFIX_DIFFUSION),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("NaN"), "got: {error}");
+        // The complete-checkpoint audit still passes structurally (NaN is a
+        // payload property, caught by the loaders' byte screen).
+        let header = MlxSafetensorsHeader::load(&nan_path).unwrap();
+        validate_flux_combined_checkpoint(&header).unwrap();
+        let _ = std::fs::remove_file(nan_path);
+
+        // A BF16 tensor under the diffusion prefix breaks the FP8 contract.
+        let mixed_path = tiny_combined_builder()
+            .tensor(&format!("{d}time_in.out_layer.weight"), "BF16", &[2, 2], vec![0u8; 8])
+            .write("mixed.safetensors");
+        let header = MlxSafetensorsHeader::load(&mixed_path).unwrap();
+        let error = validate_flux_combined_checkpoint(&header)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FP8 contract requires"), "got: {error}");
+        let _ = std::fs::remove_file(mixed_path);
+
+        // A stray tensor outside every component prefix is rejected.
+        let stray_path = tiny_combined_builder()
+            .tensor("first_stage_model.mystery", "F32", &[1], vec![0u8; 4])
+            .write("stray.safetensors");
+        let header = MlxSafetensorsHeader::load(&stray_path).unwrap();
+        let error = validate_flux_combined_checkpoint(&header)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected tensor"), "got: {error}");
+        let _ = std::fs::remove_file(stray_path);
+
+        // A split/partial file (no vae component) is not a combined
+        // checkpoint.
+        let mut partial = SafetensorsBuilder::new();
+        for (name, dtype, shape, payload) in tiny_combined_builder().entries {
+            if !name.starts_with(FLUX_CKPT_PREFIX_VAE) {
+                partial = partial.tensor(&name, dtype, &shape, payload);
+            }
+        }
+        let partial_path = partial.write("partial.safetensors");
+        let header = MlxSafetensorsHeader::load(&partial_path).unwrap();
+        let error = validate_flux_combined_checkpoint(&header)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing its vae"), "got: {error}");
+        let _ = std::fs::remove_file(partial_path);
+    }
+
+    #[test]
+    fn checkpoint_bundle_resolves_all_components_to_one_file() {
+        use crate::comfy::{FluxWorkflowFiles, FluxWorkflowKind};
+
+        let path = tiny_combined_builder().write("bundle.safetensors");
+        let root = path.parent().unwrap().to_path_buf();
+        // ComfyModelRoots expects checkpoints/<name>; point a synthetic root
+        // at temp_dir and place the file name accordingly.
+        let checkpoints_dir = root.join("checkpoints");
+        std::fs::create_dir_all(&checkpoints_dir).unwrap();
+        let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+        let ckpt_path = checkpoints_dir.join(&file_name);
+        std::fs::copy(&path, &ckpt_path).unwrap();
+
+        let roots = ComfyModelRoots::new(&root);
+        let files = FluxWorkflowFiles {
+            checkpoint_name: Some(file_name),
+            unet_name: None,
+            vae_name: None,
+            clip_l_name: None,
+            t5xxl_name: None,
+        };
+        let bundle =
+            FluxResolvedBundle::from_workflow_files(FluxWorkflowKind::Checkpoint, &files, &roots)
+                .unwrap();
+        assert_eq!(bundle.diffusion_model_path, ckpt_path);
+        assert_eq!(bundle.vae_path.as_deref(), Some(ckpt_path.as_path()));
+        assert_eq!(bundle.clip_l_path.as_deref(), Some(ckpt_path.as_path()));
+        assert_eq!(bundle.t5xxl_path.as_deref(), Some(ckpt_path.as_path()));
+        let prefixes = bundle.component_prefixes();
+        assert_eq!(prefixes.diffusion, Some(FLUX_CKPT_PREFIX_DIFFUSION));
+        assert_eq!(prefixes.vae, Some(FLUX_CKPT_PREFIX_VAE));
+        assert_eq!(prefixes.clip_l, Some(FLUX_CKPT_PREFIX_CLIP_L));
+        assert_eq!(prefixes.t5xxl, Some(FLUX_CKPT_PREFIX_T5XXL));
+
+        // The bundle's scoped headers expose standalone-file naming.
+        let headers = bundle.inspect_headers().unwrap();
+        assert!(headers.t5xxl.unwrap().tensor("shared.weight").is_some());
+        assert!(headers
+            .vae
+            .unwrap()
+            .tensor("decoder.conv_in.bias")
+            .is_some());
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(ckpt_path);
+    }
 }
 
 #[cfg(test)]

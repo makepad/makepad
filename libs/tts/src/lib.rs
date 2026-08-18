@@ -12,6 +12,7 @@
 #[cfg(all(any(target_os = "macos", target_os = "ios"), not(no_apple_tts)))]
 mod apple;
 
+pub mod convert;
 pub mod g2p;
 pub mod kokoro;
 

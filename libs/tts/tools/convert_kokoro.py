@@ -6,6 +6,9 @@ not needed. Tensors are copied verbatim; PyTorch's weight-norm pairs
 (`weight_g` / `weight_v`) are left intact and reconstructed on the Rust side,
 where `W = g * v / ||v||` is cheap.
 
+A Rust port lives in `src/convert.rs` (the makepad-ai-content node converts
+downloaded upstream weights with it); the two must stay byte-identical.
+
     python3 convert_kokoro.py kokoro-v1_0.pth kokoro-v1_0.mktts
     python3 convert_kokoro.py --voice kokoro_voices/af_heart.pt af_heart.mkvoice
 

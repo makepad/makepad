@@ -1,20 +1,28 @@
 use crate::backend::{
-    create_graph_session, new_runtime, prepare_graph, runtime_available, try_add_f32,
+    create_graph_session, gpu_act_f16_enabled, gpu_attention_packed, gpu_concat_cols,
+    gpu_concat_rows,
+    gpu_device_available, gpu_download, gpu_gated_residual_mod, gpu_gelu, gpu_gelu_bias_f16,
+    gpu_graph_capture, gpu_graph_launch,
+    gpu_layer_norm_mod, gpu_layer_norm_mod_f16,
+    gpu_linear_nt_cached, gpu_linear_nt_cached_f16, gpu_rms_norm_mul, gpu_rope_interleaved,
+    gpu_slice_cols, gpu_slice_rows, gpu_to_f16,
+    gpu_upload, gpu_upload_into, new_runtime, prepare_graph, runtime_available, try_add_f32,
     try_attention_softmax_weighted_sum_f32, try_flash_attn_f32_packed, try_gelu_f32,
     try_layer_norm_mul_add_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_mul_f32,
-    try_rms_norm_mul_f32,
-    BufferStorageMode, GraphSession, GraphTensorWrite, Runtime,
+    try_rms_norm_mul_f32, BufferStorageMode, GpuLinearPart, GpuStepGraph, GpuTensor,
+    GraphSession, GraphTensorWrite, Runtime,
 };
 use crate::flux::{
     canonicalize_flux_diffusion_tensor_name, FluxLatentShape, FluxTransformerConfig,
     FluxTransformerInspection,
 };
 use crate::flux_text::FluxConditioning;
-use crate::{DiffusionError, Result};
-use makepad_ggml::backend::try_matmul_nt_ggml_bytes_cached;
+use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
+use makepad_ggml::backend::{try_matmul_nt_ggml_bytes, try_matmul_nt_ggml_bytes_cached};
 use makepad_ggml::{
-    bf16_to_f32, f16_to_f32, ggml_pad, BufferUsage, Context, GluOp, Graph, InitParams, Op, Tensor,
-    TensorDesc, TensorId, TensorLayout, TensorType, GGML_MEM_ALIGN,
+    bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, ggml_pad, ggml_type_size_for_type, BufferUsage,
+    Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
+    UnaryOp, GGML_MEM_ALIGN, GGML_ROPE_TYPE_NORMAL,
 };
 use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::cell::RefCell;
@@ -34,6 +42,16 @@ pub struct LoadedFluxTransformerWeights {
     pub tensor_ids: BTreeMap<String, TensorId>,
     pub config: FluxTransformerConfig,
     pub path: PathBuf,
+    /// True when the resident matrices are raw F8_E4M3 (the combined-FP8
+    /// checkpoints). The device path then keeps the f32 activation spine
+    /// (the F8 dequant feeds the bf16 f32-accumulate gemms, which refuse
+    /// f16 activations) and never captures step graphs (pinned pool buffers
+    /// have no headroom next to an all-resident 24GB-tier stack).
+    pub f8_weights: bool,
+    /// True when any weight is a block-quant GGUF type (Q4_K, …).
+    /// Compiled Metal graphs still assume dense F16/BF16/F8, so these
+    /// stay on the lazy `try_matmul_nt_ggml_bytes` path.
+    pub quantized: bool,
     graph_extra_bytes: usize,
 }
 
@@ -47,6 +65,8 @@ pub struct FluxTransformerGraph {
     pub input_guidance: Option<TensorId>,
     pub result_prediction: TensorId,
     pub image_token_count: usize,
+    input_hidden: TensorId,
+    input_hidden_mm: TensorId,
     debug_tensors: Vec<FluxTransformerDebugTensor>,
 }
 
@@ -162,8 +182,57 @@ impl LoadedFluxTransformerWeights {
         Self::load_with_extra(path, DEFAULT_GRAPH_EXTRA_BYTES)
     }
 
+    /// [`Self::load`] with cumulative byte progress ("load unet 8.2/23.8GB")
+    /// every ~256MB of streamed weight bytes.
+    pub fn load_with_progress(
+        path: impl AsRef<Path>,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_with_extra_progress(path, DEFAULT_GRAPH_EXTRA_BYTES, progress)
+    }
+
     pub fn load_with_extra(path: impl AsRef<Path>, extra_bytes: usize) -> Result<Self> {
-        let header = MlxSafetensorsHeader::load(path.as_ref())?;
+        Self::load_with_extra_progress(path, extra_bytes, None)
+    }
+
+    /// [`Self::load_with_progress`] over the diffusion component of a
+    /// combined checkpoint (see [`Self::load_scoped_with_extra_progress`]).
+    pub fn load_component_with_progress(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_extra_progress(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES, progress)
+    }
+
+    pub fn load_with_extra_progress(
+        path: impl AsRef<Path>,
+        extra_bytes: usize,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_extra_progress(path, None, extra_bytes, progress)
+    }
+
+    /// [`Self::load_with_extra_progress`] over a component of a combined
+    /// checkpoint: `prefix` (e.g. `model.diffusion_model.`) scopes the header
+    /// so only the diffusion component's tensors are allocated and its byte
+    /// ranges read; the weights keep the combined file's path as their
+    /// device-cache identity.
+    pub fn load_scoped_with_extra_progress(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        if crate::flux_gguf::is_gguf_path(&path) {
+            if prefix.is_some() {
+                return Err(DiffusionError::model(
+                    "flux GGUF loader does not take a combined-checkpoint prefix",
+                ));
+            }
+            return crate::flux_gguf::load_weights(path, extra_bytes, progress);
+        }
+        let header = crate::flux::flux_component_header(path.as_ref(), prefix)?;
         let inspect = FluxTransformerInspection::from_header(&header)?;
         let total_bytes = flux_weight_total_bytes(&header, extra_bytes)?;
         let mut ctx = Context::new(InitParams {
@@ -172,15 +241,41 @@ impl LoadedFluxTransformerWeights {
             no_alloc: false,
         });
         let tensor_ids = allocate_flux_weight_tensors(&mut ctx, &header)?;
-        load_flux_weight_bytes(&mut ctx, &header, &tensor_ids)?;
+        load_flux_weight_bytes(&mut ctx, &header, &tensor_ids, &mut progress)?;
+        let f8_weights = header
+            .tensors
+            .values()
+            .any(|entry| entry.dtype == MlxDType::F8E4M3 && entry.shape.len() == 2);
 
         Ok(Self {
             ctx,
             tensor_ids,
             config: inspect.config,
             path: header.path,
+            f8_weights,
+            quantized: false,
             graph_extra_bytes: extra_bytes,
         })
+    }
+
+    pub(crate) fn from_loaded(
+        ctx: Context,
+        tensor_ids: BTreeMap<String, TensorId>,
+        config: FluxTransformerConfig,
+        path: PathBuf,
+        f8_weights: bool,
+        quantized: bool,
+        extra_bytes: usize,
+    ) -> Self {
+        Self {
+            ctx,
+            tensor_ids,
+            config,
+            path,
+            f8_weights,
+            quantized,
+            graph_extra_bytes: extra_bytes,
+        }
     }
 
     pub fn tensor_id(&self, name: &str) -> Result<TensorId> {
@@ -235,11 +330,33 @@ impl CompiledFluxTransformer {
         latent_shape: FluxLatentShape,
     ) -> Result<(Self, FluxTransformerCompileTiming)> {
         Self::compile_for_mode(
-            FluxTransformerExecutionMode::from_env(),
+            flux_execution_mode(weights),
             None,
             weights,
             conditioning,
             latent_shape,
+            &mut None,
+        )
+    }
+
+    /// Profiled compile with sub-stage progress ("compile transformer
+    /// graph/prepare/session") — the compiled mode's three multi-second
+    /// stages each get a label and a cancel boundary; lazy mode is instant
+    /// and emits nothing.
+    pub fn compile_hooked(
+        runtime: Option<Runtime>,
+        weights: &mut LoadedFluxTransformerWeights,
+        conditioning: &FluxConditioning,
+        latent_shape: FluxLatentShape,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<(Self, FluxTransformerCompileTiming)> {
+        Self::compile_for_mode(
+            flux_execution_mode(weights),
+            runtime,
+            weights,
+            conditioning,
+            latent_shape,
+            &mut progress,
         )
     }
 
@@ -259,11 +376,12 @@ impl CompiledFluxTransformer {
         latent_shape: FluxLatentShape,
     ) -> Result<(Self, FluxTransformerCompileTiming)> {
         Self::compile_for_mode(
-            FluxTransformerExecutionMode::from_env(),
+            flux_execution_mode(weights),
             Some(runtime),
             weights,
             conditioning,
             latent_shape,
+            &mut None,
         )
     }
 
@@ -273,6 +391,7 @@ impl CompiledFluxTransformer {
         weights: &mut LoadedFluxTransformerWeights,
         conditioning: &FluxConditioning,
         latent_shape: FluxLatentShape,
+        progress: &mut Option<ProgressHook>,
     ) -> Result<(Self, FluxTransformerCompileTiming)> {
         match mode {
             FluxTransformerExecutionMode::Lazy => Ok((
@@ -291,7 +410,7 @@ impl CompiledFluxTransformer {
                     None => new_runtime()?,
                 };
                 let (compiled, timing) =
-                    Self::compile_graph(runtime, weights, conditioning, latent_shape)?;
+                    Self::compile_graph(runtime, weights, conditioning, latent_shape, progress)?;
                 Ok((
                     Self {
                         inner: FluxTransformerExecutor::Compiled(compiled),
@@ -307,9 +426,11 @@ impl CompiledFluxTransformer {
         weights: &mut LoadedFluxTransformerWeights,
         conditioning: &FluxConditioning,
         latent_shape: FluxLatentShape,
+        progress: &mut Option<ProgressHook>,
     ) -> Result<(CompiledFluxTransformerGraph, FluxTransformerCompileTiming)> {
         for attempt in 0..=MAX_GRAPH_GROWTH_ATTEMPTS {
             let build_start = Instant::now();
+            emit_progress(progress, "compile transformer graph", 0.0)?;
             let graph = match build_flux_transformer_graph(weights, conditioning, latent_shape) {
                 Ok(graph) => graph,
                 Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
@@ -324,9 +445,22 @@ impl CompiledFluxTransformer {
             };
             let graph_build_ms = build_start.elapsed().as_secs_f64() * 1000.0;
             let prepare_start = Instant::now();
+            emit_progress(progress, "compile transformer prepare", 0.35)?;
             let prepared = prepare_graph(&runtime, &weights.ctx, &graph.graph)?;
+            let fused = prepared
+                .nodes
+                .iter()
+                .filter(|node| !node.fuse_src_ids.is_empty())
+                .count();
+            eprintln!(
+                "flux dit compiled nodes={} fused={} main_buffer={}",
+                prepared.nodes.len(),
+                fused,
+                prepared.main_buffer_size
+            );
             let graph_prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
             let session_start = Instant::now();
+            emit_progress(progress, "compile transformer session", 0.7)?;
             let session = create_graph_session(
                 &runtime,
                 &weights.ctx,
@@ -365,13 +499,38 @@ impl CompiledFluxTransformer {
         timestep: f32,
         guidance: f32,
     ) -> Result<FluxTransformerRun> {
+        self.execute_hooked(weights, conditioning, packed_latents, timestep, guidance, None)
+    }
+
+    /// [`Self::execute`] with per-block progress ("block 12/57") from the
+    /// lazy/device step — on the cold first denoise step each block's weights
+    /// stream to the device, so the hook is what makes that stream visible.
+    /// The compiled (single-graph) executor has no interior boundary and
+    /// emits nothing.
+    pub fn execute_hooked(
+        &self,
+        weights: &LoadedFluxTransformerWeights,
+        conditioning: &FluxConditioning,
+        packed_latents: &[f32],
+        timestep: f32,
+        guidance: f32,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<FluxTransformerRun> {
         match &self.inner {
             FluxTransformerExecutor::Compiled(compiled) => {
                 compiled.execute(weights, conditioning, packed_latents, timestep, guidance)
             }
-            FluxTransformerExecutor::Lazy(lazy) => {
-                lazy.execute(weights, conditioning, packed_latents, timestep, guidance)
-            }
+            FluxTransformerExecutor::Lazy(lazy) => Ok(lazy
+                .execute_internal(
+                    weights,
+                    conditioning,
+                    packed_latents,
+                    timestep,
+                    guidance,
+                    false,
+                    &mut progress,
+                )?
+                .run),
         }
     }
 
@@ -480,9 +639,25 @@ impl CompiledFluxTransformerGraph {
         let output_tensor = require_tensor(&weights.ctx, self.graph.result_prediction)?;
         let channel_count = usize::try_from(output_tensor.ne[0])
             .map_err(|_| DiffusionError::model("flux transformer output channels exceed usize"))?;
+        let prediction = f32_bytes_to_vec(prediction_bytes)?;
+        if std::env::var_os("FLUX_DIT_DOUBLE_EXEC").is_some() {
+            let execution2 = self
+                .session
+                .execute(&weights.ctx, &writes, &[self.graph.result_prediction])
+                .map_err(DiffusionError::model)?;
+            let pred2 = f32_bytes_to_vec(
+                execution2
+                    .outputs
+                    .get(&self.graph.result_prediction)
+                    .ok_or_else(|| {
+                        DiffusionError::model("flux transformer double-exec missing output")
+                    })?,
+            )?;
+            eprintln!("flux dit pred2-same-in {}", f32_stats(&pred2));
+        }
 
         Ok(FluxTransformerRun {
-            prediction: f32_bytes_to_vec(prediction_bytes)?,
+            prediction,
             image_token_count: self.graph.image_token_count,
             channel_count,
         })
@@ -605,6 +780,14 @@ impl CompiledFluxTransformerGraph {
     }
 }
 
+fn flux_execution_mode(weights: &LoadedFluxTransformerWeights) -> FluxTransformerExecutionMode {
+    // Q4 GGUF tensors are valid ggml Metal MUL_MAT sources (Qwen already
+    // runs them). Keeping quantized Flux on the compiled graph avoids the
+    // lazy host↔GPU activation bounce that dominated the 256² step time.
+    let _ = weights;
+    FluxTransformerExecutionMode::from_env()
+}
+
 impl FluxTransformerExecutionMode {
     pub fn from_env() -> Self {
         match std::env::var("FLUX_TRANSFORMER_MODE") {
@@ -640,19 +823,6 @@ impl LazyFluxTransformer {
         })
     }
 
-    fn execute(
-        &self,
-        weights: &LoadedFluxTransformerWeights,
-        conditioning: &FluxConditioning,
-        packed_latents: &[f32],
-        timestep: f32,
-        guidance: f32,
-    ) -> Result<FluxTransformerRun> {
-        Ok(self
-            .execute_internal(weights, conditioning, packed_latents, timestep, guidance, false)?
-            .run)
-    }
-
     fn execute_with_debug(
         &self,
         weights: &LoadedFluxTransformerWeights,
@@ -661,9 +831,18 @@ impl LazyFluxTransformer {
         timestep: f32,
         guidance: f32,
     ) -> Result<FluxTransformerDebugRun> {
-        self.execute_internal(weights, conditioning, packed_latents, timestep, guidance, true)
+        self.execute_internal(
+            weights,
+            conditioning,
+            packed_latents,
+            timestep,
+            guidance,
+            true,
+            &mut None,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_internal(
         &self,
         weights: &LoadedFluxTransformerWeights,
@@ -672,6 +851,7 @@ impl LazyFluxTransformer {
         timestep: f32,
         guidance: f32,
         capture_debug: bool,
+        progress: &mut Option<ProgressHook>,
     ) -> Result<FluxTransformerDebugRun> {
         if packed_latents.len() != self.image_token_count * weights.config.in_channels as usize {
             return Err(DiffusionError::workflow(format!(
@@ -695,6 +875,38 @@ impl LazyFluxTransformer {
                 weights.config.vec_in_dim,
                 conditioning.clip_pooled.len()
             )));
+        }
+
+        // Device-resident fast path: run the whole step on the GPU (activations
+        // never leave the device between ops; only tiny modulation vectors and
+        // the final prediction cross the bus). Any failure falls back to the
+        // host math below, which stays byte-for-byte what it was.
+        if !capture_debug
+            && !flux_force_cpu_math()
+            && flux_device_path_enabled()
+            && gpu_device_available()
+        {
+            match self.execute_device(
+                weights,
+                conditioning,
+                packed_latents,
+                timestep,
+                guidance,
+                progress,
+            ) {
+                Ok(run) => {
+                    return Ok(FluxTransformerDebugRun {
+                        run,
+                        stages: Vec::new(),
+                    });
+                }
+                Err(DiffusionError::Cancelled) => return Err(DiffusionError::Cancelled),
+                Err(err) => {
+                    eprintln!(
+                        "flux transformer device path failed ({err}); falling back to host math"
+                    );
+                }
+            }
         }
 
         let mut stages = Vec::new();
@@ -741,7 +953,16 @@ impl LazyFluxTransformer {
         }
         push_debug_rows(&mut stages, capture_debug, "input.temb", &temb);
 
+        let total_blocks =
+            weights.config.depth as usize + weights.config.depth_single_blocks as usize;
         for layer in 0..weights.config.depth as usize {
+            if progress.is_some() {
+                emit_progress(
+                    progress,
+                    &format!("block {}/{total_blocks}", layer + 1),
+                    layer as f64 / total_blocks as f64,
+                )?;
+            }
             let prefix = format!("double_blocks.{layer}");
 
             let (
@@ -977,6 +1198,14 @@ impl LazyFluxTransformer {
         }
 
         for layer in 0..weights.config.depth_single_blocks as usize {
+            if progress.is_some() {
+                let done = weights.config.depth as usize + layer;
+                emit_progress(
+                    progress,
+                    &format!("block {}/{total_blocks}", done + 1),
+                    done as f64 / total_blocks as f64,
+                )?;
+            }
             let prefix = format!("single_blocks.{layer}");
             let joint = RowsTensor::concat_rows(&encoder_hidden, &hidden)?;
             let (shift, scale, gate, _, _, _) = modulation_chunks_rows(
@@ -1116,6 +1345,879 @@ impl LazyFluxTransformer {
             stages,
         })
     }
+
+    /// The device-resident mirror of `execute_internal`: identical math, but
+    /// every activation tensor lives on the GPU for the whole step. Host
+    /// traffic per step = packed latents + t5 states + rope tables up, the
+    /// per-block modulation vectors (tiny, computed host-side from temb), and
+    /// the final prediction down.
+    fn execute_device(
+        &self,
+        weights: &LoadedFluxTransformerWeights,
+        conditioning: &FluxConditioning,
+        packed_latents: &[f32],
+        timestep: f32,
+        guidance: f32,
+        progress: &mut Option<ProgressHook>,
+    ) -> Result<FluxTransformerRun> {
+        // temb is 1 x hidden_size; the host path is exact and cheap. Its
+        // silu'd row is the only step-varying host input besides the latents.
+        let input_pooled_projections = RowsTensor::new(
+            1,
+            weights.config.vec_in_dim as usize,
+            conditioning.clip_pooled.clone(),
+        )?;
+        let mut temb = apply_timestep_projection_rows(weights, timestep, "time_in")?;
+        let pooled = apply_silu_mlp_rows(weights, &input_pooled_projections, "vector_in")?;
+        temb = add_rows(&temb, &pooled)?;
+        if weights.config.guidance_embed {
+            let guidance = apply_timestep_projection_rows(weights, guidance, "guidance_in")?;
+            temb = add_rows(&temb, &guidance)?;
+        }
+        let temb_silu = silu_rows(&temb)?;
+
+        if !weights.f8_weights
+            && flux_graph_enabled(self.image_token_count + self.text_token_count)
+        {
+            return self.execute_device_graph(
+                weights,
+                conditioning,
+                packed_latents,
+                &temb_silu.data,
+                progress,
+            );
+        }
+
+        let input_latents = gpu_upload(
+            packed_latents,
+            self.image_token_count,
+            weights.config.in_channels as usize,
+        )
+        .map_err(DiffusionError::model)?;
+        let input_encoder = gpu_upload(
+            &conditioning.t5_hidden_states,
+            self.text_token_count,
+            weights.config.context_in_dim as usize,
+        )
+        .map_err(DiffusionError::model)?;
+        let temb_gpu =
+            gpu_upload(&temb_silu.data, 1, self.hidden_size).map_err(DiffusionError::model)?;
+        let rope_cos = gpu_upload(
+            &self.rope_tables.cos,
+            self.rope_tables.token_count,
+            self.rope_tables.half_dim,
+        )
+        .map_err(DiffusionError::model)?;
+        let rope_sin = gpu_upload(
+            &self.rope_tables.sin,
+            self.rope_tables.token_count,
+            self.rope_tables.half_dim,
+        )
+        .map_err(DiffusionError::model)?;
+        let prediction = self.execute_device_core(
+            weights,
+            &input_latents,
+            &input_encoder,
+            &temb_gpu,
+            &rope_cos,
+            &rope_sin,
+            progress,
+        )?;
+        let channel_count = prediction.cols();
+        let values = gpu_download(&prediction).map_err(DiffusionError::model)?;
+        Ok(FluxTransformerRun {
+            prediction: values,
+            image_token_count: self.image_token_count,
+            channel_count,
+        })
+    }
+
+    /// The graph-replay path: step inputs live in persistent device tensors,
+    /// the whole device-resident step is captured as a CUDA graph after two
+    /// warm runs, and later steps are one upload + one graph launch + one
+    /// download. Default policy: 512-class shapes only (at 1024 the pinned
+    /// buffers would sit against the 32GB WDDM residency cliff during VAE).
+    fn execute_device_graph(
+        &self,
+        weights: &LoadedFluxTransformerWeights,
+        conditioning: &FluxConditioning,
+        packed_latents: &[f32],
+        temb_silu: &[f32],
+        progress: &mut Option<ProgressHook>,
+    ) -> Result<FluxTransformerRun> {
+        FLUX_DEVICE_GRAPH.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let namespace = flux_cache_namespace(weights);
+            let act16 = flux_act16_enabled(weights);
+            let matches = slot.as_ref().is_some_and(|state| {
+                state.namespace == namespace
+                    && state.image_token_count == self.image_token_count
+                    && state.text_token_count == self.text_token_count
+                    && state.act16 == act16
+            });
+            if matches {
+                let state = slot.as_ref().expect("matching flux graph state");
+                gpu_upload_into(&state.latents, packed_latents).map_err(DiffusionError::model)?;
+                gpu_upload_into(&state.encoder, &conditioning.t5_hidden_states)
+                    .map_err(DiffusionError::model)?;
+                gpu_upload_into(&state.temb, temb_silu).map_err(DiffusionError::model)?;
+            } else {
+                // Drop the old graph first: its Drop unpins the pool buffers.
+                *slot = None;
+                *slot = Some(FluxDeviceGraphState {
+                    namespace,
+                    image_token_count: self.image_token_count,
+                    text_token_count: self.text_token_count,
+                    act16,
+                    latents: gpu_upload(
+                        packed_latents,
+                        self.image_token_count,
+                        weights.config.in_channels as usize,
+                    )
+                    .map_err(DiffusionError::model)?,
+                    encoder: gpu_upload(
+                        &conditioning.t5_hidden_states,
+                        self.text_token_count,
+                        weights.config.context_in_dim as usize,
+                    )
+                    .map_err(DiffusionError::model)?,
+                    temb: gpu_upload(temb_silu, 1, self.hidden_size)
+                        .map_err(DiffusionError::model)?,
+                    rope_cos: gpu_upload(
+                        &self.rope_tables.cos,
+                        self.rope_tables.token_count,
+                        self.rope_tables.half_dim,
+                    )
+                    .map_err(DiffusionError::model)?,
+                    rope_sin: gpu_upload(
+                        &self.rope_tables.sin,
+                        self.rope_tables.token_count,
+                        self.rope_tables.half_dim,
+                    )
+                    .map_err(DiffusionError::model)?,
+                    warm_runs: 0,
+                    graph: None,
+                });
+            }
+            let state = slot.as_mut().expect("flux graph state");
+            let (values, channel_count) = if let Some((graph, prediction)) = &state.graph {
+                gpu_graph_launch(graph).map_err(DiffusionError::model)?;
+                (
+                    gpu_download(prediction).map_err(DiffusionError::model)?,
+                    prediction.cols(),
+                )
+            } else if state.warm_runs < 2 {
+                // Warm runs fill the weight caches and settle the pool into
+                // its steady state before addresses get baked into a graph.
+                // These are the runs where the weight stream-in happens, so
+                // they get the per-block progress.
+                state.warm_runs += 1;
+                let prediction = self.execute_device_core(
+                    weights,
+                    &state.latents,
+                    &state.encoder,
+                    &state.temb,
+                    &state.rope_cos,
+                    &state.rope_sin,
+                    progress,
+                )?;
+                (
+                    gpu_download(&prediction).map_err(DiffusionError::model)?,
+                    prediction.cols(),
+                )
+            } else {
+                let captured = gpu_graph_capture(|| {
+                    // Capture records without executing — no progress inside.
+                    self.execute_device_core(
+                        weights,
+                        &state.latents,
+                        &state.encoder,
+                        &state.temb,
+                        &state.rope_cos,
+                        &state.rope_sin,
+                        &mut None,
+                    )
+                    .map_err(|err| err.to_string())
+                });
+                match captured {
+                    Ok((graph, prediction)) => {
+                        // Capture records without executing: launch for the
+                        // real step result.
+                        gpu_graph_launch(&graph).map_err(DiffusionError::model)?;
+                        let values =
+                            gpu_download(&prediction).map_err(DiffusionError::model)?;
+                        let channel_count = prediction.cols();
+                        state.graph = Some((graph, prediction));
+                        (values, channel_count)
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "flux device graph capture failed ({err}); running uncaptured"
+                        );
+                        state.warm_runs = u32::MAX;
+                        let prediction = self.execute_device_core(
+                            weights,
+                            &state.latents,
+                            &state.encoder,
+                            &state.temb,
+                            &state.rope_cos,
+                            &state.rope_sin,
+                            &mut None,
+                        )?;
+                        (
+                            gpu_download(&prediction).map_err(DiffusionError::model)?,
+                            prediction.cols(),
+                        )
+                    }
+                }
+            };
+            Ok(FluxTransformerRun {
+                prediction: values,
+                image_token_count: self.image_token_count,
+                channel_count,
+            })
+        })
+    }
+
+    /// The device-resident denoise step from persistent inputs to the
+    /// still-on-device prediction: pure async device work on the dense
+    /// backend's stream (capturable as a CUDA graph).
+    #[allow(clippy::too_many_arguments)]
+    fn execute_device_core(
+        &self,
+        weights: &LoadedFluxTransformerWeights,
+        input_latents: &GpuTensor,
+        input_encoder: &GpuTensor,
+        temb_gpu: &GpuTensor,
+        rope_cos: &GpuTensor,
+        rope_sin: &GpuTensor,
+        progress: &mut Option<ProgressHook>,
+    ) -> Result<GpuTensor> {
+        let namespace = flux_cache_namespace(weights);
+        let attention_scale = 1.0 / (self.head_dim as f32).sqrt();
+        // The f16 activation spine: modulated-norm outputs, qkv/linear1/mlp
+        // activations and the q/k/v pipeline stay f16 between the f16acc
+        // gemms and the attention/gelu consumers (FLUX_ACT_F16=0 reverts;
+        // F8 weights force it off — their dequant feeds f32-accumulate
+        // gemms, which refuse f16 activations).
+        let act16 = flux_act16_enabled(weights);
+
+        let mut hidden = linear_device(
+            weights,
+            &namespace,
+            input_latents,
+            "img_in.weight",
+            "img_in.bias",
+        )?;
+        let mut encoder_hidden = linear_device(
+            weights,
+            &namespace,
+            input_encoder,
+            "txt_in.weight",
+            "txt_in.bias",
+        )?;
+
+        // Every per-layer modulation projection depends only on temb, so run
+        // them all as ONE resident multi-part linear + one download per step
+        // instead of 76 host round-trips (each of which drains the stream).
+        let hidden_size = self.hidden_size;
+        let depth = weights.config.depth as usize;
+        let depth_single = weights.config.depth_single_blocks as usize;
+        let mut mod_names = Vec::with_capacity(depth * 2 + depth_single);
+        for layer in 0..depth {
+            mod_names.push((
+                format!("double_blocks.{layer}.img_mod.lin.weight"),
+                format!("double_blocks.{layer}.img_mod.lin.bias"),
+            ));
+            mod_names.push((
+                format!("double_blocks.{layer}.txt_mod.lin.weight"),
+                format!("double_blocks.{layer}.txt_mod.lin.bias"),
+            ));
+        }
+        for layer in 0..depth_single {
+            mod_names.push((
+                format!("single_blocks.{layer}.modulation.lin.weight"),
+                format!("single_blocks.{layer}.modulation.lin.bias"),
+            ));
+        }
+        let mut mod_part_lists = Vec::with_capacity(mod_names.len());
+        let mut mod_bias = Vec::new();
+        let mut mod_offsets = Vec::with_capacity(mod_names.len());
+        let mut mod_total = 0usize;
+        for (weight_name, bias_name) in &mod_names {
+            mod_offsets.push(mod_total);
+            let parts = weights.tensor_matrix_parts(weight_name)?;
+            for part in &parts {
+                if part.cols != hidden_size {
+                    return Err(DiffusionError::model(format!(
+                        "flux modulation weight '{}' width mismatch: {}",
+                        weight_name, part.cols
+                    )));
+                }
+                mod_total += part.rows;
+            }
+            mod_bias.extend(weights.tensor_f32_values_concat(bias_name)?);
+            mod_part_lists.push(parts);
+        }
+        if mod_bias.len() != mod_total {
+            return Err(DiffusionError::model(
+                "flux modulation bias/weight length mismatch",
+            ));
+        }
+        let mod_gpu_parts = mod_part_lists
+            .iter()
+            .flatten()
+            .map(|part| GpuLinearPart {
+                bt_ggml_type: part.ggml_type,
+                n: part.rows,
+                cache_key: &part.cache_key,
+                bytes: part.bytes,
+            })
+            .collect::<Vec<_>>();
+        // The modulation row STAYS on device: layer norms and gated residuals
+        // read scale/shift/gate at element offsets into it (no per-step
+        // download, no per-call host vector uploads).
+        let mod_out = gpu_linear_nt_cached(temb_gpu, &namespace, &mod_gpu_parts, &mod_bias)
+            .map_err(DiffusionError::model)?;
+        let mod_off = |index: usize, chunk: usize| -> usize {
+            mod_offsets[index] + chunk * hidden_size
+        };
+
+        // Progress rides the block loop: on cold steps each block's weights
+        // stream through gpu_weight_cache_ensure (synchronous uploads), so
+        // per-block labels are what make the stream-in visible. On warm
+        // steps the loop just enqueues async kernels and races ahead — the
+        // labels then merely tick, which is harmless.
+        let total_blocks = depth + depth_single;
+        for layer in 0..depth {
+            if progress.is_some() {
+                emit_progress(
+                    progress,
+                    &format!("block {}/{total_blocks}", layer + 1),
+                    layer as f64 / total_blocks as f64,
+                )?;
+            }
+            let prefix = format!("double_blocks.{layer}");
+
+            let img_mod = layer * 2;
+            let txt_mod = layer * 2 + 1;
+            let img_shift_msa = mod_off(img_mod, 0);
+            let img_scale_msa = mod_off(img_mod, 1);
+            let img_gate_msa = mod_off(img_mod, 2);
+            let img_shift_mlp = mod_off(img_mod, 3);
+            let img_scale_mlp = mod_off(img_mod, 4);
+            let img_gate_mlp = mod_off(img_mod, 5);
+            let txt_shift_msa = mod_off(txt_mod, 0);
+            let txt_scale_msa = mod_off(txt_mod, 1);
+            let txt_gate_msa = mod_off(txt_mod, 2);
+            let txt_shift_mlp = mod_off(txt_mod, 3);
+            let txt_scale_mlp = mod_off(txt_mod, 4);
+            let txt_gate_mlp = mod_off(txt_mod, 5);
+
+            let norm_hidden = if act16 {
+                gpu_layer_norm_mod_f16(
+                    &hidden,
+                    &mod_out,
+                    img_scale_msa,
+                    img_shift_msa,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            } else {
+                gpu_layer_norm_mod(
+                    &hidden,
+                    &mod_out,
+                    img_scale_msa,
+                    img_shift_msa,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            }
+            .map_err(DiffusionError::model)?;
+            let norm_encoder_hidden = if act16 {
+                gpu_layer_norm_mod_f16(
+                    &encoder_hidden,
+                    &mod_out,
+                    txt_scale_msa,
+                    txt_shift_msa,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            } else {
+                gpu_layer_norm_mod(
+                    &encoder_hidden,
+                    &mod_out,
+                    txt_scale_msa,
+                    txt_shift_msa,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            }
+            .map_err(DiffusionError::model)?;
+
+            let img_qkv = if act16 {
+                linear_device_f16(
+                    weights,
+                    &namespace,
+                    &norm_hidden,
+                    &format!("{prefix}.img_attn.qkv.weight"),
+                    Some(&format!("{prefix}.img_attn.qkv.bias")),
+                )?
+            } else {
+                linear_device(
+                    weights,
+                    &namespace,
+                    &norm_hidden,
+                    &format!("{prefix}.img_attn.qkv.weight"),
+                    &format!("{prefix}.img_attn.qkv.bias"),
+                )?
+            };
+            drop(norm_hidden);
+            let img_q = gpu_slice_cols(&img_qkv, 0, self.hidden_size).map_err(DiffusionError::model)?;
+            let img_k = gpu_slice_cols(&img_qkv, self.hidden_size, self.hidden_size)
+                .map_err(DiffusionError::model)?;
+            let img_v = gpu_slice_cols(&img_qkv, self.hidden_size * 2, self.hidden_size)
+                .map_err(DiffusionError::model)?;
+            drop(img_qkv);
+            let txt_qkv = if act16 {
+                linear_device_f16(
+                    weights,
+                    &namespace,
+                    &norm_encoder_hidden,
+                    &format!("{prefix}.txt_attn.qkv.weight"),
+                    Some(&format!("{prefix}.txt_attn.qkv.bias")),
+                )?
+            } else {
+                linear_device(
+                    weights,
+                    &namespace,
+                    &norm_encoder_hidden,
+                    &format!("{prefix}.txt_attn.qkv.weight"),
+                    &format!("{prefix}.txt_attn.qkv.bias"),
+                )?
+            };
+            drop(norm_encoder_hidden);
+            let txt_q = gpu_slice_cols(&txt_qkv, 0, self.hidden_size).map_err(DiffusionError::model)?;
+            let txt_k = gpu_slice_cols(&txt_qkv, self.hidden_size, self.hidden_size)
+                .map_err(DiffusionError::model)?;
+            let txt_v = gpu_slice_cols(&txt_qkv, self.hidden_size * 2, self.hidden_size)
+                .map_err(DiffusionError::model)?;
+            drop(txt_qkv);
+
+            let img_q = head_rms_norm_device(
+                weights,
+                &img_q,
+                self.head_dim,
+                &format!("{prefix}.img_attn.norm.query_norm.scale"),
+            )?;
+            let img_k = head_rms_norm_device(
+                weights,
+                &img_k,
+                self.head_dim,
+                &format!("{prefix}.img_attn.norm.key_norm.scale"),
+            )?;
+            let txt_q = head_rms_norm_device(
+                weights,
+                &txt_q,
+                self.head_dim,
+                &format!("{prefix}.txt_attn.norm.query_norm.scale"),
+            )?;
+            let txt_k = head_rms_norm_device(
+                weights,
+                &txt_k,
+                self.head_dim,
+                &format!("{prefix}.txt_attn.norm.key_norm.scale"),
+            )?;
+
+            let q = gpu_concat_rows(&txt_q, &img_q).map_err(DiffusionError::model)?;
+            let k = gpu_concat_rows(&txt_k, &img_k).map_err(DiffusionError::model)?;
+            let v = gpu_concat_rows(&txt_v, &img_v).map_err(DiffusionError::model)?;
+            drop((txt_q, img_q, txt_k, img_k, txt_v, img_v));
+            let q = gpu_rope_interleaved(&q, self.head_count, &rope_cos, &rope_sin)
+                .map_err(DiffusionError::model)?;
+            let k = gpu_rope_interleaved(&k, self.head_count, &rope_cos, &rope_sin)
+                .map_err(DiffusionError::model)?;
+
+            let attn = gpu_attention_packed(&q, &k, &v, self.head_count, attention_scale)
+                .map_err(DiffusionError::model)?;
+            drop((q, k, v));
+            let encoder_attn =
+                gpu_slice_rows(&attn, 0, self.text_token_count).map_err(DiffusionError::model)?;
+            let hidden_attn = gpu_slice_rows(&attn, self.text_token_count, self.image_token_count)
+                .map_err(DiffusionError::model)?;
+            drop(attn);
+
+            let hidden_attn = linear_device(
+                weights,
+                &namespace,
+                &hidden_attn,
+                &format!("{prefix}.img_attn.proj.weight"),
+                &format!("{prefix}.img_attn.proj.bias"),
+            )?;
+            let encoder_attn = linear_device(
+                weights,
+                &namespace,
+                &encoder_attn,
+                &format!("{prefix}.txt_attn.proj.weight"),
+                &format!("{prefix}.txt_attn.proj.bias"),
+            )?;
+            hidden = gpu_gated_residual_mod(&hidden, &hidden_attn, &mod_out, img_gate_msa)
+                .map_err(DiffusionError::model)?;
+            encoder_hidden =
+                gpu_gated_residual_mod(&encoder_hidden, &encoder_attn, &mod_out, txt_gate_msa)
+                    .map_err(DiffusionError::model)?;
+            drop((hidden_attn, encoder_attn));
+
+            let hidden_ff_input = if act16 {
+                gpu_layer_norm_mod_f16(
+                    &hidden,
+                    &mod_out,
+                    img_scale_mlp,
+                    img_shift_mlp,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            } else {
+                gpu_layer_norm_mod(
+                    &hidden,
+                    &mod_out,
+                    img_scale_mlp,
+                    img_shift_mlp,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            }
+            .map_err(DiffusionError::model)?;
+            let encoder_ff_input = if act16 {
+                gpu_layer_norm_mod_f16(
+                    &encoder_hidden,
+                    &mod_out,
+                    txt_scale_mlp,
+                    txt_shift_mlp,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            } else {
+                gpu_layer_norm_mod(
+                    &encoder_hidden,
+                    &mod_out,
+                    txt_scale_mlp,
+                    txt_shift_mlp,
+                    FLUX_LAYER_NORM_EPSILON,
+                )
+            }
+            .map_err(DiffusionError::model)?;
+
+            let hidden_ff = feed_forward_device(
+                weights,
+                &namespace,
+                &hidden_ff_input,
+                &format!("{prefix}.img_mlp.0.weight"),
+                &format!("{prefix}.img_mlp.0.bias"),
+                &format!("{prefix}.img_mlp.2.weight"),
+                &format!("{prefix}.img_mlp.2.bias"),
+            )?;
+            drop(hidden_ff_input);
+            let encoder_ff = feed_forward_device(
+                weights,
+                &namespace,
+                &encoder_ff_input,
+                &format!("{prefix}.txt_mlp.0.weight"),
+                &format!("{prefix}.txt_mlp.0.bias"),
+                &format!("{prefix}.txt_mlp.2.weight"),
+                &format!("{prefix}.txt_mlp.2.bias"),
+            )?;
+            drop(encoder_ff_input);
+            hidden = gpu_gated_residual_mod(&hidden, &hidden_ff, &mod_out, img_gate_mlp)
+                .map_err(DiffusionError::model)?;
+            encoder_hidden =
+                gpu_gated_residual_mod(&encoder_hidden, &encoder_ff, &mod_out, txt_gate_mlp)
+                    .map_err(DiffusionError::model)?;
+        }
+
+        for layer in 0..depth_single {
+            if progress.is_some() {
+                let done = depth + layer;
+                emit_progress(
+                    progress,
+                    &format!("block {}/{total_blocks}", done + 1),
+                    done as f64 / total_blocks as f64,
+                )?;
+            }
+            let prefix = format!("single_blocks.{layer}");
+            let joint = gpu_concat_rows(&encoder_hidden, &hidden).map_err(DiffusionError::model)?;
+            let single_mod = depth * 2 + layer;
+            let shift = mod_off(single_mod, 0);
+            let scale = mod_off(single_mod, 1);
+            let gate = mod_off(single_mod, 2);
+            let norm_joint = if act16 {
+                gpu_layer_norm_mod_f16(&joint, &mod_out, scale, shift, FLUX_LAYER_NORM_EPSILON)
+            } else {
+                gpu_layer_norm_mod(&joint, &mod_out, scale, shift, FLUX_LAYER_NORM_EPSILON)
+            }
+            .map_err(DiffusionError::model)?;
+            let linear1 = if act16 {
+                linear_device_f16(
+                    weights,
+                    &namespace,
+                    &norm_joint,
+                    &format!("{prefix}.linear1.weight"),
+                    Some(&format!("{prefix}.linear1.bias")),
+                )?
+            } else {
+                linear_device(
+                    weights,
+                    &namespace,
+                    &norm_joint,
+                    &format!("{prefix}.linear1.weight"),
+                    &format!("{prefix}.linear1.bias"),
+                )?
+            };
+            drop(norm_joint);
+            let q = gpu_slice_cols(&linear1, 0, self.hidden_size).map_err(DiffusionError::model)?;
+            let k = gpu_slice_cols(&linear1, self.hidden_size, self.hidden_size)
+                .map_err(DiffusionError::model)?;
+            let v = gpu_slice_cols(&linear1, self.hidden_size * 2, self.hidden_size)
+                .map_err(DiffusionError::model)?;
+            let mlp = gpu_slice_cols(&linear1, self.hidden_size * 3, self.hidden_size * 4)
+                .map_err(DiffusionError::model)?;
+            drop(linear1);
+
+            let q = head_rms_norm_device(
+                weights,
+                &q,
+                self.head_dim,
+                &format!("{prefix}.norm.query_norm.scale"),
+            )?;
+            let k = head_rms_norm_device(
+                weights,
+                &k,
+                self.head_dim,
+                &format!("{prefix}.norm.key_norm.scale"),
+            )?;
+            let q = gpu_rope_interleaved(&q, self.head_count, &rope_cos, &rope_sin)
+                .map_err(DiffusionError::model)?;
+            let k = gpu_rope_interleaved(&k, self.head_count, &rope_cos, &rope_sin)
+                .map_err(DiffusionError::model)?;
+            let attn = gpu_attention_packed(&q, &k, &v, self.head_count, attention_scale)
+                .map_err(DiffusionError::model)?;
+            drop((q, k, v));
+            let mlp = gpu_gelu(&mlp).map_err(DiffusionError::model)?;
+            // On the f16 spine the mlp half is f16; bring the f32 attention
+            // output over so linear2 consumes one f16 activation block.
+            let fused = if act16 {
+                let attn16 = gpu_to_f16(&attn).map_err(DiffusionError::model)?;
+                gpu_concat_cols(&[&attn16, &mlp]).map_err(DiffusionError::model)?
+            } else {
+                gpu_concat_cols(&[&attn, &mlp]).map_err(DiffusionError::model)?
+            };
+            drop((attn, mlp));
+            let proj = linear_device(
+                weights,
+                &namespace,
+                &fused,
+                &format!("{prefix}.linear2.weight"),
+                &format!("{prefix}.linear2.bias"),
+            )?;
+            drop(fused);
+            let joint =
+                gpu_gated_residual_mod(&joint, &proj, &mod_out, gate).map_err(DiffusionError::model)?;
+            drop(proj);
+            encoder_hidden =
+                gpu_slice_rows(&joint, 0, self.text_token_count).map_err(DiffusionError::model)?;
+            hidden = gpu_slice_rows(&joint, self.text_token_count, self.image_token_count)
+                .map_err(DiffusionError::model)?;
+        }
+
+        // Final adaLN on device from the same silu(temb) row the modulation
+        // linear used (m=1, f32-accumulate): adaLN output is [shift, scale]
+        // and gpu_layer_norm_mod applies the +1 on scale internally — the
+        // step stays fully device-resident (graph-capturable).
+        let final_mod = linear_device(
+            weights,
+            &namespace,
+            temb_gpu,
+            "final_layer.adaLN_modulation.1.weight",
+            "final_layer.adaLN_modulation.1.bias",
+        )?;
+        let hidden = gpu_layer_norm_mod(
+            &hidden,
+            &final_mod,
+            self.hidden_size,
+            0,
+            FLUX_LAYER_NORM_EPSILON,
+        )
+        .map_err(DiffusionError::model)?;
+        linear_device(
+            weights,
+            &namespace,
+            &hidden,
+            "final_layer.linear.weight",
+            "final_layer.linear.bias",
+        )
+    }
+
+}
+
+/// The captured denoise-step graph + its persistent step-input tensors,
+/// keyed by (weights namespace, shape, spine mode). Thread-local because
+/// GpuTensor is single-thread; the denoise loop runs on one thread.
+struct FluxDeviceGraphState {
+    namespace: String,
+    image_token_count: usize,
+    text_token_count: usize,
+    act16: bool,
+    latents: GpuTensor,
+    encoder: GpuTensor,
+    temb: GpuTensor,
+    rope_cos: GpuTensor,
+    rope_sin: GpuTensor,
+    warm_runs: u32,
+    graph: Option<(GpuStepGraph, GpuTensor)>,
+}
+
+thread_local! {
+    static FLUX_DEVICE_GRAPH: std::cell::RefCell<Option<FluxDeviceGraphState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn flux_device_path_enabled() -> bool {
+    match std::env::var("FLUX_DEVICE") {
+        Ok(value) => value != "0",
+        Err(_) => true,
+    }
+}
+
+/// CUDA-graph replay of the denoise step. Default: 512-class shapes only —
+/// at 1024 the graph-pinned pool buffers cannot be freed at the VAE phase
+/// boundary, which re-crowds the 32GB WDDM residency cliff the per-phase
+/// pool cap exists to avoid. FLUX_GRAPH=1 forces all shapes, =0 disables.
+/// Compare/profile modes bypass the graph (they sync inside the step).
+fn flux_graph_enabled(total_tokens: usize) -> bool {
+    if matches!(std::env::var("FLUX_ATTN_COMPARE"), Ok(value) if value == "1")
+        || matches!(std::env::var("MAKEPAD_GPU_PROF"), Ok(value) if value == "1")
+    {
+        return false;
+    }
+    match std::env::var("FLUX_GRAPH") {
+        Ok(value) if value == "0" => false,
+        Ok(value) if value == "1" => true,
+        _ => total_tokens < 2048,
+    }
+}
+
+/// Device linear mirroring `linear_rows`: multi-part weights land in their
+/// column ranges directly; the cache key layout ("{ns}::{ns}::{name}") matches
+/// the host lazy path exactly so both paths share one weight cache.
+fn linear_device(
+    weights: &LoadedFluxTransformerWeights,
+    namespace: &str,
+    input: &GpuTensor,
+    weight_name: &str,
+    bias_name: &str,
+) -> Result<GpuTensor> {
+    let parts = weights.tensor_matrix_parts(weight_name)?;
+    let bias = weights.tensor_f32_values_concat(bias_name)?;
+    for part in &parts {
+        if part.cols != input.cols() {
+            return Err(DiffusionError::model(format!(
+                "flux device linear '{}' width mismatch: input={} weight={}",
+                weight_name,
+                input.cols(),
+                part.cols
+            )));
+        }
+    }
+    let gpu_parts = parts
+        .iter()
+        .map(|part| GpuLinearPart {
+            bt_ggml_type: part.ggml_type,
+            n: part.rows,
+            cache_key: &part.cache_key,
+            bytes: part.bytes,
+        })
+        .collect::<Vec<_>>();
+    gpu_linear_nt_cached(input, namespace, &gpu_parts, &bias).map_err(DiffusionError::model)
+}
+
+/// linear_device with an f16 result (the f16 activation spine): the gemm's
+/// f16 C is the output, bias broadcast in place. `bias_name` = None defers
+/// the bias into the consumer (the fused gelu).
+fn linear_device_f16(
+    weights: &LoadedFluxTransformerWeights,
+    namespace: &str,
+    input: &GpuTensor,
+    weight_name: &str,
+    bias_name: Option<&str>,
+) -> Result<GpuTensor> {
+    let parts = weights.tensor_matrix_parts(weight_name)?;
+    let bias = match bias_name {
+        Some(name) => weights.tensor_f32_values_concat(name)?,
+        None => Vec::new(),
+    };
+    for part in &parts {
+        if part.cols != input.cols() {
+            return Err(DiffusionError::model(format!(
+                "flux device linear '{}' width mismatch: input={} weight={}",
+                weight_name,
+                input.cols(),
+                part.cols
+            )));
+        }
+    }
+    let gpu_parts = parts
+        .iter()
+        .map(|part| GpuLinearPart {
+            bt_ggml_type: part.ggml_type,
+            n: part.rows,
+            cache_key: &part.cache_key,
+            bytes: part.bytes,
+        })
+        .collect::<Vec<_>>();
+    gpu_linear_nt_cached_f16(input, namespace, &gpu_parts, &bias).map_err(DiffusionError::model)
+}
+
+/// Device mirror of `apply_head_rms_norm_rows`.
+fn head_rms_norm_device(
+    weights: &LoadedFluxTransformerWeights,
+    input: &GpuTensor,
+    head_dim: usize,
+    scale_name: &str,
+) -> Result<GpuTensor> {
+    let scale = weights.tensor_f32_values(scale_name)?;
+    if scale.len() != head_dim {
+        return Err(DiffusionError::model(format!(
+            "flux head rms scale mismatch: scale={} head_dim={}",
+            scale.len(),
+            head_dim
+        )));
+    }
+    gpu_rms_norm_mul(
+        input,
+        head_dim,
+        &flux_cache_namespace(weights),
+        scale_name,
+        &scale,
+        FLUX_LAYER_NORM_EPSILON,
+    )
+    .map_err(DiffusionError::model)
+}
+
+/// Device mirror of `feed_forward_rows`. On the f16 spine the mlp.0 C stays
+/// f16 with its bias deferred into the fused gelu, and mlp.2 consumes the
+/// f16 activations directly.
+fn feed_forward_device(
+    weights: &LoadedFluxTransformerWeights,
+    namespace: &str,
+    input: &GpuTensor,
+    weight0: &str,
+    bias0: &str,
+    weight2: &str,
+    bias2: &str,
+) -> Result<GpuTensor> {
+    if flux_act16_enabled(weights) {
+        let hidden = linear_device_f16(weights, namespace, input, weight0, None)?;
+        let bias = weights.tensor_f32_values_concat(bias0)?;
+        let hidden = gpu_gelu_bias_f16(&hidden, namespace, weight0, &bias)
+            .map_err(DiffusionError::model)?;
+        return linear_device(weights, namespace, &hidden, weight2, bias2);
+    }
+    let hidden = linear_device(weights, namespace, input, weight0, bias0)?;
+    let hidden = gpu_gelu(&hidden).map_err(DiffusionError::model)?;
+    linear_device(weights, namespace, &hidden, weight2, bias2)
 }
 
 impl RowsTensor {
@@ -1421,6 +2523,18 @@ fn linear_rows(
         } else if flux_force_cpu_math() {
             let decoded = decoded_matrix_f32_cached(part)?;
             matmul_nt_f32_cpu(&input.data, decoded.as_slice(), input.rows, input.cols, part.rows)?
+        } else if let Some(values) = try_matmul_nt_ggml_bytes(
+            &input.data,
+            part.bytes,
+            part.ggml_type,
+            input.rows,
+            input.cols,
+            part.rows,
+        ) {
+            // Pass the resident mmap/arena slice so Metal's pointer-keyed
+            // weight cache can reuse the GPU buffer. `to_vec()` here used to
+            // allocate a new host copy every linear and bust that cache.
+            values
         } else if let Some(result) = try_matmul_nt_ggml_bytes_cached(
             &input.data,
             part.ggml_type,
@@ -1883,8 +2997,53 @@ fn push_debug_heads(
     });
 }
 
-fn flux_cache_namespace(weights: &LoadedFluxTransformerWeights) -> String {
+pub(crate) fn flux_cache_namespace(weights: &LoadedFluxTransformerWeights) -> String {
     format!("flux_transformer:{}", weights.path.display())
+}
+
+/// The f16 activation spine requires f16-accumulate gemms, which the F8
+/// dequant path (bf16 scratch + f32 accumulate, the ComfyUI-default numerics
+/// class) deliberately refuses — so F8 weights force the f32 spine.
+fn flux_act16_enabled(weights: &LoadedFluxTransformerWeights) -> bool {
+    !weights.f8_weights && gpu_act_f16_enabled()
+}
+
+/// Compiled-graph F16 spine (Metal). Off by default: at 256 the extra
+/// F32↔F16 casts after ggml mul_mat (always F32) cost more than Q4×F16
+/// saves. `FLUX_ACT_F16=1` enables; dirty drops ~150MB.
+fn flux_compiled_act16() -> bool {
+    matches!(std::env::var("FLUX_ACT_F16"), Ok(value) if value != "0")
+}
+
+fn tensor_type_of(ctx: &Context, id: TensorId) -> Result<TensorType> {
+    Ok(require_tensor(ctx, id)?.desc.ty)
+}
+
+fn cast_activation(ctx: &mut Context, src: TensorId, ty: TensorType) -> Result<TensorId> {
+    let tensor = require_tensor(ctx, src)?;
+    if tensor.desc.ty == ty {
+        return Ok(src);
+    }
+    let ne = tensor.ne;
+    let dst = ctx
+        .new_tensor_4d(ty, ne[0], ne[1], ne[2], ne[3], BufferUsage::Activations)
+        .map_err(DiffusionError::model)?;
+    ctx.cpy(src, dst, BufferUsage::Activations)
+        .map_err(DiffusionError::model)
+}
+
+fn match_activation_type(ctx: &mut Context, src: TensorId, like: TensorId) -> Result<TensorId> {
+    let ty = tensor_type_of(ctx, like)?;
+    cast_activation(ctx, src, ty)
+}
+
+/// Drops every device weight-cache entry belonging to `weights` (the whole
+/// unet, ~24GB in f16 on dev/schnell). The cache keys on the transformer
+/// path and never evicts on its own — call this before replacing a resident
+/// pipeline with a DIFFERENT model on the same thread, or a 32GB card ends
+/// up asked to hold two flux unets. Returns the number of buffers freed.
+pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxTransformerWeights) -> usize {
+    crate::backend::gpu_weight_cache_evict_prefix(&flux_cache_namespace(weights)).unwrap_or(0)
 }
 
 fn flux_force_cpu_math() -> bool {
@@ -1917,6 +3076,7 @@ fn tensor_to_f32_vec(ctx: &Context, tensor_id: TensorId) -> Result<Vec<f32>> {
         TensorType::F32 => f32_bytes_to_vec(bytes),
         TensorType::F16 => f16_bytes_to_f32_vec(bytes),
         TensorType::BF16 => bf16_bytes_to_f32_vec(bytes),
+        TensorType::F8E4M3 => Ok(bytes.iter().map(|&b| f8_e4m3_to_f32(b)).collect()),
         other => Err(DiffusionError::model(format!(
             "flux tensor {} cannot be decoded as f32 from {:?}",
             tensor_id, other
@@ -1937,6 +3097,10 @@ fn decode_ggml_matrix_to_f32(matrix: &ResidentMatrix<'_>) -> Result<Vec<f32>> {
         }
         x if x == TensorType::BF16.ggml_type() => {
             out.extend_from_slice(&bf16_bytes_to_f32_vec(matrix.bytes)?);
+            Ok(out)
+        }
+        x if x == TensorType::F8E4M3.ggml_type() => {
+            out.extend(matrix.bytes.iter().map(|&b| f8_e4m3_to_f32(b)));
             Ok(out)
         }
         other => Err(DiffusionError::model(format!(
@@ -2243,38 +3407,58 @@ pub fn build_flux_transformer_graph(
     } else {
         None
     };
-    let (rope_cos, rope_sin) = build_flux_rope_tables(
+    let (rope_pos_h, rope_pos_w) = build_flux_rope_axis_positions(
         &mut weights.ctx,
         text_token_count,
         latent_shape,
-        weights.config,
     )?;
-    let ones_hidden = weights
-        .ctx
-        .new_named_tensor(
-            "flux.ones_hidden",
-            TensorType::F32,
-            2,
-            &[hidden_size, 1],
-            BufferUsage::Activations,
-        )
-        .map_err(DiffusionError::model)?;
+    bake_modulation_scale_plus_one(weights, shape.hidden_size)?;
+    // Host-backed scalar used by silu/gelu `repeat`. Created before
+    // no_alloc so write_tensor_data still has a dirty-arena slot.
     weights
         .ctx
-        .write_tensor_data(
-            ones_hidden,
-            &f32s_to_le_bytes(&vec![1.0f32; hidden_size as usize]),
+        .new_named_tensor(
+            "flux.scalar_one",
+            TensorType::F32,
+            1,
+            &[1],
+            BufferUsage::Weights,
         )
+        .and_then(|id| {
+            weights
+                .ctx
+                .write_tensor_data(id, &1.0f32.to_le_bytes())
+                .map(|_| id)
+        })
         .map_err(DiffusionError::model)?;
+    // Graph intermediates stay metadata-only. The Metal binding planner
+    // assigns (and reuses) GPU dirty ranges; CPU-allocating them is what
+    // grew a 32GiB arena and then failed newBufferWithBytesNoCopy.
+    weights.ctx.set_no_alloc(true);
     let mut debug_tensors = Vec::new();
 
-    let mut hidden = apply_linear(
+    let img_in_weight = concat_linear_parts(
         &mut weights.ctx,
         &weights.tensor_ids,
-        input_packed_latents,
         "img_in.weight",
+    )?;
+    let input_hidden_mm = weights
+        .ctx
+        .mul_mat(img_in_weight, input_packed_latents, BufferUsage::Activations)
+        .map_err(DiffusionError::model)?;
+    let img_in_bias = concat_linear_parts(
+        &mut weights.ctx,
+        &weights.tensor_ids,
         "img_in.bias",
     )?;
+    let mut hidden = weights
+        .ctx
+        .binary_like_a(Op::Add, input_hidden_mm, img_in_bias, BufferUsage::Activations)
+        .map_err(DiffusionError::model)?;
+    let input_hidden = hidden;
+    if flux_compiled_act16() {
+        hidden = cast_activation(&mut weights.ctx, hidden, TensorType::F16)?;
+    }
     push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "input.hidden", hidden)?;
     let mut encoder_hidden = apply_linear(
         &mut weights.ctx,
@@ -2283,6 +3467,9 @@ pub fn build_flux_transformer_graph(
         "txt_in.weight",
         "txt_in.bias",
     )?;
+    if flux_compiled_act16() {
+        encoder_hidden = cast_activation(&mut weights.ctx, encoder_hidden, TensorType::F16)?;
+    }
     push_debug_tensor(
         &mut weights.ctx,
         &mut debug_tensors,
@@ -2319,6 +3506,9 @@ pub fn build_flux_transformer_graph(
             .map_err(DiffusionError::model)?;
     }
     push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "input.temb", temb)?;
+    // One SiLU(temb) for every AdaLN linear. The previous graph silu'd the
+    // same 1x3072 row 76 times (19*2 + 38).
+    let temb_silu = silu(&mut weights.ctx, temb)?;
 
     for layer in 0..weights.config.depth as usize {
         let prefix = format!("double_blocks.{layer}");
@@ -2333,7 +3523,7 @@ pub fn build_flux_transformer_graph(
         ) = modulation_chunks(
             &mut weights.ctx,
             &weights.tensor_ids,
-            temb,
+            temb_silu,
             &format!("{prefix}.img_mod.lin.weight"),
             &format!("{prefix}.img_mod.lin.bias"),
             hidden_size as usize,
@@ -2349,7 +3539,7 @@ pub fn build_flux_transformer_graph(
         ) = modulation_chunks(
             &mut weights.ctx,
             &weights.tensor_ids,
-            temb,
+            temb_silu,
             &format!("{prefix}.txt_mod.lin.weight"),
             &format!("{prefix}.txt_mod.lin.bias"),
             hidden_size as usize,
@@ -2361,14 +3551,12 @@ pub fn build_flux_transformer_graph(
             hidden,
             img_scale_msa,
             img_shift_msa,
-            ones_hidden,
         )?;
         let norm_encoder_hidden = apply_modulated_layer_norm(
             &mut weights.ctx,
             encoder_hidden,
             txt_scale_msa,
             txt_shift_msa,
-            ones_hidden,
         )?;
         if layer == 0 {
             push_debug_tensor(
@@ -2483,8 +3671,14 @@ pub fn build_flux_transformer_graph(
             .ctx
             .concat(txt_v, img_v, 2, BufferUsage::Activations)
             .map_err(DiffusionError::model)?;
-        let q = apply_flux_rope(&mut weights.ctx, q, rope_cos, rope_sin, weights.config)?;
-        let k = apply_flux_rope(&mut weights.ctx, k, rope_cos, rope_sin, weights.config)?;
+        let (q, k) = apply_flux_rope_pair(
+            &mut weights.ctx,
+            q,
+            k,
+            rope_pos_h,
+            rope_pos_w,
+            weights.config,
+        )?;
         if layer == 0 {
             push_debug_tensor(
                 &mut weights.ctx,
@@ -2559,7 +3753,6 @@ pub fn build_flux_transformer_graph(
             hidden,
             img_scale_mlp,
             img_shift_mlp,
-            ones_hidden,
         )?;
         let hidden_ff = feed_forward(
             &mut weights.ctx,
@@ -2575,7 +3768,6 @@ pub fn build_flux_transformer_graph(
             encoder_hidden,
             txt_scale_mlp,
             txt_shift_mlp,
-            ones_hidden,
         )?;
         if layer == 0 {
             push_debug_tensor(
@@ -2617,23 +3809,31 @@ pub fn build_flux_transformer_graph(
         )?;
     }
 
+    // Stay in the joint [text+image] layout for every single block.
+    // The old loop concat/split each layer (~37 extra 6MB CPY at 256).
+    let enc_f32 = cast_activation(&mut weights.ctx, encoder_hidden, TensorType::F32)?;
+    let hid_f32 = cast_activation(&mut weights.ctx, hidden, TensorType::F32)?;
+    let mut joint = weights
+        .ctx
+        .concat(enc_f32, hid_f32, 1, BufferUsage::Activations)
+        .map_err(DiffusionError::model)?;
+    if flux_compiled_act16() {
+        joint = cast_activation(&mut weights.ctx, joint, TensorType::F16)?;
+    }
+
     for layer in 0..weights.config.depth_single_blocks as usize {
         let prefix = format!("single_blocks.{layer}");
-        let joint = weights
-            .ctx
-            .concat(encoder_hidden, hidden, 1, BufferUsage::Activations)
-            .map_err(DiffusionError::model)?;
         let (shift, scale, gate, _, _, _) = modulation_chunks(
             &mut weights.ctx,
             &weights.tensor_ids,
-            temb,
+            temb_silu,
             &format!("{prefix}.modulation.lin.weight"),
             &format!("{prefix}.modulation.lin.bias"),
             hidden_size as usize,
             3,
         )?;
         let norm_joint =
-            apply_modulated_layer_norm(&mut weights.ctx, joint, scale, shift, ones_hidden)?;
+            apply_modulated_layer_norm(&mut weights.ctx, joint, scale, shift)?;
         if layer == 0 {
             push_debug_tensor(
                 &mut weights.ctx,
@@ -2649,24 +3849,35 @@ pub fn build_flux_transformer_graph(
             &format!("{prefix}.linear1.weight"),
             &format!("{prefix}.linear1.bias"),
         )?;
-        let q = slice_rows_2d(&mut weights.ctx, linear1, 0, hidden_size)?;
-        let k = slice_rows_2d(&mut weights.ctx, linear1, hidden_size, hidden_size)?;
-        let v = slice_rows_2d(&mut weights.ctx, linear1, hidden_size * 2, hidden_size)?;
-        let mlp = slice_rows_2d(&mut weights.ctx, linear1, hidden_size * 3, hidden_size * 4)?;
-
         let total_token_count = text_token_count + image_token_count;
-        let q = weights
-            .ctx
-            .reshape(q, &[head_dim, head_count, total_token_count as i64])
-            .map_err(DiffusionError::model)?;
-        let k = weights
-            .ctx
-            .reshape(k, &[head_dim, head_count, total_token_count as i64])
-            .map_err(DiffusionError::model)?;
-        let v = weights
-            .ctx
-            .reshape(v, &[head_dim, head_count, total_token_count as i64])
-            .map_err(DiffusionError::model)?;
+        let q = view_heads(
+            &mut weights.ctx,
+            linear1,
+            0,
+            hidden_size,
+            head_dim,
+            head_count,
+            total_token_count as i64,
+        )?;
+        let k = view_heads(
+            &mut weights.ctx,
+            linear1,
+            hidden_size,
+            hidden_size,
+            head_dim,
+            head_count,
+            total_token_count as i64,
+        )?;
+        let v = view_heads(
+            &mut weights.ctx,
+            linear1,
+            hidden_size * 2,
+            hidden_size,
+            head_dim,
+            head_count,
+            total_token_count as i64,
+        )?;
+        let mlp = slice_rows_2d(&mut weights.ctx, linear1, hidden_size * 3, hidden_size * 4)?;
         let q = apply_head_rms_norm(
             &mut weights.ctx,
             &weights.tensor_ids,
@@ -2694,8 +3905,14 @@ pub fn build_flux_transformer_graph(
             )?;
             push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "single_blocks.0.v", v)?;
         }
-        let q = apply_flux_rope(&mut weights.ctx, q, rope_cos, rope_sin, weights.config)?;
-        let k = apply_flux_rope(&mut weights.ctx, k, rope_cos, rope_sin, weights.config)?;
+        let (q, k) = apply_flux_rope_pair(
+            &mut weights.ctx,
+            q,
+            k,
+            rope_pos_h,
+            rope_pos_w,
+            weights.config,
+        )?;
         let attn = build_attention_output(&mut weights.ctx, q, k, v, weights.config.head_dim())?;
         if layer == 0 {
             push_debug_tensor(
@@ -2733,7 +3950,7 @@ pub fn build_flux_transformer_graph(
                 proj,
             )?;
         }
-        let joint = gated_residual(&mut weights.ctx, joint, proj, gate)?;
+        joint = gated_residual(&mut weights.ctx, joint, proj, gate)?;
         if trace_single_block(layer, weights.config.depth_single_blocks as usize) {
             push_debug_tensor(
                 &mut weights.ctx,
@@ -2741,29 +3958,34 @@ pub fn build_flux_transformer_graph(
                 &format!("single_blocks.{layer}.joint"),
                 joint,
             )?;
-        }
-        encoder_hidden = slice_cols_2d(&mut weights.ctx, joint, 0, text_token_count as i64)?;
-        hidden = slice_cols_2d(
-            &mut weights.ctx,
-            joint,
-            text_token_count as i64,
-            image_token_count as i64,
-        )?;
-        if trace_single_block(layer, weights.config.depth_single_blocks as usize) {
+            let dbg_enc =
+                slice_cols_2d(&mut weights.ctx, joint, 0, text_token_count as i64)?;
+            let dbg_hid = slice_cols_2d(
+                &mut weights.ctx,
+                joint,
+                text_token_count as i64,
+                image_token_count as i64,
+            )?;
             push_debug_tensor(
                 &mut weights.ctx,
                 &mut debug_tensors,
                 &format!("single_blocks.{layer}.hidden"),
-                hidden,
+                dbg_hid,
             )?;
             push_debug_tensor(
                 &mut weights.ctx,
                 &mut debug_tensors,
                 &format!("single_blocks.{layer}.encoder_hidden"),
-                encoder_hidden,
+                dbg_enc,
             )?;
         }
     }
+    hidden = slice_cols_2d(
+        &mut weights.ctx,
+        joint,
+        text_token_count as i64,
+        image_token_count as i64,
+    )?;
 
     let final_mod_input = silu(&mut weights.ctx, temb)?;
     let final_mod = apply_linear(
@@ -2780,7 +4002,6 @@ pub fn build_flux_transformer_graph(
         hidden,
         final_scale,
         final_shift,
-        ones_hidden,
     )?;
     let result_prediction = apply_linear(
         &mut weights.ctx,
@@ -2806,6 +4027,8 @@ pub fn build_flux_transformer_graph(
             .build_forward_expand(&weights.ctx, debug_tensor.tensor_id)
             .map_err(DiffusionError::model)?;
     }
+    graph.add_leaf(input_hidden);
+    graph.add_leaf(input_hidden_mm);
 
     Ok(FluxTransformerGraph {
         graph,
@@ -2816,8 +4039,14 @@ pub fn build_flux_transformer_graph(
         input_guidance,
         result_prediction,
         image_token_count,
+        input_hidden,
+        input_hidden_mm,
         debug_tensors,
     })
+}
+
+fn flux_debug_transformer_stages() -> bool {
+    std::env::var_os("FLUX_DEBUG_TRANSFORMER_STAGES").is_some()
 }
 
 fn push_debug_tensor(
@@ -2826,6 +4055,12 @@ fn push_debug_tensor(
     name: &str,
     tensor_id: TensorId,
 ) -> Result<()> {
+    // Production denoise never reads these. Leaving them in the compiled
+    // graph runs ~80 extra CPY kernels and pins activations in the dirty
+    // buffer. Smoke/compare opt in with FLUX_DEBUG_TRANSFORMER_STAGES.
+    if !flux_debug_transformer_stages() {
+        return Ok(());
+    }
     let captured = ctx.cont(tensor_id).map_err(DiffusionError::model)?;
     debug_tensors.push(FluxTransformerDebugTensor {
         name: name.to_string(),
@@ -2891,6 +4126,7 @@ fn feed_forward(
     bias2: &str,
 ) -> Result<TensorId> {
     let hidden = apply_linear(ctx, tensor_ids, input, weight0, bias0)?;
+    let hidden = match_activation_type(ctx, hidden, input)?;
     let hidden = gelu(ctx, hidden)?;
     apply_linear(ctx, tensor_ids, hidden, weight2, bias2)
 }
@@ -2904,7 +4140,6 @@ fn modulation_chunks(
     chunk_size: usize,
     chunk_count: usize,
 ) -> Result<(TensorId, TensorId, TensorId, TensorId, TensorId, TensorId)> {
-    let temb = silu(ctx, temb)?;
     let linear = apply_linear(ctx, tensor_ids, temb, weight_name, bias_name)?;
     let mut chunks = Vec::with_capacity(chunk_count);
     for index in 0..chunk_count {
@@ -2935,107 +4170,225 @@ fn qkv_projections(
     token_count: i64,
 ) -> Result<(TensorId, TensorId, TensorId)> {
     let qkv = apply_linear(ctx, tensor_ids, input, weight_name, bias_name)?;
-    let q = slice_rows_2d(ctx, qkv, 0, hidden_size as i64)?;
-    let k = slice_rows_2d(ctx, qkv, hidden_size as i64, hidden_size as i64)?;
-    let v = slice_rows_2d(ctx, qkv, (hidden_size * 2) as i64, hidden_size as i64)?;
-    let q = ctx
-        .reshape(q, &[head_dim, head_count, token_count])
-        .map_err(DiffusionError::model)?;
-    let k = ctx
-        .reshape(k, &[head_dim, head_count, token_count])
-        .map_err(DiffusionError::model)?;
-    let v = ctx
-        .reshape(v, &[head_dim, head_count, token_count])
-        .map_err(DiffusionError::model)?;
+    let q = view_heads(
+        ctx,
+        qkv,
+        0,
+        hidden_size as i64,
+        head_dim,
+        head_count,
+        token_count,
+    )?;
+    let k = view_heads(
+        ctx,
+        qkv,
+        hidden_size as i64,
+        hidden_size as i64,
+        head_dim,
+        head_count,
+        token_count,
+    )?;
+    let v = view_heads(
+        ctx,
+        qkv,
+        (hidden_size * 2) as i64,
+        hidden_size as i64,
+        head_dim,
+        head_count,
+        token_count,
+    )?;
     Ok((q, k, v))
+}
+
+/// `[head_dim, heads, tokens]` window into a packed `[rows, tokens]` linear.
+/// Official ggml view — no CPY. Dim0 stays contiguous so RMS/bin/flash work.
+fn view_heads(
+    ctx: &mut Context,
+    input: TensorId,
+    start_row: i64,
+    row_count: i64,
+    head_dim: i64,
+    head_count: i64,
+    token_count: i64,
+) -> Result<TensorId> {
+    if row_count != head_dim * head_count {
+        return Err(DiffusionError::model(format!(
+            "flux head view expected {} rows, got {}",
+            head_dim * head_count,
+            row_count
+        )));
+    }
+    let tensor = require_tensor(ctx, input)?.clone();
+    if tensor.ne[1] != token_count {
+        return Err(DiffusionError::model(format!(
+            "flux head view token mismatch: tensor={} expected={}",
+            tensor.ne[1], token_count
+        )));
+    }
+    let elem = ggml_type_size_for_type(tensor.desc.ty);
+    let offset = usize::try_from(start_row)
+        .map_err(|_| DiffusionError::model("flux head view start is negative"))?
+        .checked_mul(elem)
+        .ok_or_else(|| DiffusionError::model("flux head view offset overflow"))?;
+    ctx.view_3d(
+        input,
+        head_dim,
+        head_count,
+        token_count,
+        usize::try_from(head_dim)
+            .map_err(|_| DiffusionError::model("flux head dim exceeds usize"))?
+            .checked_mul(elem)
+            .ok_or_else(|| DiffusionError::model("flux head view nb1 overflow"))?,
+        tensor.nb[1],
+        offset,
+    )
+    .map_err(DiffusionError::model)
+}
+
+fn flux_qk_stack() -> bool {
+    match std::env::var("FLUX_QK_STACK") {
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("off") => false,
+        _ => true,
+    }
+}
+
+fn apply_flux_rope_pair(
+    ctx: &mut Context,
+    q: TensorId,
+    k: TensorId,
+    pos_h: TensorId,
+    pos_w: TensorId,
+    config: FluxTransformerConfig,
+) -> Result<(TensorId, TensorId)> {
+    // Stacking Q/K on ne[3] halved rope dispatches but flash_attn then
+    // NaN'd at mid-schedule sigmas (t=0.8448). Default is separate ropes;
+    // FLUX_QK_STACK=1 restores the cut.
+    if flux_qk_stack() {
+        let q_t = require_tensor(ctx, q)?.clone();
+        let k_t = require_tensor(ctx, k)?.clone();
+        let q4 = ctx
+            .reshape(q, &[q_t.ne[0], q_t.ne[1], q_t.ne[2], 1])
+            .map_err(DiffusionError::model)?;
+        let k4 = ctx
+            .reshape(k, &[k_t.ne[0], k_t.ne[1], k_t.ne[2], 1])
+            .map_err(DiffusionError::model)?;
+        let qk = ctx
+            .concat(q4, k4, 3, BufferUsage::Activations)
+            .map_err(DiffusionError::model)?;
+        let qk_rot = apply_flux_rope(ctx, qk, pos_h, pos_w, config)?;
+        let rot = require_tensor(ctx, qk_rot)?.clone();
+        let elem = ggml_type_size_for_type(rot.desc.ty);
+        let plane = usize::try_from(rot.ne[0] * rot.ne[1] * rot.ne[2])
+            .map_err(|_| DiffusionError::model("flux rope qk plane exceeds usize"))?
+            .checked_mul(elem)
+            .ok_or_else(|| DiffusionError::model("flux rope qk plane overflow"))?;
+        let q_rot = ctx
+            .view_4d(
+                qk_rot,
+                rot.ne[0],
+                rot.ne[1],
+                rot.ne[2],
+                1,
+                rot.nb[1],
+                rot.nb[2],
+                rot.nb[3],
+                0,
+            )
+            .map_err(DiffusionError::model)?;
+        let k_rot = ctx
+            .view_4d(
+                qk_rot,
+                rot.ne[0],
+                rot.ne[1],
+                rot.ne[2],
+                1,
+                rot.nb[1],
+                rot.nb[2],
+                rot.nb[3],
+                plane,
+            )
+            .map_err(DiffusionError::model)?;
+        return Ok((q_rot, k_rot));
+    }
+    let q = apply_flux_rope(ctx, q, pos_h, pos_w, config)?;
+    let k = apply_flux_rope(ctx, k, pos_h, pos_w, config)?;
+    Ok((q, k))
 }
 
 fn apply_flux_rope(
     ctx: &mut Context,
     tensor: TensorId,
-    rope_cos: TensorId,
-    rope_sin: TensorId,
+    pos_h: TensorId,
+    pos_w: TensorId,
     config: FluxTransformerConfig,
 ) -> Result<TensorId> {
-    let head_dim = i64::from(config.head_dim());
-    let packed = pack_rope_interleaved_pairs(ctx, tensor, head_dim)?;
-    let packed_ref = require_tensor(ctx, packed)?.clone();
-    let half_dim = head_dim / 2;
-    let x0 = ctx
-        .view_3d(
-            packed,
-            half_dim,
-            packed_ref.ne[1],
-            packed_ref.ne[2],
-            packed_ref.nb[1],
-            packed_ref.nb[2],
-            0,
-        )
-        .map_err(DiffusionError::model)?;
-    let x0 = ctx
-        .cont_3d(x0, half_dim, packed_ref.ne[1], packed_ref.ne[2])
-        .map_err(DiffusionError::model)?;
-    let x1 = ctx
-        .view_3d(
-            packed,
-            half_dim,
-            packed_ref.ne[1],
-            packed_ref.ne[2],
-            packed_ref.nb[1],
-            packed_ref.nb[2],
-            usize::try_from(half_dim)
-                .map_err(|_| DiffusionError::model("flux rope half dim exceeds usize"))?
-                .checked_mul(packed_ref.nb[0])
-                .ok_or_else(|| DiffusionError::model("flux rope split offset overflow"))?,
-        )
-        .map_err(DiffusionError::model)?;
-    let x1 = ctx
-        .cont_3d(x1, half_dim, packed_ref.ne[1], packed_ref.ne[2])
-        .map_err(DiffusionError::model)?;
-    let rope_cos = ctx
-        .repeat_4d(
-            rope_cos,
-            half_dim,
-            packed_ref.ne[1],
-            packed_ref.ne[2],
-            1,
-            BufferUsage::Activations,
-        )
-        .map_err(DiffusionError::model)?;
-    let rope_sin = ctx
-        .repeat_4d(
-            rope_sin,
-            half_dim,
-            packed_ref.ne[1],
-            packed_ref.ne[2],
-            1,
-            BufferUsage::Activations,
-        )
-        .map_err(DiffusionError::model)?;
-    let x0_cos = ctx
-        .binary_like_a(Op::Mul, x0, rope_cos, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let x0_sin = ctx
-        .binary_like_a(Op::Mul, x0, rope_sin, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let x1_cos = ctx
-        .binary_like_a(Op::Mul, x1, rope_cos, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let x1_sin = ctx
-        .binary_like_a(Op::Mul, x1, rope_sin, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let out0 = ctx
-        .binary_like_a(Op::Sub, x0_cos, x1_sin, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let out1 = ctx
-        .binary_like_a(Op::Add, x0_sin, x1_cos, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let rotated = ctx
-        .concat(out0, out1, 0, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    unpack_rope_interleaved_pairs(ctx, rotated, head_dim)
+    // Official kernel_rope_norm on each spatial axis. Time (axes_dim[0]) is
+    // always position 0 in Flux1 — identity, so we just keep that view.
+    // Interleaved pairing matches rope_norm; no pack/unpack CPY.
+    let mut cursor = 0i64;
+    let mut out: Option<TensorId> = None;
+    for (axis_i, &axis_dim) in config.axes_dim.iter().enumerate() {
+        let dim = i64::from(axis_dim);
+        let section = view_rope_section(ctx, tensor, cursor, dim)?;
+        let piece = if axis_i == 0 {
+            section
+        } else {
+            let positions = if axis_i == 1 { pos_h } else { pos_w };
+            ctx.rope_ext(
+                section,
+                positions,
+                None,
+                axis_dim as i32,
+                GGML_ROPE_TYPE_NORMAL,
+                256,
+                config.theta as f32,
+                1.0,
+                0.0,
+                1.0,
+                32.0,
+                1.0,
+                BufferUsage::Activations,
+            )
+            .map_err(DiffusionError::model)?
+        };
+        out = Some(match out {
+            None => piece,
+            Some(prev) => ctx
+                .concat(prev, piece, 0, BufferUsage::Activations)
+                .map_err(DiffusionError::model)?,
+        });
+        cursor += dim;
+    }
+    out.ok_or_else(|| DiffusionError::model("flux rope has no axes"))
 }
 
+fn view_rope_section(
+    ctx: &mut Context,
+    input: TensorId,
+    start_dim: i64,
+    section_dim: i64,
+) -> Result<TensorId> {
+    let tensor = require_tensor(ctx, input)?.clone();
+    let elem = ggml_type_size_for_type(tensor.desc.ty);
+    let offset = usize::try_from(start_dim)
+        .map_err(|_| DiffusionError::model("flux rope section start is negative"))?
+        .checked_mul(elem)
+        .ok_or_else(|| DiffusionError::model("flux rope section offset overflow"))?;
+    ctx.view_4d(
+        input,
+        section_dim,
+        tensor.ne[1],
+        tensor.ne[2],
+        tensor.ne[3].max(1),
+        tensor.nb[1],
+        tensor.nb[2],
+        tensor.nb[3],
+        offset,
+    )
+    .map_err(DiffusionError::model)
+}
+
+#[allow(dead_code)]
 fn pack_rope_interleaved_pairs(
     ctx: &mut Context,
     tensor: TensorId,
@@ -3056,6 +4409,7 @@ fn pack_rope_interleaved_pairs(
         .map_err(DiffusionError::model)
 }
 
+#[allow(dead_code)]
 fn unpack_rope_interleaved_pairs(
     ctx: &mut Context,
     tensor: TensorId,
@@ -3076,39 +4430,149 @@ fn unpack_rope_interleaved_pairs(
         .map_err(DiffusionError::model)
 }
 
-fn build_flux_rope_tables(
+fn build_flux_rope_axis_positions(
     ctx: &mut Context,
     text_token_count: usize,
     latent_shape: FluxLatentShape,
-    config: FluxTransformerConfig,
 ) -> Result<(TensorId, TensorId)> {
-    let tables = flux_rope_table_values(text_token_count, latent_shape, config)?;
-
-    let cos_tensor = ctx
+    let token_count = text_token_count + latent_shape.image_token_count as usize;
+    let mut pos_h = vec![0i32; token_count];
+    let mut pos_w = vec![0i32; token_count];
+    let packed_width = latent_shape.packed_width as usize;
+    let packed_height = latent_shape.packed_height as usize;
+    let mut token_index = text_token_count;
+    for row in 0..packed_height {
+        for col in 0..packed_width {
+            pos_h[token_index] = i32::try_from(row)
+                .map_err(|_| DiffusionError::model("flux rope row exceeds i32"))?;
+            pos_w[token_index] = i32::try_from(col)
+                .map_err(|_| DiffusionError::model("flux rope col exceeds i32"))?;
+            token_index += 1;
+        }
+    }
+    let h_tensor = ctx
         .new_named_tensor(
-            "flux.rope_cos",
-            TensorType::F32,
-            3,
-            &[tables.half_dim as i64, 1, tables.token_count as i64],
+            "flux.rope_pos_h",
+            TensorType::I32,
+            1,
+            &[token_count as i64],
             BufferUsage::Activations,
         )
         .map_err(DiffusionError::model)?;
-    ctx.write_tensor_data(cos_tensor, &f32s_to_le_bytes(&tables.cos))
+    ctx.write_tensor_data(h_tensor, &i32s_to_le_bytes(&pos_h))
         .map_err(DiffusionError::model)?;
-
-    let sin_tensor = ctx
+    let w_tensor = ctx
         .new_named_tensor(
-            "flux.rope_sin",
-            TensorType::F32,
-            3,
-            &[tables.half_dim as i64, 1, tables.token_count as i64],
+            "flux.rope_pos_w",
+            TensorType::I32,
+            1,
+            &[token_count as i64],
             BufferUsage::Activations,
         )
         .map_err(DiffusionError::model)?;
-    ctx.write_tensor_data(sin_tensor, &f32s_to_le_bytes(&tables.sin))
+    ctx.write_tensor_data(w_tensor, &i32s_to_le_bytes(&pos_w))
         .map_err(DiffusionError::model)?;
+    Ok((h_tensor, w_tensor))
+}
 
-    Ok((cos_tensor, sin_tensor))
+fn bake_modulation_scale_plus_one(
+    weights: &mut LoadedFluxTransformerWeights,
+    hidden: usize,
+) -> Result<()> {
+    let mut jobs: Vec<(String, usize, Vec<usize>)> = Vec::new();
+    for layer in 0..weights.config.depth as usize {
+        jobs.push((
+            format!("double_blocks.{layer}.img_mod.lin.bias"),
+            6,
+            vec![1, 4],
+        ));
+        jobs.push((
+            format!("double_blocks.{layer}.txt_mod.lin.bias"),
+            6,
+            vec![1, 4],
+        ));
+    }
+    for layer in 0..weights.config.depth_single_blocks as usize {
+        jobs.push((
+            format!("single_blocks.{layer}.modulation.lin.bias"),
+            3,
+            vec![1],
+        ));
+    }
+    jobs.push((
+        "final_layer.adaLN_modulation.1.bias".to_string(),
+        2,
+        vec![1],
+    ));
+    for (name, chunks, scale_idxs) in jobs {
+        let src = require_tensor_id(&weights.tensor_ids, &name)?;
+        let baked = bias_with_scale_plus_one(&mut weights.ctx, src, hidden, chunks, &scale_idxs, &name)?;
+        weights.tensor_ids.insert(name, baked);
+    }
+    Ok(())
+}
+
+fn bias_with_scale_plus_one(
+    ctx: &mut Context,
+    src: TensorId,
+    hidden: usize,
+    chunks: usize,
+    scale_idxs: &[usize],
+    name: &str,
+) -> Result<TensorId> {
+    let src_t = require_tensor(ctx, src)?.clone();
+    if src_t.desc.ty != TensorType::F32 {
+        return Err(DiffusionError::model(format!(
+            "flux modulation bias '{}' must be f32 to bake scale+1, got {}",
+            name,
+            src_t.desc.ty.name()
+        )));
+    }
+    let expected = hidden
+        .checked_mul(chunks)
+        .ok_or_else(|| DiffusionError::model("flux modulation bias size overflow"))?;
+    let nbytes = expected * 4;
+    let bytes = ctx.tensor_data(src).map_err(DiffusionError::model)?;
+    if bytes.len() < nbytes {
+        return Err(DiffusionError::model(format!(
+            "flux modulation bias '{}' is {} bytes, expected at least {}",
+            name,
+            bytes.len(),
+            nbytes
+        )));
+    }
+    let mut baked = bytes[..nbytes].to_vec();
+    for &idx in scale_idxs {
+        let start = idx
+            .checked_mul(hidden)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| DiffusionError::model("flux scale-bias offset overflow"))?;
+        let end = start + hidden * 4;
+        for chunk in baked[start..end].chunks_exact_mut(4) {
+            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) + 1.0;
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let dst = ctx
+        .new_named_tensor(
+            &format!("{name}.scale_p1"),
+            TensorType::F32,
+            src_t.desc.layout.rank(),
+            &src_t.ne[..src_t.desc.layout.rank()],
+            BufferUsage::Weights,
+        )
+        .map_err(DiffusionError::model)?;
+    ctx.write_tensor_data(dst, &baked)
+        .map_err(DiffusionError::model)?;
+    Ok(dst)
+}
+
+fn i32s_to_le_bytes(values: &[i32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
 }
 
 fn build_attention_output(
@@ -3127,6 +4591,12 @@ fn build_attention_output(
     let v = ctx
         .permute(v, [0, 2, 1, 3])
         .map_err(DiffusionError::model)?;
+    // flash_attn_ext_tile assumes a contiguous D-major layout. A permute
+    // view at mid-timestep AdaLN scales produced all-NaN preds (t=0.9);
+    // t=0/1 happened to stay finite.
+    let q = ctx.cont(q).map_err(DiffusionError::model)?;
+    let k = ctx.cont(k).map_err(DiffusionError::model)?;
+    let v = ctx.cont(v).map_err(DiffusionError::model)?;
     let attention_scale = 1.0 / (head_dim as f32).sqrt();
 
     if flux_flash_attention_allowed(head_dim) {
@@ -3187,10 +4657,13 @@ fn apply_head_rms_norm(
     input: TensorId,
     scale_name: &str,
 ) -> Result<TensorId> {
+    let scale = require_tensor_id(tensor_ids, scale_name)?;
+    let scale = match_activation_type(ctx, scale, input)?;
     let norm = ctx
         .rms_norm_eps(input, FLUX_LAYER_NORM_EPSILON, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    let scale = repeat_weight(ctx, require_tensor_id(tensor_ids, scale_name)?, norm)?;
+    // Vector scale: Metal bin/norm kernels broadcast. A Repeat here is a
+    // full activation copy and blocks official RMS_NORM+MUL fusion.
     ctx.binary_like_a(Op::Mul, norm, scale, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
@@ -3200,16 +4673,15 @@ fn apply_modulated_layer_norm(
     input: TensorId,
     scale: TensorId,
     shift: TensorId,
-    ones_hidden: TensorId,
 ) -> Result<TensorId> {
+    // scale already has +1 baked into the modulation bias (see
+    // bake_modulation_scale_plus_one). Stream is NORM, MUL, ADD —
+    // official kernel_norm_mul_add.
+    let scale = match_activation_type(ctx, scale, input)?;
+    let shift = match_activation_type(ctx, shift, input)?;
     let norm = ctx
         .norm_eps(input, FLUX_LAYER_NORM_EPSILON, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    let scale_plus_one = ctx
-        .binary_like_a(Op::Add, scale, ones_hidden, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let scale = repeat_weight(ctx, scale_plus_one, norm)?;
-    let shift = repeat_weight(ctx, shift, norm)?;
     let scaled = ctx
         .binary_like_a(Op::Mul, norm, scale, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
@@ -3223,7 +4695,8 @@ fn gated_residual(
     update: TensorId,
     gate: TensorId,
 ) -> Result<TensorId> {
-    let gate = repeat_weight(ctx, gate, update)?;
+    let update = match_activation_type(ctx, update, residual)?;
+    let gate = match_activation_type(ctx, gate, residual)?;
     let update = ctx
         .binary_like_a(Op::Mul, update, gate, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
@@ -3232,26 +4705,12 @@ fn gated_residual(
 }
 
 fn silu(ctx: &mut Context, input: TensorId) -> Result<TensorId> {
-    apply_glu_activation(ctx, input, GluOp::Swiglu)
-}
-
-fn gelu(ctx: &mut Context, input: TensorId) -> Result<TensorId> {
-    apply_glu_activation(ctx, input, GluOp::Geglu)
-}
-
-fn apply_glu_activation(ctx: &mut Context, input: TensorId, glu: GluOp) -> Result<TensorId> {
-    let ones = repeat_scalar_one(ctx, input)?;
-    ctx.glu_split(input, ones, glu, BufferUsage::Activations)
+    ctx.unary(input, UnaryOp::Silu, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
 
-fn repeat_scalar_one(ctx: &mut Context, shape_of: TensorId) -> Result<TensorId> {
-    let one = ctx
-        .new_tensor_1d(TensorType::F32, 1, BufferUsage::Weights)
-        .map_err(DiffusionError::model)?;
-    ctx.write_tensor_data(one, &1.0f32.to_le_bytes())
-        .map_err(DiffusionError::model)?;
-    ctx.repeat(one, shape_of, BufferUsage::Activations)
+fn gelu(ctx: &mut Context, input: TensorId) -> Result<TensorId> {
+    ctx.unary(input, UnaryOp::Gelu, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
 
@@ -3266,8 +4725,7 @@ fn apply_linear(
     let out = ctx
         .mul_mat(weight, input, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    let bias_tensor = concat_linear_parts(ctx, tensor_ids, bias_name)?;
-    let bias = repeat_weight(ctx, bias_tensor, out)?;
+    let bias = concat_linear_parts(ctx, tensor_ids, bias_name)?;
     ctx.binary_like_a(Op::Add, out, bias, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
@@ -3313,6 +4771,9 @@ fn slice_rows_2d(ctx: &mut Context, input: TensorId, start: i64, len: i64) -> Re
     let view = ctx
         .view_2d(input, len, tensor.ne[1], tensor.nb[1], offset)
         .map_err(DiffusionError::model)?;
+    if require_tensor(ctx, view)?.is_contiguous() {
+        return Ok(view);
+    }
     ctx.cont_2d(view, len, tensor.ne[1])
         .map_err(DiffusionError::model)
 }
@@ -3326,12 +4787,10 @@ fn slice_cols_2d(ctx: &mut Context, input: TensorId, start: i64, len: i64) -> Re
     let view = ctx
         .view_2d(input, tensor.ne[0], len, tensor.nb[1], offset)
         .map_err(DiffusionError::model)?;
+    if require_tensor(ctx, view)?.is_contiguous() {
+        return Ok(view);
+    }
     ctx.cont_2d(view, tensor.ne[0], len)
-        .map_err(DiffusionError::model)
-}
-
-fn repeat_weight(ctx: &mut Context, weight: TensorId, shape_of: TensorId) -> Result<TensorId> {
-    ctx.repeat(weight, shape_of, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
 
@@ -3375,9 +4834,14 @@ fn load_flux_weight_bytes(
     ctx: &mut Context,
     header: &MlxSafetensorsHeader,
     tensor_ids: &BTreeMap<String, TensorId>,
+    progress: &mut Option<ProgressHook>,
 ) -> Result<()> {
     let mut names = header.tensors.keys().cloned().collect::<Vec<_>>();
     names.sort();
+    let total_bytes = flux_weight_total_bytes(header, 0)?;
+    let mut done_bytes = 0usize;
+    let mut last_emit = 0usize;
+    emit_byte_progress(progress, "load unet", 0, total_bytes)?;
     for name in names {
         let entry = header.tensor(&name).ok_or_else(|| {
             DiffusionError::model(format!("flux transformer header missing tensor '{}'", name))
@@ -3392,6 +4856,11 @@ fn load_flux_weight_bytes(
         let bytes = flux_target_bytes(header, &name, entry)?;
         ctx.write_tensor_data(tensor_id, &bytes)
             .map_err(DiffusionError::model)?;
+        done_bytes = done_bytes.saturating_add(flux_target_nbytes(entry)?);
+        if done_bytes - last_emit >= crate::BYTE_PROGRESS_STEP {
+            last_emit = done_bytes;
+            emit_byte_progress(progress, "load unet", done_bytes, total_bytes)?;
+        }
     }
     Ok(())
 }
@@ -3451,6 +4920,9 @@ fn flux_target_tensor_type(entry: &MlxTensorEntry) -> Result<TensorType> {
         MlxDType::BF16 => Ok(TensorType::BF16),
         MlxDType::F16 => Ok(TensorType::F16),
         MlxDType::F32 => Ok(TensorType::F32),
+        // Combined-FP8 checkpoints: matrices stay raw 1-byte resident
+        // (host and device); rank-1 tensors promoted to F32 above.
+        MlxDType::F8E4M3 => Ok(TensorType::F8E4M3),
         other => Err(DiffusionError::model(format!(
             "flux transformer unsupported tensor dtype {:?}",
             other
@@ -3469,6 +4941,7 @@ fn flux_target_bytes(
             MlxDType::F32 => Ok(bytes),
             MlxDType::F16 => f16_bytes_to_f32_bytes(&bytes),
             MlxDType::BF16 => bf16_bytes_to_f32_bytes(&bytes),
+            MlxDType::F8E4M3 => f8_bytes_to_f32_bytes_checked(name, &bytes),
             other => Err(DiffusionError::model(format!(
                 "flux transformer unsupported rank1 dtype {:?}",
                 other
@@ -3478,12 +4951,46 @@ fn flux_target_bytes(
     match entry.dtype {
         MlxDType::BF16 if flux_force_f32_weights() => bf16_bytes_to_f32_bytes(&bytes),
         MlxDType::F16 if flux_force_f32_weights() => f16_bytes_to_f32_bytes(&bytes),
+        MlxDType::F8E4M3 if flux_force_f32_weights() => {
+            f8_bytes_to_f32_bytes_checked(name, &bytes)
+        }
+        MlxDType::F8E4M3 => {
+            // Raw resident payload: reject the two NaN encodings up front —
+            // fail closed at load rather than propagate NaN activations.
+            reject_f8_nan_bytes(name, &bytes)?;
+            Ok(bytes)
+        }
         MlxDType::F32 | MlxDType::F16 | MlxDType::BF16 => Ok(bytes),
         other => Err(DiffusionError::model(format!(
             "flux transformer unsupported tensor dtype {:?}",
             other
         ))),
     }
+}
+
+/// Fail-closed NaN screen for raw E4M3FN payloads: 0x7f/0xff are the only
+/// NaN encodings (the format has no infinities); a checkpoint containing one
+/// is corrupt and must never reach the device.
+fn reject_f8_nan_bytes(name: &str, bytes: &[u8]) -> Result<()> {
+    if let Some(position) = bytes
+        .iter()
+        .position(|&byte| byte == 0x7f || byte == 0xff)
+    {
+        return Err(DiffusionError::model(format!(
+            "flux tensor '{}' contains E4M3FN NaN byte {:#04x} at offset {} — checkpoint rejected",
+            name, bytes[position], position
+        )));
+    }
+    Ok(())
+}
+
+fn f8_bytes_to_f32_bytes_checked(name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+    reject_f8_nan_bytes(name, bytes)?;
+    let mut out = Vec::with_capacity(bytes.len() * 4);
+    for &byte in bytes {
+        out.extend_from_slice(&f8_e4m3_to_f32(byte).to_le_bytes());
+    }
+    Ok(out)
 }
 
 fn flux_force_f32_weights() -> bool {
@@ -3585,6 +5092,38 @@ fn bf16_bytes_to_f32_vec(bytes: &[u8]) -> Result<Vec<f32>> {
         .collect())
 }
 
+fn f32_stats(values: &[f32]) -> String {
+    let mut finite = 0usize;
+    let mut nan = 0usize;
+    let mut inf = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &value in values {
+        if value.is_nan() {
+            nan += 1;
+            continue;
+        }
+        if value.is_infinite() {
+            inf += 1;
+            continue;
+        }
+        finite += 1;
+        min = min.min(value);
+        max = max.max(value);
+    }
+    let sum: f64 = values
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| f64::from(*v))
+        .sum();
+    let first = values.first().copied().unwrap_or(0.0);
+    let last = values.last().copied().unwrap_or(0.0);
+    format!(
+        "n={} finite={finite} nan={nan} inf={inf} min={min} max={max} sum={sum:.6} first={first} last={last}",
+        values.len()
+    )
+}
+
 fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
     for value in values {
@@ -3632,8 +5171,16 @@ fn tensor_extents_usize(tensor: &Tensor) -> Result<[usize; 4]> {
 }
 
 fn flux_flash_attention_allowed(head_dim: u32) -> bool {
-    let _ = head_dim;
-    false
+    if matches!(
+        std::env::var("FLUX_FLASH").ok().as_deref(),
+        Some("0") | Some("off") | Some("OFF")
+    ) {
+        return false;
+    }
+    // Official ggml Metal flash_attn_ext has f32 dk128/dv128. Naive
+    // softmax attention was a temporary disable and dominated step time
+    // once weights were Metal-resident.
+    matches!(head_dim, 128)
 }
 
 fn is_context_oom(err: &DiffusionError) -> bool {

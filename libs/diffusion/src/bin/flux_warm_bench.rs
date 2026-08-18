@@ -81,6 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("load.vae_load_ms={:.3}", load_timing.vae_load_ms);
     println!("load.vae_compile_ms={:.3}", load_timing.vae_compile_ms);
     println!("load.total_ms={:.3}", load_timing.total_ms);
+    if makepad_ggml::backend::prof::enabled() {
+        print!("{}", makepad_ggml::backend::prof::report_and_reset("prof.load."));
+    }
 
     let base_seed = pipeline.default_seed();
     for warmup in 0..warmup_runs {
@@ -91,6 +94,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             warmup + 1,
             run.timing.total_ms
         );
+        if makepad_ggml::backend::prof::enabled() {
+            print!(
+                "{}",
+                makepad_ggml::backend::prof::report_and_reset(&format!(
+                    "prof.warmup.run_{}.",
+                    warmup + 1
+                ))
+            );
+        }
     }
 
     let mut total_ms = 0.0f64;
@@ -117,6 +129,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             measured + 1,
             run.timing.vae_execute_ms
         );
+        if makepad_ggml::backend::prof::enabled() {
+            print!(
+                "{}",
+                makepad_ggml::backend::prof::report_and_reset(&format!(
+                    "prof.measured.run_{}.",
+                    measured + 1
+                ))
+            );
+        }
         total_ms += run.timing.total_ms;
         total_denoise_ms += run.timing.denoise_ms;
         total_vae_ms += run.timing.vae_execute_ms;
