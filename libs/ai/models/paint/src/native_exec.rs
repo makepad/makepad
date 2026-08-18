@@ -455,6 +455,25 @@ impl PaintModelExec for NativeHunyuanExec {
         let dino_tok = dino_proj
             .forward(&hidden, rows)
             .map_err(PbrError::Internal)?;
+        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
+            let write_f32 = |path: &str, data: &[f32]| {
+                let mut bytes = Vec::with_capacity(data.len() * 4);
+                for v in data {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                let _ = std::fs::write(path, bytes);
+            };
+            write_f32(&format!("{dir}/dino_hidden.f32"), &hidden);
+            write_f32(&format!("{dir}/dino_tok.f32"), &dino_tok);
+            write_f32(&format!("{dir}/dino_pixels.f32"), &encoded.dino_pixels);
+            eprintln!(
+                "[pbr-dino] hidden {} f32 ({rows} rows x {}), tok {} f32, pixels {} f32",
+                hidden.len(),
+                crate::dino_proj::DINO_DIM,
+                dino_tok.len(),
+                encoded.dino_pixels.len()
+            );
+        }
         let enc_alb = unet.learned_text_clip_albedo().map_err(PbrError::Internal)?;
         let enc_mr = unet.learned_text_clip_mr().map_err(PbrError::Internal)?;
         let n_views = encoded.n_views;
