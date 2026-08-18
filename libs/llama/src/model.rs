@@ -1,4 +1,3 @@
-mod gemma4_config;
 mod gguf_meta;
 mod qwen35_config;
 mod qwen35moe_config;
@@ -6,8 +5,6 @@ mod qwen35moe_config;
 use makepad_ggml::TensorType;
 
 use crate::error::{LlamaError, Result};
-use crate::gemma4::Gemma4Tensors;
-use crate::gemma4_runtime::{gemma4_execution_plan, gemma4_hybrid_decode_spec};
 use crate::gguf::{GgufFile, GgufTensorInfo};
 use crate::plan::ModelExecutionPlan;
 use crate::qwen35::Qwen35Tensors;
@@ -18,7 +15,6 @@ use crate::runtime::HybridDecodeSpec;
 use crate::weights::GgufWeightLayout;
 use std::path::Path;
 
-pub use gemma4_config::Gemma4Config;
 use gguf_meta::{optional_u32, optional_utf8_string, required_utf8_string};
 pub use qwen35_config::Qwen35Config;
 pub use qwen35moe_config::Qwen35MoeConfig;
@@ -27,7 +23,6 @@ pub use qwen35moe_config::Qwen35MoeConfig;
 pub enum LlamaArchitecture {
     Qwen35,
     Qwen35Moe,
-    Gemma4,
     Unknown(String),
 }
 
@@ -36,7 +31,6 @@ impl LlamaArchitecture {
         match value {
             "qwen35" => Self::Qwen35,
             "qwen35moe" => Self::Qwen35Moe,
-            "gemma4" => Self::Gemma4,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -45,7 +39,6 @@ impl LlamaArchitecture {
         match self {
             Self::Qwen35 => "qwen35",
             Self::Qwen35Moe => "qwen35moe",
-            Self::Gemma4 => "gemma4",
             Self::Unknown(name) => name.as_str(),
         }
     }
@@ -67,7 +60,6 @@ pub struct LlamaModel {
     pub general: ModelGeneral,
     pub qwen35: Option<Qwen35Config>,
     pub qwen35moe: Option<Qwen35MoeConfig>,
-    pub gemma4: Option<Gemma4Config>,
 }
 
 impl LlamaModel {
@@ -75,7 +67,6 @@ impl LlamaModel {
         let gguf = GgufFile::open(path)?;
         let architecture = required_utf8_string(&gguf, "general.architecture")?;
         let architecture_kind = LlamaArchitecture::from_str(&architecture);
-        let is_gemma4 = architecture == "gemma4";
 
         let general = ModelGeneral {
             architecture: architecture.clone(),
@@ -93,11 +84,6 @@ impl LlamaModel {
             LlamaArchitecture::Qwen35Moe => Some(Qwen35MoeConfig::from_gguf(&gguf)?),
             _ => None,
         };
-        let gemma4 = if is_gemma4 {
-            Some(Gemma4Config::from_gguf(&gguf)?)
-        } else {
-            None
-        };
 
         Ok(Self {
             gguf,
@@ -105,7 +91,6 @@ impl LlamaModel {
             general,
             qwen35,
             qwen35moe,
-            gemma4,
         })
     }
 
@@ -147,31 +132,11 @@ impl LlamaModel {
         self.qwen35_tensors()?.weight_layout()
     }
 
-    pub fn require_gemma4(&self) -> Result<&Gemma4Config> {
-        self.gemma4.as_ref().ok_or_else(|| {
-            LlamaError::unsupported(format!(
-                "model architecture '{}' is not gemma4",
-                self.architecture.name()
-            ))
-        })
-    }
-
-    pub fn gemma4_tensors(&self) -> Result<Gemma4Tensors> {
-        Gemma4Tensors::from_model(self)
-    }
-
-    pub fn gemma4_weight_layout(&self) -> Result<GgufWeightLayout> {
-        self.gemma4_tensors()?.weight_layout()
-    }
-
     pub fn context_length(&self) -> Result<u32> {
         if let Some(cfg) = &self.qwen35 {
             return Ok(cfg.context_length);
         }
         if let Some(cfg) = &self.qwen35moe {
-            return Ok(cfg.context_length);
-        }
-        if let Some(cfg) = &self.gemma4 {
             return Ok(cfg.context_length);
         }
         Err(LlamaError::unsupported(format!(
@@ -185,9 +150,6 @@ impl LlamaModel {
             return Ok(cfg.embedding_length);
         }
         if let Some(cfg) = &self.qwen35moe {
-            return Ok(cfg.embedding_length);
-        }
-        if let Some(cfg) = &self.gemma4 {
             return Ok(cfg.embedding_length);
         }
         Err(LlamaError::unsupported(format!(
@@ -224,15 +186,6 @@ impl LlamaModel {
                 recurrent_r_type,
                 recurrent_s_type,
             ),
-            LlamaArchitecture::Gemma4 => gemma4_hybrid_decode_spec(
-                self,
-                max_context,
-                max_sequences,
-                attention_k_type,
-                attention_v_type,
-                recurrent_r_type,
-                recurrent_s_type,
-            ),
             _ => Err(LlamaError::unsupported(format!(
                 "hybrid decode spec is not implemented for architecture '{}'",
                 self.architecture.name()
@@ -244,7 +197,6 @@ impl LlamaModel {
         match self.architecture {
             LlamaArchitecture::Qwen35 => qwen35_execution_plan(self),
             LlamaArchitecture::Qwen35Moe => qwen35moe_execution_plan(self),
-            LlamaArchitecture::Gemma4 => gemma4_execution_plan(self),
             _ => Err(LlamaError::unsupported(format!(
                 "execution plan builder is not implemented for architecture '{}'",
                 self.architecture.name()

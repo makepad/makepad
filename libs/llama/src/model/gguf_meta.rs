@@ -23,10 +23,6 @@ pub(super) fn required_f32(gguf: &GgufFile, key: &str) -> Result<f32> {
     })
 }
 
-pub(super) fn optional_f32(gguf: &GgufFile, key: &str) -> Option<f32> {
-    gguf.get_value(key).and_then(GgufValue::as_f32)
-}
-
 pub(super) fn required_u32_array(gguf: &GgufFile, key: &str) -> Result<Vec<u32>> {
     let value = gguf.require_value(key)?;
     match value {
@@ -39,65 +35,6 @@ pub(super) fn required_u32_array(gguf: &GgufFile, key: &str) -> Result<Vec<u32>>
         }),
         other => Err(LlamaError::format(format!(
             "gguf key '{}' has type {}, expected u32 array",
-            key,
-            other.value_type().name()
-        ))),
-    }
-}
-
-pub(super) fn required_u32_or_repeat_array(
-    gguf: &GgufFile,
-    key: &str,
-    repeat_len: usize,
-) -> Result<Vec<u32>> {
-    let value = gguf.require_value(key)?;
-    if let Some(scalar) = value_to_u32(value) {
-        return Ok(vec![scalar; repeat_len]);
-    }
-    match value {
-        GgufValue::Array(values) => {
-            let out = array_to_u32_vec(values).ok_or_else(|| {
-                LlamaError::format(format!(
-                    "gguf key '{}' has type {}, expected integral scalar or array",
-                    key,
-                    value.value_type().name()
-                ))
-            })?;
-            if out.len() != repeat_len {
-                return Err(LlamaError::format(format!(
-                    "gguf key '{}' length mismatch: got {}, expected {}",
-                    key,
-                    out.len(),
-                    repeat_len
-                )));
-            }
-            Ok(out)
-        }
-        other => Err(LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected scalar or u32 array",
-            key,
-            other.value_type().name()
-        ))),
-    }
-}
-
-pub(super) fn required_u32_or_first_array(gguf: &GgufFile, key: &str) -> Result<u32> {
-    let value = gguf.require_value(key)?;
-    if let Some(scalar) = value_to_u32(value) {
-        return Ok(scalar);
-    }
-    match value {
-        GgufValue::Array(values) => array_to_u32_vec(values)
-            .and_then(|values| values.into_iter().next())
-            .ok_or_else(|| {
-                LlamaError::format(format!(
-                    "gguf key '{}' has type {}, expected integral scalar or non-empty array",
-                    key,
-                    value.value_type().name()
-                ))
-            }),
-        other => Err(LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected scalar or u32 array",
             key,
             other.value_type().name()
         ))),

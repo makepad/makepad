@@ -1,8 +1,6 @@
 mod error;
 pub mod cuda_exec;
 pub mod exec;
-pub mod gemma4;
-pub mod gemma4_runtime;
 pub mod gguf;
 pub mod model;
 pub mod plan;
@@ -23,19 +21,10 @@ pub use error::{LlamaError, Result};
 pub use exec::{
     CompiledHybridDecode, ExecBackendKind, ExecContextBuffers, ExecFeatures, ExecRuntime,
 };
-pub use gemma4::{Gemma4GlobalTensors, Gemma4LayerTensors, Gemma4Tensors};
-pub use gemma4_runtime::{
-    gemma4_attention_block_layout, gemma4_attention_block_spec, gemma4_attention_decode_spec,
-    gemma4_dense_ffn_spec, gemma4_embedding_logits_probe_spec, gemma4_execution_plan,
-    gemma4_first_attention_block_spec, gemma4_first_full_attention_block_spec,
-    gemma4_hybrid_decode_spec,
-};
 pub use gguf::{
     GgufArray, GgufFile, GgufKeyValue, GgufString, GgufTensorInfo, GgufType, GgufValue,
 };
-pub use model::{
-    Gemma4Config, LlamaArchitecture, LlamaModel, ModelGeneral, Qwen35Config, Qwen35MoeConfig,
-};
+pub use model::{LlamaArchitecture, LlamaModel, ModelGeneral, Qwen35Config, Qwen35MoeConfig};
 pub use plan::{
     ModelExecutionPlan, ModelLayerInventory, ModelLayerRole, ModelTailProbePlan,
     ModelTensorInventory,

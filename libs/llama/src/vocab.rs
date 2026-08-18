@@ -770,9 +770,6 @@ fn tokenizer_kind_from_gguf(
                 _ => LlamaBpePreTokenizer::Gpt2,
             }),
         ),
-        Some(model) if model.eq_ignore_ascii_case("gemma4") => {
-            (LlamaTokenizerKind::SentencePiece, None)
-        }
         _ => (LlamaTokenizerKind::Plain, None),
     }
 }
