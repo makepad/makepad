@@ -558,17 +558,10 @@ impl UnetFirst {
                     _ => f64::NAN,
                 }
             };
-            eprintln!(
-                "[pbr-ra] {tb} ref_tokens {}x{} rms={:.4} | k rms={:.4} v_alb rms={:.4} | q rms={:.4} | o_alb rms={:.4} | tokens rms={:.4}",
-                res.ref_tokens.rows(),
-                res.ref_tokens.cols(),
-                rms(res.ref_tokens),
-                rms(&k),
-                rms(&v_alb),
-                rms(&alb_q),
-                rms(&o_alb),
-                rms(&tokens),
-            );
+            let short = tb.trim_start_matches("unet.").replace(".transformer_blocks.0", "");
+            eprintln!("[pbr-ra] {short} ref {}x{} rms={:.4}", res.ref_tokens.rows(), res.ref_tokens.cols(), rms(res.ref_tokens));
+            eprintln!("[pbr-ra] {short} k={:.4} valb={:.4} q={:.4}", rms(&k), rms(&v_alb), rms(&alb_q));
+            eprintln!("[pbr-ra] {short} oalb={:.4} tokens={:.4}", rms(&o_alb), rms(&tokens));
         }
         for cfg in 0..n_cfg {
             let rs = ref_scales[cfg];
