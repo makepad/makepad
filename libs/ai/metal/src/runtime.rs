@@ -90,7 +90,7 @@ mod imp {
 
         // compiled.rs compares buffer identity on every target; the Windows
         // stub never runs that path, but rustc 1.92 still type-checks it.
-        pub(crate) fn as_id(&self) -> *const MetalBuffer {
+        pub fn as_id(&self) -> *const MetalBuffer {
             self
         }
     }
