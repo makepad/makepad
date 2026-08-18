@@ -388,6 +388,31 @@ impl PaintModelExec for NativeHunyuanExec {
                 cache.len()
             )));
         }
+        // Debug: dump the reference latent + every write-cache layer as raw
+        // little-endian f32 (row-major [tokens, hidden]) for a byte-level
+        // diff against the official unet_dual write pass.
+        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
+            let write_f32 = |path: &str, data: &[f32]| {
+                let mut bytes = Vec::with_capacity(data.len() * 4);
+                for v in data {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                if let Err(error) = std::fs::write(path, bytes) {
+                    eprintln!("dual dump write {path}: {error}");
+                }
+            };
+            write_f32(&format!("{dir}/ref_latent.f32"), &encoded.reference_latent);
+            for (name, data) in &cache {
+                write_f32(&format!("{dir}/cache_{name}.f32"), data);
+            }
+            eprintln!(
+                "[pbr-dual] dumped ref_latent ({} f32, {}x{}) + {} cache layers to {dir}",
+                encoded.reference_latent.len(),
+                encoded.lat_w,
+                encoded.lat_h,
+                cache.len()
+            );
+        }
         let size = cond.resolution as usize;
         let mut pos_maps = Vec::with_capacity(cond.views.len());
         for view in cond.views {
