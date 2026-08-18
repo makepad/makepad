@@ -674,9 +674,23 @@ mod exec {
         /// Official `AutoModel(...)[0]` / `last_hidden_state`: `[TOKENS, HIDDEN]`.
         pub fn forward(&self, pixels: &[f32]) -> Result<Vec<f32>, String> {
             let emb = self.embeddings(pixels)?;
+            let dump_dir = std::env::var("MAKEPAD_PBR_DINO_LAYER_DUMP").ok();
+            let dump = |tag: &str, data: &[f32]| {
+                if let Some(dir) = &dump_dir {
+                    let mut bytes = Vec::with_capacity(data.len() * 4);
+                    for v in data {
+                        bytes.extend_from_slice(&v.to_le_bytes());
+                    }
+                    let _ = std::fs::write(format!("{dir}/dino_layer_{tag}.f32"), bytes);
+                }
+            };
+            dump("emb", &emb);
             let mut x = gpu_upload(&emb, TOKENS, HIDDEN)?;
-            for layer in &self.layers {
+            for (i, layer) in self.layers.iter().enumerate() {
                 x = Self::block(&x, layer)?;
+                if dump_dir.is_some() {
+                    dump(&format!("{i:02}"), &gpu_download(&x)?);
+                }
             }
             let x = Self::layer_norm(&x, &self.ln_w, &self.ln_b)?;
             gpu_download(&x)
