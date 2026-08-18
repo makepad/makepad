@@ -476,7 +476,18 @@ impl PaintModelExec for NativeHunyuanExec {
             }
         }
         let scale_t = gpu_upload(&scale_host, 4, n_rows * hw).map_err(PbrError::Internal)?;
-        let ref_scales = [0.0f32, 1.0, 1.0];
+        // Debug ablation: MAKEPAD_PBR_REF_SCALE=<f> overrides the conditioned
+        // branches' reference-attention scale (official [0,1,1]). 0 kills RA
+        // outright — if the output does not move, RA was already inert and
+        // its INPUTS (write-cache/K/V) are the bug; if it moves a lot, RA is
+        // contributing wrong content.
+        let ref_override = std::env::var("MAKEPAD_PBR_REF_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
+        let ref_scales = match ref_override {
+            Some(rs) => [0.0f32, rs, rs],
+            None => [0.0f32, 1.0, 1.0],
+        };
         // Official times denoise after one discarded UNet; keep the same split.
         if let Some(&t0) = ts.first() {
             let x12 = pack_cfg_x12_gpu(&sample, &normals_pbr, &positions_pbr)
