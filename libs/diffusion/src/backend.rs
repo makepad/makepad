@@ -51,6 +51,7 @@ pub use makepad_ggml::backend::cuda::{
     gpu_linear_nt_cached_bf16_mm_from_buf, gpu_linear_nt_cached_bf16_mm_from_buf_to_buf,
     gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
     gpu_linear_nt_cached_f8_mm_from_buf_to_buf,
+    gpu_stream_ring_active, gpu_stream_ring_advance, gpu_stream_ring_setup,
     gpu_linear_nt_cached_f16_f32acc,
     gpu_linear_nt_cached_f16,
     gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear,

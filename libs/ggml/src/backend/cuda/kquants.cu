@@ -10,6 +10,7 @@
 // output elements [i*block_elems, (i+1)*block_elems).
 
 #include <cuda_runtime.h>
+#include <cuda_fp8.h>
 #include <stdint.h>
 
 static __device__ __forceinline__ uint16_t makepad_ggml_kq_f32_to_bf16_bits(float value) {
@@ -366,6 +367,50 @@ extern "C" cudaError_t makepad_ggml_cuda_dequant_f8_e4m3_bf16(
     makepad_ggml_kq_dequant_f8_e4m3_bf16_kernel<<<grid, block_dim, 0, stream>>>(
         static_cast<const uint8_t *>(src_bytes),
         static_cast<uint16_t *>(dst_bf16),
+        count);
+    return cudaGetLastError();
+}
+
+// Static-scale activation quantization for the fp8 scaled-mm path: bf16
+// words * inv_scale -> saturating RN E4M3FN bytes (same conversion class as
+// torch `t.to(float8_e4m3fn)` after the reference's `tensor * (1/scale)`
+// multiply; SATFINITE clamps to +-448 like the reference's explicit clamp).
+static __global__ void makepad_ggml_kq_quant_bf16_f8_e4m3_kernel(
+        const uint16_t * __restrict__ src_bf16,
+        uint8_t * __restrict__ dst,
+        float inv_scale,
+        uint32_t count) {
+    const uint32_t base = (blockIdx.x * blockDim.x + threadIdx.x) * 4u;
+    if (base >= count) {
+        return;
+    }
+    const uint32_t take = count - base < 4u ? count - base : 4u;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4u; i++) {
+        if (i < take) {
+            const float value =
+                makepad_ggml_kq_bf16_bits_to_f32(src_bf16[base + i]) * inv_scale;
+            dst[base + i] = static_cast<uint8_t>(
+                __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3));
+        }
+    }
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_quant_bf16_f8_e4m3(
+        const void *src_bf16,
+        void *dst_bytes,
+        float inv_scale,
+        uint32_t count,
+        cudaStream_t stream) {
+    if (count == 0) {
+        return cudaSuccess;
+    }
+    const uint32_t block_dim = 256;
+    const uint32_t grid = (count + block_dim * 4u - 1u) / (block_dim * 4u);
+    makepad_ggml_kq_quant_bf16_f8_e4m3_kernel<<<grid, block_dim, 0, stream>>>(
+        static_cast<const uint16_t *>(src_bf16),
+        static_cast<uint8_t *>(dst_bytes),
+        inv_scale,
         count);
     return cudaGetLastError();
 }

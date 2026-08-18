@@ -13,12 +13,11 @@
 //! which the pipeline does, not this encoder.
 //!
 //! Weight numerics: fp8 projections run through the F8-resident dense
-//! linears (`gpu_linear_nt_cached_f8_mm`) — bf16 activations, f32
-//! accumulate, per-tensor `weight_scale` applied as the f32 GEMM alpha, bf16
-//! D — the same post-accumulate scale structure as the reference's
-//! `_scaled_mm`. (The reference additionally quantizes ACTIVATIONS to fp8
-//! with `input_scale`; keeping ours bf16 is the finer-precision side of the
-//! oracle envelope.) Rotate-half RoPE at theta 1e9 with bf16 tables, RMSNorm
+//! linears (`gpu_linear_nt_cached_f8_mm`). With `input_scale` present the
+//! default path is the reference's own arithmetic — fp8 tensor-core
+//! `_scaled_mm` with static activation quantization (see f8_scaled_mm in
+//! the cuda backend); `MAKEPAD_FLUX2_FP8MM=0` selects the finer bf16-dequant
+//! GEMM instead. Rotate-half RoPE at theta 1e9 with bf16 tables, RMSNorm
 //! eps 1e-5, no qk-norm, GQA 32q/8kv.
 //!
 //! Every layer's weights are used exactly once per encode, so the cache is
@@ -49,8 +48,9 @@ pub struct Flux2DevTextPrepared {
     pub config: Mistral3TextConfig,
     input_norm: Vec<Vec<f32>>,
     post_attention_norm: Vec<Vec<f32>>,
-    /// Per-layer per-projection weight scales, keyed by tensor name.
-    f8_scales: std::collections::HashMap<String, f32>,
+    /// Per-layer per-projection `(weight_scale, input_scale)`, keyed by
+    /// tensor name.
+    f8_scales: std::collections::HashMap<String, (f32, Option<f32>)>,
     pub rope_inv_freq: Vec<f32>,
 }
 
@@ -107,7 +107,13 @@ impl Flux2DevTextPrepared {
                 } else {
                     1.0
                 };
-                f8_scales.insert(name, scale);
+                let input_scale_name = format!("{prefix}{proj}.input_scale");
+                let input_scale = if weights.has_tensor(&input_scale_name) {
+                    Some(weights.read_f32(&input_scale_name)?.first().copied().unwrap_or(1.0))
+                } else {
+                    None
+                };
+                f8_scales.insert(name, (scale, input_scale));
             }
         }
         // Embeddings must be BF16 for the row-streaming reader.
@@ -140,7 +146,7 @@ fn ensure_f8_linear<'a>(
     name: &'a str,
     output_cols: usize,
     input_cols: usize,
-) -> Result<(GpuLinearPart<'a>, f32)> {
+) -> Result<(GpuLinearPart<'a>, (f32, Option<f32>))> {
     let info = weights.tensor(name)?;
     let expected = [output_cols as u64, input_cols as u64];
     if info.shape != expected {
@@ -159,7 +165,11 @@ fn ensure_f8_linear<'a>(
         || weights.read_bytes(name).map_err(|err| err.to_string()),
     )
     .map_err(DiffusionError::model)?;
-    let scale = prepared.f8_scales.get(name).copied().unwrap_or(1.0);
+    let scale = prepared
+        .f8_scales
+        .get(name)
+        .copied()
+        .unwrap_or((1.0, None));
     Ok((
         GpuLinearPart {
             bt_ggml_type: GGML_TYPE_F8_E4M3,
@@ -178,8 +188,9 @@ fn f8_linear(
     name: &str,
     output_cols: usize,
 ) -> Result<GpuTensor> {
-    let (part, scale) = ensure_f8_linear(weights, prepared, name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_f8_mm(input, FLUX2_DEV_TE_NAMESPACE, &[part], scale)
+    let (part, (scale, input_scale)) =
+        ensure_f8_linear(weights, prepared, name, output_cols, input.cols())?;
+    gpu_linear_nt_cached_f8_mm(input, FLUX2_DEV_TE_NAMESPACE, &[part], scale, input_scale)
         .map_err(DiffusionError::model)
 }
 

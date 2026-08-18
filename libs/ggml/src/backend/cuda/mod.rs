@@ -380,6 +380,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_quant_bf16_f8_e4m3(
+            src_bf16: *const std::ffi::c_void,
+            dst_bytes: *mut std::ffi::c_void,
+            inv_scale: f32,
+            count: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_get_rows_f8_e4m3_f32(
             src_bytes: *const std::ffi::c_void,
             row_indices_i32: *const std::ffi::c_void,
@@ -3273,6 +3281,9 @@ mod imp {
         /// device; the executing matrix expands transiently here only).
         dequant_bf16: Option<DeviceBuffer>,
         dequant_bf16_capacity_bytes: usize,
+        /// Double-buffered pinned-host weight streamer (flux2-dev: the 8
+        /// double blocks don't co-fit with the resident singles on 32GB).
+        stream_ring: Option<FluxStreamRing>,
         /// Weight-cache key prefixes that must survive allocation-failure
         /// recovery: the resident FLUX checkpoint namespaces. OOM handling
         /// may drop scratch and unprotected weights, never these — a silent
@@ -3324,6 +3335,7 @@ mod imp {
                 output_f32_capacity: 0,
                 dequant_bf16: None,
                 dequant_bf16_capacity_bytes: 0,
+                stream_ring: None,
                 protected_prefixes: Vec::new(),
             })
         }
@@ -3379,6 +3391,11 @@ mod imp {
         where
             F: FnOnce() -> Result<Vec<u8>, String>,
         {
+            // Ring-streamed weights are device-resident via their slot; the
+            // cache must not upload a duplicate copy.
+            if self.ring_weight_ptr(qualified_key).is_some() {
+                return Ok(());
+            }
             if let Some(existing) = self.weight_buffers.get(qualified_key) {
                 if existing.size_bytes == expected_bytes {
                     return Ok(());
@@ -4714,25 +4731,24 @@ mod imp {
             let output = GpuTensor::from_pool(m, n)?;
 
             backend.ensure_input_half(m * k * size_of::<u16>())?;
-            let input_bf16 = backend
+            let input_bf16_ptr = backend
                 .input_half
                 .as_ref()
-                .ok_or_else(|| "missing PyTorch BF16 mm input buffer".to_string())?;
+                .ok_or_else(|| "missing PyTorch BF16 mm input buffer".to_string())?
+                .ptr
+                .as_ptr();
             // RN-even straight to bf16 words (bit-identical to round-then-truncate).
             let status = unsafe {
                 makepad_ggml_cuda_f32_to_bf16_rn(
                     x.device_ptr()?,
-                    input_bf16.ptr.as_ptr().cast::<u16>(),
+                    input_bf16_ptr.cast::<u16>(),
                     (m * k) as u32,
                     backend.stream,
                 )
             };
             gpu_check(status)?;
 
-            let weight = backend
-                .weight_buffers
-                .get(&weight_key)
-                .ok_or_else(|| format!("missing cached CUDA weight buffer {weight_key}"))?;
+            let (weight_ptr, _) = backend.weight_ptr(&weight_key)?;
             let alpha = 1.0f32;
             let beta = 0.0f32;
             // Row-major X[M,K] @ W^T[K,N] is column-major W^T[N,K] @
@@ -4746,10 +4762,10 @@ mod imp {
                     m as i32,
                     k as i32,
                     &alpha,
-                    weight.ptr.as_ptr(),
+                    weight_ptr,
                     makepad_cuda::CUDA_R_16BF,
                     k as i32,
-                    input_bf16.ptr.as_ptr(),
+                    input_bf16_ptr,
                     makepad_cuda::CUDA_R_16BF,
                     k as i32,
                     &beta,
@@ -8385,10 +8401,7 @@ mod imp {
                 .ok_or_else(|| "PyTorch BF16 mm output size overflow".to_string())?;
             let output_bf16 = gpu_pool_acquire(output_values * size_of::<u16>())?;
             let output = GpuTensor::from_pool(m, n)?;
-            let weight = backend
-                .weight_buffers
-                .get(&weight_key)
-                .ok_or_else(|| format!("missing cached CUDA weight buffer {weight_key}"))?;
+            let (weight_ptr, _) = backend.weight_ptr(&weight_key)?;
             let alpha = 1.0f32;
             let beta = 0.0f32;
             unsafe {
@@ -8400,7 +8413,7 @@ mod imp {
                     m as i32,
                     k as i32,
                     &alpha,
-                    weight.ptr.as_ptr(),
+                    weight_ptr,
                     makepad_cuda::CUDA_R_16BF,
                     k as i32,
                     x.device_ptr_u16()?.cast::<std::ffi::c_void>(),
@@ -8468,10 +8481,7 @@ mod imp {
                 Ok(part.bytes.to_vec())
             })?;
             let output = GpuBf16Buf::from_pool(m, n)?;
-            let weight = backend
-                .weight_buffers
-                .get(&weight_key)
-                .ok_or_else(|| format!("missing cached CUDA weight buffer {weight_key}"))?;
+            let (weight_ptr, _) = backend.weight_ptr(&weight_key)?;
             let alpha = 1.0f32;
             let beta = 0.0f32;
             unsafe {
@@ -8483,7 +8493,7 @@ mod imp {
                     m as i32,
                     k as i32,
                     &alpha,
-                    weight.ptr.as_ptr(),
+                    weight_ptr,
                     makepad_cuda::CUDA_R_16BF,
                     k as i32,
                     x.device_ptr_u16()?.cast::<std::ffi::c_void>(),
@@ -8508,19 +8518,247 @@ mod imp {
         })
     }
 
+    /// One streamed weight: qualified cache key + pinned host copy.
+    struct RingTensor {
+        key: String,
+        len: usize,
+        host: std::ptr::NonNull<c_void>,
+    }
+
+    // The pinned pointers are only touched from the dense-backend thread
+    // (thread-local backend), but the struct must be Send-safe for the
+    // OnceLock plumbing types; uploads never alias.
+    unsafe impl Send for RingTensor {}
+
+    /// Double-buffered weight streamer: N groups of identically-shaped
+    /// tensors rotate through 2 device slot-sets; group g lives in slot g%2.
+    /// `advance(g)` records g's compute-done fence on the main stream, then
+    /// prefetches group (g+2)%N into the freed slot on a dedicated copy
+    /// stream — the upload of the NEXT same-parity group overlaps the
+    /// compute of everything in between (the other-parity block plus, at
+    /// step boundaries, the whole single-block phase).
+    struct FluxStreamRing {
+        groups: Vec<Vec<RingTensor>>,
+        slots: [Vec<DeviceBuffer>; 2],
+        copy_stream: cudaStream_t,
+        upload_done: [makepad_cuda::cudaEvent_t; 2],
+        compute_done: [makepad_cuda::cudaEvent_t; 2],
+        /// Group currently (or being) uploaded per slot; -1 = none.
+        resident: [i64; 2],
+        /// Whether the compute stream has already waited this slot's upload.
+        upload_waited: [bool; 2],
+    }
+
+    impl CudaDenseLinearBackend {
+        /// Device pointer for `key` when it is ring-resident.
+        fn ring_weight_ptr(&self, key: &str) -> Option<(*mut c_void, usize)> {
+            let ring = self.stream_ring.as_ref()?;
+            for slot in 0..2 {
+                let group = ring.resident[slot];
+                if group < 0 {
+                    continue;
+                }
+                for (index, tensor) in ring.groups[group as usize].iter().enumerate() {
+                    if tensor.key == key {
+                        return Some((
+                            ring.slots[slot][index].ptr.as_ptr(),
+                            tensor.len,
+                        ));
+                    }
+                }
+            }
+            None
+        }
+
+        /// GEMM-side weight lookup: ring slots first (waiting the slot's
+        /// upload fence once), then the ordinary cache.
+        fn weight_ptr(&mut self, key: &str) -> Result<(*mut c_void, usize), String> {
+            let mut ring_hit: Option<((usize, usize), usize)> = None;
+            if let Some(ring) = self.stream_ring.as_ref() {
+                'outer: for slot in 0..2 {
+                    let group = ring.resident[slot];
+                    if group < 0 {
+                        continue;
+                    }
+                    for (index, tensor) in ring.groups[group as usize].iter().enumerate() {
+                        if tensor.key == key {
+                            ring_hit = Some(((slot, index), tensor.len));
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if let Some(((slot, index), len)) = ring_hit {
+                let ring = self.stream_ring.as_mut().expect("ring present");
+                if !ring.upload_waited[slot] {
+                    makepad_cuda::stream_wait_event(self.stream, ring.upload_done[slot])
+                        .map_err(|err| format!("ring upload wait: {err}"))?;
+                    ring.upload_waited[slot] = true;
+                }
+                let ring = self.stream_ring.as_ref().expect("ring present");
+                return Ok((ring.slots[slot][index].ptr.as_ptr(), len));
+            }
+            self.weight_buffers
+                .get(key)
+                .map(|buffer| (buffer.ptr.as_ptr(), buffer.size_bytes))
+                .ok_or_else(|| format!("missing cached CUDA weight buffer {key}"))
+        }
+
+        fn ring_prefetch(&mut self, target: usize) -> Result<(), String> {
+            let stream = self.stream;
+            let ring = self
+                .stream_ring
+                .as_mut()
+                .ok_or_else(|| "stream ring not set up".to_string())?;
+            let slot = target % 2;
+            if ring.resident[slot] == target as i64 {
+                return Ok(());
+            }
+            let _ = stream;
+            // The copy must not overwrite weights still referenced by
+            // enqueued compute: wait the slot's last compute fence.
+            makepad_cuda::stream_wait_event(ring.copy_stream, ring.compute_done[slot])
+                .map_err(|err| format!("ring compute-fence wait: {err}"))?;
+            for (index, tensor) in ring.groups[target].iter().enumerate() {
+                unsafe {
+                    makepad_cuda::memcpy_async_host_to_device(
+                        ring.slots[slot][index].ptr,
+                        tensor.host.as_ptr().cast_const(),
+                        tensor.len,
+                        ring.copy_stream,
+                    )
+                }
+                .map_err(|err| format!("ring H2D {}: {err}", tensor.key))?;
+            }
+            makepad_cuda::event_record(ring.upload_done[slot], ring.copy_stream)
+                .map_err(|err| format!("ring upload record: {err}"))?;
+            ring.resident[slot] = target as i64;
+            ring.upload_waited[slot] = false;
+            Ok(())
+        }
+    }
+
+    /// Register the streamed groups (pinned host copies + 2 device slot-sets)
+    /// and prime groups 0 and 1. Replaces any previous ring.
+    pub fn gpu_stream_ring_setup(groups: Vec<Vec<(String, Vec<u8>)>>) -> Result<(), String> {
+        if groups.len() < 3 {
+            return Err("stream ring needs at least 3 groups".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let shape: Vec<usize> = groups[0].iter().map(|(_, bytes)| bytes.len()).collect();
+            for group in &groups {
+                let lens: Vec<usize> = group.iter().map(|(_, bytes)| bytes.len()).collect();
+                if lens != shape {
+                    return Err("stream ring groups must share tensor shapes".to_string());
+                }
+            }
+            let mut ring_groups = Vec::with_capacity(groups.len());
+            for group in groups {
+                let mut tensors = Vec::with_capacity(group.len());
+                for (key, bytes) in group {
+                    let host = unsafe { makepad_cuda::host_alloc_pinned(bytes.len()) }
+                        .map_err(|err| format!("ring pinned alloc: {err}"))?;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            host.as_ptr().cast::<u8>(),
+                            bytes.len(),
+                        );
+                    }
+                    tensors.push(RingTensor {
+                        key,
+                        len: bytes.len(),
+                        host,
+                    });
+                }
+                ring_groups.push(tensors);
+            }
+            let mut slots: [Vec<DeviceBuffer>; 2] = [Vec::new(), Vec::new()];
+            for slot in &mut slots {
+                for len in &shape {
+                    slot.push(backend.alloc_with_evict(*len)?);
+                }
+            }
+            let copy_stream =
+                makepad_cuda::create_non_blocking_stream().map_err(|err| err.to_string())?;
+            let events = || -> Result<makepad_cuda::cudaEvent_t, String> {
+                makepad_cuda::event_create().map_err(|err| err.to_string())
+            };
+            backend.stream_ring = Some(FluxStreamRing {
+                groups: ring_groups,
+                slots,
+                copy_stream,
+                upload_done: [events()?, events()?],
+                compute_done: [events()?, events()?],
+                resident: [-1, -1],
+                upload_waited: [true, true],
+            });
+            backend.ring_prefetch(0)?;
+            backend.ring_prefetch(1)?;
+            Ok(())
+        })
+    }
+
+    pub fn gpu_stream_ring_active() -> bool {
+        with_dense_linear_backend(|backend| Ok(backend.stream_ring.is_some())).unwrap_or(false)
+    }
+
+    /// Compute-stream fence + prefetch of the next same-parity group. Call
+    /// right after enqueueing the last op that reads `group`'s weights.
+    pub fn gpu_stream_ring_advance(group: usize) -> Result<(), String> {
+        with_dense_linear_backend(|backend| {
+            let stream = backend.stream;
+            let (target, slot) = {
+                let ring = backend
+                    .stream_ring
+                    .as_ref()
+                    .ok_or_else(|| "stream ring not set up".to_string())?;
+                let count = ring.groups.len();
+                ((group + 2) % count, group % 2)
+            };
+            {
+                let ring = backend.stream_ring.as_mut().expect("ring present");
+                makepad_cuda::event_record(ring.compute_done[slot], stream)
+                    .map_err(|err| format!("ring compute record: {err}"))?;
+            }
+            backend.ring_prefetch(target)
+        })
+    }
+
+    /// The fp8 scaled-mm switch: default ON (the fp8mixed reference's own
+    /// arithmetic class — torch `_scaled_mm` with static activation
+    /// quantization); `MAKEPAD_FLUX2_FP8MM=0` forces the bf16-dequant
+    /// reference path everywhere.
+    fn f8_scaled_mm_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            !matches!(std::env::var("MAKEPAD_FLUX2_FP8MM").as_deref(), Ok("0"))
+        })
+    }
+
     /// Shared body of the F8_E4M3-resident dense linears (flux2-dev): the
     /// weight stays 1-byte in the cache (key suffix `::f8` so a layout change
-    /// can never reuse a stale half buffer), expands into pooled bf16 scratch
-    /// per call, and the per-tensor `weight_scale` rides the f32 GEMM alpha —
-    /// exact f32 post-accumulate scaling, the same structure as torch
-    /// `_scaled_mm`'s epilogue (the fp8mixed reference applies scales after
-    /// the fp8 accumulate, not to the dequantized operand).
+    /// can never reuse a stale half buffer).
+    ///
+    /// Two arithmetic paths:
+    /// - `input_scale` present (and fp8-mm enabled): TRUE fp8 tensor-core
+    ///   matmul — the bf16 activation quantizes to E4M3 with the static
+    ///   `1/input_scale` (SATFINITE, torch cast parity), and cuBLASLt runs
+    ///   e4m3 x e4m3 -> bf16 D with the per-tensor `weight_scale` /
+    ///   `input_scale` dequant pointers applied post-accumulate — exactly
+    ///   the reference `_scaled_mm` recipe. Falls back to the dequant path
+    ///   on any Lt refusal (odd shapes etc.).
+    /// - otherwise: dequant into pooled bf16 scratch (exact e4m3->bf16
+    ///   kernel) + bf16 GEMM f32-accumulate with alpha = weight_scale.
+    #[allow(clippy::too_many_arguments)]
     fn f8_linear_gemm(
         backend: &mut CudaDenseLinearBackend,
         input_bf16_ptr: *const std::ffi::c_void,
         cache_namespace: &str,
         part: &GpuLinearPart<'_>,
         weight_scale: f32,
+        input_scale: Option<f32>,
         m: usize,
         k: usize,
         out_bf16_ptr: *const std::ffi::c_void,
@@ -8531,16 +8769,36 @@ mod imp {
             .ok_or_else(|| "f8 mm weight size overflow".to_string())?;
         let weight_key = format!("{cache_namespace}::{}::f8", part.cache_key);
         backend.cached_weight_buffer(&weight_key, weight_bytes, || Ok(part.bytes.to_vec()))?;
-        let weight = backend
-            .weight_buffers
-            .get(&weight_key)
-            .ok_or_else(|| format!("missing cached CUDA weight buffer {weight_key}"))?;
+
+        if let Some(input_scale) = input_scale.filter(|_| f8_scaled_mm_enabled()) {
+            match f8_scaled_mm(
+                backend,
+                input_bf16_ptr,
+                &weight_key,
+                weight_scale,
+                input_scale,
+                m,
+                k,
+                n,
+                out_bf16_ptr,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        eprintln!("f8 scaled-mm unavailable ({err}); using bf16 dequant path");
+                    });
+                }
+            }
+        }
+
+        let (weight_ptr, _) = backend.weight_ptr(&weight_key)?;
         let scratch = gpu_pool_acquire(weight_bytes * size_of::<u16>())?;
         let count = u32::try_from(weight_bytes)
             .map_err(|_| "f8_e4m3 dequant count exceeds u32".to_string())?;
         let status = unsafe {
             makepad_ggml_cuda_dequant_f8_e4m3_bf16(
-                weight.ptr.as_ptr().cast_const(),
+                weight_ptr.cast_const(),
                 scratch.ptr.as_ptr(),
                 count,
                 backend.stream,
@@ -8577,6 +8835,203 @@ mod imp {
         result
     }
 
+    /// Round-to-nearest-even bf16 grid value of `1/scale` — the reference
+    /// computes `(1.0/scale).to(bf16)` before multiplying.
+    fn bf16_grid(value: f32) -> f32 {
+        let bits = value.to_bits();
+        let rounding = 0x7fffu32 + ((bits >> 16) & 1);
+        f32::from_bits(bits.wrapping_add(rounding) & 0xffff_0000)
+    }
+
+    /// The cuBLASLt e4m3 x e4m3 -> bf16 matmul with device dequant-scale
+    /// pointers (see `f8_linear_gemm`). Weight is the cached raw fp8 buffer;
+    /// the activation is quantized transiently into pooled scratch.
+    #[allow(clippy::too_many_arguments)]
+    fn f8_scaled_mm(
+        backend: &mut CudaDenseLinearBackend,
+        input_bf16_ptr: *const std::ffi::c_void,
+        weight_key: &str,
+        weight_scale: f32,
+        input_scale: f32,
+        m: usize,
+        k: usize,
+        n: usize,
+        out_bf16_ptr: *const std::ffi::c_void,
+    ) -> Result<(), String> {
+        use std::ffi::c_void;
+        // Per-tensor f32 scales live in tiny cached device buffers (Lt wants
+        // device pointers); keys ride beside the weight so eviction drops
+        // them together.
+        let wscale_key = format!("{weight_key}::wscale");
+        backend.cached_weight_buffer(&wscale_key, 4, || Ok(weight_scale.to_le_bytes().to_vec()))?;
+        let iscale_key = format!("{weight_key}::iscale");
+        backend.cached_weight_buffer(&iscale_key, 4, || Ok(input_scale.to_le_bytes().to_vec()))?;
+
+        let input_values = m
+            .checked_mul(k)
+            .ok_or_else(|| "f8 scaled mm input size overflow".to_string())?;
+        let input_f8 = gpu_pool_acquire(input_values)?;
+        let inv_input_scale = bf16_grid(1.0 / input_scale);
+        let status = unsafe {
+            makepad_ggml_cuda_quant_bf16_f8_e4m3(
+                input_bf16_ptr,
+                input_f8.ptr.as_ptr(),
+                inv_input_scale,
+                input_values as u32,
+                backend.stream,
+            )
+        };
+        if let Err(err) = gpu_check(status) {
+            gpu_pool_release(input_f8);
+            return Err(err);
+        }
+
+        let workspace_size = 32usize * 1024 * 1024;
+        let workspace = match gpu_pool_acquire(workspace_size) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                gpu_pool_release(input_f8);
+                return Err(err);
+            }
+        };
+
+        let run = (|| -> Result<(), String> {
+            let (weight_ptr, _) = backend.weight_ptr(weight_key)?;
+            let wscale = backend
+                .weight_buffers
+                .get(&wscale_key)
+                .ok_or_else(|| "missing f8 weight scale buffer".to_string())?;
+            let iscale = backend
+                .weight_buffers
+                .get(&iscale_key)
+                .ok_or_else(|| "missing f8 input scale buffer".to_string())?;
+
+            let operation = makepad_cuda::cublas_lt_matmul_desc_create(
+                makepad_cuda::CUBLAS_COMPUTE_32F,
+                makepad_cuda::CUDA_R_32F,
+            )
+            .map_err(|error| format!("f8 Lt desc create: {error}"))?;
+            let a_desc = makepad_cuda::cublas_lt_matrix_layout_create(
+                makepad_cuda::CUDA_R_8F_E4M3,
+                k as u64,
+                n as u64,
+                k as i64,
+            );
+            let b_desc = makepad_cuda::cublas_lt_matrix_layout_create(
+                makepad_cuda::CUDA_R_8F_E4M3,
+                k as u64,
+                m as u64,
+                k as i64,
+            );
+            let d_desc = makepad_cuda::cublas_lt_matrix_layout_create(
+                makepad_cuda::CUDA_R_16BF,
+                n as u64,
+                m as u64,
+                n as i64,
+            );
+            let preference = makepad_cuda::cublas_lt_matmul_preference_create();
+            let inner = (|| -> Result<(), String> {
+                let a_desc = a_desc
+                    .as_ref()
+                    .map_err(|error| format!("f8 Lt A layout: {error}"))?;
+                let b_desc = b_desc
+                    .as_ref()
+                    .map_err(|error| format!("f8 Lt B layout: {error}"))?;
+                let d_desc = d_desc
+                    .as_ref()
+                    .map_err(|error| format!("f8 Lt D layout: {error}"))?;
+                let preference = preference
+                    .as_ref()
+                    .map_err(|error| format!("f8 Lt preference: {error}"))?;
+                let transpose_a = makepad_cuda::CUBLAS_OP_T;
+                let transpose_b = makepad_cuda::CUBLAS_OP_N;
+                makepad_cuda::cublas_lt_matmul_desc_set_attribute(
+                    operation,
+                    makepad_cuda::CUBLASLT_MATMUL_DESC_TRANSA,
+                    &transpose_a,
+                )
+                .map_err(|error| format!("f8 Lt transA: {error}"))?;
+                makepad_cuda::cublas_lt_matmul_desc_set_attribute(
+                    operation,
+                    makepad_cuda::CUBLASLT_MATMUL_DESC_TRANSB,
+                    &transpose_b,
+                )
+                .map_err(|error| format!("f8 Lt transB: {error}"))?;
+                let a_scale_ptr = wscale.ptr.as_ptr().cast::<c_void>();
+                let b_scale_ptr = iscale.ptr.as_ptr().cast::<c_void>();
+                makepad_cuda::cublas_lt_matmul_desc_set_attribute(
+                    operation,
+                    makepad_cuda::CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                    &a_scale_ptr,
+                )
+                .map_err(|error| format!("f8 Lt a_scale: {error}"))?;
+                makepad_cuda::cublas_lt_matmul_desc_set_attribute(
+                    operation,
+                    makepad_cuda::CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                    &b_scale_ptr,
+                )
+                .map_err(|error| format!("f8 Lt b_scale: {error}"))?;
+                makepad_cuda::cublas_lt_matmul_preference_set_attribute(
+                    *preference,
+                    makepad_cuda::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                    &workspace_size,
+                )
+                .map_err(|error| format!("f8 Lt workspace pref: {error}"))?;
+                let heuristic = makepad_cuda::cublas_lt_matmul_algo_get_heuristic(
+                    backend.blas_lt,
+                    operation,
+                    *a_desc,
+                    *b_desc,
+                    *d_desc,
+                    *d_desc,
+                    *preference,
+                )
+                .map_err(|error| format!("f8 Lt heuristic: {error}"))?
+                .ok_or_else(|| format!("f8 Lt no algorithm for m={m} k={k} n={n}"))?;
+                let alpha = 1.0f32;
+                let beta = 0.0f32;
+                unsafe {
+                    makepad_cuda::cublas_lt_matmul(
+                        backend.blas_lt,
+                        operation,
+                        (&alpha as *const f32).cast::<c_void>(),
+                        weight_ptr,
+                        *a_desc,
+                        input_f8.ptr.as_ptr(),
+                        *b_desc,
+                        (&beta as *const f32).cast::<c_void>(),
+                        out_bf16_ptr,
+                        *d_desc,
+                        out_bf16_ptr.cast_mut(),
+                        *d_desc,
+                        &heuristic.algo,
+                        workspace.ptr.as_ptr(),
+                        workspace_size,
+                        backend.stream,
+                    )
+                }
+                .map_err(|error| format!("f8 Lt matmul m={m} k={k} n={n}: {error}"))
+            })();
+            if let Ok(desc) = preference {
+                let _ = makepad_cuda::cublas_lt_matmul_preference_destroy(desc);
+            }
+            if let Ok(desc) = d_desc {
+                let _ = makepad_cuda::cublas_lt_matrix_layout_destroy(desc);
+            }
+            if let Ok(desc) = b_desc {
+                let _ = makepad_cuda::cublas_lt_matrix_layout_destroy(desc);
+            }
+            if let Ok(desc) = a_desc {
+                let _ = makepad_cuda::cublas_lt_matrix_layout_destroy(desc);
+            }
+            let _ = makepad_cuda::cublas_lt_matmul_desc_destroy(operation);
+            inner
+        })();
+        gpu_pool_release(workspace);
+        gpu_pool_release(input_f8);
+        run
+    }
+
     fn require_one_f8_part<'a, 'b>(
         parts: &'b [GpuLinearPart<'a>],
         who: &str,
@@ -8594,6 +9049,7 @@ mod imp {
         cache_namespace: &str,
         parts: &[GpuLinearPart<'_>],
         weight_scale: f32,
+        input_scale: Option<f32>,
     ) -> Result<GpuTensor, String> {
         if x.half {
             return Err("gpu_linear_nt_cached_f8_mm expects f32 storage".to_string());
@@ -8640,6 +9096,7 @@ mod imp {
                 cache_namespace,
                 part,
                 weight_scale,
+                input_scale,
                 m,
                 k,
                 output_bf16.ptr.as_ptr().cast_const(),
@@ -8665,6 +9122,7 @@ mod imp {
         cache_namespace: &str,
         parts: &[GpuLinearPart<'_>],
         weight_scale: f32,
+        input_scale: Option<f32>,
     ) -> Result<GpuTensor, String> {
         let part = require_one_f8_part(parts, "gpu_linear_nt_cached_f8_mm_from_buf")?;
         let (m, k, n) = (x.rows, x.cols, part.n);
@@ -8687,6 +9145,7 @@ mod imp {
                 cache_namespace,
                 part,
                 weight_scale,
+                input_scale,
                 m,
                 k,
                 output_bf16.ptr.as_ptr().cast_const(),
@@ -8713,6 +9172,7 @@ mod imp {
         cache_namespace: &str,
         parts: &[GpuLinearPart<'_>],
         weight_scale: f32,
+        input_scale: Option<f32>,
     ) -> Result<GpuBf16Buf, String> {
         let part = require_one_f8_part(parts, "gpu_linear_nt_cached_f8_mm_from_buf_to_buf")?;
         let (m, k, n) = (x.rows, x.cols, part.n);
@@ -8731,6 +9191,7 @@ mod imp {
                 cache_namespace,
                 part,
                 weight_scale,
+                input_scale,
                 m,
                 k,
                 output.device_ptr_u16()?.cast::<std::ffi::c_void>().cast_const(),
@@ -23812,6 +24273,7 @@ mod imp {
         _cache_namespace: &str,
         _parts: &[GpuLinearPart<'_>],
         _weight_scale: f32,
+        _input_scale: Option<f32>,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
@@ -23821,6 +24283,7 @@ mod imp {
         _cache_namespace: &str,
         _parts: &[GpuLinearPart<'_>],
         _weight_scale: f32,
+        _input_scale: Option<f32>,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
@@ -23830,7 +24293,20 @@ mod imp {
         _cache_namespace: &str,
         _parts: &[GpuLinearPart<'_>],
         _weight_scale: f32,
+        _input_scale: Option<f32>,
     ) -> Result<GpuBf16Buf, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_stream_ring_setup(_groups: Vec<Vec<(String, Vec<u8>)>>) -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_stream_ring_active() -> bool {
+        false
+    }
+
+    pub fn gpu_stream_ring_advance(_group: usize) -> Result<(), String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 

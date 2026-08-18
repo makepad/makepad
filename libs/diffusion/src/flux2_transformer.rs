@@ -8,10 +8,13 @@
 //! at theta 2000, QK RMSNorm. Reuses flux1/h3 device kernels.
 //!
 //! Dev fp8mixed weights (Comfy `flux2_dev_fp8mixed.safetensors`): the double
-//! mlps and single linear1/linear2 are F8_E4M3 with a scalar f32
-//! `.weight_scale` sibling; they stay 1-byte resident in the device cache
-//! (the dense backend dequantizes into transient bf16 scratch per call) so
-//! the 32B DiT fits a 32GB card.
+//! mlps and single linear1/linear2 are F8_E4M3 with scalar f32
+//! `.weight_scale`/`.input_scale` siblings; they stay 1-byte resident and by
+//! default run the reference's fp8 `_scaled_mm` arithmetic (bf16-dequant
+//! GEMM under `MAKEPAD_FLUX2_FP8MM=0`). Because even the fp8 DiT (35.5GB)
+//! exceeds a 32GB card, the 8 double blocks stream through the pinned-host
+//! double-buffer ring (`gpu_stream_ring_*`) while singles + globals stay
+//! resident.
 
 use crate::backend::{
     gpu_add_bf16, gpu_attention_packed_composite_f32, gpu_attention_packed_flash_cross,
@@ -23,7 +26,8 @@ use crate::backend::{
     gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
     gpu_linear_nt_cached_f8_mm_from_buf_to_buf,
     gpu_pool_clear, gpu_rms_norm_mul_from_bf16_slab, gpu_rope_interleaved, gpu_silu,
-    gpu_slice_rows, gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into,
+    gpu_slice_rows, gpu_stream_ring_active, gpu_stream_ring_advance, gpu_stream_ring_setup,
+    gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into,
     gpu_weight_cache_ensure,
     gpu_weight_cache_evict_prefix, GpuBf16Buf, GpuLinearPart, GpuTensor,
 };
@@ -40,10 +44,10 @@ pub struct Flux2TransformerWeights {
     pub path: PathBuf,
     pub config: Flux2TransformerConfig,
     pub file: Flux2WeightFile,
-    /// Lazily-read `<name>_scale` values of the fp8mixed checkpoint, cached
-    /// so the per-step ensure path never re-opens the weight file for a
-    /// 4-byte scalar.
-    f8_scales: std::cell::RefCell<std::collections::HashMap<String, f32>>,
+    /// Lazily-read `(weight_scale, input_scale)` pairs of the fp8mixed
+    /// checkpoint, cached so the per-step ensure path never re-opens the
+    /// weight file for 4-byte scalars.
+    f8_scales: std::cell::RefCell<std::collections::HashMap<String, (f32, Option<f32>)>>,
 }
 
 impl Flux2TransformerWeights {
@@ -67,9 +71,9 @@ impl Flux2TransformerWeights {
         })
     }
 
-    fn f8_scale(&self, resolved: &str) -> Result<f32> {
-        if let Some(scale) = self.f8_scales.borrow().get(resolved) {
-            return Ok(*scale);
+    fn f8_scale(&self, resolved: &str) -> Result<(f32, Option<f32>)> {
+        if let Some(scales) = self.f8_scales.borrow().get(resolved) {
+            return Ok(*scales);
         }
         let scale_name = format!("{resolved}_scale");
         let scale = if self.file.has_tensor(&scale_name) {
@@ -77,10 +81,19 @@ impl Flux2TransformerWeights {
         } else {
             1.0
         };
+        // `<module>.weight` -> `<module>.input_scale` (static act quant).
+        let input_scale = resolved
+            .strip_suffix("weight")
+            .map(|prefix| format!("{prefix}input_scale"))
+            .filter(|name| self.file.has_tensor(name))
+            .map(|name| -> Result<f32> {
+                Ok(self.file.read_f32(&name)?.first().copied().unwrap_or(1.0))
+            })
+            .transpose()?;
         self.f8_scales
             .borrow_mut()
-            .insert(resolved.to_owned(), scale);
-        Ok(scale)
+            .insert(resolved.to_owned(), (scale, input_scale));
+        Ok((scale, input_scale))
     }
 }
 
@@ -237,7 +250,8 @@ fn resolve_name(weights: &Flux2TransformerWeights, name: &str) -> Option<String>
 /// carries scales on its fp8 tensors).
 struct EnsuredLinear<'a> {
     part: GpuLinearPart<'a>,
-    f8_scale: Option<f32>,
+    /// `(weight_scale, input_scale)` when the tensor is F8_E4M3.
+    f8_scale: Option<(f32, Option<f32>)>,
 }
 
 fn ensure_linear<'a>(
@@ -248,7 +262,7 @@ fn ensure_linear<'a>(
 ) -> Result<EnsuredLinear<'a>> {
     let f8_scale = match resolve_name(weights, name) {
         Some(resolved) if weights.file.tensor(&resolved)?.dtype == "F8_E4M3" => {
-            let scale = weights.f8_scale(&resolved)?;
+            let scales = weights.f8_scale(&resolved)?;
             gpu_weight_cache_ensure(
                 &ns(weights),
                 name,
@@ -264,7 +278,7 @@ fn ensure_linear<'a>(
                 },
             )
             .map_err(DiffusionError::model)?;
-            Some(scale)
+            Some(scales)
         }
         _ => {
             gpu_weight_cache_ensure(
@@ -303,7 +317,9 @@ fn linear(
 ) -> Result<GpuTensor> {
     let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
     match ensured.f8_scale {
-        Some(scale) => gpu_linear_nt_cached_f8_mm(input, &ns(weights), &[ensured.part], scale),
+        Some((scale, input_scale)) => {
+            gpu_linear_nt_cached_f8_mm(input, &ns(weights), &[ensured.part], scale, input_scale)
+        }
         None => gpu_linear_nt_cached_bf16_mm(input, &ns(weights), &[ensured.part]),
     }
     .map_err(DiffusionError::model)
@@ -317,9 +333,13 @@ fn linear_from_buf(
 ) -> Result<GpuTensor> {
     let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
     match ensured.f8_scale {
-        Some(scale) => {
-            gpu_linear_nt_cached_f8_mm_from_buf(input, &ns(weights), &[ensured.part], scale)
-        }
+        Some((scale, input_scale)) => gpu_linear_nt_cached_f8_mm_from_buf(
+            input,
+            &ns(weights),
+            &[ensured.part],
+            scale,
+            input_scale,
+        ),
         None => gpu_linear_nt_cached_bf16_mm_from_buf(input, &ns(weights), &[ensured.part]),
     }
     .map_err(DiffusionError::model)
@@ -333,9 +353,13 @@ fn linear_from_buf_to_buf(
 ) -> Result<GpuBf16Buf> {
     let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
     match ensured.f8_scale {
-        Some(scale) => {
-            gpu_linear_nt_cached_f8_mm_from_buf_to_buf(input, &ns(weights), &[ensured.part], scale)
-        }
+        Some((scale, input_scale)) => gpu_linear_nt_cached_f8_mm_from_buf_to_buf(
+            input,
+            &ns(weights),
+            &[ensured.part],
+            scale,
+            input_scale,
+        ),
         None => {
             gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(input, &ns(weights), &[ensured.part])
         }
@@ -463,6 +487,7 @@ pub fn flux2_transformer_forward(
             "flux2-klein transformer takes no guidance value",
         ));
     }
+    flux2_ensure_double_ring(weights)?;
     let temb_in = flux2_timestep_embedding(sigma, TIME_EMBED_DIM);
     let gemb_in = guidance.map(|g| flux2_timestep_embedding(g, TIME_EMBED_DIM));
     if flux2_state_enabled() {
@@ -586,6 +611,9 @@ fn flux2_transformer_core(
     let depth = config.depth as usize;
     let depth_single = config.depth_single_blocks as usize;
 
+    let ring_streams = config.guidance_embed
+        && flux2_stream_doubles_enabled()
+        && gpu_stream_ring_active();
     for layer in 0..depth {
         let prefix = format!("double_blocks.{layer}");
         let (img_next, txt_next) = double_block(
@@ -604,6 +632,13 @@ fn flux2_transformer_core(
             attn_scale,
             txt_count,
         )?;
+        if ring_streams {
+            // All of this block's weight reads are enqueued — fence the slot
+            // and prefetch the next same-parity block (or, from the last two
+            // blocks, the next STEP's first two — uploads overlap the whole
+            // single-block phase).
+            gpu_stream_ring_advance(layer).map_err(DiffusionError::model)?;
+        }
         img = img_next;
         txt = txt_next;
         dump_named(&format!("double{layer}_img"), &img);
@@ -673,6 +708,84 @@ fn flux2_state_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(std::env::var("MAKEPAD_FLUX2_STATE").as_deref(), Ok("0"))
     })
+}
+
+/// Dev-32B on a 32GB card: the 35.5GB DiT cannot be fully device-resident.
+/// The 8 double blocks (10.3GB) stream through the pinned-host ring while
+/// the 48 single blocks + globals (25.2GB) stay cache-resident.
+/// MAKEPAD_FLUX2_STREAM_DOUBLES=0 forces all-resident (WDDM overcommit —
+/// pages every step; only for experiments).
+fn flux2_stream_doubles_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("MAKEPAD_FLUX2_STREAM_DOUBLES").as_deref(),
+            Ok("0")
+        )
+    })
+}
+
+thread_local! {
+    /// Namespace the stream ring currently serves (one resident dev DiT).
+    static FLUX2_RING_NS: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The 8 per-double-block weights that rotate through the ring, with their
+/// GEMM-lookup cache keys (`::f8` suffix for the fp8 mlps).
+fn double_block_ring_names(layer: usize) -> [(String, bool); 8] {
+    let prefix = format!("double_blocks.{layer}");
+    [
+        (format!("{prefix}.img_attn.qkv.weight"), false),
+        (format!("{prefix}.img_attn.proj.weight"), false),
+        (format!("{prefix}.txt_attn.qkv.weight"), false),
+        (format!("{prefix}.txt_attn.proj.weight"), false),
+        (format!("{prefix}.img_mlp.0.weight"), true),
+        (format!("{prefix}.img_mlp.2.weight"), true),
+        (format!("{prefix}.txt_mlp.0.weight"), true),
+        (format!("{prefix}.txt_mlp.2.weight"), true),
+    ]
+}
+
+/// Build + register the double-block stream ring for a dev transformer.
+fn flux2_ensure_double_ring(weights: &Flux2TransformerWeights) -> Result<bool> {
+    if !weights.config.guidance_embed || !flux2_stream_doubles_enabled() {
+        return Ok(false);
+    }
+    let namespace = ns(weights);
+    let already = FLUX2_RING_NS.with(|cell| cell.borrow().as_deref() == Some(namespace.as_str()));
+    if already && gpu_stream_ring_active() {
+        return Ok(true);
+    }
+    let depth = weights.config.depth as usize;
+    let mut groups = Vec::with_capacity(depth);
+    for layer in 0..depth {
+        let mut group = Vec::with_capacity(8);
+        for (name, is_f8) in double_block_ring_names(layer) {
+            let (key, bytes) = if is_f8 {
+                let resolved = resolve_name(weights, &name).ok_or_else(|| {
+                    DiffusionError::model(format!("flux2 ring missing {name}"))
+                })?;
+                // Warm the scale cache so the per-step ensure path never
+                // touches the file.
+                let _ = weights.f8_scale(&resolved)?;
+                (
+                    format!("{namespace}::{name}::f8"),
+                    weights.file.read_bytes(&resolved)?,
+                )
+            } else {
+                (
+                    format!("{namespace}::{name}"),
+                    load_linear_bytes(weights, &name)?,
+                )
+            };
+            group.push((key, bytes));
+        }
+        groups.push(group);
+    }
+    gpu_stream_ring_setup(groups).map_err(DiffusionError::model)?;
+    FLUX2_RING_NS.with(|cell| *cell.borrow_mut() = Some(namespace));
+    Ok(true)
 }
 
 struct Flux2DeviceState {
