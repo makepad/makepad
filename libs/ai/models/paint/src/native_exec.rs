@@ -566,6 +566,29 @@ impl PaintModelExec for NativeHunyuanExec {
             let temb_act = unet.silu_temb(&temb).map_err(PbrError::Internal)?;
             let head = walk_extras_on_resident(unet, xs, &temb_act, &ctx, n_views, &ref_scales)
                 .map_err(PbrError::Internal)?;
+            if i == 0 {
+                if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
+                    // Step-0 black-box tap: the sample the UNet saw and the
+                    // 3-branch v-prediction it produced, for one-step parity
+                    // against the official UNet on identical inputs.
+                    let write = |name: &str, data: &[f32]| {
+                        let mut bytes = Vec::with_capacity(data.len() * 4);
+                        for v in data {
+                            bytes.extend_from_slice(&v.to_le_bytes());
+                        }
+                        let _ = std::fs::write(format!("{dir}/{name}"), bytes);
+                    };
+                    if let (Ok(s), Ok(h), Ok(sc)) = (gpu_download(&sample), gpu_download(&head.t), gpu_download(&scale_t)) {
+                        write("step0_sample.f32", &s);
+                        write("step0_head.f32", &h);
+                        write("step0_scale.f32", &sc);
+                        // Conditioning latents the x12 pack uses (planar per row).
+                        if let Ok(np) = gpu_download(&normals_pbr) { write("step0_normals_pbr.f32", &np); }
+                        if let Ok(pp) = gpu_download(&positions_pbr) { write("step0_positions_pbr.f32", &pp); }
+                        eprintln!("[pbr-step0] t={t} sample {} head {} rows={n_rows} hw={hw}", s.len(), h.len());
+                    }
+                }
+            }
             let (c1, c2) = sched.ddim_linear_coeffs(t, batch.steps);
             sample = cfg_ddim_gpu(&sample, &head.t, &scale_t, c1, c2).map_err(PbrError::Internal)?;
         }
