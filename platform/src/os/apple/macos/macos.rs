@@ -1208,7 +1208,7 @@ impl Cx {
         else {
             return;
         };
-        let CxOsOp::StartExternalDragging { window_id, items } =
+        let Some(CxOsOp::StartExternalDragging { window_id, items }) =
             self.platform_ops.remove(index)
         else {
             unreachable!();

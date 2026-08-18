@@ -122,6 +122,15 @@ impl TextureSize {
     }
 }
 
+/// Wrap mode stored on vec textures. Metal/Vulkan/D3D take address from the
+/// shader sampler; OpenGL (and other per-texture wrap backends) read this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextureWrap {
+    #[default]
+    ClampToEdge,
+    Repeat,
+}
+
 #[derive(Clone)]
 pub enum TextureFormat {
     Unknown,
@@ -143,6 +152,7 @@ pub enum TextureFormat {
         height: usize,
         data: Option<Vec<u32>>,
         max_level: Option<usize>,
+        wrap: TextureWrap,
         updated: TextureUpdated,
     },
     VecMipRGBAf32 {
@@ -654,6 +664,15 @@ impl TextureFormat {
         matches!(self, Self::VideoRgbaHardwareBuffer)
     }
 
+    /// Per-texture wrap. Defaults to clamp; world/albedo mip textures set Repeat
+    /// so OpenGL matches the shader's `sample_*_repeat` sampler.
+    pub fn wrap(&self) -> TextureWrap {
+        match self {
+            Self::VecMipBGRAu8_32 { wrap, .. } => *wrap,
+            _ => TextureWrap::ClampToEdge,
+        }
+    }
+
     pub fn vec_width_height(&self) -> Option<(usize, usize)> {
         match self {
             Self::VecBGRAu8_32 { width, height, .. } => Some((*width, *height)),
@@ -993,4 +1012,41 @@ pub struct CxTexture {
     pub(crate) animation: Option<TextureAnimation>,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextureFormat, TextureUpdated, TextureWrap};
+
+    #[test]
+    fn mip_format_reports_wrap() {
+        let clamp = TextureFormat::VecMipBGRAu8_32 {
+            width: 4,
+            height: 4,
+            data: None,
+            max_level: Some(2),
+            wrap: TextureWrap::ClampToEdge,
+            updated: TextureUpdated::Full,
+        };
+        let repeat = TextureFormat::VecMipBGRAu8_32 {
+            width: 4,
+            height: 4,
+            data: None,
+            max_level: Some(2),
+            wrap: TextureWrap::Repeat,
+            updated: TextureUpdated::Full,
+        };
+        assert_eq!(clamp.wrap(), TextureWrap::ClampToEdge);
+        assert_eq!(repeat.wrap(), TextureWrap::Repeat);
+        assert_eq!(
+            TextureFormat::VecBGRAu8_32 {
+                width: 1,
+                height: 1,
+                data: None,
+                updated: TextureUpdated::Full,
+            }
+            .wrap(),
+            TextureWrap::ClampToEdge
+        );
+    }
 }

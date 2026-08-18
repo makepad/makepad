@@ -266,6 +266,7 @@ impl ImageBuffer {
                 height: self.height,
                 data: Some(self.data),
                 max_level: Some(max_level),
+                wrap: TextureWrap::ClampToEdge,
                 updated: TextureUpdated::Full,
             }
         } else {
@@ -279,6 +280,46 @@ impl ImageBuffer {
         let texture = Texture::new_with_format(cx, format);
         texture.set_animation(cx, self.animation);
         texture
+    }
+
+    /// Always upload a mip chain (unlike [`into_new_texture`], which is gated
+    /// by `MAKEPAD_IMAGE_MIPMAPS` / OpenGL-only). World / statue albedo uses
+    /// this so distant tiling surfaces trilinear-filter instead of sparkling.
+    pub fn into_new_mip_texture(self, cx: &mut Cx) -> Texture {
+        self.into_new_mip_texture_wrap(cx, TextureWrap::ClampToEdge)
+    }
+
+    /// Same as [`into_new_mip_texture`], with REPEAT wrap so UVs outside 0..1
+    /// tile. Pair with `sample_as_bgra_repeat` (not `fract(uv)`) so mip LOD
+    /// stays valid across wrap seams.
+    pub fn into_new_mip_repeat_texture(self, cx: &mut Cx) -> Texture {
+        self.into_new_mip_texture_wrap(cx, TextureWrap::Repeat)
+    }
+
+    fn into_new_mip_texture_wrap(mut self, cx: &mut Cx, wrap: TextureWrap) -> Texture {
+        if self.animation.is_some() {
+            return self.into_new_texture(cx);
+        }
+        if self.max_level.is_none() && backend_uploads_cpu_mip_chain() {
+            let level0 = std::mem::take(&mut self.data);
+            let (data, max_level) = generate_bgra_mip_chain(self.width, self.height, level0);
+            self.data = data;
+            self.max_level = Some(max_level);
+        }
+        let max_level = self
+            .max_level
+            .unwrap_or_else(|| mip_chain_max_level(self.width, self.height));
+        Texture::new_with_format(
+            cx,
+            TextureFormat::VecMipBGRAu8_32 {
+                width: self.width,
+                height: self.height,
+                data: Some(self.data),
+                max_level: Some(max_level),
+                wrap,
+                updated: TextureUpdated::Full,
+            },
+        )
     }
 
     pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
@@ -1343,6 +1384,14 @@ mod tests {
             let (_, max_level) = generate_bgra_mip_chain(w, h, vec![0u32; w * h]);
             assert_eq!(max_level, mip_chain_max_level(w, h), "dims {w}x{h}");
         }
+    }
+
+    #[test]
+    fn test_mip_chain_is_longer_than_level0() {
+        let (data, max_level) = generate_bgra_mip_chain(4, 4, vec![0xFF00_00FFu32; 16]);
+        assert_eq!(max_level, 2);
+        // 4x4 + 2x2 + 1x1
+        assert_eq!(data.len(), 16 + 4 + 1);
     }
 
     #[test]
