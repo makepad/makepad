@@ -656,6 +656,18 @@ fn remove_leaf(tree: &mut DynamicTree, leaf: i32) {
                 tree.nodes[child1 as usize].category_bits | tree.nodes[child2 as usize].category_bits;
             tree.nodes[i].height =
                 1 + max_u16(tree.nodes[child1 as usize].height, tree.nodes[child2 as usize].height);
+            // Recompute ENLARGED like the other summaries (PORT FIX, absent
+            // upstream): destroying the only enlarged leaf under an ancestor
+            // chain used to leave the flags stale. If nothing else was in the
+            // move buffer, update_broad_phase_pairs early-outs, no rebuild
+            // clears the tree, and validate_no_enlarged asserts on the next
+            // step. First hit by destroying fast kinematic bodies (expiring
+            // projectile capsules) between steps; bottom-up recomputation
+            // from the direct children keeps the invariant exact — a child's
+            // flag already summarizes its subtree.
+            let enlarged =
+                (tree.nodes[child1 as usize].flags | tree.nodes[child2 as usize].flags) & ENLARGED_NODE;
+            tree.nodes[i].flags = (tree.nodes[i].flags & !ENLARGED_NODE) | enlarged;
 
             index = tree.nodes[i].parent;
         }

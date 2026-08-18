@@ -1,0 +1,2135 @@
+//! GPU-resident world lightmap bake: the CPU ray bake's per-texel work as
+//! fragment-shader passes, ZERO CPU readback. The output is bit-compatible
+//! with lightmap.rs's atlas conventions (A = sun SDF with 128 the edge,
+//! RGB = lamp light x0.5, plus the R8-style shadow-top plane), so the
+//! material shaders consume it unchanged.
+//!
+//! # Pass pipeline (all raster, per dirty region)
+//!
+//! 1. sun depth: every caster (mesh instances + occluder boxes + movers in
+//!    Realtime) from the region's fitted ortho sun camera into an R32F
+//!    scratch (hardware z-test keeps the nearest).
+//! 2. sun gather: the region's OWN geometry rasterized in lightmap-uv space
+//!    at 4x its atlas resolution — the fragment is one supersample doing
+//!    the depth compare (lightmap.rs's `sun_bit`, bias for rays).
+//! 3. despeckle (3x3 vote) at 4x, then 4x->1x coverage downsample into an
+//!    atlas-layout coverage texture.
+//! 4. distance transform at 1x as iterated 3/4-chamfer relaxation over the
+//!    coverage majority (see below for why not seed-JFA), rect-clamped so
+//!    regions never bleed.
+//! 5. lamps: per lamp a 6-face tiled depth render + one additive gather
+//!    over every receiving region in radius (N.L x (1-d/r)^2 x cone^2 with
+//!    SPILL = 0.35, mirroring the CPU lamp loop), then the two-ring rim
+//!    dilation + 4/2/1 smooth.
+//! 6. encode: A from the signed distance blended toward measured coverage
+//!    at mixed texels (the CPU's thin-feature guard), RGB from the lamp
+//!    accumulation. Region quads are expanded one texel so the pad ring
+//!    keeps the "fully lit / no lamps" default.
+//! 7. shadow-top plane from the GROUND region's sun depth, + two min-dilate
+//!    rings (bake_top_plane's contract).
+//!
+//! # Why chamfer iterations instead of seed-JFA
+//!
+//! The encoded band is only ±4 texels, so 5 relaxation steps of the exact
+//! 3/4-chamfer metric reproduce the CPU transform bit-for-bit-ish in the
+//! only range that is ever decoded — with two byte channels in a plain
+//! BGRA8 ping-pong. JFA needs 2x11-bit seed coordinates per class, which
+//! wants integer targets for no accuracy gain inside the band.
+//!
+//! # Scheduling modes — the two-tier shadow contract
+//!
+//! The ATLAS is static-only and mode-independent: one camera-blind bake per
+//! dirty kick (world edit / explicit sun change, settle-debounced by the
+//! renderer), identical bytes in both modes. What differs is how DYNAMIC
+//! casters shadow and where SUN visibility comes from at shade time:
+//!
+//! [`GpuLightmapMode::OnChange`] (default everywhere, the slow-GPU tier):
+//! sun visibility from the atlas A channel; dynamics cast through the
+//! prebaked SDF silhouette quads ([`dynamic_shadow_tiers`]).
+//!
+//! [`GpuLightmapMode::Realtime`] (opt-in, fast GPUs): classic CASCADED
+//! SHADOW MAPS — per frame, [`crate::shadow_csm`] fits ortho cascades to
+//! the view frustum and ONE depth pass renders every caster (statics,
+//! entity boxes, movers, skinned characters) into them, chained ahead of
+//! the scene pass in the same frame's command stream. Material shaders
+//! take sun visibility from a PCF compare against the cascades and IGNORE
+//! the atlas A channel; the atlas serves only lamps RGB (and the models'
+//! AO textures ride their own sidecars). One receive path for every
+//! surface class — a mover cannot inherit ground-projected shadow
+//! bookkeeping, because there is none in this tier. The steady-state atlas
+//! cost in Realtime is therefore ZERO passes, exactly like OnChange; the
+//! per-frame cost is the cascade depth pass.
+
+use crate::lightmap::{plan_atlas, LmLight, LmRect, LmScene};
+use crate::shadow_csm::{fit_cascades, CsmFrame, CsmView, CSM_CASCADES};
+use crate::shaders::*;
+use makepad_draw::*;
+
+/// Mirrors lightmap.rs's private constants — the GPU passes must agree with
+/// the CPU conventions the material shaders were tuned against.
+const RAY_OFFSET: f32 = 0.02;
+const LIGHT_CLEARANCE: f32 = 0.25;
+
+/// How the baker schedules work. Pure runtime policy — no platform
+/// conditionals; switchable live via [`Renderer::set_gpu_lightmap_mode`].
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum GpuLightmapMode {
+    /// The universal default (slow-GPU tier): sun from the baked atlas,
+    /// dynamics through the prebaked SDF quad tier.
+    #[default]
+    OnChange,
+    /// Fast-GPU tier: per-frame cascaded shadow maps serve SUN visibility
+    /// for every receiver; every caster (characters included) renders into
+    /// the cascades; the SDF quad tier draws nothing.
+    Realtime,
+}
+
+/// Device-local budget for the Realtime cascaded-shadow tier.
+///
+/// `tile_resolution` is the edge of ONE cascade. The three fixed-layout
+/// cascade tiles are stored side by side, with one R32F color target and one
+/// D32 depth target, so target memory is `24 * tile_resolution^2` bytes.
+/// `far_range` is the world-space reach of the final cascade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CsmConfig {
+    pub tile_resolution: usize,
+    pub far_range: f32,
+}
+
+pub const DEFAULT_CSM_CONFIG: CsmConfig = CsmConfig {
+    tile_resolution: 2048,
+    far_range: 80.0,
+};
+
+const MIN_CSM_TILE_RESOLUTION: usize = 256;
+const MAX_CSM_TILE_RESOLUTION: usize = 4096;
+const MIN_CSM_FAR_RANGE: f32 = 10.0;
+const MAX_CSM_FAR_RANGE: f32 = 4096.0;
+
+impl Default for CsmConfig {
+    fn default() -> Self {
+        DEFAULT_CSM_CONFIG
+    }
+}
+
+impl CsmConfig {
+    fn clamped(tile_resolution: usize, far_range: f32) -> Self {
+        Self {
+            tile_resolution: tile_resolution
+                .clamp(MIN_CSM_TILE_RESOLUTION, MAX_CSM_TILE_RESOLUTION),
+            far_range: if far_range.is_finite() {
+                far_range.clamp(MIN_CSM_FAR_RANGE, MAX_CSM_FAR_RANGE)
+            } else {
+                DEFAULT_CSM_CONFIG.far_range
+            },
+        }
+    }
+}
+
+/// Runtime device policy plus optional launch-time locks. Explicit
+/// `MAKEPAD_CSM_RES` / `MAKEPAD_CSM_FAR` values always win over a later
+/// device-tier request (for example the sandbox's first-XR-frame cut).
+#[derive(Clone, Copy, Debug)]
+struct CsmPolicy {
+    device: CsmConfig,
+    env_resolution: Option<usize>,
+    env_far_range: Option<f32>,
+}
+
+impl Default for CsmPolicy {
+    fn default() -> Self {
+        Self {
+            device: CsmConfig::default(),
+            env_resolution: std::env::var("MAKEPAD_CSM_RES")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+            env_far_range: std::env::var("MAKEPAD_CSM_FAR")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+        }
+    }
+}
+
+impl CsmPolicy {
+    fn effective(&self) -> CsmConfig {
+        CsmConfig::clamped(
+            self.env_resolution
+                .unwrap_or(self.device.tile_resolution),
+            self.env_far_range.unwrap_or(self.device.far_range),
+        )
+    }
+
+    fn set_device(&mut self, tile_resolution: usize, far_range: f32) -> CsmConfig {
+        self.device = CsmConfig::clamped(tile_resolution, far_range);
+        self.effective()
+    }
+}
+
+/// Which tier serves the DYNAMIC casters under a scheduling mode. ONE
+/// decision point, consumed by both the renderer's SDF-quad/blob/drape draw
+/// gates and its mover collection, so the two can never disagree — a caster
+/// drawing both tiers doubles its shadow, drawing neither loses it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicShadowTiers {
+    /// Prebaked SDF silhouette quads (plus their blob/hull fallbacks).
+    pub sdf_quads: bool,
+    /// Everything renders into the per-frame shadow-map cascades (and every
+    /// material samples them for sun visibility).
+    pub csm: bool,
+}
+
+pub fn dynamic_shadow_tiers(mode: GpuLightmapMode) -> DynamicShadowTiers {
+    match mode {
+        GpuLightmapMode::OnChange => DynamicShadowTiers {
+            sdf_quads: true,
+            csm: false,
+        },
+        GpuLightmapMode::Realtime => DynamicShadowTiers {
+            sdf_quads: false,
+            csm: true,
+        },
+    }
+}
+
+/// The ATLAS scheduling decision, pure and mode-independent: the dirty bit
+/// — set only by a realized job (a world edit's settle kick), never by
+/// routine mover or replication traffic — bakes ALL regions once,
+/// camera-blind, and a clean bit encodes ZERO atlas passes. Realtime's
+/// per-frame work is the CASCADES, never the atlas (the invariant the
+/// tests below pin for both modes).
+///
+/// `only_region` is the MAKEPAD_GPU_LM_ONLY_REGION debug pin (stage
+/// dumps).
+fn schedule_regions(
+    dirty: &mut bool,
+    region_count: usize,
+    only_region: Option<usize>,
+) -> Vec<usize> {
+    if !*dirty {
+        return Vec::new();
+    }
+    *dirty = false;
+    match only_region.filter(|only| *only < region_count) {
+        Some(only) => vec![only],
+        None => (0..region_count).collect(),
+    }
+}
+
+/// One caster the depth passes rasterize.
+pub struct GpuBakeMesh {
+    pub geometry: GeometryId,
+    pub transform: Mat4f,
+    /// World AABB (transformed model bounds).
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+/// A dynamic caster for Realtime mode's depth passes. No identity, no
+/// history: Realtime is stateless, every visible region re-bakes with the
+/// current caster set each frame.
+pub struct GpuLmMover {
+    pub geometry: GeometryId,
+    pub transform: Mat4f,
+    /// Model-space bounds (lamp-face culling via the world transform).
+    pub min: Vec3f,
+    pub max: Vec3f,
+    /// Skinned casters (characters): rest mesh in `geometry`, pose from the
+    /// frame's joint palette. `None` = rigid.
+    pub skin: Option<GpuLmSkin>,
+}
+
+/// A skinned mover's pose source: the frame's shared joint-palette texture
+/// and this caster's first texel in it — exactly what the visible
+/// DrawSceneSkinnedGpu draw binds, so bake and picture skin identically.
+#[derive(Clone)]
+pub struct GpuLmSkin {
+    pub joint_tex: Texture,
+    pub joint_base: f32,
+}
+
+/// A snapshot the renderer hands over on the settle path (the same moment
+/// the CPU bake used to be kicked).
+pub struct GpuBakeJob {
+    pub scene: LmScene,
+    /// Parallel to `scene.meshes`: each instance's GPU geometry.
+    pub mesh_geometry: Vec<GeometryId>,
+    /// Parallel to `scene.meshes`: the placed-model index each region maps
+    /// back to (for the renderer's lm_remaps).
+    pub mesh_map: Vec<usize>,
+    /// World xz rect of the ground region (x0, z0, span, span).
+    pub terrain_world: Option<Vec4f>,
+}
+
+/// What the renderer stores when a scheduled layout is first realized.
+pub struct GpuLmDelivery {
+    pub atlas: Texture,
+    pub top: (Texture, f32, f32),
+    pub size: usize,
+    pub mesh_rects: Vec<LmRect>,
+    pub planar_rects: Vec<LmRect>,
+    pub mesh_map: Vec<usize>,
+    pub terrain_world: Option<Vec4f>,
+}
+
+/// A fitted sun (or lamp-face) camera as shader rows:
+/// `dot(row.xyz, world) + row.w` = ndc x / ndc y / z01.
+#[derive(Clone, Copy)]
+struct SunCam {
+    rx: Vec4f,
+    ry: Vec4f,
+    rz: Vec4f,
+    /// z01 span in world units (decodes z01 deltas back to distances).
+    zr: f32,
+    /// Depth bias in z01 units, scaled by the map's texel footprint.
+    bias01: f32,
+}
+
+struct GroundInfo {
+    /// World rect (x0, z0, span_x, span_z).
+    world: Vec4f,
+    /// Heightfield decode: (origin_x, origin_z, cell, n).
+    hf: Vec4f,
+    heights_tex: Texture,
+    /// Shadow-top encode window.
+    top_base: f32,
+    top_range: f32,
+}
+
+enum RegionKind {
+    /// Index into `BakeState::meshes`.
+    Mesh(usize),
+    Ground,
+}
+
+struct Region {
+    rect: LmRect,
+    kind: RegionKind,
+    /// World bounds of the receiver (light culling, sun camera fit).
+    min: Vec3f,
+    max: Vec3f,
+}
+
+struct BakeTextures {
+    atlas: Texture,
+    top_a: Texture,
+    top_b: Texture,
+    cov: Texture,
+    lamp_a: Texture,
+    lamp_b: Texture,
+    dt_a: Texture,
+    dt_b: Texture,
+    mask_a: Texture,
+    mask_b: Texture,
+    sun_depth: Texture,
+    sun_depth_z: Texture,
+    /// FAR sun depth (max z01 = the surface nearest the GROUND along the
+    /// ray): the shadow-top plane records where a ground ray is first
+    /// BLOCKED, i.e. a slab's underside — the CPU bake's
+    /// `scene_nearest_block` semantics. The near map would put the blocker
+    /// at the slab's TOP, and every receiver at that height re-shadowed.
+    sun_far: Texture,
+    lamp_depth: Texture,
+    lamp_depth_z: Texture,
+    /// Realtime's cascaded shadow maps: CSM_CASCADES tiles side by side in
+    /// one Rf32 strip (one texture slot in every material family), plus its
+    /// hardware depth. Written every Realtime frame, sampled by the PCF
+    /// compare in the material shaders.
+    /// Allocated only while Realtime is serving. At the default 2048 tile
+    /// edge these two targets are about 96 MiB per view, so retaining them in
+    /// OnChange (where they are never sampled) is a serious split/mobile
+    /// memory leak rather than harmless scratch.
+    csm: Option<Texture>,
+    csm_z: Option<Texture>,
+    mask_w: usize,
+    mask_h: usize,
+}
+
+/// The realized layout: everything a frame's passes read.
+struct BakeState {
+    size: usize,
+    regions: Vec<Region>,
+    meshes: Vec<GpuBakeMesh>,
+    /// All occluder boxes packed as one world-space triangle soup.
+    box_geometry: Option<Geometry>,
+    lights: Vec<LmLight>,
+    ground: Option<GroundInfo>,
+    /// Scene AABB (casters + ground) — bounds every sun camera's near plane
+    /// and the cascades' z windows.
+    scene_min: Vec3f,
+    scene_max: Vec3f,
+    /// One cascade tile's edge, texels (MAKEPAD_CSM_RES at realize).
+    csm_res: usize,
+    tex: BakeTextures,
+}
+
+/// All the baker's draw shaders, lazily constructed from their script
+/// type defaults.
+struct LmDraws {
+    sun_depth: DrawLmSunDepth,
+    sun_depth_skinned: DrawLmSunDepthSkinned,
+    lamp_depth: DrawLmLampDepth,
+    gather_mesh: DrawLmSunGatherMesh,
+    gather_ground: DrawLmSunGatherGround,
+    despeckle: DrawLmDespeckle,
+    downsample: DrawLmDownsample,
+    chamfer: DrawLmChamfer,
+    lamp_mesh: DrawLmLampGatherMesh,
+    lamp_ground: DrawLmLampGatherGround,
+    lamp_dilate: DrawLmLampDilate,
+    encode: DrawLmEncode,
+    top: DrawLmTop,
+    top_dilate: DrawLmTopDilate,
+}
+
+struct BakePass {
+    pass: DrawPass,
+    list: DrawList,
+    /// Probed pool index of the pass id — the execution order sorts by
+    /// this DESCENDING so the platform's child-before-parent insertion
+    /// yields exactly the chain order (a child must carry a HIGHER id than
+    /// the pass that consumes its output).
+    probe: usize,
+}
+
+/// One frame's chained pass sequence over the (persistent) pool: opens
+/// passes in execution order, wiring each pass's parent to the NEXT one so
+/// the platform renders them in exactly this order, ending at the pass
+/// currently being drawn (the game's 3D pass).
+struct PassSeq<'a> {
+    pool: &'a mut Vec<BakePass>,
+    /// Pool indices in execution order (descending pass id).
+    order: Vec<usize>,
+    cursor: usize,
+}
+
+impl<'a> PassSeq<'a> {
+    fn open(
+        &mut self,
+        cx: &mut CxDraw,
+        w: usize,
+        h: usize,
+        color: &Texture,
+        clear: DrawPassClearColor,
+        depth: Option<&Texture>,
+    ) -> usize {
+        let n = self.order.len();
+        let k = self.cursor;
+        self.cursor += 1;
+        // Parent chain: pass k renders before pass k+1; the tail parents to
+        // whatever pass is open right now.
+        if k + 1 < n {
+            let parent_id = self.pool[self.order[k + 1]].pass.draw_pass_id();
+            let child_id = self.pool[self.order[k]].pass.draw_pass_id();
+            cx.cx.passes[child_id].parent = CxDrawPassParent::DrawPass(parent_id);
+        } else {
+            cx.make_child_pass(&self.pool[self.order[k]].pass);
+        }
+        let bp = &mut self.pool[self.order[k]];
+        cx.begin_pass(&bp.pass, Some(1.0));
+        bp.pass.set_size(cx.cx, dvec2(w as f64, h as f64));
+        bp.pass.clear_color_textures(cx.cx);
+        bp.pass.set_color_texture(cx.cx, color, clear);
+        match depth {
+            Some(t) => {
+                bp.pass
+                    .set_depth_texture(cx.cx, t, DrawPassClearDepth::ClearWith(1.0));
+            }
+            None => {
+                cx.cx.passes[bp.pass.draw_pass_id()].depth_texture = None;
+            }
+        }
+        bp.list.begin_always(cx);
+        self.order[k]
+    }
+
+    fn close(&mut self, cx: &mut CxDraw, idx: usize) {
+        let bp = &mut self.pool[idx];
+        bp.list.end(cx);
+        cx.end_pass(&bp.pass);
+    }
+}
+
+pub struct GpuLightmapBaker {
+    mode: GpuLightmapMode,
+    /// Realtime CSM resolution/range are presentation policy, not realm
+    /// state. They survive realm switches and may change live.
+    csm_policy: CsmPolicy,
+    /// A job scheduled by the renderer, realized on the next draw.
+    pending: Option<GpuBakeJob>,
+    state: Option<BakeState>,
+    draws: Option<Box<LmDraws>>,
+    pool: Vec<BakePass>,
+    /// The whole dirt model, both modes: the next run re-bakes ALL atlas
+    /// regions in one frame. Set only by a realized job — the atlas is
+    /// static-only and mode-independent, so mode switches never touch it.
+    dirty: bool,
+    /// This frame's fitted cascades (Realtime), for the renderer's material
+    /// uniforms. None in OnChange.
+    csm_last: Option<CsmFrame>,
+    /// Realtime perf probe accumulators (`MAKEPAD_GPU_LM_PERF=1` logs the
+    /// per-frame cascade-encode averages every 120 frames).
+    rt_frames: u64,
+    rt_us: u64,
+}
+
+impl Default for GpuLightmapBaker {
+    fn default() -> Self {
+        Self {
+            mode: GpuLightmapMode::default(),
+            csm_policy: CsmPolicy::default(),
+            pending: None,
+            state: None,
+            draws: None,
+            pool: Vec::new(),
+            dirty: false,
+            csm_last: None,
+            rt_frames: 0,
+            rt_us: 0,
+        }
+    }
+}
+
+fn v3(x: f32, y: f32, z: f32) -> Vec3f {
+    Vec3f { x, y, z }
+}
+
+fn min3(a: Vec3f, b: Vec3f) -> Vec3f {
+    v3(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z))
+}
+
+fn max3(a: Vec3f, b: Vec3f) -> Vec3f {
+    v3(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z))
+}
+
+fn sphere_touches_box(c: Vec3f, r: f32, min: Vec3f, max: Vec3f) -> bool {
+    let dx = (min.x - c.x).max(0.0).max(c.x - max.x);
+    let dy = (min.y - c.y).max(0.0).max(c.y - max.y);
+    let dz = (min.z - c.z).max(0.0).max(c.z - max.z);
+    dx * dx + dy * dy + dz * dz < r * r
+}
+
+/// Fit an ortho sun camera over a receiver's bounds: xy extents from the
+/// REGION (plus a texel pad), z reaching back to the whole SCENE toward the
+/// sun so every possible caster is inside the volume. `depth_res` is the
+/// scratch edge in texels.
+fn fit_sun_cam(
+    sun_dir: Vec3f,
+    r_min: Vec3f,
+    r_max: Vec3f,
+    s_min: Vec3f,
+    s_max: Vec3f,
+    depth_res: f32,
+) -> SunCam {
+    // fwd = the direction sunlight TRAVELS (away from the sun).
+    let fwd = (sun_dir * -1.0).normalize();
+    let up_hint = if fwd.y.abs() > 0.99 {
+        v3(1.0, 0.0, 0.0)
+    } else {
+        v3(0.0, 1.0, 0.0)
+    };
+    let right = Vec3f::cross(up_hint, fwd).normalize();
+    let up = Vec3f::cross(fwd, right);
+    let c = (r_min + r_max) * 0.5;
+    let corner = |min: Vec3f, max: Vec3f, i: usize| {
+        v3(
+            if i & 1 == 0 { min.x } else { max.x },
+            if i & 2 == 0 { min.y } else { max.y },
+            if i & 4 == 0 { min.z } else { max.z },
+        )
+    };
+    let (mut ex, mut ey) = (0.0f32, 0.0f32);
+    let (mut rz_max, mut sz_min) = (f32::MIN, f32::MAX);
+    for i in 0..8 {
+        let p = corner(r_min, r_max, i) - c;
+        ex = ex.max(right.dot(p).abs());
+        ey = ey.max(up.dot(p).abs());
+        rz_max = rz_max.max(fwd.dot(p));
+        let q = corner(s_min, s_max, i) - c;
+        sz_min = sz_min.min(fwd.dot(q));
+    }
+    // Pad: two depth texels + a hand's width, so rim receivers never sample
+    // the clamp border.
+    let texel = 2.0 * ex.max(ey).max(0.5) / depth_res;
+    let pad = texel * 2.0 + 0.05;
+    let (ex, ey) = (ex + pad, ey + pad);
+    let z0 = sz_min - 0.5;
+    let z1 = rz_max + 0.5;
+    let zr = (z1 - z0).max(0.01);
+    // Tolerance = raster error only. The CPU rays this replaces forgave
+    // nothing beyond their 2cm normal offset, and kit models stack detail
+    // sheets 2-5cm apart — a fat constant here read every under-sheet as
+    // lit where the CPU shadowed it (the crypt's paver floors).
+    let bias_world = texel * 1.5 + 0.005;
+    SunCam {
+        rx: Vec4f {
+            x: right.x / ex,
+            y: right.y / ex,
+            z: right.z / ex,
+            w: -right.dot(c) / ex,
+        },
+        ry: Vec4f {
+            x: up.x / ey,
+            y: up.y / ey,
+            z: up.z / ey,
+            w: -up.dot(c) / ey,
+        },
+        rz: Vec4f {
+            x: fwd.x / zr,
+            y: fwd.y / zr,
+            z: fwd.z / zr,
+            w: (-fwd.dot(c) - z0) / zr,
+        },
+        zr,
+        bias01: bias_world / zr,
+    }
+}
+
+/// A lamp face's view rows + clip tile mapping, matching the gather
+/// shader's `face_v` table exactly.
+fn lamp_face(lamp: Vec3f, face: usize) -> (Vec4f, Vec4f, Vec4f, Vec4f) {
+    let (r, u, f) = match face {
+        0 => (v3(0.0, 0.0, -1.0), v3(0.0, 1.0, 0.0), v3(1.0, 0.0, 0.0)),
+        1 => (v3(0.0, 0.0, 1.0), v3(0.0, 1.0, 0.0), v3(-1.0, 0.0, 0.0)),
+        2 => (v3(1.0, 0.0, 0.0), v3(0.0, 0.0, -1.0), v3(0.0, 1.0, 0.0)),
+        3 => (v3(1.0, 0.0, 0.0), v3(0.0, 0.0, 1.0), v3(0.0, -1.0, 0.0)),
+        4 => (v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, 1.0)),
+        _ => (v3(-1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, -1.0)),
+    };
+    let row = |a: Vec3f| Vec4f {
+        x: a.x,
+        y: a.y,
+        z: a.z,
+        w: -a.dot(lamp),
+    };
+    let (col, rw) = (face % 3, face / 3);
+    let tile = Vec4f {
+        x: 1.0 / 3.0,
+        y: 0.5,
+        z: (2.0 * col as f32 + 1.0) / 3.0 - 1.0,
+        w: if rw == 0 { 0.5 } else { -0.5 },
+    };
+    (row(r), row(u), row(f), tile)
+}
+
+fn render_tex(cx: &mut Cx, w: usize, h: usize) -> Texture {
+    Texture::new_with_format(
+        cx,
+        TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed {
+                width: w,
+                height: h,
+            },
+            initial: true,
+        },
+    )
+}
+
+fn render_tex_rf32(cx: &mut Cx, w: usize, h: usize) -> Texture {
+    Texture::new_with_format(
+        cx,
+        TextureFormat::RenderRf32 {
+            size: TextureSize::Fixed {
+                width: w,
+                height: h,
+            },
+            initial: true,
+        },
+    )
+}
+
+fn depth_tex(cx: &mut Cx, w: usize, h: usize) -> Texture {
+    Texture::new_with_format(
+        cx,
+        TextureFormat::DepthD32 {
+            size: TextureSize::Fixed {
+                width: w,
+                height: h,
+            },
+            initial: true,
+        },
+    )
+}
+
+/// Sun-depth scratch edge, texels.
+const SUN_DEPTH_RES: usize = 2048;
+/// Lamp cube-face tile edge, texels (3x2 tiles in one scratch).
+const LAMP_FACE_RES: usize = 512;
+/// Chamfer relaxation steps: covers the 4-texel encode band with a step of
+/// slack.
+const CHAMFER_STEPS: usize = 5;
+/// Depth-shader tile transform for a full-target pass (scale 1, offset 0) —
+/// the cascade pass retargets the same shaders at one tile of the strip.
+const FULL_TILE: Vec4f = Vec4f {
+    x: 1.0,
+    y: 1.0,
+    z: 0.0,
+    w: 0.0,
+};
+
+impl GpuLightmapBaker {
+    pub fn mode(&self) -> GpuLightmapMode {
+        self.mode
+    }
+
+    /// Effective Realtime CSM budget for this device. Explicit launch-time
+    /// `MAKEPAD_CSM_RES` / `MAKEPAD_CSM_FAR` values have final precedence.
+    pub fn csm_config(&self) -> CsmConfig {
+        self.csm_policy.effective()
+    }
+
+    /// Request a device-tier Realtime CSM budget.
+    ///
+    /// Values are clamped to safe target sizes/ranges. If the effective tile
+    /// resolution changes while a scene is realized, both old targets are
+    /// released immediately and recreated together at the next draw. The
+    /// last fitted frame is also invalidated, so material bindings can never
+    /// combine a new inverse resolution with an old target.
+    ///
+    /// Returns the effective configuration after environment overrides.
+    pub fn set_csm_config(&mut self, tile_resolution: usize, far_range: f32) -> CsmConfig {
+        let old = self.csm_policy.effective();
+        let new = self.csm_policy.set_device(tile_resolution, far_range);
+        if old == new {
+            return new;
+        }
+
+        self.csm_last = None;
+        if old.tile_resolution != new.tile_resolution {
+            if let Some(state) = self.state.as_mut() {
+                state.csm_res = new.tile_resolution;
+                // The strip and depth attachment are one shape-coupled pair.
+                // Drop both even if one was unexpectedly absent so the next
+                // sync can never assemble a mixed-resolution framebuffer.
+                state.tex.csm = None;
+                state.tex.csm_z = None;
+            }
+        }
+        log!(
+            "gpu csm: tile {}px, far {:.0} (requested {}px/{:.0})",
+            new.tile_resolution,
+            new.far_range,
+            tile_resolution,
+            far_range
+        );
+        new
+    }
+
+    /// Drop the old realm's queued snapshot, realized atlas, and fitted
+    /// cascades. Shader objects and render-pass scratch stay resident: they
+    /// are device resources, while `pending`/`state`/`csm_last` contain
+    /// geometry and bounds belonging to one particular realm.
+    pub(crate) fn enter_realm(&mut self) {
+        self.pending = None;
+        self.state = None;
+        self.dirty = false;
+        self.csm_last = None;
+        self.rt_frames = 0;
+        self.rt_us = 0;
+    }
+
+    /// Live mode switch. No re-bake either way: the atlas is static-only
+    /// and byte-identical in both modes — the switch only changes which
+    /// tier the dynamics cast through and where the materials read sun
+    /// visibility (atlas A vs cascades), both applied the same frame.
+    pub fn set_mode(&mut self, mode: GpuLightmapMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        log!("gpu lightmap: mode -> {:?}", mode);
+    }
+
+    /// Match the expensive realtime targets to the active serving tier.
+    /// Called from `run_frame`, where a draw context is available; mode
+    /// switches themselves deliberately remain allocation-free.
+    fn sync_csm_targets(&mut self, cx: &mut Cx) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if self.mode == GpuLightmapMode::Realtime {
+            if state.tex.csm.is_none() {
+                let width = state.csm_res * CSM_CASCADES;
+                state.tex.csm = Some(render_tex_rf32(cx, width, state.csm_res));
+                state.tex.csm_z = Some(depth_tex(cx, width, state.csm_res));
+            }
+        } else {
+            // Dropping the last handles lets the backend reclaim ~96 MiB per
+            // 2048px view instead of carrying realtime-only memory forever.
+            state.tex.csm = None;
+            state.tex.csm_z = None;
+            self.csm_last = None;
+        }
+    }
+
+    /// Queue a new scene snapshot; realized (planned, textures created,
+    /// everything dirtied) on the next draw.
+    pub fn schedule(&mut self, job: GpuBakeJob) {
+        self.pending = Some(job);
+    }
+
+    pub fn has_state(&self) -> bool {
+        self.state.is_some() || self.pending.is_some()
+    }
+
+    /// True when a realized layout exists and nothing is queued: the atlas
+    /// content is complete as of the previous frame (debug dumps read here).
+    pub fn is_idle(&self) -> bool {
+        self.state.is_some() && self.pending.is_none() && !self.dirty
+    }
+
+    /// This frame's cascade binding for the material shaders: the fitted
+    /// cascades, the tile-strip texture and one tile's inverse resolution.
+    /// None whenever the CSM tier is not serving (OnChange, or no realized
+    /// scene) — the renderer then writes csm off into the uniforms.
+    pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
+        let state = self.state.as_ref()?;
+        let frame = self.csm_last?;
+        Some((
+            frame,
+            state.tex.csm.as_ref()?.clone(),
+            1.0 / state.csm_res as f32,
+        ))
+    }
+
+    /// DEBUG: the stage textures worth dumping alongside the atlas. The mask
+    /// scratches hold whichever region was processed LAST (see
+    /// MAKEPAD_GPU_LM_ONLY_REGION to pin one).
+    pub fn debug_stage_textures(&self) -> Vec<(Texture, &'static str)> {
+        let Some(state) = &self.state else {
+            return Vec::new();
+        };
+        vec![
+            (state.tex.cov.clone(), "cov"),
+            (state.tex.dt_a.clone(), "dt_a"),
+            (state.tex.dt_b.clone(), "dt_b"),
+            (state.tex.mask_a.clone(), "mask_a"),
+            (state.tex.mask_b.clone(), "mask_b"),
+            (state.tex.sun_depth.clone(), "sun_depth"),
+            // The shadow-top plane pair (final content lands in top_a after
+            // the two dilate rings) — the data the occ_g/occ rejection reads.
+            (state.tex.top_a.clone(), "top_a"),
+            (state.tex.top_b.clone(), "top_b"),
+        ]
+    }
+
+    /// Realize a pending job: plan the atlas (identical layout math to the
+    /// CPU bake), create the persistent + scratch targets, pack the
+    /// occluder boxes, upload the heightfield, dirty everything.
+    fn realize(&mut self, cx: &mut Cx, job: GpuBakeJob) -> Option<GpuLmDelivery> {
+        let (size, rects) = plan_atlas(&job.scene);
+        let mesh_count = job.scene.meshes.len();
+        let mut regions = Vec::new();
+        let mut meshes = Vec::new();
+        let mut scene_min = v3(f32::MAX, f32::MAX, f32::MAX);
+        let mut scene_max = v3(f32::MIN, f32::MIN, f32::MIN);
+        for (i, m) in job.scene.meshes.iter().enumerate() {
+            let (lo, hi) = m.world_bounds();
+            scene_min = min3(scene_min, lo);
+            scene_max = max3(scene_max, hi);
+            regions.push(Region {
+                rect: rects[i],
+                kind: RegionKind::Mesh(i),
+                min: lo,
+                max: hi,
+            });
+            meshes.push(GpuBakeMesh {
+                geometry: job.mesh_geometry[i],
+                transform: m.transform,
+                min: lo,
+                max: hi,
+            });
+        }
+        for (bmin, bmax) in &job.scene.boxes {
+            scene_min = min3(scene_min, *bmin);
+            scene_max = max3(scene_max, *bmax);
+        }
+        // The ground planar region (at most one — the renderer builds one
+        // synthetic field for the whole scene).
+        let mut ground = None;
+        let mut planar_rects = Vec::new();
+        for (i, p) in job.scene.planars.iter().enumerate() {
+            let rect = rects[mesh_count + i];
+            planar_rects.push(rect);
+            let Some(f) = &p.field else {
+                continue;
+            };
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for h in f.heights.iter() {
+                lo = lo.min(*h);
+                hi = hi.max(*h);
+            }
+            if lo > hi {
+                continue;
+            }
+            let gmin = v3(p.x0, lo, p.z0);
+            let gmax = v3(p.x1, hi, p.z1);
+            scene_min = min3(scene_min, gmin);
+            scene_max = max3(scene_max, gmax);
+            let heights_tex = Texture::new_with_format(
+                cx,
+                TextureFormat::VecRf32 {
+                    width: f.n,
+                    height: f.n,
+                    data: Some(f.heights.as_ref().clone()),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            // The encode window, exactly bake_top_plane's: base a hair under
+            // the lowest ground texel, range with 8 units of blocker
+            // headroom over the highest.
+            let base = lo - 0.25;
+            let range = ((hi + 8.0) - base).max(8.0);
+            regions.push(Region {
+                rect,
+                kind: RegionKind::Ground,
+                min: gmin,
+                max: gmax,
+            });
+            ground = Some(GroundInfo {
+                world: Vec4f {
+                    x: p.x0,
+                    y: p.z0,
+                    z: p.x1 - p.x0,
+                    w: p.z1 - p.z0,
+                },
+                hf: Vec4f {
+                    x: f.origin_x,
+                    y: f.origin_z,
+                    z: f.cell,
+                    w: f.n as f32,
+                },
+                heights_tex,
+                top_base: base,
+                top_range: range,
+            });
+        }
+        if regions.is_empty() {
+            self.state = None;
+            self.dirty = false;
+            return None;
+        }
+        if scene_min.x > scene_max.x {
+            scene_min = v3(-1.0, -1.0, -1.0);
+            scene_max = v3(1.0, 1.0, 1.0);
+        }
+        // Occluder boxes as one static world-space triangle soup in the
+        // packed mesh layout (position lanes only — the depth shader reads
+        // nothing else).
+        let box_geometry = if job.scene.boxes.is_empty() {
+            None
+        } else {
+            let mut vertices = Vec::with_capacity(job.scene.boxes.len() * 8 * 7);
+            let mut indices: Vec<u32> = Vec::with_capacity(job.scene.boxes.len() * 36);
+            for (bmin, bmax) in &job.scene.boxes {
+                let base = (vertices.len() / 7) as u32;
+                for i in 0..8 {
+                    vertices.extend_from_slice(&[
+                        if i & 1 == 0 { bmin.x } else { bmax.x },
+                        if i & 2 == 0 { bmin.y } else { bmax.y },
+                        if i & 4 == 0 { bmin.z } else { bmax.z },
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ]);
+                }
+                // 12 triangles over the corner lattice (winding irrelevant:
+                // the depth passes are double-sided).
+                const QUADS: [[u32; 4]; 6] = [
+                    [0, 2, 6, 4], // -y? (lattice faces; orientation unimportant)
+                    [1, 3, 7, 5],
+                    [0, 1, 5, 4],
+                    [2, 3, 7, 6],
+                    [0, 1, 3, 2],
+                    [4, 5, 7, 6],
+                ];
+                for q in QUADS {
+                    indices.extend_from_slice(&[base + q[0], base + q[1], base + q[2]]);
+                    indices.extend_from_slice(&[base + q[0], base + q[2], base + q[3]]);
+                }
+            }
+            let g = Geometry::new(cx);
+            g.update(cx, indices, vertices);
+            Some(g)
+        };
+        // Scratch + persistent targets. The mask scratch fits the largest
+        // region at 4x.
+        let (mut mw, mut mh) = (4, 4);
+        for r in &regions {
+            mw = mw.max(r.rect.w * 4);
+            mh = mh.max(r.rect.h * 4);
+        }
+        // One cascade tile's edge. The targets themselves stay lazy until
+        // Realtime serves; the shape comes from this device's current tier.
+        let csm_res = self.csm_policy.effective().tile_resolution;
+        let tex = BakeTextures {
+            atlas: render_tex(cx, size, size),
+            top_a: render_tex(cx, size, size),
+            top_b: render_tex(cx, size, size),
+            cov: render_tex(cx, size, size),
+            lamp_a: render_tex(cx, size, size),
+            lamp_b: render_tex(cx, size, size),
+            dt_a: render_tex(cx, size, size),
+            dt_b: render_tex(cx, size, size),
+            mask_a: render_tex(cx, mw, mh),
+            mask_b: render_tex(cx, mw, mh),
+            sun_depth: render_tex_rf32(cx, SUN_DEPTH_RES, SUN_DEPTH_RES),
+            sun_depth_z: depth_tex(cx, SUN_DEPTH_RES, SUN_DEPTH_RES),
+            sun_far: render_tex_rf32(cx, SUN_DEPTH_RES, SUN_DEPTH_RES),
+            lamp_depth: render_tex_rf32(cx, LAMP_FACE_RES * 3, LAMP_FACE_RES * 2),
+            lamp_depth_z: depth_tex(cx, LAMP_FACE_RES * 3, LAMP_FACE_RES * 2),
+            // Realtime-only and very large; `run_frame` realizes these on
+            // demand after the scene has been adopted.
+            csm: None,
+            csm_z: None,
+            mask_w: mw,
+            mask_h: mh,
+        };
+        let mesh_rects = rects[..mesh_count].to_vec();
+        let delivery = GpuLmDelivery {
+            atlas: tex.atlas.clone(),
+            top: (
+                tex.top_a.clone(),
+                ground.as_ref().map_or(0.0, |g| g.top_base),
+                ground.as_ref().map_or(8.0, |g| g.top_range),
+            ),
+            size,
+            mesh_rects: mesh_rects.clone(),
+            planar_rects: planar_rects.clone(),
+            mesh_map: job.mesh_map.clone(),
+            terrain_world: job.terrain_world,
+        };
+        self.state = Some(BakeState {
+            size,
+            regions,
+            meshes,
+            box_geometry,
+            lights: job.scene.lights.clone(),
+            ground,
+            scene_min,
+            scene_max,
+            csm_res,
+            tex,
+        });
+        self.dirty = true;
+        Some(delivery)
+    }
+
+    fn ensure_draws(&mut self, cx: &mut Cx) -> bool {
+        if self.draws.is_some() {
+            return true;
+        }
+        let draws = cx.try_with_vm(|vm| {
+            Box::new(LmDraws {
+                sun_depth: DrawLmSunDepth::script_new_with_default(vm),
+                sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
+                lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
+                gather_mesh: DrawLmSunGatherMesh::script_new_with_default(vm),
+                gather_ground: DrawLmSunGatherGround::script_new_with_default(vm),
+                despeckle: DrawLmDespeckle::script_new_with_default(vm),
+                downsample: DrawLmDownsample::script_new_with_default(vm),
+                chamfer: DrawLmChamfer::script_new_with_default(vm),
+                lamp_mesh: DrawLmLampGatherMesh::script_new_with_default(vm),
+                lamp_ground: DrawLmLampGatherGround::script_new_with_default(vm),
+                lamp_dilate: DrawLmLampDilate::script_new_with_default(vm),
+                encode: DrawLmEncode::script_new_with_default(vm),
+                top: DrawLmTop::script_new_with_default(vm),
+                top_dilate: DrawLmTopDilate::script_new_with_default(vm),
+            })
+        });
+        match draws {
+            Some(d) => {
+                self.draws = Some(d);
+                true
+            }
+            None => false, // VM held (script-driven draw); retry next frame
+        }
+    }
+
+    fn ensure_pool(&mut self, cx: &mut Cx, n: usize) {
+        while self.pool.len() < n {
+            let pass = DrawPass::new(cx);
+            // Recover the pool index of this pass id: pass ids are small
+            // (one per pass ever alive), so a linear probe terminates fast.
+            let probe = (0..1_000_000)
+                .find(|i| pass.id_equals(*i))
+                .unwrap_or(usize::MAX);
+            self.pool.push(BakePass {
+                pass,
+                list: DrawList::new(cx),
+                probe,
+            });
+        }
+    }
+
+    /// Per-frame entry, called by the renderer inside its 3D pass. Realizes
+    /// pending jobs and encodes this frame's passes: the whole atlas once
+    /// per dirty kick (camera-blind, statics only, both modes), plus — in
+    /// Realtime — the cascade depth pass every frame with every caster.
+    /// The chain renders before the scene pass that samples it, so nothing
+    /// is ever sampled stale. Returns a delivery when a NEW layout was
+    /// realized (the renderer stores the atlas + remaps once).
+    pub fn run_frame(
+        &mut self,
+        cx: &mut CxDraw,
+        sun_dir: Vec3f,
+        movers: &[GpuLmMover],
+        csm_view: Option<&CsmView>,
+        eye: Vec3f,
+    ) -> Option<GpuLmDelivery> {
+        self.csm_last = None;
+        if !self.ensure_draws(cx.cx) {
+            return None;
+        }
+        let mut delivery = None;
+        if let Some(job) = self.pending.take() {
+            delivery = self.realize(cx.cx, job);
+        }
+        if self.state.is_none() {
+            return delivery;
+        }
+        let realtime = self.mode == GpuLightmapMode::Realtime;
+        self.sync_csm_targets(cx.cx);
+        let mut batch: Vec<usize> = {
+            let state = self.state.as_ref().unwrap();
+            let only_region = std::env::var("MAKEPAD_GPU_LM_ONLY_REGION")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok());
+            schedule_regions(&mut self.dirty, state.regions.len(), only_region)
+        };
+        // Realtime: fit this frame's cascades (sun below the horizon fits
+        // nothing — the materials' sun term is dead anyway).
+        let csm = (realtime && sun_dir.y > 0.02).then(|| {
+            let state = self.state.as_ref().unwrap();
+            let range = self.csm_policy.effective().far_range;
+            fit_cascades(
+                csm_view,
+                eye,
+                sun_dir,
+                state.scene_min,
+                state.scene_max,
+                range,
+                state.csm_res as f32,
+            )
+        });
+        if batch.is_empty() && csm.is_none() {
+            return delivery;
+        }
+        // The ground region must be processed LAST within a batch (its sun
+        // depth must survive until the top-plane passes).
+        {
+            let state = self.state.as_ref().unwrap();
+            batch.sort_by_key(|ri| matches!(state.regions[*ri].kind, RegionKind::Ground));
+        }
+        let t0 = std::time::Instant::now();
+        let passes = self.encode_batch(cx, sun_dir, movers, &batch, csm);
+        let us = t0.elapsed().as_micros() as u64;
+        self.csm_last = csm;
+        if !batch.is_empty() {
+            let state = self.state.as_ref().unwrap();
+            log!(
+                "gpu lightmap: {}px atlas, {} regions, {} lamps — {} passes encoded in {}us (CPU-side submission; GPU renders in-frame)",
+                state.size,
+                state.regions.len(),
+                state.lights.len(),
+                passes,
+                us
+            );
+        } else if std::env::var_os("MAKEPAD_GPU_LM_PERF").is_some() {
+            self.rt_frames += 1;
+            self.rt_us += us;
+            if self.rt_frames % 120 == 0 {
+                log!(
+                    "gpu csm: avg {:.0}us cascade encode/frame ({} movers)",
+                    self.rt_us as f64 / 120.0,
+                    movers.len()
+                );
+                self.rt_us = 0;
+            }
+        }
+        delivery
+    }
+
+    /// Encode one batch of dirty atlas regions (statics only, both modes)
+    /// plus — when `csm` is fitted — this frame's cascade depth pass, as
+    /// one chain of render passes. Returns the number of passes encoded.
+    fn encode_batch(
+        &mut self,
+        cx: &mut CxDraw,
+        sun_dir: Vec3f,
+        movers: &[GpuLmMover],
+        batch: &[usize],
+        csm: Option<CsmFrame>,
+    ) -> usize {
+        let state = self.state.take().unwrap();
+        let mut draws = self.draws.take().unwrap();
+        let sun_up = sun_dir.y > 0.02;
+        let inv_size = 1.0 / state.size as f32;
+
+        // Lamps that touch any batch region.
+        let lamps: Vec<usize> = state
+            .lights
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                batch.iter().any(|ri| {
+                    let r = &state.regions[*ri];
+                    sphere_touches_box(l.pos, l.radius, r.min, r.max)
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let ground_in_batch = batch
+            .iter()
+            .any(|ri| matches!(state.regions[*ri].kind, RegionKind::Ground));
+
+        // Atlas pass count (zero on a clean frame): lamp coverage +
+        // 4/region + 2/lamp + 3 lamp dilate + (1 + CHAMFER_STEPS) DT +
+        // encode + 4 top passes (far depth, convert, two dilate rings).
+        let atlas_passes = if batch.is_empty() {
+            0
+        } else {
+            1 + batch.len() * 4
+                + lamps.len() * 2
+                + 3
+                + 1
+                + CHAMFER_STEPS
+                + 1
+                + if ground_in_batch && state.ground.is_some() {
+                    4
+                } else {
+                    0
+                }
+        };
+        let n_passes = atlas_passes + csm.is_some() as usize;
+        // Loop bounds for the fixed-count atlas sections, zeroed when no
+        // region bakes this frame (Realtime steady state encodes ONLY the
+        // cascade pass).
+        let lamp_dilate_passes = if batch.is_empty() { 0 } else { 3 };
+        let dt_passes = if batch.is_empty() { 0 } else { 1 + CHAMFER_STEPS };
+        self.ensure_pool(cx.cx, n_passes);
+        // Execution order = DESCENDING pass id (see BakePass::probe).
+        let mut order: Vec<usize> = (0..self.pool.len()).collect();
+        order.sort_by(|a, b| self.pool[*b].probe.cmp(&self.pool[*a].probe));
+        order.truncate(n_passes);
+        let mut seq = PassSeq {
+            pool: &mut self.pool,
+            order,
+            cursor: 0,
+        };
+
+        let clear0 = DrawPassClearColor::ClearWith(Vec4f::default());
+        let load = |c: Vec4f| DrawPassClearColor::InitWith(c);
+
+        // ---- 1. Lamp coverage prepass: batch regions rasterized at 1x,
+        // (0,0,0,1) marks "holds light" and zeroes the accumulator.
+        if !batch.is_empty() {
+            let idx = seq.open(
+                cx,
+                state.size,
+                state.size,
+                &state.tex.lamp_a,
+                load(Vec4f::default()),
+                None
+            );
+            for ri in batch {
+                let r = &state.regions[*ri];
+                match r.kind {
+                    RegionKind::Mesh(mi) => {
+                        let m = &state.meshes[mi];
+                        let d = &mut draws.lamp_mesh;
+                        d.transform = m.transform;
+                        d.target_a = r.rect.uv_remap(state.size);
+                        d.lamp_c = Vec4f {
+                            x: 0.0,
+                            y: -1.0,
+                            z: 0.0,
+                            w: 0.0, // coverage mode
+                        };
+                        d.draw_vars.set_texture(0, &state.tex.lamp_depth);
+                        d.draw_vars.geometry_id = Some(m.geometry);
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                    RegionKind::Ground => {
+                        let Some(g) = &state.ground else { continue };
+                        let d = &mut draws.lamp_ground;
+                        d.quad_a = r.rect.uv_remap(state.size);
+                        d.ground_a = g.world;
+                        d.hf_a = g.hf;
+                        d.lamp_c = Vec4f {
+                            x: 0.0,
+                            y: -1.0,
+                            z: 0.0,
+                            w: 0.0,
+                        };
+                        d.draw_vars.set_texture(0, &state.tex.lamp_depth);
+                        d.draw_vars.set_texture(1, &g.heights_tex);
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                }
+            }
+            seq.close(cx, idx);
+        }
+
+        // ---- 2. Per region: sun depth + 4x gather + despeckle + coverage
+        // downsample. Ground is last in the batch, so its depth scratch
+        // content survives for the top-plane passes.
+        let mut ground_cam: Option<SunCam> = None;
+        for ri in batch {
+            let r = &state.regions[*ri];
+            let cam = fit_sun_cam(
+                sun_dir,
+                r.min,
+                r.max,
+                state.scene_min,
+                state.scene_max,
+                SUN_DEPTH_RES as f32,
+            );
+            if matches!(r.kind, RegionKind::Ground) {
+                ground_cam = Some(cam);
+            }
+            // 2a. depth
+            {
+                let idx = seq.open(
+                    cx,
+                    SUN_DEPTH_RES,
+                    SUN_DEPTH_RES,
+                    &state.tex.sun_depth,
+                    DrawPassClearColor::ClearWith(Vec4f {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 1.0,
+                        w: 1.0
+                    }),
+                    Some(&state.tex.sun_depth_z)
+                );
+                // Statics only: the atlas is the STATIC bake in both modes
+                // (Realtime dynamics live in the cascades, section 8).
+                let d = &mut draws.sun_depth;
+                d.sun_rx = cam.rx;
+                d.sun_ry = cam.ry;
+                d.sun_rz = cam.rz;
+                d.flip_a = Vec4f::default();
+                d.tile_a = FULL_TILE;
+                for m in &state.meshes {
+                    d.transform = m.transform;
+                    d.draw_vars.geometry_id = Some(m.geometry);
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                }
+                if let Some(g) = &state.box_geometry {
+                    d.transform = Mat4f::identity();
+                    d.draw_vars.geometry_id = Some(g.geometry_id());
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                }
+                seq.close(cx, idx);
+            }
+            // 2b. gather at 4x into the mask scratch
+            let (aw, ah) = (r.rect.w * 4, r.rect.h * 4);
+            let target_a = Vec4f {
+                x: 0.0,
+                y: 0.0,
+                z: aw as f32 / state.tex.mask_w as f32,
+                w: ah as f32 / state.tex.mask_h as f32,
+            };
+            {
+                let idx = seq.open(
+                    cx,
+                    state.tex.mask_w,
+                    state.tex.mask_h,
+                    &state.tex.mask_a,
+                    clear0.clone(),
+                    None
+                );
+                match r.kind {
+                    RegionKind::Mesh(mi) => {
+                        let m = &state.meshes[mi];
+                        let d = &mut draws.gather_mesh;
+                        d.transform = m.transform;
+                        d.sun_rx = cam.rx;
+                        d.sun_ry = cam.ry;
+                        d.sun_rz = cam.rz;
+                        d.target_a = target_a;
+                        d.sun_dir_p = Vec4f {
+                            x: sun_dir.x,
+                            y: sun_dir.y,
+                            z: sun_dir.z,
+                            w: RAY_OFFSET,
+                        };
+                        d.params_a = Vec4f {
+                            x: cam.bias01,
+                            y: if sun_up { 1.0 } else { 0.0 },
+                            z: 0.0,
+                            w: 0.0,
+                        };
+                        d.draw_vars.set_texture(0, &state.tex.sun_depth);
+                        d.draw_vars.geometry_id = Some(m.geometry);
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                    RegionKind::Ground => {
+                        let Some(g) = &state.ground else { continue };
+                        let d = &mut draws.gather_ground;
+                        d.quad_a = target_a;
+                        d.sun_rx = cam.rx;
+                        d.sun_ry = cam.ry;
+                        d.sun_rz = cam.rz;
+                        d.sun_dir_p = Vec4f {
+                            x: sun_dir.x,
+                            y: sun_dir.y,
+                            z: sun_dir.z,
+                            w: RAY_OFFSET,
+                        };
+                        d.params_a = Vec4f {
+                            x: cam.bias01,
+                            y: if sun_up { 1.0 } else { 0.0 },
+                            z: 0.0,
+                            w: 0.0,
+                        };
+                        d.ground_a = g.world;
+                        d.hf_a = g.hf;
+                        d.draw_vars.set_texture(0, &state.tex.sun_depth);
+                        d.draw_vars.set_texture(1, &g.heights_tex);
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                }
+                seq.close(cx, idx);
+            }
+            // 2c. despeckle mask_a -> mask_b
+            {
+                let idx = seq.open(
+                    cx,
+                    state.tex.mask_w,
+                    state.tex.mask_h,
+                    &state.tex.mask_b,
+                    clear0.clone(),
+                    None
+                );
+                let d = &mut draws.despeckle;
+                d.quad_a = target_a;
+                d.src_a = Vec4f {
+                    x: 1.0 / state.tex.mask_w as f32,
+                    y: 1.0 / state.tex.mask_h as f32,
+                    z: aw as f32,
+                    w: ah as f32,
+                };
+                d.draw_vars.set_texture(0, &state.tex.mask_a);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
+                }
+                seq.close(cx, idx);
+            }
+            // 2d. downsample mask_b -> coverage atlas (persistent, loads)
+            {
+                let idx = seq.open(
+                    cx,
+                    state.size,
+                    state.size,
+                    &state.tex.cov,
+                    load(Vec4f::default()),
+                    None
+                );
+                let d = &mut draws.downsample;
+                d.quad_a = r.rect.uv_remap(state.size);
+                d.src_a = Vec4f {
+                    x: 1.0 / state.tex.mask_w as f32,
+                    y: 1.0 / state.tex.mask_h as f32,
+                    z: 0.0,
+                    w: 0.0,
+                };
+                d.rect_a = Vec4f {
+                    x: r.rect.x as f32,
+                    y: r.rect.y as f32,
+                    z: r.rect.w as f32,
+                    w: r.rect.h as f32,
+                };
+                d.draw_vars.set_texture(0, &state.tex.mask_b);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
+                }
+                seq.close(cx, idx);
+            }
+        }
+
+        // ---- 3. Lamps: per lamp a 6-face depth render + one additive
+        // gather over every batch region in radius.
+        for li in &lamps {
+            let light = &state.lights[*li];
+            {
+                let idx = seq.open(
+                    cx,
+                    LAMP_FACE_RES * 3,
+                    LAMP_FACE_RES * 2,
+                    &state.tex.lamp_depth,
+                    DrawPassClearColor::ClearWith(Vec4f {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 1.0,
+                        w: 1.0
+                    }),
+                    Some(&state.tex.lamp_depth_z)
+                );
+                let lamp_range = Vec4f {
+                    x: LIGHT_CLEARANCE,
+                    y: light.radius,
+                    z: 0.0,
+                    w: 0.0,
+                };
+                for face in 0..6 {
+                    let (rx, ry, rz, tile) = lamp_face(light.pos, face);
+                    let d = &mut draws.lamp_depth;
+                    d.lamp_range = lamp_range;
+                    d.face_rx = rx;
+                    d.face_ry = ry;
+                    d.face_rz = rz;
+                    d.tile_a = tile;
+                    for m in &state.meshes {
+                        if !sphere_touches_box(light.pos, light.radius, m.min, m.max) {
+                            continue;
+                        }
+                        d.transform = m.transform;
+                        d.draw_vars.geometry_id = Some(m.geometry);
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                    if let Some(g) = &state.box_geometry {
+                        d.transform = Mat4f::identity();
+                        d.draw_vars.geometry_id = Some(g.geometry_id());
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                }
+                seq.close(cx, idx);
+            }
+            {
+                let idx = seq.open(
+                    cx,
+                    state.size,
+                    state.size,
+                    &state.tex.lamp_a,
+                    load(Vec4f::default()),
+                    None
+                );
+                let lamp_a = Vec4f {
+                    x: light.pos.x,
+                    y: light.pos.y,
+                    z: light.pos.z,
+                    w: light.radius,
+                };
+                let lamp_b = Vec4f {
+                    x: light.color.x,
+                    y: light.color.y,
+                    z: light.color.z,
+                    w: light.spot,
+                };
+                let lamp_c = Vec4f {
+                    x: light.dir.x,
+                    y: light.dir.y,
+                    z: light.dir.z,
+                    w: 1.0, // lamp mode
+                };
+                let lamp_d = Vec4f {
+                    x: LIGHT_CLEARANCE,
+                    y: light.radius,
+                    z: 0.06,
+                    w: RAY_OFFSET,
+                };
+                for ri in batch {
+                    let r = &state.regions[*ri];
+                    if !sphere_touches_box(light.pos, light.radius, r.min, r.max) {
+                        continue;
+                    }
+                    match r.kind {
+                        RegionKind::Mesh(mi) => {
+                            let m = &state.meshes[mi];
+                            let d = &mut draws.lamp_mesh;
+                            d.transform = m.transform;
+                            d.target_a = r.rect.uv_remap(state.size);
+                            d.lamp_a = lamp_a;
+                            d.lamp_b = lamp_b;
+                            d.lamp_c = lamp_c;
+                            d.lamp_d = lamp_d;
+                            d.draw_vars.set_texture(0, &state.tex.lamp_depth);
+                            d.draw_vars.geometry_id = Some(m.geometry);
+                            if d.draw_vars.can_instance() {
+                                cx.add_instance(&d.draw_vars);
+                            }
+                        }
+                        RegionKind::Ground => {
+                            let Some(g) = &state.ground else { continue };
+                            let d = &mut draws.lamp_ground;
+                            d.quad_a = r.rect.uv_remap(state.size);
+                            d.ground_a = g.world;
+                            d.hf_a = g.hf;
+                            d.lamp_a = lamp_a;
+                            d.lamp_b = lamp_b;
+                            d.lamp_c = lamp_c;
+                            d.lamp_d = lamp_d;
+                            d.draw_vars.set_texture(0, &state.tex.lamp_depth);
+                            d.draw_vars.set_texture(1, &g.heights_tex);
+                            if d.draw_vars.can_instance() {
+                                cx.add_instance(&d.draw_vars);
+                            }
+                        }
+                    }
+                }
+                seq.close(cx, idx);
+            }
+        }
+
+        // ---- 4. Lamp dilate x2 + smooth: lamp_a -> lamp_b -> lamp_a ->
+        // lamp_b; encode reads lamp_b.
+        for mode in 0..lamp_dilate_passes {
+            let (src, dst) = match mode {
+                0 => (&state.tex.lamp_a, &state.tex.lamp_b),
+                1 => (&state.tex.lamp_b, &state.tex.lamp_a),
+                _ => (&state.tex.lamp_a, &state.tex.lamp_b),
+            };
+            let idx = seq.open(cx, state.size, state.size, dst, load(Vec4f::default()), None);
+            for ri in batch {
+                let r = &state.regions[*ri];
+                let d = &mut draws.lamp_dilate;
+                d.quad_a = r.rect.uv_remap(state.size);
+                d.rect_px = Vec4f {
+                    x: r.rect.x as f32,
+                    y: r.rect.y as f32,
+                    z: r.rect.w as f32,
+                    w: r.rect.h as f32,
+                };
+                d.misc_a = Vec4f {
+                    x: inv_size,
+                    y: mode as f32,
+                    z: 0.0,
+                    w: 0.0,
+                };
+                d.draw_vars.set_texture(0, src);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
+                }
+            }
+            seq.close(cx, idx);
+        }
+
+        // ---- 5. Distance transform: seed + CHAMFER_STEPS relaxations,
+        // ping-ponging dt_a/dt_b. Scratch — cleared to FAR every pass, so
+        // pad texels around each rect decode to "fully lit".
+        let far_clear = DrawPassClearColor::ClearWith(Vec4f {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+            w: 1.0,
+        });
+        for step in 0..dt_passes {
+            let (src, dst) = if step % 2 == 0 {
+                (&state.tex.dt_b, &state.tex.dt_a)
+            } else {
+                (&state.tex.dt_a, &state.tex.dt_b)
+            };
+            let idx = seq.open(cx, state.size, state.size, dst, far_clear.clone(), None);
+            for ri in batch {
+                let r = &state.regions[*ri];
+                let d = &mut draws.chamfer;
+                d.quad_a = r.rect.uv_remap(state.size);
+                d.rect_px = Vec4f {
+                    x: r.rect.x as f32,
+                    y: r.rect.y as f32,
+                    z: r.rect.w as f32,
+                    w: r.rect.h as f32,
+                };
+                d.misc_a = Vec4f {
+                    x: inv_size,
+                    y: if step == 0 { 0.0 } else { 1.0 },
+                    z: 0.0,
+                    w: 0.0,
+                };
+                d.draw_vars.set_texture(0, &state.tex.cov);
+                d.draw_vars.set_texture(1, src);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
+                }
+            }
+            seq.close(cx, idx);
+        }
+        // 1 + CHAMFER_STEPS passes: final result lands in dt_a when the
+        // count is odd, dt_b when even.
+        let dt_final = if (1 + CHAMFER_STEPS) % 2 == 1 {
+            &state.tex.dt_a
+        } else {
+            &state.tex.dt_b
+        };
+
+        // ---- 6. Encode into the atlas (persistent; loads). Quads expanded
+        // one texel to stamp the pad ring's default.
+        if !batch.is_empty() {
+            let idx = seq.open(
+                cx,
+                state.size,
+                state.size,
+                &state.tex.atlas,
+                load(Vec4f {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 1.0
+                }),
+                None
+            );
+            for ri in batch {
+                let r = &state.regions[*ri];
+                let ex = LmRect {
+                    x: r.rect.x.saturating_sub(1),
+                    y: r.rect.y.saturating_sub(1),
+                    w: (r.rect.w + 2).min(state.size - r.rect.x.saturating_sub(1)),
+                    h: (r.rect.h + 2).min(state.size - r.rect.y.saturating_sub(1)),
+                };
+                let d = &mut draws.encode;
+                d.quad_a = ex.uv_remap(state.size);
+                d.rect_px = Vec4f {
+                    x: ex.x as f32,
+                    y: ex.y as f32,
+                    z: ex.w as f32,
+                    w: ex.h as f32,
+                };
+                let show = std::env::var("MAKEPAD_GPU_LM_SHOW")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(0.0);
+                d.misc_a = Vec4f {
+                    x: inv_size,
+                    y: show,
+                    z: 0.0,
+                    w: 0.0,
+                };
+                d.draw_vars.set_texture(0, dt_final);
+                d.draw_vars.set_texture(1, &state.tex.cov);
+                d.draw_vars.set_texture(2, &state.tex.lamp_b);
+                if d.draw_vars.can_instance() {
+                    cx.add_instance(&d.draw_vars);
+                }
+            }
+            seq.close(cx, idx);
+        }
+
+        // ---- 7. Shadow-top plane: convert + two min-dilate rings, only
+        // when the ground region was in this batch (its sun depth is still
+        // in the scratch — it was processed last).
+        if ground_in_batch {
+            if let (Some(g), Some(cam)) = (&state.ground, ground_cam) {
+                let gr = state
+                    .regions
+                    .iter()
+                    .find(|r| matches!(r.kind, RegionKind::Ground))
+                    .unwrap();
+                let rect_px = Vec4f {
+                    x: gr.rect.x as f32,
+                    y: gr.rect.y as f32,
+                    z: gr.rect.w as f32,
+                    w: gr.rect.h as f32,
+                };
+                let quad_a = gr.rect.uv_remap(state.size);
+                // 7a. FAR sun depth from the ground camera: flipped z01 test
+                // keeps the surface nearest the ground along the ray — the
+                // CPU top plane's `scene_nearest_block` (a slab records its
+                // UNDERSIDE, so the slab's own top escapes its shadow).
+                {
+                    let idx = seq.open(
+                        cx,
+                        SUN_DEPTH_RES,
+                        SUN_DEPTH_RES,
+                        &state.tex.sun_far,
+                        DrawPassClearColor::ClearWith(Vec4f {
+                            x: 1.0,
+                            y: 1.0,
+                            z: 1.0,
+                            w: 1.0
+                        }),
+                        Some(&state.tex.sun_depth_z)
+                    );
+                    let flip = Vec4f {
+                        x: 1.0,
+                        y: 0.0,
+                        z: 0.0,
+                        w: 0.0,
+                    };
+                    // Statics only, like every atlas pass: the top plane
+                    // serves the OnChange ground-projection path, and its
+                    // blockers are the baked scene's.
+                    let d = &mut draws.sun_depth;
+                    d.sun_rx = cam.rx;
+                    d.sun_ry = cam.ry;
+                    d.sun_rz = cam.rz;
+                    d.flip_a = flip;
+                    d.tile_a = FULL_TILE;
+                    for m in &state.meshes {
+                        d.transform = m.transform;
+                        d.draw_vars.geometry_id = Some(m.geometry);
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                    if let Some(gb) = &state.box_geometry {
+                        d.transform = Mat4f::identity();
+                        d.draw_vars.geometry_id = Some(gb.geometry_id());
+                        if d.draw_vars.can_instance() {
+                            cx.add_instance(&d.draw_vars);
+                        }
+                    }
+                    seq.close(cx, idx);
+                }
+                {
+                    let idx = seq.open(
+                        cx,
+                        state.size,
+                        state.size,
+                        &state.tex.top_a,
+                        load(Vec4f {
+                            x: 1.0,
+                            y: 1.0,
+                            z: 1.0,
+                            w: 1.0
+                        }),
+                        None
+                    );
+                    let d = &mut draws.top;
+                    d.quad_a = quad_a;
+                    d.sun_rx = cam.rx;
+                    d.sun_ry = cam.ry;
+                    d.sun_rz = cam.rz;
+                    d.top_a = Vec4f {
+                        x: cam.zr,
+                        y: sun_dir.y,
+                        z: g.top_base,
+                        w: g.top_range,
+                    };
+                    d.params_a = Vec4f {
+                        x: if sun_up { 1.0 } else { 0.0 },
+                        y: cam.bias01,
+                        z: RAY_OFFSET,
+                        w: 0.0,
+                    };
+                    d.ground_a = g.world;
+                    d.hf_a = g.hf;
+                    d.draw_vars.set_texture(0, &state.tex.atlas);
+                    d.draw_vars.set_texture(1, &state.tex.sun_far);
+                    d.draw_vars.set_texture(2, &g.heights_tex);
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                    seq.close(cx, idx);
+                }
+                for ring in 0..2 {
+                    let (src, dst) = if ring == 0 {
+                        (&state.tex.top_a, &state.tex.top_b)
+                    } else {
+                        (&state.tex.top_b, &state.tex.top_a)
+                    };
+                    let idx = seq.open(
+                        cx,
+                        state.size,
+                        state.size,
+                        dst,
+                        load(Vec4f {
+                            x: 1.0,
+                            y: 1.0,
+                            z: 1.0,
+                            w: 1.0
+                        }),
+                        None
+                    );
+                    let d = &mut draws.top_dilate;
+                    d.quad_a = quad_a;
+                    d.rect_px = rect_px;
+                    d.misc_a = Vec4f {
+                        x: inv_size,
+                        y: 0.0,
+                        z: 0.0,
+                        w: 0.0,
+                    };
+                    d.draw_vars.set_texture(0, src);
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                    seq.close(cx, idx);
+                }
+            }
+        }
+
+        // ---- 8. Realtime cascades: ONE pass, CSM_CASCADES tiles side by
+        // side in the strip, EVERY caster — static meshes, occluder boxes,
+        // rigid movers and skinned characters (posed from the same joint
+        // palette the visible draw binds, so a character shadows in exactly
+        // the pose it renders in). No CPU per-cascade culling yet: instance
+        // encodes are cheap at village scale and the GPU clips; cull here
+        // first if a big world ever makes this loop hot.
+        if let Some(frame) = &csm {
+            let res = state.csm_res;
+            let csm_tex = state
+                .tex
+                .csm
+                .as_ref()
+                .expect("realtime CSM target synchronized before encoding");
+            let csm_z = state
+                .tex
+                .csm_z
+                .as_ref()
+                .expect("realtime CSM depth synchronized before encoding");
+            let idx = seq.open(
+                cx,
+                res * CSM_CASCADES,
+                res,
+                csm_tex,
+                DrawPassClearColor::ClearWith(Vec4f {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 1.0,
+                    w: 1.0,
+                }),
+                Some(csm_z),
+            );
+            for (ci, casc) in frame.cascades.iter().enumerate() {
+                let tile = Vec4f {
+                    x: 1.0 / CSM_CASCADES as f32,
+                    y: 1.0,
+                    z: (2.0 * ci as f32 + 1.0) / CSM_CASCADES as f32 - 1.0,
+                    w: 0.0,
+                };
+                let d = &mut draws.sun_depth;
+                d.sun_rx = casc.rx;
+                d.sun_ry = casc.ry;
+                d.sun_rz = casc.rz;
+                d.flip_a = Vec4f::default();
+                d.tile_a = tile;
+                for m in &state.meshes {
+                    d.transform = m.transform;
+                    d.draw_vars.geometry_id = Some(m.geometry);
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                }
+                if let Some(g) = &state.box_geometry {
+                    d.transform = Mat4f::identity();
+                    d.draw_vars.geometry_id = Some(g.geometry_id());
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                }
+                for mv in movers.iter().filter(|m| m.skin.is_none()) {
+                    d.transform = mv.transform;
+                    d.draw_vars.geometry_id = Some(mv.geometry);
+                    if d.draw_vars.can_instance() {
+                        cx.add_instance(&d.draw_vars);
+                    }
+                }
+                for mv in movers {
+                    let Some(skin) = &mv.skin else { continue };
+                    let ds = &mut draws.sun_depth_skinned;
+                    ds.sun_rx = casc.rx;
+                    ds.sun_ry = casc.ry;
+                    ds.sun_rz = casc.rz;
+                    ds.flip_a = Vec4f::default();
+                    ds.tile_a = tile;
+                    ds.transform = mv.transform;
+                    ds.skin_a.x = skin.joint_base;
+                    ds.draw_vars.set_texture(0, &skin.joint_tex);
+                    ds.draw_vars.geometry_id = Some(mv.geometry);
+                    if ds.draw_vars.can_instance() {
+                        cx.add_instance(&ds.draw_vars);
+                    }
+                }
+            }
+            seq.close(cx, idx);
+        }
+
+        let encoded = seq.cursor;
+        assert!(encoded <= n_passes, "gpu lightmap pass budget mismatch");
+        self.draws = Some(draws);
+        self.state = Some(state);
+        encoded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csm_device_policy_clamps_and_explicit_environment_wins() {
+        let mut policy = CsmPolicy {
+            device: CsmConfig::default(),
+            env_resolution: None,
+            env_far_range: None,
+        };
+        assert_eq!(policy.effective(), DEFAULT_CSM_CONFIG);
+        assert_eq!(
+            policy.set_device(1, 100_000.0),
+            CsmConfig {
+                tile_resolution: MIN_CSM_TILE_RESOLUTION,
+                far_range: MAX_CSM_FAR_RANGE,
+            }
+        );
+
+        policy.env_resolution = Some(1536);
+        policy.env_far_range = Some(120.0);
+        assert_eq!(
+            policy.set_device(1024, 48.0),
+            CsmConfig {
+                tile_resolution: 1536,
+                far_range: 120.0,
+            },
+            "explicit launch overrides must not be silently replaced by XR policy"
+        );
+    }
+
+    #[test]
+    fn changing_csm_budget_invalidates_the_last_fitted_frame() {
+        let mut baker = GpuLightmapBaker::default();
+        // Do not let a developer's shell override make this unit test depend
+        // on its process environment.
+        baker.csm_policy.env_resolution = None;
+        baker.csm_policy.env_far_range = None;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let texture = Texture::new(&mut cx);
+        baker.state = Some(BakeState {
+            size: 1,
+            regions: Vec::new(),
+            meshes: Vec::new(),
+            box_geometry: None,
+            lights: Vec::new(),
+            ground: None,
+            scene_min: Vec3f::default(),
+            scene_max: Vec3f::default(),
+            csm_res: DEFAULT_CSM_CONFIG.tile_resolution,
+            tex: BakeTextures {
+                atlas: texture.clone(),
+                top_a: texture.clone(),
+                top_b: texture.clone(),
+                cov: texture.clone(),
+                lamp_a: texture.clone(),
+                lamp_b: texture.clone(),
+                dt_a: texture.clone(),
+                dt_b: texture.clone(),
+                mask_a: texture.clone(),
+                mask_b: texture.clone(),
+                sun_depth: texture.clone(),
+                sun_depth_z: texture.clone(),
+                sun_far: texture.clone(),
+                lamp_depth: texture.clone(),
+                lamp_depth_z: texture.clone(),
+                csm: Some(texture.clone()),
+                csm_z: Some(texture),
+                mask_w: 1,
+                mask_h: 1,
+            },
+        });
+        baker.csm_last = Some(CsmFrame::default());
+
+        assert_eq!(
+            baker.set_csm_config(1024, 48.0),
+            CsmConfig {
+                tile_resolution: 1024,
+                far_range: 48.0,
+            }
+        );
+        assert!(baker.csm_last.is_none());
+        assert_eq!(baker.csm_config().tile_resolution, 1024);
+        let state = baker.state.as_ref().unwrap();
+        assert_eq!(state.csm_res, 1024);
+        assert!(state.tex.csm.is_none());
+        assert!(state.tex.csm_z.is_none());
+    }
+
+    /// The mode split is airtight by construction: exactly ONE tier serves
+    /// the dynamic casters in each mode. OnChange = prebaked SDF quads only;
+    /// Realtime = everything through the per-frame cascades and the SDF
+    /// tier draws nothing (both at once would double every shadow, neither
+    /// would lose them).
+    #[test]
+    fn each_mode_serves_dynamics_through_exactly_one_tier() {
+        let on_change = dynamic_shadow_tiers(GpuLightmapMode::OnChange);
+        assert!(on_change.sdf_quads && !on_change.csm);
+        let realtime = dynamic_shadow_tiers(GpuLightmapMode::Realtime);
+        assert!(!realtime.sdf_quads && realtime.csm);
+        for mode in [GpuLightmapMode::OnChange, GpuLightmapMode::Realtime] {
+            let t = dynamic_shadow_tiers(mode);
+            assert!(
+                t.sdf_quads ^ t.csm,
+                "{mode:?} must use exactly one dynamic shadow tier"
+            );
+        }
+    }
+
+    /// THE atlas invariant (user directive), BOTH modes: one dirty kick
+    /// bakes the whole atlas ONCE, camera-blind; every following frame with
+    /// no world edit encodes ZERO atlas passes — Realtime's per-frame work
+    /// is the cascades, never the atlas. A regression that re-dirties the
+    /// atlas routinely fails here, it doesn't just feel slow.
+    #[test]
+    fn steady_state_encodes_zero_atlas_passes() {
+        let mut dirty = true;
+        // The kick: all regions.
+        let first = schedule_regions(&mut dirty, 4, None);
+        assert_eq!(first, vec![0, 1, 2, 3]);
+        assert!(!dirty, "the kick must consume the dirty bit");
+        // Steady state: N frames, nothing edits the world — nothing bakes.
+        // The scheduler is mode-blind by construction, so this covers
+        // Realtime's "zero lightmap sun passes" mirror too.
+        for frame in 0..600 {
+            let batch = schedule_regions(&mut dirty, 4, None);
+            assert!(
+                batch.is_empty(),
+                "atlas re-baked at steady-state frame {frame}: {batch:?}"
+            );
+        }
+        // The debug pin narrows a kick to one region without unconsuming
+        // the bit.
+        dirty = true;
+        assert_eq!(schedule_regions(&mut dirty, 4, Some(2)), vec![2]);
+        assert!(schedule_regions(&mut dirty, 4, Some(2)).is_empty());
+    }
+
+    #[test]
+    fn entering_a_realm_clears_scene_state_but_preserves_mode_and_device_pool() {
+        let mut baker = GpuLightmapBaker::default();
+        baker.csm_policy.env_resolution = None;
+        baker.csm_policy.env_far_range = None;
+        baker.set_mode(GpuLightmapMode::Realtime);
+        baker.set_csm_config(1024, 48.0);
+        baker.dirty = true;
+        baker.rt_frames = 9;
+        baker.rt_us = 42;
+        // A pass cannot be constructed without a draw context, but an empty
+        // pool still pins the important ownership rule: enter_realm does not
+        // replace the pool allocation or the lazily-created draw shaders.
+        let pool_capacity = baker.pool.capacity();
+
+        baker.enter_realm();
+
+        assert_eq!(baker.mode(), GpuLightmapMode::Realtime);
+        assert_eq!(
+            baker.csm_config(),
+            CsmConfig {
+                tile_resolution: 1024,
+                far_range: 48.0,
+            }
+        );
+        assert!(baker.pending.is_none());
+        assert!(baker.state.is_none());
+        assert!(baker.csm_last.is_none());
+        assert!(!baker.dirty);
+        assert_eq!(baker.rt_frames, 0);
+        assert_eq!(baker.rt_us, 0);
+        assert_eq!(baker.pool.capacity(), pool_capacity);
+    }
+}
