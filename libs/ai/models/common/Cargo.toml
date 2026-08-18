@@ -2,8 +2,13 @@
 name = "makepad-ai-common"
 version = "0.1.0"
 edition = "2021"
-description = "Cross-family internals shared by the AI model family crates: the DiffusionError type and the plain sharded-safetensors-directory reader. Split out of libs/diffusion (lane T6a, /aiarch.md)."
+description = "Cross-family internals shared by the AI model family crates: DiffusionError, sharded safetensors, the ggml backend re-export surface, progress hooks, host .pth / Metal-GEMM helpers. Split out of libs/diffusion (lanes T6a–T6, /aiarch.md)."
 license = "MIT"
 
 [dependencies]
 makepad-ai-loader = { path = "../../loader" }
+# Must not be target-specific: when this crate is a path dep of another
+# standalone `[workspace]` (diffusion / family crates), cargo 1.92 drops
+# target-cfg deps. metal-precompile bakes the metallib at build time so
+# the first Metal dispatch is not a 13k-line shader compile.
+makepad-ggml = { path = "../../../ggml", features = ["metal-precompile"] }

@@ -382,31 +382,7 @@ fn bytes_to_f32(bytes: &[u8], dtype: MlxDType, name: &str) -> Result<Vec<f32>> {
     }
 }
 
-pub fn f16_word_to_f32(word: u16) -> f32 {
-    let sign = ((word >> 15) & 1) as u32;
-    let exp = ((word >> 10) & 0x1f) as u32;
-    let frac = (word & 0x3ff) as u32;
-    let bits = if exp == 0 {
-        if frac == 0 {
-            sign << 31
-        } else {
-            // subnormal
-            let mut exp32 = 127 - 15 + 1;
-            let mut frac32 = frac;
-            while frac32 & 0x400 == 0 {
-                frac32 <<= 1;
-                exp32 -= 1;
-            }
-            frac32 &= 0x3ff;
-            (sign << 31) | ((exp32 as u32) << 23) | (frac32 << 13)
-        }
-    } else if exp == 31 {
-        (sign << 31) | (0xff << 23) | (frac << 13)
-    } else {
-        (sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13)
-    };
-    f32::from_bits(bits)
-}
+pub use makepad_ai_common::f16_word_to_f32;
 
 // ---------------------------------------------------------------------------
 // Frame / latent arithmetic (modular_pipeline.py helpers).
