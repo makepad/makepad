@@ -2,33 +2,16 @@ pub use makepad_micro_serde;
 pub use makepad_widgets;
 
 use crate::makepad_micro_serde::*;
+use makepad_show_control as show;
 use makepad_widgets::*;
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
 app_main!(App);
 
-const DMX_FRAME_HZ: f64 = 44.0;
-const DMX_FRAME_DT: f64 = 1.0 / DMX_FRAME_HZ;
-const ARTNET_BIND_ADDR: &str = "0.0.0.0:0";
-const ARTNET_BROADCAST_ADDR: &str = "255.255.255.255:6454";
 const PRESET_DIR: &str = "examples/automate/local/dmx";
 const CURRENT_STATE_FILE: &str = "examples/automate/local/dmx/current.ron";
 const DEBUG_SCENE_EVENTS: bool = true;
-const CONTROLLER_INSTANCE_LOCK_ADDR: &str = "127.0.0.1:64640";
-
-pub const DMXOUTPUT_HEADER: [u8; 18] = [
-    b'A', b'r', b't', b'-', b'N', b'e', b't', b'\0', 0,    // opcode hi
-    0x50, // opcode lo = output
-    0,    // proto hi
-    0xe,  // proto lo = 14
-    0,    // sequence
-    0,    // physical
-    0,    // sub uni
-    0,    // net
-    2,    // buffer hi size (512)
-    0,    // buffer lo
-];
 
 script_mod! {
 use mod.prelude.widgets.*
@@ -388,31 +371,8 @@ startup() do #(App::script_component(vm)){
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, SerRon, DeRon)]
-struct ControllerState {
-    fade: [f32; 9],
-    tempo: f32,
-    dial_0: [f32; 8],
-    dial_1: [f32; 8],
-    dial_2: [f32; 8],
-    dial_3: [f32; 8],
-    dial_4: [f32; 8],
-    dial_5: [f32; 8],
-    dial_6: [f32; 8],
-    dial_7: [f32; 8],
-    dial_top: [f32; 8],
-}
-
-impl ControllerState {}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct ControllerButtons {
-    preset: [bool; 13],
-    write_preset: bool,
-    power: bool,
-}
-
-impl ControllerButtons {}
+type ControllerState = show::ControllerState;
+type ControllerButtons = show::ControllerButtons;
 
 #[derive(Debug, Clone)]
 struct MidiMirrorState {
@@ -475,166 +435,7 @@ enum UiControlMessage {
 }
 
 fn clamp01(value: f32) -> f32 {
-    value.clamp(0.0, 1.0)
-}
-
-fn hsv_to_rgb(mut hue: f32, sat: f32, val: f32) -> (f32, f32, f32) {
-    hue = clamp01(hue) * 6.0;
-    let sector = hue.floor() as i32;
-    let fract = hue - sector as f32;
-    let p = val * (1.0 - sat);
-    let q = val * (1.0 - sat * fract);
-    let t = val * (1.0 - sat * (1.0 - fract));
-    match sector {
-        0 => (val, t, p),
-        1 => (q, val, p),
-        2 => (p, val, t),
-        3 => (p, q, val),
-        4 => (t, p, val),
-        _ => (val, p, q),
-    }
-}
-
-fn map_wargb(value: f32, fade: f32, out: &mut [u8], bases: &[usize]) {
-    let fade = clamp01(fade);
-    let (r, g, b) = hsv_to_rgb(value, 1.0, fade);
-    for base in bases {
-        if *base == 0 || *base + 1 >= out.len() {
-            continue;
-        }
-        out[*base - 1] = (r * 255.0) as u8;
-        out[*base] = (g * 255.0) as u8;
-        out[*base + 1] = (b * 255.0) as u8;
-    }
-}
-
-fn dmx_u8(value: u8, out: &mut [u8], bases: &[usize], channel: usize) {
-    for base in bases {
-        let index = base.saturating_sub(1) + channel.saturating_sub(1);
-        if index < out.len() {
-            out[index] = value;
-        }
-    }
-}
-
-fn dmx_f32(value: f32, out: &mut [u8], bases: &[usize], channel: usize) {
-    let value = (clamp01(value) * 255.0) as u8;
-    dmx_u8(value, out, bases, channel);
-}
-
-fn apply_dmx_mapping(
-    state: &ControllerState,
-    buttons: &ControllerButtons,
-    dmx: &mut [u8],
-    clock: f64,
-) {
-    if !buttons.power {
-        return;
-    }
-
-    map_wargb(state.dial_top[3], 1.0, dmx, &[110 + 2 - 1]);
-    let rgb_laser_addr = 110;
-    match (state.fade[3] * 3.0) as usize {
-        0 => {
-            dmx_u8(0, dmx, &[rgb_laser_addr], 1);
-        }
-        1 => {
-            dmx_u8(255, dmx, &[rgb_laser_addr], 1);
-            dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
-            dmx_u8(32, dmx, &[rgb_laser_addr], 7);
-        }
-        2 => {
-            dmx_u8(255, dmx, &[rgb_laser_addr], 1);
-            dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
-            dmx_u8(32, dmx, &[rgb_laser_addr], 7);
-        }
-        _ => {}
-    }
-
-    map_wargb(state.dial_top[3], 1.0, dmx, &[rgb_laser_addr + 2 - 1]);
-    match (state.fade[3] * 4.0) as usize {
-        0 => dmx_u8(0, dmx, &[rgb_laser_addr], 1),
-        1 => {
-            dmx_u8(255, dmx, &[rgb_laser_addr], 1);
-            dmx_f32(1.0, dmx, &[rgb_laser_addr], 6);
-            dmx_u8(32, dmx, &[rgb_laser_addr], 7);
-        }
-        2 => {
-            dmx_u8(255, dmx, &[rgb_laser_addr], 1);
-            dmx_f32(0.75, dmx, &[rgb_laser_addr], 6);
-            dmx_u8(32, dmx, &[rgb_laser_addr], 7);
-        }
-        3 => dmx_u8(0, dmx, &[rgb_laser_addr], 1),
-        _ => {}
-    }
-
-    let rgb_strobe = 120;
-    map_wargb(state.dial_top[3], state.fade[3], dmx, &[rgb_strobe + 3 - 1]);
-    dmx_f32(state.fade[3], dmx, &[rgb_strobe], 1);
-    dmx_f32(state.tempo, dmx, &[rgb_strobe], 10);
-    dmx_f32(state.dial_3[0], dmx, &[rgb_strobe], 13);
-    dmx_f32(state.dial_3[1], dmx, &[rgb_strobe], 14);
-    dmx_f32(state.dial_3[2], dmx, &[rgb_strobe], 15);
-    dmx_f32(state.dial_3[3], dmx, &[rgb_strobe], 16);
-    dmx_f32(state.dial_3[4], dmx, &[rgb_strobe], 17);
-
-    dmx_f32(state.fade[4], dmx, &[rgb_strobe], 6);
-    dmx_f32(state.tempo, dmx, &[rgb_strobe], 8);
-    dmx_f32(state.dial_4[0], dmx, &[rgb_strobe], 11);
-    dmx_f32(state.dial_4[1], dmx, &[rgb_strobe], 12);
-
-    let spot1 = 200;
-    let spot2 = 250;
-    dmx_f32(state.fade[1], dmx, &[spot1, spot2], 6);
-    dmx_f32(state.dial_1[0], dmx, &[spot1], 1);
-    dmx_f32(state.dial_1[0], dmx, &[spot2], 1);
-    dmx_f32(state.dial_1[1], dmx, &[spot1, spot2], 3);
-    dmx_f32(state.dial_top[1], dmx, &[spot1, spot2], 8);
-    dmx_f32(state.dial_1[4], dmx, &[spot1, spot2], 12);
-    dmx_f32(state.dial_1[3], dmx, &[spot1, spot2], 13);
-    dmx_f32(state.dial_1[2], dmx, &[spot1, spot2], 10);
-
-    dmx_f32(state.fade[2], dmx, &[spot1, spot2], 14);
-    map_wargb(
-        state.dial_top[2],
-        1.0,
-        dmx,
-        &[spot1 + 16 - 1, spot2 + 16 - 1],
-    );
-
-    let smoke = 300;
-    let slot_len = 101.0f64;
-    let needed = slot_len * state.dial_0[0] as f64;
-    let t = clock.rem_euclid(slot_len);
-    dmx_f32(if t < needed { 1.0 } else { 0.0 }, dmx, &[smoke], 1);
-
-    let smoke2 = 310;
-    dmx_f32(state.dial_0[2], dmx, &[smoke2], 1);
-    dmx_f32(state.dial_0[1], dmx, &[smoke2], 2);
-
-    let lasers = [400, 420, 440, 460, 480];
-    dmx_f32(state.fade[5], dmx, &lasers, 1);
-    dmx_f32(state.dial_5[0], dmx, &lasers, 2);
-    dmx_f32(state.dial_top[5], dmx, &lasers, 11);
-    dmx_f32(state.dial_5[1], dmx, &lasers, 12);
-    dmx_f32(0.5, dmx, &lasers, 3);
-    dmx_f32(0.3, dmx, &lasers, 4);
-    dmx_f32(state.dial_5[2], dmx, &lasers, 5);
-    dmx_f32(state.dial_5[3], dmx, &lasers, 6);
-    dmx_f32(0.5, dmx, &lasers, 7);
-    dmx_f32(0.5, dmx, &lasers, 8);
-    dmx_f32(0.5, dmx, &lasers, 10);
-    dmx_f32(0.5, dmx, &lasers, 9);
-
-    let uv = [500, 502, 504];
-    dmx_f32(state.fade[6], dmx, &uv, 1);
-    dmx_f32(
-        if state.tempo < 0.1 { 0.0 } else { state.tempo },
-        dmx,
-        &uv,
-        2,
-    );
-    dmx_f32(if state.fade[7] > 0.5 { 1.0 } else { 0.0 }, dmx, &uv, 3);
+    show::clamp01(value)
 }
 
 fn preset_file(slot: usize) -> String {
@@ -760,12 +561,12 @@ impl App {
         let ui_receiver = self.ui_controls.receiver();
 
         std::thread::spawn(move || {
-            let _instance_lock = match UdpSocket::bind(CONTROLLER_INSTANCE_LOCK_ADDR) {
+            let _instance_lock = match UdpSocket::bind(show::CONTROLLER_INSTANCE_LOCK_ADDR) {
                 Ok(socket) => socket,
                 Err(err) => {
                     println!(
                         "scene_change source=runtime action=instance_lock_busy addr={} err={}",
-                        CONTROLLER_INSTANCE_LOCK_ADDR, err
+                        show::CONTROLLER_INSTANCE_LOCK_ADDR, err
                     );
                     return;
                 }
@@ -776,10 +577,9 @@ impl App {
             buttons.power = true;
             let mut mirror = MidiMirrorState::default();
 
-            let mut universe = [0u8; DMXOUTPUT_HEADER.len() + 512];
-            universe[0..DMXOUTPUT_HEADER.len()].copy_from_slice(&DMXOUTPUT_HEADER);
+            let mut universe = show::ArtNetPacket::default();
 
-            let socket = match UdpSocket::bind(ARTNET_BIND_ADDR) {
+            let socket = match UdpSocket::bind(show::ARTNET_BIND_ADDR) {
                 Ok(socket) => {
                     let _ = socket.set_broadcast(true);
                     Some(socket)
@@ -1028,21 +828,21 @@ impl App {
                     }
                 }
 
-                universe[12] = (dmx_packets % 255) as u8;
+                universe.set_sequence((dmx_packets % 255 + 1) as u8);
                 {
-                    let dmx = &mut universe[DMXOUTPUT_HEADER.len()..];
+                    let dmx = universe.dmx_mut();
                     dmx.fill(0);
-                    apply_dmx_mapping(&state, &buttons, dmx, clock);
+                    show::apply_dmx_mapping(&state, &buttons, dmx, clock);
                 }
                 if let Some(socket) = socket.as_ref() {
-                    let _ = socket.send_to(&universe, ARTNET_BROADCAST_ADDR);
+                    let _ = socket.send_to(universe.as_bytes(), show::ARTNET_BROADCAST_ADDR);
                 }
 
                 dmx_packets += 1;
                 persist_counter += 1;
-                clock += DMX_FRAME_DT;
+                clock += show::DMX_FRAME_DT;
 
-                if persist_counter >= DMX_FRAME_HZ as u32 {
+                if persist_counter >= show::DMX_FRAME_HZ as u32 {
                     save_state_file(CURRENT_STATE_FILE, &state);
                     persist_counter = 0;
                 }
@@ -1054,7 +854,7 @@ impl App {
                     });
                 }
 
-                std::thread::sleep(Duration::from_secs_f64(DMX_FRAME_DT));
+                std::thread::sleep(Duration::from_secs_f64(show::DMX_FRAME_DT));
             }
         });
     }
