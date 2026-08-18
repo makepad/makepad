@@ -617,6 +617,32 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
             }
         }
 
+        // Debug bisection hatch: dump the raw multiview diffusion outputs
+        // before the bake, splitting "diffusion produced mush" from "bake
+        // scrambled good views" without touching the job contract.
+        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
+            let dump = |tag: &str, images: &[Vec<f32>]| {
+                for (index, img) in images.iter().enumerate() {
+                    let px: Vec<u8> = img
+                        .iter()
+                        .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+                        .collect();
+                    let png = crate::png::encode_png(
+                        multiview.size,
+                        multiview.size,
+                        crate::png::PngColor::Rgb,
+                        &px,
+                    );
+                    let path = format!("{dir}/view_{tag}_{index}.png");
+                    if let Err(error) = std::fs::write(&path, png) {
+                        eprintln!("MAKEPAD_PBR_DUMP_VIEWS write {path}: {error}");
+                    }
+                }
+            };
+            dump("albedo", &multiview.albedo);
+            dump("mr", &multiview.mr);
+        }
+
         // ---- Bake albedo and MR into the input mesh's UV atlas.
         fn make_bake_views<'v>(
             images: &'v [Vec<f32>],
