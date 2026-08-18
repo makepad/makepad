@@ -1,0 +1,13 @@
+[package]
+name = "makepad-ai-cuda"
+version = "0.1.0"
+edition = "2021"
+description = "THE CUDA store for Makepad AI models: driver/cuDNN FFI (absorbed from libs/cuda) plus every .cu kernel and the nvcc build (absorbed from libs/ggml)."
+license = "MIT"
+links = "makepad_ai_cuda"
+
+[dependencies]
+
+[[bin]]
+name = "cudnn-v8-bench"
+path = "src/bin/cudnn_v8_bench.rs"

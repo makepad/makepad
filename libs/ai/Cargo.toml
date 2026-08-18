@@ -6,6 +6,7 @@
 [workspace]
 members = [
     "loader",
+    "cuda",
     "job",
 ]
 resolver = "2"

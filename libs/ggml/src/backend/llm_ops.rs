@@ -1,7 +1,8 @@
 //! Shared gen-AI op surface for llama (and a future Metal backend).
 //!
 //! These Rust names are the contract. CUDA forwards them to the `mkllm_*`
-//! C ABI compiled once from `backend/cuda/llm/kernels.cu`. Metal should
+//! C ABI compiled once from makepad-ai-cuda's `kernels/llm/kernels.cu`
+//! (libs/ai/cuda, absorbed lane T4, /aiarch.md §1 + §4). Metal should
 //! later implement the same names with shaders — do not bury new launch
 //! logic only in `makepad-llama`.
 //!
@@ -58,7 +59,7 @@ pub const QUANT_Q80: i32 = 3;
 pub type Stream = *mut c_void;
 pub type CudaError = i32;
 
-/// True when this crate's CUDA build compiled `backend/cuda/llm/kernels.cu`.
+/// True when makepad-ai-cuda's build compiled `kernels/llm/kernels.cu`.
 pub const CUDA_KERNELS: bool =
     cfg!(all(any(target_os = "linux", target_os = "windows"), makepad_ggml_cuda_kernels));
 
