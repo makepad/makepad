@@ -150,7 +150,7 @@ pub struct PaintDefaults {
 
 pub fn defaults() -> PaintDefaults {
     PaintDefaults {
-        num_inference_steps: 15,
+        num_inference_steps: 50,
         guidance_scale: 3.0,
         cfg_batch: 3,
         view_size: 512,
@@ -359,7 +359,7 @@ mod tests {
         }
         let d = defaults();
         assert_eq!(d.view_size / 8, arch.sample_size);
-        assert_eq!(d.num_inference_steps, 15);
+        assert_eq!(d.num_inference_steps, 50);
         assert_eq!(d.cfg_batch, 3);
         assert_eq!(candidate_views().len(), 30);
         assert!(d.num_view >= 6 && d.max_view <= 9);
