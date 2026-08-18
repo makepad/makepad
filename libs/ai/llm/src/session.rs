@@ -279,6 +279,49 @@ impl LlamaSession {
         Ok(hash)
     }
 
+    /// Debug: reset, then additionally zero EVERY allocated tensor that does
+    /// not overlap a GGUF weight tensor. If a normal `reset()` leaves the
+    /// next run nondeterministic but this restores determinism, some kernel
+    /// reads a non-weight buffer it did not write this run.
+    pub fn debug_scorched_reset(&mut self) -> Result<usize> {
+        self.reset()?;
+        let ctx = &self.weights.ctx;
+        let mut weight_ranges: Vec<(usize, usize)> = Vec::new();
+        for id in self.weights.tensor_ids.values() {
+            if let Some(tensor) = ctx.tensor(*id) {
+                if let Some(offset) = tensor.data_offset {
+                    weight_ranges.push((offset, offset + tensor.nbytes()));
+                }
+            }
+        }
+        weight_ranges.sort_unstable();
+        let overlaps_weight = |start: usize, end: usize| {
+            let idx = weight_ranges.partition_point(|(_, we)| *we <= start);
+            weight_ranges
+                .get(idx)
+                .map(|(ws, _)| *ws < end)
+                .unwrap_or(false)
+        };
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for tensor in ctx.tensors() {
+            let Some(offset) = tensor.data_offset else { continue };
+            let len = tensor.nbytes();
+            if len == 0 || overlaps_weight(offset, offset + len) {
+                continue;
+            }
+            ranges.push((offset, len));
+        }
+        ranges.sort_unstable();
+        ranges.dedup();
+        let count = ranges.len();
+        self.graphs.shared_runtime.clear_state_ranges(
+            &mut self.weights.ctx,
+            &self.graphs.shared_buffers,
+            &ranges,
+        )?;
+        Ok(count)
+    }
+
     /// Debug: hash every allocated context tensor's live device bytes
     /// (capped at 1 MiB each). Diffing two snapshots taken at points that
     /// should be identical (e.g. right after two different `reset()` calls)
