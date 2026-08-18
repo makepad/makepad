@@ -11,6 +11,10 @@ pub enum DiffusionError {
     Workflow(String),
     Model(String),
     Mlx(MlxRtError),
+    /// A caller-supplied cancel hook asked the pipeline to stop; the run
+    /// unwound at a step/tile/component boundary. Service backends map this
+    /// to their own Cancelled error (job state "cancelled", not an error).
+    Cancelled,
 }
 
 impl DiffusionError {
@@ -47,6 +51,7 @@ impl fmt::Display for DiffusionError {
             Self::Workflow(message) => write!(f, "workflow error: {}", message),
             Self::Model(message) => write!(f, "model error: {}", message),
             Self::Mlx(err) => err.fmt(f),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }

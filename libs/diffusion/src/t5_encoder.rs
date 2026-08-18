@@ -5,12 +5,15 @@ use crate::backend::{
 };
 use crate::flux::T5TextEncoderConfig;
 use crate::t5::T5TokenizedPrompt;
-use crate::{DiffusionError, Result};
-use makepad_ggml::backend::{try_get_rows_ggml_bytes, try_matmul_nt_ggml_bytes};
+use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
+use makepad_ggml::backend::{
+    try_get_rows_ggml_bytes, try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes,
+    try_matmul_nt_ggml_bytes_cached,
+};
 use makepad_ggml::{
-    bf16_to_f32, f16_to_f32, get_rows_ggml_bytes_cpu, ggml_pad, BufferUsage, Context, Graph,
-    InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType, UnaryOp,
-    GGML_MEM_ALIGN,
+    bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, get_rows_ggml_bytes_cpu, ggml_pad, BufferUsage,
+    Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
+    UnaryOp, GGML_MEM_ALIGN, GGML_TYPE_F8_E4M3,
 };
 use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::cell::RefCell;
@@ -133,8 +136,49 @@ impl LoadedT5xxlWeights {
         Self::load_with_extra(path, DEFAULT_GRAPH_EXTRA_BYTES)
     }
 
+    /// [`Self::load`] with cumulative byte progress ("load t5 3.2/9.5GB")
+    /// every ~256MB of streamed weight bytes.
+    pub fn load_with_progress(
+        path: impl AsRef<Path>,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_with_extra_progress(path, DEFAULT_GRAPH_EXTRA_BYTES, progress)
+    }
+
     pub fn load_with_extra(path: impl AsRef<Path>, extra_bytes: usize) -> Result<Self> {
-        let header = MlxSafetensorsHeader::load(path.as_ref())?;
+        Self::load_with_extra_progress(path, extra_bytes, None)
+    }
+
+    /// [`Self::load_with_progress`] over the t5xxl component of a combined
+    /// checkpoint (see [`Self::load_scoped_with_extra_progress`]).
+    pub fn load_component_with_progress(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_extra_progress(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES, progress)
+    }
+
+    pub fn load_with_extra_progress(
+        path: impl AsRef<Path>,
+        extra_bytes: usize,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_extra_progress(path, None, extra_bytes, progress)
+    }
+
+    /// [`Self::load_with_extra_progress`] over the t5xxl component of a
+    /// combined checkpoint: `prefix` (e.g. `text_encoders.t5xxl.transformer.`)
+    /// scopes the header so only the t5 tensors are allocated and its byte
+    /// ranges read; the weights keep the combined file's path as their
+    /// device-cache identity.
+    pub fn load_scoped_with_extra_progress(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        let header = crate::flux::flux_component_header(path.as_ref(), prefix)?;
         let inspect = T5TextEncoderConfig::from_header(&header)?;
         let config = t5_model_config_from_header(&header, &inspect)?;
         let relative_attention_bias = decode_relative_attention_bias(&header, &config)?;
@@ -145,7 +189,7 @@ impl LoadedT5xxlWeights {
             no_alloc: false,
         });
         let tensor_ids = allocate_t5_weight_tensors(&mut ctx, &header)?;
-        load_t5_weight_bytes(&mut ctx, &header, &tensor_ids)?;
+        load_t5_weight_bytes(&mut ctx, &header, &tensor_ids, &mut progress)?;
 
         Ok(Self {
             ctx,
@@ -347,6 +391,18 @@ impl LazyT5xxl {
     }
 
     pub fn execute(&self, weights: &LoadedT5xxlWeights, token_ids: &[i32]) -> Result<T5xxlRun> {
+        self.execute_with_progress(weights, token_ids, None)
+    }
+
+    /// [`Self::execute`] with a per-block progress/cancel boundary
+    /// ("text-encode t5 block 7/24") — each block's weights stream to the
+    /// device on first touch, so cold encodes move visibly.
+    pub fn execute_with_progress(
+        &self,
+        weights: &LoadedT5xxlWeights,
+        token_ids: &[i32],
+        mut progress: Option<ProgressHook>,
+    ) -> Result<T5xxlRun> {
         if token_ids.len() != self.token_count {
             return Err(DiffusionError::workflow(format!(
                 "t5xxl token length mismatch: executor expects {}, got {}",
@@ -373,7 +429,15 @@ impl LazyT5xxl {
         if dump_t5_debug {
             debug_hidden_states.push(("t5_embed".to_string(), hidden.data.clone()));
         }
-        for layer in 0..weights.config.layer_count as usize {
+        let layer_count = weights.config.layer_count as usize;
+        for layer in 0..layer_count {
+            if progress.is_some() {
+                emit_progress(
+                    &mut progress,
+                    &format!("text-encode t5 block {}/{layer_count}", layer + 1),
+                    layer as f64 / layer_count as f64,
+                )?;
+            }
             let attn_prefix = format!("encoder.block.{layer}.layer.0");
             let ff_prefix = format!("encoder.block.{layer}.layer.1");
 
@@ -596,6 +660,33 @@ fn embed_t5_tokens(
             model_dim, embedding.cols
         )));
     }
+    // F8 embeddings gather from the device-resident payload (uploaded once
+    // under the checkpoint namespace; warm calls upload only token indices).
+    // A real device error fails closed — the canonical FP8 tier never
+    // degrades to CPU math behind a ready state. `None` means no capable
+    // device backend exists (mac/unit tests), where the CPU twin is the
+    // intended path.
+    if embedding.ggml_type == GGML_TYPE_F8_E4M3 && !t5_force_cpu_math() {
+        match try_get_rows_ggml_bytes_cached(
+            embedding.ggml_type,
+            embedding.cols,
+            embedding.rows,
+            token_ids,
+            &t5_cache_namespace(weights),
+            "shared.weight",
+            || Ok(embedding.bytes.to_vec()),
+        ) {
+            Some(Ok(values)) => {
+                return RowsTensor::new(token_ids.len(), model_dim, values);
+            }
+            Some(Err(error)) => {
+                return Err(DiffusionError::model(format!(
+                    "t5xxl fp8 embedding gather failed: {error}"
+                )));
+            }
+            None => {}
+        }
+    }
     let values = if let Some(values) = try_get_rows_ggml_bytes(
         embedding.bytes,
         embedding.ggml_type,
@@ -624,7 +715,72 @@ fn linear_rows_ggml(
     input_scale: f32,
 ) -> Result<RowsTensor> {
     let weight = weights.tensor_matrix(weight_name)?;
+    // Device-cached dense path: the weight payload (raw F8 for the combined
+    // checkpoints) uploads once under `t5xxl:<path>::<tensor>` and stays
+    // resident — a changed prompt re-encodes with zero weight bytes moved.
+    // The pre-existing uncached path below re-uploaded ~5-10GB per encode.
+    if !t5_force_cpu_math()
+        && !t5_force_f32_linear()
+        && input.rows > 0
+        && input.cols == weight.cols
+    {
+        let scaled_input;
+        let input_values = if input_scale == 1.0 {
+            &input.data
+        } else {
+            scaled_input = input
+                .data
+                .iter()
+                .map(|value| value * input_scale)
+                .collect::<Vec<_>>();
+            &scaled_input
+        };
+        match try_matmul_nt_ggml_bytes_cached(
+            input_values,
+            weight.ggml_type,
+            input.rows,
+            input.cols,
+            weight.rows,
+            &t5_cache_namespace(weights),
+            weight_name,
+            || Ok(weight.bytes.to_vec()),
+        ) {
+            Some(Ok(mut output)) => {
+                if input_scale != 1.0 {
+                    let inv_scale = 1.0 / input_scale;
+                    for value in &mut output {
+                        *value *= inv_scale;
+                    }
+                }
+                return RowsTensor::new(input.rows, weight.rows, output);
+            }
+            Some(Err(error)) if weight.ggml_type == GGML_TYPE_F8_E4M3 => {
+                // Fail closed: the canonical FP8 tier must never silently
+                // fall back to host math behind a ready state.
+                return Err(DiffusionError::model(format!(
+                    "t5xxl fp8 linear '{weight_name}' failed on device: {error}"
+                )));
+            }
+            // Legacy half-precision files keep their historical fallback
+            // ladder (device error -> uncached/host paths below).
+            Some(Err(_)) | None => {}
+        }
+    }
     linear_rows_ggml_matrix(input, weight, input_scale)
+}
+
+/// Device weight-cache namespace of these t5 weights: keyed by the source
+/// file path, so combined checkpoints share one evictable checkpoint root
+/// across all components.
+pub(crate) fn t5_cache_namespace(weights: &LoadedT5xxlWeights) -> String {
+    format!("t5xxl:{}", weights.path.display())
+}
+
+/// Drops every device weight-cache entry belonging to these t5 weights
+/// (raw FP8 payloads + gathered embedding). Called on a model switch —
+/// combined checkpoints key all components on the outgoing checkpoint path.
+pub(crate) fn evict_device_weight_cache(weights: &LoadedT5xxlWeights) -> usize {
+    crate::backend::gpu_weight_cache_evict_prefix(&t5_cache_namespace(weights)).unwrap_or(0)
 }
 
 fn linear_rows_ggml_matrix(
@@ -1402,7 +1558,12 @@ fn load_t5_weight_bytes(
     ctx: &mut Context,
     header: &MlxSafetensorsHeader,
     tensor_ids: &BTreeMap<String, TensorId>,
+    progress: &mut Option<ProgressHook>,
 ) -> Result<()> {
+    let total_bytes = t5_weight_total_bytes(header, 0)?;
+    let mut done_bytes = 0usize;
+    let mut last_emit = 0usize;
+    emit_byte_progress(progress, "load t5", 0, total_bytes)?;
     for (name, tensor_id) in tensor_ids {
         let entry = header.tensor(name).ok_or_else(|| {
             DiffusionError::model(format!("t5xxl header missing tensor '{}'", name))
@@ -1410,6 +1571,11 @@ fn load_t5_weight_bytes(
         let bytes = t5_target_bytes(header, entry, name)?;
         ctx.write_tensor_data(*tensor_id, &bytes)
             .map_err(DiffusionError::model)?;
+        done_bytes = done_bytes.saturating_add(t5_target_nbytes(entry)?);
+        if done_bytes - last_emit >= crate::BYTE_PROGRESS_STEP {
+            last_emit = done_bytes;
+            emit_byte_progress(progress, "load t5", done_bytes, total_bytes)?;
+        }
     }
     Ok(())
 }
@@ -1506,10 +1672,14 @@ fn t5_target_extents(entry: &MlxTensorEntry) -> Result<Vec<i64>> {
 
 fn t5_target_tensor_type(entry: &MlxTensorEntry) -> Result<TensorType> {
     match entry.dtype {
-        MlxDType::F16 | MlxDType::BF16 if entry.shape.len() == 1 => Ok(TensorType::F32),
+        MlxDType::F16 | MlxDType::BF16 | MlxDType::F8E4M3 if entry.shape.len() == 1 => {
+            Ok(TensorType::F32)
+        }
         MlxDType::F16 => Ok(TensorType::F16),
         MlxDType::BF16 => Ok(TensorType::BF16),
         MlxDType::F32 => Ok(TensorType::F32),
+        // Combined-FP8 checkpoints: t5 matrices stay raw 1-byte resident.
+        MlxDType::F8E4M3 => Ok(TensorType::F8E4M3),
         other => Err(DiffusionError::model(format!(
             "t5xxl unsupported tensor dtype {:?}",
             other
@@ -1540,12 +1710,43 @@ fn t5_target_bytes(
             }
             Ok(out)
         }
+        MlxDType::F8E4M3 if entry.shape.len() == 1 => {
+            let bytes = header.read_tensor_bytes(name)?;
+            t5_reject_f8_nan_bytes(name, &bytes)?;
+            let mut out = Vec::with_capacity(bytes.len() * 4);
+            for &byte in &bytes {
+                out.extend_from_slice(&f8_e4m3_to_f32(byte).to_le_bytes());
+            }
+            Ok(out)
+        }
+        MlxDType::F8E4M3 => {
+            // Raw resident payload: reject the two NaN encodings up front —
+            // fail closed at load rather than propagate NaN activations.
+            let bytes = header.read_tensor_bytes(name)?;
+            t5_reject_f8_nan_bytes(name, &bytes)?;
+            Ok(bytes)
+        }
         MlxDType::F16 | MlxDType::BF16 => header.read_tensor_bytes(name).map_err(Into::into),
         other => Err(DiffusionError::model(format!(
             "t5xxl unsupported tensor dtype {:?}",
             other
         ))),
     }
+}
+
+/// Fail-closed NaN screen for raw E4M3FN payloads (0x7f/0xff are the only
+/// NaN encodings; the format has no infinities).
+fn t5_reject_f8_nan_bytes(name: &str, bytes: &[u8]) -> Result<()> {
+    if let Some(position) = bytes
+        .iter()
+        .position(|&byte| byte == 0x7f || byte == 0xff)
+    {
+        return Err(DiffusionError::model(format!(
+            "t5xxl tensor '{}' contains E4M3FN NaN byte {:#04x} at offset {} — checkpoint rejected",
+            name, bytes[position], position
+        )));
+    }
+    Ok(())
 }
 
 fn decode_relative_attention_bias(
@@ -1573,6 +1774,10 @@ fn decode_relative_attention_bias(
         MlxDType::F32 => f32_bytes_to_vec(&bytes)?,
         MlxDType::F16 => f16_bytes_to_f32_vec(&bytes)?,
         MlxDType::BF16 => bf16_bytes_to_f32_vec(&bytes)?,
+        MlxDType::F8E4M3 => {
+            t5_reject_f8_nan_bytes(T5_RELATIVE_ATTENTION_BIAS_NAME, &bytes)?;
+            bytes.iter().map(|&b| f8_e4m3_to_f32(b)).collect()
+        }
         other => {
             return Err(DiffusionError::model(format!(
                 "t5xxl relative attention bias has unsupported dtype {:?}",
@@ -1735,6 +1940,7 @@ fn tensor_to_f32_vec(ctx: &Context, tensor_id: TensorId) -> Result<Vec<f32>> {
         TensorType::F32 => f32_bytes_to_vec(bytes),
         TensorType::F16 => f16_bytes_to_f32_vec(bytes),
         TensorType::BF16 => bf16_bytes_to_f32_vec(bytes),
+        TensorType::F8E4M3 => Ok(bytes.iter().map(|&b| f8_e4m3_to_f32(b)).collect()),
         other => Err(DiffusionError::model(format!(
             "t5xxl tensor {} cannot be decoded as f32 from {:?}",
             tensor_id, other
