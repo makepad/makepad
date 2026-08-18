@@ -45,3 +45,7 @@ required-features = ["cuda-taps"]
 name = "pbr-pipeline-canary"
 path = "src/bin/pipeline_canary.rs"
 required-features = ["cuda-taps"]
+
+[[bin]]
+name = "pbr-dino-bisect"
+path = "src/bin/dino_bisect.rs"
