@@ -25,7 +25,7 @@ use makepad_ai_cuda::{
     CUBLAS_STATUS_SUCCESS, CUDA_MEMCPY_DEVICE_TO_HOST, CUDA_MEMCPY_HOST_TO_DEVICE, CUDA_R_16BF,
     CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
 };
-use crate::llm_ops::{
+use makepad_ai_cuda::llm_ops::{
     binary, cast_f32_bf16, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
     fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
     get_rows_f32, get_rows_quant, glu, mmq_q4k, mmq_q5k, mmq_q6k, mmq_quant, mmq_quant_q81,
