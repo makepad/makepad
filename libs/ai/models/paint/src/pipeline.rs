@@ -687,6 +687,19 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
             };
             dump("albedo", &multiview.albedo);
             dump("mr", &multiview.mr);
+            {
+                // The exact reference bytes the neural stage received.
+                let png = crate::png::encode_png(
+                    inputs.ref_width,
+                    inputs.ref_height,
+                    crate::png::PngColor::Rgb,
+                    inputs.reference_rgb,
+                );
+                let path = format!("{dir}/reference_in.png");
+                if let Err(error) = std::fs::write(&path, png) {
+                    eprintln!("MAKEPAD_PBR_DUMP_VIEWS write {path}: {error}");
+                }
+            }
             for (index, view) in views.iter().enumerate() {
                 for (tag, rgb) in [
                     ("cond_normal", &view.normal_map_rgb),
