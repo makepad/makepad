@@ -19,8 +19,12 @@ use crate::hunyuan;
 use crate::schedule::DdimVpredZsnr;
 use crate::test_backend::PbrError;
 
-/// Official inference step count (`Hunyuan3DPaintConfig`).
-pub const DEFAULT_STEPS: usize = 15;
+/// Official inference step count. The caller in `multiview_utils.forward_one`
+/// selects per scheduler class (`infer_steps_dict`): the shipped
+/// hunyuan3d-paintpbr-v2-1 checkpoint uses `DDIMScheduler`, which runs 50
+/// steps — 15 belongs to the UniPC/ShiftSNR variants. Running the ZSNR
+/// v-pred DDIM at 15 under-denoises into flat saturated tints.
+pub const DEFAULT_STEPS: usize = 50;
 /// Official CFG scale.
 pub const DEFAULT_GUIDANCE: f32 = 3.0;
 
