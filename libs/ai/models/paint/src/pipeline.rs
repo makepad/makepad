@@ -20,7 +20,7 @@ use crate::camera::{candidate_views, default_orthographic, model_view_matrix, Ma
 use crate::contract::{pack_orm, ChannelSlot, ColorSpace, PbrMap, PbrMaterialSet, PbrMeta, PixelFormat};
 use crate::hunyuan;
 use crate::mesh::TriMesh;
-use crate::raster::{normal_map_rgb8, position_map_rgb8, render_gbuffer};
+use crate::raster::{normal_map_rgb8, normal_map_rgb8_negated, position_map_rgb8, render_gbuffer};
 use crate::test_backend::{PbrError, PbrProgress, PbrStage};
 use crate::view_select::bake_view_selection;
 
@@ -588,7 +588,13 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
             // vertically flipped renders relative to our top-down row order.
             // Flip the conditioning to the model's orientation; the model's
             // outputs are flipped back before the bake below.
-            let mut normal_map_rgb = normal_map_rgb8(&gbuf, CONDITIONING_BG);
+            // Upstream shades with cross-product normals of the reflected
+            // (still original-winding) triangles = the NEGATION of the
+            // outward normals our re-oriented mesh carries. Measured against
+            // the official render_normal on the same mesh: channel means
+            // official (+2.7, -89.8, +22.1) vs ours-outward (-3.6, +89.7,
+            // -23.3). Encode -n for the conditioning only.
+            let mut normal_map_rgb = normal_map_rgb8_negated(&gbuf, CONDITIONING_BG);
             let mut position_map_rgb = position_map_rgb8(&gbuf, PAINT_SCALE_FACTOR, POSITION_BG);
             flip_rows_u8(&mut normal_map_rgb, cfg.resolution as usize, 3);
             flip_rows_u8(&mut position_map_rgb, cfg.resolution as usize, 3);
