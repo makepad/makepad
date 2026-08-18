@@ -551,6 +551,11 @@ impl UnetFirst {
             heads,
             scale,
         )?;
+        sub_tap("alb_n1", &alb_n1);
+        sub_tap("mr_n1", &mr_n1);
+        sub_tap("alb_attn", &alb_attn);
+        sub_tap("mr_attn", &mr_attn);
+        sub_tap("tokens_pre_mda", &tokens);
         tokens = scatter_add_pbr(&tokens, &alb_attn, &mr_attn, n_cfg, n_views, plane)?;
         sub_tap("after_mda", &tokens);
 
