@@ -242,6 +242,52 @@ impl LlamaSession {
         self.token_ids.clear();
         self.rope_pos_next = 0;
         self.last_run = None;
+        if std::env::var("MAKEPAD_LLM_RESET_VERIFY").is_ok() {
+            self.verify_state_cleared()?;
+        }
+        Ok(())
+    }
+
+    /// Debug (MAKEPAD_LLM_RESET_VERIFY=1): read every shared cache tensor
+    /// back from the live device buffer and report any that still holds
+    /// nonzero bytes after `reset`. Catches a clear that silently missed the
+    /// device (wrong offsets, wrong buffer, stale stream).
+    fn verify_state_cleared(&self) -> Result<()> {
+        let ctx = &self.weights.ctx;
+        let mut named: Vec<(String, usize, usize)> = Vec::new();
+        for (layer, ids) in &self.graphs.shared_cache.attention {
+            for (tag, id) in [("k", ids.k_cache), ("v", ids.v_cache)] {
+                let Some(tensor) = ctx.tensor(id) else { continue };
+                let Some(offset) = tensor.data_offset else { continue };
+                named.push((format!("attn{layer}.{tag}"), offset, tensor.nbytes()));
+            }
+        }
+        for (layer, ids) in &self.graphs.shared_cache.recurrent {
+            for (tag, id) in [("r", ids.r_cache), ("s", ids.s_cache)] {
+                let Some(tensor) = ctx.tensor(id) else { continue };
+                let Some(offset) = tensor.data_offset else { continue };
+                named.push((format!("recur{layer}.{tag}"), offset, tensor.nbytes()));
+            }
+        }
+        let mut dirty = 0usize;
+        for (name, offset, len) in &named {
+            let bytes = self.graphs.shared_runtime.read_state_range(
+                &self.graphs.shared_buffers,
+                *offset,
+                *len,
+            )?;
+            let nonzero = bytes.iter().filter(|b| **b != 0).count();
+            if nonzero > 0 {
+                dirty += 1;
+                eprintln!(
+                    "[llm reset-verify] {name} STILL DIRTY: {nonzero}/{len} nonzero bytes at ctx offset {offset}"
+                );
+            }
+        }
+        eprintln!(
+            "[llm reset-verify] {} cache tensors checked, {dirty} dirty",
+            named.len()
+        );
         Ok(())
     }
 
