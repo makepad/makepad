@@ -168,10 +168,14 @@ pub fn unify_face_orientations(positions: &[[f32; 3]], indices: &mut [u32]) -> u
 }
 
 /// Merge vertices within `step` of each other; faces are remapped in place.
-/// Returns the number of duplicates removed.
+/// Also collapses any triangle that welding turned into an exact duplicate
+/// (see the doublet note below) or a degenerate `{a,a,b}` down to a single
+/// kept copy, shrinking `indices` in place. Returns the number of duplicate
+/// *vertices* removed (unchanged meaning; doublet triangles dropped are not
+/// counted in this total).
 pub fn weld_vertices(
     positions: &mut Vec<[f32; 3]>,
-    indices: &mut [u32],
+    indices: &mut Vec<u32>,
     step: f32,
 ) -> usize {
     weld_vertices_ctl(positions, indices, step, &mut |_, _| true)
@@ -181,7 +185,7 @@ pub fn weld_vertices(
 /// and leaves `positions`/`indices` unchanged.
 pub fn weld_vertices_ctl(
     positions: &mut Vec<[f32; 3]>,
-    indices: &mut [u32],
+    indices: &mut Vec<u32>,
     step: f32,
     ctl: &mut impl FnMut(usize, usize) -> bool,
 ) -> usize {
@@ -239,6 +243,86 @@ pub fn weld_vertices_ctl(
     }
     let welded = v - kept.len();
     *positions = kept;
+
+    // Fusing near-coincident vertices can also fuse a hairline-thin double
+    // wall (front/back sheets of a thin feature, e.g. a nose bridge, ear, or
+    // hat point) into a single set of shared vertices while leaving the two
+    // independently-decoded triangles behind: an exact-duplicate triangle
+    // pair, almost always opposite-wound since the two sheets face away
+    // from each other, sitting at zero distance. `audit_mesh_topology`
+    // cannot see this as a hole (each shared edge still looks like an
+    // ordinary 2-face, opposite-direction pair) — but at render time the
+    // two coincident triangles z-fight, and the reversed-normal one shades
+    // dark, flipping per pixel into an isolated black-pixel pinhole on
+    // exactly the thin, high-curvature spots (forehead/nose/hat) where
+    // welding is most likely to fuse a double wall.
+    //
+    // Collapse a duplicate group (same vertex set, either winding) down to
+    // one kept triangle ONLY when every one of its 3 edges has a genuine
+    // neighbor beyond the group itself — i.e. dropping the extra copies
+    // cannot strand an edge at count 1. Some of these duplicate pairs turn
+    // out to be the *only* coverage of a hairline decoder crack (FaithC
+    // issue #3): both sides of the crack independently plug the same tiny
+    // gap, landing on identical welded vertices. Deduping those unconditionally
+    // would trade a z-fighting doublet for an actual open hole, which
+    // `fill_small_holes` mostly can't close (dangling, non-loop boundary
+    // edges) — strictly worse. Leaving that subset as a doublet keeps
+    // today's (already shipped) visual behavior unchanged there while still
+    // removing every doublet that's provably redundant.
+    let f = indices.len() / 3;
+    let mut edge_count: HashMap<u64, u32> = HashMap::with_capacity(f * 3);
+    for tri in indices.chunks_exact(3) {
+        for j in 0..3 {
+            let a = tri[j];
+            let b = tri[(j + 1) % 3];
+            if a != b {
+                *edge_count.entry(ekey(a, b)).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut groups: HashMap<[u32; 3], Vec<usize>> = HashMap::with_capacity(f);
+    for r in 0..f {
+        let tri = [indices[r * 3], indices[r * 3 + 1], indices[r * 3 + 2]];
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+            continue; // degenerate rows are dropped unconditionally below
+        }
+        let mut key = tri;
+        key.sort_unstable();
+        groups.entry(key).or_default().push(r);
+    }
+    let mut drop = vec![false; f];
+    for (key, rows) in &groups {
+        if rows.len() < 2 {
+            continue;
+        }
+        let edges = [ekey(key[0], key[1]), ekey(key[1], key[2]), ekey(key[0], key[2])];
+        let safe = edges.iter().all(|e| {
+            edge_count.get(e).copied().unwrap_or(0) as usize >= rows.len() + 1
+        });
+        if safe {
+            for &r in &rows[1..] {
+                drop[r] = true;
+            }
+        }
+    }
+    for r in 0..f {
+        let tri = [indices[r * 3], indices[r * 3 + 1], indices[r * 3 + 2]];
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+            drop[r] = true; // degenerate after welding: zero-area, always safe to drop
+        }
+    }
+    let mut w = 0usize;
+    for r in 0..f {
+        if drop[r] {
+            continue;
+        }
+        indices[w * 3] = indices[r * 3];
+        indices[w * 3 + 1] = indices[r * 3 + 1];
+        indices[w * 3 + 2] = indices[r * 3 + 2];
+        w += 1;
+    }
+    indices.truncate(w * 3);
+
     let _ = ctl(v, v);
     welded
 }
@@ -875,6 +959,84 @@ mod tests {
         assert_eq!(welded, 1);
         assert_eq!(positions.len(), 4);
         assert_eq!(indices[3], 1); // remapped to the kept twin
+    }
+
+    #[test]
+    fn weld_drops_only_doublets_that_have_a_real_third_neighbor() {
+        // Group A: triangle (0,1,2) plus an opposite-wound exact duplicate
+        // (0,2,1), each of whose 3 edges also has one genuine neighbor
+        // triangle (N1/N2/N3). Safe to collapse to a single triangle.
+        //
+        // Group B: triangle (6,7,8) plus an opposite-wound exact duplicate
+        // (6,8,7), completely isolated (no other triangle touches 6/7/8).
+        // Collapsing this one would strand all 3 of its edges at boundary
+        // count 1, so both copies must survive (matches shipped behavior:
+        // a welded hairline-crack doublet, not a provably-redundant one).
+        let mut positions = vec![
+            [0.0, 0.0, 0.0],   // 0
+            [1.0, 0.0, 0.0],   // 1
+            [0.0, 1.0, 0.0],   // 2
+            [1.0, 1.0, 0.0],   // 3
+            [-1.0, 1.0, 0.0],  // 4
+            [1.0, -1.0, 0.0],  // 5
+            [10.0, 0.0, 0.0],  // 6
+            [11.0, 0.0, 0.0],  // 7
+            [10.0, 1.0, 0.0],  // 8
+        ];
+        let mut indices = vec![
+            0, 1, 2, // T (kept)
+            0, 2, 1, // T doublet (dropped: every edge has a real neighbor)
+            1, 0, 3, // N1: shares edge (0,1)
+            2, 1, 4, // N2: shares edge (1,2)
+            0, 2, 5, // N3: shares edge (0,2)
+            6, 7, 8, // U (isolated doublet member, kept)
+            6, 8, 7, // U doublet (kept: no real neighbor on any edge)
+        ];
+        // N1/N2/N3 each contribute 2 unshared outer edges (boundary) plus 1
+        // edge shared with group A; group A's edges start at count 3
+        // (T + doublet + the one real neighbor) and group B's at count 2
+        // (U + doublet only) -- neither is boundary yet, so the baseline is
+        // exactly the 3 neighbors' 6 outer edges.
+        let before = audit_mesh_topology(&positions, &indices);
+        assert_eq!(before.boundary_edges, 6, "unexpected test fixture topology");
+
+        weld_vertices(&mut positions, &mut indices, 1e-6);
+
+        // Only the provably-redundant doublet (Group A) was dropped: 7
+        // triangles in, 1 dropped, 6 remain.
+        assert_eq!(indices.len() / 3, 6, "expected exactly one dropped triangle");
+
+        // Collapsing Group A must not strand any of its edges as new
+        // boundary edges, and Group B's doublet must still fully cover its
+        // own edges (unsafe to touch) -- so overall boundary count cannot
+        // have increased from the pre-weld baseline.
+        let after = audit_mesh_topology(&positions, &indices);
+        assert_eq!(
+            after.boundary_edges, before.boundary_edges,
+            "safe dedupe must never create a new boundary edge"
+        );
+
+        // Group B's isolated doublet (6,7,8) is still present twice.
+        let group_b_count = indices
+            .chunks_exact(3)
+            .filter(|tri| {
+                let mut v = [tri[0], tri[1], tri[2]];
+                v.sort_unstable();
+                v == [6, 7, 8]
+            })
+            .count();
+        assert_eq!(group_b_count, 2, "isolated doublet must be preserved");
+
+        // Group A's triangle (0,1,2) now appears exactly once.
+        let group_a_count = indices
+            .chunks_exact(3)
+            .filter(|tri| {
+                let mut v = [tri[0], tri[1], tri[2]];
+                v.sort_unstable();
+                v == [0, 1, 2]
+            })
+            .count();
+        assert_eq!(group_a_count, 1, "redundant doublet must be dropped");
     }
 
     #[test]
