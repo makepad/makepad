@@ -24,6 +24,10 @@ use crate::raster::{normal_map_rgb8, position_map_rgb8, render_gbuffer};
 use crate::test_backend::{PbrError, PbrProgress, PbrStage};
 use crate::view_select::bake_view_selection;
 
+/// Upstream `MeshRender` mesh-normalization scale factor: after centering,
+/// the largest radial distance becomes `PAINT_SCALE_FACTOR / 2`, and the
+/// position conditioning encodes `0.5 - p / PAINT_SCALE_FACTOR`.
+pub const PAINT_SCALE_FACTOR: f32 = 1.15;
 /// Background for normal conditioning maps (mid-gray = zero vector).
 /// Exact upstream background is re-verified at oracle-parity time.
 pub const CONDITIONING_BG: [u8; 3] = [128, 128, 128];
@@ -501,13 +505,17 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
         };
 
         emit(PbrStage::Prepare, 1, 1, progress)?;
-        // Normalized working copy: centered, max half-extent 0.5, so the
-        // position-map encoding `0.5 - p / 1.0` lands in [0,1].
+        // Normalized working copy in the upstream renderer's frame: glTF
+        // Y-up mapped to the Z-up paint world, bbox-centered, max radial
+        // distance PAINT_SCALE_FACTOR/2 — so the position-map encoding
+        // `0.5 - p / PAINT_SCALE_FACTOR` lands in [0,1] and the Z-up camera
+        // ring actually orbits the character's vertical axis.
         let mut mesh = inputs.mesh.clone();
         if mesh.normals.len() != mesh.positions.len() {
             mesh.compute_vertex_normals();
         }
-        mesh.normalize_to_half_extent(0.5);
+        mesh.apply_paint_frame();
+        mesh.normalize_paint_radial(PAINT_SCALE_FACTOR);
         mesh.validate(true).map_err(|error| {
             PbrError::InvalidParams(format!("normalized mesh invalid: {error}"))
         })?;
@@ -554,7 +562,7 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
                 weight: cand.weight,
                 size: cfg.resolution,
                 normal_map_rgb: normal_map_rgb8(&gbuf, CONDITIONING_BG),
-                position_map_rgb: position_map_rgb8(&gbuf, 1.0, POSITION_BG),
+                position_map_rgb: position_map_rgb8(&gbuf, PAINT_SCALE_FACTOR, POSITION_BG),
             });
             view_mats.push(mv);
         }
