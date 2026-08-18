@@ -1,0 +1,22 @@
+# Makepad VJ — live performance app over the Asset Server: video program
+# tiles with a two-slot crossfaded output window, two DJ music decks with an
+# equal-power crossfader, and a polyphonic one-shot SFX pad bank.
+#
+# All networking (discovery, auth, catalog/search, blob download, event
+# subscription, verified cache) lives in makepad-asset-client; this
+# crate contains only UI, playback/crossfade orchestration and presentation
+# adapters.
+
+[package]
+name = "makepad-vj"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-asset-data = { path = "../../libs/asset/data" }
+makepad-asset-client = { path = "../../libs/asset/client" }
+# 3D program lane: skinned-GLB playback via the renderer.
+makepad-render = { path = "../../libs/render" }
+makepad-show-control = { path = "../../libs/show_control" }
+makepad-gltf = { path = "../../libs/gltf" }
