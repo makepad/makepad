@@ -1,4 +1,4 @@
-use makepad_mlx::MlxRtError;
+use makepad_ai_loader::MlxRtError;
 use std::fmt;
 use std::path::PathBuf;
 

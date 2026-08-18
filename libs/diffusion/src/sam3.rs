@@ -11,7 +11,7 @@
 //! non-Comfy multiplex header all refuse before a generate.
 
 use crate::{DiffusionError, ProgressHook, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
 
 pub const SAM3_REPO: &str = "Comfy-Org/sam3.1";
@@ -384,7 +384,7 @@ impl Sam3Weights {
         self.f32(name)
     }
 
-    fn entry(&self, name: &str) -> Result<&makepad_mlx::MlxTensorEntry> {
+    fn entry(&self, name: &str) -> Result<&makepad_ai_loader::MlxTensorEntry> {
         self.header.tensors.get(name).ok_or_else(|| {
             DiffusionError::model(format!(
                 "sam3 tensor {name} missing from {}",

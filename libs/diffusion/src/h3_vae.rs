@@ -41,7 +41,7 @@ use crate::backend::{
 use crate::h3::H3ShardedWeights;
 use crate::{DiffusionError, Result};
 use makepad_ggml::quant::GGML_TYPE_F16;
-use makepad_mlx::MlxDType;
+use makepad_ai_loader::MlxDType;
 
 pub const H3_VAE_NAMESPACE: &str = "h3vae";
 pub const H3_VAE_LATENT_CHANNELS: usize = 24;

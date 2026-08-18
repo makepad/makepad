@@ -26,7 +26,7 @@ use crate::birefnet::{
 };
 use crate::{DiffusionError, ProgressHook, Result};
 use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
-use makepad_mlx::MlxDType;
+use makepad_ai_loader::MlxDType;
 use std::collections::HashMap;
 
 fn device_error(stage: &str, error: String) -> DiffusionError {

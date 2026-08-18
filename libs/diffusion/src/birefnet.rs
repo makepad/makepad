@@ -10,7 +10,7 @@
 //! image/API contract and all checkpoint validation.
 
 use crate::{DiffusionError, ProgressHook, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
 
 pub const BIREFNET_REPO: &str = "ZhengPeng7/BiRefNet_HR-matting";
@@ -257,7 +257,7 @@ impl BiRefNetWeights {
         Ok(FoldedBatchNorm { scale, shift })
     }
 
-    fn entry(&self, name: &str) -> Result<&makepad_mlx::MlxTensorEntry> {
+    fn entry(&self, name: &str) -> Result<&makepad_ai_loader::MlxTensorEntry> {
         self.header.tensors.get(name).ok_or_else(|| {
             DiffusionError::model(format!(
                 "birefnet tensor {name} missing from {}",

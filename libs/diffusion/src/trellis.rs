@@ -6,7 +6,7 @@
 //! exactly — schedule grid in f64 (numpy), tensor math in f32.
 
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
 
 // DiT trunk (identical across the three flow models).

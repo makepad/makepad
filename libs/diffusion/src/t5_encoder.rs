@@ -15,7 +15,7 @@ use makepad_ggml::{
     Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
     UnaryOp, GGML_MEM_ALIGN, GGML_TYPE_F8_E4M3,
 };
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -2347,7 +2347,7 @@ mod tests {
     };
     use crate::flux::T5TextEncoderConfig;
     use makepad_ggml::TensorType;
-    use makepad_mlx::{MlxDType, MlxTensorEntry};
+    use makepad_ai_loader::{MlxDType, MlxTensorEntry};
     use std::collections::{BTreeMap, HashMap};
     use std::path::PathBuf;
 

@@ -28,7 +28,7 @@ use crate::skin_tokens_tokenizer::{
 };
 use crate::{DiffusionError, Result};
 use makepad_ggml::quant::GGML_TYPE_BF16;
-use makepad_mlx::MlxDType;
+use makepad_ai_loader::MlxDType;
 
 /// Shared with the continuous-prefix encoders so one service unload evicts
 /// every streamed TokenRig matrix, rather than leaving the decoder resident.

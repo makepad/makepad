@@ -8,7 +8,7 @@
 //! are compared stage-by-stage by `sa3-validate`.
 
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::Path;
 
 pub const SA3_SAMPLE_RATE: usize = 44_100;

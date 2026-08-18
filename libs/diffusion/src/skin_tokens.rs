@@ -13,7 +13,7 @@
 //! named tensors); Python/Torch is only used by the parity oracle.
 
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::Path;
 
 /// Declarative source artifact consumed by the shared ai-content lifecycle.

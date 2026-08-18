@@ -11,7 +11,7 @@ use makepad_ggml::{
     f16_to_f32, f32_to_f16, ggml_pad, BufferUsage, Context, Graph, InitParams, Op, ScaleMode,
     Tensor, TensorDesc, TensorId, TensorLayout, TensorType, UnaryOp, GGML_MEM_ALIGN,
 };
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

@@ -5,7 +5,7 @@
 //! exactly — grid math in f64, schedule math in f32, rope angles in f32.
 
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

@@ -28,7 +28,7 @@ use crate::backend::{
 use crate::trellis::TrellisWeights;
 use crate::{DiffusionError, Result};
 use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
-use makepad_mlx::MlxDType;
+use makepad_ai_loader::MlxDType;
 use std::collections::HashMap;
 
 pub const T2_DEC_CHANNELS: [usize; 5] = [1024, 512, 256, 128, 64];

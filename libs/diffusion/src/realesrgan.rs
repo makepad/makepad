@@ -11,7 +11,7 @@
 //! and all checkpoint validation.
 
 use crate::{DiffusionError, ProgressHook, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
 
 pub const REALESRGAN_REPO: &str = "Comfy-Org/Real-ESRGAN_repackaged";
@@ -194,7 +194,7 @@ impl RealEsrganWeights {
             .collect())
     }
 
-    fn entry(&self, name: &str) -> Result<&makepad_mlx::MlxTensorEntry> {
+    fn entry(&self, name: &str) -> Result<&makepad_ai_loader::MlxTensorEntry> {
         self.header.tensors.get(name).ok_or_else(|| {
             DiffusionError::model(format!(
                 "realesrgan tensor {name} missing from {}",

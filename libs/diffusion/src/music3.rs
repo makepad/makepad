@@ -40,7 +40,7 @@ use crate::backend::{
 };
 use crate::h3_tokenizer::H3Tokenizer;
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::{Path, PathBuf};
 
 pub const MUSIC3_SAMPLE_RATE: usize = 44_100;

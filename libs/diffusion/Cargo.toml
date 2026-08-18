@@ -10,7 +10,10 @@ license = "MIT"
 # the first Metal dispatch compiles the shader source at runtime.
 makepad-ggml = { path = "../ggml", features = ["metal-precompile"] }
 makepad-llama = { path = "../llama" }
-makepad-mlx = { path = "../mlx" }
+# Safetensors reader moved out of mlx (lane T2, /aiarch.md §1): mlx's other
+# ~89k LOC (chat/KV, qwen35moe, ...) has no consumers here. mlx itself stays
+# in the tree unbuilt until lane T3 deletes it.
+makepad-ai-loader = { path = "../ai/loader" }
 makepad-gltf = { path = "../gltf" }
 makepad-micro-serde = { path = "../micro_serde" }
 makepad-zune-core = { path = "../zune/zune-core" }

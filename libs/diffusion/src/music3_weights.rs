@@ -8,7 +8,7 @@
 
 use crate::music3_quant::Music3GgufFile;
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

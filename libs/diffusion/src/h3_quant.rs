@@ -2450,6 +2450,7 @@ mod tests {
         entries.insert(format!("{base}.comfy_quant"), nv_info("U8", &[19]));
         let file = Flux2SafetensorsHeader {
             path: PathBuf::new(),
+            header_len: 0,
             tensors: entries,
         };
         let mut tensors = HashMap::new();
@@ -2489,6 +2490,7 @@ mod tests {
         entries.insert(source.to_string(), nv_info("U8", &[128, 32]));
         let file = Flux2SafetensorsHeader {
             path: PathBuf::new(),
+            header_len: 0,
             tensors: entries,
         };
         let err = nv_quant_layout(&file, source).unwrap_err();

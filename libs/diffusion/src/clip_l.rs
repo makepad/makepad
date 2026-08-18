@@ -11,7 +11,7 @@ use makepad_ggml::{
     bf16_to_f32, f16_to_f32, get_rows_ggml_bytes_cpu, ggml_pad, BufferUsage, Context, GluOp, Graph,
     InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType, GGML_MEM_ALIGN,
 };
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -1786,7 +1786,7 @@ mod tests {
     };
     use crate::flux::ClipLTextEncoderConfig;
     use makepad_ggml::TensorType;
-    use makepad_mlx::{MlxDType, MlxTensorEntry};
+    use makepad_ai_loader::{MlxDType, MlxTensorEntry};
 
     #[test]
     fn clip_layout_reverses_rank2_weights_for_ggml_matmul() {

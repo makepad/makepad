@@ -4,7 +4,7 @@ use crate::comfy::{
 };
 use crate::t5::{T5TokenizedPrompt, T5Tokenizer};
 use crate::{DiffusionError, Result};
-use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
+use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::path::{Path, PathBuf};
 
 pub const FLUX_CLIP_L_MAX_LENGTH: usize = 77;

@@ -10,6 +10,10 @@ license = "MIT"
 # MetalRuntime::new() compiles the 13k-line shader source on the GPU via
 # newLibraryWithSource and can stall WindowServer / trip GPU recovery.
 makepad-ggml = { path = "../ggml", features = ["metal-precompile"] }
+# gguf.rs moved here (lane T2, /aiarch.md §1); this crate's src/gguf.rs is
+# now a thin re-export shim. Own `[workspace]`, reached via path dep (same
+# pattern as ../cuda below).
+makepad-ai-loader = { path = "../ai/loader" }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-cuda = { path = "../cuda" }

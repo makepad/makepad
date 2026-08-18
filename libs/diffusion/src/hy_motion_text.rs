@@ -19,7 +19,7 @@ use crate::h3_tokenizer::H3Tokenizer;
 use crate::hy_motion::HY_MOTION_TEXT_TOKENS;
 use crate::{DiffusionError, Result};
 use makepad_ggml::quant::GGML_TYPE_BF16;
-use makepad_mlx::MlxDType;
+use makepad_ai_loader::MlxDType;
 
 pub const HY_MOTION_QWEN_NAMESPACE: &str = "hy-motion-qwen3-8b";
 pub const HY_MOTION_QWEN_VOCAB: usize = 151_936;
