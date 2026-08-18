@@ -19762,11 +19762,11 @@ mod imp {
     }
 
     pub fn supports_affine_quantized_matmul(bits: u32, group_size: u64) -> bool {
-        matches!(bits, 4 | 8) && group_size == 64 && crate::is_available()
+        matches!(bits, 4 | 8) && group_size == 64 && crate::driver::is_available()
     }
 
     pub fn is_available() -> bool {
-        crate::is_available()
+        crate::driver::is_available()
     }
 
     pub fn try_affine_quantized_matmul_bf16<FW, FS, FB>(
