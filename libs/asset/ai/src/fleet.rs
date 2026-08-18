@@ -594,6 +594,7 @@ mod tests {
                 capabilities: None,
                 vram_reserve_mb: None,
                 queue_limit: None,
+                fleet: None,
             }),
             models,
         }

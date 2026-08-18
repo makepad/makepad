@@ -6,7 +6,7 @@
 //!
 //! Kept deliberately tiny and separate from `asset_client::http` (which is
 //! specialized for the asset server's two-plane protocol): this speaks to
-//! `libs/game/asset-ai` service nodes.
+//! `libs/asset/ai` service nodes.
 
 use makepad_asset_client::json::{self, Value};
 use std::io::{Read, Write};

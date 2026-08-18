@@ -15,6 +15,29 @@ use std::time::{Duration, Instant};
 
 /// Fixed LAN port beacons are sent to and clients listen on.
 pub const DISCOVERY_PORT: u16 = 41830;
+/// Backend/frontend partition. Empty or omitted fleet is this value, so an
+/// unscoped box (today's asset-ui / .169) stays on its own lane.
+pub const DEFAULT_FLEET: &str = "default";
+
+/// Lowercase trimmed fleet name. Empty becomes [`DEFAULT_FLEET`].
+pub fn normalize_fleet(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        DEFAULT_FLEET.to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
+    }
+}
+
+/// Frontend filter: `MAKEPAD_AI_FLEET`, else [`DEFAULT_FLEET`].
+pub fn wanted_fleet() -> String {
+    normalize_fleet(&std::env::var("MAKEPAD_AI_FLEET").unwrap_or_default())
+}
+
+/// Backend name: `MAKEPAD_ASSET_AI_FLEET`, else [`DEFAULT_FLEET`].
+pub fn fleet_from_env() -> String {
+    normalize_fleet(&std::env::var("MAKEPAD_ASSET_AI_FLEET").unwrap_or_default())
+}
 const BEACON_INTERVAL: Duration = Duration::from_secs(2);
 /// A node whose beacon has been silent this long drops out of the
 /// discovered set (its fleet snapshot then goes down via health polling).
@@ -28,6 +51,8 @@ pub struct BeaconJson {
     pub node_id: u64,
     /// The service's HTTP port on the sender's address.
     pub port: u16,
+    /// Partition this box belongs to. Missing on older beacons = default.
+    pub fleet: Option<String>,
 }
 
 /// Random-enough node id: wall-clock nanos xor pid. Uniqueness only needs
@@ -43,7 +68,7 @@ pub fn mint_node_id() -> u64 {
 /// Service side: broadcast a beacon every [`BEACON_INTERVAL`] until the
 /// process exits. Failures log once and end the thread — discovery is an
 /// extra, never a crash. `MAKEPAD_AI_NO_BEACON=1` disables.
-pub fn start_beacon(node_id: u64, http_port: u16) {
+pub fn start_beacon(node_id: u64, http_port: u16, fleet: String) {
     if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
         return;
     }
@@ -63,6 +88,7 @@ pub fn start_beacon(node_id: u64, http_port: u16) {
             service: "makepad-asset-ai".to_string(),
             node_id,
             port: http_port,
+            fleet: Some(normalize_fleet(&fleet)),
         }
         .serialize_json();
         loop {
@@ -80,6 +106,7 @@ pub fn start_beacon(node_id: u64, http_port: u16) {
 pub struct DiscoveredNode {
     pub base_url: String,
     pub node_id: u64,
+    pub fleet: String,
 }
 
 /// Live set of discovered nodes, shared with the listener thread.
@@ -97,6 +124,7 @@ impl Discovered {
             .map(|(node_id, (base_url, _))| DiscoveredNode {
                 base_url: base_url.clone(),
                 node_id: *node_id,
+                fleet: wanted_fleet(),
             })
             .collect()
     }
@@ -132,6 +160,10 @@ pub fn start_listener() -> Discovered {
             if beacon.service != "makepad-asset-ai" {
                 continue;
             }
+            let fleet = normalize_fleet(beacon.fleet.as_deref().unwrap_or(""));
+            if fleet != wanted_fleet() {
+                continue;
+            }
             let base_url = format!("http://{}:{}", from.ip(), beacon.port);
             nodes
                 .lock()
@@ -152,12 +184,20 @@ mod tests {
             service: "makepad-asset-ai".to_string(),
             node_id: 0xDEAD_BEEF,
             port: 8767,
+            fleet: Some("game".to_string()),
         };
         let json = beacon.serialize_json();
         let back = BeaconJson::deserialize_json(&json).unwrap();
         assert_eq!(back.node_id, 0xDEAD_BEEF);
         assert_eq!(back.port, 8767);
         assert_eq!(back.service, "makepad-asset-ai");
+        assert_eq!(back.fleet.as_deref(), Some("game"));
+    }
+
+    #[test]
+    fn normalize_empty_is_default() {
+        assert_eq!(normalize_fleet(""), DEFAULT_FLEET);
+        assert_eq!(normalize_fleet(" Game "), "game");
     }
 
     #[test]

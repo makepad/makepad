@@ -1,6 +1,6 @@
 //! The Asset Server wire contract as this client speaks it, in one place.
 //!
-//! Everything here mirrors the server transport (`libs/game/asset-store`): the
+//! Everything here mirrors the server transport (`libs/asset/store`): the
 //! UDP discovery beacon layout, the bearer-token shape, the v1 route paths,
 //! and the request-target charset the server accepts (no percent-encoding, no
 //! dot segments, restricted bytes). Centralizing it means a server-side route

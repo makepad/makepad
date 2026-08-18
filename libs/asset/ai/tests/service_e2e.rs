@@ -40,6 +40,7 @@ fn start_test_service(name: &str) -> LocalService {
         registry: Registry::embedded().unwrap(),
         downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
         peer: peer_off(),
+        fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
     })
     .unwrap();
     let provider = LocalService::new(&format!("http://{}", handle.addr));
@@ -470,6 +471,7 @@ fn node_identity_is_durable_and_capabilities_are_honest() {
             registry: Registry::embedded().unwrap(),
             downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
             peer: peer_off(),
+            fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
         })
         .unwrap();
         // Dropping the handle releases the per-cache-dir singleton lock —

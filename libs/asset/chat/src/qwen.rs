@@ -1,5 +1,5 @@
 //! Fleet/local Qwen chat provider — the adapter seam onto the
-//! `libs/game/asset-ai` service wire.
+//! `libs/asset/ai` service wire.
 //!
 //! ## The proposed additive chat contract (for the fleet backend owner)
 //!

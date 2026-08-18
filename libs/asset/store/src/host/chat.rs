@@ -114,7 +114,10 @@ pub fn spawn_broker(
     let (tx, rx) = mpsc::channel();
     let factory: Box<dyn ProviderFactory> = match cfg.script.clone() {
         Some(script) => Box::new(ScriptedFactory::new(script)),
-        None => Box::new(EnvFactory { fleet_bases: cfg.fleet_bases.clone() }),
+        None => Box::new(EnvFactory {
+            fleet_bases: cfg.fleet_bases.clone(),
+            fleet: cfg.fleet.clone(),
+        }),
     };
     let join = std::thread::Builder::new()
         .name("asset-server-chat".into())
@@ -805,6 +808,15 @@ trait ProviderFactory: Send {
 
 struct EnvFactory {
     fleet_bases: Vec<String>,
+    fleet: String,
+}
+
+impl EnvFactory {
+    fn bases(&self) -> Vec<String> {
+        makepad_asset_chat::fleet_discovery::set_wanted_fleet(&self.fleet);
+        makepad_asset_chat::fleet_discovery::seed_bases(self.fleet_bases.clone());
+        makepad_asset_chat::fleet_discovery::live_bases()
+    }
 }
 
 impl ProviderFactory for EnvFactory {
@@ -819,7 +831,7 @@ impl ProviderFactory for EnvFactory {
         match kind {
             ProviderKind::FleetQwen => Ok(Box::new(FleetQwenChatProvider::new(
                 HttpFleetTransport,
-                self.fleet_bases.clone(),
+                self.bases(),
             ))),
             ProviderKind::OpenAi => Ok(Box::new(makepad_asset_chat::openai::from_env())),
             ProviderKind::Grok => Ok(Box::new(makepad_asset_chat::grok::from_env())),

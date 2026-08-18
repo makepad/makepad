@@ -7,7 +7,7 @@
 //! so a payload cannot redirect a client to a third host. Nothing a beacon
 //! carries is trusted until [`crate::AssetClient::connect`] health-checks the
 //! endpoint over HTTP, verifies the server identity matches, and probes the
-//! caller's credential. See `libs/game/asset-store/src/discovery.rs` for the
+//! caller's credential. See `libs/asset/store/src/discovery.rs` for the
 //! authoritative wire notes; the 36-byte layout is mirrored in
 //! [`crate::wire`].
 

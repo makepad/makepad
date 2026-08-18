@@ -29,6 +29,7 @@ fn start() -> (AssetServer, String) {
     cfg.bootstrap_admin = true;
     cfg.log = false;
     cfg.chat = ChatConfig {
+        fleet: String::new(),
         fleet_bases: Vec::new(),
         max_sessions: 8,
         max_sessions_per_owner: 4,

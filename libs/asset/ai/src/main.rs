@@ -6,6 +6,7 @@
 //!
 //!   --port      listen port          (env MAKEPAD_ASSET_AI_PORT, default 8765)
 //!   --host      bind address         (default 0.0.0.0)
+//!   --fleet     partition name       (env MAKEPAD_ASSET_AI_FLEET, default default)
 //!   --cache-dir model + artifact dir (env MAKEPAD_ASSET_AI_CACHE,
 //!                                     default <home>/.makepad/ai_content)
 //!   --registry  registry json path   (default: <cache-dir>/registry.json if it
@@ -31,6 +32,7 @@ fn main() {
 fn run() -> Result<(), AssetAiError> {
     let mut port: Option<u16> = None;
     let mut host = "0.0.0.0".to_string();
+    let mut fleet: Option<String> = None;
     let mut cache_dir: Option<PathBuf> = None;
     let mut registry_path: Option<PathBuf> = None;
 
@@ -52,6 +54,11 @@ fn run() -> Result<(), AssetAiError> {
                     .next()
                     .ok_or_else(|| AssetAiError::Io("--host needs a value".into()))?;
             }
+            "--fleet" => {
+                fleet = Some(args.next().ok_or_else(|| {
+                    AssetAiError::Io("--fleet needs a value".into())
+                })?);
+            }
             "--cache-dir" => {
                 cache_dir = Some(PathBuf::from(args.next().ok_or_else(|| {
                     AssetAiError::Io("--cache-dir needs a value".into())
@@ -64,7 +71,7 @@ fn run() -> Result<(), AssetAiError> {
             }
             "--help" | "-h" => {
                 println!(
-                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--cache-dir PATH] [--registry PATH]"
+                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH]"
                 );
                 return Ok(());
             }
@@ -84,6 +91,9 @@ fn run() -> Result<(), AssetAiError> {
         },
     };
     let cache_dir = cache_dir.unwrap_or_else(default_cache_dir);
+    let fleet = makepad_asset_ai::discovery::normalize_fleet(
+        &fleet.unwrap_or_else(makepad_asset_ai::discovery::fleet_from_env),
+    );
 
     // Registry: explicit path > registry.json dropped into the cache dir
     // (per-box extension without a rebuild) > embedded seed registry.
@@ -109,10 +119,12 @@ fn run() -> Result<(), AssetAiError> {
         // (MAKEPAD_AI_PEER_SECRET or <cache>/peer-secret enables serving;
         // MAKEPAD_AI_PEER_SOURCES injects download sources).
         peer: Default::default(),
+        fleet: fleet.clone(),
     })?;
 
     println!("{SERVICE_NAME} {SERVICE_VERSION}");
     println!("  listening on http://{}", handle.addr);
+    println!("  fleet {fleet}");
     println!("  cache dir {}", cache_dir.display());
     if std::env::var("HF_TOKEN").is_ok() {
         println!("  HF_TOKEN present (gated repos enabled)");

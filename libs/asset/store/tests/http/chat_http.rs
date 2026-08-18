@@ -10,6 +10,7 @@ use makepad_asset_store::{ChatConfig, ChatScript, ScriptedLane, ScriptedTurn};
 fn scripted_cfg() -> impl FnOnce(&mut makepad_asset_store::ServerConfig) {
     |cfg| {
         cfg.chat = ChatConfig {
+            fleet: String::new(),
             fleet_bases: Vec::new(),
             max_sessions: 8,
             max_sessions_per_owner: 4,

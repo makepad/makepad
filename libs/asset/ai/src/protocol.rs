@@ -46,6 +46,9 @@ pub struct HealthJson {
     pub vram_reserve_mb: Option<u64>,
     /// Max queued jobs before POST /generate refuses with 409 "queue full".
     pub queue_limit: Option<u64>,
+    /// Partition this process belongs to (`--fleet` / `MAKEPAD_ASSET_AI_FLEET`).
+    /// Missing on services predating the field; clients treat that as `default`.
+    pub fleet: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

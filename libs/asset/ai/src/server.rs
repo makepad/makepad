@@ -33,6 +33,8 @@ pub struct ServiceConfig {
     /// Peer-assisted model-cache distribution knobs (all optional; env/file
     /// fallbacks — see [`crate::peer_serve::PeerOptions`]).
     pub peer: crate::peer_serve::PeerOptions,
+    /// Partition advertised on `/health` and LAN beacons.
+    pub fleet: String,
 }
 
 pub struct ServiceHandle {
@@ -185,6 +187,8 @@ pub struct ServiceShared {
     pub residency: ResidencyConfig,
     /// Last time each model's backend ran a job (LRU input for eviction).
     pub last_used: Mutex<HashMap<String, Instant>>,
+    /// Partition advertised on `/health` and LAN beacons.
+    pub fleet: String,
     /// Peer-assisted model distribution state: transfer secret, serve
     /// bounds, in-flight serve leases, operator-injected sources.
     pub peer: crate::peer_serve::PeerRuntime,
@@ -268,11 +272,12 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         started_ms: crate::jobs::now_ms(),
         residency: ResidencyConfig::from_env(),
         last_used: Mutex::new(HashMap::new()),
+        fleet: crate::discovery::normalize_fleet(&config.fleet),
         peer,
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
-    // fleet-file edit.
-    crate::discovery::start_beacon(node_id, port);
+    // fleet-file edit. Frontends keep only beacons whose fleet matches.
+    crate::discovery::start_beacon(node_id, port, shared.fleet.clone());
 
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
     // Character chains relay self-contained GLBs between mesh, rig, and
@@ -547,6 +552,7 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         capabilities: Some(capabilities),
         vram_reserve_mb: Some(shared.residency.reserve_mb),
         queue_limit: Some(queue_limit),
+        fleet: Some(shared.fleet.clone()),
     }
 }
 
@@ -1386,6 +1392,7 @@ mod lifecycle_tests {
             started_ms: 0,
             residency,
             last_used: Mutex::new(HashMap::new()),
+            fleet: crate::discovery::DEFAULT_FLEET.to_string(),
             peer: crate::peer_serve::PeerRuntime::resolve(
                 &peer_options,
                 &std::env::temp_dir(),

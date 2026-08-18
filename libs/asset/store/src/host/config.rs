@@ -132,6 +132,8 @@ pub struct ServerConfig {
 /// node URLs are operator-supplied and never appear on the chat wire.
 #[derive(Clone, Debug)]
 pub struct ChatConfig {
+    /// Named fleet this server will use. Empty = `default`.
+    pub fleet: String,
     /// Fleet/local Qwen node base URLs (`http://10.0.0.217:8765`).
     pub fleet_bases: Vec<String>,
     pub max_sessions: usize,
@@ -145,6 +147,7 @@ pub struct ChatConfig {
 impl Default for ChatConfig {
     fn default() -> Self {
         ChatConfig {
+            fleet: String::new(),
             fleet_bases: Vec::new(),
             max_sessions: 32,
             max_sessions_per_owner: 8,
