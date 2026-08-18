@@ -1,0 +1,28 @@
+# Content chat/tool protocol — the reusable seam between a chat UI (AI
+# Content now, the game sandbox later), the three explicit chat providers
+# (fleet/local Qwen, OpenAI Responses, xAI Grok Responses), and the Asset
+# Server that actually executes every content tool.
+#
+# Wired into the root workspace by AI Content + Asset Server chat.
+# Dependency policy mirrors the asset family: the content contract, the
+# hardened asset client, and the shared bounded HTTP client in
+# makepad-network. No async runtime, no extra JSON crate, no UI Cx.
+# Secrets never appear on the client wire.
+
+[package]
+name = "makepad-asset-chat"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Provider-explicit chat + content-tool protocol over the Makepad Asset Server (fleet Qwen / OpenAI / xAI Grok)"
+
+[dependencies]
+makepad-asset-data = { path = "../data" }
+makepad-asset-client = { path = "../client" }
+makepad-network = { path = "../../../platform/network" }
+
+[dev-dependencies]
+# The REAL dispatch proof: tool execution runs against an actual AssetServer
+# over sockets, with a deterministic in-test worker standing in for the GPU
+# fleet. Mocks exist only inside tests, never as a runtime fallback.
+makepad-asset-store = { path = "../store" }

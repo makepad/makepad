@@ -1,0 +1,26 @@
+# Catalog store: CAS/SQLite core plus the HTTP/UDP host that asset-ui and
+# sandbox embed. The standalone binary is the same crate, for rare
+# out-of-process runs.
+
+[package]
+name = "makepad-asset-store"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_asset_store"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-asset-store"
+path = "src/bin/makepad-asset-store.rs"
+
+[dependencies]
+makepad-asset-data = { path = "../data" }
+makepad-asset-chat = { path = "../chat" }
+makepad-asset-client = { path = "../client" }
+
+[dev-dependencies]
+makepad-asset-client = { path = "../client" }
+

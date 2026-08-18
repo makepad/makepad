@@ -1,0 +1,383 @@
+//! Chat broker HTTP: provider listing, owner-scoped sessions, send, events,
+//! cancel, retire. Credentials and provider base URLs never appear here.
+
+use super::api::{body_str, body_u64, parse_limit, principal_str, Fail, RouteResult};
+use super::chat::{ChatFail, ChatHandle, ProviderStatus, SessionView};
+use super::http::{Conn, Head, Method, Resp};
+use super::json::{obj, s, Value};
+use super::routes::{call_state, is_read, method_not_allowed, require_cap, secret_of, Outcome, RouteCtx};
+use super::routes_control::read_json_body;
+use super::util::now_ms;
+use makepad_asset_chat::session::SessionId;
+use makepad_asset_chat::wire::{AttachmentBinding, ChatEvent, ProviderKind, MAX_ATTACHMENTS};
+use crate::{validate_namespace, Capability, PrincipalId};
+use makepad_asset_data::AssetRevisionId;
+use std::str::FromStr;
+
+const EVENT_WAIT_SLICE_MS: u64 = 250;
+const MAX_CHAT_EVENT_WAITERS: usize = 8;
+
+struct WaiterSlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> WaiterSlot<'a> {
+    fn acquire(counter: &'a std::sync::atomic::AtomicUsize) -> Option<WaiterSlot<'a>> {
+        let mut current = counter.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if current >= MAX_CHAT_EVENT_WAITERS {
+                return None;
+            }
+            match counter.compare_exchange(
+                current,
+                current + 1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(WaiterSlot(counter)),
+                Err(found) => current = found,
+            }
+        }
+    }
+}
+
+impl<'a> Drop for WaiterSlot<'a> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+pub fn dispatch(
+    conn: &mut Conn,
+    head: &mut Head,
+    rc: &RouteCtx,
+    segs: &[&str],
+) -> Option<RouteResult<Outcome>> {
+    let m = head.method;
+    let result = match segs {
+        ["v1", "chat", "providers"] => {
+            if is_read(m) {
+                providers(head, rc)
+            } else {
+                method_not_allowed()
+            }
+        }
+        ["v1", "chat", "sessions"] if m == Method::Post => session_create(conn, head, rc),
+        ["v1", "chat", "sessions", id] if is_read(m) => session_get(head, rc, id),
+        ["v1", "chat", "sessions", id] if m == Method::Delete => session_retire(head, rc, id),
+        ["v1", "chat", "sessions", id, "send"] if m == Method::Post => {
+            session_send(conn, head, rc, id)
+        }
+        ["v1", "chat", "sessions", id, "events"] if is_read(m) => session_events(head, rc, id),
+        ["v1", "chat", "sessions", id, "cancel"] if m == Method::Post => {
+            session_cancel(conn, head, rc, id)
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+fn chat_of(rc: &RouteCtx) -> RouteResult<&ChatHandle> {
+    rc.chat.as_ref().ok_or(Fail::StateDown)
+}
+
+fn sid_of(id: &str) -> RouteResult<SessionId> {
+    SessionId::parse(id).ok_or(Fail::Http(400, "malformed session id"))
+}
+
+fn auth_owner(head: &Head, rc: &RouteCtx, ns: Option<&str>) -> RouteResult<(PrincipalId, String)> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let ns_owned = ns.map(str::to_string);
+    call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        if let Some(ns) = &ns_owned {
+            require_cap(ctx, &p, Capability::Chat, ns)?;
+        }
+        Ok((p, secret))
+    })
+}
+
+fn check_known_fields(v: &Value, allowed: &[&str], what: &'static str) -> RouteResult<()> {
+    if let Value::Obj(pairs) = v {
+        for (key, _) in pairs {
+            if !allowed.contains(&key.as_str()) {
+                return Err(Fail::Http(400, what));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn providers(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let _ = auth_owner(head, rc, None)?;
+    let rows = match chat_of(rc)?.list_providers() {
+        Ok(rows) => rows,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("providers", Value::Arr(rows.iter().map(provider_value).collect()))]),
+    )))
+}
+
+fn session_create(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let body = match read_json_body(conn, head, rc) {
+        Err(o) => return Ok(o),
+        Ok(r) => r?,
+    };
+    check_known_fields(&body, &["api_version", "namespace", "provider"], "unknown chat session field")?;
+    match body_u64(&body, "api_version") {
+        Some(1) => {}
+        _ => return Err(Fail::Http(400, "unsupported api_version")),
+    }
+    let ns = body_str(&body, "namespace")?.to_string();
+    validate_namespace(&ns).map_err(Fail::Srv)?;
+    let provider = ProviderKind::from_slug(body_str(&body, "provider")?)
+        .ok_or(Fail::Http(400, "unknown chat provider"))?;
+    let (owner, token) = auth_owner(head, rc, Some(&ns))?;
+    let view = match chat_of(rc)?.create(owner, ns, token, provider) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    Ok(Outcome::Resp(Resp::json(201, &session_value(&view))))
+}
+
+fn session_get(head: &Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let view = match chat_of(rc)?.get(owner, id) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    Ok(Outcome::Resp(Resp::json(200, &session_value(&view))))
+}
+
+fn session_send(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let body = match read_json_body(conn, head, rc) {
+        Err(o) => return Ok(o),
+        Ok(r) => r?,
+    };
+    check_known_fields(&body, &["text", "attachments"], "unknown chat send field")?;
+    let text = body_str(&body, "text")?.to_string();
+    let attachments = attachments_of(&body)?;
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let view = match chat_of(rc)?.get(owner, id.clone()) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    require_chat_ns(head, rc, &view.namespace)?;
+    let turn = match chat_of(rc)?.send(owner, id, text, attachments) {
+        Ok(t) => t,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    Ok(Outcome::Resp(Resp::json(200, &obj(vec![("turn", Value::Int(turn.min(i64::MAX as u64) as i64))]))))
+}
+
+fn session_events(head: &Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let after = match head.query_get("after") {
+        None => 0,
+        Some(t) => {
+            if t.is_empty() || t.len() > 12 || !t.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Fail::Http(400, "malformed after"));
+            }
+            t.parse().map_err(|_| Fail::Http(400, "malformed after"))?
+        }
+    };
+    let wait_ms = match head.query_get("wait") {
+        None => 0,
+        Some(t) => {
+            if t.is_empty() || t.len() > 6 || !t.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Fail::Http(400, "malformed wait"));
+            }
+            let n: u64 = t.parse().map_err(|_| Fail::Http(400, "malformed wait"))?;
+            n.min(rc.cfg.chat.event_max_wait_ms)
+        }
+    };
+    let limit = parse_limit(head.query_get("limit"), 64, 256)? as u32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    let mut slot: Option<WaiterSlot<'_>> = None;
+    loop {
+        let (events, cursor) = match chat_of(rc)?.events(owner, id.clone(), after, limit) {
+            Ok(v) => v,
+            Err(e) => return Ok(chat_outcome(e)),
+        };
+        let park = events.is_empty()
+            && std::time::Instant::now() < deadline
+            && match &slot {
+                Some(_) => true,
+                None => {
+                    slot = WaiterSlot::acquire(&rc.chat_event_waiters);
+                    slot.is_some()
+                }
+            };
+        if !park {
+            let encoded: Vec<Value> = events.iter().map(event_value).collect();
+            return Ok(Outcome::Resp(Resp::json(
+                200,
+                &obj(vec![
+                    ("events", Value::Arr(encoded)),
+                    ("cursor", Value::Int(cursor.min(i64::MAX as u64) as i64)),
+                ]),
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            EVENT_WAIT_SLICE_MS.min(wait_ms.max(1)),
+        ));
+    }
+}
+
+fn session_cancel(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let _body = match read_json_body(conn, head, rc) {
+        Err(o) => return Ok(o),
+        Ok(r) => r?,
+    };
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let view = match chat_of(rc)?.get(owner, id.clone()) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    require_chat_ns(head, rc, &view.namespace)?;
+    let view = match chat_of(rc)?.cancel(owner, id) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    Ok(Outcome::Resp(Resp::json(200, &session_value(&view))))
+}
+
+fn session_retire(head: &Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let view = match chat_of(rc)?.get(owner, id.clone()) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    require_chat_ns(head, rc, &view.namespace)?;
+    let retired = match chat_of(rc)?.retire(owner, id) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    Ok(Outcome::Resp(Resp::json(200, &obj(vec![("retired", Value::Bool(retired))]))))
+}
+
+fn require_chat_ns(head: &Head, rc: &RouteCtx, ns: &str) -> RouteResult<()> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let ns = ns.to_string();
+    call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_cap(ctx, &p, Capability::Chat, &ns)
+    })
+}
+
+fn attachments_of(body: &Value) -> RouteResult<Vec<AttachmentBinding>> {
+    let Some(raw) = body.get("attachments") else {
+        return Ok(Vec::new());
+    };
+    let arr = raw.as_arr().ok_or(Fail::Http(400, "attachments must be an array"))?;
+    if arr.len() > MAX_ATTACHMENTS {
+        return Err(Fail::Http(400, "too many attachments"));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        check_known_fields(entry, &["revision", "role"], "unknown attachment field")?;
+        let rev = body_str(entry, "revision")?;
+        let revision =
+            AssetRevisionId::from_str(rev).map_err(|_| Fail::Http(400, "malformed revision id"))?;
+        let role = body_str(entry, "role")?.to_string();
+        let binding = AttachmentBinding { revision, role };
+        binding.validate().map_err(|_| Fail::Http(400, "malformed attachment"))?;
+        out.push(binding);
+    }
+    Ok(out)
+}
+
+fn provider_value(row: &ProviderStatus) -> Value {
+    let mut pairs = vec![("kind", s(row.kind.slug()))];
+    if row.available {
+        pairs.push(("state", s("available")));
+        if let Some(model) = &row.model {
+            pairs.push(("model", s(model.clone())));
+        }
+    } else {
+        pairs.push(("state", s("unavailable")));
+        if let Some(reason) = &row.reason {
+            pairs.push(("reason", s(reason.clone())));
+        }
+    }
+    obj(pairs)
+}
+
+fn session_value(view: &SessionView) -> Value {
+    obj(vec![
+        ("session", s(view.id.as_str())),
+        ("namespace", s(view.namespace.clone())),
+        ("provider", s(view.provider.slug())),
+        ("owner", s(principal_str(&view.owner))),
+        ("state", s(view.state)),
+        ("turn", Value::Int(view.turn.min(i64::MAX as u64) as i64)),
+        ("idle", Value::Bool(view.idle)),
+    ])
+}
+
+fn event_value(ev: &ChatEvent) -> Value {
+    let encoded = ev.encode().to_json();
+    match super::json::parse(encoded.as_bytes()) {
+        Ok(v) => v,
+        Err(_) => obj(vec![
+            ("seq", Value::Int(ev.seq.min(i64::MAX as u64) as i64)),
+            ("type", s("error")),
+            ("code", s("encode")),
+            ("message", s("event encode failed")),
+        ]),
+    }
+}
+
+fn chat_outcome(e: ChatFail) -> Outcome {
+    match e {
+        ChatFail::Down => Outcome::Resp(Resp::error(503, "state unavailable")),
+        ChatFail::NotFound => Outcome::Resp(Resp::error(404, "not found")),
+        ChatFail::Busy => Outcome::Resp(Resp::json(
+            409,
+            &obj(vec![("error", s("busy"))]),
+        )),
+        ChatFail::Sealed { reason } => Outcome::Resp(Resp::json(
+            409,
+            &obj(vec![("error", s("sealed")), ("reason", s(reason))]),
+        )),
+        ChatFail::ProviderUnavailable { reason } => Outcome::Resp(Resp::json(
+            503,
+            &obj(vec![("error", s("provider_unavailable")), ("reason", s(reason))]),
+        )),
+        ChatFail::ProviderError { message } => Outcome::Resp(Resp::json(
+            502,
+            &obj(vec![("error", s("provider")), ("message", s(message))]),
+        )),
+        ChatFail::TooLarge { what } => Outcome::Resp(Resp::json(
+            413,
+            &obj(vec![("error", s("too_large")), ("what", s(what))]),
+        )),
+        ChatFail::TooMany { what } => Outcome::Resp(Resp::json(
+            400,
+            &obj(vec![("error", s("too_many")), ("what", s(what))]),
+        )),
+        ChatFail::HistoryFull => Outcome::Resp(Resp::json(
+            409,
+            &obj(vec![("error", s("history_full"))]),
+        )),
+        ChatFail::InvalidAttachment { what } => Outcome::Resp(Resp::json(
+            400,
+            &obj(vec![("error", s("invalid_attachment")), ("what", s(what))]),
+        )),
+        ChatFail::OverBudget { what } => Outcome::Resp(Resp::json(
+            413,
+            &obj(vec![("error", s("over_budget")), ("what", s(what))]),
+        )),
+        ChatFail::ToolsConnect { message } => Outcome::Resp(Resp::json(
+            503,
+            &obj(vec![("error", s("tools_unavailable")), ("message", s(message))]),
+        )),
+    }
+}
