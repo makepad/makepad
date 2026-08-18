@@ -1,9 +1,0 @@
-[package]
-name = "makepad-mlx-cli"
-version = "0.1.0"
-edition = "2021"
-description = "Command-line chat interface for the Makepad MLX runtime"
-license = "MIT"
-
-[dependencies]
-makepad-mlx = { path = ".." }

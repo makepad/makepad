@@ -78,7 +78,6 @@ workspace.exclude = [
     # target-specific path dep of libs/llama)
     "libs/cuda",
     "libs/voice",
-    "libs/voice2",
     "libs/tts",
     "widgets/test",
     "libs/stitch",
