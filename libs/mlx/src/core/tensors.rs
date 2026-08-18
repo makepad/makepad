@@ -13,6 +13,10 @@ pub enum MlxDType {
     BF16,
     F32,
     F64,
+    /// Signed FP8 E4M3FN (safetensors "F8_E4M3"): 1 sign + 4 exponent (bias 7)
+    /// + 3 mantissa bits, no infinities, 0x7f/0xff are NaN. Raw storage dtype
+    /// only — consumers must opt in explicitly (no implicit f32 widening).
+    F8E4M3,
 }
 
 impl MlxDType {
@@ -31,6 +35,7 @@ impl MlxDType {
             "BF16" => Ok(Self::BF16),
             "F32" => Ok(Self::F32),
             "F64" => Ok(Self::F64),
+            "F8_E4M3" => Ok(Self::F8E4M3),
             other => Err(MlxRtError::InvalidSafetensors {
                 path: PathBuf::new(),
                 message: format!("unsupported dtype {}", other),
@@ -40,7 +45,7 @@ impl MlxDType {
 
     pub fn byte_width(self) -> u64 {
         match self {
-            Self::Bool | Self::U8 | Self::I8 => 1,
+            Self::Bool | Self::U8 | Self::I8 | Self::F8E4M3 => 1,
             Self::U16 | Self::I16 | Self::F16 | Self::BF16 => 2,
             Self::U32 | Self::I32 | Self::F32 => 4,
             Self::U64 | Self::I64 | Self::F64 => 8,
@@ -229,6 +234,48 @@ impl MlxSafetensorsHeader {
             })?;
         let file_offsets = entry.file_offsets(self.payload_base_offset());
         self.read_file_range(file_offsets[0], entry.data_len_bytes() as usize)
+    }
+
+    /// Component view of a combined checkpoint: keeps only the tensors whose
+    /// name starts with `prefix`, with the prefix stripped, sharing this
+    /// header's file handle and payload offsets. Loaders written against a
+    /// separate component file (e.g. a standalone t5xxl/clip/vae safetensors)
+    /// work unchanged on the view, and per-tensor range reads mean only the
+    /// component's byte ranges are ever read. Errors when nothing matches or
+    /// when stripping collides with an existing name (malformed header).
+    pub fn scoped_to_prefix(&self, prefix: &str) -> Result<Self> {
+        let mut tensors = HashMap::new();
+        for (name, entry) in &self.tensors {
+            let Some(stripped) = name.strip_prefix(prefix) else {
+                continue;
+            };
+            if stripped.is_empty() {
+                continue;
+            }
+            if tensors.insert(stripped.to_string(), entry.clone()).is_some() {
+                return Err(MlxRtError::InvalidSafetensors {
+                    path: self.path.clone(),
+                    message: format!(
+                        "prefix scope {:?} produces duplicate tensor name {:?}",
+                        prefix, stripped
+                    ),
+                });
+            }
+        }
+        if tensors.is_empty() {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!("no tensors under prefix {:?}", prefix),
+            });
+        }
+        Ok(Self {
+            path: self.path.clone(),
+            file_len: self.file_len,
+            header_len: self.header_len,
+            metadata: self.metadata.clone(),
+            tensors,
+            file: Arc::clone(&self.file),
+        })
     }
 
     pub fn read_rank2_row_bytes(&self, name: &str, row: u64) -> Result<Vec<u8>> {

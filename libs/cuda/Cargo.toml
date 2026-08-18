@@ -7,4 +7,8 @@ license = "MIT"
 
 [dependencies]
 
+[[bin]]
+name = "cudnn-v8-bench"
+path = "src/bin/cudnn_v8_bench.rs"
+
 [workspace]

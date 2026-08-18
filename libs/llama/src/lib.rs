@@ -1,4 +1,6 @@
 mod error;
+pub mod cuda_exec;
+pub mod exec;
 pub mod gemma4;
 pub mod gemma4_runtime;
 pub mod gguf;
@@ -14,7 +16,13 @@ pub mod vision;
 pub mod vocab;
 pub mod weights;
 
+pub use cuda_exec::{
+    CompiledHybridDecodeCuda, CudaContextArena, CudaDeviceFeatures, CudaExecRuntime,
+};
 pub use error::{LlamaError, Result};
+pub use exec::{
+    CompiledHybridDecode, ExecBackendKind, ExecContextBuffers, ExecFeatures, ExecRuntime,
+};
 pub use gemma4::{Gemma4GlobalTensors, Gemma4LayerTensors, Gemma4Tensors};
 pub use gemma4_runtime::{
     gemma4_attention_block_layout, gemma4_attention_block_spec, gemma4_attention_decode_spec,

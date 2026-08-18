@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::context::Context;
 use crate::core::{ggml_pad, GGML_MEM_ALIGN, GGML_SCALE_FLAG_ALIGN_CORNERS};
@@ -953,6 +953,8 @@ pub struct MetalPreparedNode {
     pub node_id: NodeId,
     pub tail_offset_bytes: usize,
     pub stages: Vec<MetalPreparedStage>,
+    pub fuse_src_ids: Vec<NodeId>,
+    pub output_id: NodeId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -962,6 +964,9 @@ pub struct MetalPreparedGraph {
     pub bindings: BTreeMap<TensorId, MetalTensorBinding>,
     pub main_buffer_size: usize,
     pub tail_buffer_size: usize,
+    /// Storage roots whose range the reuse planner recycled mid-graph. Their
+    /// bytes (and any view into them) are not readable after execute.
+    pub reclaimed: BTreeSet<TensorId>,
 }
 
 #[derive(Clone, Debug)]
@@ -978,6 +983,8 @@ pub struct MetalCompiledNode {
     pub node_id: NodeId,
     pub tail_offset_bytes: usize,
     pub stages: Vec<MetalCompiledStage>,
+    pub fuse_src_ids: Vec<NodeId>,
+    pub output_id: NodeId,
 }
 
 #[derive(Clone, Debug)]
@@ -995,6 +1002,10 @@ pub struct MetalCompiledGraph {
     /// single-buffer behavior.
     pub ro_buffer: Option<super::MetalBuffer>,
     pub ro_split: usize,
+    /// Storage roots whose range the reuse planner recycled mid-graph.
+    /// Readback of these (or views into them) errors instead of returning
+    /// whichever tensor reused the slot.
+    pub reclaimed: BTreeSet<TensorId>,
 }
 
 /// Buffers backing one logical context address space: an optional
@@ -1023,7 +1034,7 @@ pub fn prepare_graph(
     features: MetalDeviceFeatures,
 ) -> Result<MetalPreparedGraph, String> {
     let graph_plan = build_graph_plan(ctx, graph, features)?;
-    let (bindings, main_buffer_size) = collect_tensor_bindings(ctx, graph)?;
+    let (bindings, main_buffer_size, reclaimed) = collect_tensor_bindings(ctx, graph, &graph_plan)?;
     let mut tail_cursor = 0usize;
     let mut nodes = Vec::with_capacity(graph_plan.nodes.len());
     for plan in &graph_plan.nodes {
@@ -1052,6 +1063,7 @@ pub fn prepare_graph(
         bindings,
         main_buffer_size,
         tail_buffer_size,
+        reclaimed,
     })
 }
 
@@ -1060,8 +1072,55 @@ pub fn create_context_main_buffer(
     ctx: &Context,
     storage: BufferStorageMode,
 ) -> Result<super::MetalBuffer, String> {
-    let main_bytes = collect_main_buffer_bytes(ctx, ctx.mem_size())?;
+    // Two-region contexts: the CPU arena is only the dirty prefix. The
+    // logical mem_size includes the mapped weight region and must not be
+    // used as the Metal dirty-buffer length (that requested 32GiB).
+    let len = if ctx.ro_split() != 0 {
+        ctx.mem_buffer().len()
+    } else {
+        ctx.mem_size()
+    };
+    let main_bytes = collect_main_buffer_bytes(ctx, len)?;
     runtime.create_buffer_with_bytes(&main_bytes, storage)
+}
+
+/// Metal dirty buffer covering planned activations for a two-region
+/// context. Sized to `dirty_size` (prepared.main_buffer_size - ro_split),
+/// with the CPU dirty prefix (inputs / constants) copied in. Never wraps
+/// a huge overcommitted CPU arena — that is what failed at 32GiB.
+pub fn warmup_affine_qmm_weights(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+) -> Result<usize, String> {
+    super::qmm::warmup_affine_qmm(runtime, ctx)
+}
+
+pub fn create_context_dirty_buffer(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    dirty_size: usize,
+    storage: BufferStorageMode,
+) -> Result<super::MetalBuffer, String> {
+    let dirty_size = dirty_size.max(1);
+    let arena = ctx.mem_buffer();
+    let used = if ctx.ro_split() != 0 {
+        ctx.used_mem().saturating_sub(ctx.ro_split()).min(arena.len())
+    } else {
+        ctx.used_mem().min(arena.len())
+    };
+    if used > dirty_size {
+        return Err(format!(
+            "dirty prefix ({used}) exceeds planned Metal dirty buffer ({dirty_size})"
+        ));
+    }
+    // Allocate the planned activation buffer and blit only the host
+    // prefix (inputs / rope / ones). Do not materialize a host image of
+    // the whole dirty region — that is how 10GB+ zeros showed up.
+    let buffer = runtime.create_buffer(dirty_size, storage)?;
+    if used > 0 {
+        runtime.write_buffer(&buffer, 0, &arena[..used])?;
+    }
+    Ok(buffer)
 }
 
 fn os_page_size() -> usize {
@@ -1189,6 +1248,8 @@ fn compile_prepared_graph_from_buffers(
             node_id: node.node_id,
             tail_offset_bytes: node.tail_offset_bytes,
             stages,
+            fuse_src_ids: node.fuse_src_ids.clone(),
+            output_id: node.output_id,
         });
     }
 
@@ -1202,6 +1263,7 @@ fn compile_prepared_graph_from_buffers(
         tail_buffer,
         ro_buffer,
         ro_split,
+        reclaimed: prepared.reclaimed.clone(),
     })
 }
 
@@ -1276,7 +1338,46 @@ impl MetalGraphSession {
         main_storage: BufferStorageMode,
         tail_storage: BufferStorageMode,
     ) -> Result<Self, String> {
+        // Mapped GGUF weights live in a two-region context. Bind the file
+        // mapping no-copy (llama decode) and allocate a dirty Metal buffer
+        // sized to the *planned* activation peak — not the CPU dirty arena
+        // (which either is too small, or was grown to 32GiB and rejected).
+        if ctx.ro_split() != 0 {
+            let ro_buffer = create_context_ro_buffer(&runtime, ctx)?;
+            let ro_split = if ro_buffer.is_some() {
+                ctx.ro_split()
+            } else {
+                0
+            };
+            let dirty_needed = prepared
+                .main_buffer_size
+                .saturating_sub(ro_split)
+                .max(1);
+            eprintln!(
+                "metal: two-region session ro_split={} dirty_needed={} dirty_used={} arena={} cooldown={}",
+                ro_split,
+                dirty_needed,
+                ctx.used_mem().saturating_sub(ctx.ro_split()),
+                ctx.mem_buffer().len(),
+                reuse_cooldown()
+            );
+            let main_buffer =
+                create_context_dirty_buffer(&runtime, ctx, dirty_needed, main_storage)?;
+            let buffers = MetalContextBuffers {
+                ro_buffer,
+                ro_split,
+                main_buffer,
+            };
+            let _ = super::qmm::warmup_affine_qmm(&runtime, ctx);
+            return Self::from_runtime_with_context_buffers(
+                runtime,
+                prepared,
+                &buffers,
+                tail_storage,
+            );
+        }
         let compiled = compile_prepared_graph(&runtime, ctx, prepared, main_storage, tail_storage)?;
+        let _ = super::qmm::warmup_affine_qmm(&runtime, ctx);
         Ok(Self { runtime, compiled })
     }
 
@@ -1338,23 +1439,86 @@ pub fn execute_compiled_graph_with_buffer_inputs(
     buffer_inputs: &[MetalGraphTensorBufferCopy<'_>],
     outputs: &[TensorId],
 ) -> Result<MetalGraphExecution, String> {
+    if super::qmm::affine_qmm_enabled()
+        || std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some()
+    {
+        runtime.reset_counters();
+    }
+    // Write host inputs while the GPU is idle (after the previous
+    // execute's readback wait). A Shared memcpy inside an active batch
+    // was invisible to later compute: Flux kept the step-0 packed
+    // latents and only the timestep write appeared to change.
+    for input in inputs {
+        let binding = binding(compiled, input.tensor_id)?;
+        let tensor = ctx
+            .tensor(input.tensor_id)
+            .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
+        if input.bytes.len() != tensor.nbytes() {
+            return Err(format!(
+                "input '{}' byte length mismatch: got {}, expected {}",
+                tensor.name().unwrap_or("<unnamed>"),
+                input.bytes.len(),
+                tensor.nbytes()
+            ));
+        }
+        let offset_bytes = resolve_main_write_offset(compiled, binding.offset_bytes)?;
+        runtime.write_buffer(&compiled.main_buffer, offset_bytes, input.bytes)?;
+    }
     runtime.begin_command_batch()?;
     let execute_result =
-        execute_compiled_graph_in_active_batch(runtime, ctx, compiled, inputs, buffer_inputs);
+        execute_compiled_graph_in_active_batch(runtime, ctx, compiled, &[], buffer_inputs);
 
     if let Err(err) = execute_result {
         let _ = runtime.discard_command_batch();
         return Err(err);
     }
     runtime.end_command_batch()?;
+    if super::qmm::affine_qmm_enabled() {
+        let c = runtime.counters();
+        eprintln!(
+            "metal: steel graph commits={} dispatches={} encoders={}->{} barriers={}",
+            c.command_buffer_commits,
+            c.compute_dispatches,
+            c.compute_encoder_starts,
+            c.compute_encoder_ends,
+            c.buffer_barriers
+        );
+    }
 
     let mut execution = MetalGraphExecution::default();
     for &tensor_id in outputs {
+        // Offsets were frozen at compile time; if the reuse planner recycled
+        // this tensor's storage root mid-graph, its bytes are whichever
+        // tensor took the slot — error instead of returning them.
+        let mut root = tensor_id;
+        while let Some(view_src) = ctx.tensor(root).and_then(|tensor| tensor.view_src) {
+            root = view_src;
+        }
+        if compiled.reclaimed.contains(&root) {
+            let name = ctx
+                .tensor(tensor_id)
+                .and_then(|tensor| tensor.name().map(str::to_string))
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            return Err(format!(
+                "output '{name}' (tensor {tensor_id}) was reclaimed by the buffer reuse \
+                 planner before end of graph; add_leaf it before compiling to keep it \
+                 readable after execute"
+            ));
+        }
         let binding = binding(compiled, tensor_id)?;
         let (buffer, offset_bytes) = resolve_buffer_offset(compiled, binding.offset_bytes);
         execution.outputs.insert(
             tensor_id,
             runtime.read_buffer_range(buffer, offset_bytes, binding.size_bytes)?,
+        );
+    }
+    // GPUStartTime/EndTime is only valid after the CBs complete. The
+    // in-batch counter dump runs before that wait; print true GPU time here.
+    if std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some() {
+        let c = runtime.counters();
+        eprintln!(
+            "metal.gpu_ms={:.3} (sum of MTLCommandBuffer GPUStart/End)",
+            c.gpu_elapsed_ns as f64 / 1e6
         );
     }
     Ok(execution)
@@ -1398,14 +1562,263 @@ pub fn execute_compiled_graph_in_active_batch(
         )?;
     }
 
-    for node in &compiled.nodes {
+    // Official ggml_metal_op_concurrency / ggml_mem_ranges: barrier only when
+    // this node's src/dst *buffer ranges* overlap a prior dst (or a prior src
+    // if we write). Tensor-id RAW barriers serialize independent Flux streams.
+    let mut live_ranges: Vec<MetalMemRange> = Vec::with_capacity(256);
+    let mut concurrent_nodes = 0u32;
+    let mut missing_bind = 0u32;
+    let mut barrier_raw = 0u32;
+    let mut barrier_war = 0u32;
+    let mut barrier_alias = 0u32;
+    let log_ops = std::env::var_os("MAKEPAD_METAL_LOG_OPS").is_some();
+    // Official n_cb=1: encode+submit the first max(64, 10%) nodes so the GPU
+    // starts while the remaining ops are encoded.
+    let n_main = compiled.nodes.len().div_ceil(10).max(64);
+    for (op_i, node) in compiled.nodes.iter().enumerate() {
         let tensor = ctx
             .tensor(node.node_id)
             .ok_or_else(|| format!("compiled graph references invalid tensor {}", node.node_id))?;
+        if log_ops {
+            let stage = node
+                .stages
+                .first()
+                .map(|stage| stage.descriptor.base_name.as_str())
+                .unwrap_or("-");
+            let src_desc: Vec<String> = tensor
+                .src
+                .iter()
+                .map(|src| match src {
+                    Some(id) => match ctx.tensor(*id) {
+                        Some(src_t) => {
+                            let bind = compiled
+                                .bindings
+                                .get(id)
+                                .map(|binding| binding.offset_bytes)
+                                .unwrap_or(usize::MAX);
+                            format!(
+                                "{}:{}:{:?}:bind={}",
+                                id,
+                                src_t.name().unwrap_or("?"),
+                                src_t.ne,
+                                bind
+                            )
+                        }
+                        None => format!("{id}:missing"),
+                    },
+                    None => "-".to_string(),
+                })
+                .collect();
+            let dest_bind = compiled
+                .bindings
+                .get(&tensor.id)
+                .map(|binding| binding.offset_bytes)
+                .unwrap_or(usize::MAX);
+            eprintln!(
+                "metal.op[{op_i}]: id={} op={} ne={:?} dest_bind={} src=[{}] fuse={:?} out={} kernel={stage}",
+                tensor.id,
+                tensor.op.name(),
+                tensor.ne,
+                dest_bind,
+                src_desc.join(", "),
+                node.fuse_src_ids,
+                node.output_id,
+            );
+        }
+        match node_range_status(compiled, ctx, tensor, node, &live_ranges) {
+            NodeRangeStatus::Concurrent => concurrent_nodes += 1,
+            NodeRangeStatus::MissingBind => {
+                missing_bind += 1;
+                runtime.memory_barrier_buffers()?;
+                live_ranges.clear();
+            }
+            NodeRangeStatus::Overlap { raw, war, alias } => {
+                if raw {
+                    barrier_raw += 1;
+                } else if war {
+                    barrier_war += 1;
+                } else if alias {
+                    barrier_alias += 1;
+                }
+                runtime.memory_barrier_buffers()?;
+                live_ranges.clear();
+            }
+        }
         execute_node(runtime, ctx, compiled, tensor, node)?;
-        runtime.memory_barrier_buffers()?;
+        push_node_ranges(compiled, tensor, node, &mut live_ranges);
+        if op_i + 1 == n_main && compiled.nodes.len() > n_main {
+            runtime.submit_partial_command_batch()?;
+            live_ranges.clear();
+        }
+    }
+    if std::env::var_os("MAKEPAD_METAL_COUNTERS").is_some() {
+        let c = runtime.counters();
+        eprintln!(
+            "metal.counters nodes={} barriers={} raw={} war={} alias={} dispatches={} enc_start={} cb_commit={} n_main={} concurrent={} missing_bind={}",
+            compiled.nodes.len(),
+            c.buffer_barriers,
+            barrier_raw,
+            barrier_war,
+            barrier_alias,
+            c.compute_dispatches,
+            c.compute_encoder_starts,
+            c.command_buffer_commits,
+            n_main,
+            concurrent_nodes,
+            missing_bind
+        );
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct MetalMemRange {
+    buf: u8,
+    p0: usize,
+    p1: usize,
+    is_dst: bool,
+    tensor_id: TensorId,
+}
+
+fn compiled_tensor_range(
+    compiled: &MetalCompiledGraph,
+    tensor_id: TensorId,
+    is_dst: bool,
+) -> Option<MetalMemRange> {
+    let binding = compiled.bindings.get(&tensor_id)?;
+    let on_ro = compiled.ro_split != 0 && binding.offset_bytes < compiled.ro_split;
+    let (buf, off) = if on_ro {
+        (1u8, binding.offset_bytes)
+    } else {
+        (
+            0u8,
+            binding.offset_bytes.saturating_sub(compiled.ro_split),
+        )
+    };
+    Some(MetalMemRange {
+        buf,
+        p0: off,
+        p1: off.saturating_add(binding.size_bytes.max(1)),
+        is_dst,
+        tensor_id,
+    })
+}
+
+fn mem_range_ok(live: &[MetalMemRange], mr: &MetalMemRange) -> bool {
+    for cmp in live {
+        if mr.buf != cmp.buf {
+            continue;
+        }
+        if !mr.is_dst && !cmp.is_dst {
+            continue;
+        }
+        if mr.p0 < cmp.p1 && mr.p1 >= cmp.p0 {
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NodeRangeStatus {
+    Concurrent,
+    Overlap { raw: bool, war: bool, alias: bool },
+    MissingBind,
+}
+
+fn same_storage_family(ctx: &Context, a: TensorId, b: TensorId) -> bool {
+    if a == b {
+        return true;
+    }
+    let root = |mut id: TensorId| {
+        for _ in 0..8 {
+            let Some(tensor) = ctx.tensor(id) else {
+                return id;
+            };
+            let Some(src) = tensor.view_src else {
+                return id;
+            };
+            id = src;
+        }
+        id
+    };
+    root(a) == root(b)
+}
+
+fn node_range_status(
+    compiled: &MetalCompiledGraph,
+    ctx: &Context,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+    live: &[MetalMemRange],
+) -> NodeRangeStatus {
+    let mut raw = false;
+    let mut war = false;
+    let mut alias = false;
+    let mut saw_overlap = false;
+    for src_id in tensor.src.iter().flatten().chain(node.fuse_src_ids.iter()) {
+        let Some(mr) = compiled_tensor_range(compiled, *src_id, false) else {
+            return NodeRangeStatus::MissingBind;
+        };
+        for cmp in live {
+            if mr.buf != cmp.buf || !cmp.is_dst {
+                continue;
+            }
+            if !(mr.p0 < cmp.p1 && mr.p1 >= cmp.p0) {
+                continue;
+            }
+            saw_overlap = true;
+            if same_storage_family(ctx, mr.tensor_id, cmp.tensor_id) {
+                raw = true;
+            } else {
+                alias = true;
+            }
+        }
+    }
+    let Some(mr) = compiled_tensor_range(compiled, node.output_id, true) else {
+        return NodeRangeStatus::MissingBind;
+    };
+    for cmp in live {
+        if mr.buf != cmp.buf {
+            continue;
+        }
+        if !(mr.p0 < cmp.p1 && mr.p1 >= cmp.p0) {
+            continue;
+        }
+        saw_overlap = true;
+        if same_storage_family(ctx, mr.tensor_id, cmp.tensor_id) {
+            if cmp.is_dst {
+                alias = true;
+            } else {
+                war = true;
+            }
+        } else {
+            alias = true;
+        }
+    }
+    if !saw_overlap {
+        NodeRangeStatus::Concurrent
+    } else {
+        NodeRangeStatus::Overlap { raw, war, alias }
+    }
+}
+
+
+
+fn push_node_ranges(
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+    live: &mut Vec<MetalMemRange>,
+) {
+    for src_id in tensor.src.iter().flatten().chain(node.fuse_src_ids.iter()) {
+        if let Some(mr) = compiled_tensor_range(compiled, *src_id, false) {
+            live.push(mr);
+        }
+    }
+    if let Some(mr) = compiled_tensor_range(compiled, node.output_id, true) {
+        live.push(mr);
+    }
 }
 
 fn prepared_node_from_plan(
@@ -1415,6 +1828,8 @@ fn prepared_node_from_plan(
     MetalPreparedNode {
         node_id: plan.node_id,
         tail_offset_bytes,
+        fuse_src_ids: plan.fuse_src_ids.clone(),
+        output_id: plan.output_id,
         stages: plan
             .program
             .stages
@@ -1432,20 +1847,60 @@ fn prepared_node_from_plan(
 fn collect_tensor_bindings(
     ctx: &Context,
     graph: &Graph,
-) -> Result<(BTreeMap<TensorId, MetalTensorBinding>, usize), String> {
+    plan: &super::selector::MetalGraphPlan,
+) -> Result<(BTreeMap<TensorId, MetalTensorBinding>, usize, BTreeSet<TensorId>), String> {
     let tensors = ctx.tensors();
-    let mut needed = graph.nodes.clone();
-    needed.extend(graph.leafs.iter().copied());
+    // Only tensors the fused execute list (plus host-read leafs) need a
+    // slot. Sweeping every raw ggml node allocated fused-away NORM/MUL
+    // dests and pinned them to the end — that was the 157MB→~1.7GB jump.
+    let mut needed = graph.leafs.clone();
+    for node in &plan.nodes {
+        needed.push(node.node_id);
+        needed.push(node.output_id);
+        needed.extend(node.fuse_src_ids.iter().copied());
+        if let Some(tensor) = tensors.get(node.node_id) {
+            needed.extend(tensor.src.iter().flatten().copied());
+            if let Some(view_src) = tensor.view_src {
+                needed.push(view_src);
+            }
+        }
+    }
     needed.sort_unstable();
     needed.dedup();
 
-    let mut planner = GraphBindingPlanner::new(ctx.used_mem());
-    let mut bindings = BTreeMap::new();
+    // Liveness follows the *fused* execute list. Walking raw ggml nodes
+    // released AdaLN sources after NORM even though the fused
+    // norm+mul+add kernel runs later and still reads them — Flux then
+    // ignored packed latents and decoded to gray mush.
+    let last_use = tensor_last_use_plan(ctx, graph, plan);
+    let mut planner = GraphBindingPlanner::new(ctx.used_mem(), reuse_cooldown());
+    for (index, node) in plan.nodes.iter().enumerate() {
+        planner.set_now(index);
+        if let Some(tensor) = tensors.get(node.node_id) {
+            for src in tensor.src.iter().flatten().copied() {
+                planner.resolve_tensor_offset(tensors, src)?;
+            }
+            if let Some(view_src) = tensor.view_src {
+                planner.resolve_tensor_offset(tensors, view_src)?;
+            }
+        }
+        for &src in &node.fuse_src_ids {
+            planner.resolve_tensor_offset(tensors, src)?;
+        }
+        planner.resolve_tensor_offset(tensors, node.node_id)?;
+        planner.resolve_tensor_offset(tensors, node.output_id)?;
+        planner.release_dead(tensors, &last_use, index);
+    }
+    planner.set_now(plan.nodes.len());
     for tensor_id in needed {
+        planner.resolve_tensor_offset(tensors, tensor_id)?;
+    }
+
+    let mut bindings = BTreeMap::new();
+    for (&tensor_id, &offset_bytes) in &planner.planned_offsets {
         let tensor = tensors
             .get(tensor_id)
             .ok_or_else(|| format!("graph references invalid tensor {}", tensor_id))?;
-        let offset_bytes = planner.resolve_tensor_offset(tensors, tensor_id)?;
         bindings.insert(
             tensor_id,
             MetalTensorBinding {
@@ -1457,27 +1912,182 @@ fn collect_tensor_bindings(
             },
         );
     }
-    Ok((bindings, planner.required_main_buffer_size()))
+    let size = planner.required_main_buffer_size();
+    Ok((bindings, size, planner.released))
+}
+
+fn tensor_last_use_plan(
+    ctx: &Context,
+    graph: &Graph,
+    plan: &super::selector::MetalGraphPlan,
+) -> BTreeMap<TensorId, usize> {
+    let mut last_use = BTreeMap::new();
+    let end = plan.nodes.len();
+    for (index, node) in plan.nodes.iter().enumerate() {
+        mark_last_use(ctx, &mut last_use, node.node_id, index);
+        mark_last_use(ctx, &mut last_use, node.output_id, index);
+        for &src in &node.fuse_src_ids {
+            mark_last_use(ctx, &mut last_use, src, index);
+        }
+        if let Some(tensor) = ctx.tensor(node.node_id) {
+            for src in tensor.src.iter().flatten().copied() {
+                mark_last_use(ctx, &mut last_use, src, index);
+            }
+        }
+    }
+    // Produced and never consumed afterwards → graph output, keep until the
+    // host reads it after execute. Only the fused *output* is live; pinning
+    // node_id as well kept fused-away NORM dests resident for the whole step.
+    for (&id, use_i) in last_use.iter_mut() {
+        if plan
+            .nodes
+            .get(*use_i)
+            .is_some_and(|node| node.output_id == id)
+        {
+            *use_i = end;
+        }
+    }
+    // Extra host-read tensors (Flux img_in probe, etc.) live in leafs even
+    // when they are also consumed mid-graph. Pin them to the end so the
+    // planner does not reuse the slot before readback. mark_last_use (not a
+    // direct entry write) so a leaf that is a VIEW also pins its view_src
+    // root — releasing the root clobbers the leaf's bytes just the same.
+    for &id in &graph.leafs {
+        mark_last_use(ctx, &mut last_use, id, end);
+    }
+    last_use
+}
+
+fn mark_last_use(
+    ctx: &Context,
+    last_use: &mut BTreeMap<TensorId, usize>,
+    tensor_id: TensorId,
+    index: usize,
+) {
+    last_use
+        .entry(tensor_id)
+        .and_modify(|current| *current = (*current).max(index))
+        .or_insert(index);
+    if let Some(tensor) = ctx.tensor(tensor_id) {
+        if let Some(view_src) = tensor.view_src {
+            mark_last_use(ctx, last_use, view_src, index);
+        }
+    }
+}
+
+fn reuse_cooldown() -> usize {
+    std::env::var("MAKEPAD_METAL_REUSE_COOLDOWN")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(48)
 }
 
 #[derive(Debug)]
 struct GraphBindingPlanner {
     next_offset: usize,
     max_end: usize,
+    now: usize,
+    cooldown: usize,
     planned_offsets: BTreeMap<TensorId, usize>,
+    /// (offset, len, available_at plan index)
+    reusable: Vec<(usize, usize, usize)>,
+    owned: BTreeSet<TensorId>,
+    /// Roots whose range was handed back for reuse — not readable after
+    /// execute; recorded so readback can fail loudly instead of returning
+    /// clobbered bytes.
+    released: BTreeSet<TensorId>,
 }
 
 impl GraphBindingPlanner {
-    fn new(resident_bytes: usize) -> Self {
+    fn new(resident_bytes: usize, cooldown: usize) -> Self {
         Self {
             next_offset: ggml_pad(resident_bytes, GGML_MEM_ALIGN),
             max_end: resident_bytes,
+            now: 0,
+            cooldown,
             planned_offsets: BTreeMap::new(),
+            reusable: Vec::new(),
+            owned: BTreeSet::new(),
+            released: BTreeSet::new(),
         }
+    }
+
+    fn set_now(&mut self, now: usize) {
+        self.now = now;
     }
 
     fn required_main_buffer_size(&self) -> usize {
         ggml_pad(self.max_end, GGML_MEM_ALIGN)
+    }
+
+    fn alloc_range(&mut self, nbytes: usize) -> Result<usize, String> {
+        let size = ggml_pad(nbytes.max(1), GGML_MEM_ALIGN);
+        let now = self.now;
+        for index in 0..self.reusable.len() {
+            let (offset, len, available_at) = self.reusable[index];
+            if available_at <= now && len >= size {
+                self.reusable.remove(index);
+                if len > size {
+                    self.reusable
+                        .insert(index, (offset + size, len - size, available_at));
+                }
+                let end = offset
+                    .checked_add(size)
+                    .ok_or_else(|| "Metal binding allocation overflow".to_string())?;
+                self.max_end = self.max_end.max(end);
+                return Ok(offset);
+            }
+        }
+        let offset = ggml_pad(self.next_offset, GGML_MEM_ALIGN);
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| "Metal binding allocation overflow".to_string())?;
+        self.next_offset = end;
+        self.max_end = self.max_end.max(end);
+        Ok(offset)
+    }
+
+    fn release_range(&mut self, offset: usize, nbytes: usize, available_at: usize) {
+        let size = ggml_pad(nbytes.max(1), GGML_MEM_ALIGN);
+        self.reusable.push((offset, size, available_at));
+        self.reusable.sort_unstable_by_key(|&(off, _, _)| off);
+        let mut merged: Vec<(usize, usize, usize)> = Vec::new();
+        for (offset, len, available_at) in self.reusable.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if last.0 + last.1 == offset && last.2 == available_at {
+                    last.1 += len;
+                    continue;
+                }
+            }
+            merged.push((offset, len, available_at));
+        }
+        self.reusable = merged;
+    }
+
+    fn release_dead(
+        &mut self,
+        tensors: &[Tensor],
+        last_use: &BTreeMap<TensorId, usize>,
+        index: usize,
+    ) {
+        let dead: Vec<TensorId> = last_use
+            .iter()
+            .filter_map(|(&id, &use_i)| (use_i == index).then_some(id))
+            .collect();
+        let available_at = index.saturating_add(self.cooldown);
+        for id in dead {
+            if !self.owned.remove(&id) {
+                continue;
+            }
+            let Some(&offset) = self.planned_offsets.get(&id) else {
+                continue;
+            };
+            let Some(tensor) = tensors.get(id) else {
+                continue;
+            };
+            self.release_range(offset, tensor.nbytes(), available_at);
+            self.released.insert(id);
+        }
     }
 
     fn resolve_tensor_offset(
@@ -1523,11 +2133,8 @@ impl GraphBindingPlanner {
         } else if let Some(offset) = tensor.data_offset {
             offset
         } else {
-            let offset = ggml_pad(self.next_offset, GGML_MEM_ALIGN);
-            let end = offset
-                .checked_add(tensor.nbytes())
-                .ok_or_else(|| format!("tensor {} allocation overflow", tensor.id))?;
-            self.next_offset = end;
+            let offset = self.alloc_range(tensor.nbytes())?;
+            self.owned.insert(tensor_id);
             offset
         };
 
@@ -1541,14 +2148,14 @@ impl GraphBindingPlanner {
 }
 
 fn collect_main_buffer_bytes(ctx: &Context, len: usize) -> Result<Vec<u8>, String> {
-    if ctx.ro_split() != 0 {
-        return Err(
-            "the copying main-buffer path does not support two-region (mapped weight) contexts"
-                .to_string(),
-        );
-    }
     let src = ctx.mem_buffer();
-    let used = ctx.used_mem();
+    // Two-region: mem_buffer is only the dirty prefix. used_mem is a
+    // logical offset (ro_split + dirty_used).
+    let used = if ctx.ro_split() != 0 {
+        ctx.used_mem().saturating_sub(ctx.ro_split()).min(src.len())
+    } else {
+        ctx.used_mem()
+    };
     if used > len {
         return Err(format!(
             "context memory image ({}) exceeds prepared main buffer size ({})",
@@ -1669,7 +2276,19 @@ fn dispatch_concat(
         dim: tensor.op_param_i32(0),
     };
 
-    let nth = std::cmp::min(1024_u64, tensor.ne[0].max(1) as u64);
+    // Official ggml_metal_op_concat: nth = min(256, ne0); when rows are short,
+    // pack nrptg = min(ceil(256/nth), ne1) rows into one threadgroup.
+    let ne0 = tensor.ne[0].max(1) as u64;
+    let ne1 = tensor.ne[1].max(1) as u64;
+    let nth = ne0.min(256);
+    let mut nrptg = 1_u64;
+    if nth < 256 {
+        nrptg = (256_u64).div_ceil(nth).min(ne1);
+        if nrptg.saturating_mul(nth) > 256 {
+            nrptg = (256 / nth).max(1);
+        }
+    }
+    let nw0 = ne1.div_ceil(nrptg);
     runtime.dispatch_compute(
         &stage.pipeline,
         bytes_of(&args),
@@ -1680,13 +2299,13 @@ fn dispatch_concat(
         ],
         &[],
         MetalSize {
-            width: tensor.ne[1].max(1) as u64,
+            width: nw0,
             height: tensor.ne[2].max(1) as u64,
             depth: tensor.ne[3].max(1) as u64,
         },
         MetalSize {
             width: nth,
-            height: 1,
+            height: nrptg,
             depth: 1,
         },
     )
@@ -1971,6 +2590,28 @@ fn dispatch_bin(
         o1: [0u64; 8],
     };
 
+    // Official ggml_metal_op_bin: bind src1's Metal buffer at offset 0 and
+    // address each fused addend via o1[j] (ggml-metal-ops.cpp:3507-3536).
+    let src1_binding = binding(compiled, src1_id)?;
+    let (src1_buffer, src1_off) = resolve_buffer_offset(compiled, src1_binding.offset_bytes);
+    args.o1[0] = src1_off as u64;
+    for (i, &fuse_id) in node.fuse_src_ids.iter().enumerate() {
+        let slot = i + 1;
+        if slot >= args.o1.len() {
+            return Err("binary ADD fuse exceeds o1 slots".to_string());
+        }
+        let fuse_binding = binding(compiled, fuse_id)?;
+        let (fuse_buffer, fuse_off) = resolve_buffer_offset(compiled, fuse_binding.offset_bytes);
+        if !std::ptr::eq(fuse_buffer.as_id(), src1_buffer.as_id()) {
+            return Err(format!(
+                "binary ADD fuse src1 {} is not in the same Metal buffer as {}",
+                fuse_id, src1_id
+            ));
+        }
+        args.o1[slot] = fuse_off as u64;
+    }
+    let dst_id = node.output_id;
+
     if is_c4 {
         args.ne00 /= 4;
         args.ne10 /= 4;
@@ -2015,8 +2656,12 @@ fn dispatch_bin(
         bytes_of(&args),
         &[
             buffer_ref(compiled, 1, src0_id),
-            buffer_ref(compiled, 2, src1_id),
-            buffer_ref(compiled, 3, tensor.id),
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: src1_buffer,
+                offset_bytes: 0,
+            },
+            buffer_ref(compiled, 3, dst_id),
         ],
         &[],
         threadgroups,
@@ -2857,16 +3502,42 @@ fn dispatch_norm(
         .tensor(src0_id)
         .ok_or_else(|| format!("norm src0 {} is invalid", src0_id))?;
     let src0_shape = shape4(src0)?;
-    let dst_shape = shape4(tensor)?;
+    let output = ctx.tensor(node.output_id).ok_or_else(|| {
+        format!(
+            "norm fused dst {} is invalid",
+            node.output_id
+        )
+    })?;
+    let dst_shape = shape4(output)?;
     let is_c4 = src0_shape.ne[0] % 4 == 0;
     let ne00_t = if is_c4 {
         src0_shape.ne[0] / 4
     } else {
         src0_shape.ne[0]
     };
-    // The Metal norm shader computes fused-src pointers before it branches on the
-    // fuse level. For unfused norm/rms_norm dispatches we still need non-zero
-    // extents/strides in those slots to avoid modulo-by-zero UB.
+    // Official ggml_metal_kargs_norm: slot 0 is src0, slot 1 is fused MUL
+    // src1, slot 2 is fused ADD src1. Unfused slots keep src0 extents so
+    // the shader's % nef* is never modulo-by-zero.
+    let mut nef1 = [src0_shape.ne[1]; 3];
+    let mut nef2 = [src0_shape.ne[2]; 3];
+    let mut nef3 = [src0_shape.ne[3]; 3];
+    let mut nbf1 = [src0_shape.nb[1]; 3];
+    let mut nbf2 = [src0_shape.nb[2]; 3];
+    let mut nbf3 = [src0_shape.nb[3]; 3];
+    let mut fuse_ids = [src0_id, src0_id];
+    for (slot, &fuse_id) in node.fuse_src_ids.iter().take(2).enumerate() {
+        let fuse = ctx.tensor(fuse_id).ok_or_else(|| {
+            format!("norm fused src{} {} is invalid", slot, fuse_id)
+        })?;
+        let fuse_shape = shape4(fuse)?;
+        nef1[slot + 1] = fuse_shape.ne[1];
+        nef2[slot + 1] = fuse_shape.ne[2];
+        nef3[slot + 1] = fuse_shape.ne[3];
+        nbf1[slot + 1] = fuse_shape.nb[1];
+        nbf2[slot + 1] = fuse_shape.nb[2];
+        nbf3[slot + 1] = fuse_shape.nb[3];
+        fuse_ids[slot] = fuse_id;
+    }
     let args = KArgsNorm {
         ne00: src0_shape.ne[0],
         ne00_t,
@@ -2874,12 +3545,12 @@ fn dispatch_norm(
         nb2: dst_shape.nb[2],
         nb3: dst_shape.nb[3],
         eps: tensor.op_param_f32(0),
-        nef1: [src0_shape.ne[1], src0_shape.ne[1], src0_shape.ne[1]],
-        nef2: [src0_shape.ne[2], src0_shape.ne[2], src0_shape.ne[2]],
-        nef3: [src0_shape.ne[3], src0_shape.ne[3], src0_shape.ne[3]],
-        nbf1: [src0_shape.nb[1], src0_shape.nb[1], src0_shape.nb[1]],
-        nbf2: [src0_shape.nb[2], src0_shape.nb[2], src0_shape.nb[2]],
-        nbf3: [src0_shape.nb[3], src0_shape.nb[3], src0_shape.nb[3]],
+        nef1,
+        nef2,
+        nef3,
+        nbf1,
+        nbf2,
+        nbf3,
     };
 
     let mut nth = 32u64;
@@ -2893,9 +3564,9 @@ fn dispatch_norm(
     let buffers = if rms || tensor.op == Op::RmsNorm || tensor.op == Op::Norm {
         vec![
             buffer_ref(compiled, 1, src0_id),
-            buffer_ref(compiled, 2, src0_id),
-            buffer_ref(compiled, 3, src0_id),
-            buffer_ref(compiled, 4, tensor.id),
+            buffer_ref(compiled, 2, fuse_ids[0]),
+            buffer_ref(compiled, 3, fuse_ids[1]),
+            buffer_ref(compiled, 4, node.output_id),
         ]
     } else {
         unreachable!()
@@ -3518,6 +4189,26 @@ fn dispatch_mul_mat(
         .map_err(|_| format!("mul_mat r3 {} exceeds i16", ne13 / ne03))?;
 
     if base.starts_with("kernel_mul_mm_") {
+        let src0_bind = buffer_ref(compiled, 1, src0_id);
+        let src1_bind = buffer_ref(compiled, 2, src1_id);
+        let dst_bind = buffer_ref(compiled, 3, tensor.id);
+        match super::qmm::try_dispatch_affine_qmm(
+            runtime,
+            ctx,
+            src0,
+            src1,
+            tensor,
+            src0_bind,
+            src1_bind,
+            dst_bind,
+            ne12,
+        ) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!("metal: affine qmm unavailable ({err}); using kernel_mul_mm");
+            }
+        }
         let ne00 = i32_dim(src0, 0)?;
         let ne01 = i32_dim(src0, 1)?;
         let ne0 = i32_dim(tensor, 0)?;
@@ -4737,8 +5428,7 @@ fn dispatch_flash_attn_ext(
             stage_blk.ok_or_else(|| "flash_attn_ext is missing blk stage".to_string())?;
         let args_blk = KArgsFlashAttnExtBlk {
             ne01: q_shape.ne[1],
-            ne30: i32::try_from(k_shape.ne[1])
-                .map_err(|_| "flash_attn k sequence exceeds i32".to_string())?,
+            ne30: mask_shape.ne[0],
             ne31: mask_shape.ne[1],
             ne32: mask_shape.ne[2],
             ne33: mask_shape.ne[3],
@@ -5331,11 +6021,9 @@ fn flash_attn_ext_extra_pad_bytes(
     } else {
         0
     };
-    let ncpsg = if flash_attn_ext_use_vec(q) {
-        OP_FLASH_ATTN_EXT_VEC_NCPSG
-    } else {
-        64
-    };
+    // Official always reserves the non-vec pad width (NCPSG=64).
+    let _ = q;
+    let ncpsg = 64;
     Ok(
         usize::try_from(ncpsg).map_err(|_| "flash_attn ncpsg overflow".to_string())?
             * (k.nb[1]
@@ -5465,6 +6153,47 @@ mod tests {
     }
 
     #[test]
+    fn prepare_graph_reuses_dead_activation_ranges() {
+        std::env::set_var("MAKEPAD_METAL_REUSE_COOLDOWN", "0");
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: true,
+        });
+
+        let rows = 64i64;
+        let cols = 64i64;
+        let leaf = ctx
+            .new_tensor_2d(TensorType::F32, cols, rows, BufferUsage::Activations)
+            .unwrap();
+        let mut current = leaf;
+        let mut nodes = Vec::new();
+        for _ in 0..16 {
+            current = ctx
+                .unary(current, UnaryOp::Gelu, BufferUsage::Activations)
+                .unwrap();
+            nodes.push(current);
+        }
+
+        let mut graph = Graph::new();
+        graph.add_leaf(leaf);
+        for node in nodes {
+            graph.add_node(node);
+        }
+
+        let prepared = prepare_graph(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
+        let tensor_bytes = ctx.tensor(leaf).unwrap().nbytes();
+        let naive = tensor_bytes.saturating_mul(17);
+        assert!(
+            prepared.main_buffer_size < naive / 2,
+            "expected liveness reuse, got main_buffer_size={} naive={}",
+            prepared.main_buffer_size,
+            naive
+        );
+        assert!(prepared.main_buffer_size >= tensor_bytes);
+    }
+
+    #[test]
     fn prepare_graph_assigns_distinct_tail_offsets_for_temp_nodes() {
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -5559,6 +6288,200 @@ mod tests {
         assert!(input_binding.offset_bytes >= ggml_pad(resident_used_mem, GGML_MEM_ALIGN));
         assert!(out_binding.offset_bytes > input_binding.offset_bytes);
         assert!(prepared.main_buffer_size > resident_used_mem);
+    }
+
+    fn scale_chain_ctx(
+        leaf_view_of_mid: bool,
+    ) -> (Context, TensorId, TensorId, TensorId, Option<TensorId>, Graph) {
+        // no_alloc so activations are planner-owned (CPU-arena tensors have
+        // fixed offsets and are never released/reused).
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: true,
+        });
+        let input = ctx
+            .new_tensor_1d(TensorType::F32, 8, BufferUsage::Activations)
+            .unwrap();
+        let mid = ctx.scale(input, 2.0, BufferUsage::Activations).unwrap();
+        // Long enough that mid's slot passes the reuse cooldown (default 48)
+        // and is handed back for reuse well before end of graph.
+        let mut cur = mid;
+        for _ in 0..60 {
+            cur = ctx.scale(cur, 1.0, BufferUsage::Activations).unwrap();
+        }
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, cur).unwrap();
+        let view = if leaf_view_of_mid {
+            let view = ctx.view_1d(mid, 4, 0).unwrap();
+            graph.add_leaf(view);
+            Some(view)
+        } else {
+            None
+        };
+        (ctx, input, mid, cur, view, graph)
+    }
+
+    #[test]
+    fn reclaimed_midgraph_readback_errors_instead_of_returning_clobbered_bytes() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let (ctx, input, mid, cur, _, graph) = scale_chain_ctx(false);
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        assert!(
+            prepared.reclaimed.contains(&mid),
+            "test premise: the planner should reclaim the mid-graph tensor"
+        );
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let values: Vec<f32> = (0..8).map(|i| i as f32 + 1.0).collect();
+        let bytes = f32s_to_bytes(&values);
+        let writes = [MetalGraphTensorWrite {
+            tensor_id: input,
+            bytes: &bytes,
+        }];
+        let err = session.execute(&ctx, &writes, &[cur, mid]).unwrap_err();
+        assert!(
+            err.contains("reclaimed"),
+            "expected a reclaimed-readback error, got: {err}"
+        );
+        // The final output alone still reads fine.
+        let execution = session.execute(&ctx, &writes, &[cur]).unwrap();
+        let out = bytes_to_f32s(execution.outputs.get(&cur).unwrap());
+        for (i, v) in out.iter().enumerate() {
+            assert!((v - (i as f32 + 1.0) * 2.0).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn leaf_view_pins_its_root_for_readback_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let (ctx, input, mid, cur, view, graph) = scale_chain_ctx(true);
+        let view = view.unwrap();
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        assert!(
+            !prepared.reclaimed.contains(&mid),
+            "add_leaf on a view of mid must pin mid itself"
+        );
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let values: Vec<f32> = (0..8).map(|i| i as f32 + 1.0).collect();
+        let bytes = f32s_to_bytes(&values);
+        let writes = [MetalGraphTensorWrite {
+            tensor_id: input,
+            bytes: &bytes,
+        }];
+        let execution = session.execute(&ctx, &writes, &[cur, view, mid]).unwrap();
+        let mid_out = bytes_to_f32s(execution.outputs.get(&mid).unwrap());
+        for (i, v) in mid_out.iter().enumerate() {
+            assert!(
+                (v - (i as f32 + 1.0) * 2.0).abs() < 1.0e-5,
+                "mid readback clobbered at {i}: {v}"
+            );
+        }
+        let view_out = bytes_to_f32s(execution.outputs.get(&view).unwrap());
+        assert_eq!(view_out.len(), 4);
+        for (i, v) in view_out.iter().enumerate() {
+            assert!((v - (i as f32 + 1.0) * 2.0).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn host_read_leaf_inside_fusible_add_chain_is_not_fused_away() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: true,
+        });
+        let input = ctx
+            .new_tensor_1d(TensorType::F32, 8, BufferUsage::Activations)
+            .unwrap();
+        let s1 = ctx
+            .new_tensor_1d(TensorType::F32, 8, BufferUsage::Activations)
+            .unwrap();
+        let s2 = ctx
+            .new_tensor_1d(TensorType::F32, 8, BufferUsage::Activations)
+            .unwrap();
+        let a = ctx
+            .binary_like_a(Op::Add, input, s1, BufferUsage::Activations)
+            .unwrap();
+        let b = ctx
+            .binary_like_a(Op::Add, a, s2, BufferUsage::Activations)
+            .unwrap();
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, b).unwrap();
+        // Host-read the interior ADD: without leaf-aware use counts the
+        // fused a+b kernel never writes a's dst and this read returned
+        // uninitialized buffer bytes.
+        graph.add_leaf(a);
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        assert!(
+            prepared.nodes.iter().any(|node| node.output_id == a),
+            "leaf'd interior add must survive as its own written output"
+        );
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let input_values: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let s1_values: Vec<f32> = (0..8).map(|i| 10.0 + i as f32).collect();
+        let s2_values: Vec<f32> = (0..8).map(|i| 100.0 + i as f32).collect();
+        let input_bytes = f32s_to_bytes(&input_values);
+        let s1_bytes = f32s_to_bytes(&s1_values);
+        let s2_bytes = f32s_to_bytes(&s2_values);
+        let writes = [
+            MetalGraphTensorWrite {
+                tensor_id: input,
+                bytes: &input_bytes,
+            },
+            MetalGraphTensorWrite {
+                tensor_id: s1,
+                bytes: &s1_bytes,
+            },
+            MetalGraphTensorWrite {
+                tensor_id: s2,
+                bytes: &s2_bytes,
+            },
+        ];
+        let execution = session.execute(&ctx, &writes, &[a, b]).unwrap();
+        let a_out = bytes_to_f32s(execution.outputs.get(&a).unwrap());
+        let b_out = bytes_to_f32s(execution.outputs.get(&b).unwrap());
+        for i in 0..8 {
+            let expected_a = input_values[i] + s1_values[i];
+            assert!(
+                (a_out[i] - expected_a).abs() < 1.0e-5,
+                "leaf'd interior add clobbered at {i}: {} != {expected_a}",
+                a_out[i]
+            );
+            let expected_b = expected_a + s2_values[i];
+            assert!((b_out[i] - expected_b).abs() < 1.0e-5);
+        }
     }
 
     #[test]
