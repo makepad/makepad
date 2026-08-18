@@ -1,0 +1,12 @@
+[package]
+name = "makepad-asset-data"
+version = "0.1.0"
+edition = "2021"
+description = "Shared canonical content contract for the Makepad Asset Server: IDs, manifests, locks, scene plans, activation and snapshot DTOs"
+license = "MIT OR Apache-2.0"
+
+# Zero dependencies, on purpose: these types are shared by the Asset Server,
+# the client cache, the scene compiler, and the headless World Server, so they
+# must never drag in a UI Cx, GPU, database, or HTTP stack. SHA-256 is kept
+# in-crate for the same reason game_net's auth.rs and game_pkg keep theirs.
+[dependencies]
