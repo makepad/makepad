@@ -8508,6 +8508,238 @@ mod imp {
         })
     }
 
+    /// Shared body of the F8_E4M3-resident dense linears (flux2-dev): the
+    /// weight stays 1-byte in the cache (key suffix `::f8` so a layout change
+    /// can never reuse a stale half buffer), expands into pooled bf16 scratch
+    /// per call, and the per-tensor `weight_scale` rides the f32 GEMM alpha —
+    /// exact f32 post-accumulate scaling, the same structure as torch
+    /// `_scaled_mm`'s epilogue (the fp8mixed reference applies scales after
+    /// the fp8 accumulate, not to the dequantized operand).
+    fn f8_linear_gemm(
+        backend: &mut CudaDenseLinearBackend,
+        input_bf16_ptr: *const std::ffi::c_void,
+        cache_namespace: &str,
+        part: &GpuLinearPart<'_>,
+        weight_scale: f32,
+        m: usize,
+        k: usize,
+        out_bf16_ptr: *const std::ffi::c_void,
+    ) -> Result<(), String> {
+        let n = part.n;
+        let weight_bytes = n
+            .checked_mul(k)
+            .ok_or_else(|| "f8 mm weight size overflow".to_string())?;
+        let weight_key = format!("{cache_namespace}::{}::f8", part.cache_key);
+        backend.cached_weight_buffer(&weight_key, weight_bytes, || Ok(part.bytes.to_vec()))?;
+        let weight = backend
+            .weight_buffers
+            .get(&weight_key)
+            .ok_or_else(|| format!("missing cached CUDA weight buffer {weight_key}"))?;
+        let scratch = gpu_pool_acquire(weight_bytes * size_of::<u16>())?;
+        let count = u32::try_from(weight_bytes)
+            .map_err(|_| "f8_e4m3 dequant count exceeds u32".to_string())?;
+        let status = unsafe {
+            makepad_ggml_cuda_dequant_f8_e4m3_bf16(
+                weight.ptr.as_ptr().cast_const(),
+                scratch.ptr.as_ptr(),
+                count,
+                backend.stream,
+            )
+        };
+        gpu_check(status)?;
+        let alpha = weight_scale;
+        let beta = 0.0f32;
+        let result = unsafe {
+            makepad_cuda::cublas_gemm_ex(
+                backend.blas,
+                makepad_cuda::CUBLAS_OP_T,
+                makepad_cuda::CUBLAS_OP_N,
+                n as i32,
+                m as i32,
+                k as i32,
+                &alpha,
+                scratch.ptr.as_ptr(),
+                makepad_cuda::CUDA_R_16BF,
+                k as i32,
+                input_bf16_ptr,
+                makepad_cuda::CUDA_R_16BF,
+                k as i32,
+                &beta,
+                out_bf16_ptr.cast_mut(),
+                makepad_cuda::CUDA_R_16BF,
+                n as i32,
+                makepad_cuda::CUDA_R_32F,
+                makepad_cuda::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            )
+        }
+        .map_err(|err| format!("f8 mm failed: m={m} k={k} n={n}: {err}"));
+        gpu_pool_release(scratch);
+        result
+    }
+
+    fn require_one_f8_part<'a, 'b>(
+        parts: &'b [GpuLinearPart<'a>],
+        who: &str,
+    ) -> Result<&'b GpuLinearPart<'a>, String> {
+        if parts.len() != 1 || parts[0].bt_ggml_type != GGML_TYPE_F8_E4M3 {
+            return Err(format!("{who} requires one F8_E4M3 weight part"));
+        }
+        Ok(&parts[0])
+    }
+
+    /// F8_E4M3-resident dense linear, f32 activation in / f32 out (values on
+    /// the bf16 grid like the bf16_mm twin: bf16 D, expanded losslessly).
+    pub fn gpu_linear_nt_cached_f8_mm(
+        x: &GpuTensor,
+        cache_namespace: &str,
+        parts: &[GpuLinearPart<'_>],
+        weight_scale: f32,
+    ) -> Result<GpuTensor, String> {
+        if x.half {
+            return Err("gpu_linear_nt_cached_f8_mm expects f32 storage".to_string());
+        }
+        let part = require_one_f8_part(parts, "gpu_linear_nt_cached_f8_mm")?;
+        let (m, k, n) = (x.rows, x.cols, part.n);
+        if m == 0 || k == 0 || n == 0 {
+            return Err(format!("gpu_linear_nt_cached_f8_mm empty shape: x={m}x{k} n={n}"));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            backend.ensure_input_half(m * k * size_of::<u16>())?;
+            let status = unsafe {
+                makepad_ggml_cuda_f32_to_bf16_rn(
+                    x.device_ptr()?,
+                    backend
+                        .input_half
+                        .as_ref()
+                        .ok_or_else(|| "missing f8 mm input buffer".to_string())?
+                        .ptr
+                        .as_ptr()
+                        .cast::<u16>(),
+                    (m * k) as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            let output_values = m
+                .checked_mul(n)
+                .ok_or_else(|| "f8 mm output size overflow".to_string())?;
+            let output_bf16 = gpu_pool_acquire(output_values * size_of::<u16>())?;
+            let output = GpuTensor::from_pool(m, n)?;
+            let input_ptr = backend
+                .input_half
+                .as_ref()
+                .expect("ensured above")
+                .ptr
+                .as_ptr()
+                .cast_const();
+            f8_linear_gemm(
+                backend,
+                input_ptr,
+                cache_namespace,
+                part,
+                weight_scale,
+                m,
+                k,
+                output_bf16.ptr.as_ptr().cast_const(),
+            )?;
+            let status = unsafe {
+                makepad_ggml_cuda_bf16_to_f32(
+                    output_bf16.ptr.as_ptr().cast::<u16>(),
+                    output.device_ptr()?,
+                    output_values as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_pool_release(output_bf16);
+            gpu_prof(backend.stream, crate::backend::prof::CAT_DENSE_TOTAL, prof_start, 0);
+            Ok(output)
+        })
+    }
+
+    /// F8_E4M3-resident dense linear from a bf16 buffer, f32 out.
+    pub fn gpu_linear_nt_cached_f8_mm_from_buf(
+        x: &GpuBf16Buf,
+        cache_namespace: &str,
+        parts: &[GpuLinearPart<'_>],
+        weight_scale: f32,
+    ) -> Result<GpuTensor, String> {
+        let part = require_one_f8_part(parts, "gpu_linear_nt_cached_f8_mm_from_buf")?;
+        let (m, k, n) = (x.rows, x.cols, part.n);
+        if m == 0 || k == 0 || n == 0 {
+            return Err(format!(
+                "gpu_linear_nt_cached_f8_mm_from_buf empty shape: x={m}x{k} n={n}"
+            ));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let output_values = m
+                .checked_mul(n)
+                .ok_or_else(|| "f8 mm output size overflow".to_string())?;
+            let output_bf16 = gpu_pool_acquire(output_values * size_of::<u16>())?;
+            let output = GpuTensor::from_pool(m, n)?;
+            f8_linear_gemm(
+                backend,
+                x.device_ptr_u16()?.cast::<std::ffi::c_void>().cast_const(),
+                cache_namespace,
+                part,
+                weight_scale,
+                m,
+                k,
+                output_bf16.ptr.as_ptr().cast_const(),
+            )?;
+            let status = unsafe {
+                makepad_ggml_cuda_bf16_to_f32(
+                    output_bf16.ptr.as_ptr().cast::<u16>(),
+                    output.device_ptr()?,
+                    output_values as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_pool_release(output_bf16);
+            gpu_prof(backend.stream, crate::backend::prof::CAT_DENSE_TOTAL, prof_start, 0);
+            Ok(output)
+        })
+    }
+
+    /// F8_E4M3-resident dense linear from a bf16 buffer straight to a bf16
+    /// buffer (the gemm's own bf16 D is the result).
+    pub fn gpu_linear_nt_cached_f8_mm_from_buf_to_buf(
+        x: &GpuBf16Buf,
+        cache_namespace: &str,
+        parts: &[GpuLinearPart<'_>],
+        weight_scale: f32,
+    ) -> Result<GpuBf16Buf, String> {
+        let part = require_one_f8_part(parts, "gpu_linear_nt_cached_f8_mm_from_buf_to_buf")?;
+        let (m, k, n) = (x.rows, x.cols, part.n);
+        if m == 0 || k == 0 || n == 0 {
+            return Err(format!(
+                "gpu_linear_nt_cached_f8_mm_from_buf_to_buf empty shape: x={m}x{k} n={n}"
+            ));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let output = GpuBf16Buf::from_pool(m, n)?;
+            f8_linear_gemm(
+                backend,
+                x.device_ptr_u16()?.cast::<std::ffi::c_void>().cast_const(),
+                cache_namespace,
+                part,
+                weight_scale,
+                m,
+                k,
+                output.device_ptr_u16()?.cast::<std::ffi::c_void>().cast_const(),
+            )?;
+            gpu_prof(backend.stream, crate::backend::prof::CAT_DENSE_TOTAL, prof_start, 0);
+            Ok(output)
+        })
+    }
+
     /// LayerNorm+mod storing bf16-RN — the bits the next linear's staging
     /// would produce from the f32 result.
     pub fn gpu_layer_norm_mod_to_bf16buf(
@@ -8861,12 +9093,21 @@ mod imp {
     where
         F: FnOnce() -> Result<Vec<u8>, String>,
     {
+        // F8_E4M3 stays 1-byte resident under the same `::f8` key suffix the
+        // f8 mm family looks up (see f8_linear_gemm).
+        let elem_bytes = if bt_ggml_type == GGML_TYPE_F8_E4M3 {
+            1
+        } else {
+            size_of::<u16>()
+        };
         let weight_bytes = n
             .checked_mul(k)
-            .and_then(|len| len.checked_mul(size_of::<u16>()))
+            .and_then(|len| len.checked_mul(elem_bytes))
             .ok_or_else(|| "gpu_weight_cache_ensure size overflow".to_string())?;
         let qualified_key = if want_a16 {
             format!("{cache_namespace}::{cache_key}::a16")
+        } else if bt_ggml_type == GGML_TYPE_F8_E4M3 {
+            format!("{cache_namespace}::{cache_key}::f8")
         } else {
             format!("{cache_namespace}::{cache_key}")
         };
@@ -23562,6 +23803,33 @@ mod imp {
         _x: &GpuBf16Buf,
         _cache_namespace: &str,
         _parts: &[GpuLinearPart<'_>],
+    ) -> Result<GpuBf16Buf, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_f8_mm(
+        _x: &GpuTensor,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _weight_scale: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_f8_mm_from_buf(
+        _x: &GpuBf16Buf,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _weight_scale: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_linear_nt_cached_f8_mm_from_buf_to_buf(
+        _x: &GpuBf16Buf,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _weight_scale: f32,
     ) -> Result<GpuBf16Buf, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }

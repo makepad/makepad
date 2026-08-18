@@ -1,16 +1,27 @@
-//! FLUX.2-klein transformer (guidance_embed = false).
+//! FLUX.2 transformer: klein-4B (guidance_embed = false) and dev-32B
+//! (guidance_embed = true, `guidance_in` MLPEmbedder summed into the time
+//! vector exactly like the reference `vec += guidance_in(timestep_embedding
+//! (guidance, 256))`).
 //!
 //! Global modulation (three shared SiLU+Linear modules computed once per
 //! step), bias-free linears, SwiGLU (gate-first), 4-axis interleaved RoPE
 //! at theta 2000, QK RMSNorm. Reuses flux1/h3 device kernels.
+//!
+//! Dev fp8mixed weights (Comfy `flux2_dev_fp8mixed.safetensors`): the double
+//! mlps and single linear1/linear2 are F8_E4M3 with a scalar f32
+//! `.weight_scale` sibling; they stay 1-byte resident in the device cache
+//! (the dense backend dequantizes into transient bf16 scratch per call) so
+//! the 32B DiT fits a 32GB card.
 
 use crate::backend::{
-    gpu_attention_packed_composite_f32, gpu_attention_packed_flash_cross,
+    gpu_add_bf16, gpu_attention_packed_composite_f32, gpu_attention_packed_flash_cross,
     gpu_attention_packed_flash_cross_bf16_rn, gpu_attention_packed_flash_cross_bf16pre_f16,
     gpu_bf16_round, gpu_bf16buf_slab_to_f32, gpu_concat_f32rn_bf16buf, gpu_concat_rows,
     gpu_device_available, gpu_download, gpu_gated_residual_mod_round_bf16, gpu_layer_norm_mod,
     gpu_layer_norm_mod_to_bf16buf, gpu_linear_nt_cached_bf16_mm,
     gpu_linear_nt_cached_bf16_mm_from_buf, gpu_linear_nt_cached_bf16_mm_from_buf_to_buf,
+    gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
+    gpu_linear_nt_cached_f8_mm_from_buf_to_buf,
     gpu_pool_clear, gpu_rms_norm_mul_from_bf16_slab, gpu_rope_interleaved, gpu_silu,
     gpu_slice_rows, gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into,
     gpu_weight_cache_ensure,
@@ -18,7 +29,7 @@ use crate::backend::{
 };
 use crate::flux2::{Flux2PosId, Flux2TransformerConfig, Flux2WeightFile};
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
 use std::path::{Path, PathBuf};
 
 pub const FLUX2_DIT_NAMESPACE: &str = "flux2-dit-bf16";
@@ -29,6 +40,10 @@ pub struct Flux2TransformerWeights {
     pub path: PathBuf,
     pub config: Flux2TransformerConfig,
     pub file: Flux2WeightFile,
+    /// Lazily-read `<name>_scale` values of the fp8mixed checkpoint, cached
+    /// so the per-step ensure path never re-opens the weight file for a
+    /// 4-byte scalar.
+    f8_scales: std::cell::RefCell<std::collections::HashMap<String, f32>>,
 }
 
 impl Flux2TransformerWeights {
@@ -36,12 +51,36 @@ impl Flux2TransformerWeights {
         let path = path.as_ref().to_path_buf();
         let file = Flux2WeightFile::load(&path)?;
         let config = file.detect_transformer_config()?;
-        if config.guidance_embed && !file.has_tensor("guidance_in.in_layer.weight") {
+        if config.guidance_embed
+            && !file.has_tensor("guidance_in.in_layer.weight")
+            && !file.has_tensor("time_guidance_embed.guidance_embedder.linear_1.weight")
+        {
             return Err(DiffusionError::model(
                 "flux2 dit config wants guidance_in but the file has none",
             ));
         }
-        Ok(Self { path, config, file })
+        Ok(Self {
+            path,
+            config,
+            file,
+            f8_scales: std::cell::RefCell::new(std::collections::HashMap::new()),
+        })
+    }
+
+    fn f8_scale(&self, resolved: &str) -> Result<f32> {
+        if let Some(scale) = self.f8_scales.borrow().get(resolved) {
+            return Ok(*scale);
+        }
+        let scale_name = format!("{resolved}_scale");
+        let scale = if self.file.has_tensor(&scale_name) {
+            self.file.read_f32(&scale_name)?.first().copied().unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        self.f8_scales
+            .borrow_mut()
+            .insert(resolved.to_owned(), scale);
+        Ok(scale)
     }
 }
 
@@ -62,6 +101,12 @@ fn alias_one(name: &str) -> Option<String> {
         }
         "time_in.out_layer.weight" => {
             Some("time_guidance_embed.timestep_embedder.linear_2.weight".into())
+        }
+        "guidance_in.in_layer.weight" => {
+            Some("time_guidance_embed.guidance_embedder.linear_1.weight".into())
+        }
+        "guidance_in.out_layer.weight" => {
+            Some("time_guidance_embed.guidance_embedder.linear_2.weight".into())
         }
         "double_stream_modulation_img.lin.weight" => {
             Some("double_stream_modulation_img.linear.weight".into())
@@ -173,27 +218,80 @@ fn final_adaln_scale_first(weights: &Flux2TransformerWeights) -> bool {
         && !weights.file.has_tensor("final_layer.adaLN_modulation.1.weight")
 }
 
+/// Resolve the on-file tensor name for a canonical name (direct, then
+/// `transformer.` prefixed, then the diffusers alias).
+fn resolve_name(weights: &Flux2TransformerWeights, name: &str) -> Option<String> {
+    if weights.file.has_tensor(name) {
+        return Some(name.to_owned());
+    }
+    let prefixed = format!("transformer.{name}");
+    if weights.file.has_tensor(&prefixed) {
+        return Some(prefixed);
+    }
+    alias_one(name).filter(|alias| weights.file.has_tensor(alias))
+}
+
+/// The fp8mixed checkpoint's per-tensor dequant scale (`<name>_scale`
+/// sibling); `None` when the tensor is stored bf16 (or has no scale, which
+/// the raw e4m3 mapping treats as 1.0 — pinned: the Comfy dev file always
+/// carries scales on its fp8 tensors).
+struct EnsuredLinear<'a> {
+    part: GpuLinearPart<'a>,
+    f8_scale: Option<f32>,
+}
+
 fn ensure_linear<'a>(
     weights: &'a Flux2TransformerWeights,
     name: &'a str,
     output_cols: usize,
     input_cols: usize,
-) -> Result<GpuLinearPart<'a>> {
-    gpu_weight_cache_ensure(
-        &ns(weights),
-        name,
-        GGML_TYPE_BF16,
-        output_cols,
-        input_cols,
-        false,
-        || load_linear_bytes(weights, name).map_err(|err| err.to_string()),
-    )
-    .map_err(DiffusionError::model)?;
-    Ok(GpuLinearPart {
-        bt_ggml_type: GGML_TYPE_BF16,
-        n: output_cols,
-        cache_key: name,
-        bytes: &[],
+) -> Result<EnsuredLinear<'a>> {
+    let f8_scale = match resolve_name(weights, name) {
+        Some(resolved) if weights.file.tensor(&resolved)?.dtype == "F8_E4M3" => {
+            let scale = weights.f8_scale(&resolved)?;
+            gpu_weight_cache_ensure(
+                &ns(weights),
+                name,
+                GGML_TYPE_F8_E4M3,
+                output_cols,
+                input_cols,
+                false,
+                || {
+                    weights
+                        .file
+                        .read_bytes(&resolved)
+                        .map_err(|err| err.to_string())
+                },
+            )
+            .map_err(DiffusionError::model)?;
+            Some(scale)
+        }
+        _ => {
+            gpu_weight_cache_ensure(
+                &ns(weights),
+                name,
+                GGML_TYPE_BF16,
+                output_cols,
+                input_cols,
+                false,
+                || load_linear_bytes(weights, name).map_err(|err| err.to_string()),
+            )
+            .map_err(DiffusionError::model)?;
+            None
+        }
+    };
+    Ok(EnsuredLinear {
+        part: GpuLinearPart {
+            bt_ggml_type: if f8_scale.is_some() {
+                GGML_TYPE_F8_E4M3
+            } else {
+                GGML_TYPE_BF16
+            },
+            n: output_cols,
+            cache_key: name,
+            bytes: &[],
+        },
+        f8_scale,
     })
 }
 
@@ -203,8 +301,12 @@ fn linear(
     name: &str,
     output_cols: usize,
 ) -> Result<GpuTensor> {
-    let part = ensure_linear(weights, name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_bf16_mm(input, &ns(weights), &[part]).map_err(DiffusionError::model)
+    let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
+    match ensured.f8_scale {
+        Some(scale) => gpu_linear_nt_cached_f8_mm(input, &ns(weights), &[ensured.part], scale),
+        None => gpu_linear_nt_cached_bf16_mm(input, &ns(weights), &[ensured.part]),
+    }
+    .map_err(DiffusionError::model)
 }
 
 fn linear_from_buf(
@@ -213,9 +315,14 @@ fn linear_from_buf(
     name: &str,
     output_cols: usize,
 ) -> Result<GpuTensor> {
-    let part = ensure_linear(weights, name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_bf16_mm_from_buf(input, &ns(weights), &[part])
-        .map_err(DiffusionError::model)
+    let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
+    match ensured.f8_scale {
+        Some(scale) => {
+            gpu_linear_nt_cached_f8_mm_from_buf(input, &ns(weights), &[ensured.part], scale)
+        }
+        None => gpu_linear_nt_cached_bf16_mm_from_buf(input, &ns(weights), &[ensured.part]),
+    }
+    .map_err(DiffusionError::model)
 }
 
 fn linear_from_buf_to_buf(
@@ -224,9 +331,16 @@ fn linear_from_buf_to_buf(
     name: &str,
     output_cols: usize,
 ) -> Result<GpuBf16Buf> {
-    let part = ensure_linear(weights, name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(input, &ns(weights), &[part])
-        .map_err(DiffusionError::model)
+    let ensured = ensure_linear(weights, name, output_cols, input.cols())?;
+    match ensured.f8_scale {
+        Some(scale) => {
+            gpu_linear_nt_cached_f8_mm_from_buf_to_buf(input, &ns(weights), &[ensured.part], scale)
+        }
+        None => {
+            gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(input, &ns(weights), &[ensured.part])
+        }
+    }
+    .map_err(DiffusionError::model)
 }
 
 fn round_bf16(tensor: GpuTensor) -> Result<GpuTensor> {
@@ -297,6 +411,8 @@ pub struct Flux2TransformerRun {
 /// One DiT forward. `img_tokens` is token-major `[N, 128]` including any
 /// reference tokens concatenated after the generated tokens. The returned
 /// prediction is trimmed to `gen_tokens` (the first generated-image tokens).
+/// `guidance` feeds the dev `guidance_in` MLPEmbedder (required when
+/// `config.guidance_embed`, rejected otherwise).
 pub fn flux2_transformer_forward(
     weights: &Flux2TransformerWeights,
     img_tokens: &[f32],
@@ -304,6 +420,7 @@ pub fn flux2_transformer_forward(
     txt_tokens: &[f32],
     txt_ids: &[Flux2PosId],
     sigma: f32,
+    guidance: Option<f32>,
     gen_tokens: usize,
 ) -> Result<Flux2TransformerRun> {
     if !gpu_device_available() {
@@ -336,10 +453,22 @@ pub fn flux2_transformer_forward(
         )));
     }
 
+    if config.guidance_embed && guidance.is_none() {
+        return Err(DiffusionError::workflow(
+            "flux2-dev transformer requires a guidance value",
+        ));
+    }
+    if !config.guidance_embed && guidance.is_some() {
+        return Err(DiffusionError::workflow(
+            "flux2-klein transformer takes no guidance value",
+        ));
+    }
     let temb_in = flux2_timestep_embedding(sigma, TIME_EMBED_DIM);
+    let gemb_in = guidance.map(|g| flux2_timestep_embedding(g, TIME_EMBED_DIM));
     if flux2_state_enabled() {
         return flux2_forward_state(
-            weights, img_tokens, img_ids, txt_tokens, txt_ids, &temb_in, gen_tokens,
+            weights, img_tokens, img_ids, txt_tokens, txt_ids, &temb_in,
+            gemb_in.as_deref(), gen_tokens,
         );
     }
 
@@ -354,8 +483,15 @@ pub fn flux2_transformer_forward(
     let txt = gpu_upload(txt_tokens, txt_count, config.context_in_dim as usize)
         .map_err(DiffusionError::model)?;
     let temb = gpu_upload(&temb_in, 1, TIME_EMBED_DIM).map_err(DiffusionError::model)?;
+    let gemb = match &gemb_in {
+        Some(values) => {
+            Some(gpu_upload(values, 1, TIME_EMBED_DIM).map_err(DiffusionError::model)?)
+        }
+        None => None,
+    };
     let pred = flux2_transformer_core(
-        weights, &img, &txt, &temb, &rope_cos, &rope_sin, txt_count, img_count, gen_tokens,
+        weights, &img, &txt, &temb, gemb.as_ref(), &rope_cos, &rope_sin, txt_count, img_count,
+        gen_tokens,
     )?;
     let prediction = gpu_download(&pred).map_err(DiffusionError::model)?;
     return Ok(Flux2TransformerRun {
@@ -373,6 +509,7 @@ fn flux2_transformer_core(
     img_input: &GpuTensor,
     txt_input: &GpuTensor,
     temb_input: &GpuTensor,
+    gemb_input: Option<&GpuTensor>,
     rope_cos: &GpuTensor,
     rope_sin: &GpuTensor,
     txt_count: usize,
@@ -389,11 +526,32 @@ fn flux2_transformer_core(
     let temb = linear(weights, &temb, "time_in.out_layer.weight", hidden)?;
     dump_named("temb", &temb);
 
-    if config.guidance_embed {
-        return Err(DiffusionError::workflow(
-            "flux2-dev guidance path is not wired; this port targets klein-4B",
-        ));
-    }
+    // Dev: vec = time_in(...) + guidance_in(timestep_embedding(guidance)) —
+    // the same MLPEmbedder shape, summed on the bf16 grid like the bf16
+    // reference's `vec + self.guidance_in(...)`.
+    let temb = match gemb_input {
+        Some(gemb_input) => {
+            if !config.guidance_embed {
+                return Err(DiffusionError::workflow(
+                    "guidance embedding fed to a guidance_embed=false transformer",
+                ));
+            }
+            let gemb = linear(weights, gemb_input, "guidance_in.in_layer.weight", hidden)?;
+            let gemb = round_bf16(gpu_silu(&gemb).map_err(DiffusionError::model)?)?;
+            let gemb = linear(weights, &gemb, "guidance_in.out_layer.weight", hidden)?;
+            dump_named("gemb", &gemb);
+            gpu_add_bf16(&temb, &gemb).map_err(DiffusionError::model)?
+        }
+        None => {
+            if config.guidance_embed {
+                return Err(DiffusionError::workflow(
+                    "flux2-dev transformer core needs the guidance embedding",
+                ));
+            }
+            temb
+        }
+    };
+    dump_named("vec", &temb);
 
     let mut img = linear(weights, img_input, "img_in.weight", hidden)?;
     let mut txt = linear(weights, txt_input, "txt_in.weight", hidden)?;
@@ -526,6 +684,8 @@ struct Flux2DeviceState {
     img: GpuTensor,
     txt: GpuTensor,
     temb_in: GpuTensor,
+    /// Present iff the transformer is guidance-embedded (dev).
+    gemb_in: Option<GpuTensor>,
     rope_cos: GpuTensor,
     rope_sin: GpuTensor,
 }
@@ -564,6 +724,7 @@ fn flux2_forward_state(
     txt_tokens: &[f32],
     txt_ids: &[Flux2PosId],
     temb_in: &[f32],
+    gemb_in: Option<&[f32]>,
     gen_tokens: usize,
 ) -> Result<Flux2TransformerRun> {
     let config = &weights.config;
@@ -579,6 +740,7 @@ fn flux2_forward_state(
                 && state.txt_count == txt_count
                 && state.gen_tokens == gen_tokens
                 && state.ids_fp == ids_fp
+                && state.gemb_in.is_some() == gemb_in.is_some()
         });
         if !matches {
             *slot = None;
@@ -597,6 +759,12 @@ fn flux2_forward_state(
                 txt: gpu_upload(txt_tokens, txt_count, config.context_in_dim as usize)
                     .map_err(DiffusionError::model)?,
                 temb_in: gpu_upload(temb_in, 1, TIME_EMBED_DIM).map_err(DiffusionError::model)?,
+                gemb_in: match gemb_in {
+                    Some(values) => Some(
+                        gpu_upload(values, 1, TIME_EMBED_DIM).map_err(DiffusionError::model)?,
+                    ),
+                    None => None,
+                },
                 rope_cos: gpu_upload(&cos, all_ids.len(), half).map_err(DiffusionError::model)?,
                 rope_sin: gpu_upload(&sin, all_ids.len(), half).map_err(DiffusionError::model)?,
             });
@@ -605,6 +773,9 @@ fn flux2_forward_state(
             gpu_upload_into(&state.img, img_tokens).map_err(DiffusionError::model)?;
             gpu_upload_into(&state.txt, txt_tokens).map_err(DiffusionError::model)?;
             gpu_upload_into(&state.temb_in, temb_in).map_err(DiffusionError::model)?;
+            if let (Some(target), Some(values)) = (&state.gemb_in, gemb_in) {
+                gpu_upload_into(target, values).map_err(DiffusionError::model)?;
+            }
         }
         let state = slot.as_ref().expect("flux2 device state");
         let pred = flux2_transformer_core(
@@ -612,6 +783,7 @@ fn flux2_forward_state(
             &state.img,
             &state.txt,
             &state.temb_in,
+            state.gemb_in.as_ref(),
             &state.rope_cos,
             &state.rope_sin,
             txt_count,

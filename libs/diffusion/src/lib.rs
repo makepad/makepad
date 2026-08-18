@@ -22,6 +22,7 @@ pub mod flux_text;
 pub mod flux_transformer;
 pub mod flux_vae;
 pub mod flux2;
+pub mod flux2_dev_text;
 pub mod flux2_klein_text;
 pub mod flux2_pipeline;
 pub mod flux2_text;

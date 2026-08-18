@@ -253,6 +253,17 @@ impl Flux2Tokenizer {
         }
     }
 
+    /// Tokenize one t2i prompt through the chat template WITHOUT padding —
+    /// the ComfyUI reference semantics (batch-1 unpadded; the DiT's 512-row
+    /// text window comes from zero-left-padding the conditioning, not the
+    /// ids). Still truncates at 512.
+    pub fn encode_t2i_unpadded(&self, system_message: &str, prompt: &str) -> Vec<u32> {
+        let rendered = render_flux2_t2i_prompt(system_message, prompt);
+        let mut token_ids = self.encode(&rendered);
+        token_ids.truncate(FLUX2_MAX_SEQUENCE_LENGTH);
+        token_ids
+    }
+
     /// Resolve a full piece (added token or byte-level piece) to its id.
     pub fn token_id(&self, piece: &str) -> Option<u32> {
         self.added_tokens
