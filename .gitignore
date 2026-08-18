@@ -2,6 +2,10 @@
 # will have compiled files and executables
 **/target/
 
+# Private Arcade frontend. Clone into this path:
+#   git clone git@github.com:makepad/sandbox.git apps/sandbox
+/apps/sandbox/
+
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
 Cargo.lock
@@ -80,3 +84,37 @@ tesla_credentials.json
 /route.md
 /shiny.md
 /status.md
+
+# Baked AO atlases: regenerate with tools/ao_bake, never commit (41 MB).
+**/ao_atlas.png
+
+# LAN fleet configs — machine-local, never committed
+fleet-hosts*.txt
+
+# Local secrets and AI-session state — never commit
+/GOOGLE_API_KEY
+/aichat_history.json
+/godot_chat_history.json
+/codex2
+/hello_world.py
+/package-lock.json
+/mapplan.md
+/mix.md
+/overlay.md
+
+# Local data dumps, benches and scratch checkouts — never commit
+/*.csv
+/*.mbtiles
+/kokoro_ref*
+/silero_vad.onnx
+/.rustup/
+/build/
+/box3d/
+/sub/
+/refdump/
+/traces/
+/xr/dump/
+/examples/splash_preview/
+/examples/automate/local/
+/examples/cad/generated/
+window_*_frame_*.png
