@@ -49,10 +49,7 @@ impl<'a> ScriptVm<'a> {
                     if old_value.is_err() {
                         self.bx.threads.cur().push_stack_unchecked(old_value);
                     } else if old_value.is_string_like() || value.is_string_like() {
-                        let str = self.bx.heap.new_string_with(|heap, out| {
-                            heap.cast_to_string(old_value, out);
-                            heap.cast_to_string(value, out);
-                        });
+                        let str = self.bx.heap.new_string_concat(old_value, value);
                         self.bx.heap.scope_write_in_map(
                             owner,
                             key,
@@ -79,10 +76,7 @@ impl<'a> ScriptVm<'a> {
                     if old_value.is_err() {
                         self.bx.threads.cur().push_stack_unchecked(old_value);
                     } else if old_value.is_string_like() || value.is_string_like() {
-                        let str = self.bx.heap.new_string_with(|heap, out| {
-                            heap.cast_to_string(old_value, out);
-                            heap.cast_to_string(value, out);
-                        });
+                        let str = self.bx.heap.new_string_concat(old_value, value);
                         self.bx
                             .threads
                             .cur()
@@ -188,10 +182,7 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .value(obj, field, self.bx.threads.cur().trap.pass());
             if old_value.is_string_like() || value.is_string_like() {
-                let str = self.bx.heap.new_string_with(|heap, out| {
-                    heap.cast_to_string(old_value, out);
-                    heap.cast_to_string(value, out);
-                });
+                let str = self.bx.heap.new_string_concat(old_value, value);
                 let value = self.bx.heap.set_value(
                     obj,
                     field,
@@ -301,10 +292,7 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .value(obj, index, self.bx.threads.cur().trap.pass());
             if old_value.is_string_like() || value.is_string_like() {
-                let str = self.bx.heap.new_string_with(|heap, out| {
-                    heap.cast_to_string(old_value, out);
-                    heap.cast_to_string(value, out);
-                });
+                let str = self.bx.heap.new_string_concat(old_value, value);
                 let value = self.bx.heap.set_value(
                     obj,
                     index,
@@ -331,10 +319,7 @@ impl<'a> ScriptVm<'a> {
                 .heap
                 .array_index(arr, index, self.bx.threads.cur().trap.pass());
             if old_value.is_string_like() || value.is_string_like() {
-                let str = self.bx.heap.new_string_with(|heap, out| {
-                    heap.cast_to_string(old_value, out);
-                    heap.cast_to_string(value, out);
-                });
+                let str = self.bx.heap.new_string_concat(old_value, value);
                 let value = self.bx.heap.set_array_index(
                     arr,
                     index,

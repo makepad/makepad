@@ -1,6 +1,6 @@
 use super::socket_stream::SocketStream;
 
-use crate::types::{HttpError, HttpRequest, HttpResponse, NetworkResponse};
+use crate::types::{HttpError, HttpProgress, HttpRequest, HttpResponse, NetworkResponse};
 use makepad_live_id::LiveId;
 use std::{
     collections::HashMap,
@@ -146,6 +146,15 @@ fn run_http_request(
     }
 
     let mut body = std::mem::take(&mut body_prefix);
+    let total = content_length_of(&headers_string);
+    let mut last_emit = 0usize;
+    let emit_progress = |loaded: u64| {
+        let _ = response_sender.send(NetworkResponse::HttpProgress {
+            request_id,
+            progress: HttpProgress { loaded, total },
+        });
+    };
+    emit_progress(body.len() as u64);
     let mut buf = [0u8; 16384];
     loop {
         if cancel_flag.load(Ordering::SeqCst) {
@@ -153,7 +162,13 @@ fn run_http_request(
         }
         match stream.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                body.extend_from_slice(&buf[..n]);
+                if body.len().saturating_sub(last_emit) >= 256 * 1024 {
+                    last_emit = body.len();
+                    emit_progress(body.len() as u64);
+                }
+            }
             Err(err)
                 if matches!(
                     err.kind(),
@@ -347,6 +362,17 @@ fn write_all(stream: &mut SocketStream, data: &[u8]) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn content_length_of(headers: &str) -> u64 {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse().ok()
+        } else {
+            None
+        }
+    }).unwrap_or(0)
 }
 
 fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {

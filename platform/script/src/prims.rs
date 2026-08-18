@@ -564,6 +564,13 @@ where
             for (key, value) in self.iter() {
                 let key = key.script_to_value(vm);
                 let value = value.script_to_value(vm);
+                if !vm.bx.heap.charge_object_map_entry(
+                    obj,
+                    key,
+                    "converting a Rust map to a script object",
+                ) {
+                    continue;
+                }
                 obj_map.insert(
                     key,
                     ScriptMapValue {

@@ -7,6 +7,8 @@ pub mod dropsource;
 pub mod droptarget;
 pub mod enumformatetc;
 pub mod media_foundation;
+pub mod video_file_decoder;
+pub mod video_file_encoder;
 pub mod wasapi;
 pub mod win32_event;
 pub mod win32_window;

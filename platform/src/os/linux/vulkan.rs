@@ -3983,6 +3983,7 @@ impl CxVulkan {
             TexturePixel::BGRAu8 => Some(vk::Format::B8G8R8A8_UNORM),
             TexturePixel::RGBAf16 => Some(vk::Format::R16G16B16A16_SFLOAT),
             TexturePixel::RGBAf32 => Some(vk::Format::R32G32B32A32_SFLOAT),
+            TexturePixel::Rf32 => Some(vk::Format::R32_SFLOAT),
             _ => None,
         }
     }

@@ -7775,7 +7775,31 @@ pub fn load_local_tile_batch(
                         )
                     })?;
                 let Some(raw) = raw else {
-                    unavailable.push(tile_key);
+                    // The base pyramid omits contentless tiles entirely (open
+                    // sea has no OSM features), but an overlay may still cover
+                    // the spot — the ocean sidecars cover every sea tile. Build
+                    // from an empty base so water renders there; a tile no
+                    // overlay covers stays a true miss.
+                    let overlay_tiles = fetch_overlays(tile_key);
+                    if overlay_tiles.is_empty() {
+                        unavailable.push(tile_key);
+                        continue;
+                    }
+                    match build_tile_buffers_from_mvt(
+                        tile_key,
+                        &[],
+                        None,
+                        None,
+                        false,
+                        &overlay_tiles,
+                        theme,
+                        render_zoom,
+                        buildings_3d,
+                        build_road_core,
+                    ) {
+                        Ok(buffers) => loaded.push(LoadedLocalTile { tile_key, buffers }),
+                        Err(_) => unavailable.push(tile_key),
+                    }
                     continue;
                 };
                 let t_build = std::time::Instant::now();
@@ -11430,6 +11454,101 @@ mod bridge_probe_tests {
         }
         let key = TileKey { z, x: tx as i32, y: ty as i32 };
         parse_mvt_tile(&data, key, &mut Dump).unwrap();
+    }
+
+    #[test]
+    #[ignore] // needs local/maps/ocean-*.mbtiles (ocean-tiles output)
+    fn probe_ocean_overlay() {
+        use super::*;
+        // 1. Exact-zoom coastal tile from the high archive parses into ways
+        //    that carry the injected natural=water (the styling contract).
+        let high = std::path::Path::new("../local/maps/ocean-high.mbtiles");
+        assert!(high.is_file(), "no ocean archive at {}", high.display());
+        let mut reader = MbtilesReader::open(high).unwrap();
+        let (z, x, y) = (14_i64, 8385_i64, 5402_i64); // Scheveningen coast
+        let raw = reader
+            .get_tile_decoded(z, x, (1 << z) - 1 - y)
+            .unwrap()
+            .expect("coastal ocean tile missing");
+        let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+        let mut collector = MvtLocalCollector::new(2.0);
+        parse_mvt_tile(&raw, key, &mut collector).unwrap();
+        let ocean_ways: Vec<_> = collector
+            .ways
+            .iter()
+            .filter(|way| way.closed && way.tags.get("natural").map(String::as_str) == Some("water"))
+            .collect();
+        println!("coastal z14: {} ocean ways", ocean_ways.len());
+        assert!(!ocean_ways.is_empty());
+
+        // 2. Ancestor-shift path: a z14 view over open sea fetches the z9
+        //    low-archive tile; merge_overlay_features must scale it into
+        //    local space and still yield water polygons covering the tile.
+        let low = std::path::Path::new("../local/maps/ocean-low.mbtiles");
+        assert!(low.is_file(), "no ocean archive at {}", low.display());
+        let mut low_reader = MbtilesReader::open(low).unwrap();
+        // Mid-North-Sea z14 tile (no high-archive coverage), z9 ancestor.
+        let (vz, vx, vy) = (14_u32, 8340_u32, 5390_u32);
+        let shift = 5_u32; // 14 - maxzoom 9
+        let (fx, fy) = (vx >> shift, vy >> shift);
+        let araw = low_reader
+            .get_tile_decoded(9, fx as i64, (1 << 9) - 1 - fy as i64)
+            .unwrap()
+            .expect("z9 ancestor ocean tile missing");
+        let overlay = OverlayTileData {
+            raw: araw,
+            shift,
+            quadrant_x: vx - (fx << shift),
+            quadrant_y: vy - (fy << shift),
+            filter: 0,
+            has_chargers: false,
+        };
+        let mut points = Vec::new();
+        let mut ways = Vec::new();
+        merge_overlay_features(
+            &overlay,
+            TileKey { z: vz, x: vx as i32, y: vy as i32 },
+            2.0,
+            &mut points,
+            &mut ways,
+        )
+        .unwrap();
+        let water: Vec<_> = ways
+            .iter()
+            .filter(|way| way.tags.get("natural").map(String::as_str) == Some("water"))
+            .collect();
+        println!("shifted z9->z14: {} water ways, {} pts first", water.len(),
+            water.first().map(|w| w.points.len()).unwrap_or(0));
+        assert!(!water.is_empty());
+
+        // 3. A pure-ocean tile the base pyramid omits entirely (central
+        //    North Sea) must still build via the empty-base path when the
+        //    ocean overlays cover it — the "dead beige rectangles" bug.
+        let world = std::path::Path::new("../local/maps/world.mkmap");
+        if world.exists() {
+            let theme = CompiledMapTheme::default();
+            let keys = vec![TileKey { z: 8, x: 130, y: 82 }];
+            let overlays = vec![
+                "../local/maps/ocean-low.mbtiles".to_string(),
+                "../local/maps/ocean-high.mbtiles".to_string(),
+            ];
+            let (loaded, failed) = load_local_tile_batch(
+                world,
+                Some(world),
+                None,
+                &overlays,
+                &keys,
+                &theme,
+                8,
+                false,
+                false,
+            )
+            .unwrap();
+            println!("ocean-only tile: loaded {} failed {}", loaded.len(), failed.len());
+            assert_eq!(loaded.len(), 1, "pure-ocean tile must build from empty base");
+        } else {
+            println!("world.mkmap absent — skipping empty-base build check");
+        }
     }
 
     #[test]

@@ -26,6 +26,7 @@ use crate::{
             //ComInterface,
             Interface,
             PCSTR,
+            PCWSTR,
         },
         Win32::{
             Foundation::{CloseHandle, HANDLE, HMODULE, S_FALSE, WAIT_TIMEOUT},
@@ -37,7 +38,7 @@ use crate::{
                 },
                 Direct3D11::{
                     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
-                    ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout,
+                    ID3D11DepthStencilView, ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11InputLayout,
                     ID3D11PixelShader, ID3D11Query, ID3D11RasterizerState, ID3D11RenderTargetView,
                     ID3D11Resource, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
                     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_FLAG,
@@ -51,14 +52,14 @@ use crate::{
                     D3D11_DEPTH_WRITE_MASK_ALL, D3D11_DEPTH_WRITE_MASK_ZERO,
                     D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
                     D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
-                    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
+                    D3D11_MAP, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
                     D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
                     D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
                     D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SDK_VERSION,
                     D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
                     D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
-                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
                     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
@@ -86,8 +87,8 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIResource,
-                    IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS,
+                    CreateDXGIFactory2, IDXGIFactory2, IDXGIKeyedMutex, IDXGIResource,
+                    IDXGIResource1, IDXGISwapChain1, IDXGISwapChain2, DXGI_CREATE_FACTORY_FLAGS,
                     DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT, DXGI_PRESENT_DO_NOT_WAIT, DXGI_RGBA,
                     DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
                     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
@@ -372,6 +373,11 @@ impl Cx {
                     );
                 }
 
+                // Cross-process shared textures (studio RunView) are backed by a keyed
+                // mutex. This consumer device must HOLD it while sampling so it waits on
+                // the producer's writes (GPU-timeline) and sees coherent pixels; released
+                // after the draw call below.
+                let mut acquired_mutexes: Vec<IDXGIKeyedMutex> = Vec::new();
                 for i in 0..sh.mapping.textures.len() {
                     let texture_id = if let Some(texture) = &draw_call.texture_slots[i] {
                         texture.texture_id()
@@ -392,6 +398,17 @@ impl Cx {
 
                     if cxtexture.format.is_shared() {
                         cxtexture.update_shared_texture(&d3d11_cx.device);
+                        if let Some(km) = &cxtexture.os.keyed_mutex {
+                            let km = km.clone();
+                            unsafe {
+                                let _ = (Interface::vtable(&km).AcquireSync)(
+                                    Interface::as_raw(&km),
+                                    0,
+                                    2000,
+                                );
+                            }
+                            acquired_mutexes.push(km);
+                        }
                     } else if cxtexture.format.is_vec() {
                         cxtexture.update_vec_texture(d3d11_cx);
                     }
@@ -426,6 +443,12 @@ impl Cx {
                         0,
                     )
                 };
+                // Release keyed mutexes acquired for shared textures in this draw call.
+                for km in &acquired_mutexes {
+                    unsafe {
+                        let _ = (Interface::vtable(km).ReleaseSync)(Interface::as_raw(km), 0);
+                    }
+                }
             }
         }
     }
@@ -804,6 +827,185 @@ impl Cx {
         let cxtexture = &mut self.textures[texture.texture_id()];
         cxtexture.update_shared_texture(self.os.d3d11_device.as_ref().unwrap());
         cxtexture.os.shared_handle.0 as u64
+    }
+
+    /// Acquire the cross-process keyed mutex of a shared texture (key 0). A no-op for
+    /// textures without a keyed mutex (non-shared). The 2s timeout guards against a peer
+    /// that died holding the mutex; on timeout AcquireSync still returns a success HRESULT
+    /// (WAIT_TIMEOUT), so callers always pair this with a `release` and never deadlock.
+    pub fn shared_texture_keyed_acquire(&self, texture: &Texture) {
+        if let Some(km) = &self.textures[texture.texture_id()].os.keyed_mutex {
+            // The stripped windows bindings only expose the `_Impl` (server) side of
+            // IDXGIKeyedMutex, so call AcquireSync through the vtable like `is_gpu_done`
+            // does for ID3D11DeviceContext::GetData.
+            unsafe {
+                let _ = (Interface::vtable(km).AcquireSync)(Interface::as_raw(km), 0, 2000);
+            }
+        }
+    }
+
+    /// Release the cross-process keyed mutex of a shared texture (key 0).
+    pub fn shared_texture_keyed_release(&self, texture: &Texture) {
+        if let Some(km) = &self.textures[texture.texture_id()].os.keyed_mutex {
+            unsafe {
+                let _ = (Interface::vtable(km).ReleaseSync)(Interface::as_raw(km), 0);
+            }
+        }
+    }
+
+    /// CPU grab of a render target (thumbnail icons). Staging copy + Map.
+    /// Returns packed BGRA8, same layout as the Metal readback.
+    pub fn debug_read_render_texture(
+        &mut self,
+        texture: &Texture,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        let cxtexture = &self.textures[texture.texture_id()];
+        let alloc = cxtexture.alloc.as_ref()?;
+        let (width, height) = (alloc.width, alloc.height);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let src_tex = cxtexture.os.texture.clone()?;
+        let device = self.os.d3d11_device.clone()?;
+        unsafe {
+            let context = device.GetImmediateContext().ok()?;
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width as u32,
+                Height: height as u32,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE(3),
+                BindFlags: 0,
+                CPUAccessFlags: 0x20000,
+                MiscFlags: 0,
+            };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .ok()?;
+            let staging_res: ID3D11Resource = staging?.cast().ok()?;
+            let src_res: ID3D11Resource = src_tex.cast().ok()?;
+            context.CopySubresourceRegion(&staging_res, 0, 0, 0, 0, &src_res, 0, None);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging_res, 0, D3D11_MAP(1), 0, Some(&mut mapped))
+                .ok()?;
+            let pitch = mapped.RowPitch as usize;
+            let mut bytes = vec![0u8; width * height * 4];
+            let src = mapped.pData as *const u8;
+            for y in 0..height {
+                let row = src.add(y * pitch);
+                std::ptr::copy_nonoverlapping(
+                    row,
+                    bytes.as_mut_ptr().add(y * width * 4),
+                    width * 4,
+                );
+            }
+            context.Unmap(&staging_res, 0);
+            Some((width, height, bytes))
+        }
+    }
+
+    /// TEMP DIAGNOSTIC (strip before merge): CPU staging readback of a shared texture on
+    /// THIS process's device — distinguishes "child renders black" / "coherence broken"
+    /// from "studio display/layout bug". Copies the whole texture to a STAGING texture,
+    /// maps it, and logs a 16x16 grid summary + key texels.
+    pub fn debug_readback_shared_texture(&mut self, texture: &Texture, tag: &str) {
+        let cxtexture = &self.textures[texture.texture_id()];
+        let Some(src_tex) = cxtexture.os.texture.clone() else {
+            crate::log!("WINDBG[{}]: readback: no os.texture", tag);
+            return;
+        };
+        let keyed_mutex = cxtexture.os.keyed_mutex.clone();
+        let (width, height) = if let TextureFormat::SharedBGRAu8 { width, height, .. } = &cxtexture.format {
+            (*width as u32, *height as u32)
+        } else {
+            crate::log!("WINDBG[{}]: readback: not SharedBGRAu8", tag);
+            return;
+        };
+        if width == 0 || height == 0 {
+            return;
+        }
+        let Some(device) = self.os.d3d11_device.clone() else {
+            crate::log!("WINDBG[{}]: readback: no device", tag);
+            return;
+        };
+        unsafe {
+            let context = match device.GetImmediateContext() {
+                Ok(c) => c,
+                Err(err) => {
+                    crate::log!("WINDBG[{}]: GetImmediateContext failed {:?}", tag, err);
+                    return;
+                }
+            };
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE(3), // D3D11_USAGE_STAGING (const stripped from bindings)
+                BindFlags: 0,
+                CPUAccessFlags: 0x20000, // D3D11_CPU_ACCESS_READ (const stripped from bindings)
+                MiscFlags: 0,
+            };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            if let Err(err) = device.CreateTexture2D(&desc, None, Some(&mut staging)) {
+                crate::log!("WINDBG[{}]: staging CreateTexture2D failed {:?}", tag, err);
+                return;
+            }
+            let staging_res: ID3D11Resource = staging.unwrap().cast().unwrap();
+            let src_res: ID3D11Resource = src_tex.cast().unwrap();
+            let mut acq_hr = 0i32;
+            if let Some(km) = &keyed_mutex {
+                acq_hr = (Interface::vtable(km).AcquireSync)(Interface::as_raw(km), 0, 2000).0;
+            }
+            context.CopySubresourceRegion(&staging_res, 0, 0, 0, 0, &src_res, 0, None);
+            if let Some(km) = &keyed_mutex {
+                let _ = (Interface::vtable(km).ReleaseSync)(Interface::as_raw(km), 0);
+            }
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            // D3D11_MAP_READ = 1 (const stripped from bindings)
+            match context.Map(&staging_res, 0, D3D11_MAP(1), 0, Some(&mut mapped)) {
+                Ok(()) => {
+                    let px = |x: u32, y: u32| -> u32 {
+                        let x = x.min(width - 1) as usize;
+                        let y = y.min(height - 1) as usize;
+                        let row = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize)
+                            as *const u32;
+                        row.add(x).read_unaligned()
+                    };
+                    let mut nonzero = 0usize;
+                    let mut distinct: Vec<u32> = Vec::new();
+                    for gy in 0..16u32 {
+                        for gx in 0..16u32 {
+                            let v = px(gx * width / 16, gy * height / 16);
+                            if v != 0 {
+                                nonzero += 1;
+                            }
+                            if !distinct.contains(&v) && distinct.len() < 8 {
+                                distinct.push(v);
+                            }
+                        }
+                    }
+                    crate::log!(
+                        "WINDBG[{}]: readback {}x{} acq_hr={:#x} pitch={} nonzero={}/256 distinct={:08x?} tl={:08x} c={:08x} br={:08x}",
+                        tag, width, height, acq_hr, mapped.RowPitch, nonzero, distinct,
+                        px(2, 2), px(width / 2, height / 2), px(width - 3, height - 3)
+                    );
+                    context.Unmap(&staging_res, 0);
+                }
+                Err(err) => {
+                    crate::log!("WINDBG[{}]: Map failed {:?}", tag, err);
+                }
+            }
+        }
     }
 
     // HLSL shaders compile synchronously via `hlsl_compile_shaders`, so a shader
@@ -1476,6 +1678,12 @@ impl D3d11Buffer {
 pub struct CxOsTexture {
     pub(crate) texture: Option<ID3D11Texture2D>,
     pub shared_handle: HANDLE,
+    /// Keyed mutex for cross-process shared textures (studio RunView). Present only
+    /// on `SharedBGRAu8` textures created with `D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX`.
+    /// The producer (hosted app) brackets its render with Acquire/Release; the consumer
+    /// (studio host) takes a transient Acquire/Release to make the writes visible on its
+    /// own device — legacy `D3D11_RESOURCE_MISC_SHARED` gives no cross-device coherence.
+    pub(crate) keyed_mutex: Option<IDXGIKeyedMutex>,
     pub(crate) shader_resource_view: Option<ID3D11ShaderResourceView>,
     render_target_view: Option<ID3D11RenderTargetView>,
     render_target_face_views: [Option<ID3D11RenderTargetView>; 6],
@@ -1903,15 +2111,24 @@ impl CxTexture {
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
                 CPUAccessFlags: 0,
-                MiscFlags: 2, // D3D11_RESOURCE_MISC_SHARED
+                // Legacy plain D3D11_RESOURCE_MISC_SHARED (0x2) gives NO cross-device
+                // coherence between the two process-local D3D11 devices, so the studio host
+                // sampled the hosted app's writes as black. Use a keyed mutex
+                // (D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX = 0x100) — which both serializes
+                // access and flushes writes across devices — shared via an NT handle
+                // (D3D11_RESOURCE_MISC_SHARED_NTHANDLE = 0x800). Keyed-mutex resources are
+                // incompatible with the legacy GetSharedHandle/OpenSharedResource path.
+                MiscFlags: 0x100 | 0x800,
             };
 
             let mut texture = None;
-            unsafe {
-                d3d11_device
-                    .CreateTexture2D(&texture_desc, None, Some(&mut texture))
-                    .unwrap()
+            let create_res = unsafe {
+                d3d11_device.CreateTexture2D(&texture_desc, None, Some(&mut texture))
             };
+            if let Err(err) = &create_res {
+                crate::error!("WINHOST: CreateTexture2D(shared keyed-mutex) FAILED: {:?} miscflags={:x}", err, texture_desc.MiscFlags);
+                return;
+            }
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {
@@ -1920,48 +2137,113 @@ impl CxTexture {
                     .unwrap()
             };
 
-            // get IDXGIResource interface on newly created texture object
-            let dxgi_resource: IDXGIResource = resource.cast().unwrap();
-            //let mut dxgi_resource_ptr = None;
-            //unsafe { resource.query(IDXGIResource::IID,Some(&mut dxgi_resource_ptr)).unwrap() };
-            //let dxgi_resource = dxgi_resource_ptr.as_ref().unwrap().into();
-
-            // get shared handle of this resource
-            let handle = unsafe { dxgi_resource.GetSharedHandle().unwrap() };
-            //log!("created new shared texture with handle {:?}",handle);
+            // NT handles are process-local, so instead of passing the raw value we register
+            // a name derived from the presentable-image id (which the hosted app also has),
+            // and it opens the resource by that same name — no cross-process handle
+            // duplication needed. The returned NT handle is kept open in `shared_handle` to
+            // keep the named object alive for the app to find.
+            let id_u64 = match &self.format {
+                TextureFormat::SharedBGRAu8 { id, .. } => id.as_u64(),
+                _ => 0,
+            };
+            let mut name_wide: Vec<u16> = shared_texture_name(id_u64).encode_utf16().collect();
+            name_wide.push(0);
+            let mut handle = HANDLE(std::ptr::null_mut());
+            match resource.cast::<IDXGIResource1>() {
+                Ok(dxgi_resource1) => {
+                    let hr = unsafe {
+                        (Interface::vtable(&dxgi_resource1).CreateSharedHandle)(
+                            Interface::as_raw(&dxgi_resource1),
+                            std::ptr::null(),
+                            DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                            PCWSTR(name_wide.as_ptr()),
+                            &mut handle,
+                        )
+                    };
+                    crate::log!("WINHOST: CreateSharedHandle hr={:?} handle={:?} size={}x{} id={:x}", hr, handle.0, alloc.width, alloc.height, id_u64);
+                }
+                Err(err) => {
+                    crate::error!("WINHOST: IDXGIResource1 cast failed: {:?}", err);
+                }
+            }
+            let keyed_mutex: Option<IDXGIKeyedMutex> = resource.cast().ok();
+            crate::log!("WINHOST: update_shared_texture keyed_mutex={}", keyed_mutex.is_some());
 
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
             self.os.shared_handle = handle;
+            self.os.keyed_mutex = keyed_mutex;
         }
     }
 
-    pub fn update_from_shared_handle(&mut self, d3d11_cx: &D3d11Cx, handle: HANDLE) {
-        if self.alloc_shared() {
-            let mut texture: Option<ID3D11Texture2D> = None;
-            if let Ok(()) = unsafe { d3d11_cx.device.OpenSharedResource(handle, &mut texture) } {
-                let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
-                let mut shader_resource_view = None;
-                unsafe {
-                    d3d11_cx
-                        .device
-                        .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
-                        .unwrap()
-                };
-                let mut render_target_view = None;
-                unsafe {
-                    d3d11_cx
-                        .device
-                        .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
-                        .unwrap()
-                };
-                self.os.texture = texture;
-                self.os.render_target_view = render_target_view;
-                self.os.shader_resource_view = shader_resource_view;
-            }
+    /// Open the cross-process shared texture the studio host created, by the name derived
+    /// from the presentable-image id (see `update_shared_texture`). `_handle` is the legacy
+    /// value from the protocol and is unused now that keyed-mutex/NT-handle sharing is
+    /// name-based.
+    pub fn update_from_shared_handle(&mut self, d3d11_cx: &D3d11Cx, _handle: HANDLE) {
+        let did_alloc = self.alloc_shared();
+        if !did_alloc {
+            return;
         }
+        let id_u64 = match &self.format {
+            TextureFormat::SharedBGRAu8 { id, .. } => id.as_u64(),
+            _ => 0,
+        };
+        let device1: ID3D11Device1 = match d3d11_cx.device.cast() {
+            Ok(d) => d,
+            Err(err) => {
+                crate::error!("WINCHILD: ID3D11Device1 cast failed: {:?}", err);
+                return;
+            }
+        };
+        let mut name_wide: Vec<u16> = shared_texture_name(id_u64).encode_utf16().collect();
+        name_wide.push(0);
+        let mut resource_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hr = unsafe {
+            (Interface::vtable(&device1).OpenSharedResourceByName)(
+                Interface::as_raw(&device1),
+                PCWSTR(name_wide.as_ptr()),
+                DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                &<ID3D11Texture2D as Interface>::IID,
+                &mut resource_ptr,
+            )
+        };
+        if hr.is_err() || resource_ptr.is_null() {
+            crate::error!("WINCHILD: OpenSharedResourceByName FAILED hr={:?} id={:x}", hr, id_u64);
+            return;
+        }
+        let texture: ID3D11Texture2D = unsafe { ID3D11Texture2D::from_raw(resource_ptr) };
+        let resource: ID3D11Resource = texture.clone().cast().unwrap();
+        let mut shader_resource_view = None;
+        let srv = unsafe {
+            d3d11_cx
+                .device
+                .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+        };
+        let mut render_target_view = None;
+        let rtv = unsafe {
+            d3d11_cx
+                .device
+                .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
+        };
+        let keyed_mutex: Option<IDXGIKeyedMutex> = resource.cast().ok();
+        crate::log!("WINCHILD: OpenSharedResourceByName OK SRV={:?} RTV={:?} keyed_mutex={} id={:x}", srv, rtv, keyed_mutex.is_some(), id_u64);
+        self.os.texture = Some(texture);
+        self.os.render_target_view = render_target_view;
+        self.os.shader_resource_view = shader_resource_view;
+        self.os.keyed_mutex = keyed_mutex;
     }
 }
+
+/// Session-local name of the cross-process RunView shared texture, derived from the
+/// presentable-image id so the studio host and the hosted app agree without extra plumbing.
+fn shared_texture_name(id_u64: u64) -> String {
+    format!("Local\\makepad-runview-{:016x}", id_u64)
+}
+
+/// DXGI shared-resource access rights for CreateSharedHandle / OpenSharedResourceByName.
+const DXGI_SHARED_RESOURCE_READ: u32 = 0x8000_0000;
+const DXGI_SHARED_RESOURCE_WRITE: u32 = 0x0000_0001;
 
 impl CxOsPass {
     pub fn set_states(&mut self, d3d11_cx: &D3d11Cx) {

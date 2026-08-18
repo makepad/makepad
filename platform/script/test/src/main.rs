@@ -93,6 +93,50 @@ pub fn main() {
         dummy: f32,
     }
 
+    // Instance layout modeled on the game renderer's analytic sky
+    // (DrawSceneSkyAnalytic): many rust-instance vec3/vec4 fields read from
+    // the PIXEL stage. Used by the shader capacity tests below.
+    #[derive(Script, ScriptHook)]
+    #[repr(C)]
+    pub struct ShaderSkyCapacity {
+        #[live]
+        pub color: Vec4f,
+        #[live]
+        pub light_dir: Vec3f,
+        #[live]
+        pub transform: Mat4f,
+        #[live]
+        pub cube_size: Vec3f,
+        #[live]
+        pub cube_pos: Vec3f,
+        #[live(1.0)]
+        pub depth_clip: f32,
+        #[live(1.0)]
+        pub sky_mode: f32,
+        #[live]
+        pub sky_top: Vec3f,
+        #[live]
+        pub sky_horizon: Vec3f,
+        #[live]
+        pub sky_ground: Vec3f,
+        #[live]
+        pub sky_bottom: Vec3f,
+        #[live]
+        pub pz_y: Vec4f,
+        #[live]
+        pub pz_x: Vec4f,
+        #[live]
+        pub pz_yc: Vec4f,
+        #[live]
+        pub pz_e: Vec4f,
+        #[live]
+        pub pz_f0: Vec4f,
+        #[live]
+        pub zenith: Vec4f,
+        #[live]
+        pub sun_e: Vec4f,
+    }
+
     #[derive(Script, ScriptHook)]
     #[repr(C)]
     pub struct RustUniformBufferTest {
@@ -4810,6 +4854,306 @@ pub fn main() {
         let _ = vm.take_errors();
 
         println!("tick budget accounting tests passed");
+    }
+
+    // ========================================
+    // Shader capacity + loud-failure tests
+    //
+    // History: the sandbox's combined Preetham sky pixel fn appeared to sit
+    // at a "capacity limit" where one more statement made the WHOLE shader
+    // silently render flat gray — no compile error, no log, the draw just
+    // stopped. The compiler has no such statement-count limit (verified by
+    // the size sweep below), but the failure mode it exposed was real:
+    // shader compile errors could set `has_errors` without any message ever
+    // reaching a log (entry points compile under NoTrap which discards
+    // script_err_*! messages; errors queued on a nested fn compiler's trap
+    // were never drained; the loc-less drain dropped messages), after which
+    // every backend silently skipped the pipeline and the draw disappeared.
+    //
+    // These tests pin down both halves:
+    //  1. big sky-shaped pixel fns (early-return branch + many rust-instance
+    //     vec4 reads) must compile COMPLETELY at any size;
+    //  2. a shader that does fail must REPORT — test_compile_draw_errors
+    //     must return a non-empty diagnostic (it returns "" when healthy).
+    // ========================================
+    println!("Running shader capacity + loud-failure tests...");
+    {
+        // Build the sky-shaped shader script with `pads` extra let
+        // statements inside the early-return branch (the exact shape that
+        // was reported to silently break the sandbox sky).
+        fn gen_sky_code(pads: usize, tail: &str) -> String {
+            let mut pad_lets = String::new();
+            for i in 0..pads {
+                let prev = if i == 0 {
+                    "hclip".to_string()
+                } else {
+                    format!("pad{}", i - 1)
+                };
+                pad_lets.push_str(&format!(
+                    "                let pad{} = clamp({} * {}.0 + v.x, 0.0, 1.0)\n",
+                    i,
+                    prev,
+                    (i % 7) + 1
+                ));
+            }
+            let last_pad = if pads == 0 {
+                "hclip".to_string()
+            } else {
+                format!("pad{}", pads - 1)
+            };
+            format!(
+                r#"
+        use mod.std.assert
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+
+        let vertex_data = struct{{
+            geom_pos: vec3f,
+            geom_id: f32,
+            geom_normal: vec3f,
+            geom_uv: vec2f,
+        }}
+
+        let sky = #(0){{
+            vertex_pos: shader.vertex_position(vec4f)
+            fb0: shader.fragment_output(0, vec4f)
+            geom: shader.vertex_buffer(vertex_data)
+            v_dir: shader.varying(vec3f)
+            world: shader.varying(vec4f)
+
+            vertex: fn() {{
+                let pos = self.cube_size * self.geom.geom_pos + self.cube_pos
+                self.world = self.transform * vec4(pos.x, pos.y, pos.z, 1.0)
+                self.v_dir = self.geom.geom_pos
+                return self.world
+            }}
+
+            pixel: fn() {{
+                let v = normalize(self.v_dir)
+                if self.sky_mode > 0.5 {{
+                    let ct = max(v.y, 0.01)
+                    let cg = clamp(dot(v, self.sun_e.xyz), 0.0 - 1.0, 1.0)
+                    let g = acos(cg)
+                    let cg2 = cg * cg
+                    let fy = (1.0 + self.pz_y.x * exp(self.pz_y.y / ct))
+                        * (1.0 + self.pz_y.z * exp(self.pz_y.w * g) + self.pz_e.x * cg2)
+                    let fx = (1.0 + self.pz_x.x * exp(self.pz_x.y / ct))
+                        * (1.0 + self.pz_x.z * exp(self.pz_x.w * g) + self.pz_e.y * cg2)
+                    let fc = (1.0 + self.pz_yc.x * exp(self.pz_yc.y / ct))
+                        * (1.0 + self.pz_yc.z * exp(self.pz_yc.w * g) + self.pz_e.z * cg2)
+                    let yl = self.zenith.x * fy * self.pz_f0.x
+                    let xc = self.zenith.y * fx * self.pz_f0.y
+                    let yc = max(self.zenith.z * fc * self.pz_f0.z, 0.0001)
+                    var yt = max(yl * self.sun_e.w, 0.0)
+                    yt = yt / (1.0 + yt)
+                    let bx = xc * (yt / yc)
+                    let bz = (1.0 - xc - yc) * (yt / yc)
+                    let r = max(3.2406 * bx - 1.5372 * yt - 0.4986 * bz, 0.0)
+                    let gr = max((0.0 - 0.9689) * bx + 1.8758 * yt + 0.0415 * bz, 0.0)
+                    let b = max(0.0557 * bx - 0.204 * yt + 1.057 * bz, 0.0)
+                    let m = max(max(r, gr), max(b, 1.0))
+                    var day = pow(vec3(r / m, gr / m, b / m), vec3(0.4545, 0.4545, 0.4545))
+                    day = day * mix(1.0, 0.35, clamp((0.0 - v.y) * 3.0, 0.0, 1.0))
+                    let nb = self.zenith.w
+                    let hclip = clamp(v.y * 90.0 + 0.5, 0.0, 1.0)
+{pad_lets}
+                    let sfade = clamp(self.sun_e.y * 30.0 + 1.0, 0.0, 1.0)
+                    let disc = pow(max(cg, 0.0), 900.0) * 1.5 * {last_pad} * sfade
+                    day = day + vec3(1.0, 0.88, 0.62) * disc
+                    let nsky = mix(
+                        vec3(0.045, 0.055, 0.085),
+                        vec3(0.012, 0.016, 0.032),
+                        clamp(v.y * 1.4, 0.0, 1.0)
+                    )
+                    return vec4(mix(day, nsky, nb), 1.0)
+                }}
+                let y = v.y
+                let up = clamp(y * 2.2, 0.0, 1.0)
+                let down = clamp((0.0 - y) * 2.2, 0.0, 1.0)
+                let sky = mix(self.sky_horizon, self.sky_top, up)
+                let ground = mix(self.sky_ground, self.sky_bottom, down)
+                let color = mix(ground, sky, step(0.0, y))
+                return vec4(color, 1.0)
+            }}
+
+            fragment: fn() {{
+                self.fb0 = self.pixel()
+            }}
+        }}
+{tail}
+    "#,
+                pad_lets = pad_lets,
+                last_pad = last_pad,
+                tail = tail,
+            )
+        }
+
+        fn eval_generated(vm: &mut ScriptVm, code: String) -> ScriptValue {
+            let shader_obj = ShaderSkyCapacity::script_shader(vm);
+            let script_mod = ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
+                module_path: "shader_capacity_test".to_string(),
+                file: "shader_capacity_gen.rs".to_string(),
+                line: 1,
+                column: 1,
+                code,
+                values: vec![shader_obj],
+            };
+            vm.eval(script_mod)
+        }
+
+        fn eval_to_string(vm: &mut ScriptVm, code: String) -> String {
+            let v = eval_generated(vm, code);
+            assert!(!v.is_err(), "generated shader test script errored: {:?}", v);
+            vm.bx
+                .heap
+                .string_with(v, |_heap, s| s.to_string())
+                .unwrap_or_default()
+        }
+
+        // 1. Size sweep: the sky shape must compile COMPLETELY at every
+        // size — the last generated statement's local must appear in the
+        // emitted Metal source and the compile must report no errors.
+        for pads in [0usize, 2, 16, 64, 256] {
+            let last = if pads == 0 {
+                "l_hclip".to_string()
+            } else {
+                format!("l_pad{}", pads - 1)
+            };
+            let tail = format!(
+                r#"
+        assert(shader.test_compile_draw_contains(sky, "l_sfade"))
+        assert(shader.test_compile_draw_contains(sky, "{last}"))
+        shader.test_compile_draw_errors(sky)
+    "#
+            );
+            let errors = eval_to_string(vm, gen_sky_code(pads, &tail));
+            assert!(
+                errors.is_empty(),
+                "sky-shaped shader with {} extra statements reported: {}",
+                pads,
+                errors
+            );
+        }
+
+        // 2. A failing shader must REPORT. Entry points compile under
+        // NoTrap, which silently discards script_err_*! messages — this
+        // exact shape (an entry fn whose declared params can't be
+        // supplied) used to set has_errors with NO diagnostic anywhere,
+        // and the shader fell back to drawing nothing.
+        {
+            let bad = r#"
+        use mod.std.assert
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+
+        let bad = #(0){
+            vertex_pos: shader.vertex_position(vec4f)
+            fb0: shader.fragment_output(0, vec4f)
+            v_dir: shader.varying(vec3f)
+
+            // Entry points take no script-level arguments: declaring one
+            // must fail LOUDLY, not silently.
+            vertex: fn(oops: f32) {
+                return vec4(oops, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.fb0 = vec4(1.0, 0.0, 0.0, 1.0)
+            }
+        }
+        shader.test_compile_draw_errors(bad)
+    "#
+            .to_string();
+            let shader_obj = ShaderSkyCapacity::script_shader(vm);
+            let script_mod = ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
+                module_path: "shader_capacity_test".to_string(),
+                file: "shader_loud_failure_gen.rs".to_string(),
+                line: 1,
+                column: 1,
+                code: bad,
+                values: vec![shader_obj],
+            };
+            let v = vm.eval(script_mod);
+            assert!(!v.is_err(), "loud-failure test script errored: {:?}", v);
+            let errors = vm
+                .bx
+                .heap
+                .string_with(v, |_heap, s| s.to_string())
+                .unwrap_or_default();
+            assert!(
+                errors.contains("expects 1 argument"),
+                "entry-arity compile failure must surface a diagnostic, got: {:?}",
+                errors
+            );
+        }
+
+        // 3. The emitted-size ceiling (MAX_EMITTED_BYTES) must also REPORT.
+        // The overflow error was queued on a nested fn compiler's trap that
+        // nobody ever drained — has_errors with zero diagnostics, the
+        // "whole shader silently gray" failure. Build one pixel fn whose
+        // emitted source exceeds the 1MB ceiling.
+        {
+            let mut big = String::new();
+            big.push_str("                let a0 = v.x + 1.0\n");
+            // ~36 emitted bytes per statement; 40_000 clears the 1<<20 cap.
+            for i in 1..40_000usize {
+                big.push_str(&format!(
+                    "                let a{} = a{} + 1.0\n",
+                    i,
+                    i - 1
+                ));
+            }
+            let code = format!(
+                r#"
+        use mod.std.assert
+        use mod.shader
+        use mod.pod.*
+        use mod.math.*
+
+        let vertex_data = struct{{
+            geom_pos: vec3f,
+            geom_id: f32,
+            geom_normal: vec3f,
+            geom_uv: vec2f,
+        }}
+
+        let huge = #(0){{
+            vertex_pos: shader.vertex_position(vec4f)
+            fb0: shader.fragment_output(0, vec4f)
+            geom: shader.vertex_buffer(vertex_data)
+            v_dir: shader.varying(vec3f)
+
+            vertex: fn() {{
+                self.v_dir = self.geom.geom_pos
+                return vec4(0.0, 0.0, 0.0, 1.0)
+            }}
+
+            pixel: fn() {{
+                let v = normalize(self.v_dir)
+{big}
+                return vec4(a39999, 0.0, 0.0, 1.0)
+            }}
+
+            fragment: fn() {{
+                self.fb0 = self.pixel()
+            }}
+        }}
+        shader.test_compile_draw_errors(huge)
+    "#
+            );
+            let errors = eval_to_string(vm, code);
+            assert!(
+                errors.contains("shader too large"),
+                "emitted-size overflow must surface a diagnostic, got: {:?}",
+                &errors[..errors.len().min(200)]
+            );
+        }
+
+        println!("shader capacity + loud-failure tests passed");
     }
 
     println!("Test done");

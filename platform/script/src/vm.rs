@@ -243,6 +243,31 @@ impl<'a> ScriptVm<'a> {
         result
     }
 
+    /// Run one untrusted evaluation/callback under a logical heap-allocation
+    /// ceiling. The default VM has no ceiling; callers opt in explicitly, so
+    /// trusted widget, shader and Studio script execution is unchanged.
+    ///
+    /// Container growth is charged before allocation. If a script exceeds
+    /// the allowance, the current run bails with a captured `script limit`
+    /// error instead of attempting the allocation. The report lets a host
+    /// share one cumulative allowance across several callbacks in a tick.
+    pub fn with_heap_allocation_limit<R>(
+        &mut self,
+        allocation_limit: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> (R, ScriptAllocationReport) {
+        let previous = self.bx.heap.begin_allocation_budget(allocation_limit);
+        let result = f(self);
+        // Parser/native work can be the last action in `f`, with no following
+        // opcode for run_core's poll. Surface that pending refusal here too.
+        if let Some(message) = self.bx.heap.take_allocation_error() {
+            let _ = script_err_limit!(self.bx.threads.cur_ref().trap, "{}", message);
+            self.drain_errors();
+        }
+        let report = self.bx.heap.end_allocation_budget(previous);
+        (result, report)
+    }
+
     /// Instructions charged by the most recent `with_instruction_limit` call.
     pub fn last_limit_consumed(&self) -> usize {
         self.bx.last_limit_consumed
@@ -404,6 +429,7 @@ impl<'a> ScriptVm<'a> {
                         bases: self.bx.threads.cur_ref().new_bases(),
                         args: OpcodeArgs::default(),
                         return_ip: None,
+                        prev_slot_base: self.bx.threads.cur_ref().slot_base,
                     };
                     self.bx.threads.cur().scopes.push(scope);
                     self.bx.threads.cur().calls.push(call);
@@ -697,6 +723,7 @@ impl<'a> ScriptVm<'a> {
                 // and truncate all stacks back to clean state.
                 loop {
                     if let Some(call) = self.bx.threads.cur().calls.pop() {
+                        self.bx.threads.cur().slot_base = call.prev_slot_base;
                         self.bx
                             .threads
                             .cur()
@@ -723,6 +750,26 @@ impl<'a> ScriptVm<'a> {
         let mut opcodes_len: usize = 0;
 
         loop {
+            // Heap growth paths cannot own the interpreter trap (many are
+            // shared with parsers/native bindings), so they record one hard
+            // refusal on the heap. Turn it into the same uncatchable Bail as
+            // the instruction ceiling before executing another opcode.
+            if let Some(message) = self.bx.heap.take_allocation_error() {
+                let err = script_err_limit!(
+                    self.bx.threads.cur_ref().trap,
+                    "{}",
+                    message
+                );
+                self.drain_errors();
+                self.bx
+                    .threads
+                    .cur()
+                    .trap
+                    .set_on(Some(ScriptTrapOn::Bail(err)));
+                if let Some(value) = self.handle_trap_on() {
+                    return value;
+                }
+            }
             let instruction_limit_exceeded = if let Some(remaining) =
                 self.bx.threads.cur().instruction_limit_remaining.as_mut()
             {
@@ -846,6 +893,8 @@ impl<'a> ScriptVm<'a> {
             )
         };
 
+        let root_slots = self.bx.threads.cur_ref().slots.len();
+        let root_slot_base = self.bx.threads.cur_ref().slot_base;
         self.bx.threads.cur().calls.push(CallFrame {
             bases: StackBases {
                 tries: 0,
@@ -853,9 +902,13 @@ impl<'a> ScriptVm<'a> {
                 stack: 0,
                 scope: 0,
                 mes: 0,
+                // unlike the other zeroed bases, never truncate slots below
+                // what an enclosing (paused/re-entrant) frame allocated
+                slots: root_slots,
             },
             args: Default::default(),
             return_ip: None,
+            prev_slot_base: root_slot_base,
         });
 
         self.bx.threads.cur().scopes.push(scope);
@@ -1084,6 +1137,13 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn new_string_with<F: FnOnce(&mut Self, &mut String)>(&mut self, f: F) -> ScriptValue {
+        if self.bx.heap.has_allocation_budget() {
+            let _ = self.bx.heap.charge_allocation(
+                usize::MAX,
+                "building a native string without an allocation preflight",
+            );
+            return NIL;
+        }
         let mut out = if let Some(s) = self.bx.heap.strings_reuse.pop() {
             s
         } else {
@@ -1510,5 +1570,55 @@ mod tests {
                 idx
             );
         }
+    }
+
+    fn parse_reports_error(code: &str) -> bool {
+        let mut bx = ScriptVmBase::new();
+        let mut tokenizer = ScriptTokenizer::default();
+        // Production eval appends "\n;" so the tail statement finalizes
+        // (the streaming parser only closes a statement on the next token);
+        // mirror that here or emit-time checks never run for the last line.
+        let code = format!("{}\n;", code);
+        tokenizer.tokenize(&code, &mut bx.heap);
+        let mut parser = ScriptParser::default();
+        parser.parse(&tokenizer, "reserved_binding_test", (0, 0), &[]);
+        parser.had_error
+    }
+
+    #[test]
+    fn reserved_words_cannot_be_bound() {
+        // let / var
+        assert!(parse_reports_error("let me = 1"));
+        assert!(parse_reports_error("let self = 1"));
+        assert!(parse_reports_error("let scope = 1"));
+        assert!(parse_reports_error("let nil = 1"));
+        assert!(parse_reports_error("let true = 1"));
+        assert!(parse_reports_error("let for = 1"));
+        assert!(parse_reports_error("var me = 1"));
+        // fn / closure argument names
+        assert!(parse_reports_error("let f = |me| me"));
+        assert!(parse_reports_error("let f = |x, self| x"));
+        assert!(parse_reports_error("fn f(me) { }"));
+        // for-loop variables
+        assert!(parse_reports_error("for me in [1] { }"));
+        assert!(parse_reports_error("for k, self in [1] { }"));
+        // destructuring patterns
+        assert!(parse_reports_error("let [me] = [1]"), "array simple");
+        assert!(parse_reports_error("let {a, me} = {x: 1}"), "object multi");
+        assert!(parse_reports_error("let {me} = {x: 1}"), "object single");
+        assert!(parse_reports_error("let [nil] = [1]"));
+        assert!(parse_reports_error("let [a, [me]] = [1, [2]]"));
+    }
+
+    #[test]
+    fn reserved_words_still_read_and_normal_names_bind() {
+        // Reading the implicits stays legal — only BINDING them errors.
+        assert!(!parse_reports_error("let hero = 1"));
+        assert!(!parse_reports_error("let x = me"));
+        assert!(!parse_reports_error("let f = |dt, input| dt"));
+        assert!(!parse_reports_error("for k, v in [1] { }"));
+        assert!(!parse_reports_error("let {x} = {x: 1}"));
+        // `me:` as an OBJECT KEY is data, not a binding.
+        assert!(!parse_reports_error("let o = {me: 1}"));
     }
 }

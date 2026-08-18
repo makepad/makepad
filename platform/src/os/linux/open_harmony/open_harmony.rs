@@ -591,6 +591,10 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     //unsafe {android_jni::to_java_show_keyboard(false);}
                 }
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!("external file dragging is not implemented on OpenHarmony");
+                    self.call_event_handler(&Event::DragEnd);
+                }
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 e => {

@@ -275,6 +275,7 @@ impl Cx {
                             self.windows.window_id_contains(dvec2(e.x, e.y))
                         };
                     self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
+                lock_delta: Default::default(),
                         abs: dvec2(e.x - pos.x, e.y - pos.y),
                         window_id,
                         modifiers: e.modifiers.into_key_modifiers(),
@@ -680,6 +681,10 @@ impl Cx {
                 }
                 CxOsOp::Quit => {
                     return false;
+                }
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!("external file dragging is not implemented in headless mode");
+                    self.call_event_handler(&Event::DragEnd);
                 }
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}

@@ -11,6 +11,39 @@ use crate::*;
 impl ScriptHeap {
     // New objects
 
+    #[inline]
+    pub(crate) fn charge_object_vec_entries(
+        &mut self,
+        entries: usize,
+        operation: &'static str,
+    ) -> bool {
+        let bytes = entries
+            .checked_mul(std::mem::size_of::<ScriptVecValue>())
+            .unwrap_or(usize::MAX);
+        self.charge_allocation(bytes, operation)
+    }
+
+    #[inline]
+    pub(crate) fn charge_object_map_entry(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        operation: &'static str,
+    ) -> bool {
+        if self.is_allocation_poison_object(ptr) {
+            return false;
+        }
+        if self.objects[ptr].map.contains_key(&key) {
+            return true;
+        }
+        // ValueMap is a compact Vec for small maps and spills to a HashMap.
+        // Charge one key/value pair plus one word each of table/index
+        // overhead. This is deliberately conservative across both layouts.
+        let bytes = std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
+            .saturating_add(2 * std::mem::size_of::<usize>());
+        self.charge_allocation(bytes, operation)
+    }
+
     pub fn new_object(&mut self) -> ScriptObject {
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
@@ -23,6 +56,12 @@ impl ScriptHeap {
             object.proto = id!(object).into();
             obj
         } else {
+            if !self.charge_allocation(
+                std::mem::size_of::<ScriptObjectData>(),
+                "creating an object",
+            ) {
+                return self.allocation_poison_object;
+            }
             let index = self.objects.len() as u32;
             let mut object = ScriptObjectData::default();
             object.tag.set_alloced();
@@ -57,15 +96,38 @@ impl ScriptHeap {
         copy_vec_from_auto_proto: bool,
     ) -> ScriptObject {
         let (proto_fwd, proto_ptr) = if let Some(ptr) = proto.as_object() {
-            // Use checked access via ScriptObject
-            let object = &mut self.objects[ptr];
-            object.tag.set_reffed();
-            (object.tag.proto_fwd(), ptr)
+            // Use checked access via ScriptObject. Do not mutate the
+            // prototype until all script-controlled growth is preflighted.
+            (self.objects[ptr].tag.proto_fwd(), ptr)
         } else {
             let ptr = self.new_object();
+            if self.is_allocation_poison_object(ptr) {
+                return ptr;
+            }
             self.objects[ptr].proto = proto;
             return ptr;
         };
+
+        let copy_count = if copy_vec_from_auto_proto && self.objects[proto_ptr].tag.is_auto() {
+            self.objects[proto_ptr].vec.len()
+        } else {
+            0
+        };
+        let metadata_bytes = if self.objects_free.is_empty() {
+            std::mem::size_of::<ScriptObjectData>()
+        } else {
+            0
+        };
+        let copy_bytes = copy_count
+            .checked_mul(std::mem::size_of::<ScriptVecValue>())
+            .unwrap_or(usize::MAX);
+        if !self.charge_allocation(
+            metadata_bytes.checked_add(copy_bytes).unwrap_or(usize::MAX),
+            "creating an object with a prototype",
+        ) {
+            return self.allocation_poison_object;
+        }
+        self.objects[proto_ptr].tag.set_reffed();
 
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
@@ -207,6 +269,9 @@ impl ScriptHeap {
         key: ScriptValue,
         sself: ScriptValue,
     ) {
+        if !self.charge_object_map_entry(ptr, key, "adding an object property") {
+            return;
+        }
         self.escape_value(sself);
         let object = &mut self.objects[ptr];
         object.map_insert(key, sself);
@@ -219,14 +284,23 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        // alright so. now what.
-        let object = &mut self.objects[ptr];
-        if object.tag.is_vec_frozen() {
+        if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_vec_frozen() {
             // has rw flags
             return script_err_immutable!(trap, "cannot set index on frozen vec");
         }
 
         let index = index.as_index();
+        let len = self.objects[ptr].vec.len();
+        if index >= len {
+            let additional = index
+                .checked_add(1)
+                .and_then(|target| target.checked_sub(len))
+                .unwrap_or(usize::MAX);
+            if !self.charge_object_vec_entries(additional, "growing a sparse object index") {
+                return NIL;
+            }
+        }
+        let object = &mut self.objects[ptr];
         if index >= object.vec.len() {
             object.vec.resize(index + 1, ScriptVecValue::default());
         }
@@ -253,6 +327,10 @@ impl ScriptHeap {
             }
         }
         // just append it
+        if !self.charge_object_vec_entries(1, "adding an object vector property") {
+            return NIL;
+        }
+        let object = &mut self.objects[ptr];
         object.vec.push(ScriptVecValue { key, value });
         NIL
     }
@@ -293,13 +371,20 @@ impl ScriptHeap {
             }
         }
         // alright nothing found
-        let object = &mut self.objects[ptr];
-        if object.tag.is_immutable() {
+        if self.objects[ptr].tag.is_immutable() {
             return script_err_immutable!(trap, "cannot modify immutable object");
         }
-        if object.tag.is_vec2() {
+        if self.objects[ptr].tag.is_vec2() {
+            if !self.charge_object_vec_entries(1, "adding a deep object vector property") {
+                return NIL;
+            }
+            let object = &mut self.objects[ptr];
             object.vec.push(ScriptVecValue { key, value });
         } else {
+            if !self.charge_object_map_entry(ptr, key, "adding a deep object property") {
+                return NIL;
+            }
+            let object = &mut self.objects[ptr];
             object.map_insert(key, value);
         }
         NIL
@@ -381,6 +466,9 @@ impl ScriptHeap {
                     suggest_property(self, top_ptr, key)
                 );
             }
+            if !self.charge_object_map_entry(top_ptr, key, "adding a checked object property") {
+                return NIL;
+            }
             let object = &mut self.objects[top_ptr];
             object.map_insert(key, value);
             return NIL;
@@ -438,20 +526,31 @@ impl ScriptHeap {
                 }
             }
         }
-        let object = &mut self.objects[top_ptr];
-        if object.tag.is_map_add() {
-            if object.tag.is_vec2() {
-                for kv in object.vec.iter_mut().rev() {
+        if self.objects[top_ptr].tag.is_map_add() {
+            if self.objects[top_ptr].tag.is_vec2() {
+                for kv in self.objects[top_ptr].vec.iter().rev() {
                     if kv.key == key {
                         return script_err_duplicate!(trap, "key {:?} already exists in vec", key);
                     }
                 }
+                if !self.charge_object_vec_entries(1, "adding a checked object vector property") {
+                    return NIL;
+                }
+                let object = &mut self.objects[top_ptr];
                 object.vec.push(ScriptVecValue { key, value });
                 return NIL;
             }
-            if let Some(_) = object.map_get(&key) {
+            if self.objects[top_ptr].map_get(&key).is_some() {
                 return script_err_duplicate!(trap, "key {:?} already exists in map", key);
             } else {
+                if !self.charge_object_map_entry(
+                    top_ptr,
+                    key,
+                    "adding a checked object property",
+                ) {
+                    return NIL;
+                }
+                let object = &mut self.objects[top_ptr];
                 object.map_insert(key, value);
                 return NIL;
             }
@@ -466,20 +565,27 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        let object = &mut self.objects[ptr];
-        if object.tag.is_immutable() {
+        if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_immutable() {
             return script_err_immutable!(trap, "cannot set property on immutable object");
         }
-        if object.tag.is_vec2() {
-            for kv in object.vec.iter_mut().rev() {
+        if self.objects[ptr].tag.is_vec2() {
+            for kv in self.objects[ptr].vec.iter_mut().rev() {
                 if kv.key == key {
                     kv.value = value;
                     return NIL;
                 }
             }
+            if !self.charge_object_vec_entries(1, "adding an object vector property") {
+                return NIL;
+            }
+            let object = &mut self.objects[ptr];
             object.vec.push(ScriptVecValue { key, value });
             return NIL;
         }
+        if !self.charge_object_map_entry(ptr, key, "adding an object property") {
+            return NIL;
+        }
+        let object = &mut self.objects[ptr];
         object.map_insert(key, value);
         NIL
     }
@@ -675,12 +781,15 @@ impl ScriptHeap {
     ) -> Option<ScriptObject> {
         self.escape_value(value);
         // if we already have sself value we have to shadow the scope
-        let object = &mut self.objects[ptr];
-        if let Some(_) = object.map.get(&key.into()) {
+        let key: ScriptValue = key.into();
+        if self.objects[ptr].map.contains_key(&key) {
             let new_scope = self.new_with_proto(ptr.into());
+            if !self.charge_object_map_entry(new_scope, key, "defining a scope value") {
+                return Some(new_scope);
+            }
             let object = &mut self.objects[new_scope];
             object.map.insert(
-                key.into(),
+                key,
                 ScriptMapValue {
                     tag: Default::default(),
                     value,
@@ -688,8 +797,12 @@ impl ScriptHeap {
             );
             return Some(new_scope);
         } else {
+            if !self.charge_object_map_entry(ptr, key, "defining a scope value") {
+                return None;
+            }
+            let object = &mut self.objects[ptr];
             object.map.insert(
-                key.into(),
+                key,
                 ScriptMapValue {
                     tag: Default::default(),
                     value,
@@ -1134,6 +1247,13 @@ impl ScriptHeap {
                 target.index
             );
         }
+        if self.is_allocation_poison_object(target) || self.objects[target].tag.is_vec_frozen() {
+            return script_err_immutable!(trap, "cannot push to frozen vec");
+        }
+        let source_len = self.objects[source].vec.len();
+        if !self.charge_object_vec_entries(source_len, "extending an object vector") {
+            return NIL;
+        }
         let (target_obj, source_obj) = if target.index > source.index {
             let (o1, o2) = self.objects.slots_split_at_mut(target.index as usize);
             (&mut o2[0].data, &mut o1[source.index as usize].data)
@@ -1141,9 +1261,6 @@ impl ScriptHeap {
             let (o1, o2) = self.objects.slots_split_at_mut(source.index as usize);
             (&mut o1[target.index as usize].data, &mut o2[0].data)
         };
-        if target_obj.tag.is_vec_frozen() {
-            return script_err_immutable!(trap, "cannot push to frozen vec");
-        }
         target_obj.push_vec_from_other(source_obj);
         NIL
     }
@@ -1165,6 +1282,35 @@ impl ScriptHeap {
                         target.index
                     );
                 }
+                if self.is_allocation_poison_object(target)
+                    || self.objects[target].tag.is_vec_frozen()
+                {
+                    return script_err_immutable!(
+                        trap,
+                        "cannot push to frozen vec in nested push"
+                    );
+                }
+                let vec_entries = self.objects[source].vec.len();
+                let map_entries = if map {
+                    self.objects[source].map.len()
+                } else {
+                    0
+                };
+                let vec_bytes = vec_entries
+                    .checked_mul(std::mem::size_of::<ScriptVecValue>())
+                    .unwrap_or(usize::MAX);
+                let map_bytes = map_entries
+                    .checked_mul(
+                        std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
+                            .saturating_add(2 * std::mem::size_of::<usize>()),
+                    )
+                    .unwrap_or(usize::MAX);
+                if !self.charge_allocation(
+                    vec_bytes.checked_add(map_bytes).unwrap_or(usize::MAX),
+                    "merging nested object containers",
+                ) {
+                    return NIL;
+                }
                 let (target_obj, source_obj) = if target.index > source.index {
                     let (o1, o2) = self.objects.slots_split_at_mut(target.index as usize);
                     (&mut o2[0].data, &mut o1[source.index as usize].data)
@@ -1172,9 +1318,6 @@ impl ScriptHeap {
                     let (o1, o2) = self.objects.slots_split_at_mut(source.index as usize);
                     (&mut o1[target.index as usize].data, &mut o2[0].data)
                 };
-                if target_obj.tag.is_vec_frozen() {
-                    return script_err_immutable!(trap, "cannot push to frozen vec in nested push");
-                }
                 target_obj.push_vec_from_other(source_obj);
                 if map {
                     target_obj.merge_map_from_other(source_obj);
@@ -1200,6 +1343,40 @@ impl ScriptHeap {
                 target.index
             );
         }
+        if self.is_allocation_poison_object(target) || self.objects[target].tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot merge into immutable object");
+        }
+        let vec_entries = if self.objects[target].tag.is_vec_frozen() {
+            0
+        } else {
+            self.objects[source].vec.len()
+        };
+        let missing_map_entries = self.objects[source]
+            .map
+            .iter()
+            .filter(|(key, _)| !self.objects[target].map.contains_key(key))
+            .count();
+        let temp_bytes = self.objects[source]
+            .map
+            .len()
+            .checked_mul(std::mem::size_of::<ScriptValue>())
+            .unwrap_or(usize::MAX);
+        let vec_bytes = vec_entries
+            .checked_mul(std::mem::size_of::<ScriptVecValue>())
+            .unwrap_or(usize::MAX);
+        let map_bytes = missing_map_entries
+            .checked_mul(
+                std::mem::size_of::<(ScriptValue, ScriptMapValue)>()
+                    .saturating_add(2 * std::mem::size_of::<usize>()),
+            )
+            .unwrap_or(usize::MAX);
+        let bytes = temp_bytes
+            .checked_add(vec_bytes)
+            .and_then(|bytes| bytes.checked_add(map_bytes))
+            .unwrap_or(usize::MAX);
+        if !self.charge_allocation(bytes, "merging object containers") {
+            return NIL;
+        }
         // escape barrier: source's values become reachable from target
         let vec_len = self.objects[source].vec.len();
         for i in 0..vec_len {
@@ -1221,9 +1398,6 @@ impl ScriptHeap {
             let (o1, o2) = self.objects.slots_split_at_mut(source.index as usize);
             (&mut o1[target.index as usize].data, &mut o2[0].data)
         };
-        if target_obj.tag.is_immutable() {
-            return script_err_immutable!(trap, "cannot merge into immutable object");
-        }
         if !target_obj.tag.is_vec_frozen() {
             target_obj.push_vec_from_other(source_obj);
         }
@@ -1239,16 +1413,25 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        self.escape_value(value);
-        let object = &mut self.objects[ptr];
-        if object.tag.is_vec_frozen() {
+        if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot push to frozen vec");
         }
+        if !self.charge_object_vec_entries(1, "pushing an object vector value") {
+            return NIL;
+        }
+        self.escape_value(value);
+        let object = &mut self.objects[ptr];
         object.vec.push(ScriptVecValue { key, value });
         NIL
     }
 
     pub fn vec_push_unchecked(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue) {
+        if self.is_allocation_poison_object(ptr) || self.allocation_exceeded() {
+            return;
+        }
+        if !self.charge_object_vec_entries(1, "pushing an object vector value") {
+            return;
+        }
         let object = &mut self.objects[ptr];
         object.vec.push(ScriptVecValue { key, value });
     }

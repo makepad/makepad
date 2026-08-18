@@ -432,7 +432,8 @@ impl ScriptNative {
                     if sself.is_string_like() {
                         return sself;
                     }
-                    vm.bx.heap.new_string_with(|heap, out| {
+                    let len = vm.bx.heap.cast_to_string_len(sself);
+                    vm.bx.heap.new_string_with_preflight(len, "converting a value to a string", |heap, out| {
                         heap.cast_to_string(sself, out);
                     })
                 });

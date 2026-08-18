@@ -1767,6 +1767,7 @@ impl WaylandState {
             return;
         }
         self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
+                lock_delta: Default::default(),
             abs: pos,
             window_id,
             modifiers: self.modifiers,

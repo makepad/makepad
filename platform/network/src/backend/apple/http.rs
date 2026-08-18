@@ -1,13 +1,15 @@
 use {
-    crate::types::{HttpError, HttpRequest, HttpResponse, NetworkResponse},
+    crate::types::{HttpError, HttpProgress, HttpRequest, HttpResponse, NetworkResponse},
     makepad_apple_sys::*,
     makepad_apple_sys::{objc_block, objc_block_invoke},
     makepad_live_id::LiveId,
-    std::{ptr, ptr::NonNull, sync::mpsc::Sender, sync::Once},
+    std::{collections::BTreeMap, ptr, ptr::NonNull, sync::mpsc::Sender, sync::Once},
 };
 
 const URL_SESSION_DATA_DELEGATE_CLASS_NAME: &str = "MakepadNSURLSessionDataDelegate";
+const URL_SESSION_BUFFER_DELEGATE_CLASS_NAME: &str = "MakepadNSURLSessionBufferDelegate";
 const URL_SESSION_DELEGATE_CLASS_NAME: &str = "MakepadNSURLSessionDelegate";
+const PROGRESS_EVERY: usize = 256 * 1024;
 
 struct UrlSessionDataDelegateContext {
     sender: Sender<NetworkResponse>,
@@ -20,6 +22,15 @@ fn url_session_data_delegate_class() -> *const Class {
     static mut CLASS: *const Class = ptr::null();
     INIT.call_once(|| unsafe {
         CLASS = define_url_session_data_delegate();
+    });
+    unsafe { CLASS }
+}
+
+fn url_session_buffer_delegate_class() -> *const Class {
+    static INIT: Once = Once::new();
+    static mut CLASS: *const Class = ptr::null();
+    INIT.call_once(|| unsafe {
+        CLASS = define_url_session_buffer_delegate();
     });
     unsafe { CLASS }
 }
@@ -146,6 +157,163 @@ pub fn define_url_session_data_delegate() -> *const Class {
     decl.register()
 }
 
+struct UrlSessionBufferContext {
+    sender: Sender<NetworkResponse>,
+    request_id: LiveId,
+    metadata_id: LiveId,
+    body: Vec<u8>,
+    expected: u64,
+    last_emit: usize,
+    status_code: u16,
+    headers: BTreeMap<String, Vec<String>>,
+}
+
+fn emit_http_progress(ctx: &UrlSessionBufferContext) {
+    let _ = ctx.sender.send(NetworkResponse::HttpProgress {
+        request_id: ctx.request_id,
+        progress: HttpProgress {
+            loaded: ctx.body.len() as u64,
+            total: ctx.expected,
+        },
+    });
+}
+
+pub fn define_url_session_buffer_delegate() -> *const Class {
+    extern "C" fn did_receive_response(
+        this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _data_task: ObjcId,
+        response: ObjcId,
+        completion: ObjcId,
+    ) {
+        unsafe {
+            let context_box: u64 = *this.get_ivar("context_box");
+            let mut ctx: Box<UrlSessionBufferContext> = Box::from_raw(context_box as *mut _);
+            let expected: i64 = msg_send![response, expectedContentLength];
+            // New response (including after a 302) replaces any redirect body.
+            ctx.body.clear();
+            ctx.last_emit = 0;
+            if expected > 0 {
+                ctx.expected = expected as u64;
+                ctx.body.reserve(expected as usize);
+            } else {
+                ctx.expected = 0;
+            }
+            let is_http: bool = msg_send![response, isKindOfClass: class!(NSHTTPURLResponse)];
+            if is_http {
+                ctx.status_code = msg_send![response, statusCode];
+                let headers: ObjcId = msg_send![response, allHeaderFields];
+                let key_enumerator: ObjcId = msg_send![headers, keyEnumerator];
+                let mut key: ObjcId = msg_send![key_enumerator, nextObject];
+                while key != ptr::null_mut() {
+                    let value: ObjcId = msg_send![headers, objectForKey: key];
+                    ctx.headers
+                        .entry(nsstring_to_string(key))
+                        .or_default()
+                        .push(nsstring_to_string(value));
+                    key = msg_send![key_enumerator, nextObject];
+                }
+            }
+            emit_http_progress(&ctx);
+            let _ = Box::into_raw(ctx);
+            objc_block_invoke!(completion, invoke((NSURLSessionResponseAllow): u64));
+        }
+    }
+
+    extern "C" fn did_receive_data(
+        this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _data_task: ObjcId,
+        data: ObjcId,
+    ) {
+        unsafe {
+            let context_box: u64 = *this.get_ivar("context_box");
+            let mut ctx: Box<UrlSessionBufferContext> = Box::from_raw(context_box as *mut _);
+            let bytes: *const u8 = msg_send![data, bytes];
+            let length: usize = msg_send![data, length];
+            if !bytes.is_null() && length > 0 {
+                ctx.body.extend_from_slice(std::slice::from_raw_parts(bytes, length));
+            }
+            if ctx.body.len().saturating_sub(ctx.last_emit) >= PROGRESS_EVERY {
+                ctx.last_emit = ctx.body.len();
+                emit_http_progress(&ctx);
+            }
+            let _ = Box::into_raw(ctx);
+        }
+    }
+
+    extern "C" fn did_complete_with_error(
+        this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _task: ObjcId,
+        error: ObjcId,
+    ) {
+        unsafe {
+            let context_box: u64 = *this.get_ivar("context_box");
+            let ctx: Box<UrlSessionBufferContext> = Box::from_raw(context_box as *mut _);
+            if error != nil {
+                let error_str: String = nsstring_to_string(msg_send![error, localizedDescription]);
+                let _ = ctx.sender.send(NetworkResponse::HttpError {
+                    request_id: ctx.request_id,
+                    error: HttpError {
+                        metadata_id: ctx.metadata_id,
+                        message: error_str,
+                    },
+                });
+                return;
+            }
+            emit_http_progress(&ctx);
+            let mut response = HttpResponse::new(
+                ctx.metadata_id,
+                ctx.status_code,
+                Default::default(),
+                Some(ctx.body),
+            );
+            for (key, values) in ctx.headers {
+                for value in values {
+                    response.set_header(key.clone(), value);
+                }
+            }
+            let _ = ctx.sender.send(NetworkResponse::HttpResponse {
+                request_id: ctx.request_id,
+                response,
+            });
+        }
+    }
+
+    if let Some(existing) = Class::get(URL_SESSION_BUFFER_DELEGATE_CLASS_NAME) {
+        return existing as *const Class;
+    }
+
+    let superclass = class!(NSObject);
+    let Some(mut decl) = ClassDecl::new(URL_SESSION_BUFFER_DELEGATE_CLASS_NAME, superclass) else {
+        if let Some(existing) = Class::get(URL_SESSION_BUFFER_DELEGATE_CLASS_NAME) {
+            return existing as *const Class;
+        }
+        return superclass as *const Class;
+    };
+
+    unsafe {
+        decl.add_method(
+            sel!(URLSession:dataTask:didReceiveResponse:completionHandler:),
+            did_receive_response as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(URLSession:dataTask:didReceiveData:),
+            did_receive_data as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(URLSession:task:didCompleteWithError:),
+            did_complete_with_error as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId),
+        );
+    }
+    decl.add_ivar::<u64>("context_box");
+    decl.register()
+}
+
 // This allows locally signed SSL certificates to pass.
 pub fn define_url_session_delegate() -> *const Class {
     extern "C" fn did_receive_challenge(
@@ -213,6 +381,10 @@ pub(crate) unsafe fn make_ns_request(request: &HttpRequest) -> ObjcId {
 struct HttpReq {
     request_id: LiveId,
     data_task: RcObjcId,
+    #[allow(dead_code)]
+    session: Option<RcObjcId>,
+    #[allow(dead_code)]
+    session_delegate: Option<RcObjcId>,
 }
 
 #[derive(Default)]
@@ -274,9 +446,45 @@ impl AppleHttpRequests {
                     defaultSessionConfiguration
                 ];
                 let () = msg_send![config, setURLCache: nil];
-                let () = msg_send![config, setTimeoutIntervalForRequest: 60.0];
-                let () = msg_send![config, setTimeoutIntervalForResource: 120.0];
-                msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: nil delegateQueue:nil]
+                let () = msg_send![config, setTimeoutIntervalForRequest: 120.0];
+                // Large Range / zip downloads (TDM, Archive.org) need more
+                // than two minutes or NSURLSession kills the transfer and we
+                // retry, which is worse for the remote host.
+                let () = msg_send![config, setTimeoutIntervalForResource: 1800.0];
+                if is_streaming {
+                    msg_send![class!(NSURLSession), sessionWithConfiguration: config delegate: nil delegateQueue:nil]
+                } else {
+                    let context_box = Box::into_raw(Box::new(UrlSessionBufferContext {
+                        request_id,
+                        metadata_id,
+                        sender: networking_sender.clone(),
+                        body: Vec::new(),
+                        expected: 0,
+                        last_emit: 0,
+                        status_code: 0,
+                        headers: BTreeMap::new(),
+                    })) as u64;
+                    let buffer_delegate: ObjcId =
+                        msg_send![url_session_buffer_delegate_class(), new];
+                    (*buffer_delegate).set_ivar("context_box", context_box);
+                    let session: ObjcId = msg_send![
+                        class!(NSURLSession),
+                        sessionWithConfiguration: config
+                        delegate: buffer_delegate
+                        delegateQueue: nil
+                    ];
+                    let data_task: ObjcId = msg_send![session, dataTaskWithRequest: ns_request];
+                    let () = msg_send![data_task, resume];
+                    self.requests.push(HttpReq {
+                        request_id,
+                        data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap()),
+                        session: Some(RcObjcId::from_unowned(NonNull::new(session).unwrap())),
+                        session_delegate: Some(RcObjcId::from_unowned(
+                            NonNull::new(buffer_delegate).unwrap(),
+                        )),
+                    });
+                    return;
+                }
             };
 
             if is_streaming {
@@ -295,6 +503,8 @@ impl AppleHttpRequests {
                 self.requests.push(HttpReq {
                     request_id,
                     data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap()),
+                    session: None,
+                    session_delegate: None,
                 });
             } else {
                 let sender = networking_sender.clone();
@@ -347,6 +557,8 @@ impl AppleHttpRequests {
                 self.requests.push(HttpReq {
                     request_id,
                     data_task: RcObjcId::from_unowned(NonNull::new(data_task).unwrap()),
+                    session: None,
+                    session_delegate: None,
                 });
             }
         }

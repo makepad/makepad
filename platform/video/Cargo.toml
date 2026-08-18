@@ -1,0 +1,42 @@
+[package]
+name = "makepad-video"
+version = "1.0.0"
+edition = "2021"
+description = "Offline hardware video file encode/decode (Media Foundation / VideoToolbox), no Cx"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies.windows]
+path = "../../libs/windows/windows-rs"
+version = "0.62.2"
+# Same Media Foundation surface as platform's windows dep so the vendored
+# windows crate enables IMFSinkWriter / source-reader (H3 mux).
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D9",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_DxMediaObjects",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
+makepad-apple-sys = { path = "../../libs/apple_sys", version = "1.0.0" }
+makepad-objc-sys = { path = "../../libs/objc-sys", version = "1.0.0" }

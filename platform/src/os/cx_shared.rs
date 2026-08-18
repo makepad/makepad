@@ -509,6 +509,7 @@ impl Cx {
             }
             StudioToApp::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
+                lock_delta: Default::default(),
                     abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),

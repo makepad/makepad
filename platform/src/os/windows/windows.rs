@@ -736,6 +736,14 @@ impl Cx {
                 CxOsOp::StartDragging(dragged_item) => {
                     with_win32_app(|app| app.start_dragging(dragged_item));
                 }
+                CxOsOp::StartExternalDragging { .. } => {
+                    // The existing OLE path advertises MOVE and has internal
+                    // drag completion semantics. Do not expose managed files
+                    // through it until the external COPY-only contract has a
+                    // dedicated Windows source implementation.
+                    crate::error!("external file dragging is not implemented on Windows");
+                    self.call_event_handler(&Event::DragEnd);
+                }
                 CxOsOp::HttpRequest {
                     request_id,
                     request,

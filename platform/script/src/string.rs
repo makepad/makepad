@@ -1,4 +1,3 @@
-use crate::array::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::native::*;
@@ -245,18 +244,10 @@ impl ScriptStringData {
                 if let Some(Some(s)) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
                     heap.string_mut_self_with(pat, |heap, pat| {
                         let array = heap.new_array();
-                        heap.array_mut_mut_self_with(array, |heap, storage| {
-                            if let ScriptArrayStorage::ScriptValue(_) = storage {
-                            } else {
-                                *storage = ScriptArrayStorage::ScriptValue(Default::default());
-                            }
-                            if let ScriptArrayStorage::ScriptValue(vec) = storage {
-                                vec.clear();
-                                for s in sself.split(pat) {
-                                    vec.push_back(heap.new_string_from_str(s));
-                                }
-                            }
-                        });
+                        for value in sself.split(pat) {
+                            let value = heap.new_string_from_str(value);
+                            heap.array_push_unchecked(array, value);
+                        }
                         array
                     })
                 }) {
@@ -425,21 +416,12 @@ impl ScriptStringData {
 
                 // Regex path
                 if let Some(re_ptr) = pat.as_regex() {
-                    // Get the replacement string
-                    let rep_str = if let Some(r) = vm.bx.heap.string_with(rep, |_, s| s.to_string())
-                    {
-                        r
-                    } else {
-                        return script_err_type_mismatch!(
-                            vm.bx.threads.cur_ref().trap,
-                            "replace: replacement must be a string"
-                        );
-                    };
-
-                    let result = vm.bx.heap.string_mut_self_with(sself, |heap, s| {
-                        regex_replace(heap, s, re_ptr, &rep_str)
+                    let result = vm.bx.heap.string_mut_self_with(sself, |heap, input| {
+                        heap.string_mut_self_with(rep, |heap, replacement| {
+                            regex_replace(heap, input, re_ptr, replacement)
+                        })
                     });
-                    if let Some(val) = result {
+                    if let Some(Some(val)) = result {
                         return val;
                     }
                     return script_err_unexpected!(
@@ -452,7 +434,7 @@ impl ScriptStringData {
                 if let Some(Some(result)) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
                     heap.string_mut_self_with(pat, |heap, pat| {
                         heap.string_mut_self_with(rep, |heap, rep| {
-                            heap.new_string_from_str(&sself.replacen(pat, rep, 1))
+                            replace_first(heap, sself, pat, rep)
                         })
                     })
                 }) {
@@ -476,8 +458,10 @@ impl ScriptStringData {
             |vm, args| {
                 let sself = script_value!(vm, args.self);
                 if let Some(s) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
-                    let decoded = percent_decode(sself);
-                    heap.new_string_from_str(&decoded)
+                    let len = percent_decode_len(sself);
+                    heap.new_string_with_preflight(len, "URL-decoding a string", |_heap, out| {
+                        percent_decode_into(sself, out);
+                    })
                 }) {
                     return s.into();
                 }
@@ -497,8 +481,10 @@ impl ScriptStringData {
             |vm, args| {
                 let sself = script_value!(vm, args.self);
                 if let Some(s) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
-                    let encoded = percent_encode(sself);
-                    heap.new_string_from_str(&encoded)
+                    let len = percent_encode_len(sself);
+                    heap.new_string_with_preflight(len, "URL-encoding a string", |_heap, out| {
+                        percent_encode_into(sself, out);
+                    })
                 }) {
                     return s.into();
                 }
@@ -511,8 +497,33 @@ impl ScriptStringData {
     }
 }
 
-fn percent_decode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+fn percent_decode_len(input: &str) -> usize {
+    let mut len = 0usize;
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                len = len
+                    .checked_add(((hi << 4 | lo) as char).len_utf8())
+                    .unwrap_or(usize::MAX);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            len = len.checked_add(1).unwrap_or(usize::MAX);
+            i += 1;
+            continue;
+        }
+        len = len
+            .checked_add((bytes[i] as char).len_utf8())
+            .unwrap_or(usize::MAX);
+        i += 1;
+    }
+    len
+}
+
+fn percent_decode_into(input: &str, out: &mut String) {
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -530,7 +541,6 @@ fn percent_decode(input: &str) -> String {
         out.push(bytes[i] as char);
         i += 1;
     }
-    out
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -542,8 +552,17 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() * 3);
+fn percent_encode_len(input: &str) -> usize {
+    input.bytes().fold(0usize, |len, byte| {
+        let additional = match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => 1,
+            _ => 3,
+        };
+        len.checked_add(additional).unwrap_or(usize::MAX)
+    })
+}
+
+fn percent_encode_into(input: &str, out: &mut String) {
     for b in input.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -556,20 +575,52 @@ fn percent_encode(input: &str) -> String {
             }
         }
     }
-    out
+}
+
+fn replace_first(
+    heap: &mut ScriptHeap,
+    input: &str,
+    pattern: &str,
+    replacement: &str,
+) -> ScriptValue {
+    let Some(start) = input.find(pattern) else {
+        return heap.new_string_from_str(input);
+    };
+    let tail = start
+        .checked_add(pattern.len())
+        .filter(|end| *end <= input.len())
+        .unwrap_or(input.len());
+    let len = start
+        .checked_add(replacement.len())
+        .and_then(|len| len.checked_add(input.len() - tail))
+        .unwrap_or(usize::MAX);
+    heap.new_string_with_preflight(len, "replacing string contents", |_heap, out| {
+        out.push_str(&input[..start]);
+        out.push_str(replacement);
+        out.push_str(&input[tail..]);
+    })
 }
 
 // ---- Regex helper functions ----
 
 /// Find all non-overlapping matches and return their byte ranges
 fn regex_find_all(
-    heap: &ScriptHeap,
+    heap: &mut ScriptHeap,
     input: &str,
     re_ptr: ScriptRegex,
     num_captures: usize,
 ) -> Vec<(usize, usize, Vec<Option<(usize, usize)>>)> {
     let mut results = Vec::new();
-    let num_slots = (num_captures + 1) * 2;
+    let num_slots = num_captures
+        .checked_add(1)
+        .and_then(|slots| slots.checked_mul(2))
+        .unwrap_or(usize::MAX);
+    let slot_bytes = num_slots
+        .checked_mul(std::mem::size_of::<Option<usize>>())
+        .unwrap_or(usize::MAX);
+    if !heap.charge_allocation(slot_bytes, "allocating regex capture slots") {
+        return results;
+    }
     let mut slots = vec![None; num_slots];
     let mut search_from = 0;
 
@@ -591,6 +642,16 @@ fn regex_find_all(
         let match_start = search_from + slots[0].unwrap_or(0);
         let match_end = search_from + slots[1].unwrap_or(0);
 
+        let match_bytes = std::mem::size_of::<(usize, usize, Vec<Option<(usize, usize)>>)>()
+            .checked_add(
+                num_captures
+                    .checked_mul(std::mem::size_of::<Option<(usize, usize)>>())
+                    .unwrap_or(usize::MAX),
+            )
+            .unwrap_or(usize::MAX);
+        if !heap.charge_allocation(match_bytes, "collecting regex matches") {
+            break;
+        }
         let mut caps = Vec::new();
         for i in 1..=num_captures {
             let s = slots.get(i * 2).copied().flatten();
@@ -627,24 +688,22 @@ fn regex_split(heap: &mut ScriptHeap, input: &str, re_ptr: ScriptRegex) -> Scrip
     let matches = regex_find_all(heap, input, re_ptr, num_captures);
 
     let array = heap.new_array();
-    heap.array_mut_mut_self_with(array, |heap, storage| {
-        *storage = ScriptArrayStorage::ScriptValue(Default::default());
-        if let ScriptArrayStorage::ScriptValue(vec) = storage {
-            let mut last_end = 0;
-            for (start, end, caps) in &matches {
-                vec.push_back(heap.new_string_from_str(&input[last_end..*start]));
-                // JS behavior: include capture groups in split result
-                for cap in caps {
-                    match cap {
-                        Some((s, e)) => vec.push_back(heap.new_string_from_str(&input[*s..*e])),
-                        None => vec.push_back(NIL),
-                    }
-                }
-                last_end = *end;
-            }
-            vec.push_back(heap.new_string_from_str(&input[last_end..]));
+    let mut last_end = 0;
+    for (start, end, caps) in &matches {
+        let value = heap.new_string_from_str(&input[last_end..*start]);
+        heap.array_push_unchecked(array, value);
+        // JS behavior: include capture groups in split result
+        for cap in caps {
+            let value = match cap {
+                Some((s, e)) => heap.new_string_from_str(&input[*s..*e]),
+                None => NIL,
+            };
+            heap.array_push_unchecked(array, value);
         }
-    });
+        last_end = *end;
+    }
+    let value = heap.new_string_from_str(&input[last_end..]);
+    heap.array_push_unchecked(array, value);
     array
 }
 
@@ -654,14 +713,10 @@ fn regex_match_all_strings(heap: &mut ScriptHeap, input: &str, re_ptr: ScriptReg
     let matches = regex_find_all(heap, input, re_ptr, num_captures);
 
     let array = heap.new_array();
-    heap.array_mut_mut_self_with(array, |heap, storage| {
-        *storage = ScriptArrayStorage::ScriptValue(Default::default());
-        if let ScriptArrayStorage::ScriptValue(vec) = storage {
-            for (start, end, _) in &matches {
-                vec.push_back(heap.new_string_from_str(&input[*start..*end]));
-            }
-        }
-    });
+    for (start, end, _) in &matches {
+        let value = heap.new_string_from_str(&input[*start..*end]);
+        heap.array_push_unchecked(array, value);
+    }
     array
 }
 
@@ -700,20 +755,17 @@ fn regex_exec_first(
 
     // Build captures array
     let captures = heap.new_array();
-    heap.array_mut_mut_self_with(captures, |heap, storage| {
-        *storage = ScriptArrayStorage::ScriptValue(Default::default());
-        if let ScriptArrayStorage::ScriptValue(vec) = storage {
-            vec.push_back(heap.new_string_from_str(value));
-            for i in 1..=num_captures {
-                let s = slots.get(i * 2).copied().flatten();
-                let e = slots.get(i * 2 + 1).copied().flatten();
-                match (s, e) {
-                    (Some(s), Some(e)) => vec.push_back(heap.new_string_from_str(&input[s..e])),
-                    _ => vec.push_back(NIL),
-                }
-            }
-        }
-    });
+    let value = heap.new_string_from_str(value);
+    heap.array_push_unchecked(captures, value);
+    for i in 1..=num_captures {
+        let s = slots.get(i * 2).copied().flatten();
+        let e = slots.get(i * 2 + 1).copied().flatten();
+        let value = match (s, e) {
+            (Some(s), Some(e)) => heap.new_string_from_str(&input[s..e]),
+            _ => NIL,
+        };
+        heap.array_push_unchecked(captures, value);
+    }
     heap.set_value_def(obj, id!(captures).into(), captures.into());
     obj.into()
 }
@@ -728,36 +780,26 @@ fn regex_match_all_detail(
     let matches = regex_find_all(heap, input, re_ptr, num_captures);
 
     let array = heap.new_array();
-    heap.array_mut_mut_self_with(array, |heap, storage| {
-        *storage = ScriptArrayStorage::ScriptValue(Default::default());
-        if let ScriptArrayStorage::ScriptValue(vec) = storage {
-            for (start, end, caps) in &matches {
-                let value = &input[*start..*end];
-                let obj = heap.new_with_proto(NIL);
-                let value_sv = heap.new_string_from_str(value);
-                heap.set_value_def(obj, id!(value).into(), value_sv);
-                heap.set_value_def(obj, id!(index).into(), ScriptValue::from_f64(*start as f64));
+    for (start, end, caps) in &matches {
+        let value = &input[*start..*end];
+        let obj = heap.new_with_proto(NIL);
+        let value_sv = heap.new_string_from_str(value);
+        heap.set_value_def(obj, id!(value).into(), value_sv);
+        heap.set_value_def(obj, id!(index).into(), ScriptValue::from_f64(*start as f64));
 
-                let cap_arr = heap.new_array();
-                heap.array_mut_mut_self_with(cap_arr, |heap, cap_storage| {
-                    *cap_storage = ScriptArrayStorage::ScriptValue(Default::default());
-                    if let ScriptArrayStorage::ScriptValue(cap_vec) = cap_storage {
-                        cap_vec.push_back(heap.new_string_from_str(value));
-                        for cap in caps {
-                            match cap {
-                                Some((s, e)) => {
-                                    cap_vec.push_back(heap.new_string_from_str(&input[*s..*e]))
-                                }
-                                None => cap_vec.push_back(NIL),
-                            }
-                        }
-                    }
-                });
-                heap.set_value_def(obj, id!(captures).into(), cap_arr.into());
-                vec.push_back(obj.into());
-            }
+        let cap_arr = heap.new_array();
+        let value_sv = heap.new_string_from_str(value);
+        heap.array_push_unchecked(cap_arr, value_sv);
+        for cap in caps {
+            let value = match cap {
+                Some((s, e)) => heap.new_string_from_str(&input[*s..*e]),
+                None => NIL,
+            };
+            heap.array_push_unchecked(cap_arr, value);
         }
-    });
+        heap.set_value_def(obj, id!(captures).into(), cap_arr.into());
+        heap.array_push_unchecked(array, obj.into());
+    }
     array
 }
 
@@ -788,7 +830,23 @@ fn regex_replace(
         return heap.new_string_from_str(input);
     }
 
-    heap.new_string_with(|_heap, out| {
+    let mut len = 0usize;
+    let mut last_end = 0;
+    for (start, end, caps) in &matches {
+        len = len
+            .checked_add(start.saturating_sub(last_end))
+            .and_then(|len| {
+                replacement_expanded_len(replacement, &input[*start..*end], input, caps)
+                    .and_then(|replacement_len| len.checked_add(replacement_len))
+            })
+            .unwrap_or(usize::MAX);
+        last_end = *end;
+    }
+    len = len
+        .checked_add(input.len().saturating_sub(last_end))
+        .unwrap_or(usize::MAX);
+
+    heap.new_string_with_preflight(len, "replacing regex matches", |_heap, out| {
         let mut last_end = 0;
         for (start, end, caps) in &matches {
             out.push_str(&input[last_end..*start]);
@@ -797,6 +855,54 @@ fn regex_replace(
         }
         out.push_str(&input[last_end..]);
     })
+}
+
+fn replacement_expanded_len(
+    replacement: &str,
+    matched: &str,
+    input: &str,
+    caps: &[Option<(usize, usize)>],
+) -> Option<usize> {
+    let bytes = replacement.as_bytes();
+    let mut len = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'$' => {
+                    len = len.checked_add(1)?;
+                    i += 2;
+                }
+                b'&' => {
+                    len = len.checked_add(matched.len())?;
+                    i += 2;
+                }
+                b'0'..=b'9' => {
+                    let start = i + 1;
+                    let mut end = start + 1;
+                    while end < bytes.len() && bytes[end].is_ascii_digit() {
+                        end += 1;
+                    }
+                    let num: usize = replacement[start..end].parse().unwrap_or(0);
+                    if num >= 1 && num <= caps.len() {
+                        if let Some((start, end)) = caps[num - 1] {
+                            len = len.checked_add(input[start..end].len())?;
+                        }
+                    }
+                    i = end;
+                }
+                _ => {
+                    len = len.checked_add(1)?;
+                    i += 1;
+                }
+            }
+        } else {
+            let ch = replacement[i..].chars().next()?;
+            len = len.checked_add(ch.len_utf8())?;
+            i += ch.len_utf8();
+        }
+    }
+    Some(len)
 }
 
 /// Expand replacement string patterns ($&, $1, $$, etc.)

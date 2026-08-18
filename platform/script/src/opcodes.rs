@@ -220,6 +220,18 @@ impl<'a> ScriptVm<'a> {
             Opcode::TRY_OK => self.handle_try_ok(opargs),
 
             // Destructuring
+            // Frame slots
+            Opcode::SLOTS_FRAME => self.handle_slots_frame(opargs),
+            Opcode::ARGS_TO_SLOTS => self.handle_args_to_slots(opargs),
+            Opcode::PUSH_SLOT => self.handle_push_slot(opargs),
+            Opcode::LET_SLOT => self.handle_let_slot(opargs),
+            Opcode::STORE_SLOT => self.handle_store_slot(opargs),
+            Opcode::ASSIGN_SLOT_ADD => self.handle_assign_slot_add(opargs),
+            Opcode::ASSIGN_SLOT_SUB => self.handle_slot_num_assign_op(opargs, |a, b| a - b),
+            Opcode::ASSIGN_SLOT_MUL => self.handle_slot_num_assign_op(opargs, |a, b| a * b),
+            Opcode::ASSIGN_SLOT_DIV => self.handle_slot_num_assign_op(opargs, |a, b| a / b),
+            Opcode::ASSIGN_SLOT_MOD => self.handle_slot_num_assign_op(opargs, |a, b| a % b),
+
             Opcode::DUP => self.handle_dup(),
             Opcode::DROP => self.handle_drop(),
             Opcode::ARRAY_INDEX_NIL => self.handle_array_index_nil(),

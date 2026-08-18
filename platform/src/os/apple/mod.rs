@@ -24,6 +24,10 @@ pub mod apple_media;
 pub mod apple_video_playback;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple_video_player;
+#[cfg(target_os = "macos")]
+pub mod video_file_decoder;
+#[cfg(target_os = "macos")]
+pub mod video_file_encoder;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple_webview;
 #[cfg(any(target_os = "macos", target_os = "ios"))]

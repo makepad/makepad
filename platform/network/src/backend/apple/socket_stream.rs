@@ -29,6 +29,16 @@ fn check_ssl_status(stage: &str, status: OSStatus) -> io::Result<()> {
     }
 }
 
+// SecureTransport's SSLSetIOFuncs contract: a callback returns noErr ONLY
+// when the FULL requested length was transferred; anything shorter must be
+// reported as a partial count in *data_len with errSSLWouldBlock so the
+// library re-enters for the remainder. Returning noErr with a short read
+// makes SecureTransport parse a short buffer and fail the whole handshake
+// with errSecParam (-50) whenever a flight spans TCP segments (any server
+// whose certificate chain exceeds one segment — huggingface.co, example.com).
+// The sockets here are blocking, so the callbacks loop to fill the request
+// and only report WouldBlock on a genuine socket timeout.
+
 unsafe extern "C" fn ssl_read_callback(
     connection: SSLConnectionRef,
     data: *mut std::ffi::c_void,
@@ -45,29 +55,32 @@ unsafe extern "C" fn ssl_read_callback(
     }
 
     let buffer = std::slice::from_raw_parts_mut(data as *mut u8, requested);
-    match stream.read(buffer) {
-        Ok(0) => {
-            *data_len = 0;
-            ERR_SSL_CLOSED_GRACEFUL
-        }
-        Ok(read_bytes) => {
-            *data_len = read_bytes;
-            SSL_OK
-        }
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-            ) =>
-        {
-            *data_len = 0;
-            ERR_SSL_WOULD_BLOCK
-        }
-        Err(_) => {
-            *data_len = 0;
-            ERR_SSL_CLOSED_ABORT
+    let mut done = 0usize;
+    while done < requested {
+        match stream.read(&mut buffer[done..]) {
+            Ok(0) => {
+                *data_len = done;
+                return ERR_SSL_CLOSED_GRACEFUL;
+            }
+            Ok(read_bytes) => done += read_bytes,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                *data_len = done;
+                return ERR_SSL_WOULD_BLOCK;
+            }
+            Err(_) => {
+                *data_len = done;
+                return ERR_SSL_CLOSED_ABORT;
+            }
         }
     }
+    *data_len = done;
+    SSL_OK
 }
 
 unsafe extern "C" fn ssl_write_callback(
@@ -86,25 +99,32 @@ unsafe extern "C" fn ssl_write_callback(
     }
 
     let buffer = std::slice::from_raw_parts(data as *const u8, requested);
-    match stream.write(buffer) {
-        Ok(written_bytes) => {
-            *data_len = written_bytes;
-            SSL_OK
-        }
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-            ) =>
-        {
-            *data_len = 0;
-            ERR_SSL_WOULD_BLOCK
-        }
-        Err(_) => {
-            *data_len = 0;
-            ERR_SSL_CLOSED_ABORT
+    let mut done = 0usize;
+    while done < requested {
+        match stream.write(&buffer[done..]) {
+            Ok(0) => {
+                *data_len = done;
+                return ERR_SSL_CLOSED_ABORT;
+            }
+            Ok(written_bytes) => done += written_bytes,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                *data_len = done;
+                return ERR_SSL_WOULD_BLOCK;
+            }
+            Err(_) => {
+                *data_len = done;
+                return ERR_SSL_CLOSED_ABORT;
+            }
         }
     }
+    *data_len = done;
+    SSL_OK
 }
 
 pub(crate) struct SecureTransportStream {
@@ -222,6 +242,9 @@ impl Read for SecureTransportStream {
         };
         match status {
             SSL_OK => Ok(processed),
+            // A socket timeout mid-record surfaces as WouldBlock; anything
+            // already decrypted is delivered first.
+            ERR_SSL_WOULD_BLOCK if processed > 0 => Ok(processed),
             ERR_SSL_WOULD_BLOCK => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "SSLRead would block",
@@ -252,6 +275,7 @@ impl Write for SecureTransportStream {
         };
         match status {
             SSL_OK => Ok(processed),
+            ERR_SSL_WOULD_BLOCK if processed > 0 => Ok(processed),
             ERR_SSL_WOULD_BLOCK => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "SSLWrite would block",

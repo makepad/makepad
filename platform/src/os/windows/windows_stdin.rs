@@ -25,6 +25,9 @@ use {
     std::ffi::c_void,
 };
 
+static WINDIAG_REPAINT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static WINDIAG_FLIP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 struct LocalPresentableImage {
     id: PresentableImageId,
     image: Texture,
@@ -69,22 +72,34 @@ impl Cx {
                         // and if GPU is not already rendering something else
                         if window.new_frame_being_rendered.is_none() {
                             let current_image = &swapchain.presentable_images[window.present_index];
+                            let img_tex = current_image.image.clone();
+                            let img_id = current_image.id;
 
                             window.present_index =
                                 (window.present_index + 1) % swapchain.presentable_images.len();
 
-                            // render to swapchain
+                            // Bracket the render into the shared texture with the keyed
+                            // mutex: Acquire before queuing draws, Release after. This makes
+                            // the studio host's later Acquire (consumer side) wait for these
+                            // draws on the GPU timeline and see coherent pixels — plain
+                            // D3D11_RESOURCE_MISC_SHARED gave no cross-device coherence, so
+                            // the host was sampling the never-updated (black) surface.
+                            if WINDIAG_REPAINT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
+                                crate::log!("WINCHILD: repaint -> swapchain target={:?}", img_id);
+                            }
+                            self.shared_texture_keyed_acquire(&img_tex);
                             self.draw_pass_to_texture(
                                 draw_pass_id,
                                 d3d11_cx,
-                                Some(current_image.image.texture_id()),
+                                Some(img_tex.texture_id()),
                             );
+                            self.shared_texture_keyed_release(&img_tex);
 
                             let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
                                 window_id: window_id.id(),
-                                target_id: current_image.id,
+                                target_id: img_id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
                                 height: (pass_rect.size.y * dpi_factor) as u32,
                             };
@@ -260,6 +275,7 @@ impl Cx {
             }
             StudioToApp::Swapchain(new_swapchain) => {
                 let window_id = new_swapchain.window_id;
+                crate::log!("WINCHILD: Swapchain msg window_id={} stdin_windows.len={} alloc={}x{}", window_id, stdin_windows.len(), new_swapchain.alloc_width, new_swapchain.alloc_height);
                 let local_swapchain = LocalSwapchain {
                     presentable_images: new_swapchain.presentable_images.map(|pi| {
                         let handle = HANDLE(pi.handle as usize as *mut c_void);
@@ -343,6 +359,9 @@ impl Cx {
                 if has_pending_draws && d3d11_cx.is_gpu_done() {
                     for window in stdin_windows.iter_mut() {
                         if let Some(presentable_draw) = window.new_frame_being_rendered.take() {
+                            if WINDIAG_FLIP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
+                                crate::log!("WINCHILD: DrawCompleteAndFlip target={:?} {}x{}", presentable_draw.target_id, presentable_draw.width, presentable_draw.height);
+                            }
                             Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(
                                 presentable_draw,
                             ));
@@ -424,6 +443,12 @@ impl Cx {
                 }
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));
+                }
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!(
+                        "external file dragging is not available in the Studio stdin runtime"
+                    );
+                    self.call_event_handler(&Event::DragEnd);
                 }
                 _ => (), /*
                          CxOsOp::CloseWindow(_window_id) => {},

@@ -205,6 +205,14 @@ pub struct ShaderOutput {
     pub hlsl_needs_tex_size: bool,
     /// Set to true if any errors occurred during shader compilation
     pub has_errors: bool,
+    /// Human-readable messages for every error behind [`Self::has_errors`].
+    /// Backends log these with the shader's identity when they refuse to
+    /// build the pipeline — a shader must never fail into a silent
+    /// fallback. Populated via [`Self::push_error`]; also collects messages
+    /// that would otherwise vanish (entry-point compiles run under `NoTrap`,
+    /// which discards `script_err_*!` messages, and errors queued on a
+    /// nested function compiler's trap are never drained by anyone).
+    pub errors: Vec<String>,
     /// True if this shader uses screen-space derivatives (dFdx/dFdy).
     pub uses_derivatives: bool,
     /// Monotonic temporary id source for Rust backend expression hoisting.
@@ -236,6 +244,26 @@ impl ShaderOutput {
         let n = self.loop_guard_counter;
         self.loop_guard_counter += 1;
         format!("_mp_loop_guard_{n}")
+    }
+
+    /// Record a compile error so the backend can report it with the shader's
+    /// identity. Never silent: every `has_errors = true` must leave at least
+    /// one message here.
+    pub fn push_error(&mut self, msg: String) {
+        self.has_errors = true;
+        self.errors.push(msg);
+    }
+
+    /// All collected error messages, one per line — what a backend logs when
+    /// it refuses to build the pipeline.
+    pub fn error_report(&self) -> String {
+        if self.errors.is_empty() {
+            // has_errors was set without a message — still say something.
+            "shader compile failed (no diagnostic captured; this is a compiler bug, please report)"
+                .to_string()
+        } else {
+            self.errors.join("\n")
+        }
     }
 }
 

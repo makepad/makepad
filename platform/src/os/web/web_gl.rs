@@ -363,12 +363,19 @@ impl Cx {
             let size = pass_size * dpi_factor;
             self.textures[color_texture.texture.texture_id()]
                 .alloc_render(size.x as usize, size.y as usize);
+            // Attachment format for the JS side: R32F float targets need a
+            // different texImage2D (and EXT_color_buffer_float).
+            let format = match &self.textures[color_texture.texture.texture_id()].format {
+                TextureFormat::RenderRf32 { .. } => 1,
+                _ => 0,
+            };
             match color_texture.clear_color {
                 DrawPassClearColor::InitWith(clear_color) => {
                     color_targets[index] = WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: true,
                         clear_color: clear_color.into(),
+                        format,
                     };
                 }
                 DrawPassClearColor::ClearWith(clear_color) => {
@@ -376,6 +383,7 @@ impl Cx {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: false,
                         clear_color: clear_color.into(),
+                        format,
                     };
                 }
             }
