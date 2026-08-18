@@ -581,7 +581,13 @@ pub(crate) fn walk_extras_on_resident(
     let mut skips: Vec<BatchAct> = vec![xs.clone_act()?];
     // MAKEPAD_PBR_UNET_TAP=<dir>: dump the activation after named stages
     // (planar [n][c][hw] f32) for a step-0 bisect against official hooks.
-    let tap_dir = std::env::var("MAKEPAD_PBR_UNET_TAP").ok();
+    // Only the first walk of the process is dumped (files would otherwise be
+    // overwritten by every later step); the warm-up call is skipped by the
+    // caller running it before the tap env is honored... so tap the first
+    // t=999 call: skip while a "done" marker exists.
+    let tap_dir = std::env::var("MAKEPAD_PBR_UNET_TAP").ok().filter(|dir| {
+        !std::path::Path::new(&format!("{dir}/unet_tap_DONE")).exists()
+    });
     let tap = |name: &str, x: &BatchAct| {
         if let Some(dir) = &tap_dir {
             if let Ok(v) = gpu_download(&x.t) {
@@ -876,6 +882,9 @@ pub(crate) fn walk_extras_on_resident(
         1.0,
     )?;
     tap("up3_attn2", &xs);
+    if let Some(dir) = &tap_dir {
+        let _ = std::fs::write(format!("{dir}/unet_tap_DONE"), b"1");
+    }
     unet.conv_head_batch(&xs)
 }
 
