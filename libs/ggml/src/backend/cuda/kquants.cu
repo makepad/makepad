@@ -10,6 +10,7 @@
 // output elements [i*block_elems, (i+1)*block_elems).
 
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <stdint.h>
 
@@ -371,15 +372,17 @@ extern "C" cudaError_t makepad_ggml_cuda_dequant_f8_e4m3_bf16(
     return cudaGetLastError();
 }
 
-// Static-scale activation quantization for the fp8 scaled-mm path: bf16
-// words * inv_scale -> saturating RN E4M3FN bytes (same conversion class as
-// torch `t.to(float8_e4m3fn)` after the reference's `tensor * (1/scale)`
-// multiply; SATFINITE clamps to +-448 like the reference's explicit clamp).
+// Static-scale activation quantization for the fp8 scaled-mm path,
+// operation-exact to the reference `(t * (1/scale).to(bf16)).to(fp8_e4m3fn)`:
+// BF16 multiply (RN, one rounding) then saturating RN E4M3FN cast
+// (SATFINITE clamps to +-448 like the torch cast). `inv_scale` arrives
+// already on the bf16 grid.
 static __global__ void makepad_ggml_kq_quant_bf16_f8_e4m3_kernel(
         const uint16_t * __restrict__ src_bf16,
         uint8_t * __restrict__ dst,
         float inv_scale,
         uint32_t count) {
+    const __nv_bfloat16 inv = __float2bfloat16(inv_scale);
     const uint32_t base = (blockIdx.x * blockDim.x + threadIdx.x) * 4u;
     if (base >= count) {
         return;
@@ -388,10 +391,10 @@ static __global__ void makepad_ggml_kq_quant_bf16_f8_e4m3_kernel(
     #pragma unroll
     for (uint32_t i = 0; i < 4u; i++) {
         if (i < take) {
-            const float value =
-                makepad_ggml_kq_bf16_bits_to_f32(src_bf16[base + i]) * inv_scale;
+            const __nv_bfloat16 value = __ushort_as_bfloat16(src_bf16[base + i]);
+            const float product = __bfloat162float(__hmul(value, inv));
             dst[base + i] = static_cast<uint8_t>(
-                __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3));
+                __nv_cvt_float_to_fp8(product, __NV_SATFINITE, __NV_E4M3));
         }
     }
 }

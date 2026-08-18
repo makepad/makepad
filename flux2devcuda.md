@@ -123,7 +123,28 @@ latent; `vae_out.npy` (1,1024,1024,3) decoded [0,1]; `oracle.png`
 
 ## Results
 
-(validation in progress — this section is filled by the validator runs)
+First native pass (2026-08-18, 5090, `own_te=false`, seed 7, 1024² / 20 steps):
+
+| gate | native | official | pass |
+|---|---|---|---|
+| input_ids | 118 | 117 | no |
+| TE cosine | 0.999617 | — | no (max_abs 3.5) |
+| step0 pred cosine | 0.999809 | — | yes-ish (max_abs 0.219) |
+| final latents | cosine 0.939 / max_abs 5.47 | — | no |
+| decoded image | cosine 0.9869 / u8_max 252 | — | no |
+| denoise warm | 18870 ms | 19160 ms | yes |
+| VAE decode warm | 2611 ms | 295 ms | no |
+| warm e2e | 21734 ms | 20117 ms | no (`failed_gates=4`) |
+
+Denoise already under official. VAE decode is the e2e hole (~9×). Dump lock is not held (latent cosine 0.94). PNGs at `local/flux2dev_{oracle,native}.png` — same scene, not pixel-locked.
+
+Parked 2026-08-18 to land the port and refactor `libs/ai`. Resume: close dump lock + VAE decode, then re-run `flux2-dev-validate` until `failed_gates=0` and warm e2e ≤ 20117 ms.
+
+## Open / next
+
+- Dump lock: tokenizer off-by-one (118 vs 117) and latent drift after step 0.
+- VAE decode ~2.6 s vs official 0.30 s (release ring slots first — done in the follow-up commit; still not enough).
+- Do not restart the fp8 scaled_mm / stream-ring work; that is in.
 
 ## Box facts / gotchas
 
@@ -143,10 +164,10 @@ latent; `vae_out.npy` (1,1024,1024,3) decoded [0,1]; `oracle.png`
 - Pre-existing on this branch: 2 asset-ai `server::lifecycle_tests`
   admission failures (fail with all lane changes stashed too).
 
-## Open / next
+## Parked (do not redo)
 
-- fp8 cuBLASLt scaled_mm path (quantize activations with `input_scale`,
-  fp8xfp8 → bf16-out): required to BEAT the official 947ms/step — bf16
-  compute ceiling is above it.
-- Double-block streaming policy for the ~5GB VRAM overcommit (resident
-  singles + streamed doubles with pinned prefetch) — measure first.
+- fp8 cuBLASLt scaled_mm (quantize activations with `input_scale`,
+  fp8×fp8 → bf16-out) — landed in `88eede3b8`.
+- Double-block stream ring (resident singles + pinned-host doubles) —
+  landed in `88eede3b8`; slot release/re-prime around VAE decode is in
+  the follow-up commit.

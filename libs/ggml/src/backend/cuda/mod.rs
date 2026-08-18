@@ -8539,6 +8539,9 @@ mod imp {
     /// step boundaries, the whole single-block phase).
     struct FluxStreamRing {
         groups: Vec<Vec<RingTensor>>,
+        /// Per-tensor byte lengths (identical across groups) — slots re-alloc
+        /// from this after a release.
+        shape: Vec<usize>,
         slots: [Vec<DeviceBuffer>; 2],
         copy_stream: cudaStream_t,
         upload_done: [makepad_cuda::cudaEvent_t; 2],
@@ -8605,7 +8608,26 @@ mod imp {
         }
 
         fn ring_prefetch(&mut self, target: usize) -> Result<(), String> {
-            let stream = self.stream;
+            // Slots may have been released for a VRAM-hungry phase (VAE
+            // decode); re-allocate before borrowing the ring mutably.
+            let needs_slots = self
+                .stream_ring
+                .as_ref()
+                .is_some_and(|ring| ring.slots[target % 2].is_empty());
+            if needs_slots {
+                let shape = self
+                    .stream_ring
+                    .as_ref()
+                    .map(|ring| ring.shape.clone())
+                    .unwrap_or_default();
+                let mut buffers = Vec::with_capacity(shape.len());
+                for len in &shape {
+                    buffers.push(self.alloc_with_evict(*len)?);
+                }
+                if let Some(ring) = self.stream_ring.as_mut() {
+                    ring.slots[target % 2] = buffers;
+                }
+            }
             let ring = self
                 .stream_ring
                 .as_mut()
@@ -8614,7 +8636,6 @@ mod imp {
             if ring.resident[slot] == target as i64 {
                 return Ok(());
             }
-            let _ = stream;
             // The copy must not overwrite weights still referenced by
             // enqueued compute: wait the slot's last compute fence.
             makepad_cuda::stream_wait_event(ring.copy_stream, ring.compute_done[slot])
@@ -8687,6 +8708,7 @@ mod imp {
             };
             backend.stream_ring = Some(FluxStreamRing {
                 groups: ring_groups,
+                shape,
                 slots,
                 copy_stream,
                 upload_done: [events()?, events()?],
@@ -8697,6 +8719,37 @@ mod imp {
             backend.ring_prefetch(0)?;
             backend.ring_prefetch(1)?;
             Ok(())
+        })
+    }
+
+    /// Free both device slot-sets (the ~2.6GB the VAE-decode phase needs as
+    /// headroom on a 32GB card). Pinned host copies stay; the next
+    /// prime/prefetch re-allocates and re-uploads.
+    pub fn gpu_stream_ring_release_slots() -> Result<(), String> {
+        with_dense_linear_backend(|backend| {
+            let Some(ring) = backend.stream_ring.as_mut() else {
+                return Ok(());
+            };
+            // In-flight prefetches write into the slots on the copy stream;
+            // enqueued compute reads them on the main stream.
+            makepad_cuda::synchronize_stream(ring.copy_stream).map_err(|err| err.to_string())?;
+            makepad_cuda::synchronize_stream(backend.stream).map_err(|err| err.to_string())?;
+            let ring = backend.stream_ring.as_mut().expect("ring present");
+            ring.slots = [Vec::new(), Vec::new()];
+            ring.resident = [-1, -1];
+            ring.upload_waited = [true, true];
+            Ok(())
+        })
+    }
+
+    /// Ensure groups 0 and 1 are (re-)uploaded — cheap no-op when resident.
+    pub fn gpu_stream_ring_prime() -> Result<(), String> {
+        with_dense_linear_backend(|backend| {
+            if backend.stream_ring.is_none() {
+                return Err("stream ring not set up".to_string());
+            }
+            backend.ring_prefetch(0)?;
+            backend.ring_prefetch(1)
         })
     }
 
@@ -24304,6 +24357,14 @@ mod imp {
 
     pub fn gpu_stream_ring_active() -> bool {
         false
+    }
+
+    pub fn gpu_stream_ring_release_slots() -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn gpu_stream_ring_prime() -> Result<(), String> {
+        Err(GPU_UNAVAILABLE.to_string())
     }
 
     pub fn gpu_stream_ring_advance(_group: usize) -> Result<(), String> {

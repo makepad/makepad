@@ -603,6 +603,10 @@ impl Flux2DevPipeline {
             );
         }
         flux2_dit_clear_pool();
+        // Decode transients (~2-3GB at 1024px) plus the resident DiT sit at
+        // the 32GB WDDM cliff; the ring slots are the cheapest headroom —
+        // freed here, re-primed on the next forward.
+        let _ = crate::backend::gpu_stream_ring_release_slots();
 
         let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
         let decode_started = std::time::Instant::now();
@@ -611,6 +615,13 @@ impl Flux2DevPipeline {
         }
         let image = flux2_vae_decode(&self.vae, &packed)?;
         let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+        if prof {
+            eprintln!("flux2dev prof vae_decode ms={decode_ms:.1}");
+            eprint!(
+                "{}",
+                makepad_ggml::backend::prof::report_and_reset("flux2dev prof vae ")
+            );
+        }
         let png_started = std::time::Instant::now();
         let rgb = flux2_image_to_rgb_u8(&image);
         let png = encode_png_rgb(

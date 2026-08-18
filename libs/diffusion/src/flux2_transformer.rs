@@ -26,7 +26,8 @@ use crate::backend::{
     gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
     gpu_linear_nt_cached_f8_mm_from_buf_to_buf,
     gpu_pool_clear, gpu_rms_norm_mul_from_bf16_slab, gpu_rope_interleaved, gpu_silu,
-    gpu_slice_rows, gpu_stream_ring_active, gpu_stream_ring_advance, gpu_stream_ring_setup,
+    gpu_slice_rows, gpu_stream_ring_active, gpu_stream_ring_advance, gpu_stream_ring_prime,
+    gpu_stream_ring_setup,
     gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into,
     gpu_weight_cache_ensure,
     gpu_weight_cache_evict_prefix, GpuBf16Buf, GpuLinearPart, GpuTensor,
@@ -755,6 +756,8 @@ fn flux2_ensure_double_ring(weights: &Flux2TransformerWeights) -> Result<bool> {
     let namespace = ns(weights);
     let already = FLUX2_RING_NS.with(|cell| cell.borrow().as_deref() == Some(namespace.as_str()));
     if already && gpu_stream_ring_active() {
+        // Slots may have been released for the VAE-decode phase.
+        gpu_stream_ring_prime().map_err(DiffusionError::model)?;
         return Ok(true);
     }
     let depth = weights.config.depth as usize;
