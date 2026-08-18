@@ -121,6 +121,7 @@ script_mod! {
                             mbtiles_path: "local/maps/world.mkmap"
                             detail_mbtiles_path: "local/maps/world.mkmap"
                             bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
+                            overlay_mbtiles_paths: "local/maps/ocean-low.mbtiles;local/maps/ocean-high.mbtiles"
                             buildings_3d: true
                         }
 
