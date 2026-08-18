@@ -10,19 +10,12 @@ mod quake;
 
 pub use shared::*;
 
-use crate::ao_bake::{self, BakeStats};
-use crate::pack_import::{self, PackCompileReport};
-use crate::duke_import;
-use crate::quake2_import;
-use crate::quake3_import;
-use crate::doom3_import;
-use crate::stateful_billboard;
+use crate::ao_bake::BakeStats;
+use crate::pack_import;
 use makepad_asset_data::AssetKind;
-use makepad_gltf::write_glb_mesh;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use shared::*;
 use doom::*;
 use quake::*;
 
@@ -1121,6 +1114,9 @@ fn convert_wav(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ao_bake;
+    use makepad_gltf::write_glb_mesh;
+    use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_dir(name: &str) -> PathBuf {

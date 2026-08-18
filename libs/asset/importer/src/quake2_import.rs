@@ -23,7 +23,7 @@ use crate::vertex_skin;
 use makepad_asset_data::AssetKind;
 use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const QUAKE2_SOURCE_ID: &str = "quake2";
 pub const QUAKE2_SOURCE_TITLE: &str = "Quake II (shareware)";
@@ -1732,6 +1732,7 @@ fn q2_palette() -> [[u8; 3]; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn tmp_dir(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -1967,8 +1968,8 @@ mod tests {
         // One triangle. ST table is all zeros (the official-MD2 footgun).
         // glcmds carry the real float UVs.
         let mut bytes = b"IDP2".to_vec();
-        let mut push_i32 = |b: &mut Vec<u8>, v: i32| b.extend_from_slice(&v.to_le_bytes());
-        let mut push_f32 = |b: &mut Vec<u8>, v: f32| b.extend_from_slice(&v.to_le_bytes());
+        let push_i32 = |b: &mut Vec<u8>, v: i32| b.extend_from_slice(&v.to_le_bytes());
+        let push_f32 = |b: &mut Vec<u8>, v: f32| b.extend_from_slice(&v.to_le_bytes());
         // skinw, skinh, framesize, nskins, nxyz, nst, ntris, ngl, nframes
         // ofs_skins, ofs_st, ofs_tris, ofs_frames, ofs_glcmds, ofs_end
         let skinw = 64i32;

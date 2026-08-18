@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-draw = { path = "../../draw", version = "2.0.0" }
-makepad-game-sim = { path = "../game/sim" }
+makepad-game-sim = { path = "../sim" }
 # Inflate for the baked AO textures' zlib streams (tools/ao_bake writes
 # them); in-repo, so the no-external-crates rule holds.
 makepad-fast-inflate = { path = "../fast_inflate" }

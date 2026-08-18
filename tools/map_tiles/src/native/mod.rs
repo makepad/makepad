@@ -22,7 +22,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use store::{

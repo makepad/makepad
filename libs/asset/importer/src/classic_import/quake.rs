@@ -5,11 +5,10 @@ use super::doom::{
 };
 use super::shared::*;
 use crate::vertex_skin;
-use crate::world_place;
 use makepad_asset_data::AssetKind;
-use makepad_gltf::{write_glb_mesh, write_glb_mesh_textured, GlbTexturedMesh};
+use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) fn convert_bsp(
     path: &Path,

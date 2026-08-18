@@ -1849,7 +1849,7 @@ fn assemble_player(
 
     let mut unique_frames = Vec::new();
     let mut named = Vec::new();
-    let mut frame_at = 0usize;
+    let frame_at = 0usize;
     unique_frames.push(rest.unique.clone());
     for (clip_name, pairs) in &clip_defs {
         if pairs.is_empty() {
