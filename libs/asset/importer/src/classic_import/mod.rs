@@ -214,9 +214,11 @@ pub fn convert_classic_ex(
     let idtech4 = files_are_idtech4(&files);
     let q3_bank = if matches!(source, ClassicSource::Quake3) {
         let mut bank = crate::quake3_import::load_tex_bank(pack_dir);
-        bank.images.extend(
-            crate::quake3_import::load_tex_bank(pak_scratch.join("pk3").as_path()).images,
-        );
+        bank.extend_bank(crate::quake3_import::load_tex_bank(
+            pak_scratch.join("pk3").as_path(),
+        ));
+        crate::quake3_import::apply_shader_aliases(&mut bank, pack_dir);
+        crate::quake3_import::apply_shader_aliases(&mut bank, &pak_scratch.join("pk3"));
         bank
     } else if idtech4 {
         tick(
@@ -386,9 +388,6 @@ pub fn convert_classic_ex(
                 }
                 Err(e) => skipped.push(format!("{}: {e}", f.rel)),
             },
-            ClassicFileKind::Md3 if crate::quake3_import::is_lod_md3(&f.rel) => {
-                convert_done += 1;
-            }
             ClassicFileKind::Md3 => match std::fs::read(&f.path)
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| {
@@ -534,10 +533,13 @@ pub fn convert_classic_ex(
             .collect();
         let (assembled, drop) =
             crate::quake3_import::assemble_players_and_weapons(&md3s, staged_dir, source.id(), &q3_bank);
-        if !assembled.is_empty() {
-            assets.retain(|a| !drop.contains(&a.key));
-            assets.extend(assembled);
-        }
+        let _ = drop;
+        assets.extend(assembled);
+        assets.extend(crate::quake3_import::emit_texture_assets(
+            &q3_bank,
+            staged_dir,
+            source.id(),
+        ));
     }
 
     if matches!(source, ClassicSource::Duke3d) {
@@ -562,8 +564,8 @@ pub fn convert_classic_ex(
     // Meshes write their own raster icons. A 0x20 placeholder next to a GLB
     // becomes the library thumb and looks empty.
 
-    // AO bake is parked: a large id Tech 4 pack takes hours and hides convert
-    // bugs. Sidecars remain optional; re-enable bake_glb_tree here later.
+    // Classic / old-game packs stay AO-off. Kenney bakes in Asset UI
+    // `bake_staged_glbs`; a Dark Mod-sized tree here takes hours.
     let bake = BakeStats {
         total: 0,
         baked: 0,

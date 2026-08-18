@@ -453,7 +453,7 @@ pub(crate) fn kind_tag(kind: AssetKind) -> &'static str {
         AssetKind::Audio => "audio",
         AssetKind::Video => "video",
         AssetKind::Skybox => "skybox",
-        AssetKind::World => "world",
+        AssetKind::World => "map",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
     }

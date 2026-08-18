@@ -61,8 +61,10 @@ Modes:
                                 server's atomic operation finalizer.
 
 Options:
-  --server <ip:ctrl:data>       Asset Server endpoints. Required (or env
-                                ASSET_WORKER_SERVER) except --import-pack.
+  --server <ip:ctrl:data>       Asset Server endpoints. Repeatable so one
+                                worker claims from every live server. Or env
+                                ASSET_WORKER_SERVER / ASSET_WORKER_SERVERS
+                                (comma-separated). Required except --import-pack.
   --token-file <path>           File holding the bearer token (mpat_…).
                                 Required (or env ASSET_WORKER_TOKEN) except
                                 --import-pack.
@@ -135,6 +137,7 @@ fn fail(message: &str) -> ! {
 
 struct Args {
     endpoints: ApiEndpoints,
+    extra_servers: Vec<ApiEndpoints>,
     server_id: Option<[u8; 16]>,
     token: String,
     fleet: Option<PathBuf>,
@@ -178,7 +181,20 @@ fn from_hex16(text: &str) -> Option<[u8; 16]> {
 
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
-    let mut server = std::env::var("ASSET_WORKER_SERVER").ok();
+    let mut servers: Vec<String> = Vec::new();
+    if let Ok(one) = std::env::var("ASSET_WORKER_SERVER") {
+        if !one.trim().is_empty() {
+            servers.push(one);
+        }
+    }
+    if let Ok(many) = std::env::var("ASSET_WORKER_SERVERS") {
+        for part in many.split(',') {
+            let spec = part.trim();
+            if !spec.is_empty() && !servers.iter().any(|s| s == spec) {
+                servers.push(spec.to_string());
+            }
+        }
+    }
     let mut token = std::env::var("ASSET_WORKER_TOKEN").ok();
     let mut token_file: Option<PathBuf> = None;
     let mut server_id = None;
@@ -209,7 +225,12 @@ fn parse_args() -> Args {
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--server" => server = Some(value_of("--server", &mut args)),
+            "--server" => {
+                let spec = value_of("--server", &mut args);
+                if !servers.iter().any(|s| s == &spec) {
+                    servers.push(spec);
+                }
+            }
             "--token-file" => {
                 token_file = Some(PathBuf::from(value_of("--token-file", &mut args)))
             }
@@ -337,22 +358,31 @@ fn parse_args() -> Args {
     {
         fail("--out / --source-config / pack identity flags require --import-pack");
     }
-    let (endpoints, token) = if import_pack.is_some() {
+    let (endpoints, extra_servers, token) = if import_pack.is_some() {
         // Pack compile is local: no server session, no bearer token.
         (
             ApiEndpoints {
                 control: SocketAddr::from(([127, 0, 0, 1], 0)),
                 data: SocketAddr::from(([127, 0, 0, 1], 0)),
             },
+            Vec::new(),
             String::new(),
         )
     } else {
-        let Some(server) = server else { fail("--server is required") };
-        let Some(endpoints) = parse_endpoints(&server) else {
-            fail("malformed --server (want ip:controlport:dataport)")
-        };
+        if servers.is_empty() {
+            fail("--server is required");
+        }
+        let mut parsed = Vec::new();
+        for spec in &servers {
+            let Some(ep) = parse_endpoints(spec) else {
+                fail("malformed --server (want ip:controlport:dataport)")
+            };
+            parsed.push(ep);
+        }
+        let endpoints = parsed.remove(0);
+        let extra_servers = parsed;
         let Some(token) = token else { fail("--token-file is required") };
-        (endpoints, token)
+        (endpoints, extra_servers, token)
     };
     let fleet = fleet.or_else(|| std::env::var("MAKEPAD_AI_FLEET").ok().map(PathBuf::from));
     let cache = cache.unwrap_or_else(|| {
@@ -402,6 +432,7 @@ fn parse_args() -> Args {
     };
     Args {
         endpoints,
+        extra_servers,
         server_id,
         token,
         fleet,
@@ -612,6 +643,48 @@ fn main() {
     }
 
     // ---- coordinator mode ----
+    for (i, endpoints) in args.extra_servers.into_iter().enumerate() {
+        let token = args.token.clone();
+        let suffix = format!("{}-s{}", args.suffix, i + 2);
+        let cache = args.cache.join(format!("cache-s{}", i + 2));
+        let fleet_file = args.fleet.clone();
+        let log = args.log;
+        std::thread::Builder::new()
+            .name(format!("asset-worker-{i}"))
+            .spawn(move || {
+                let mut config = ClientConfig::new(cache);
+                config.token = Some(token);
+                let client = match AssetClient::connect(config, endpoints, None) {
+                    Ok(c) => c,
+                    Err(error) => {
+                        eprintln!("[asset-worker] extra server connect failed: {error}");
+                        return;
+                    }
+                };
+                let mut fleet = match fleet_file.as_deref() {
+                    Some(path) => match AssetAiFleet::from_fleet_file(path, log) {
+                        Ok(f) => f,
+                        Err(error) => {
+                            eprintln!("[asset-worker] extra fleet: {error}");
+                            return;
+                        }
+                    },
+                    None => AssetAiFleet::from_urls(
+                        vec!["http://10.0.0.123:8765".into()],
+                        log,
+                    ),
+                };
+                Coordinator {
+                    client,
+                    fleet: &mut fleet,
+                    suffix,
+                    rights: PublishRights::generated_cc0(),
+                    log,
+                }
+                .run(&STOP);
+            })
+            .ok();
+    }
     let mut fleet = match args.fleet.as_deref() {
         Some(path) => match AssetAiFleet::from_fleet_file(path, args.log) {
             Ok(fleet) => fleet,
