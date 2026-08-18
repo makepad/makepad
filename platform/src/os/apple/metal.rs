@@ -2363,7 +2363,8 @@ impl CxTexture {
                     .saturating_mul(4)
             }
             // Mipmapped images: texture is allocated with the full chain above; upload each level
-            // here. TODO: needs a mip-filter sampler to actually help (verify on macOS/iOS).
+            // here. Shader samplers already set mip_filter::linear; world albedo
+            // pairs this with sample_*_repeat so distant tiles trilinear-filter.
             TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,

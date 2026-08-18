@@ -4,10 +4,6 @@ workspace.members = [
     "apps/asset-ui",
     "apps/vj",
     "libs/asset/importer",
-    # Game frontend is the private repo git@github.com:makepad/sandbox
-    # cloned into apps/sandbox (same ../../ path layout as before).
-    "apps/sandbox",
-    "apps/sandbox/tools/sandbox-eval",
     "libs/asset/data",
     "libs/asset/client",
     "libs/asset/store",
@@ -75,6 +71,11 @@ workspace.members = [
 ]
 
 workspace.exclude = [
+    # Private Arcade frontend. Clone into apps/sandbox; path deps stay ../../
+    # like a subdirectory. Not a required member so a clean makepad tree
+    # still loads.
+    "apps/sandbox",
+    "apps/sandbox/tools/sandbox-eval",
     "libs/terminal_core",
     # standalone GPU generate service (own workspace, like diffusion)
     "libs/asset/ai",
