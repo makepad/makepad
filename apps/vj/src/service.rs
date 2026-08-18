@@ -66,10 +66,14 @@ struct LocalAssetDb {
 }
 
 fn attach_local_asset_db(home: &Path) -> Option<LocalAssetDb> {
-    // asset-ui's live catalog first; the older ai-content tree is a
-    // fallback for checkouts that never moved.
+    // Checkout-local Asset UI first; leftover $HOME trees are a fallback
+    // for checkouts that never moved.
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/asset-ui/asset-server");
+    let mut roots = vec![checkout];
     for leaf in [".makepad-asset-ai", ".makepad-ai-content"] {
-        let root = home.join(leaf).join("asset-server");
+        roots.push(home.join(leaf).join("asset-server"));
+    }
+    for root in roots {
         let token = read_trimmed(&root.join("admin-token"));
         let server_id = read_trimmed(&root.join("server-id")).and_then(|t| from_hex16(&t));
         let endpoints = read_trimmed(&root.join("listen"))
@@ -93,7 +97,7 @@ pub fn session_config_from_env() -> SessionConfig {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
-    let vj_home = home.join(".makepad-vj");
+    let vj_home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj");
     let cache_parent = std::env::var("VJ_ASSET_CACHE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| vj_home.clone());
