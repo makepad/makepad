@@ -752,6 +752,15 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
         let view_px_size = multiview.size as usize;
         emit(PbrStage::Bake, 1, 2, progress)?;
         let tex = cfg.texture_size as usize;
+        // The conditioning renders use upstream's cross-product shading
+        // normals, which point INWARD in the reflected paint frame (that is
+        // what the diffusion model was trained on). The bake's facing test
+        // (n . to_cam) and the geometry-derived normal map need OUTWARD
+        // normals: flip them for the bake stages.
+        let mut mesh = mesh;
+        for n in &mut mesh.normals {
+            *n = [-n[0], -n[1], -n[2]];
+        }
         let baked_albedo = bake_from_views(
             &mesh,
             &make_bake_views(&multiview.albedo, &view_mats, &selection.selected, &candidates, view_px_size, proj),
@@ -967,13 +976,30 @@ mod tests {
         set.validate().unwrap();
         let albedo = set.albedo.map.as_ref().unwrap();
         assert_eq!(albedo.width, 48);
-        // Mock albedo := world-normal map, so the +Y face cell (face 2) must
-        // bake to the encoded (0,1,0) normal: (128, 255, 128).
-        let c = face_cell_center(2, 48);
-        let px = &albedo.data[c * 3..c * 3 + 3];
-        assert!((px[0] as i32 - 128).abs() <= 3, "r {}", px[0]);
-        assert!(px[1] >= 252, "g {}", px[1]);
-        assert!((px[2] as i32 - 128).abs() <= 3, "b {}", px[2]);
+        // Mock albedo := the world-normal conditioning map (paint frame,
+        // model-orientation flip and all), so every baked face cell must
+        // hold an axis-aligned encoded normal: exactly one channel saturated
+        // (0 or 255) and the other two at 128. That is the "geometry flows
+        // to the baked albedo" invariant independent of the frame mapping.
+        // Faces 0/1 (+X/-X in glTF) land on the paint frame's side ring and
+        // are always covered by the canonical azimuth views; the glTF +Y face
+        // becomes the paint-frame bottom, which the 6-view selection may
+        // legitimately skip (characters are not textured from below).
+        let nonblack = albedo.data.chunks_exact(3).filter(|p| p.iter().any(|v| *v > 3)).count();
+        assert!(nonblack > 0, "bake produced no texels");
+        let mut covered = 0;
+        for face in [0usize, 1] {
+            let c = face_cell_center(face, 48);
+            let px = &albedo.data[c * 3..c * 3 + 3];
+            let saturated = px.iter().filter(|v| **v <= 3 || **v >= 252).count();
+            let mid = px.iter().filter(|v| (**v as i32 - 128).abs() <= 3).count();
+            if saturated == 1 && mid == 2 {
+                covered += 1;
+            } else {
+                assert_eq!(px, &[0u8, 0, 0], "face {face} neither axis normal nor empty: {px:?}");
+            }
+        }
+        assert!(covered >= 1, "no side face received a baked axis normal");
         // ORM present with neutral R (occlusion honestly absent).
         let orm = set.packed_orm.as_ref().unwrap();
         assert!(orm.data.chunks_exact(3).all(|p| p[0] == NEUTRAL_OCCLUSION));

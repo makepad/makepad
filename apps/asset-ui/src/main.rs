@@ -2554,7 +2554,10 @@ impl App {
 
         // Type dropdown (pipeline). Field captions sit beside the control;
         // items are the choices only.
-        let labels: Vec<String> = PRESETS.iter().map(|p| p.name.to_string()).collect();
+        let labels: Vec<String> = crate::pipeline::presets_sorted_order()
+            .iter()
+            .map(|&i| PRESETS[i].name.to_string())
+            .collect();
         self.ui
             .drop_down2(cx, ids!(preset_drop))
             .set_labels(cx, labels);
@@ -2737,10 +2740,13 @@ impl App {
     }
 
     fn current_preset_index(&self, cx: &mut Cx) -> usize {
-        self.ui
+        let order = crate::pipeline::presets_sorted_order();
+        let row = self
+            .ui
             .drop_down2(cx, ids!(preset_drop))
             .selected_item()
-            .min(PRESETS.len() - 1)
+            .min(order.len() - 1);
+        order[row]
     }
 
     fn fleet_models_for_domain(&self, domain: &str) -> Vec<String> {
@@ -3058,7 +3064,7 @@ impl App {
         };
         self.ui
             .drop_down2(cx, ids!(preset_drop))
-            .set_selected_item(cx, preset);
+            .set_selected_item(cx, crate::pipeline::preset_row_for_index(preset));
         self.refresh_model_ui(cx, false);
         for pin in &saved.models {
             let ids = self.fleet_models_for_domain(&pin.domain);
@@ -3129,11 +3135,7 @@ impl App {
         if let Some(model) = self.selected_stage_model(cx, "speech") {
             return Some(model);
         }
-        let preset = self
-            .ui
-            .drop_down2(cx, ids!(preset_drop))
-            .selected_item()
-            .min(PRESETS.len() - 1);
+        let preset = self.current_preset_index(cx);
         PRESETS[preset]
             .pins
             .iter()
@@ -3200,7 +3202,7 @@ impl App {
         }
         self.ui
             .drop_down2(cx, ids!(preset_drop))
-            .set_selected_item(cx, preset_index);
+            .set_selected_item(cx, crate::pipeline::preset_row_for_index(preset_index));
         self.refresh_model_ui(cx, true);
         // Extra queued runs, to exercise the run queue. Each is its own
         // History group, exactly like distinct Generate clicks.
@@ -3244,11 +3246,7 @@ impl App {
         if prompt.trim().is_empty() {
             prompt = "a weathered fishing trawler at dawn, misty harbor".to_string();
         }
-        let preset = self
-            .ui
-            .drop_down2(cx, ids!(preset_drop))
-            .selected_item()
-            .min(PRESETS.len() - 1);
+        let preset = self.current_preset_index(cx);
         let model_overrides =
             self.collected_stage_models(cx, PRESETS[preset].domains);
         let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();

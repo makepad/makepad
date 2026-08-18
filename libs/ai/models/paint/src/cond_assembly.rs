@@ -64,7 +64,11 @@ pub fn cfg_branch_table() -> CfgBranchTable {
     CfgBranchTable {
         ref_scale: [0.0, 1.0, 1.0],
         dino_zeroed: [true, true, false],
-        prompt_zeroed: [true, false, false],
+        // Official pipeline.py: `negative_prompt_embeds = stack(all_shading_tokens)`
+        // — the uncond branch keeps the learned per-material shading tokens
+        // (the `zeros_like` variant is commented out upstream). Only DINO
+        // and the reference scale differ across branches.
+        prompt_zeroed: [false, false, false],
     }
 }
 
@@ -327,7 +331,7 @@ mod tests {
         let table = cfg_branch_table();
         assert_eq!(table.ref_scale, [0.0, 1.0, 1.0]);
         assert_eq!(table.dino_zeroed, [true, true, false]);
-        assert_eq!(table.prompt_zeroed, [true, false, false]);
+        assert_eq!(table.prompt_zeroed, [false, false, false]);
         assert_eq!(TEXT_TOKENS, 77);
         assert_eq!(TEXT_DIM, 1024);
     }

@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn ddim_loop_honors_cancel_and_runs_15() {
+    fn ddim_loop_honors_cancel_and_runs_default_steps() {
         let sched = DdimVpredZsnr::hunyuan_paint();
         let mut batch = DenoiseBatch::from_defaults(2, &[0.0], 1, 1, &sched).unwrap();
         let mut seen = 0u32;
@@ -411,7 +411,7 @@ mod tests {
             |sample, _t| Ok(vec![0.0f32; CFG_BRANCHES * sample.len()]),
             &mut |step, total| {
                 seen = step;
-                assert_eq!(total, 15);
+                assert_eq!(total, DEFAULT_STEPS as u32);
                 step < 3
             },
         )
@@ -431,7 +431,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(last, 15);
+        assert_eq!(last, DEFAULT_STEPS as u32);
         assert!(batch.sample.iter().all(|x| x.is_finite()));
     }
 
