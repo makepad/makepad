@@ -326,6 +326,24 @@ fn pick_stage_model_target(
     }
 }
 
+/// Dropdown presentation order: preset indices sorted by name so the
+/// families group ("expand → …" together, "image → …" together). `PRESETS`
+/// itself stays in curated order — saved presets reference names, and every
+/// stored index is a `PRESETS` index; only the dropdown rows are sorted.
+pub fn presets_sorted_order() -> Vec<usize> {
+    let mut order: Vec<usize> = (0..PRESETS.len()).collect();
+    order.sort_by_key(|&index| PRESETS[index].name);
+    order
+}
+
+/// The dropdown row showing `PRESETS[index]` under the sorted order.
+pub fn preset_row_for_index(index: usize) -> usize {
+    presets_sorted_order()
+        .iter()
+        .position(|&i| i == index)
+        .unwrap_or(0)
+}
+
 /// The preset chains offered in the UI. Domains not yet served by any box
 /// (mesh, world today) stay listed on purpose: picking them surfaces the
 /// service gap in the stage status instead of hiding it.
