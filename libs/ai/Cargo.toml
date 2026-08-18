@@ -1,0 +1,11 @@
+# The AI model workspace: loader (disk), cuda/metal (kernel+residency
+# stores), job (the one cross-model contract), llm + models/* (per-family
+# model crates). Standalone workspace like libs/diffusion before it; the
+# asset-ai service and root-workspace apps reach in via path deps.
+# Plan of record: /aiarch.md
+[workspace]
+members = [
+    "loader",
+    "job",
+]
+resolver = "2"
