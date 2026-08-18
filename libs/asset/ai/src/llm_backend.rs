@@ -341,7 +341,7 @@ impl ContentBackend for LlmBackend {
             build_prompt_with_think(
                 &system,
                 params,
-                crate::protocol::think_prefill_for_model(&self.model_id),
+                crate::protocol::think_prefill_for_expand(&self.model_id),
             )
         };
 
@@ -850,6 +850,14 @@ mod tests {
         );
         assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n"));
         assert!(!prompt.contains("</think>"));
+        let expand = build_prompt_with_think(
+            "SYS",
+            &params("a pretty elf", "video"),
+            crate::protocol::think_prefill_for_expand("qwen3.8-27b"),
+        );
+        assert!(expand.ends_with(
+            "<|im_start|>assistant\n<think>\nWrite the expanded generation prompt next.\n</think>\n\n"
+        ));
     }
 
     #[test]
@@ -870,14 +878,15 @@ mod tests {
             build_prompt_with_think(
                 default_system_prompt("video"),
                 &params("x", "video"),
-                crate::protocol::think_prefill_for_model("qwen3.8-27b"),
+                crate::protocol::think_prefill_for_expand("qwen3.8-27b"),
             )
         };
         assert!(
-            qwen38.ends_with("<|im_start|>assistant\n<think>\n"),
-            "Qwen3.8 must leave <think> open, got {qwen38:?}"
+            qwen38.ends_with(
+                "<|im_start|>assistant\n<think>\nWrite the expanded generation prompt next.\n</think>\n\n"
+            ),
+            "Qwen3.8 expander must close think with a one-line seed, got {qwen38:?}"
         );
-        assert!(!qwen38.contains("</think>"));
         // No style line when style is empty.
         let plain = build_prompt(default_system_prompt("mesh"), &params("x", "mesh"));
         assert!(!plain.contains("Style direction"));

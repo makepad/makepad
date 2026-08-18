@@ -129,6 +129,21 @@ pub fn think_prefill_for_model(model_id: &str) -> &'static str {
         CHAT_THINK_PREFILL
     }
 }
+
+/// Expander jobs need the *answer*, not another think dump. An empty
+/// `</think>` prefill makes 3.8 emit `<|im_end|>` immediately; leaving
+/// `<think>` open spends the fleet's 220–512 token budget inside the
+/// think block. A one-line closed thought starts the model on the prompt.
+pub const CHAT_THINK_PREFILL_EXPAND_38: &str =
+    "<think>\nWrite the expanded generation prompt next.\n</think>\n\n";
+
+pub fn think_prefill_for_expand(model_id: &str) -> &'static str {
+    if model_uses_open_think(model_id) {
+        CHAT_THINK_PREFILL_EXPAND_38
+    } else {
+        CHAT_THINK_PREFILL
+    }
+}
 /// Appended after the generated assistant text so the next chat prompt is
 /// a strict string-prefix extension (KV reuse).
 pub const CHAT_COMMIT_SUFFIX: &str = "<|im_end|>\n";
