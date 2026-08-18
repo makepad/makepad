@@ -1529,8 +1529,20 @@ fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [Pla
 }
 
 // llama.cpp ggml-cuda.cu:3413-3423 / 4006-4009: SSM_CONV + SILU.
+//
+// DEFAULT-OFF: with this fusion enabled the Qwen3.8-27B forward pass is
+// run-to-run NONDETERMINISTIC on sm120a (.169 hammer census: 20 identical
+// temp-0 prefills produced 5 distinct first tokens, ~45% instant-EOS — the
+// qwen-chat empty-reply bug). With it disabled the same census is 20/20
+// identical and the first token is sane. Kernel + dispatch wiring have been
+// audited without finding the mechanism, so the fusion stays opt-in
+// (MKLLM_ENABLE_SSM_SILU_FUSION=1) until the root cause is nailed; it only
+// saves one elementwise SiLU launch per recurrent layer.
 fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
-    if fusion_disabled("MKLLM_DISABLE_SSM_SILU_FUSION") {
+    let force_on = std::env::var_os("MKLLM_ENABLE_SSM_SILU_FUSION")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !force_on || fusion_disabled("MKLLM_DISABLE_SSM_SILU_FUSION") {
         return 0;
     }
     let mut fused = 0usize;
