@@ -131,9 +131,41 @@ impl KokoroSpeaker {
     }
 
     pub fn synthesize(&mut self, text: &str) -> Result<SpeechAudio, TtsError> {
+        self.synthesize_with_speed(text, 1.0)
+    }
+
+    /// [`Self::synthesize`] with a speaking-rate multiplier. Matches the
+    /// upstream pipeline: predicted per-phoneme durations are divided by
+    /// `speed` before rounding to frames, so 2.0 speaks twice as fast at the
+    /// same pitch. `speed == 1.0` is bit-identical to [`Self::synthesize`].
+    pub fn synthesize_with_speed(&mut self, text: &str, speed: f32) -> Result<SpeechAudio, TtsError> {
+        self.synthesize_with_speed_observed(text, speed, &mut |_, _| true)
+    }
+
+    /// [`Self::synthesize_with_speed`] with a per-chunk observer for
+    /// progress/cancellation: `on_chunk(done, total)` fires before each
+    /// text chunk is synthesized; returning `false` stops the run early and
+    /// returns whatever audio accumulated so far (the caller decides what an
+    /// abort means — service backends surface their own Cancelled error).
+    pub fn synthesize_with_speed_observed(
+        &mut self,
+        text: &str,
+        speed: f32,
+        on_chunk: &mut dyn FnMut(usize, usize) -> bool,
+    ) -> Result<SpeechAudio, TtsError> {
+        let speed = if speed.is_finite() && speed > 0.0 {
+            speed.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        let chunks = split_to_fit(text);
+        let total = chunks.len();
         let mut samples = Vec::new();
-        for chunk in split_to_fit(text) {
-            self.synthesize_chunk(&chunk, &mut samples);
+        for (index, chunk) in chunks.iter().enumerate() {
+            if !on_chunk(index, total) {
+                break;
+            }
+            self.synthesize_chunk(chunk, speed, &mut samples);
         }
         if samples.is_empty() {
             return Err(TtsError::Empty);
@@ -154,7 +186,7 @@ impl KokoroSpeaker {
         })
     }
 
-    fn synthesize_chunk(&self, text: &str, samples: &mut Vec<f32>) {
+    fn synthesize_chunk(&self, text: &str, speed: f32, samples: &mut Vec<f32>) {
         let tokens = g2p::tokens(text);
         // Two zero pads plus at least one phoneme.
         if tokens.len() < 3 {
@@ -173,7 +205,7 @@ impl KokoroSpeaker {
         let frames: Vec<usize> = duration
             .durations
             .iter()
-            .map(|d| round_half_even(*d).max(1.0) as usize)
+            .map(|d| round_half_even(*d / speed).max(1.0) as usize)
             .collect();
         let en = expand_to_frames(&duration.encoded, &frames);
         let asr = expand_to_frames(&encoded.output, &frames);

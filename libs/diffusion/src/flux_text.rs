@@ -8,7 +8,7 @@ use crate::flux::{
 };
 use crate::t5::T5TokenizedPrompt;
 use crate::t5_encoder::{CompiledT5xxl, LazyT5xxl, LoadedT5xxlWeights, T5xxlExecutionMode};
-use crate::{DiffusionError, Result};
+use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 
 #[derive(Clone, Debug)]
 pub struct FluxTokenizedPrompts {
@@ -48,15 +48,23 @@ pub type FluxCompiledTextEncodersMetal = FluxCompiledTextEncoders;
 impl FluxTokenizedPrompts {
     pub fn from_prompts(prompts: &FluxPrompts) -> Result<Self> {
         let clip_l = tokenize_flux_clip_l_prompt(&prompts.clip_l)?;
-        if clip_l.chunks.len() != 1 {
-            return Err(DiffusionError::workflow(format!(
-                "flux text conditioning currently supports one clip_l chunk, got {}",
+        // CLIP-L's context is 77 tokens; longer prompts tokenize into multiple
+        // chunks. Flux only consumes clip_l's POOLED output (one window), so
+        // reference behavior (ComfyUI's CLIPTextEncodeFlux) is truncation to
+        // the first window — the full prompt still reaches t5xxl (256 tokens).
+        if clip_l.chunks.len() > 1 {
+            eprintln!(
+                "flux: clip_l prompt spans {} chunks; truncating to the first \
+                 77-token window (t5xxl keeps the full prompt)",
                 clip_l.chunks.len()
-            )));
+            );
         }
+        let clip_l_chunk = clip_l.chunks.into_iter().next().ok_or_else(|| {
+            DiffusionError::workflow("clip_l tokenization produced no chunks")
+        })?;
 
         Ok(Self {
-            clip_l: clip_l.chunks.into_iter().next().unwrap(),
+            clip_l: clip_l_chunk,
             t5xxl: tokenize_flux_t5xxl_prompt(&prompts.t5xxl)?,
         })
     }
@@ -64,6 +72,16 @@ impl FluxTokenizedPrompts {
 
 impl FluxLoadedTextEncoders {
     pub fn load(bundle: &FluxResolvedBundle) -> Result<Self> {
+        Self::load_split(bundle, None)
+    }
+
+    /// [`Self::load`] with fine-grained progress: the t5 weight stream (the
+    /// ~9.5GB bulk of this load) reports cumulative bytes through the hook,
+    /// which doubles as the cancel boundary (returning Err unwinds the load).
+    pub fn load_split(
+        bundle: &FluxResolvedBundle,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<Self> {
         let clip_l_path = bundle
             .clip_l_path
             .as_ref()
@@ -73,9 +91,17 @@ impl FluxLoadedTextEncoders {
             .as_ref()
             .ok_or_else(|| DiffusionError::workflow("workflow bundle does not include t5xxl"))?;
 
+        // Combined checkpoints scope each component out of the one file;
+        // split bundles pass `None` prefixes and load unchanged.
+        let prefixes = bundle.component_prefixes();
+        let clip_l = LoadedClipLWeights::load_component(clip_l_path, prefixes.clip_l)?;
         Ok(Self {
-            clip_l: LoadedClipLWeights::load(clip_l_path)?,
-            t5xxl: LoadedT5xxlWeights::load(t5xxl_path)?,
+            clip_l,
+            t5xxl: LoadedT5xxlWeights::load_component_with_progress(
+                t5xxl_path,
+                prefixes.t5xxl,
+                progress.take(),
+            )?,
         })
     }
 
@@ -156,14 +182,31 @@ impl FluxCompiledTextEncoders {
         weights: &FluxLoadedTextEncoders,
         prompts: &FluxTokenizedPrompts,
     ) -> Result<FluxConditioning> {
+        self.execute_split(weights, prompts, None)
+    }
+
+    /// [`Self::execute`] with fine-grained progress through the t5 encode —
+    /// the multi-second phase service backends want moving and cancellable:
+    /// the lazy path emits per block ("text-encode t5 block 7/24"), the
+    /// compiled path is one opaque graph launch and gets a single label.
+    pub fn execute_split(
+        &self,
+        weights: &FluxLoadedTextEncoders,
+        prompts: &FluxTokenizedPrompts,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<FluxConditioning> {
         let clip = self
             .clip_l
             .execute(&weights.clip_l, &prompts.clip_l.token_ids)?;
         let t5 = match &self.t5xxl {
-            FluxCompiledT5xxl::Lazy(t5xxl) => {
-                t5xxl.execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?
-            }
+            FluxCompiledT5xxl::Lazy(t5xxl) => t5xxl.execute_with_progress(
+                &weights.t5xxl,
+                &prompts.t5xxl.token_ids,
+                progress.take(),
+            )?,
             FluxCompiledT5xxl::Compiled(t5xxl) => {
+                // One compiled graph launch — no interior boundary to hook.
+                emit_progress(&mut progress, "text-encode t5", 0.0)?;
                 t5xxl.execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?
             }
         };
