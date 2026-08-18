@@ -149,7 +149,11 @@ pub(crate) fn attn_packed_batched(
     heads: usize,
     scale: f32,
 ) -> Result<GpuTensor, String> {
-    if attn_use_official_sdpa(q, heads) && q.rows() % batch == 0 {
+    // MAKEPAD_PBR_ATTN_COMPOSITE=1 forces the f32 composite kernel for the
+    // batched self-attention (bisect knob: the homemade flash path is
+    // suspected of mis-striding batches).
+    let force_composite = std::env::var("MAKEPAD_PBR_ATTN_COMPOSITE").as_deref() == Ok("1");
+    if !force_composite && attn_use_official_sdpa(q, heads) && q.rows() % batch == 0 {
         return match_half(gpu_sdpa_flash_f16(q, k, v, batch, heads, scale)?, q);
     }
     let q32 = as_f32(q)?;
