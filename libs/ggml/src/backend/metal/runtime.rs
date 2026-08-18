@@ -87,6 +87,12 @@ mod imp {
         pub fn storage(&self) -> BufferStorageMode {
             self.storage
         }
+
+        // compiled.rs compares buffer identity on every target; the Windows
+        // stub never runs that path, but rustc 1.92 still type-checks it.
+        pub(crate) fn as_id(&self) -> *const MetalBuffer {
+            self
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -253,6 +259,10 @@ mod imp {
         }
 
         pub fn end_command_batch(&self) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn submit_partial_command_batch(&self) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
@@ -534,24 +544,27 @@ mod imp {
     }
 
     fn max_ops_per_command_buffer(device_name: &str) -> usize {
+        // Official ggml-metal encodes the graph in 1-2 large CBs
+        // (`n_cb = 1`, first ~10% on the main thread, rest in one extra CB;
+        // ggml-metal-context.m:445-466). The old 40-op roll was a hang-bisect
+        // leftover and added several ms of host tax per decode token.
         let name = device_name.to_ascii_lowercase();
         if name.contains("iphone") || name.contains("ipad") {
-            20
-        } else if name.contains("max") || name.contains("ultra") {
-            50
+            256
         } else {
-            40
+            // Official llama.cpp Metal is 1–2 CBs for the whole graph. 2048
+            // rolls a third CB once flash pad/blk extras push past the node
+            // count. Keep one leftover CB for the remaining 90%.
+            8192
         }
     }
 
     fn max_mb_per_command_buffer(device_name: &str) -> usize {
         let name = device_name.to_ascii_lowercase();
         if name.contains("iphone") || name.contains("ipad") {
-            40
-        } else if name.contains("max") || name.contains("ultra") {
-            50
+            64
         } else {
-            40
+            256
         }
     }
 
@@ -1045,6 +1058,10 @@ mod imp {
             self.ctx.borrow_mut().end_command_batch()
         }
 
+        pub fn submit_partial_command_batch(&self) -> MetalResult<()> {
+            self.ctx.borrow_mut().submit_partial_command_batch()
+        }
+
         pub fn command_batch_is_active(&self) -> bool {
             self.ctx.borrow().command_batch_is_active()
         }
@@ -1525,7 +1542,40 @@ mod imp {
             let command_buffer = self.active_command_buffer.take().ok_or_else(|| {
                 "Metal command batch disappeared during encoder rollover".to_string()
             })?;
+            let rolled_ops = self.active_command_buffer_ops;
             self.commit_command_buffer(command_buffer);
+            // Codex: wait each rolled CB so a later InnocentVictim does not hide
+            // the first non-terminating dispatch. Off unless opted in.
+            if std::env::var_os("MAKEPAD_METAL_WAIT_EACH_CB").is_some() {
+                self.wait_for_last_submitted_work(false).map_err(|err| {
+                    format!("Metal CB after {rolled_ops} ops: {err}")
+                })?;
+            }
+            self.active_command_buffer = Some(self.new_command_buffer()?);
+            self.active_command_buffer_ops = 0;
+            self.active_command_buffer_bytes = 0;
+            self.active_command_buffer_seen_buffers.clear();
+            Ok(())
+        }
+
+        fn submit_partial_command_batch(&mut self) -> MetalResult<()> {
+            // Official ggml-metal submits the first chunk (`n_nodes_0`) so the
+            // GPU starts while the rest of the graph is encoded
+            // (ggml-metal-context.m:454-466).
+            if self.active_command_buffer.is_none() || self.active_command_buffer_ops == 0 {
+                return Ok(());
+            }
+            self.end_active_compute_encoder();
+            let command_buffer = self.active_command_buffer.take().ok_or_else(|| {
+                "Metal command batch disappeared during official partial submit".to_string()
+            })?;
+            let rolled_ops = self.active_command_buffer_ops;
+            self.commit_command_buffer(command_buffer);
+            if std::env::var_os("MAKEPAD_METAL_WAIT_EACH_CB").is_some() {
+                self.wait_for_last_submitted_work(false).map_err(|err| {
+                    format!("Metal CB after {rolled_ops} ops: {err}")
+                })?;
+            }
             self.active_command_buffer = Some(self.new_command_buffer()?);
             self.active_command_buffer_ops = 0;
             self.active_command_buffer_bytes = 0;
@@ -1832,8 +1882,14 @@ mod imp {
                 ));
             }
 
-            let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
-            if storage_mode == MTL_STORAGE_MODE_PRIVATE {
+            // Always GPU-blit host writes. A Shared memcpy is not ordered
+            // with later compute on this runtime once the GPU has touched
+            // the buffer (or after the session-create prefix fill): Flux
+            // then keeps the step-0 packed/timestep and later preds go
+            // stale or NaN. Opt back into memcpy only for isolated benches.
+            let force_memcpy = std::env::var_os("MAKEPAD_METAL_MEMCPY_WRITES").is_some();
+            let blit = !force_memcpy;
+            if blit {
                 let staging = self.new_buffer_with_bytes(bytes)?;
                 self.copy_between_buffers_ranges(
                     staging.as_id(),
@@ -1953,6 +2009,19 @@ mod imp {
             threadgroups: MetalSize,
             threads_per_threadgroup: MetalSize,
         ) -> MetalResult<()> {
+            // `for (i = tpitg.x; i < n; i += ntg.x)` hangs the GPU if ntg.x==0.
+            // A 0-width threadsPerThreadgroup is also an invalid dispatch.
+            if threads_per_threadgroup.width == 0
+                || threads_per_threadgroup.height == 0
+                || threads_per_threadgroup.depth == 0
+            {
+                return Err(format!(
+                    "refusing Metal dispatch with threadsPerThreadgroup=({},{},{})",
+                    threads_per_threadgroup.width,
+                    threads_per_threadgroup.height,
+                    threads_per_threadgroup.depth
+                ));
+            }
             let batched = self.active_command_buffer.is_some();
             let (command_buffer, commit_when_done) = if batched {
                 (

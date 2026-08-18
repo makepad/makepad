@@ -146,6 +146,49 @@ static __global__ void makepad_ggml_cuda_f32_to_bf16_kernel(
     output[idx] = makepad_ggml_cuda_f32_to_bf16_bits(input[idx]);
 }
 
+static __global__ void makepad_ggml_cuda_bf16_to_f32_kernel(
+        const uint16_t * __restrict__ input,
+        float * __restrict__ output,
+        uint32_t n) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) {
+        return;
+    }
+    output[idx] = makepad_ggml_cuda_bf16_to_f32(input[idx]);
+}
+
+// Exact layout of Michelangelo FourierEmbedder(num_freqs=8,
+// include_input=true, include_pi=false) followed by concatenated normals:
+// [xyz, sin(xyz * 2^[0..7]), cos(xyz * 2^[0..7]), normals].
+static __global__ void makepad_ggml_cuda_skintokens_michelangelo_fourier_f32_kernel(
+        const float * __restrict__ condition,
+        float * __restrict__ output,
+        uint32_t rows) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t values = rows * 54u;
+    if (idx >= values) {
+        return;
+    }
+    const uint32_t row = idx / 54u;
+    const uint32_t col = idx - row * 54u;
+    const float *input_row = condition + row * 6u;
+    if (col < 3u) {
+        output[idx] = input_row[col];
+        return;
+    }
+    if (col >= 51u) {
+        output[idx] = input_row[col - 48u];
+        return;
+    }
+    const uint32_t trig_col = col - 3u;
+    const bool cosine = trig_col >= 24u;
+    const uint32_t component = trig_col % 24u;
+    const uint32_t coordinate = component / 8u;
+    const uint32_t frequency = component % 8u;
+    const float angle = __fmul_rn(input_row[coordinate], ldexpf(1.0f, frequency));
+    output[idx] = cosine ? cosf(angle) : sinf(angle);
+}
+
 static __global__ void makepad_ggml_cuda_add_f32_kernel(
         const float * __restrict__ left,
         const float * __restrict__ right,
@@ -480,6 +523,103 @@ static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_p
     __syncthreads();
     for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
         row_out[idx] = row_in[idx] * inv_rms * weights_f32[idx];
+    }
+}
+
+// The precise weighted RMS-norm above, reading its groups out of a bf16
+// column slab (flux2's fused qkv linear output kept in bf16 storage) and
+// writing contiguous f32. Values expand losslessly, the strided per-thread
+// accumulation and block reduction are identical, so the output bits match
+// slice+expand+rms exactly. `groups_per_row` groups of `n` sit at
+// `col_off` within each `in_stride`-wide row.
+static __global__ void makepad_ggml_cuda_rms_norm_weighted_bf16slab_f32_kernel(
+        const uint16_t * __restrict__ input,
+        const float * __restrict__ weights_f32,
+        float * __restrict__ output,
+        uint32_t group_count,
+        uint32_t groups_per_row,
+        uint32_t in_stride,
+        uint32_t col_off,
+        uint32_t n,
+        float eps) {
+    const uint32_t group = blockIdx.x;
+    if (group >= group_count) {
+        return;
+    }
+    const uint32_t row = group / groups_per_row;
+    const uint32_t sub = group - row * groups_per_row;
+    const uint16_t * group_in =
+        input + static_cast<size_t>(row) * in_stride + col_off + static_cast<size_t>(sub) * n;
+    float * group_out = output + static_cast<size_t>(group) * n;
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        const float v = makepad_ggml_cuda_bf16_to_f32(group_in[idx]);
+        sum += v * v;
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
+    }
+    __syncthreads();
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        group_out[idx] =
+            makepad_ggml_cuda_bf16_to_f32(group_in[idx]) * inv_rms * weights_f32[idx];
+    }
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_rms_norm_weighted_bf16slab_f32(
+        const uint16_t * input,
+        const float * weights_f32,
+        float * output,
+        uint32_t group_count,
+        uint32_t groups_per_row,
+        uint32_t in_stride,
+        uint32_t col_off,
+        uint32_t n,
+        float eps,
+        cudaStream_t stream) {
+    if (group_count == 0 || groups_per_row == 0 || n == 0
+        || col_off + groups_per_row * n > in_stride) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t block = n < 1024 ? 256 : 1024;
+    makepad_ggml_cuda_rms_norm_weighted_bf16slab_f32_kernel<<<group_count, block, 0, stream>>>(
+        input, weights_f32, output, group_count, groups_per_row, in_stride, col_off, n, eps);
+    return cudaGetLastError();
+}
+
+// Official Qwen3RMSNorm: x.to(f32); xhat=x*rsqrt; return w * xhat.to(input_dtype).
+// Cast xhat to bf16, then multiply by w in f32. Do not bf16-round the product
+// (that extra round is gpu_rms_norm_mul_bf16 and does not match the hook dump).
+static __global__ void makepad_ggml_cuda_rms_norm_qwen3_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ weights_f32,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t n,
+        float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= row_count) {
+        return;
+    }
+    const float * row_in = input + row * row_stride;
+    float * row_out = output + row * row_stride;
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        const float v = row_in[idx];
+        sum += v * v;
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
+    }
+    __syncthreads();
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        const float xhat = makepad_ggml_cuda_bf16_round(row_in[idx] * inv_rms);
+        row_out[idx] = weights_f32[idx] * xhat;
     }
 }
 
@@ -2711,6 +2851,41 @@ extern "C" cudaError_t makepad_ggml_cuda_f32_to_bf16(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_bf16_to_f32(
+        const uint16_t * input,
+        float * output,
+        uint32_t n,
+        cudaStream_t stream) {
+    if (n == 0) {
+        return cudaSuccess;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((n + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_bf16_to_f32_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_skintokens_michelangelo_fourier_f32(
+        const float * condition,
+        float * output,
+        uint32_t rows,
+        cudaStream_t stream) {
+    if (rows == 0) {
+        return cudaSuccess;
+    }
+    if (rows > UINT32_MAX / 54u) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t n = rows * 54u;
+    const dim3 block(256, 1, 1);
+    const dim3 grid((n + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_skintokens_michelangelo_fourier_f32_kernel<<<grid, block, 0, stream>>>(
+        condition,
+        output,
+        rows);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_add_f32(
         const float * left,
         const float * right,
@@ -2998,6 +3173,24 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_p
     }
     const uint32_t block = n < 1024 ? 256 : 1024;
     makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise_kernel<<<row_count, block, 0, stream>>>(
+        input, weights_f32, output, row_count, row_stride, n, eps);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_rms_norm_qwen3(
+        const float * input,
+        const float * weights_f32,
+        float * output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t n,
+        float eps,
+        cudaStream_t stream) {
+    if (row_count == 0 || n == 0 || row_stride < n) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t block = n < 1024 ? 256 : 1024;
+    makepad_ggml_cuda_rms_norm_qwen3_kernel<<<row_count, block, 0, stream>>>(
         input, weights_f32, output, row_count, row_stride, n, eps);
     return cudaGetLastError();
 }

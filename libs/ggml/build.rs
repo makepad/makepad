@@ -6,17 +6,36 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_METAL_PRECOMPILE");
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_CUDA_ARCH");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_REQUIRE_CUDA");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rustc-check-cfg=cfg(makepad_ggml_cuda_kernels)");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let require_cuda = env_flag("MAKEPAD_GGML_REQUIRE_CUDA");
+    if require_cuda && target_os != "linux" && target_os != "windows" {
+        panic!(
+            "MAKEPAD_GGML_REQUIRE_CUDA=1, but CUDA kernels are unsupported for target OS {target_os:?}"
+        );
+    }
     if target_os == "macos" {
         build_metallib();
     }
     if target_os == "linux" || target_os == "windows" {
-        build_cuda_backends(&target_os);
+        build_cuda_backends(&target_os, require_cuda);
     }
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn build_metallib() {
@@ -35,13 +54,18 @@ fn build_metallib() {
     let metal_src = format!("{}/ggml-metal.metal", metal_dir);
     let common_h = format!("{}/ggml-common.h", metal_dir);
     let impl_h = format!("{}/ggml-metal-impl.h", metal_dir);
+    let mlx_dir = format!("{}/src/backend/metal/mlx_qmm", manifest_dir);
+    let steel_src = format!("{}/steel_qmm.metal", mlx_dir);
 
     println!("cargo:rerun-if-changed={}", metal_src);
     println!("cargo:rerun-if-changed={}", common_h);
     println!("cargo:rerun-if-changed={}", impl_h);
+    println!("cargo:rerun-if-changed={}", steel_src);
+    rerun_if_changed_tree(Path::new(&mlx_dir));
 
     let _ = fs::create_dir_all(&out_dir);
     let air_path = format!("{}/ggml-metal.air", out_dir);
+    let steel_air_path = format!("{}/steel_qmm.air", out_dir);
     let metallib_path = format!("{}/ggml-default.metallib", out_dir);
 
     if !precompile_enabled {
@@ -76,16 +100,54 @@ fn build_metallib() {
         return;
     }
 
-    let metallib_status = Command::new("xcrun")
+    let steel_output = Command::new("xcrun")
         .args([
             "--sdk",
             "macosx",
-            "metallib",
-            &air_path,
+            "metal",
+            "-O3",
+            "-fno-fast-math",
+            "-c",
+            &steel_src,
+            "-I",
+            &mlx_dir,
             "-o",
-            &metallib_path,
+            &steel_air_path,
         ])
-        .status();
+        .output();
+
+    let steel_ok = match &steel_output {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.trim().is_empty() {
+                println!(
+                    "cargo:warning=failed to compile steel_qmm.metal (status {:?})",
+                    output.status
+                );
+            } else {
+                for line in stderr.lines() {
+                    println!("cargo:warning=steel qmm: {line}");
+                }
+            }
+            false
+        }
+        Err(err) => {
+            println!("cargo:warning=failed to invoke metal for steel_qmm.metal: {err}");
+            false
+        }
+    };
+
+    let mut metallib = Command::new("xcrun");
+    metallib.args(["--sdk", "macosx", "metallib", &air_path]);
+    if steel_ok {
+        metallib.arg(&steel_air_path);
+    } else {
+        println!(
+            "cargo:warning=steel affine_qmm_t not in metallib; MAKEPAD_METAL_AFFINE_QMM will fall back"
+        );
+    }
+    let metallib_status = metallib.arg("-o").arg(&metallib_path).status();
 
     let ok = metallib_status.as_ref().is_ok_and(|s| s.success());
     if !ok {
@@ -98,23 +160,28 @@ fn build_metallib() {
     println!("cargo:rustc-env=MAKEPAD_GGML_METALLIB={}", metallib_path);
 }
 
-fn build_cuda_backends(target_os: &str) {
+fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src_paths = [
         manifest_dir.join("src/backend/cuda/affine.cu"),
+        manifest_dir.join("src/backend/cuda/diffusion_ops.cu"),
         manifest_dir.join("src/backend/cuda/gated_delta_net.cu"),
+        manifest_dir.join("src/backend/cuda/kquants.cu"),
+        manifest_dir.join("src/backend/cuda/llm/kernels.cu"),
         manifest_dir.join("src/backend/cuda/nvfp4.cu"),
         manifest_dir.join("src/backend/cuda/nvfp4_mmq.cu"),
         manifest_dir.join("src/backend/cuda/ops.cu"),
+        manifest_dir.join("src/backend/cuda/paint_extras.cu"),
         manifest_dir.join("src/backend/cuda/qwen_ops.cu"),
         manifest_dir.join("src/backend/cuda/ssm_conv.cu"),
     ];
     for src_path in &src_paths {
         println!("cargo:rerun-if-changed={}", src_path.display());
     }
+    rerun_if_changed_tree(&manifest_dir.join("src/backend/cuda/llm"));
 
     let Some(cuda_root) = cuda_root(target_os) else {
-        println!("cargo:warning=CUDA toolkit root not found; CUDA backends disabled");
+        cuda_unavailable(require_cuda, "CUDA toolkit root not found");
         return;
     };
 
@@ -124,9 +191,9 @@ fn build_cuda_backends(target_os: &str) {
         cuda_root.join("bin").join("nvcc")
     };
     if !nvcc.exists() {
-        println!(
-            "cargo:warning=CUDA nvcc not found at {}; CUDA backends disabled",
-            nvcc.display()
+        cuda_unavailable(
+            require_cuda,
+            &format!("CUDA nvcc not found at {}", nvcc.display()),
         );
         return;
     }
@@ -149,7 +216,7 @@ fn build_cuda_backends(target_os: &str) {
         match find_msvc_tool("lib.exe") {
             Some(path) => Some(path),
             None => {
-                println!("cargo:warning=MSVC lib.exe not found; CUDA backends disabled");
+                cuda_unavailable(require_cuda, "MSVC lib.exe not found");
                 return;
             }
         }
@@ -173,6 +240,9 @@ fn build_cuda_backends(target_os: &str) {
         } else {
             command.args(["-Xcompiler", "-fPIC"]);
         }
+        if let Some(src_dir) = src_path.parent() {
+            command.arg("-I").arg(src_dir);
+        }
         let status = command
             .args([
                 "-c",
@@ -188,9 +258,12 @@ fn build_cuda_backends(target_os: &str) {
 
         let ok = status.as_ref().is_ok_and(|s| s.success());
         if !ok {
-            println!(
-                "cargo:warning=failed to compile CUDA backend source {}; CUDA path disabled",
-                src_path.display()
+            cuda_unavailable(
+                require_cuda,
+                &format!(
+                    "failed to compile CUDA backend source {} ({status:?})",
+                    src_path.display()
+                ),
             );
             return;
         }
@@ -214,7 +287,7 @@ fn build_cuda_backends(target_os: &str) {
         ar.status().as_ref().is_ok_and(|s| s.success())
     };
     if !archive_ok {
-        println!("cargo:warning=failed to archive CUDA backends; CUDA path disabled");
+        cuda_unavailable(require_cuda, "failed to archive CUDA backends");
         return;
     }
 
@@ -224,6 +297,28 @@ fn build_cuda_backends(target_os: &str) {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
     println!("cargo:rustc-cfg=makepad_ggml_cuda_kernels");
+}
+
+fn rerun_if_changed_tree(path: &Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            rerun_if_changed_tree(&child);
+        } else {
+            println!("cargo:rerun-if-changed={}", child.display());
+        }
+    }
+}
+
+fn cuda_unavailable(required: bool, reason: &str) {
+    if required {
+        panic!("MAKEPAD_GGML_REQUIRE_CUDA=1, but the CUDA backend build failed: {reason}");
+    }
+    println!("cargo:warning={reason}; CUDA backends disabled");
 }
 
 fn cuda_root(target_os: &str) -> Option<PathBuf> {

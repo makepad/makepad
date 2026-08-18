@@ -108,8 +108,11 @@ impl Qwen35Tensors {
         let output_norm = required_tensor(model, "output_norm.weight")?;
         let output = optional_tensor(model, "output.weight").unwrap_or_else(|| token_embd.clone());
 
-        let mut layers = Vec::with_capacity(cfg.block_count as usize);
-        for index in 0..cfg.block_count {
+        // MTP/draft blocks past main_block_count belong to the speculative
+        // draft network and are not part of the main forward pass.
+        let main_block_count = cfg.main_block_count()?;
+        let mut layers = Vec::with_capacity(main_block_count as usize);
+        for index in 0..main_block_count {
             let kind = layer_kind(index, cfg.full_attention_interval)?;
             let attn_norm = required_tensor(model, &layer_name(index, "attn_norm", "weight"))?;
             let post_attention_norm =

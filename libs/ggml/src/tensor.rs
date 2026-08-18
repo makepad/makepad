@@ -40,6 +40,7 @@ pub enum TensorType {
     TQ2_0 = GGML_TYPE_TQ2_0,
     MXFP4 = GGML_TYPE_MXFP4,
     NVFP4 = GGML_TYPE_NVFP4,
+    F8E4M3 = GGML_TYPE_F8_E4M3,
 }
 
 impl TensorType {
@@ -78,6 +79,7 @@ impl TensorType {
             GGML_TYPE_TQ2_0 => Self::TQ2_0,
             GGML_TYPE_MXFP4 => Self::MXFP4,
             GGML_TYPE_NVFP4 => Self::NVFP4,
+            GGML_TYPE_F8_E4M3 => Self::F8E4M3,
             _ => return None,
         })
     }
@@ -99,7 +101,7 @@ impl TensorType {
             Self::F16 | Self::BF16 | Self::I16 => Some(2),
             Self::F32 | Self::I32 => Some(4),
             Self::F64 | Self::I64 => Some(8),
-            Self::I8 => Some(1),
+            Self::I8 | Self::F8E4M3 => Some(1),
             Self::Q4_0
             | Self::Q4_1
             | Self::Q5_0

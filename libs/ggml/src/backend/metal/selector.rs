@@ -5,7 +5,7 @@ use crate::core::{
 };
 use crate::graph::{Graph, NodeId};
 use crate::op::{GluOp, Op, UnaryOp};
-use crate::tensor::{ggml_type_size_for_type, Tensor, TensorType};
+use crate::tensor::{ggml_type_size_for_type, Tensor, TensorFlags, TensorType};
 
 use super::{
     FunctionConstant, FunctionConstantValue, MetalDeviceFeatures, MetalPipelineDescriptor,
@@ -140,6 +140,11 @@ pub struct MetalOpProgram {
 pub struct MetalGraphNodePlan {
     pub node_id: NodeId,
     pub program: MetalOpProgram,
+    /// Extra fused src1 tensors after the root node (official norm MUL/ADD
+    /// src1s, or official ADD-chain src1s).
+    pub fuse_src_ids: Vec<NodeId>,
+    /// Last fused tensor written by this node (`node_id` when unfused).
+    pub output_id: NodeId,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -227,21 +232,49 @@ pub fn build_graph_plan(
     features: MetalDeviceFeatures,
 ) -> Result<MetalGraphPlan, String> {
     let tensors = ctx.tensors();
-    let mut nodes = Vec::with_capacity(graph.nodes.len());
+    let use_counts = tensor_use_counts(graph, tensors);
+    // Creation order, not expand DFS. Flux AdaLN emits `scale+1` before
+    // NORM/MUL/ADD; expand visits mul.src0 (norm) first and inserts that
+    // ADD between NORM and MUL, which blocks official norm_mul_add.
+    // Tensor ids are allocated in builder order, which is a valid topo.
+    let mut compute_ids: Vec<NodeId> = graph
+        .nodes
+        .iter()
+        .copied()
+        .filter(|&node_id| {
+            tensors
+                .get(node_id)
+                .is_some_and(|op| !is_metadata_only_op(op.op))
+        })
+        .collect();
+    compute_ids.sort_unstable();
+    let mut nodes = Vec::with_capacity(compute_ids.len());
     let mut total_output_tail_bytes = 0usize;
-
-    for &node_id in &graph.nodes {
+    let mut i = 0;
+    while i < compute_ids.len() {
+        let node_id = compute_ids[i];
         let op = tensors
             .get(node_id)
             .ok_or_else(|| format!("graph references invalid tensor {}", node_id))?;
-        if is_metadata_only_op(op.op) {
-            continue;
-        }
-        let program = build_program(tensors, op, features)?;
+        let (n_fuse, fuse_src_ids, output_id) =
+            official_fusion(tensors, &compute_ids, i, &use_counts);
+        let program = if matches!(op.op, Op::Norm | Op::RmsNorm) {
+            program_norm(tensors, op, n_fuse)?
+        } else if op.op == Op::Add && n_fuse > 1 {
+            program_bin(tensors, op, n_fuse as i16)?
+        } else {
+            build_program(tensors, op, features)?
+        };
         total_output_tail_bytes = total_output_tail_bytes
             .checked_add(program.resources.output_tail_bytes)
             .ok_or_else(|| "Metal graph tail-byte accounting overflow".to_string())?;
-        nodes.push(MetalGraphNodePlan { node_id, program });
+        nodes.push(MetalGraphNodePlan {
+            node_id,
+            program,
+            fuse_src_ids,
+            output_id,
+        });
+        i += n_fuse as usize;
     }
 
     Ok(MetalGraphPlan {
@@ -252,6 +285,179 @@ pub fn build_graph_plan(
 
 fn is_metadata_only_op(op: Op) -> bool {
     matches!(op, Op::View | Op::Reshape | Op::Permute | Op::Transpose)
+}
+
+fn tensor_use_counts(graph: &Graph, tensors: &[Tensor]) -> std::collections::BTreeMap<NodeId, u32> {
+    let mut counts = std::collections::BTreeMap::new();
+    for &node_id in &graph.nodes {
+        let Some(tensor) = tensors.get(node_id) else {
+            continue;
+        };
+        for src_id in tensor.src.iter().flatten().copied() {
+            *counts.entry(src_id).or_insert(0) += 1;
+        }
+    }
+    // A host-read leaf is a use too: the fusion guards gate on use_count == 1,
+    // and fusing away a leaf'd interior norm/add left its dst never written —
+    // execute succeeded and the host read uninitialized buffer bytes. A leaf
+    // that is a view also keeps its view_src root's dst live.
+    for &leaf in &graph.leafs {
+        *counts.entry(leaf).or_insert(0) += 1;
+        if let Some(view_src) = tensors.get(leaf).and_then(|tensor| tensor.view_src) {
+            *counts.entry(view_src).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn official_fusion(
+    tensors: &[Tensor],
+    compute_ids: &[NodeId],
+    idx: usize,
+    use_counts: &std::collections::BTreeMap<NodeId, u32>,
+) -> (i32, Vec<NodeId>, NodeId) {
+    let node_id = compute_ids[idx];
+    let Some(op) = tensors.get(node_id) else {
+        return (1, Vec::new(), node_id);
+    };
+    if matches!(op.op, Op::Norm | Op::RmsNorm) {
+        return official_norm_fusion(tensors, compute_ids, idx, use_counts);
+    }
+    if op.op == Op::Add {
+        return official_add_fusion(tensors, compute_ids, idx, use_counts);
+    }
+    (1, Vec::new(), node_id)
+}
+
+/// Official `ggml_metal_op_norm` (`ggml-metal-ops.cpp:3746`):
+/// `d[0]=norm(a); d[1]=mul(d[0],b); d[2]=add(d[1],c)`.
+fn official_norm_fusion(
+    tensors: &[Tensor],
+    compute_ids: &[NodeId],
+    idx: usize,
+    use_counts: &std::collections::BTreeMap<NodeId, u32>,
+) -> (i32, Vec<NodeId>, NodeId) {
+    let node_id = compute_ids[idx];
+    let mut n_fuse = 1_i32;
+    let mut fuse_src_ids = Vec::new();
+    let mut output_id = node_id;
+    let expected = [Op::Mul, Op::Add];
+    for step in 0..2 {
+        let next_idx = idx + step + 1;
+        let Some(&next_id) = compute_ids.get(next_idx) else {
+            break;
+        };
+        let Some(prev) = tensors.get(output_id) else {
+            break;
+        };
+        if !official_can_fuse_norm_step(tensors, prev, next_id, expected[step], use_counts) {
+            break;
+        }
+        let next = &tensors[next_id];
+        if let Some(src1) = next.src[1] {
+            fuse_src_ids.push(src1);
+        }
+        output_id = next_id;
+        n_fuse += 1;
+    }
+    (n_fuse, fuse_src_ids, output_id)
+}
+
+/// Official `ggml_metal_op_bin` ADD chain (`ggml-metal-ops.cpp:3456`).
+/// Consecutive ADDs with the same src1 layout, previous used once.
+fn official_add_fusion(
+    tensors: &[Tensor],
+    compute_ids: &[NodeId],
+    idx: usize,
+    use_counts: &std::collections::BTreeMap<NodeId, u32>,
+) -> (i32, Vec<NodeId>, NodeId) {
+    let node_id = compute_ids[idx];
+    let Some(root) = tensors.get(node_id) else {
+        return (1, Vec::new(), node_id);
+    };
+    let Some(root_src1) = root.src[1].and_then(|id| tensors.get(id)) else {
+        return (1, Vec::new(), node_id);
+    };
+    let mut n_fuse = 1_i32;
+    let mut fuse_src_ids = Vec::new();
+    let mut output_id = node_id;
+    for step in 0..6 {
+        let next_idx = idx + step + 1;
+        let Some(&next_id) = compute_ids.get(next_idx) else {
+            break;
+        };
+        let Some(prev) = tensors.get(output_id) else {
+            break;
+        };
+        let Some(next) = tensors.get(next_id) else {
+            break;
+        };
+        if next.op != Op::Add {
+            break;
+        }
+        if use_counts.get(&prev.id).copied().unwrap_or(0) != 1 {
+            break;
+        }
+        if prev.view_src.is_some() || prev.flags.contains(TensorFlags::OUTPUT) {
+            break;
+        }
+        if next.src[0] != Some(prev.id) {
+            break;
+        }
+        if !next.are_same_shape(prev) {
+            break;
+        }
+        let Some(src1) = next.src[1].and_then(|id| tensors.get(id)) else {
+            break;
+        };
+        if !src1.are_same_shape(root_src1) || !src1.are_same_stride(root_src1) {
+            break;
+        }
+        fuse_src_ids.push(src1.id);
+        output_id = next_id;
+        n_fuse += 1;
+    }
+    (n_fuse, fuse_src_ids, output_id)
+}
+
+fn official_can_fuse_norm_step(
+    tensors: &[Tensor],
+    prev: &Tensor,
+    next_id: NodeId,
+    expected: Op,
+    use_counts: &std::collections::BTreeMap<NodeId, u32>,
+) -> bool {
+    let Some(next) = tensors.get(next_id) else {
+        return false;
+    };
+    if next.op != expected {
+        return false;
+    }
+    if use_counts.get(&prev.id).copied().unwrap_or(0) != 1 {
+        return false;
+    }
+    if prev.view_src.is_some() || prev.flags.contains(TensorFlags::OUTPUT) {
+        return false;
+    }
+    if next.src[0] != Some(prev.id) {
+        return false;
+    }
+    if !next.are_same_shape(prev) {
+        return false;
+    }
+    let Some(scale) = next.src[1].and_then(|id| tensors.get(id)) else {
+        return false;
+    };
+    if scale.ne[0] != prev.ne[0] {
+        return false;
+    }
+    if scale.desc.ty != prev.desc.ty {
+        return false;
+    }
+    if !scale.is_contiguous_rows() {
+        return false;
+    }
+    matches!(next.desc.ty, TensorType::F32 | TensorType::F16)
 }
 
 fn program_concat() -> Result<MetalOpProgram, String> {
@@ -627,6 +833,8 @@ fn program_mul_mat(
     let ne00 = src0.ne[0];
     let ne11 = src1.ne[1];
 
+    let (ne12, ne13, r2, r3) = mul_mat_broadcast(src0, src1)?;
+
     if use_mul_mv_ext(src0, src1) {
         let nsg = 2_i16;
         let nxpsg = if ne00 % 256 == 0 && ne11 < 3 {
@@ -649,7 +857,10 @@ fn program_mul_mat(
             src1.desc.ty.name(),
             r1ptg
         );
-        let cache = format!("{}_nsg={}_nxpsg={}", base, nsg, nxpsg);
+        let cache = format!(
+            "{}_nsg={}_nxpsg={}_ne12={}_r2={}_r3={}",
+            base, nsg, nxpsg, ne12, r2, r3
+        );
         return Ok(program_with_stage(stage(
             MetalStageKind::Main,
             &base,
@@ -657,6 +868,9 @@ fn program_mul_mat(
             vec![
                 i16_const(FC_MUL_MV + 0, nsg),
                 i16_const(FC_MUL_MV + 1, nxpsg),
+                i16_const(FC_MUL_MV + 2, ne12),
+                i16_const(FC_MUL_MV + 3, r2),
+                i16_const(FC_MUL_MV + 4, r3),
             ],
             0,
             0,
@@ -682,7 +896,16 @@ fn program_mul_mat(
             src0.desc.ty.name(),
             src1.desc.ty.name()
         );
-        let cache = format!("{}_bci={}_bco={}", base, bool_num(bc_inp), bool_num(bc_out));
+        let cache = format!(
+            "{}_bci={}_bco={}_ne12={}_ne13={}_r2={}_r3={}",
+            base,
+            bool_num(bc_inp),
+            bool_num(bc_out),
+            ne12,
+            ne13,
+            r2,
+            r3
+        );
         return Ok(program_with_stage(stage(
             MetalStageKind::Main,
             &base,
@@ -690,6 +913,10 @@ fn program_mul_mat(
             vec![
                 bool_const(FC_MUL_MM + 0, bc_inp),
                 bool_const(FC_MUL_MM + 1, bc_out),
+                i16_const(FC_MUL_MM + 2, ne12),
+                i16_const(FC_MUL_MM + 3, ne13),
+                i16_const(FC_MUL_MM + 4, r2),
+                i16_const(FC_MUL_MM + 5, r3),
             ],
             if bc_out { 8192 } else { 4096 + 2048 },
             0,
@@ -708,12 +935,17 @@ fn program_mul_mat(
         src1.desc.ty.name(),
         suffix
     );
-    let cache = format!("{}_nsg={}", base, params.nsg);
+    let cache = format!("{}_nsg={}_ne12={}_r2={}_r3={}", base, params.nsg, ne12, r2, r3);
     Ok(program_with_stage(stage(
         MetalStageKind::Main,
         &base,
         &cache,
-        vec![i16_const(FC_MUL_MV + 0, params.nsg as i16)],
+        vec![
+            i16_const(FC_MUL_MV + 0, params.nsg as i16),
+            i16_const(FC_MUL_MV + 2, ne12),
+            i16_const(FC_MUL_MV + 3, r2),
+            i16_const(FC_MUL_MV + 4, r3),
+        ],
         params.smem,
         params.nr0,
         params.nr1,
@@ -793,7 +1025,15 @@ fn program_mul_mat_id(
         MetalStageKind::Main,
         &base,
         &cache,
-        vec![i16_const(FC_MUL_MV + 0, params.nsg as i16)],
+        // The shared mul_mv impls read FC_mul_mv_ne12/r2/r3 unconditionally; the
+        // kernel_mul_mv_id wrapper flattens each expert to a single ne12=1 matvec
+        // (args0 in ggml-metal.metal), so pin all three broadcast dims to 1.
+        vec![
+            i16_const(FC_MUL_MV + 0, params.nsg as i16),
+            i16_const(FC_MUL_MV + 2, 1),
+            i16_const(FC_MUL_MV + 3, 1),
+            i16_const(FC_MUL_MV + 4, 1),
+        ],
         params.smem,
         params.nr0,
         params.nr1,
@@ -985,17 +1225,18 @@ fn program_group_norm() -> Result<MetalOpProgram, String> {
 
 fn program_norm(tensors: &[Tensor], op: &Tensor, n_fuse: i32) -> Result<MetalOpProgram, String> {
     let suffix = if op.ne[0] % 4 == 0 { "_4" } else { "" };
+    let ty = op.desc.ty.name();
     let base = match op.op {
         Op::Norm => match n_fuse {
-            1 => format!("kernel_norm_f32{suffix}"),
-            2 => format!("kernel_norm_mul_f32{suffix}"),
-            3 => format!("kernel_norm_mul_add_f32{suffix}"),
+            1 => format!("kernel_norm_{ty}{suffix}"),
+            2 => format!("kernel_norm_mul_{ty}{suffix}"),
+            3 => format!("kernel_norm_mul_add_{ty}{suffix}"),
             _ => return Err(format!("unsupported norm fusion count {}", n_fuse)),
         },
         Op::RmsNorm => match n_fuse {
-            1 => format!("kernel_rms_norm_f32{suffix}"),
-            2 => format!("kernel_rms_norm_mul_f32{suffix}"),
-            3 => format!("kernel_rms_norm_mul_add_f32{suffix}"),
+            1 => format!("kernel_rms_norm_{ty}{suffix}"),
+            2 => format!("kernel_rms_norm_mul_{ty}{suffix}"),
+            3 => format!("kernel_rms_norm_mul_add_{ty}{suffix}"),
             _ => return Err(format!("unsupported rms_norm fusion count {}", n_fuse)),
         },
         _ => return Err(format!("expected norm op, got {}", op.op.name())),
@@ -1667,6 +1908,19 @@ fn unary_num(op: &Tensor) -> Result<i16, String> {
     })
 }
 
+fn mul_mat_broadcast(src0: &Tensor, src1: &Tensor) -> Result<(i16, i16, i16, i16), String> {
+    let ne12 = i16::try_from(src1.ne[2]).map_err(|_| "mul_mat ne12 exceeds i16".to_string())?;
+    let ne13 = i16::try_from(src1.ne[3]).map_err(|_| "mul_mat ne13 exceeds i16".to_string())?;
+    if src0.ne[2] == 0 || src0.ne[3] == 0 {
+        return Err("mul_mat src0 broadcast dim is 0".to_string());
+    }
+    let r2 = i16::try_from(src1.ne[2] / src0.ne[2])
+        .map_err(|_| "mul_mat r2 exceeds i16".to_string())?;
+    let r3 = i16::try_from(src1.ne[3] / src0.ne[3])
+        .map_err(|_| "mul_mat r3 exceeds i16".to_string())?;
+    Ok((ne12, ne13, r2, r3))
+}
+
 fn use_mul_mv_ext(src0: &Tensor, src1: &Tensor) -> bool {
     // Debug escape hatch for bisecting kernel-selection bugs.
     if std::env::var("GGML_NO_MUL_MV_EXT").is_ok() {
@@ -1829,11 +2083,10 @@ fn flash_attn_ext_extra_pad(
     } else {
         0
     };
-    let ncpsg = if flash_attn_ext_use_vec(q) {
-        OP_FLASH_ATTN_EXT_VEC_NCPSG
-    } else {
-        OP_FLASH_ATTN_EXT_NCPSG
-    };
+    // Official always reserves the non-vec pad width so the graph does not
+    // reallocate when n_q crosses the vec/ext threshold.
+    let ncpsg = OP_FLASH_ATTN_EXT_NCPSG;
+    let _ = q;
     Ok(
         usize::try_from(ncpsg).map_err(|_| "flash_attn ncpsg overflow".to_string())?
             * (k.nb[1]
@@ -2003,6 +2256,68 @@ mod tests {
     }
 
     #[test]
+    fn mul_mat_selector_specializes_decode_mul_mv_broadcast() {
+        let mut ctx = ctx();
+        let a = tensor(&mut ctx, TensorType::Q5K, &[2560, 2560, 1, 1]);
+        let b = tensor(&mut ctx, TensorType::F32, &[2560, 1, 1, 1]);
+        let dst = tensor(&mut ctx, TensorType::F32, &[2560, 1, 1, 1]);
+        let tensors = ctx.tensors().to_vec();
+        let mut op = tensors[dst].clone();
+        op.op = Op::MulMat;
+        op.src[0] = Some(a);
+        op.src[1] = Some(b);
+
+        let program = build_program(&tensors, &op, MetalDeviceFeatures::default()).unwrap();
+        assert_eq!(
+            program.stages[0].descriptor.base_name,
+            "kernel_mul_mv_q5_K_f32"
+        );
+        assert_eq!(
+            program.stages[0].descriptor.cache_name,
+            "kernel_mul_mv_q5_K_f32_nsg=2_ne12=1_r2=1_r3=1"
+        );
+        let idxs: Vec<i32> = program.stages[0]
+            .descriptor
+            .constants
+            .iter()
+            .map(|c| c.idx)
+            .collect();
+        assert_eq!(idxs, vec![FC_MUL_MV, FC_MUL_MV + 2, FC_MUL_MV + 3, FC_MUL_MV + 4]);
+    }
+
+    #[test]
+    fn mul_mat_id_decode_fallback_supplies_all_mul_mv_constants() {
+        let mut ctx = ctx();
+        let a = tensor(&mut ctx, TensorType::Q5K, &[2560, 2560, 8, 1]);
+        let b = tensor(&mut ctx, TensorType::F32, &[2560, 1, 2, 1]);
+        let ids = tensor(&mut ctx, TensorType::I32, &[2, 1, 1, 1]);
+        let dst = tensor(&mut ctx, TensorType::F32, &[2560, 2, 1, 1]);
+        let tensors = ctx.tensors().to_vec();
+        let mut op = tensors[dst].clone();
+        op.op = Op::MulMatId;
+        op.src[0] = Some(a);
+        op.src[1] = Some(b);
+        op.src[2] = Some(ids);
+
+        let program = build_program(&tensors, &op, MetalDeviceFeatures::default()).unwrap();
+        assert_eq!(
+            program.stages[0].descriptor.base_name,
+            "kernel_mul_mv_id_q5_K_f32"
+        );
+        // The shared impls read nsg + ne12/r2/r3 unconditionally; a pipeline built
+        // without all four fails creation on-device (MoE decode regression).
+        let idxs: Vec<i32> = program.stages[0]
+            .descriptor
+            .constants
+            .iter()
+            .map(|c| c.idx)
+            .collect();
+        assert_eq!(idxs, vec![FC_MUL_MV, FC_MUL_MV + 2, FC_MUL_MV + 3, FC_MUL_MV + 4]);
+        for c in program.stages[0].descriptor.constants.iter().skip(1) {
+            assert_eq!(c.value, FunctionConstantValue::Int16(1));
+        }
+    }
+
     fn mul_mat_selector_uses_mul_mm_when_feature_allows() {
         let mut ctx = ctx();
         let a = tensor(&mut ctx, TensorType::F16, &[128, 64, 1, 1]);
@@ -2095,5 +2410,82 @@ mod tests {
         let plan = build_graph_plan(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
         assert_eq!(plan.nodes.len(), 1);
         assert_eq!(plan.nodes[0].node_id, cont);
+    }
+
+    #[test]
+    fn graph_plan_fuses_official_rms_norm_mul() {
+        let mut ctx = ctx();
+        let x = tensor(&mut ctx, TensorType::F32, &[2560, 2, 1, 1]);
+        let scale = tensor(&mut ctx, TensorType::F32, &[2560, 1, 1, 1]);
+        let rms = tensor(&mut ctx, TensorType::F32, &[2560, 2, 1, 1]);
+        let mul = tensor(&mut ctx, TensorType::F32, &[2560, 2, 1, 1]);
+        {
+            let op = ctx.tensor_mut(rms).unwrap();
+            op.op = Op::RmsNorm;
+            op.src[0] = Some(x);
+        }
+        {
+            let op = ctx.tensor_mut(mul).unwrap();
+            op.op = Op::Mul;
+            op.src[0] = Some(rms);
+            op.src[1] = Some(scale);
+        }
+
+        let mut graph = Graph::new();
+        graph.add_node(rms);
+        graph.add_node(mul);
+
+        let plan = build_graph_plan(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].node_id, rms);
+        assert_eq!(plan.nodes[0].output_id, mul);
+        assert_eq!(plan.nodes[0].fuse_src_ids, vec![scale]);
+        assert_eq!(
+            plan.nodes[0].program.stages[0].descriptor.base_name,
+            "kernel_rms_norm_mul_f32_4"
+        );
+    }
+
+    #[test]
+    fn graph_plan_fuses_official_norm_mul_add_vector_affine() {
+        let mut ctx = ctx();
+        let x = tensor(&mut ctx, TensorType::F32, &[3072, 256, 1, 1]);
+        let scale = tensor(&mut ctx, TensorType::F32, &[3072, 1, 1, 1]);
+        let shift = tensor(&mut ctx, TensorType::F32, &[3072, 1, 1, 1]);
+        let norm = tensor(&mut ctx, TensorType::F32, &[3072, 256, 1, 1]);
+        let mul = tensor(&mut ctx, TensorType::F32, &[3072, 256, 1, 1]);
+        let add = tensor(&mut ctx, TensorType::F32, &[3072, 256, 1, 1]);
+        {
+            let op = ctx.tensor_mut(norm).unwrap();
+            op.op = Op::Norm;
+            op.src[0] = Some(x);
+        }
+        {
+            let op = ctx.tensor_mut(mul).unwrap();
+            op.op = Op::Mul;
+            op.src[0] = Some(norm);
+            op.src[1] = Some(scale);
+        }
+        {
+            let op = ctx.tensor_mut(add).unwrap();
+            op.op = Op::Add;
+            op.src[0] = Some(mul);
+            op.src[1] = Some(shift);
+        }
+
+        let mut graph = Graph::new();
+        graph.add_node(norm);
+        graph.add_node(mul);
+        graph.add_node(add);
+
+        let plan = build_graph_plan(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].node_id, norm);
+        assert_eq!(plan.nodes[0].output_id, add);
+        assert_eq!(plan.nodes[0].fuse_src_ids, vec![scale, shift]);
+        assert_eq!(
+            plan.nodes[0].program.stages[0].descriptor.base_name,
+            "kernel_norm_mul_add_f32_4"
+        );
     }
 }

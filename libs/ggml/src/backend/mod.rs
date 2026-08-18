@@ -3,6 +3,7 @@ use crate::graph::Graph;
 use crate::tensor::Tensor;
 
 mod accel;
+pub mod prof;
 
 pub use accel::*;
 
@@ -129,4 +130,5 @@ pub trait Backend {
 }
 
 pub mod cuda;
+pub mod llm_ops;
 pub mod metal;

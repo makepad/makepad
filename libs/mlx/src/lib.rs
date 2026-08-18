@@ -1,3 +1,7 @@
+// Apple MLX / Metal execution is parked. Windows CUDA (qwen_runtime::cuda,
+// text_runtime::cuda_exact) is the live path. Do not revive Metal from this
+// crate until the dedicated Mac pass. Shared tensor/safetensors types below
+// are still used by makepad-diffusion on CUDA.
 mod core;
 mod kv;
 pub mod multimodal;
