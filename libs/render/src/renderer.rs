@@ -375,6 +375,10 @@ pub struct Renderer {
     /// and the two stay in lockstep, because nothing it dials is simulated.
     /// Dormant until the host calls [`Renderer::report_frame_ms`].
     thermometer: Thermometer,
+    /// Orbit-preview look-at depth for Realtime CSM. `Some` fits cascade 0
+    /// to that plane so shadow texels stay roughly one screen pixel under
+    /// zoom; `None` keeps the village-scale ladder (walk / game).
+    csm_focus: Option<f32>,
 }
 
 /// One GPU-skinned character instance for [`Renderer::draw_scene_full`].
@@ -1606,6 +1610,7 @@ impl Default for Renderer {
             models_rev: 0,
             lm_box_geometry: None,
             bake: LightBake::default(),
+            csm_focus: None,
         }
     }
 }
@@ -3052,6 +3057,12 @@ impl Renderer {
         self.gpu_baker.csm_config()
     }
 
+    /// Set the orbit-camera look-at depth the Realtime cascades tighten
+    /// around. Pass `None` for first-person walk (village-scale ladder).
+    pub fn set_csm_focus_distance(&mut self, focus: Option<f32>) {
+        self.csm_focus = focus.filter(|d| d.is_finite() && *d > 0.0);
+    }
+
     /// The bake's stand-in geometry for primitive ENTITY casters: one unit
     /// box in the packed-mesh layout (position lanes only — the depth
     /// shaders read nothing else), built once.
@@ -3389,12 +3400,16 @@ impl Renderer {
             return;
         };
         dv.set_texture(slot, tex);
-        dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, 0.0, 0.0]);
         let c = &frame.cascades;
         dv.set_uniform(
             cx,
+            live_id!(csm_p),
+            &[1.0, *inv_res, c[0].texel_world, c[1].texel_world],
+        );
+        dv.set_uniform(
+            cx,
             live_id!(csm_bias),
-            &[c[0].bias01, c[1].bias01, c[2].bias01, 0.0],
+            &[c[0].bias01, c[1].bias01, c[2].bias01, c[2].texel_world],
         );
         let rows = |v: Vec4f| [v.x, v.y, v.z, v.w];
         dv.set_uniform(cx, live_id!(csm_rx0), &rows(c[0].rx));
@@ -4246,6 +4261,7 @@ impl Renderer {
                         corner(-1.0, 1.0)?,
                         corner(1.0, 1.0)?,
                     ],
+                    focus_distance: self.csm_focus.unwrap_or(0.0),
                 })
             })
             .flatten();

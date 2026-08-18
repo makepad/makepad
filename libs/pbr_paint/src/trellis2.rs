@@ -66,7 +66,7 @@ pub struct ComponentFile {
 }
 
 /// Exact blob pins (HF LFS oids at the pinned revisions; the four fleet-shared
-/// blobs match libs/game/asset-ai/registry.json byte-for-byte).
+/// blobs match libs/asset/ai/registry.json byte-for-byte).
 pub fn component_manifest() -> Vec<ComponentFile> {
     vec![
         ComponentFile {

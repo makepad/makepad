@@ -64,8 +64,10 @@ script_mod! {
         lm_top_decode: uniform(vec4(0.0, 8.0, 0.0, 0.0))
         // Realtime cascaded shadow maps (shadow_csm.rs): 3 sun-depth tiles
         // side by side in one Rf32 strip. csm_p = (tier on, one tile's
-        // inverse resolution, 0, 0); csm_r*N are cascade N's world->map
-        // rows; csm_bias holds each cascade's z01 depth bias. When the tier
+        // inverse resolution, cascade-0 texel_world, cascade-1 texel_world);
+        // csm_r*N are cascade N's world->map
+        // rows; csm_bias.xyz = z01 depth bias, .w = cascade-2 texel_world.
+        // When the tier
         // is on, `csm_vis` REPLACES every baked sun-visibility path — one
         // receive path for statics, dynamics and characters alike.
         csm_map: texture_2d(float)
@@ -98,7 +100,7 @@ script_mod! {
         // overlap in light-space XY without sharing a depth interval, so XY
         // alone is not coverage. Then a 3x3 PCF compare. Slope-scaled bias:
         // grazing sun needs more depth slack or every curved surface acnes.
-        csm_vis: fn(wp: vec3, ndl: float) -> float {
+        csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
             if self.csm_p.x < 0.5 {
                 return 1.0
             }
@@ -107,12 +109,14 @@ script_mod! {
             var ny = dot(self.csm_ry0.xyz, wp) + self.csm_ry0.w
             var nz = dot(self.csm_rz0.xyz, wp) + self.csm_rz0.w
             var bias = self.csm_bias.x
+            var tw = self.csm_p.z
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 1.0
                 nx = dot(self.csm_rx1.xyz, wp) + self.csm_rx1.w
                 ny = dot(self.csm_ry1.xyz, wp) + self.csm_ry1.w
                 nz = dot(self.csm_rz1.xyz, wp) + self.csm_rz1.w
                 bias = self.csm_bias.y
+                tw = self.csm_p.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 2.0
@@ -120,9 +124,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp) + self.csm_rz2.w
                 bias = self.csm_bias.z
+                tw = self.csm_bias.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 return 1.0
+            }
+            // Normal offset: at grazing N·L a finite depth bias cannot
+            // cover texel·tanθ, which is the Kenney terminator hatch.
+            // Slide the receiver off the knife edge along n, then reproject
+            // the same cascade (do not re-pick — the offset is sub-texel).
+            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            if ci < 0.5 {
+                nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
+                ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
+                nz = dot(self.csm_rz0.xyz, wp2) + self.csm_rz0.w
+            }
+            if ci > 0.5 && ci < 1.5 {
+                nx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                ny = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                nz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+            }
+            if ci > 1.5 {
+                nx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let u = nx * 0.5 + 0.5
             let v = 0.5 - ny * 0.5
@@ -279,7 +304,7 @@ script_mod! {
             let ndl_c = max(dot(normalize(self.v_dl_nrm), normalize(self.light_dir)), 0.0)
             let sun_vis = mix(
                 mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm * occ),
-                self.csm_vis(self.v_dl_pos, ndl_c),
+                self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_c),
                 self.csm_p.x
             )
             let lamps = lm.xyz * (2.0 * has_lm)
@@ -959,6 +984,7 @@ script_mod! {
         csm_ry2: uniform(vec4(0.0, 1.0, 0.0, 0.0))
         csm_rz2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
         v_csm: varying(vec4f)
+        v_csm_n: varying(vec3f)
 
         csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
             let m = 1.5 * self.csm_p.y
@@ -969,7 +995,7 @@ script_mod! {
             ).x)
         }
 
-        csm_vis: fn(wp: vec3, ndl: float) -> float {
+        csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
             if self.csm_p.x < 0.5 {
                 return 1.0
             }
@@ -978,12 +1004,14 @@ script_mod! {
             var ny = dot(self.csm_ry0.xyz, wp) + self.csm_ry0.w
             var nz = dot(self.csm_rz0.xyz, wp) + self.csm_rz0.w
             var bias = self.csm_bias.x
+            var tw = self.csm_p.z
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 1.0
                 nx = dot(self.csm_rx1.xyz, wp) + self.csm_rx1.w
                 ny = dot(self.csm_ry1.xyz, wp) + self.csm_ry1.w
                 nz = dot(self.csm_rz1.xyz, wp) + self.csm_rz1.w
                 bias = self.csm_bias.y
+                tw = self.csm_p.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 2.0
@@ -991,9 +1019,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp) + self.csm_rz2.w
                 bias = self.csm_bias.z
+                tw = self.csm_bias.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 return 1.0
+            }
+            // Normal offset: at grazing N·L a finite depth bias cannot
+            // cover texel·tanθ, which is the Kenney terminator hatch.
+            // Slide the receiver off the knife edge along n, then reproject
+            // the same cascade (do not re-pick — the offset is sub-texel).
+            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            if ci < 0.5 {
+                nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
+                ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
+                nz = dot(self.csm_rz0.xyz, wp2) + self.csm_rz0.w
+            }
+            if ci > 0.5 && ci < 1.5 {
+                nx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                ny = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                nz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+            }
+            if ci > 1.5 {
+                nx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let u = nx * 0.5 + 0.5
             let v = 0.5 - ny * 0.5
@@ -1117,6 +1166,7 @@ script_mod! {
             let lg_uv = self.lm_ground_rect.xy + lgf * self.lm_ground_rect.zw
             self.v_lmg = vec4(lg_uv.x, lg_uv.y, lg_in, dl_wp.y)
             self.v_csm = vec4(dl_wp.x, dl_wp.y, dl_wp.z, dp)
+            self.v_csm_n = dl_n
             self.v_uv = unpack2f16(self.geom.uv)
             // rgb is the material tint (x the per-character wash); the ALPHA
             // lane carries baked self-AO from model.rs, not opacity — this
@@ -1201,7 +1251,7 @@ script_mod! {
             // and ground projection) — one receive path for every family.
             let sun_all = mix(
                 sun_vis * sun_vis_g,
-                self.csm_vis(self.v_csm.xyz, self.v_csm.w),
+                self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
             let lamps = lm.xyz * (2.0 * has_lm)
@@ -1376,6 +1426,7 @@ script_mod! {
         csm_ry2: uniform(vec4(0.0, 1.0, 0.0, 0.0))
         csm_rz2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
         v_csm: varying(vec4f)
+        v_csm_n: varying(vec3f)
         v_ambient: varying(vec3f)
         v_direct: varying(vec3f)
         v_uv: varying(vec2f)
@@ -1421,7 +1472,7 @@ script_mod! {
             ).x)
         }
 
-        csm_vis: fn(wp: vec3, ndl: float) -> float {
+        csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
             if self.csm_p.x < 0.5 {
                 return 1.0
             }
@@ -1430,12 +1481,14 @@ script_mod! {
             var ny = dot(self.csm_ry0.xyz, wp) + self.csm_ry0.w
             var nz = dot(self.csm_rz0.xyz, wp) + self.csm_rz0.w
             var bias = self.csm_bias.x
+            var tw = self.csm_p.z
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 1.0
                 nx = dot(self.csm_rx1.xyz, wp) + self.csm_rx1.w
                 ny = dot(self.csm_ry1.xyz, wp) + self.csm_ry1.w
                 nz = dot(self.csm_rz1.xyz, wp) + self.csm_rz1.w
                 bias = self.csm_bias.y
+                tw = self.csm_p.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 2.0
@@ -1443,9 +1496,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp) + self.csm_rz2.w
                 bias = self.csm_bias.z
+                tw = self.csm_bias.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 return 1.0
+            }
+            // Normal offset: at grazing N·L a finite depth bias cannot
+            // cover texel·tanθ, which is the Kenney terminator hatch.
+            // Slide the receiver off the knife edge along n, then reproject
+            // the same cascade (do not re-pick — the offset is sub-texel).
+            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            if ci < 0.5 {
+                nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
+                ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
+                nz = dot(self.csm_rz0.xyz, wp2) + self.csm_rz0.w
+            }
+            if ci > 0.5 && ci < 1.5 {
+                nx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                ny = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                nz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+            }
+            if ci > 1.5 {
+                nx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let u = nx * 0.5 + 0.5
             let v = 0.5 - ny * 0.5
@@ -1583,6 +1657,7 @@ script_mod! {
             let lg_uv = self.lm_rect.xy + lgf * self.lm_rect.zw
             self.v_lmg = vec4(lg_uv.x, lg_uv.y, lg_in, dl_wp.y)
             self.v_csm = vec4(dl_wp.x, dl_wp.y, dl_wp.z, dp)
+            self.v_csm_n = dl_n
             self.v_uv = unpack2f16(self.geom.uv)
             // ao_uv is unorm16x2 (model.rs pack_ao_uv), NOT an f16 pair — f16
             // spacing near 1.0 is a full texel of the atlas. Each axis is
@@ -1627,7 +1702,7 @@ script_mod! {
             // maps as every other surface.
             let sun_vis = mix(
                 mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g),
-                self.csm_vis(self.v_csm.xyz, self.v_csm.w),
+                self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
             let lit = albedo * (
@@ -1998,7 +2073,7 @@ script_mod! {
             ).x)
         }
 
-        csm_vis: fn(wp: vec3, ndl: float) -> float {
+        csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float {
             if self.csm_p.x < 0.5 {
                 return 1.0
             }
@@ -2007,12 +2082,14 @@ script_mod! {
             var ny = dot(self.csm_ry0.xyz, wp) + self.csm_ry0.w
             var nz = dot(self.csm_rz0.xyz, wp) + self.csm_rz0.w
             var bias = self.csm_bias.x
+            var tw = self.csm_p.z
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 1.0
                 nx = dot(self.csm_rx1.xyz, wp) + self.csm_rx1.w
                 ny = dot(self.csm_ry1.xyz, wp) + self.csm_ry1.w
                 nz = dot(self.csm_rz1.xyz, wp) + self.csm_rz1.w
                 bias = self.csm_bias.y
+                tw = self.csm_p.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 ci = 2.0
@@ -2020,9 +2097,30 @@ script_mod! {
                 ny = dot(self.csm_ry2.xyz, wp) + self.csm_ry2.w
                 nz = dot(self.csm_rz2.xyz, wp) + self.csm_rz2.w
                 bias = self.csm_bias.z
+                tw = self.csm_bias.w
             }
             if max(abs(nx), abs(ny)) > 0.99 || nz < 0.0 || nz > 1.0 {
                 return 1.0
+            }
+            // Normal offset: at grazing N·L a finite depth bias cannot
+            // cover texel·tanθ, which is the Kenney terminator hatch.
+            // Slide the receiver off the knife edge along n, then reproject
+            // the same cascade (do not re-pick — the offset is sub-texel).
+            let wp2 = wp + normalize(n) * (tw * 1.25 * (1.0 - clamp(ndl, 0.0, 1.0)))
+            if ci < 0.5 {
+                nx = dot(self.csm_rx0.xyz, wp2) + self.csm_rx0.w
+                ny = dot(self.csm_ry0.xyz, wp2) + self.csm_ry0.w
+                nz = dot(self.csm_rz0.xyz, wp2) + self.csm_rz0.w
+            }
+            if ci > 0.5 && ci < 1.5 {
+                nx = dot(self.csm_rx1.xyz, wp2) + self.csm_rx1.w
+                ny = dot(self.csm_ry1.xyz, wp2) + self.csm_ry1.w
+                nz = dot(self.csm_rz1.xyz, wp2) + self.csm_rz1.w
+            }
+            if ci > 1.5 {
+                nx = dot(self.csm_rx2.xyz, wp2) + self.csm_rx2.w
+                ny = dot(self.csm_ry2.xyz, wp2) + self.csm_ry2.w
+                nz = dot(self.csm_rz2.xyz, wp2) + self.csm_rz2.w
             }
             let u = nx * 0.5 + 0.5
             let v = 0.5 - ny * 0.5
@@ -2084,7 +2182,7 @@ script_mod! {
             let ndl_t = max(dot(normalize(self.v_dl_nrm), normalize(self.light_dir)), 0.0)
             let sun_vis = mix(
                 mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm),
-                self.csm_vis(self.v_dl_pos, ndl_t),
+                self.csm_vis(self.v_dl_pos, self.v_dl_nrm, ndl_t),
                 self.csm_p.x
             )
             let lamps = lm.xyz * (2.0 * has_lm)

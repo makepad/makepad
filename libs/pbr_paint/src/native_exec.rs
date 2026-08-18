@@ -33,9 +33,21 @@ use makepad_ggml::backend::cuda::{gpu_concat_cols, gpu_download, gpu_upload};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Default overlay used on the 4090 paint box.
+/// Default overlay used on the 4090 paint box. Fleet jobs must not rely on
+/// this — they resolve `unet` / `vae` / `dino-conditioner` from the registry
+/// cache via [`NativeHunyuanExec::at_bins`].
 pub const DEFAULT_WEIGHTS_ROOT: &str =
     r"C:\ai\Hunyuan3D-2.1\weights\hunyuan3d-paintpbr-v2-1";
+
+/// Explicit checkpoint files. The fleet cache layout is
+/// `paint21/{unet,vae}/diffusion_pytorch_model.bin` plus
+/// `paint21/dinov2-giant/model.safetensors` — not the Hunyuan git checkout.
+#[derive(Clone, Debug)]
+pub struct HunyuanBins {
+    pub vae: PathBuf,
+    pub unet: PathBuf,
+    pub dino: PathBuf,
+}
 
 pub fn weights_root() -> PathBuf {
     if let Ok(p) = std::env::var("MAKEPAD_HUNYUAN_ROOT") {
@@ -69,9 +81,21 @@ pub fn dino_model_path() -> PathBuf {
     }
 }
 
+pub fn bins_at_root(root: &Path) -> HunyuanBins {
+    HunyuanBins {
+        vae: vae_bin_path(root),
+        unet: unet_bin_path(root),
+        dino: dino_model_path(),
+    }
+}
+
 /// Files required before we even attempt a warm.
 pub fn required_bins_present(root: &Path) -> Result<(), String> {
-    for p in [vae_bin_path(root), unet_bin_path(root), dino_model_path()] {
+    required_bins_present_at(&bins_at_root(root))
+}
+
+pub fn required_bins_present_at(bins: &HunyuanBins) -> Result<(), String> {
+    for p in [&bins.vae, &bins.unet, &bins.dino] {
         if !p.is_file() {
             return Err(format!("missing {}", p.display()));
         }
@@ -94,7 +118,7 @@ pub struct EncodedViews {
 }
 
 pub struct NativeHunyuanExec {
-    root: PathBuf,
+    bins: HunyuanBins,
     vae: Option<SdVae>,
     unet: Option<UnetFirst>,
     dino: Option<DinoVit>,
@@ -102,15 +126,19 @@ pub struct NativeHunyuanExec {
 }
 
 impl NativeHunyuanExec {
-    pub fn at(root: PathBuf) -> Result<Self, PbrError> {
-        required_bins_present(&root).map_err(PbrError::Unavailable)?;
+    pub fn at_bins(bins: HunyuanBins) -> Result<Self, PbrError> {
+        required_bins_present_at(&bins).map_err(PbrError::Unavailable)?;
         Ok(Self {
-            root,
+            bins,
             vae: None,
             unet: None,
             dino: None,
             dino_proj: None,
         })
+    }
+
+    pub fn at(root: PathBuf) -> Result<Self, PbrError> {
+        Self::at_bins(bins_at_root(&root))
     }
 
     pub fn discover() -> Result<Self, PbrError> {
@@ -266,7 +294,7 @@ impl PaintModelExec for NativeHunyuanExec {
     }
 
     fn availability(&self) -> ExecStatus {
-        if let Err(detail) = required_bins_present(&self.root) {
+        if let Err(detail) = required_bins_present_at(&self.bins) {
             return ExecStatus::MissingCheckpoints { detail };
         }
         if !makepad_ggml::backend::cuda::gpu_device_available() {
@@ -292,19 +320,19 @@ impl PaintModelExec for NativeHunyuanExec {
             }
         }
         if self.vae.is_none() {
-            let vae = SdVae::load(&vae_bin_path(&self.root)).map_err(PbrError::Internal)?;
+            let vae = SdVae::load(&self.bins.vae).map_err(PbrError::Internal)?;
             self.vae = Some(vae);
         }
         if self.unet.is_none() {
-            let unet = UnetFirst::load(&unet_bin_path(&self.root)).map_err(PbrError::Internal)?;
+            let unet = UnetFirst::load(&self.bins.unet).map_err(PbrError::Internal)?;
             self.unet = Some(unet);
         }
         if self.dino.is_none() {
-            let dino = DinoVit::load(&dino_model_path()).map_err(PbrError::Internal)?;
+            let dino = DinoVit::load(&self.bins.dino).map_err(PbrError::Internal)?;
             self.dino = Some(dino);
         }
         if self.dino_proj.is_none() {
-            let proj = DinoProj::load_from_unet_bin(&unet_bin_path(&self.root))
+            let proj = DinoProj::load_from_unet_bin(&self.bins.unet)
                 .map_err(PbrError::Internal)?;
             self.dino_proj = Some(proj);
         }
@@ -550,6 +578,24 @@ mod tests {
         let err = NativeHunyuanExec::at(PathBuf::from("/no/such/hunyuan/weights")).unwrap_err();
         match err {
             PbrError::Unavailable(m) => assert!(m.contains("missing"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn at_bins_reports_the_given_vae_path() {
+        let missing = PathBuf::from("/cache/paint21/vae/diffusion_pytorch_model.bin");
+        let err = NativeHunyuanExec::at_bins(HunyuanBins {
+            vae: missing.clone(),
+            unet: PathBuf::from("/cache/paint21/unet/diffusion_pytorch_model.bin"),
+            dino: PathBuf::from("/cache/paint21/dinov2-giant/model.safetensors"),
+        })
+        .unwrap_err();
+        match err {
+            PbrError::Unavailable(m) => {
+                assert!(m.contains("missing"), "{m}");
+                assert!(m.contains(missing.to_string_lossy().as_ref()), "{m}");
+            }
             other => panic!("{other:?}"),
         }
     }
