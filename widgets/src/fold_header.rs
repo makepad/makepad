@@ -4,7 +4,6 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    widget_tree::CxWidgetExt,
 };
 
 script_mod! {
@@ -101,24 +100,22 @@ impl Widget for FoldHeader {
         self.header.handle_event(cx, event, scope);
         self.body.handle_event(cx, event, scope);
 
-        // Check for FoldButton actions only from FoldButtons within our header
         if let Event::Actions(actions) = event {
-            for action in actions {
-                if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
-                    // Check if this action came from a widget within our header
-                    // by verifying the widget exists in the widget tree under our header
-                    if !cx.widget_tree().widget(widget_action.widget_uid).is_empty() {
-                        match widget_action.cast::<FoldButtonAction>() {
-                            FoldButtonAction::Opening => {
-                                self.animator_play(cx, ids!(active.on));
-                            }
-                            FoldButtonAction::Closing => {
-                                self.animator_play(cx, ids!(active.off));
-                            }
-                            _ => (),
-                        }
-                    }
+            let button = self.header.widget(cx, ids!(fold_button));
+            if button.is_empty() {
+                return;
+            }
+            match actions
+                .find_widget_action(button.widget_uid())
+                .map(|action| action.cast::<FoldButtonAction>())
+            {
+                Some(FoldButtonAction::Opening) => {
+                    self.animator_play(cx, ids!(active.on));
                 }
+                Some(FoldButtonAction::Closing) => {
+                    self.animator_play(cx, ids!(active.off));
+                }
+                _ => (),
             }
         }
     }
