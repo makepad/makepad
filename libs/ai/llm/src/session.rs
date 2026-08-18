@@ -255,12 +255,14 @@ impl LlamaSession {
     /// clear can ever undo.
     pub fn debug_weights_fingerprint(&self, samples: usize) -> Result<u64> {
         const WINDOW: usize = 1 << 20;
-        let ro = self.weights.ctx.ro_split();
+        let ctx = &self.weights.ctx;
+        let ids: Vec<_> = self.weights.tensor_ids.values().copied().collect();
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        let samples = samples.max(1);
-        for i in 0..samples {
-            let offset = (ro / samples) * i;
-            let len = WINDOW.min(ro - offset);
+        let step = (ids.len() / samples.max(1)).max(1);
+        for id in ids.iter().step_by(step) {
+            let Some(tensor) = ctx.tensor(*id) else { continue };
+            let Some(offset) = tensor.data_offset else { continue };
+            let len = tensor.nbytes().min(WINDOW);
             if len == 0 {
                 continue;
             }
