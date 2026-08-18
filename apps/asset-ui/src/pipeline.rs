@@ -1175,7 +1175,7 @@ impl Pipeline {
                         seconds,
                     ));
                 } else {
-                    request.max_tokens = Some(220);
+                    request.max_tokens = Some(512);
                 }
             }
             "image" => {
