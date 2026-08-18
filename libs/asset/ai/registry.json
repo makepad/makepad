@@ -1,0 +1,2620 @@
+{
+ "models": [
+  {
+   "id": "testpattern",
+   "domain": "image",
+   "backend": "testpattern",
+   "available": true,
+   "gated": false,
+   "vram_gb": 0.0,
+   "note": "procedural test pattern renderer; no GPU, no downloads; used for end-to-end service testing",
+   "files": []
+  },
+  {
+   "id": "pbr-testpattern",
+   "domain": "paint",
+   "backend": "paint-test",
+   "available": true,
+   "gated": false,
+   "vram_gb": 0.0,
+   "note": "Deterministic PBR paint tier: named inputs mesh (GLB) + reference_image (PNG) -> PBR-textured GLB + albedo/normal/ORM maps + provenance manifest via the native geometry pipeline with a mock diffusion executor. No GPU, no downloads; exercises the full paint artifact contract end-to-end.",
+   "files": []
+  },
+  {
+   "id": "hunyuan3d-paint-2.1",
+   "domain": "paint",
+   "backend": "paint",
+   "available": true,
+   "gated": false,
+   "vram_gb": 20.0,
+   "note": "Experimental OSS. License: Tencent Hunyuan 3D 2.1 Community License Agreement, sha256 5bd08f93b2d280bb26ff3eed5d3996fe47a9698b5f7785163928668d7fd578c6, https://huggingface.co/tencent/Hunyuan3D-2.1/raw/0b94677654c57bb9a6b6845cd7b704ccf551d327/LICENSE (territory excludes EU/UK/South Korea incl. outputs \u2014 informational only, not enforced). Contract: named inputs mesh (GLB) + reference_image (PNG) -> PBR-textured GLB; albedo + metallic/roughness model-generated, normal/AO geometry-derived. Official baseline 6 views @512; staged-residency 24GB budget 20000 MiB (all-resident oracle peak 21125..22681 MiB). Native CUDA UNet2p5D executor port pending; fails closed until provisioned.",
+   "files": [
+    {
+     "role": "unet",
+     "repo": "tencent/Hunyuan3D-2.1",
+     "path": "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin",
+     "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+     "cache_as": "paint21/unet/diffusion_pytorch_model.bin",
+     "size": 3925293863,
+     "sha256": "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8"
+    },
+    {
+     "role": "vae",
+     "repo": "tencent/Hunyuan3D-2.1",
+     "path": "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin",
+     "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+     "cache_as": "paint21/vae/diffusion_pytorch_model.bin",
+     "size": 334707217,
+     "sha256": "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "facebook/dinov2-giant",
+     "path": "model.safetensors",
+     "revision": "611a9d42f2335e0f921f1e313ad3c1b7178d206d",
+     "cache_as": "paint21/dinov2-giant/model.safetensors",
+     "size": 4546005432,
+     "sha256": "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f"
+    }
+   ]
+  },
+  {
+   "id": "flux1-schnell",
+   "domain": "image",
+   "backend": "flux",
+   "available": true,
+   "gated": false,
+   "vram_gb": 21.0,
+   "note": "FLUX.1-schnell CANONICAL combined single-file FP8 checkpoint (Apache-2.0): model.diffusion_model.* FP8 E4M3FN (776 tensors, 11891178560 B) + text_encoders.clip_l F16 + text_encoders.t5xxl FP8 + vae F32 in ONE safetensors under checkpoints/ - the whole stack loads from this file and stays device-resident across prompt changes on a 24GB card. Immutable revision pin = Comfy-Org commit 44ea96fbcead75dfa908449883350ada44601791; size+sha256 pin the exact LFS object (header audited 2026-08-15: 1438 tensors, all four component prefixes + 2 outer logit_scale scalars, no scale tensors - raw signed E4M3FN, implicit scale 1.0). Requires a CUDA box (availability fails closed elsewhere; no CPU/BF16 fallback). The former split-model BF16 bundle (unet 23.8GB + separate vae/clip/t5) is RETIRED from this registry; previously provisioned boxes keep those cache blobs until the FP8 canary passes and a separate cleanup step removes them. vram_gb 21.0 is the pre-canary estimate (~15.85GiB resident weights + capped activation pool); replace with the measured peak after the 4090 canary.",
+   "files": [
+    {
+     "repo": "Comfy-Org/flux1-schnell",
+     "path": "flux1-schnell-fp8.safetensors",
+     "cache_as": "checkpoints/flux1-schnell-fp8.safetensors",
+     "revision": "44ea96fbcead75dfa908449883350ada44601791",
+     "size": 17236328572,
+     "sha256": "ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72"
+    }
+   ]
+  },
+  {
+   "id": "flux1-dev",
+   "domain": "image",
+   "backend": "flux",
+   "available": true,
+   "gated": true,
+   "vram_gb": 21.0,
+   "note": "FLUX.1-dev CANONICAL combined single-file FP8 checkpoint (FLUX.1 [dev] Non-Commercial License - gated:true records the license restriction; the Comfy-Org mirror itself is ungated): the guidance-distilled base model, default 20 steps / guidance 3.5 (vs schnell's 4-step distillation). Same combined layout as flux1-schnell-fp8 - model.diffusion_model.* FP8 E4M3FN (780 tensors incl. the four guidance_in tensors, 11901408320 B) + clip_l F16 + t5xxl FP8 + vae F32 in ONE safetensors under checkpoints/. Immutable revision pin = Comfy-Org commit 7ec07cd0cd2cb88298a80c905ad38250e1389880; size+sha256 pin the exact LFS object (header audited 2026-08-15: 1442 tensors). Requires a CUDA box (availability fails closed elsewhere; no CPU/BF16 fallback). The former split-model BF16 bundle is RETIRED from this registry; existing cache blobs stay until the FP8 canary passes and a separate cleanup step removes them. vram_gb 21.0 is the pre-canary estimate; replace with the measured peak after the 4090 canary.",
+   "files": [
+    {
+     "repo": "Comfy-Org/flux1-dev",
+     "path": "flux1-dev-fp8.safetensors",
+     "cache_as": "checkpoints/flux1-dev-fp8.safetensors",
+     "revision": "7ec07cd0cd2cb88298a80c905ad38250e1389880",
+     "size": 17246524772,
+     "sha256": "8e91b68084b53a7fc44ed2a3756d821e355ac1a7b6fe29be760c1db532f3d88a"
+    }
+   ]
+  },
+  {
+   "id": "flux2-klein-4b",
+   "domain": "image",
+   "backend": "flux2",
+   "available": true,
+   "gated": false,
+   "vram_gb": 16.0,
+   "min_vram_gb": 13.0,
+   "note": "FLUX.2-klein-4B (Apache-2.0) local image edit: instruction + reference PNG through the in-repo CUDA port (Qwen3-4B TE taps [9,18,27], 32ch AutoencoderKLFlux2 encode+decode, 4-step distilled DiT, guidance_embed=false). Official transformer is BF16 (flux-2-klein-4b.safetensors 7.75GB); FP8 siblings dequant to f16 at load. CUDA-only \u2014 availability fails closed without a GPU device. Default 4 steps / 512px. Request: prompt + input_b64 PNG.",
+   "files": [
+    {
+     "role": "transformer",
+     "repo": "black-forest-labs/FLUX.2-klein-4B",
+     "path": "flux-2-klein-4b.safetensors",
+     "revision": "5e67da950fce4a097bc150c22958a05716994cea",
+     "cache_as": "flux2-klein-4b/flux-2-klein-4b.safetensors",
+     "size": 7751105712,
+     "sha256": "ec3d4e733a771f61c052fb4856c48b336c55eaf2c65487c2a1faeb9bbda7a343"
+    },
+    {
+     "role": "text-encoder-1",
+     "repo": "black-forest-labs/FLUX.2-klein-4B",
+     "path": "text_encoder/model-00001-of-00002.safetensors",
+     "revision": "5e67da950fce4a097bc150c22958a05716994cea",
+     "cache_as": "flux2-klein-4b/text_encoder/model-00001-of-00002.safetensors",
+     "size": 4967215360,
+     "sha256": "8c0506e7f4936fa7e26183a4fd8da4e2bdbc5990ba64ae441f965d51228f36ea"
+    },
+    {
+     "role": "text-encoder-2",
+     "repo": "black-forest-labs/FLUX.2-klein-4B",
+     "path": "text_encoder/model-00002-of-00002.safetensors",
+     "revision": "5e67da950fce4a097bc150c22958a05716994cea",
+     "cache_as": "flux2-klein-4b/text_encoder/model-00002-of-00002.safetensors",
+     "size": 3077766632,
+     "sha256": "82f2bd839378541b0557bfabaf37c7d3d637071fdcb73302dedd7cf61162ce07"
+    },
+    {
+     "role": "tokenizer",
+     "repo": "black-forest-labs/FLUX.2-klein-4B",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "5e67da950fce4a097bc150c22958a05716994cea",
+     "cache_as": "flux2-klein-4b/tokenizer/tokenizer.json",
+     "size": 11422654,
+     "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+     "role": "vae",
+     "repo": "black-forest-labs/FLUX.2-klein-4B",
+     "path": "vae/diffusion_pytorch_model.safetensors",
+     "revision": "5e67da950fce4a097bc150c22958a05716994cea",
+     "cache_as": "flux2-klein-4b/vae/diffusion_pytorch_model.safetensors",
+     "size": 168120878,
+     "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+    }
+   ]
+  },
+  {
+   "id": "trellis-2",
+   "domain": "mesh",
+   "backend": "trellis",
+   "available": true,
+   "gated": false,
+   "vram_gb": 14.0,
+   "note": "TRELLIS.2-4B image->GLB on the native Rust/CUDA diffusion stack: native BiRefNet soft matte, DINOv3 conditioning, SS flow, cascade shape flows, sparse FDG decode, dual-grid mesh and texture SLAT flow/decode. The complete bundle is role-addressed and pinned to immutable revisions and SHA-256 identities. Request: input_b64 PNG -> glTF Y-up GLB. Default output uses native FaithC cleanup/remesh/QEM decimation plus an embedded PBR atlas. Params: seed, remesh_resolution, texture, decimation_target and texture_size. No Python/ComfyUI fallback.",
+   "files": [
+    {
+     "role": "ss-flow",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+     "size": 2584426920,
+     "sha256": "ca01377c485bec418076d38ee80166d32dc776d744f2553b835cba1e97a7abf6"
+    },
+    {
+     "role": "shape-flow-512",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+     "size": 2584574424,
+     "sha256": "ec5e0917ef9b7e25ad51dffc7d19687a42019871f94239f2fa7f86264c55b70f"
+    },
+    {
+     "role": "shape-flow-1024",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+     "size": 2584574424,
+     "sha256": "07cd0596f634c5adc1890023d16023afc5eed02fb84b22bb23aff5bf0030fbbd"
+    },
+    {
+     "role": "texture-flow-1024",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+     "size": 2584672728,
+     "sha256": "580401269059a339b8318ab9ced459a13ba63391721c83a6c383198c29e77686"
+    },
+    {
+     "role": "shape-decoder",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+     "size": 948490494,
+     "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581"
+    },
+    {
+     "role": "texture-decoder",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+     "size": 948458812,
+     "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "visualbruno/dinov3-vitl16-pretrain-lvd1689m",
+     "path": "model.safetensors",
+     "revision": "8463e34549282813c2cbf67241b27c6fe8fa6321",
+     "cache_as": "trellis2/dinov3/model.safetensors",
+     "size": 1212559808,
+     "sha256": "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179"
+    },
+    {
+     "role": "ss-decoder",
+     "repo": "microsoft/TRELLIS-image-large",
+     "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+     "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+     "cache_as": "trellis2/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+     "size": 147591972,
+     "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a"
+    },
+    {
+     "role": "native-matte",
+     "repo": "ZhengPeng7/BiRefNet_HR-matting",
+     "path": "model.safetensors",
+     "revision": "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f",
+     "cache_as": "matte/birefnet-hr/model.safetensors",
+     "size": 444473596,
+     "sha256": "a5a4de698739ea5e0e8bbab28e1b293dde95092b87a442d566cbc585c53cef55"
+    }
+   ]
+  },
+  {
+   "id": "qwen3.8-27b",
+   "domain": "text",
+   "backend": "llm",
+   "available": true,
+   "gated": false,
+   "vram_gb": 19.0,
+   "note": "Preferred AI Content prompt expander when its weights are already ready on a live node. Qwen3.8-27B is a dense Qwen3.5-architecture conditional-generation model (general.architecture=qwen35 in GGUF), so the text-only path matches the in-repo Makepad-Llama model contract. The upstream model also has a vision tower; this text registry entry deliberately carries only the language GGUF, while a future vision-capable serving entry may pair it with mmproj-BF16.gguf. Apache-2.0. The audited Unsloth Q4_K_M is 17.1 GB decimal (~15.9 GiB), leaving materially more headroom than UD-Q4_K_XL on a 24 GB GPU. AI Content never lets an absent/downloading copy displace the ready qwen3.5-9b fallback.",
+   "files": [
+    {
+     "role": "llm-gguf",
+     "repo": "unsloth/Qwen3.8-27B-GGUF",
+     "path": "Qwen3.8-27B-Q4_K_M.gguf",
+     "revision": "fe1e2a23d973adb629709749dc4f6756df66ef10",
+     "cache_as": "llm/Qwen3.8-27B-Q4_K_M.gguf",
+     "size": 17106775008,
+     "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+    }
+   ]
+  },
+  {
+   "id": "qwen3.6-27b",
+   "domain": "text",
+   "backend": "llm",
+   "available": true,
+   "gated": false,
+   "vram_gb": 18.0,
+   "note": "Canonical embedded LLM prompt expander: dense Qwen3.6-27B instruct, Q4_K_M GGUF (general.architecture=qwen35 - runs on the in-repo makepad-llama runtime as-is). Apache-2.0. ~16.8GB weights + KV at 8k ctx; fits a 24GB card. The local Mac character workflow intentionally uses a cache-registry override named qwen3.5-9b because that smaller GGUF is the resident model there; the override does not rename or replace this canonical entry.",
+   "files": [
+    {
+     "repo": "unsloth/Qwen3.6-27B-GGUF",
+     "path": "Qwen3.6-27B-Q4_K_M.gguf",
+     "cache_as": "llm/Qwen3.6-27B-Q4_K_M.gguf",
+     "size": 16817244384,
+     "sha256": null
+    }
+   ]
+  },
+  {
+   "id": "kokoro",
+   "domain": "speech",
+   "backend": "kokoro",
+   "available": true,
+   "gated": false,
+   "vram_gb": 0.5,
+   "note": "Kokoro-82M TTS via the in-repo pure-Rust port (libs/tts). Upstream .pth/.pt weights download from hexgrad/Kokoro-82M and are converted in-process to the .mktts/.mkvoice format the loader reads (libs/tts convert.rs, byte-identical to the offline Python converter); boxes carrying pre-converted files at the tts/ cache paths never re-download. All 28 English voices (af_*/am_* American, bf_*/bm_* British; default bm_daniel). Output: mono 16-bit 24kHz WAV.",
+   "files": [
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "kokoro-v1_0.pth",
+     "cache_as": "tts/upstream/kokoro-v1_0.pth",
+     "size": 327212226,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/kokoro-v1_0.mktts"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_alloy.pt",
+     "cache_as": "tts/upstream/af_alloy.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_alloy.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_aoede.pt",
+     "cache_as": "tts/upstream/af_aoede.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_aoede.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_bella.pt",
+     "cache_as": "tts/upstream/af_bella.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_bella.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_heart.pt",
+     "cache_as": "tts/upstream/af_heart.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_heart.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_jessica.pt",
+     "cache_as": "tts/upstream/af_jessica.pt",
+     "size": 523435,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_jessica.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_kore.pt",
+     "cache_as": "tts/upstream/af_kore.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_kore.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_nicole.pt",
+     "cache_as": "tts/upstream/af_nicole.pt",
+     "size": 523430,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_nicole.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_nova.pt",
+     "cache_as": "tts/upstream/af_nova.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_nova.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_river.pt",
+     "cache_as": "tts/upstream/af_river.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_river.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_sarah.pt",
+     "cache_as": "tts/upstream/af_sarah.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_sarah.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/af_sky.pt",
+     "cache_as": "tts/upstream/af_sky.pt",
+     "size": 523351,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/af_sky.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_adam.pt",
+     "cache_as": "tts/upstream/am_adam.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_adam.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_echo.pt",
+     "cache_as": "tts/upstream/am_echo.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_echo.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_eric.pt",
+     "cache_as": "tts/upstream/am_eric.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_eric.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_fenrir.pt",
+     "cache_as": "tts/upstream/am_fenrir.pt",
+     "size": 523430,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_fenrir.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_liam.pt",
+     "cache_as": "tts/upstream/am_liam.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_liam.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_michael.pt",
+     "cache_as": "tts/upstream/am_michael.pt",
+     "size": 523435,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_michael.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_onyx.pt",
+     "cache_as": "tts/upstream/am_onyx.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_onyx.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_puck.pt",
+     "cache_as": "tts/upstream/am_puck.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_puck.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/am_santa.pt",
+     "cache_as": "tts/upstream/am_santa.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/am_santa.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bf_alice.pt",
+     "cache_as": "tts/upstream/bf_alice.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bf_alice.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bf_emma.pt",
+     "cache_as": "tts/upstream/bf_emma.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bf_emma.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bf_isabella.pt",
+     "cache_as": "tts/upstream/bf_isabella.pt",
+     "size": 523440,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bf_isabella.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bf_lily.pt",
+     "cache_as": "tts/upstream/bf_lily.pt",
+     "size": 523420,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bf_lily.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bm_daniel.pt",
+     "cache_as": "tts/upstream/bm_daniel.pt",
+     "size": 523430,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bm_daniel.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bm_fable.pt",
+     "cache_as": "tts/upstream/bm_fable.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bm_fable.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bm_george.pt",
+     "cache_as": "tts/upstream/bm_george.pt",
+     "size": 523430,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bm_george.mkvoice"
+    },
+    {
+     "repo": "hexgrad/Kokoro-82M",
+     "path": "voices/bm_lewis.pt",
+     "cache_as": "tts/upstream/bm_lewis.pt",
+     "size": 523425,
+     "sha256": null,
+     "local": false,
+     "converts_to": "tts/bm_lewis.mkvoice"
+    }
+   ]
+  },
+  {
+   "id": "indextts-2.5",
+   "domain": "speech",
+   "backend": "indextts",
+   "available": true,
+   "gated": false,
+   "vram_gb": 6.0,
+   "note": "IndexTTS-2.5 character-voice TTS via the in-repo pure-Rust port (libs/diffusion indextts_*): zero-shot voice cloning from a reference wav (input_b64 audio/wav or a named clip in indextts/voices/) + explicit 8-dim emotion vector ([happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]) for programmatic NPC states. GPT-2 0.8B AR -> semantic codec -> flow-matching mel -> BigVGAN. CPU f32 today (CUDA perf phase pending). Output: mono 16-bit 22.05kHz WAV. License: bilibili Model Use License (restricted; research posture).",
+   "files": [
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "gpt.pth",
+     "cache_as": "indextts/gpt.pth",
+     "size": 3259599833,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "s2mel.pth",
+     "cache_as": "indextts/s2mel.pth",
+     "size": 414908601,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "codec.pth",
+     "cache_as": "indextts/codec.pth",
+     "size": 607290935,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "feat1.pt",
+     "cache_as": "indextts/feat1.pt",
+     "size": 57170,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "feat2.pt",
+     "cache_as": "indextts/feat2.pt",
+     "size": 374866,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "wav2vec2bert_stats.pt",
+     "cache_as": "indextts/wav2vec2bert_stats.pt",
+     "size": 9343,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "IndexTeam/IndexTTS-2.5",
+     "path": "multilingual_zh_ja_yue_char_del.tiktoken",
+     "cache_as": "indextts/multilingual_zh_ja_yue_char_del.tiktoken",
+     "size": 907395,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "facebook/w2v-bert-2.0",
+     "path": "model.safetensors",
+     "cache_as": "indextts/w2v-bert-2.0/model.safetensors",
+     "size": 2322063736,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "funasr/campplus",
+     "path": "campplus_cn_common.bin",
+     "cache_as": "indextts/campplus_cn_common.bin",
+     "size": 28036335,
+     "sha256": null,
+     "local": false
+    },
+    {
+     "repo": "nvidia/bigvgan_v2_22khz_80band_256x",
+     "path": "bigvgan_generator.pt",
+     "cache_as": "indextts/bigvgan_generator.pt",
+     "size": 449228171,
+     "sha256": null,
+     "local": false
+    }
+   ]
+  },
+  {
+   "id": "minimax-h3",
+   "domain": "video",
+   "backend": "h3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 90.0,
+   "note": "MiniMax H3 t2va (video+audio) on the in-repo makepad-ggml CUDA port: 33B DiT + Qwen3-VL-32B TE + video/audio VAEs, f32 activation spine (validated config - H3 activations overflow f16), weights stream disk->device. Full bf16 set needs a 96GB-class card (RTX 6000 Blackwell verified; beats the diffusers reference at 640x352 and 864x480). Consumer tiers run the Q4_K_M GGUF stack instead (future backend variant): 24GB caps at 864x480x124 full-Q4 / 960x544x124 pruned-Q4, 32GB runs all canvases up to 1344x768x124; 64GB host RAM required for Q4 offload. Output: HEVC (or H264) mp4, 24 fps, stereo AAC 48kHz from the 32kHz audio VAE.",
+   "files": [
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_scheduler/scheduler_config.json",
+     "cache_as": "video/MiniMax-H3/audio_scheduler/scheduler_config.json",
+     "size": 96,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/config.json",
+     "cache_as": "video/MiniMax-H3/audio_vae/config.json",
+     "size": 2271,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/diffusion_pytorch_model.safetensors",
+     "cache_as": "video/MiniMax-H3/audio_vae/diffusion_pytorch_model.safetensors",
+     "size": 605429340,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "model_index.json",
+     "cache_as": "video/MiniMax-H3/model_index.json",
+     "size": 2936,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "modular_model_index.json",
+     "cache_as": "video/MiniMax-H3/modular_model_index.json",
+     "size": 2935,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/chat_template.json",
+     "cache_as": "video/MiniMax-H3/processor/chat_template.json",
+     "size": 5499,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/merges.txt",
+     "cache_as": "video/MiniMax-H3/processor/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/processor/preprocessor_config.json",
+     "size": 390,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/processor/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/processor/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/video_preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/processor/video_preprocessor_config.json",
+     "size": 385,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/vocab.json",
+     "cache_as": "video/MiniMax-H3/processor/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "scheduler/scheduler_config.json",
+     "cache_as": "video/MiniMax-H3/scheduler/scheduler_config.json",
+     "size": 97,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/chat_template.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/chat_template.json",
+     "size": 5499,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/config.json",
+     "size": 1474,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/merges.txt",
+     "cache_as": "video/MiniMax-H3/text_encoder/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00001-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00001-of-00014.safetensors",
+     "size": 4932328944,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00002-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00002-of-00014.safetensors",
+     "size": 4875990528,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00003-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00003-of-00014.safetensors",
+     "size": 4875990552,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00004-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00004-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00005-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00005-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00006-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00006-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00007-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00007-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00008-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00008-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00009-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00009-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00010-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00010-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00011-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00011-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00012-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00012-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00013-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00013-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00014-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00014-of-00014.safetensors",
+     "size": 3270697008,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/model.safetensors.index.json",
+     "size": 97831,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/preprocessor_config.json",
+     "size": 390,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/video_preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/video_preprocessor_config.json",
+     "size": 385,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/vocab.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/merges.txt",
+     "cache_as": "video/MiniMax-H3/tokenizer/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/vocab.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/config.json",
+     "cache_as": "video/MiniMax-H3/transformer/config.json",
+     "size": 546,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "size": 4825958704,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "size": 4702158032,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "size": 4933368192,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "size": 4702158080,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "size": 4933368232,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "size": 4702158080,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "size": 4933368232,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "size": 4702158080,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "size": 4933368232,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "size": 4644161920,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "size": 64488,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/config.json",
+     "cache_as": "video/MiniMax-H3/vae/config.json",
+     "size": 2011,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "size": 5061033024,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "size": 4955986528,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "size": 398539336,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
+     "size": 74228,
+     "sha256": null
+    }
+   ]
+  },
+  {
+   "id": "sa3-sfx",
+   "domain": "audio",
+   "backend": "sa3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 3.0,
+   "note": "Stable Audio 3 Small SFX (Stability Community license) on the in-repo libs/diffusion port: T5Gemma-B text encoder + 459M 20-block DiT (8-step ping-pong rectified flow, CFG-free distilled) + SAME-S transformer autoencoder; 44.1 kHz stereo wav, up to 120 s. Validated fp-exact against the Stability-AI/stable-audio-3 reference (oracle dumps in local/sa3_ref). Canonical weights live in the gated (auto-accept) stabilityai/stable-audio-3-small-sfx repo; these entries use the ungated exact mirror. Seeds are deterministic per build but not torch-compatible.",
+   "files": [
+    {
+     "repo": "cocktailpeanut/stable-audio-3-small-sfx",
+     "path": "model_config.json",
+     "cache_as": "audio/sa3/model_config.json",
+     "size": 10457,
+     "sha256": null
+    },
+    {
+     "repo": "cocktailpeanut/stable-audio-3-small-sfx",
+     "path": "model.safetensors",
+     "cache_as": "audio/sa3/model.safetensors",
+     "size": 2270384940,
+     "sha256": null
+    },
+    {
+     "repo": "cocktailpeanut/stable-audio-3-small-sfx",
+     "path": "t5gemma-b-b-ul2/config.json",
+     "cache_as": "audio/sa3/t5gemma-b-b-ul2/config.json",
+     "size": 2540,
+     "sha256": null
+    },
+    {
+     "repo": "cocktailpeanut/stable-audio-3-small-sfx",
+     "path": "t5gemma-b-b-ul2/tokenizer.model",
+     "cache_as": "audio/sa3/t5gemma-b-b-ul2/tokenizer.model",
+     "size": 4241003,
+     "sha256": null
+    },
+    {
+     "repo": "cocktailpeanut/stable-audio-3-small-sfx",
+     "path": "t5gemma-b-b-ul2/model.safetensors",
+     "cache_as": "audio/sa3/t5gemma-b-b-ul2/model.safetensors",
+     "size": 1183022944,
+     "sha256": null
+    }
+   ]
+  },
+  {
+   "id": "moss-sfx",
+   "domain": "audio",
+   "backend": "moss",
+   "available": true,
+   "gated": false,
+   "vram_gb": 7.0,
+   "note": "MOSS-SoundEffect v2.0 (OpenMOSS, Apache 2.0) on the in-repo libs/diffusion port: Qwen3-1.7B text encoder (duration conditioned through the prompt text) + 1.3B Wan-audio DiT (100-step CFG-4 flow matching over a fixed 30 s latent) + continuous-DAC decoder; mono 48 kHz duplicated to stereo wav, up to 30 s. The second audio model beside sa3-sfx, picked for output variety: full-band 48 kHz, denser 'produced' event character vs SA3's dry one-shots. Validated against reference oracle dumps (local/moss_ref). Seeds deterministic per build, not torch-compatible.",
+   "files": [
+    {
+     "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+     "path": "text_encoder/model-00001-of-00002.safetensors",
+     "cache_as": "audio/moss/text_encoder/model-00001-of-00002.safetensors",
+     "size": 3441185608,
+     "sha256": null
+    },
+    {
+     "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+     "path": "text_encoder/model-00002-of-00002.safetensors",
+     "cache_as": "audio/moss/text_encoder/model-00002-of-00002.safetensors",
+     "size": 622329984,
+     "sha256": null
+    },
+    {
+     "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+     "path": "transformer/diffusion_pytorch_model.safetensors",
+     "cache_as": "audio/moss/transformer/diffusion_pytorch_model.safetensors",
+     "size": 5664274560,
+     "sha256": null
+    },
+    {
+     "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+     "path": "vae/vae_128d_48k.pth",
+     "cache_as": "audio/moss/vae/vae_128d_48k.pth",
+     "size": 1486465965,
+     "sha256": null
+    },
+    {
+     "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+     "path": "tokenizer/tokenizer.json",
+     "cache_as": "audio/moss/tokenizer/tokenizer.json",
+     "size": 11422654,
+     "sha256": null
+    },
+    {
+     "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+     "path": "tokenizer/tokenizer_config.json",
+     "cache_as": "audio/moss/tokenizer/tokenizer_config.json",
+     "size": 9732,
+     "sha256": null
+    }
+   ]
+  },
+  {
+   "id": "woosh-sfx",
+   "domain": "audio",
+   "backend": "woosh",
+   "available": true,
+   "gated": false,
+   "vram_gb": 4.0,
+   "note": "Sony Woosh DFlow (code MIT, weights CC-BY-NC-4.0) on the in-repo libs/diffusion port: RoBERTa-large text conditioner + 337M dual/single-stream MMDiT (4-step Euler+renoise distilled student, CFG embedded in a single forward) + VOCOS ConvNeXt/iSTFT autoencoder; FIXED 5.0 s mono 48 kHz duplicated to stereo wav (no duration conditioning; seconds/steps ignored). Third audio voice beside sa3-sfx/moss-sfx, picked for speed (~0.06 s warm on the torch reference 5090) and take variety; band-limited ~12 kHz by model character. Weights ship as the official GitHub release zips (absolute URLs) and are extracted into the cache on first load. Validated per-stage against reference oracle dumps (local/woosh_ref). Seeds deterministic per build, not torch-compatible.",
+   "files": [
+    {
+     "repo": "SonyResearch/Woosh",
+     "path": "https://github.com/SonyResearch/Woosh/releases/download/v1.0.0/TextConditionerA.zip",
+     "cache_as": "audio/woosh/zips/TextConditionerA.zip",
+     "size": 1297121262,
+     "sha256": "68a777b9ac28aa5daf6017b21af9a3659de75074ea14dac65f5231a42c375193",
+     "converts_to": "audio/woosh/checkpoints/TextConditionerA/weights.safetensors"
+    },
+    {
+     "repo": "SonyResearch/Woosh",
+     "path": "https://github.com/SonyResearch/Woosh/releases/download/v1.0.0/Woosh-DFlow.zip",
+     "cache_as": "audio/woosh/zips/Woosh-DFlow.zip",
+     "size": 1281505601,
+     "sha256": "26cfe732500e3952c58aaaf433d29d75b46d42afe5e52f49430d6093eabfdb04",
+     "converts_to": "audio/woosh/checkpoints/Woosh-DFlow/weights.safetensors"
+    },
+    {
+     "repo": "SonyResearch/Woosh",
+     "path": "https://github.com/SonyResearch/Woosh/releases/download/v1.0.0/Woosh-AE.zip",
+     "cache_as": "audio/woosh/zips/Woosh-AE.zip",
+     "size": 822991075,
+     "sha256": "d6f77e3792ee43c21da580f39d6576e0da3e4b46b949223259adf36036c1f9af",
+     "converts_to": "audio/woosh/checkpoints/Woosh-AE/weights.safetensors"
+    },
+    {
+     "repo": "FacebookAI/roberta-large",
+     "path": "tokenizer.json",
+     "cache_as": "audio/woosh/tokenizer.json",
+     "size": 1355863,
+     "sha256": "847bbeab6174d66a88898f729d52fa8d355fafe1bea101cf960dd404581df70e"
+    }
+   ]
+  },
+  {
+   "id": "flashworld",
+   "domain": "world",
+   "backend": "flashworld",
+   "available": true,
+   "gated": false,
+   "vram_gb": 55.0,
+   "note": "FlashWorld (ICLR26) image/text -> 3DGS world, ply artifact (~4M splats, sh deg 2, ~600MB). Reference-tier python subprocess: needs box-provisioned venv+repo+ckpt (MAKEPAD_FLASHWORLD_PYTHON/_DIR/_CKPT; defaults = the .169 layout) + Wan2.2-TI2V-5B base at C:/ai/models/wan22. Weights CC-BY-NC-SA (imlixinyang/FlashWorld model.ckpt 20.9GB). Warm gen ~6s, cold ~70s (worker killed after each job unless MAKEPAD_FLASHWORLD_KEEP_WARM=1 - no cross-backend VRAM eviction yet).",
+   "files": []
+  },
+  {
+   "id": "birefnet-hr",
+   "domain": "matte",
+   "backend": "matte-native",
+   "available": true,
+   "gated": false,
+   "vram_gb": 2.0,
+   "note": "BiRefNet HR matting (ZhengPeng7/BiRefNet_HR-matting, MIT) image -> RGBA cutout with continuous soft alpha. Native Rust/CUDA inference at the checkpoint's 1024 envelope; no Python, Torch, subprocess, thresholding, or silent fallback. The checkpoint is pinned to an immutable revision, byte size, and SHA-256. Request: input_b64 PNG -> image/png RGBA at input resolution.",
+   "files": [
+    {
+     "role": "native-matte",
+     "repo": "ZhengPeng7/BiRefNet_HR-matting",
+     "path": "model.safetensors",
+     "revision": "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f",
+     "cache_as": "matte/birefnet-hr/model.safetensors",
+     "size": 444473596,
+     "sha256": "a5a4de698739ea5e0e8bbab28e1b293dde95092b87a442d566cbc585c53cef55"
+    }
+   ]
+  },
+  {
+   "id": "da3-metric-large",
+   "domain": "depth",
+   "backend": "depth-native",
+   "available": true,
+   "gated": false,
+   "vram_gb": 3.0,
+   "note": "Depth-Anything-3 DA3METRIC-LARGE (depth-anything/DA3METRIC-LARGE, Apache-2.0 - NOT the CC-BY-NC x.1 refresh) image -> metric depthmap. Native Rust/CUDA inference; no Python, Torch, subprocess, or silent fallback. Metric scale uses the processed network width (focal_px * net / 300, 60deg HFOV default). The old box script used the pre-resize width and is retained only as an explicit python-backends oracle. Sky pixels clip to far. Output: TWO artifacts - image/png 16-bit grayscale, depth in MILLIMETERS (u16, far clip 65.535m, 0 = invalid) + application/json sidecar {metric:true, unit:mm, min, max, focal_px} (min/max = pre-clip non-sky range in mm).",
+   "files": [
+    {
+     "role": "native-depth",
+     "repo": "depth-anything/DA3METRIC-LARGE",
+     "path": "model.safetensors",
+     "revision": "4010e39f3634a45bc60553321fb49fb760bd594e",
+     "cache_as": "depth/da3-metric-large/model.safetensors",
+     "size": 1336734448,
+     "sha256": "bbea5b0b3ee389849cffa7ddae89de064a90abd2b055fc5aa99aac68db324776"
+    }
+   ]
+  },
+  {
+   "id": "sam3-1-multiplex",
+   "domain": "segment",
+   "backend": "segment-native",
+   "available": true,
+   "gated": false,
+   "vram_gb": 4.0,
+   "note": "SAM 3.1 Multiplex (Comfy-Org/sam3.1, SAM License) image + text prompt -> grayscale mask PNG + RGBA cutout. Native Rust/CUDA inference; no Python, Torch, subprocess, or silent fallback. Facebook TOS checkpoints (facebook/sam3*) are never downloaded. Prompt uses multiplex syntax (\"cat:1\", \"eye:2, window panels:4\"). The checkpoint is pinned to an immutable revision, byte size, and SHA-256.",
+   "files": [
+    {
+     "role": "native-segment",
+     "repo": "Comfy-Org/sam3.1",
+     "path": "checkpoints/sam3.1_multiplex_fp16.safetensors",
+     "revision": "f38cd62b71494b53ac2b56ca36e24f3c8d565581",
+     "cache_as": "segment/sam3-1-multiplex/sam3.1_multiplex_fp16.safetensors",
+     "size": 1745546848,
+     "sha256": "9ba99c92703c2e8b4f47de2d34a539bb8e18923049e238b780d70dbe6368eb03"
+    }
+   ]
+  },
+  {
+   "id": "skintokens",
+   "domain": "rig",
+   "backend": "rig-native",
+   "available": true,
+   "gated": false,
+   "vram_gb": 9.0,
+   "note": "Canonical pure-Rust/CUDA SkinTokens auto-rigger: GLB mesh -> skinned GLB through deterministic native sampling, VAE/Michelangelo conditioning, constrained Qwen3 generation, FSQ skin decoding, 8-neighbor transfer and lossless armature augmentation. Uses the corrected strict grammar (exactly four real skin symbols per joint); the released upstream off-by-one behavior is retained only by the explicit oracle. No Python, Torch, Blender or silent fallback. The immutable official Lightning artifact is downloaded and converted atomically by the common cancellable lifecycle.",
+   "files": [
+    {
+     "role": "tokenrig-checkpoint",
+     "repo": "VAST-AI/SkinTokens",
+     "path": "experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt",
+     "revision": "79736cad0fd84de384d5eede659b4ebd24effe33",
+     "cache_as": "rig/skintokens/upstream/grpo_1400.ckpt",
+     "size": 1131603979,
+     "sha256": "f4e4706a11cfb520cdde65156a0358545e4fbf8f36237aca01ea5e79d5cb5692",
+     "conversion": {
+      "cache_as": "rig/skintokens/tokenrig.bf16.safetensors",
+      "size": 1190606876,
+      "sha256": "d251c50d182c9ca17b88261cde1f88cdae4b844587389ddadd75756bbc8aa988",
+      "converter_id": "makepad-skintokens-lightning-bf16",
+      "converter_version": "1"
+     }
+    }
+   ]
+  },
+  {
+   "id": "skintokens-oracle",
+   "domain": "rig",
+   "backend": "rig-oracle",
+   "available": true,
+   "gated": false,
+   "vram_gb": 8.0,
+   "note": "Explicit SkinTokens reference oracle: upstream Python/Torch model plus Blender/bpy transfer and export. Box-provisioned through MAKEPAD_RIG_CMD and retained only for same-box numerical and performance comparisons. The canonical skintokens model never falls back to this backend.",
+   "files": []
+  },
+  {
+   "id": "hy-motion",
+   "domain": "motion",
+   "backend": "motion-native",
+   "available": true,
+   "gated": false,
+   "vram_gb": 24.0,
+   "note": "Canonical pure-Rust/CUDA HY-Motion 1.0 FULL 1B runtime plus native hierarchy/direction retarget and lossless GLB animation augmentation. Qwen3-8B + CLIP-L + 1.04B full DiT stay resident on one persistent worker; no Python, Torch or Blender and no silent oracle fallback. Produces deterministic seeded in-place idle/walk/run/jump clips for playable-character locomotion. All runtime artifacts are immutable commit- and SHA-pinned and prepared by the common service downloader/lifecycle.",
+   "files": [
+    {
+     "role": "qwen-shard-1",
+     "repo": "Qwen/Qwen3-8B",
+     "path": "model-00001-of-00005.safetensors",
+     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "cache_as": "motion/hy-motion/qwen/model-00001-of-00005.safetensors",
+     "size": 3996250744,
+     "sha256": "31d6a825ae35f11fb85b195b4c42c146c051e446433125a215336abdf95cbf5f"
+    },
+    {
+     "role": "qwen-shard-2",
+     "repo": "Qwen/Qwen3-8B",
+     "path": "model-00002-of-00005.safetensors",
+     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "cache_as": "motion/hy-motion/qwen/model-00002-of-00005.safetensors",
+     "size": 3993160032,
+     "sha256": "5991236cea6fe21f3d43cab0f0e84448734fbbe0789816202989f2ddc9d18282"
+    },
+    {
+     "role": "qwen-shard-3",
+     "repo": "Qwen/Qwen3-8B",
+     "path": "model-00003-of-00005.safetensors",
+     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "cache_as": "motion/hy-motion/qwen/model-00003-of-00005.safetensors",
+     "size": 3959604768,
+     "sha256": "c5185c4794be2d8a9784d5753c9922db38df478ce11f9ed0b415b7304d896836"
+    },
+    {
+     "role": "qwen-shard-4",
+     "repo": "Qwen/Qwen3-8B",
+     "path": "model-00004-of-00005.safetensors",
+     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "cache_as": "motion/hy-motion/qwen/model-00004-of-00005.safetensors",
+     "size": 3187841392,
+     "sha256": "b5ee7de71fbf17db3d5704e0c8f2bc7d005ca9e1d7ca2aeb19827b0cfcaa917a"
+    },
+    {
+     "role": "qwen-shard-5",
+     "repo": "Qwen/Qwen3-8B",
+     "path": "model-00005-of-00005.safetensors",
+     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "cache_as": "motion/hy-motion/qwen/model-00005-of-00005.safetensors",
+     "size": 1244659840,
+     "sha256": "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff"
+    },
+    {
+     "role": "qwen-tokenizer",
+     "repo": "Qwen/Qwen3-8B",
+     "path": "tokenizer.json",
+     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+     "cache_as": "motion/hy-motion/qwen/tokenizer.json",
+     "size": 11422654,
+     "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+     "role": "clip-model",
+     "repo": "openai/clip-vit-large-patch14",
+     "path": "model.safetensors",
+     "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+     "cache_as": "motion/hy-motion/clip/model.safetensors",
+     "size": 1710540580,
+     "sha256": "a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb"
+    },
+    {
+     "role": "motion-checkpoint",
+     "repo": "tencent/HY-Motion-1.0",
+     "path": "HY-Motion-1.0/latest.ckpt",
+     "revision": "620dd559f8d964aac2f82f1204fe6a35ad8ad14d",
+     "cache_as": "motion/hy-motion/model/latest.ckpt",
+     "size": 4171703514,
+     "sha256": "4fa91c6085f30c49bccda150b28d6c8d0887dc07e6d5d4ec0055482732635f10"
+    },
+    {
+     "role": "wooden-v-template",
+     "repo": "Tencent-Hunyuan/HY-Motion-1.0",
+     "path": "https://media.githubusercontent.com/media/Tencent-Hunyuan/HY-Motion-1.0/4e426f5a1021cbcf7f375458c37b840ee7225229/scripts/gradio/static/assets/dump_wooden/v_template.bin",
+     "revision": "4e426f5a1021cbcf7f375458c37b840ee7225229",
+     "cache_as": "motion/hy-motion/wooden/v_template.bin",
+     "size": 291072,
+     "sha256": "b9fbe1f34bfe8a07442d11166e169318022a18da8bc62ce0a9930dfdb3171050"
+    },
+    {
+     "role": "wooden-j-template",
+     "repo": "Tencent-Hunyuan/HY-Motion-1.0",
+     "path": "https://media.githubusercontent.com/media/Tencent-Hunyuan/HY-Motion-1.0/4e426f5a1021cbcf7f375458c37b840ee7225229/scripts/gradio/static/assets/dump_wooden/j_template.bin",
+     "revision": "4e426f5a1021cbcf7f375458c37b840ee7225229",
+     "cache_as": "motion/hy-motion/wooden/j_template.bin",
+     "size": 624,
+     "sha256": "4f488cc9d0b650a816f5a8eda49eda7bc796f490e9130a6e0dec5be137d7b929"
+    },
+    {
+     "role": "wooden-kintree",
+     "repo": "Tencent-Hunyuan/HY-Motion-1.0",
+     "path": "https://media.githubusercontent.com/media/Tencent-Hunyuan/HY-Motion-1.0/4e426f5a1021cbcf7f375458c37b840ee7225229/scripts/gradio/static/assets/dump_wooden/kintree.bin",
+     "revision": "4e426f5a1021cbcf7f375458c37b840ee7225229",
+     "cache_as": "motion/hy-motion/wooden/kintree.bin",
+     "size": 208,
+     "sha256": "98a20fa3b53193790b63d9ac3a9c917f2f70fbe6e053dca495c75317ff4b756a"
+    },
+    {
+     "role": "wooden-skin-weights",
+     "repo": "Tencent-Hunyuan/HY-Motion-1.0",
+     "path": "https://media.githubusercontent.com/media/Tencent-Hunyuan/HY-Motion-1.0/4e426f5a1021cbcf7f375458c37b840ee7225229/scripts/gradio/static/assets/dump_wooden/skinWeights.bin",
+     "revision": "4e426f5a1021cbcf7f375458c37b840ee7225229",
+     "cache_as": "motion/hy-motion/wooden/skinWeights.bin",
+     "size": 388096,
+     "sha256": "343eac2902627ee6b45b547eb7d9f1526562eca7ba178d1dc71f9e466f307a77"
+    },
+    {
+     "role": "wooden-skin-indices",
+     "repo": "Tencent-Hunyuan/HY-Motion-1.0",
+     "path": "https://media.githubusercontent.com/media/Tencent-Hunyuan/HY-Motion-1.0/4e426f5a1021cbcf7f375458c37b840ee7225229/scripts/gradio/static/assets/dump_wooden/skinIndice.bin",
+     "revision": "4e426f5a1021cbcf7f375458c37b840ee7225229",
+     "cache_as": "motion/hy-motion/wooden/skinIndice.bin",
+     "size": 194048,
+     "sha256": "846794fb90ea01e069435ad242caefb3d5c2f913fef3255c247f48836ddc1bda"
+    },
+    {
+     "role": "wooden-joint-names",
+     "repo": "Tencent-Hunyuan/HY-Motion-1.0",
+     "path": "https://raw.githubusercontent.com/Tencent-Hunyuan/HY-Motion-1.0/4e426f5a1021cbcf7f375458c37b840ee7225229/scripts/gradio/static/assets/dump_wooden/joint_names.json",
+     "revision": "4e426f5a1021cbcf7f375458c37b840ee7225229",
+     "cache_as": "motion/hy-motion/wooden/joint_names.json",
+     "size": 698,
+     "sha256": "f29139c07a3e8c160cb3512428aac6e272697ade096a7e682024c47424e064d1"
+    }
+   ]
+  },
+  {
+   "id": "hy-motion-oracle",
+   "domain": "motion",
+   "backend": "motion-oracle",
+   "available": true,
+   "gated": false,
+   "vram_gb": 24.0,
+   "note": "Explicit HY-Motion reference oracle: Python/Torch generation plus Blender/bpy retarget. Box-provisioned through MAKEPAD_MOTION_CMD, retained solely for same-box quality/performance comparisons. The canonical hy-motion model never falls back to this backend.",
+   "files": []
+  },
+  {
+   "id": "minimax-music3",
+   "domain": "music",
+   "backend": "music3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 29.0,
+   "note": "MiniMax Music 3 full-song generation (lyrics + music description -> up to 5 min of stereo 16-bit wav): 8B global LLM (Qwen3-8B fine-tune) + 0.6B local RVQ depth decoder + 2.4B flow-matching DiT (Stable-Audio-derived) + Flow-VAE decoder, served reference-tier through the official diffusers ModularPipeline (music3_worker.py subprocess; diffusers pinned to PR #14456 commit dafe3733fcfdbf3c48915fe77be3aef65b5d6a2d per the model card). File set pinned at repo revision bd348f9c (2026-08-13) and limited to the diffusers components (~28.5 GB); the sglang-omni serving artifacts (qwen_7B/, flowmatching_vae.pth, dav.pth) are deliberately excluded. vram_gb is full bf16 residency; MAKEPAD_MUSIC3_OFFLOAD=1 fits ~22 GB via auto CPU offload. License: MiniMax-Music3 COMMUNITY LICENSE (MIT-style with an acceptable-use policy, a MiniMax-Music3 attribution requirement on commercial UIs, and a separate authorization gate above $20M yearly revenue) \u2014 fine under the local-generation research posture. ACE-Step 1.5 is the planned second music-domain backend and shares this request contract (lyrics + prompt + seconds + seed).",
+   "files": [
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "LICENSE",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/LICENSE",
+     "size": 7373,
+     "sha256": "b21d12df2adae59dad3fcf80c1d81492654c662342f497d9a9770198c9317e58"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/config.json",
+     "size": 107,
+     "sha256": "1ffcff67d916d5519d1ef9a36853232ee6bcb7e14a936623c4e85559f5dce106"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "modular_model_index.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/modular_model_index.json",
+     "size": 2391,
+     "sha256": "1dc86609cf8855e70cc3f5d085213988094fb59e448aedcda06740d34e386002"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "condition_encoder/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/condition_encoder/config.json",
+     "size": 292,
+     "sha256": "1cdea3f36506719128ae4a29cdfff74b1134e607eb4a504ce6d810568fac8263"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "condition_encoder/diffusion_pytorch_model.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/condition_encoder/diffusion_pytorch_model.safetensors",
+     "size": 100671852,
+     "sha256": "83179c5eaa9a68a370affe0c1b96c2179f659ea4175666b31071490a202c2a4d"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/config.json",
+     "size": 1596,
+     "sha256": "34ded58fcd5e8181557f1417e76af9f3e95109a5ce113a4771fd16f8625b53c0"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/generation_config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/generation_config.json",
+     "size": 158,
+     "sha256": "c0f7c1612e174a7bdec9548464a7bf031a0292587033228e6767fb9e5dc367cd"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model.safetensors.index.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model.safetensors.index.json",
+     "size": 32914,
+     "sha256": "a8bf9de1e8c0d680f39730a127d74445b4abf505623bd91d5ed4f97c0869cc2a"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00001-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00001-of-00004.safetensors",
+     "size": 4910103856,
+     "sha256": "1e95924a158b45b67cfad04fa0f0a352e5a263e69338734d7c1d558be776cc98"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00002-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00002-of-00004.safetensors",
+     "size": 4915960352,
+     "sha256": "fde2d335eef7eafa268d35e53d4b040ee51d2f3fa727f9855b4c97d88a2892da"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00003-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00003-of-00004.safetensors",
+     "size": 4983068496,
+     "sha256": "6549a831637ab678a573047e7fa8fdf966998c4f45330e6eb7573d67f7b9b4c6"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00004-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00004-of-00004.safetensors",
+     "size": 2359864688,
+     "sha256": "a1c9865f357b64d3ae9f428fb98a844831e5a0aee9ed17b19bd7f7be32b964a9"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "rvq_depth_decoder/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/rvq_depth_decoder/config.json",
+     "size": 274,
+     "sha256": "b38c7f72d4b2fa8667442071f9e4a63ca5a7b5d0859e5e64ee7f79c4bc64520c"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "rvq_depth_decoder/diffusion_pytorch_model.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/rvq_depth_decoder/diffusion_pytorch_model.safetensors",
+     "size": 1292055248,
+     "sha256": "80e86ab006bb5c8d4f223205045035a1c77b2bb9c3be9a86d7e740bbafe5ddf0"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "scheduler/scheduler_config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/scheduler/scheduler_config.json",
+     "size": 483,
+     "sha256": "b544466124aab333da4874417da0168610067e9c9ff95fcb63d749e4bf891d99"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "tokenizer/chat_template.jinja",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/tokenizer/chat_template.jinja",
+     "size": 4168,
+     "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "tokenizer/tokenizer_config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/tokenizer/tokenizer_config.json",
+     "size": 377,
+     "sha256": "1689852cc9c45010de040c8302a8acdc0d2c4c6c740dd7e9dd0a8c704e16eada"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/tokenizer/tokenizer.json",
+     "size": 11423801,
+     "sha256": "b1537fa9e59a537276ecbc2e12d0438edff635a1f4a4948e679774b5feb3e610"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/config.json",
+     "size": 294,
+     "sha256": "f60856be934127a8b8223510aff2e38a9efd8bbdbc230c3d3339b96e2cb12f00"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "size": 42679,
+     "sha256": "5a57fc3b98e91ec7f4e9da199b3dc8ce1c67e42824c42bed91c15443c049b991"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+     "size": 4959921384,
+     "sha256": "1943baebe93b5d5a57e9e1f603d9cef51a73a55e7a42f52913932dc06dcf10f0"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+     "size": 4767750800,
+     "sha256": "b2f9e29d241e107e5a281f8b369d6db48eee983917df966c56d7b8dd0bd482c2"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "vocoder/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/vocoder/config.json",
+     "size": 251,
+     "sha256": "4161afd07ba7d5b949e29c8a7a005592259fba73e9110b6ece9dfd38d3489eac"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "vocoder/diffusion_pytorch_model.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/vocoder/diffusion_pytorch_model.safetensors",
+     "size": 216695272,
+     "sha256": "daf0bf0560ea978ce7b5ec3e82f420a44429efef18bdfbe3c714d55ceffbe934"
+    }
+   ]
+  },
+  {
+   "id": "minimax-music3-python",
+   "domain": "music",
+   "backend": "music3-python",
+   "available": true,
+   "gated": false,
+   "vram_gb": 29.0,
+   "note": "Official MiniMax-Music3 ModularPipeline REFERENCE (Python/Torch worker). Same weights and request contract as minimax-music3 (lyrics + prompt + seconds + seed) but never the native CUDA port. Use this to A/B a 60s song against native. Requires C:\\ai\\music3venv (MAKEPAD_MUSIC3_PYTHON). Does not enable FlashWorld or other python-backends.",
+   "files": [
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "LICENSE",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/LICENSE",
+     "size": 7373,
+     "sha256": "b21d12df2adae59dad3fcf80c1d81492654c662342f497d9a9770198c9317e58"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/config.json",
+     "size": 107,
+     "sha256": "1ffcff67d916d5519d1ef9a36853232ee6bcb7e14a936623c4e85559f5dce106"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "modular_model_index.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/modular_model_index.json",
+     "size": 2391,
+     "sha256": "1dc86609cf8855e70cc3f5d085213988094fb59e448aedcda06740d34e386002"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "condition_encoder/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/condition_encoder/config.json",
+     "size": 292,
+     "sha256": "1cdea3f36506719128ae4a29cdfff74b1134e607eb4a504ce6d810568fac8263"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "condition_encoder/diffusion_pytorch_model.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/condition_encoder/diffusion_pytorch_model.safetensors",
+     "size": 100671852,
+     "sha256": "83179c5eaa9a68a370affe0c1b96c2179f659ea4175666b31071490a202c2a4d"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/config.json",
+     "size": 1596,
+     "sha256": "34ded58fcd5e8181557f1417e76af9f3e95109a5ce113a4771fd16f8625b53c0"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/generation_config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/generation_config.json",
+     "size": 158,
+     "sha256": "c0f7c1612e174a7bdec9548464a7bf031a0292587033228e6767fb9e5dc367cd"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model.safetensors.index.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model.safetensors.index.json",
+     "size": 32914,
+     "sha256": "a8bf9de1e8c0d680f39730a127d74445b4abf505623bd91d5ed4f97c0869cc2a"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00001-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00001-of-00004.safetensors",
+     "size": 4910103856,
+     "sha256": "1e95924a158b45b67cfad04fa0f0a352e5a263e69338734d7c1d558be776cc98"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00002-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00002-of-00004.safetensors",
+     "size": 4915960352,
+     "sha256": "fde2d335eef7eafa268d35e53d4b040ee51d2f3fa727f9855b4c97d88a2892da"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00003-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00003-of-00004.safetensors",
+     "size": 4983068496,
+     "sha256": "6549a831637ab678a573047e7fa8fdf966998c4f45330e6eb7573d67f7b9b4c6"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "language_model/model-00004-of-00004.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/language_model/model-00004-of-00004.safetensors",
+     "size": 2359864688,
+     "sha256": "a1c9865f357b64d3ae9f428fb98a844831e5a0aee9ed17b19bd7f7be32b964a9"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "rvq_depth_decoder/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/rvq_depth_decoder/config.json",
+     "size": 274,
+     "sha256": "b38c7f72d4b2fa8667442071f9e4a63ca5a7b5d0859e5e64ee7f79c4bc64520c"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "rvq_depth_decoder/diffusion_pytorch_model.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/rvq_depth_decoder/diffusion_pytorch_model.safetensors",
+     "size": 1292055248,
+     "sha256": "80e86ab006bb5c8d4f223205045035a1c77b2bb9c3be9a86d7e740bbafe5ddf0"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "scheduler/scheduler_config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/scheduler/scheduler_config.json",
+     "size": 483,
+     "sha256": "b544466124aab333da4874417da0168610067e9c9ff95fcb63d749e4bf891d99"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "tokenizer/chat_template.jinja",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/tokenizer/chat_template.jinja",
+     "size": 4168,
+     "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "tokenizer/tokenizer_config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/tokenizer/tokenizer_config.json",
+     "size": 377,
+     "sha256": "1689852cc9c45010de040c8302a8acdc0d2c4c6c740dd7e9dd0a8c704e16eada"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/tokenizer/tokenizer.json",
+     "size": 11423801,
+     "sha256": "b1537fa9e59a537276ecbc2e12d0438edff635a1f4a4948e679774b5feb3e610"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/config.json",
+     "size": 294,
+     "sha256": "f60856be934127a8b8223510aff2e38a9efd8bbdbc230c3d3339b96e2cb12f00"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "size": 42679,
+     "sha256": "5a57fc3b98e91ec7f4e9da199b3dc8ce1c67e42824c42bed91c15443c049b991"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+     "size": 4959921384,
+     "sha256": "1943baebe93b5d5a57e9e1f603d9cef51a73a55e7a42f52913932dc06dcf10f0"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+     "size": 4767750800,
+     "sha256": "b2f9e29d241e107e5a281f8b369d6db48eee983917df966c56d7b8dd0bd482c2"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "vocoder/config.json",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/vocoder/config.json",
+     "size": 251,
+     "sha256": "4161afd07ba7d5b949e29c8a7a005592259fba73e9110b6ece9dfd38d3489eac"
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-Music3",
+     "path": "vocoder/diffusion_pytorch_model.safetensors",
+     "revision": "bd348f9c49ea3c1b39f33ace3436f8fad435f24e",
+     "cache_as": "music/MiniMax-Music3/vocoder/diffusion_pytorch_model.safetensors",
+     "size": 216695272,
+     "sha256": "daf0bf0560ea978ce7b5ec3e82f420a44429efef18bdfbe3c714d55ceffbe934"
+    }
+   ]
+  },
+  {
+   "id": "ace-step-1.5-xl",
+   "domain": "music",
+   "backend": "ace",
+   "available": true,
+   "gated": false,
+   "vram_gb": 12.0,
+   "min_vram_gb": 10.0,
+   "min_compute_cap": 8.9,
+   "note": "ACE-Step 1.5 XL turbo (official AceStepPipeline, Apache-2.0): Qwen3-0.6B text encoder + AceStepConditionEncoder (lyric 8L + timbre 4L) + 5B 32-layer DiT (hidden 2560, GQA 32/8, 8-step shift-3 flow matching, CFG distilled) + AutoencoderOobleck 48 kHz stereo VAE. Native makepad-ggml CUDA port in libs/diffusion \u2014 same generate contract as minimax-music3 (lyrics + prompt + seconds + seed). Fail closed; never falls back to Music3. File set pinned at ACE-Step/acestep-v15-xl-turbo-diffusers revision b795de13 (~10.3 GB).",
+   "files": [
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "model_index.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/model_index.json",
+     "size": 491,
+     "sha256": "26f44f97c4908851f19dbff6c25c6dfcbe17b9c74c152cc0535c47b82b80a250"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "condition_encoder/config.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/condition_encoder/config.json",
+     "size": 502,
+     "sha256": "76e9eeba7b3248500cd0f5fb7ecd66129af0c9ea98ffb762bd8879753595233b"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "condition_encoder/diffusion_pytorch_model.safetensors",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/condition_encoder/diffusion_pytorch_model.safetensors",
+     "size": 1218676312,
+     "sha256": "ca111ca95858c8d3c3678c986dda03df20778c0de009f57109c1052866d522b2"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "text_encoder/config.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/text_encoder/config.json",
+     "size": 1354,
+     "sha256": "c55e1b1f5e665d7c65661a6c278cbdd31c48a31565fa4218c06cd56078224ddc"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "text_encoder/model.safetensors",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/text_encoder/model.safetensors",
+     "size": 1191586416,
+     "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "tokenizer/added_tokens.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/tokenizer/added_tokens.json",
+     "size": 707,
+     "sha256": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "tokenizer/special_tokens_map.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/tokenizer/special_tokens_map.json",
+     "size": 613,
+     "sha256": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "tokenizer/tokenizer_config.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/tokenizer/tokenizer_config.json",
+     "size": 5404,
+     "sha256": "443bfa629eb16387a12edbf92a76f6a6f10b2af3b53d87ba1550adfcf45f7fa0"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "tokenizer/merges.txt",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/tokenizer/merges.txt",
+     "size": 1671853,
+     "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "tokenizer/vocab.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/tokenizer/vocab.json",
+     "size": 2776833,
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/tokenizer/tokenizer.json",
+     "size": 11423705,
+     "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "transformer/config.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/transformer/config.json",
+     "size": 1303,
+     "sha256": "6b6753b2833681bb0ad3363be71cafaa2b0a751146bbeb4e8ae485a407fa5775"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "size": 58395,
+     "sha256": "51489f1d0c00a262324fd2aa3fd2dab559cd84493da312c89677bced3bd82b0c"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+     "size": 4986971904,
+     "sha256": "814723a63ba0b11dc4a7e8a5d43b8107c947fcdb5ab1e30c65469252272b35d7"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+     "size": 3350889672,
+     "sha256": "38ab6a8443be10b3c4bb0b784a5b78d471358d1b4982c139cb7893c455670b67"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "vae/config.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/vae/config.json",
+     "size": 438,
+     "sha256": "164a21874900efa4813175f812a7816408551b8c5ac38f2deb65347acb2fc3eb"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "vae/diffusion_pytorch_model.safetensors",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/vae/diffusion_pytorch_model.safetensors",
+     "size": 337431388,
+     "sha256": "da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0"
+    },
+    {
+     "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers",
+     "path": "scheduler/scheduler_config.json",
+     "revision": "b795de13d747aa94b5fd0ba81603f0316132c8b7",
+     "cache_as": "music/ACE-Step-1.5-XL/scheduler/scheduler_config.json",
+     "size": 484,
+     "sha256": "173036e3885cdd41b7af2d2918d4bfb316d789b2ebc17f4534b2d3d2aa824fa2"
+    }
+   ]
+  },
+  {
+   "id": "minimax-h3-q4-24g",
+   "domain": "video",
+   "backend": "h3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 20.0,
+   "min_vram_gb": 22.0,
+   "min_compute_cap": 8.9,
+   "note": "MiniMax H3 fl2va (t2v + first-frame i2v, video+stereo audio) NATIVE QUANTIZED 24GB tier: unsloth pruned Q4_K GGUF DiT (AdaLN rank-8 curve table, 11.4GB) + Q4_K_M Qwen3-VL TE (18.2GB), fp16 video VAE + fp32 audio VAE repacks. Runs on the in-repo CUDA stack (GGUF blocks resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine) with STAGED component residency: TE -> DiT -> video VAE load/unload sequentially so 24GB-class cards (RTX 4090, sm89+) really fit. Measured ceiling 960x544x124f (pruned ladder 2026-08-12); larger canvases are refused. Same MiniMax H3 Community License as the bf16 tree.",
+   "files": [
+    {
+     "role": "dit-gguf",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/minimax_h3_fl2va_pruned-Q4_K.gguf",
+     "size": 11420663904,
+     "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"
+    },
+    {
+     "role": "te-gguf",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+     "size": 18218065024,
+     "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc"
+    },
+    {
+     "role": "video-vae",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/vae/minimax_h3_video_vae_fp16.safetensors",
+     "size": 5207808496,
+     "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+    },
+    {
+     "role": "audio-vae",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/audio_vae/minimax_h3_audio_vae_fp32.safetensors",
+     "size": 605254808,
+     "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    },
+    {
+     "role": "audio-vae-config",
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+     "cache_as": "video/MiniMax-H3-tiers/audio_vae/config.json",
+     "size": 2271,
+     "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
+    },
+    {
+     "role": "tokenizer-json",
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+     "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
+     "size": 7032403,
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    }
+   ]
+  },
+  {
+   "id": "minimax-h3-nvfp4-32g",
+   "domain": "video",
+   "backend": "h3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 28.0,
+   "min_vram_gb": 30.0,
+   "min_compute_cap": 12.0,
+   "note": "MiniMax H3 fl2va NATIVE QUANTIZED Blackwell 32GB tier: Abiray pruned NVFP4 DiT (12.5GB, AdaLN curve) + NVFP4-AWQ Qwen3-VL TE (15.7GB), ComfyUI/TensorRT-ModelOpt layout (E2M1 nibbles + E4M3 block scales + f32 tensor scale, AWQ pre-scales folded per input column). Requires compute capability 12.0 (RTX 5090 / RTX PRO 6000, sm120a) \u2014 fails closed elsewhere. Staged component residency; v1 compute path is dequant-to-bf16 scratch + f32-accumulate gemms (numerics-safe; Blackwell FP4 MMA is a later perf lever). Measured full-ladder ceiling 1344x768x124f on 32GB. Shares VAE/tokenizer files with the q4-24g tier.",
+   "files": [
+    {
+     "role": "dit-nvfp4",
+     "repo": "Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot",
+     "path": "MiniMax_H3_FL2VA_pruned_nvfp4.safetensors",
+     "revision": "e547bd0a5b25b520d8f981fa70264111b67aa979",
+     "cache_as": "video/MiniMax-H3-tiers/MiniMax_H3_FL2VA_pruned_nvfp4.safetensors",
+     "size": 12528636865,
+     "sha256": "6ab7f0c48141e7919b32f925ca3def22e06a6aebeb9e0b6f5a0be0fe8409976f"
+    },
+    {
+     "role": "te-nvfp4",
+     "repo": "Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot",
+     "path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+     "revision": "e547bd0a5b25b520d8f981fa70264111b67aa979",
+     "cache_as": "video/MiniMax-H3-tiers/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+     "size": 15687142619,
+     "sha256": "33e69e3edab846d52949bafdb00378bd3f5a93f78124fc83d5ef109dc4a1fcbb"
+    },
+    {
+     "role": "video-vae",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/vae/minimax_h3_video_vae_fp16.safetensors",
+     "size": 5207808496,
+     "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+    },
+    {
+     "role": "audio-vae",
+     "repo": "unsloth/MiniMax-H3-GGUF",
+     "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+     "revision": "d629413c2e5b51b38c453668b75ca3b06ca92703",
+     "cache_as": "video/MiniMax-H3-tiers/audio_vae/minimax_h3_audio_vae_fp32.safetensors",
+     "size": 605254808,
+     "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    },
+    {
+     "role": "audio-vae-config",
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+     "cache_as": "video/MiniMax-H3-tiers/audio_vae/config.json",
+     "size": 2271,
+     "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
+    },
+    {
+     "role": "tokenizer-json",
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+     "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
+     "size": 7032403,
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    }
+   ]
+  },
+  {
+   "id": "minimax-h3-bf16-96g",
+   "domain": "video",
+   "backend": "h3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 90.0,
+   "min_vram_gb": 90.0,
+   "min_compute_cap": 8.9,
+   "note": "MiniMax H3 fl2va CANONICAL BF16 tier (96GB class, RTX PRO 6000 verified) \u2014 the same file set and cache paths as the legacy 'minimax-h3' id (which stays as an alias), plus the hard fail-closed VRAM gate. Full quality reference: f32 activation spine, DiT+VAE stay warm across jobs, TE re-streams per prompt. The file identities are intentionally NOT pinned: seeded/junctioned boxes carry no verification receipts, and pinning would force a 134GB re-download.",
+   "files": [
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_scheduler/scheduler_config.json",
+     "cache_as": "video/MiniMax-H3/audio_scheduler/scheduler_config.json",
+     "size": 96,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/config.json",
+     "cache_as": "video/MiniMax-H3/audio_vae/config.json",
+     "size": 2271,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "audio_vae/diffusion_pytorch_model.safetensors",
+     "cache_as": "video/MiniMax-H3/audio_vae/diffusion_pytorch_model.safetensors",
+     "size": 605429340,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "model_index.json",
+     "cache_as": "video/MiniMax-H3/model_index.json",
+     "size": 2936,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "modular_model_index.json",
+     "cache_as": "video/MiniMax-H3/modular_model_index.json",
+     "size": 2935,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/chat_template.json",
+     "cache_as": "video/MiniMax-H3/processor/chat_template.json",
+     "size": 5499,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/merges.txt",
+     "cache_as": "video/MiniMax-H3/processor/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/processor/preprocessor_config.json",
+     "size": 390,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/processor/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/processor/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/video_preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/processor/video_preprocessor_config.json",
+     "size": 385,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "processor/vocab.json",
+     "cache_as": "video/MiniMax-H3/processor/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "scheduler/scheduler_config.json",
+     "cache_as": "video/MiniMax-H3/scheduler/scheduler_config.json",
+     "size": 97,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/chat_template.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/chat_template.json",
+     "size": 5499,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/config.json",
+     "size": 1474,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/merges.txt",
+     "cache_as": "video/MiniMax-H3/text_encoder/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00001-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00001-of-00014.safetensors",
+     "size": 4932328944,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00002-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00002-of-00014.safetensors",
+     "size": 4875990528,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00003-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00003-of-00014.safetensors",
+     "size": 4875990552,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00004-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00004-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00005-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00005-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00006-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00006-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00007-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00007-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00008-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00008-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00009-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00009-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00010-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00010-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00011-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00011-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00012-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00012-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00013-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00013-of-00014.safetensors",
+     "size": 4875990584,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model-00014-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/text_encoder/model-00014-of-00014.safetensors",
+     "size": 3270697008,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/model.safetensors.index.json",
+     "size": 97831,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/preprocessor_config.json",
+     "size": 390,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/video_preprocessor_config.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/video_preprocessor_config.json",
+     "size": 385,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "text_encoder/vocab.json",
+     "cache_as": "video/MiniMax-H3/text_encoder/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/merges.txt",
+     "cache_as": "video/MiniMax-H3/tokenizer/merges.txt",
+     "size": 1671839,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/tokenizer.json",
+     "size": 7032403,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/tokenizer_config.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/tokenizer_config.json",
+     "size": 11003,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "tokenizer/vocab.json",
+     "cache_as": "video/MiniMax-H3/tokenizer/vocab.json",
+     "size": 2776833,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/config.json",
+     "cache_as": "video/MiniMax-H3/transformer/config.json",
+     "size": 546,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "size": 4825958704,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "size": 4702158032,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "size": 4933368192,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "size": 4702158080,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "size": 4933368232,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "size": 4702158080,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "size": 4933368232,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "size": 4702158080,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "size": 4933368232,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "size": 4567069608,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "size": 4644161920,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model.safetensors.index.json",
+     "size": 64488,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/config.json",
+     "cache_as": "video/MiniMax-H3/vae/config.json",
+     "size": 2011,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "size": 5061033024,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "size": 4955986528,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "size": 398539336,
+     "sha256": null
+    },
+    {
+     "repo": "MiniMaxAI/MiniMax-H3",
+     "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+     "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
+     "size": 74228,
+     "sha256": null
+    }
+   ]
+  }
+ ]
+}
