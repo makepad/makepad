@@ -64,6 +64,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("once ({} tok): {:?}", toks.len(), &toks);
         return Ok(());
     }
+    // `localize`: two identical prefills with a snapshot of every cache
+    // tensor after each; the earliest layer whose K/V or r/s rows differ is
+    // where the forward pass diverges first.
+    if mode == "localize" {
+        let mut tokens = vocab.tokenize(CHAT_PROMPT, true, true)?;
+        if tokens.last().copied() == vocab.eos_token_id() {
+            tokens.pop();
+        }
+        session.reset()?;
+        session.append_tokens(&tokens)?;
+        let s1 = session.debug_state_snapshot()?;
+        session.reset()?;
+        session.append_tokens(&tokens)?;
+        let s2 = session.debug_state_snapshot()?;
+        let mut diffs = 0;
+        for ((n1, off, len, h1), (_, _, _, h2)) in s1.iter().zip(s2.iter()) {
+            if h1 != h2 {
+                diffs += 1;
+                println!("DIVERGE {n1} (offset {off} len {len})");
+            }
+        }
+        println!("{diffs} cache tensors diverge between identical prefills (of {})", s1.len());
+        return Ok(());
+    }
     // `hammer N`: N times (reset + prefill + 1 greedy step), count distinct
     // first-token outcomes — quantifies the nondeterminism incidence.
     if mode == "hammer" {
