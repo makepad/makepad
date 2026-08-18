@@ -4,7 +4,7 @@
 //! a `Speaker`, this scores audio that came from anywhere — the ONNX reference,
 //! the Rust graph, a file on disk.
 //!
-//!     cargo run --release --manifest-path libs/tts/Cargo.toml \
+//!     cargo run --release --manifest-path libs/ai/models/speech/Cargo.toml \
 //!         --example score_wav -- kokoro_ref_16k.wav "Escape the Gummer, a squishy purple blob."
 
 use makepad_voice::{VoiceTranscribeParams, VoiceTranscriber};
@@ -71,7 +71,7 @@ fn normalize(text: &str) -> Vec<String> {
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|w| !w.is_empty())
         .flat_map(|w| match w.parse::<u64>() {
-            Ok(n) => makepad_tts::g2p::spell_number(n)
+            Ok(n) => makepad_ai_speech::g2p::spell_number(n)
                 .split_whitespace()
                 .map(str::to_string)
                 .collect::<Vec<_>>(),

@@ -12,15 +12,15 @@ license = "MIT OR Apache-2.0"
 # carry. With it off, SpeechOutput still exists and every non-audio path
 # behaves identically — the worker just drains its queue in silence.
 default = ["tts"]
-tts = ["dep:makepad-tts"]
-# The local filtering LLM (QwenFilter) on makepad-llama; heavy, so opt-in.
-local-llm = ["dep:makepad-llama"]
+tts = ["dep:makepad-ai-speech"]
+# The local filtering LLM (QwenFilter) on makepad-ai-llm; heavy, so opt-in.
+local-llm = ["dep:makepad-ai-llm"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-ai = { path = "../makepad_ai" }
-makepad-tts = { path = "../tts", optional = true }
-makepad-llama = { path = "../llama", optional = true }
+makepad-ai-speech = { path = "../ai/models/speech", optional = true }
+makepad-ai-llm = { path = "../ai/llm", optional = true }
 
 [[bin]]
 name = "filter-repl"
