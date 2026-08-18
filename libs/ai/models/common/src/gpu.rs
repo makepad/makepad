@@ -3932,4 +3932,5 @@ mod imp {
     pub fn gpu_pool_cap_override(_bytes: Option<usize>) {}
 }
 
+#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 pub use imp::*;
