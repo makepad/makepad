@@ -884,6 +884,7 @@ pub fn cfg_ddim_gpu(
     let uncond = gpu_slice_cols(head, 0, branch)?;
     let ref_only = gpu_slice_cols(head, branch, branch)?;
     let full = gpu_slice_cols(head, 2 * branch, branch)?;
+    cfg_debug_branches("cfg_ddim", &uncond, &ref_only, &full);
     let ru = gpu_add(&ref_only, &gpu_paint_scale(&uncond, -1.0)?)?;
     let fr = gpu_add(&full, &gpu_paint_scale(&ref_only, -1.0)?)?;
     let guided = gpu_add(
@@ -894,6 +895,42 @@ pub fn cfg_ddim_gpu(
         &gpu_paint_scale(sample, c1)?,
         &gpu_paint_scale(&guided, c2)?,
     )
+}
+
+/// Conditioning liveness probe (MAKEPAD_PBR_CFG_DEBUG=1): near-identical
+/// branches mean the reference/DINO tokens never influenced attention.
+fn cfg_debug_branches(tag: &str, uncond: &GpuTensor, ref_only: &GpuTensor, full: &GpuTensor) {
+    if std::env::var("MAKEPAD_PBR_CFG_DEBUG").as_deref() != Ok("1") {
+        return;
+    }
+    let stats = |t: &GpuTensor| -> (f64, f64) {
+        match gpu_download(t) {
+            Ok(v) => {
+                let l2 = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+                (l2, v.len() as f64)
+            }
+            Err(_) => (f64::NAN, 0.0),
+        }
+    };
+    let d = |a: &GpuTensor, b: &GpuTensor| -> f64 {
+        match (gpu_download(a), gpu_download(b)) {
+            (Ok(x), Ok(y)) => x
+                .iter()
+                .zip(&y)
+                .map(|(p, q)| ((*p - *q) as f64).powi(2))
+                .sum::<f64>()
+                .sqrt(),
+            _ => f64::NAN,
+        }
+    };
+    let (lu, _) = stats(uncond);
+    let (lr, _) = stats(ref_only);
+    let (lf, n) = stats(full);
+    eprintln!(
+        "[pbr-cfg] {tag} n={n} |uncond|={lu:.3} |ref|={lr:.3} |full|={lf:.3} d(u,r)={:.4} d(r,f)={:.4}",
+        d(uncond, ref_only),
+        d(ref_only, full),
+    );
 }
 
 pub fn cfg_ddim_gpu_t(
@@ -910,6 +947,7 @@ pub fn cfg_ddim_gpu_t(
     let uncond = gpu_slice_cols(head, 0, branch)?;
     let ref_only = gpu_slice_cols(head, branch, branch)?;
     let full = gpu_slice_cols(head, 2 * branch, branch)?;
+    cfg_debug_branches("cfg_ddim_t", &uncond, &ref_only, &full);
     let ru = gpu_add(&ref_only, &gpu_paint_scale(&uncond, -1.0)?)?;
     let fr = gpu_add(&full, &gpu_paint_scale(&ref_only, -1.0)?)?;
     let guided = gpu_add(
