@@ -14,6 +14,13 @@ metal-precompile = []
 # standalone `[workspace]` (diffusion), cargo 1.92 drops target-cfg deps
 # and rustc reports `no external crate makepad_cuda`.
 makepad-cuda = { path = "../cuda" }
+# Direct dep (in addition to the makepad-cuda facade above) so its
+# `links = "makepad_ai_cuda"` metadata reaches this crate's build.rs as
+# DEP_MAKEPAD_AI_CUDA_KERNELS — links-metadata only flows to IMMEDIATE
+# dependents. THE CUDA store (kernels + nvcc build), absorbed lane T4,
+# /aiarch.md §1 + §4. Same "must not be target-specific" reasoning as
+# makepad-cuda above.
+makepad-ai-cuda = { path = "../ai/cuda" }
 # TensorType/GGML_TYPE_*/block_size/block_elements/MappedRegion live in the
 # loader now (lane T2, /aiarch.md §1); this crate re-exports them at their
 # original paths. Own `[workspace]` like ../mlx, reached via path dep.
