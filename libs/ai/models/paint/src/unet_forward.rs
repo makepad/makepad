@@ -255,6 +255,7 @@ fn forward_extras_on_cfg(
         "unet.down_blocks.0.attentions.0", enc_albs, enc_mrs, dinos,
         voxels.full.xyz, voxels.full.res, ref_scales, n_views,
     )?;
+    tap("down0_attn0", &xs);
     skips.push(clone_n(&xs)?);
     xs = map_n_resnet_gpu(unet, &xs, s8w, s8h, temb, "unet.down_blocks.0.resnets.1", 320)?;
     xs = extras_on_attn_cache(
@@ -262,6 +263,7 @@ fn forward_extras_on_cfg(
         "unet.down_blocks.0.attentions.1", enc_albs, enc_mrs, dinos,
         voxels.full.xyz, voxels.full.res, ref_scales, n_views,
     )?;
+    tap("down0_attn1", &xs);
     skips.push(clone_n(&xs)?);
     xs = map_n_down_gpu(unet, &xs, s8w, s8h, "unet.down_blocks.0.downsamplers.0.conv", 320)?;
     skips.push(clone_n(&xs)?);
@@ -272,6 +274,7 @@ fn forward_extras_on_cfg(
         "unet.down_blocks.1.attentions.0", enc_albs, enc_mrs, dinos,
         voxels.half.xyz, voxels.half.res, ref_scales, n_views,
     )?;
+    tap("down1_attn0", &xs);
     skips.push(clone_n(&xs)?);
     xs = map_n_resnet_gpu(unet, &xs, s4w, s4h, temb, "unet.down_blocks.1.resnets.1", 640)?;
     xs = extras_on_attn_cache(
@@ -279,6 +282,7 @@ fn forward_extras_on_cfg(
         "unet.down_blocks.1.attentions.1", enc_albs, enc_mrs, dinos,
         voxels.half.xyz, voxels.half.res, ref_scales, n_views,
     )?;
+    tap("down1_attn1", &xs);
     skips.push(clone_n(&xs)?);
     xs = map_n_down_gpu(unet, &xs, s4w, s4h, "unet.down_blocks.1.downsamplers.0.conv", 640)?;
     skips.push(clone_n(&xs)?);
@@ -289,6 +293,7 @@ fn forward_extras_on_cfg(
         "unet.down_blocks.2.attentions.0", enc_albs, enc_mrs, dinos,
         voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
     )?;
+    tap("down2_attn0", &xs);
     skips.push(clone_n(&xs)?);
     xs = map_n_resnet_gpu(unet, &xs, s2w, s2h, temb, "unet.down_blocks.2.resnets.1", 1280)?;
     xs = extras_on_attn_cache(
@@ -296,6 +301,7 @@ fn forward_extras_on_cfg(
         "unet.down_blocks.2.attentions.1", enc_albs, enc_mrs, dinos,
         voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
     )?;
+    tap("down2_attn1", &xs);
     skips.push(clone_n(&xs)?);
     xs = map_n_down_gpu(unet, &xs, s2w, s2h, "unet.down_blocks.2.downsamplers.0.conv", 1280)?;
     skips.push(clone_n(&xs)?);
@@ -311,6 +317,7 @@ fn forward_extras_on_cfg(
         "unet.mid_block.attentions.0", enc_albs, enc_mrs, dinos,
         voxels.eighth.xyz, voxels.eighth.res, ref_scales, n_views,
     )?;
+    tap("mid_attn0", &xs);
     xs = map_n_resnet_gpu(unet, &xs, s1w, s1h, temb, "unet.mid_block.resnets.1", 1280)?;
 
     let pop = |skips: &mut Vec<Vec<GpuTensor>>| skips.pop().unwrap();
@@ -325,6 +332,7 @@ fn forward_extras_on_cfg(
         "unet.up_blocks.1.attentions.0", enc_albs, enc_mrs, dinos,
         voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
     )?;
+    tap("up1_attn0", &xs);
     xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s2w, s2h, temb, "unet.up_blocks.1.resnets.1", 2560)?;
     xs = extras_on_attn_cache(
         unet, &xs, cache_attn(cache, "up_1_1_0")?, s2w, s2h, 1280, 20,
@@ -337,6 +345,7 @@ fn forward_extras_on_cfg(
         "unet.up_blocks.1.attentions.2", enc_albs, enc_mrs, dinos,
         voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
     )?;
+    tap("up1_attn2", &xs);
     xs = map_n_up_gpu(unet, &xs, s2w, s2h, "unet.up_blocks.1.upsamplers.0.conv", 1280)?;
 
     xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s4w, s4h, temb, "unet.up_blocks.2.resnets.0", 1920)?;
@@ -357,6 +366,7 @@ fn forward_extras_on_cfg(
         "unet.up_blocks.2.attentions.2", enc_albs, enc_mrs, dinos,
         voxels.half.xyz, voxels.half.res, ref_scales, n_views,
     )?;
+    tap("up2_attn2", &xs);
     xs = map_n_up_gpu(unet, &xs, s4w, s4h, "unet.up_blocks.2.upsamplers.0.conv", 640)?;
 
     xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s8w, s8h, temb, "unet.up_blocks.3.resnets.0", 960)?;
@@ -377,6 +387,7 @@ fn forward_extras_on_cfg(
         "unet.up_blocks.3.attentions.2", enc_albs, enc_mrs, dinos,
         voxels.full.xyz, voxels.full.res, ref_scales, n_views,
     )?;
+    tap("up3_attn2", &xs);
     let mut n1 = Vec::with_capacity(xs.len());
     for h in &xs {
         n1.push(unet.conv_head_gpu(h, s8w, s8h)?);
@@ -579,8 +590,25 @@ pub(crate) fn walk_extras_on_resident(
     let vox_eighth = &ctx.vox_eighth;
 
     let mut skips: Vec<BatchAct> = vec![xs.clone_act()?];
+    // MAKEPAD_PBR_UNET_TAP=<dir>: dump the activation after named stages
+    // (planar [n][c][hw] f32) for a step-0 bisect against official hooks.
+    let tap_dir = std::env::var("MAKEPAD_PBR_UNET_TAP").ok();
+    let tap = |name: &str, x: &BatchAct| {
+        if let Some(dir) = &tap_dir {
+            if let Ok(v) = gpu_download(&x.t) {
+                let mut bytes = Vec::with_capacity(v.len() * 4);
+                for f in &v {
+                    bytes.extend_from_slice(&f.to_le_bytes());
+                }
+                let _ = std::fs::write(format!("{dir}/unet_tap_{name}.f32"), bytes);
+                eprintln!("[pbr-unet-tap] {name} n={} c={} {}x{}", x.n, x.c, x.w, x.h);
+            }
+        }
+    };
+    tap("conv_in", &xs);
 
     xs = unet.resnet_batch_act(&xs, &temb_act, "unet.down_blocks.0.resnets.0", 320)?;
+    tap("down0_res0", &xs);
     xs = unet.transformer2d_extras_batch(
         &xs,
         "unet.down_blocks.0.attentions.0",
