@@ -216,7 +216,7 @@ pub use {
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         texture::{
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
-            TextureSize, TextureUpdated,
+            TextureSize, TextureUpdated, TextureWrap,
         },
         thread::*,
         ui_runner::*,

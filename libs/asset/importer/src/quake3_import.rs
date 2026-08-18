@@ -1954,11 +1954,12 @@ fn assemble_weapon(
     let gun_b = std::fs::read(gun_path).map_err(|e| e.to_string())?;
     let gun = Md3File::parse(&gun_b)?;
     let barrel_rel = format!("models/weapons2/{name}/{name}_barrel.md3");
-    let barrel = by_rel.get(&barrel_rel).and_then(|p| {
-        std::fs::read(p)
-            .ok()
-            .and_then(|b| Md3File::parse(&b).ok().map(|m| (p.clone(), m)))
-    });
+    let barrel_path = by_rel.get(&barrel_rel).cloned();
+    let barrel_bytes = barrel_path.as_ref().and_then(|p| std::fs::read(p).ok());
+    let barrel = match (barrel_path.as_ref(), barrel_bytes.as_deref()) {
+        (Some(p), Some(b)) => Md3File::parse(b).ok().map(|m| (p.clone(), m)),
+        _ => None,
+    };
     let mut skins = load_md3_skins(gun_path);
     if let Some((bp, _)) = &barrel {
         skins.extend(load_md3_skins(bp));
@@ -2119,7 +2120,7 @@ fn xform_point(t: TagXform, p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn xform_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
+fn xform_tag_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
     [
         t.axis[0][0] * p[0] + t.axis[1][0] * p[1] + t.axis[2][0] * p[2],
         t.axis[0][1] * p[0] + t.axis[1][1] * p[1] + t.axis[2][1] * p[2],
@@ -2130,7 +2131,11 @@ fn xform_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
 fn mul_tag(a: TagXform, b: TagXform) -> TagXform {
     TagXform {
         origin: xform_point(a, b.origin),
-        axis: [xform_dir(a, b.axis[0]), xform_dir(a, b.axis[1]), xform_dir(a, b.axis[2])],
+        axis: [
+            xform_tag_dir(a, b.axis[0]),
+            xform_tag_dir(a, b.axis[1]),
+            xform_tag_dir(a, b.axis[2]),
+        ],
     }
 }
 
@@ -2146,7 +2151,7 @@ fn invert_tag(t: TagXform) -> TagXform {
     };
     let neg = [-t.origin[0], -t.origin[1], -t.origin[2]];
     TagXform {
-        origin: xform_dir(inv, neg),
+        origin: xform_tag_dir(inv, neg),
         axis,
     }
 }
@@ -2344,7 +2349,7 @@ fn anim_first(anims: &[Q3Anim], name: &str) -> Option<i32> {
     anims.iter().find(|a| a.name.eq_ignore_ascii_case(name)).map(|a| a.first)
 }
 
-fn anim_get(anims: &[Q3Anim], name: &str) -> Option<&Q3Anim> {
+fn anim_get<'a>(anims: &'a [Q3Anim], name: &str) -> Option<&'a Q3Anim> {
     anims.iter().find(|a| a.name.eq_ignore_ascii_case(name))
 }
 

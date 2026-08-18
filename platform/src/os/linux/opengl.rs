@@ -2521,15 +2521,19 @@ impl CxTexture {
 
         unsafe {
             (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+            let wrap = match self.format.wrap() {
+                crate::texture::TextureWrap::Repeat => gl_sys::REPEAT as i32,
+                crate::texture::TextureWrap::ClampToEdge => gl_sys::CLAMP_TO_EDGE as i32,
+            };
             (gl.glTexParameteri)(
                 gl_sys::TEXTURE_2D,
                 gl_sys::TEXTURE_WRAP_S,
-                gl_sys::CLAMP_TO_EDGE as i32,
+                wrap,
             );
             (gl.glTexParameteri)(
                 gl_sys::TEXTURE_2D,
                 gl_sys::TEXTURE_WRAP_T,
-                gl_sys::CLAMP_TO_EDGE as i32,
+                wrap,
             );
 
             // Set texture parameters based on the format
