@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use makepad_zune_core::bytestream::{ZByteIoError, ZByteWriterTrait, ZWriter};
 use makepad_zune_core::options::EncoderOptions;
+#[cfg(not(feature = "std"))]
 use makepad_zune_inflate::DeflateEncoder;
 
 use crate::constants::PNG_SIGNATURE;
@@ -149,8 +150,18 @@ impl<'a> PngEncoder<'a> {
                 components
             );
         }
-        // encode filtered scanline
-        self.encoded_chunks = DeflateEncoder::new(&self.filter_scanline).encode_zlib();
+        // The bundled zune-inflate encoder currently only emits stored
+        // DEFLATE blocks. That is a valid PNG, but makes large generated
+        // atlases almost exactly raw RGBA size. Standard builds use the
+        // in-repo compressor; retain the store-only fallback for no_std.
+        #[cfg(feature = "std")]
+        {
+            self.encoded_chunks = makepad_fast_inflate::zlib_compress(&self.filter_scanline, 6);
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.encoded_chunks = DeflateEncoder::new(&self.filter_scanline).encode_zlib();
+        }
     }
     fn write_idat_chunks<T: ZByteWriterTrait>(
         &self, writer: &mut ZWriter<T>
@@ -197,4 +208,24 @@ fn test_simple_write() {
     let mut hello = PngDecoder::new(ZCursor::new(&sink));
     let bytes = hello.decode_raw().unwrap();
     assert_eq!(&data, &bytes);
+}
+
+#[test]
+#[cfg(feature = "std")]
+fn repetitive_rgba_is_actually_compressed() {
+    use makepad_zune_core::bit_depth::BitDepth;
+    use makepad_zune_core::colorspace::ColorSpace;
+
+    let width = 256;
+    let height = 256;
+    let data = vec![127u8; width * height * 4];
+    let options = EncoderOptions::default()
+        .set_colorspace(ColorSpace::RGBA)
+        .set_width(width)
+        .set_height(height)
+        .set_depth(BitDepth::Eight);
+    let mut encoder = PngEncoder::new(&data, options);
+    let mut sink = vec![];
+    encoder.encode(&mut sink).unwrap();
+    assert!(sink.len() < data.len() / 20, "png bytes {}", sink.len());
 }

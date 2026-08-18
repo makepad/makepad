@@ -1,12 +1,10 @@
 //! Minimal PNG codec for raster overlay tiles: 8-bit grayscale (class-index
 //! rasters like noise/flood) and 8-bit RGB (terrarium elevation). Encoder
-//! writes filter-0 rows + zlib (flate2); decoder handles exactly what any
+//! writes filter-0 rows + zlib; decoder handles exactly what any
 //! standard encoder emits for these formats (all five row filters,
 //! non-interlaced). CRC32 is the 30-line table version — not worth a dep.
 
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
-use std::io::Write;
+use makepad_fast_inflate::{zlib_compress, zlib_decompress_vec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PngFormat {
@@ -38,9 +36,7 @@ pub fn encode(width: u32, height: u32, format: PngFormat, pixels: &[u8]) -> Vec<
         raw.push(0); // filter type 0
         raw.extend_from_slice(row);
     }
-    let mut z = ZlibEncoder::new(Vec::new(), Compression::new(6));
-    z.write_all(&raw).unwrap();
-    let idat = z.finish().unwrap();
+    let idat = zlib_compress(&raw, 6);
 
     let mut out = Vec::with_capacity(idat.len() + 64);
     out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -101,10 +97,7 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng, String> {
         return Err("png missing IHDR".into());
     }
 
-    let mut raw = Vec::new();
-    flate2::read::ZlibDecoder::new(&idat[..])
-        .read_to_end(&mut raw)
-        .map_err(|e| format!("png inflate: {e}"))?;
+    let raw = zlib_decompress_vec(&idat).map_err(|e| format!("png inflate: {e}"))?;
 
     let bpp = format.bytes_per_pixel();
     let stride = width as usize * bpp;

@@ -21,9 +21,7 @@
 //! Output: layer "bridge_dz", one LineString per way with tag dz =
 //! comma-joined decimeters per vertex and hw = corridor half-width meters.
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use makepad_fast_inflate::gzip_decompress_vec;
+use makepad_fast_inflate::{gzip_compress, gzip_decompress_vec};
 use makepad_geodata::tiff::Tiff;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
 use std::collections::HashMap;
@@ -4528,12 +4526,7 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
     jobs.sort_by_key(|job| (job.y >> 8, job.x >> 8, job.y & 255, job.x & 255));
     for job in jobs {
         let pbf = encode_tile(job.features)?;
-        let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
-        gzip.write_all(&pbf)
-            .map_err(|e| format!("gzip tile {}/{}/{}: {e}", job.z, job.x, job.y))?;
-        let tile = gzip
-            .finish()
-            .map_err(|e| format!("finish gzip tile {}/{}/{}: {e}", job.z, job.x, job.y))?;
+        let tile = gzip_compress(&pbf, 1);
         writer
             .write_tile_xyz(job.z, job.x, job.y, &tile)
             .map_err(|e| format!("write tile {}/{}/{}: {e}", job.z, job.x, job.y))?;
