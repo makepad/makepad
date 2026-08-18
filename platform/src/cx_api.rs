@@ -928,13 +928,13 @@ impl Cx {
     /// deltas keep flowing as MouseMove events; unlock restores the cursor.
     /// Convention: lock on the game's own click, RELEASE ON ESCAPE.
     pub fn lock_mouse_pointer(&mut self, lock: bool) {
-        self.platform_ops.push(CxOsOp::LockMousePointer(lock));
+        self.platform_ops.push_back(CxOsOp::LockMousePointer(lock));
     }
 
     /// Call once per frame while holding the lock — keeps the hardware
     /// cursor pinned even when the OS quietly drops the disassociation.
     pub fn repin_mouse_pointer(&mut self) {
-        self.platform_ops.push(CxOsOp::RepinMousePointer);
+        self.platform_ops.push_back(CxOsOp::RepinMousePointer);
     }
 
     pub fn show_in_dock(&mut self, show: bool) {
@@ -1165,7 +1165,7 @@ impl Cx {
             }
         });
         self.platform_ops
-            .push(CxOsOp::StartExternalDragging { window_id, items });
+            .push_back(CxOsOp::StartExternalDragging { window_id, items });
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
