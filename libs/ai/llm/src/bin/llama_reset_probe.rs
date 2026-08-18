@@ -49,12 +49,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let model_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "local/models/Qwen3.5-4B-Q5_K_M.gguf".to_string());
+    let mode = std::env::args().nth(2).unwrap_or_default();
     let config = LlamaSessionConfig {
         max_context: Some(2048),
         ..LlamaSessionConfig::default()
     };
     let mut session = LlamaSession::load(&model_path, config)?;
     let vocab = session.vocab().clone();
+
+    // `once`: single prefill + short decode, then exit — the minimal target
+    // for compute-sanitizer racecheck/initcheck runs.
+    if mode == "once" {
+        let toks = decode_run(&mut session, &vocab, CHAT_PROMPT, 4, "once")?;
+        println!("once ({} tok): {:?}", toks.len(), &toks);
+        return Ok(());
+    }
+    // `hammer N`: N times (reset + prefill + 1 greedy step), count distinct
+    // first-token outcomes — quantifies the nondeterminism incidence.
+    if mode == "hammer" {
+        let n: usize = std::env::args()
+            .nth(3)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let mut outcomes: std::collections::BTreeMap<String, usize> = Default::default();
+        for _ in 0..n {
+            session.reset()?;
+            let toks = decode_run(&mut session, &vocab, CHAT_PROMPT, 1, "hammer")?;
+            *outcomes.entry(format!("{toks:?}")).or_default() += 1;
+        }
+        println!("hammer outcomes over {n} runs:");
+        for (outcome, count) in &outcomes {
+            println!("  {count}x {outcome}");
+        }
+        println!(
+            "{}",
+            if outcomes.len() == 1 {
+                "PASS hammer deterministic"
+            } else {
+                "FAIL hammer nondeterministic"
+            }
+        );
+        return Ok(());
+    }
 
     let mut failures = 0;
 
