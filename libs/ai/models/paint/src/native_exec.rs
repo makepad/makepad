@@ -200,7 +200,11 @@ impl NativeHunyuanExec {
             return Err(PbrError::InvalidParams("no views to encode".into()));
         }
         let target = cond.resolution;
-        let ref_resized = resize_rgb8_bilinear(
+        // Official `forward_one`: `PIL.Image.resize((view_size, view_size))`
+        // — Pillow's default RGB filter is BICUBIC (antialiased). Both the
+        // VAE reference latent and the DINO chain consume this image, so the
+        // resampler must match PIL, not a bilinear tap.
+        let ref_resized = dino_vit::resize_rgb8_bicubic_pil(
             cond.reference_rgb,
             cond.ref_width as usize,
             cond.ref_height as usize,

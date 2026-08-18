@@ -126,7 +126,14 @@ fn cubic_kernel(x: f32) -> f32 {
     cubic_kernel_a(x, -0.75)
 }
 
-/// PIL `Image.BICUBIC` / BitImageProcessor resample=3 uses a = -0.5.
+/// PIL `Image.resize(..., BICUBIC)` (BitImageProcessor resample=3): a = -0.5,
+/// separable, and — the part a naive 4-tap port misses — ANTIALIASED for
+/// downscaling: the filter support widens by the scale factor (support =
+/// 2 * scale taps each side) and the weights renormalize, exactly PIL's
+/// `ImagingResampleHorizontal/Vertical` (libImaging/Resample.c). Center
+/// convention `(i + 0.5) * scale`, source window `[center - support,
+/// center + support)`, edges clamped by window clipping (not by clamping
+/// samples).
 pub fn resize_rgb8_bicubic_pil(
     rgb: &[u8],
     src_w: usize,
@@ -140,35 +147,74 @@ pub fn resize_rgb8_bicubic_pil(
     if src_w == dst_w && src_h == dst_h {
         return Ok(rgb.to_vec());
     }
-    let mut out = vec![0u8; dst_w * dst_h * 3];
-    let scale_y = src_h as f32 / dst_h as f32;
-    let scale_x = src_w as f32 / dst_w as f32;
-    let at = |y: i32, x: i32, c: usize| -> f32 {
-        let yy = y.clamp(0, src_h as i32 - 1) as usize;
-        let xx = x.clamp(0, src_w as i32 - 1) as usize;
-        rgb[(yy * src_w + xx) * 3 + c] as f32
-    };
-    for y in 0..dst_h {
-        let fy = (y as f32 + 0.5) * scale_y - 0.5;
-        let y0 = fy.floor() as i32;
-        let ty = fy - y0 as f32;
+    // Horizontal pass to f32 [src_h][dst_w][3], then vertical to [dst_h][dst_w][3].
+    let (xw, xb) = pil_precompute_coeffs(src_w, dst_w);
+    let mut tmp = vec![0.0f32; src_h * dst_w * 3];
+    for y in 0..src_h {
         for x in 0..dst_w {
-            let fx = (x as f32 + 0.5) * scale_x - 0.5;
-            let x0 = fx.floor() as i32;
-            let tx = fx - x0 as f32;
+            let (x_min, ws) = (xb[x], &xw[x]);
             for c in 0..3 {
                 let mut acc = 0.0f32;
-                for ky in -1i32..=2 {
-                    let wy = cubic_kernel_a(ty - ky as f32, -0.5);
-                    for kx in -1i32..=2 {
-                        acc += wy * cubic_kernel_a(tx - kx as f32, -0.5) * at(y0 + ky, x0 + kx, c);
-                    }
+                for (k, w) in ws.iter().enumerate() {
+                    acc += *w * rgb[(y * src_w + x_min + k) * 3 + c] as f32;
                 }
-                out[(y * dst_w + x) * 3 + c] = acc.round().clamp(0.0, 255.0) as u8;
+                tmp[(y * dst_w + x) * 3 + c] = acc;
+            }
+        }
+    }
+    let (yw, yb) = pil_precompute_coeffs(src_h, dst_h);
+    let mut out = vec![0u8; dst_w * dst_h * 3];
+    for y in 0..dst_h {
+        let (y_min, ws) = (yb[y], &yw[y]);
+        for x in 0..dst_w {
+            for c in 0..3 {
+                let mut acc = 0.0f32;
+                for (k, w) in ws.iter().enumerate() {
+                    acc += *w * tmp[((y_min + k) * dst_w + x) * 3 + c];
+                }
+                out[(y * dst_w + x) * 3 + c] = (acc + 0.5).floor().clamp(0.0, 255.0) as u8;
             }
         }
     }
     Ok(out)
+}
+
+/// PIL `precompute_coeffs` for BICUBIC (support 2.0, a = -0.5): per output
+/// pixel, the source start index and normalized weights.
+fn pil_precompute_coeffs(in_size: usize, out_size: usize) -> (Vec<Vec<f32>>, Vec<usize>) {
+    const FILTER_SUPPORT: f64 = 2.0;
+    let scale = in_size as f64 / out_size as f64;
+    let filterscale = scale.max(1.0);
+    let support = FILTER_SUPPORT * filterscale;
+    let mut weights = Vec::with_capacity(out_size);
+    let mut bounds = Vec::with_capacity(out_size);
+    for xx in 0..out_size {
+        let center = (xx as f64 + 0.5) * scale;
+        let mut xmin = (center - support + 0.5).floor() as i64;
+        if xmin < 0 {
+            xmin = 0;
+        }
+        let mut xmax = (center + support + 0.5).floor() as i64;
+        if xmax > in_size as i64 {
+            xmax = in_size as i64;
+        }
+        let ss = 1.0 / filterscale;
+        let mut ws = Vec::with_capacity((xmax - xmin) as usize);
+        let mut total = 0.0f64;
+        for x in xmin..xmax {
+            let w = cubic_kernel_a((((x - xmin) as f64 + xmin as f64 - center + 0.5) * ss) as f32, -0.5) as f64;
+            ws.push(w);
+            total += w;
+        }
+        if total != 0.0 {
+            for w in &mut ws {
+                *w /= total;
+            }
+        }
+        weights.push(ws.iter().map(|w| *w as f32).collect());
+        bounds.push(xmin as usize);
+    }
+    (weights, bounds)
 }
 
 /// Bicubic, `align_corners=False`, sample at `(i + 0.5) * old/new - 0.5`.
