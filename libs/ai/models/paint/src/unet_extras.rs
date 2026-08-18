@@ -754,34 +754,9 @@ impl UnetFirst {
             let attn = attn_cross_batched(q_all, &k, &v, batch, heads, scale)?;
             return self.linear_tokens(&attn, &format!("{prefix}.to_out.0"), true);
         }
-        if n_cfg == 3 {
-            let (k0, v0) = self.encoder_kv(enc0, prefix, "enc0")?;
-            let q0 = gpu_slice_rows(q_all, 0, group)?;
-            let c0 = attn_cross(&q0, &k0, &v0, heads, scale)?;
-
-            let q_alb = concat_rows_n(&[
-                gpu_slice_rows(q_all, group, view_blk)?,
-                gpu_slice_rows(q_all, 2 * group, view_blk)?,
-            ])?;
-            let (k_alb, v_alb) = self.encoder_kv(enc_alb, prefix, "enc_alb")?;
-            let c_alb = attn_cross(&q_alb, &k_alb, &v_alb, heads, scale)?;
-
-            let q_mr = concat_rows_n(&[
-                gpu_slice_rows(q_all, group + view_blk, view_blk)?,
-                gpu_slice_rows(q_all, 2 * group + view_blk, view_blk)?,
-            ])?;
-            let (k_mr, v_mr) = self.encoder_kv(enc_mr, prefix, "enc_mr")?;
-            let c_mr = attn_cross(&q_mr, &k_mr, &v_mr, heads, scale)?;
-
-            let packed = concat_rows_n(&[c0, c_alb, c_mr])?;
-            let packed = self.linear_tokens(&packed, &format!("{prefix}.to_out.0"), true)?;
-            let c0 = gpu_slice_rows(&packed, 0, group)?;
-            let c1_alb = gpu_slice_rows(&packed, group, view_blk)?;
-            let c2_alb = gpu_slice_rows(&packed, group + view_blk, view_blk)?;
-            let c1_mr = gpu_slice_rows(&packed, group + 2 * view_blk, view_blk)?;
-            let c2_mr = gpu_slice_rows(&packed, group + 3 * view_blk, view_blk)?;
-            return concat_rows_n(&[c0, c1_alb, c1_mr, c2_alb, c2_mr]);
-        }
+        // All three CFG branches (uncond included) attend the learned
+        // per-material shading tokens — see pack_text_kv_official.
+        let _ = enc0;
         let mut parts = Vec::with_capacity(n_cfg * 2);
         for cfg in 0..n_cfg {
             let q_alb = gpu_slice_rows(q_all, cfg * group, view_blk)?;
@@ -866,18 +841,23 @@ fn concat_rows_n(xs: &[GpuTensor]) -> Result<GpuTensor, String> {
 /// Official `encoder.unsqueeze(-3).repeat(1,1,N_gen)` then
 /// `rearrange("b n_pbr n l c -> (b n_pbr n) l c")` for 3-branch CFG:
 /// zeros on cfg0 both materials, learned alb, learned mr.
+/// Official `pipeline.py`: `negative_prompt_embeds = torch.stack(all_shading_tokens)`
+/// — the UNCOND branch carries the SAME learned per-material shading tokens
+/// as the conditioned branches (the `zeros_like` variant is commented out
+/// upstream). Only DINO and the reference scale differ across CFG branches.
+/// `k0` (zeros) is unused on the text lane and kept only for the signature.
 fn pack_text_kv_official(
-    k0: &GpuTensor,
+    _k0: &GpuTensor,
     k_alb: &GpuTensor,
     k_mr: &GpuTensor,
     n_views: usize,
 ) -> Result<GpuTensor, String> {
     let mut parts = Vec::with_capacity(3 * 2 * n_views);
     for _ in 0..n_views {
-        parts.push(k0);
+        parts.push(k_alb);
     }
     for _ in 0..n_views {
-        parts.push(k0);
+        parts.push(k_mr);
     }
     for _ in 0..n_views {
         parts.push(k_alb);
