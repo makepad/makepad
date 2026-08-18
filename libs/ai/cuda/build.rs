@@ -184,6 +184,23 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     println!("cargo:rustc-link-lib=static=ggml_cuda_affine");
     if target_os == "linux" {
         println!("cargo:rustc-link-lib=dylib=stdc++");
+        let lib_dir = cuda_root.join("lib64");
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=cudart");
+        println!("cargo:rustc-link-lib=dylib=cublas");
+        println!("cargo:rustc-link-lib=dylib=cublasLt");
+        if lib_dir.join("libcudnn.so").exists() {
+            println!("cargo:rustc-link-lib=dylib=cudnn");
+        }
+    } else if target_os == "windows" {
+        let lib_dir = cuda_root.join("lib").join("x64");
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=cudart");
+        println!("cargo:rustc-link-lib=dylib=cublas");
+        println!("cargo:rustc-link-lib=dylib=cublasLt");
+        if lib_dir.join("cudnn.lib").exists() {
+            println!("cargo:rustc-link-lib=dylib=cudnn");
+        }
     }
     println!("cargo:rustc-cfg=makepad_ai_cuda_kernels");
     // links-metadata handshake: flows to immediate dependents (libs/ggml,
