@@ -340,6 +340,11 @@ impl TriMesh {
         for n in &mut self.normals {
             *n = [-n[0], n[2], -n[1]];
         }
+        // The map is a reflection (det -1): restore right-handed winding so
+        // cross-product normals stay outward and tangent frames stay sane.
+        for tri in &mut self.indices {
+            tri.swap(1, 2);
+        }
     }
 
     /// The upstream renderer's normalization (MeshRender.py `set_mesh`,
