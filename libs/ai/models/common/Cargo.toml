@@ -1,0 +1,9 @@
+[package]
+name = "makepad-ai-common"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-family internals shared by the AI model family crates: the DiffusionError type and the plain sharded-safetensors-directory reader. Split out of libs/diffusion (lane T6a, /aiarch.md)."
+license = "MIT"
+
+[dependencies]
+makepad-ai-loader = { path = "../../loader" }
