@@ -7,9 +7,9 @@
 //!
 //! Run from the makepad root so the Whisper model resolves:
 //!
-//!     cargo run --release --manifest-path libs/tts/Cargo.toml --example roundtrip
+//!     cargo run --release --manifest-path libs/ai/models/speech/Cargo.toml --example roundtrip
 
-use makepad_tts::{SpeechAudio, Speaker};
+use makepad_ai_speech::{SpeechAudio, Speaker};
 use makepad_voice::{VoiceTranscribeParams, VoiceTranscriber};
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -98,7 +98,7 @@ fn normalize(text: &str) -> Vec<String> {
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|word| !word.is_empty())
         .flat_map(|word| match word.parse::<u64>() {
-            Ok(number) => makepad_tts::g2p::spell_number(number)
+            Ok(number) => makepad_ai_speech::g2p::spell_number(number)
                 .split_whitespace()
                 .map(str::to_string)
                 .collect::<Vec<_>>(),
