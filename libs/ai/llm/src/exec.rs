@@ -288,6 +288,36 @@ impl ExecRuntime {
             )),
         }
     }
+
+    /// Read back a logical context-image range from the live device buffer.
+    /// Debug/verify path (e.g. proving a state clear actually reached the
+    /// device); not used on the hot path.
+    pub fn read_state_range(
+        &self,
+        buffers: &ExecContextBuffers,
+        offset: usize,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        match (self, buffers) {
+            (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
+                let main_offset = offset.checked_sub(buffers.ro_split).ok_or_else(|| {
+                    LlamaError::format(format!(
+                        "read-only Metal state range [{}..+{}) below split {}",
+                        offset, len, buffers.ro_split,
+                    ))
+                })?;
+                runtime
+                    .read_buffer_range(&buffers.main_buffer, main_offset, len)
+                    .map_err(LlamaError::format)
+            }
+            (Self::Cuda(runtime), ExecContextBuffers::Cuda(arena)) => {
+                runtime.read_arena_bytes(arena, offset, len)
+            }
+            _ => Err(LlamaError::format(
+                "execution runtime and context buffers belong to different backends",
+            )),
+        }
+    }
 }
 
 impl CompiledHybridDecode {

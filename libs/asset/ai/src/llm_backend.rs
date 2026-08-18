@@ -99,6 +99,11 @@ pub struct ExpandJob {
     /// Appended after the generated text in the worker's committed prefix.
     /// Expander jobs use `"\n"`; chat uses [`crate::protocol::CHAT_COMMIT_SUFFIX`].
     pub commit_suffix: String,
+    /// KV-reuse domain: `"chat"` or `"expand:<target_domain>"`. Jobs of
+    /// different kinds never continue each other's committed prefix — the
+    /// ChatML systems differ, so a prefix match would be meaningless and a
+    /// stale one is the expand→chat contamination path.
+    pub kind: String,
 }
 
 /// The full Qwen ChatML prompt for one expansion. `think_prefill` is the
@@ -414,8 +419,15 @@ impl ContentBackend for LlmBackend {
                 // can spend the whole budget inside the think block; after
                 // clean_expansion strips it the expansion is empty and the
                 // image/video/mesh pipeline has nothing to feed forward.
+                // Chat gets the same treatment at a lower floor: a 32-token
+                // chat budget is spent inside the open think and the reply
+                // truncates to nothing.
                 max_tokens: if is_chat {
-                    params.max_tokens
+                    if crate::protocol::model_uses_open_think(&self.model_id) {
+                        params.max_tokens.max(128)
+                    } else {
+                        params.max_tokens
+                    }
                 } else if crate::protocol::model_uses_open_think(&self.model_id) {
                     params.max_tokens.max(512)
                 } else {
@@ -433,6 +445,11 @@ impl ContentBackend for LlmBackend {
                     crate::protocol::CHAT_COMMIT_SUFFIX.to_string()
                 } else {
                     "\n".to_string()
+                },
+                kind: if is_chat {
+                    "chat".to_string()
+                } else {
+                    format!("expand:{}", params.target_domain)
                 },
             };
             let sink = std::cell::RefCell::new(&mut *progress);
@@ -576,7 +593,15 @@ mod llama_worker {
                         }
                     };
                     let mut committed = String::new();
+                    let mut last_kind = String::new();
                     while let Ok(WorkerMsg::Expand(job, cancel, events)) = rx.recv() {
+                        if job.kind != last_kind {
+                            // Different ChatML family (expand vs chat, or a
+                            // different expander domain): never extend the
+                            // previous prefix, always reprefill from reset.
+                            committed.clear();
+                            last_kind = job.kind.clone();
+                        }
                         let result =
                             run_expand(&mut session, &mut committed, &job, &cancel, &events);
                         let _ = events.send(WorkerEvent::Done(result));
@@ -649,6 +674,14 @@ mod llama_worker {
             Ok::<Vec<i32>, String>(tokens)
         };
         let reuse = !committed.is_empty() && job.prompt_text.starts_with(committed.as_str());
+        eprintln!(
+            "[llm-worker] job start: reuse={reuse} committed={}B prompt={}B max_tokens={} temp={} suffix={:?}",
+            committed.len(),
+            job.prompt_text.len(),
+            job.max_tokens,
+            job.temperature,
+            job.commit_suffix,
+        );
         if reuse {
             let delta = &job.prompt_text[committed.len()..];
             if !delta.is_empty() {
@@ -737,6 +770,13 @@ mod llama_worker {
             .vocab()
             .decode_tokens(&token_ids)
             .map_err(|e| format!("detokenize: {e:?}"))?;
+        eprintln!(
+            "[llm-worker] job end: decoded={} tok first={:?} eos={:?} session_tokens={}",
+            token_ids.len(),
+            token_ids.first(),
+            session.vocab().eos_token_id(),
+            session.token_count(),
+        );
         committed.clear();
         committed.push_str(&job.prompt_text);
         committed.push_str(&text);
