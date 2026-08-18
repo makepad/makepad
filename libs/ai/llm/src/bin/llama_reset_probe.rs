@@ -104,6 +104,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("expand2 ({} tok) text: {:?}", e2.len(), vocab.decode_tokens(&e2)?);
     }
 
+    // 4. Name the leaking buffers: snapshot every tensor right after two
+    // different resets. Anything that differs carries state across reset.
+    session.reset()?;
+    let s1 = session.debug_state_snapshot()?;
+    let _ = decode_run(&mut session, &vocab, CHAT_PROMPT, 8, "leak-probe")?;
+    session.reset()?;
+    let s2 = session.debug_state_snapshot()?;
+    let mut diffs = 0;
+    for ((n1, off, len, h1), (_, _, _, h2)) in s1.iter().zip(s2.iter()) {
+        if h1 != h2 {
+            diffs += 1;
+            if diffs <= 60 {
+                println!("LEAK {n1} at {off} len {len}");
+            }
+        }
+    }
+    println!("{diffs} tensors differ across reset (of {})", s1.len());
+
     if failures == 0 {
         println!("ALL GREEN");
         Ok(())

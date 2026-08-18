@@ -279,6 +279,40 @@ impl LlamaSession {
         Ok(hash)
     }
 
+    /// Debug: hash every allocated context tensor's live device bytes
+    /// (capped at 1 MiB each). Diffing two snapshots taken at points that
+    /// should be identical (e.g. right after two different `reset()` calls)
+    /// names exactly which buffers carry state across the reset.
+    pub fn debug_state_snapshot(&self) -> Result<Vec<(String, usize, usize, u64)>> {
+        const WINDOW: usize = 1 << 20;
+        let ctx = &self.weights.ctx;
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, tensor) in ctx.tensors().iter().enumerate() {
+            let Some(offset) = tensor.data_offset else { continue };
+            let len = tensor.nbytes().min(WINDOW);
+            if len == 0 || !seen.insert((offset, len)) {
+                continue;
+            }
+            let bytes = self.graphs.shared_runtime.read_state_range(
+                &self.graphs.shared_buffers,
+                offset,
+                len,
+            )?;
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for chunk in bytes.chunks_exact(8) {
+                hash ^= u64::from_le_bytes(chunk.try_into().unwrap());
+                hash = hash.wrapping_mul(0x1000_0000_01b3);
+            }
+            let name = tensor
+                .name()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("tensor#{index}"));
+            out.push((name, offset, len, hash));
+        }
+        Ok(out)
+    }
+
     /// Debug (MAKEPAD_LLM_RESET_VERIFY=1): read every shared cache tensor
     /// back from the live device buffer and report any that still holds
     /// nonzero bytes after `reset`. Catches a clear that silently missed the
