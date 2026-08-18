@@ -17,7 +17,6 @@ workspace.members = [
     "libs/remesh",
     "libs/xatlas",
     # === examples ===
-    "examples/hotload_ui",
     "examples/teamtalk",
     "examples/automate",
     "examples/map",
