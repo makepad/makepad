@@ -1,11 +1,10 @@
 //! Doom / Freedoom IWAD conversion (WAD lumps, maps, patches, sprites).
 
 use super::shared::*;
-use crate::world_place;
 use makepad_asset_data::AssetKind;
 use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Doom WAD
@@ -470,8 +469,8 @@ pub(crate) fn quake_bsp_spawn(bytes: &[u8]) -> Option<WorldSpawn> {
     let text = std::str::from_utf8(&bytes[off..off + len]).ok()?;
     let mut best: Option<WorldSpawn> = None;
     let mut block_class = String::new();
-    let mut origin = None;
-    let mut angle = 0.0f32;
+    let mut origin;
+    let mut angle;
     let flush = |class: &str, origin: Option<[f32; 3]>, angle: f32| -> Option<WorldSpawn> {
         let o = origin?;
         let rank = match class {

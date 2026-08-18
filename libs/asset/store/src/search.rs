@@ -238,7 +238,16 @@ CREATE TABLE search_annotations_v6(
     updated_ms INTEGER NOT NULL,
     canon_alias TEXT NOT NULL DEFAULT ''
 );
-INSERT INTO search_annotations_v6 SELECT * FROM search_annotations;
+INSERT INTO search_annotations_v6(
+    asset_id, namespace, kind, visibility, owner, title, description,
+    creator, generator, backend, model, prompt, provenance, live,
+    updated_ms, canon_alias
+)
+SELECT
+    asset_id, namespace, kind, visibility, owner, title, description,
+    creator, generator, backend, model, prompt, provenance, live,
+    updated_ms, canon_alias
+FROM search_annotations;
 DROP TABLE search_annotations;
 ALTER TABLE search_annotations_v6 RENAME TO search_annotations;
 CREATE INDEX IF NOT EXISTS search_annotations_by_ns ON search_annotations(namespace);

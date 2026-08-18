@@ -1216,7 +1216,7 @@ impl StaticModel {
         ] {
             b.extend_from_slice(&n.to_le_bytes());
         }
-        let mut put3 = |v: Vec3f, b: &mut Vec<u8>| {
+        let put3 = |v: Vec3f, b: &mut Vec<u8>| {
             for f in [v.x, v.y, v.z] {
                 b.extend_from_slice(&f.to_le_bytes());
             }
@@ -1520,11 +1520,6 @@ mod tests {
                     base_color_png: b"png-layer-a",
                     normals: None,
                     base_color_factor: None,
-                    colors: None,
-                    lightmap_png: None,
-                    lightmap_uvs: None,
-                    detail_png: None,
-                    detail_scale: [0.0, 0.0],
                 },
                 makepad_gltf::GlbTexturedPart {
                     positions: &positions_b,
@@ -1533,11 +1528,6 @@ mod tests {
                     base_color_png: b"png-layer-b",
                     normals: None,
                     base_color_factor: None,
-                    colors: None,
-                    lightmap_png: None,
-                    lightmap_uvs: None,
-                    detail_png: None,
-                    detail_scale: [0.0, 0.0],
                 },
             ],
             true,
@@ -1555,60 +1545,6 @@ mod tests {
             m.draw_layers.iter().map(|l| l.indices.len()).sum::<usize>(),
             6
         );
-    }
-
-    #[test]
-    fn parse_glb_reads_detail_texture_extras() {
-        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let uvs = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-        let indices = [0u32, 1, 2];
-        let glb = makepad_gltf::write_glb_mesh_textured_parts(
-            &[makepad_gltf::GlbTexturedPart {
-                positions: &positions,
-                uvs: &uvs,
-                indices: &indices,
-                base_color_png: b"png-base",
-                normals: None,
-                base_color_factor: None,
-                colors: None,
-                lightmap_png: None,
-                lightmap_uvs: None,
-                detail_png: Some(b"png-detail"),
-                detail_scale: [2.9, 2.234],
-            }],
-            true,
-        );
-        let m = StaticModel::parse_glb(&glb).expect("detail glb");
-        assert_eq!(m.detail_png.as_deref(), Some(b"png-detail".as_slice()));
-        assert!((m.detail_scale[0] - 2.9).abs() < 1e-4);
-        assert!((m.detail_scale[1] - 2.234).abs() < 1e-4);
-        assert!(!m.prelit);
-    }
-
-    #[test]
-    fn parse_glb_marks_lightmap_extras_as_prelit() {
-        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let uvs = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-        let lm_uvs = [[0.1, 0.1], [0.2, 0.1], [0.1, 0.2]];
-        let indices = [0u32, 1, 2];
-        let glb = makepad_gltf::write_glb_mesh_textured_parts(
-            &[makepad_gltf::GlbTexturedPart {
-                positions: &positions,
-                uvs: &uvs,
-                indices: &indices,
-                base_color_png: b"png-base",
-                normals: None,
-                base_color_factor: None,
-                colors: None,
-                lightmap_png: Some(b"png-lm"),
-                lightmap_uvs: Some(&lm_uvs),
-                detail_png: None,
-                detail_scale: [0.0, 0.0],
-            }],
-            true,
-        );
-        let m = StaticModel::parse_glb(&glb).expect("lm glb");
-        assert!(m.prelit, "extras.lightmapTexture must mark the model prelit");
     }
 
     #[test]

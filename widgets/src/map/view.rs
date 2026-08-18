@@ -2408,11 +2408,6 @@ impl Widget for MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
-                    fringe_geometry,
-                    fill_3d_geometry,
-                    wall_geometry,
-                    tree_geometry,
-                    tree_cross_geometry,
                     ..
                 } = &entry.state
                 else {

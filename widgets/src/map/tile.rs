@@ -26,7 +26,7 @@ pub const RETRY_MAX_FRAMES: u64 = 300;
 pub const TILE_CACHE_DIR: &str = "local/tilecache_v4";
 pub const TILE_QUERY_PAD: f64 = 0.05;
 // Default archive: the curated Europe Shortbread base produced by
-// `./download_map.sh convert`. Apps can override per-widget via the
+// `./tools/download_map.sh convert`. Apps can override per-widget via the
 // MapView `mbtiles_path` property (examples/map pins Noord-Holland).
 pub const LOCAL_MBTILES_PATH: &str = "local/maps/europe-shortbread.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;

@@ -9,7 +9,6 @@ use crate::import::{
     probe_dir, BakeStats, DiskProbe, ImportPhase, LibraryLanding, ServerSession,
 };
 use makepad_widgets::*;
-use makepad_asset_importer::ao_bake;
 use makepad_asset_importer::classic_import::{
     self, ClassicSource, DUKE3D_CREDITS, DUKE3D_GITHUB, DUKE3D_HOME, DUKE3D_LICENSE,
     DUKE3D_SOURCE_ID, DUKE3D_TERMS_URL, FREEDOOM_CREDITS, FREEDOOM_GITHUB, FREEDOOM_HOME,
@@ -893,7 +892,7 @@ impl ClassicImportCard {
         true
     }
 
-    fn start_next_tdm_span(&mut self, cx: &mut Cx, mut plan: TdmFetchPlan, mut index: usize) -> bool {
+    fn start_next_tdm_span(&mut self, cx: &mut Cx, plan: TdmFetchPlan, mut index: usize) -> bool {
         let cache = self.tdm_cache_dir();
         while index < plan.spans.len()
             && tdm_zipsync::span_is_cached(&cache, &plan.spans[index])

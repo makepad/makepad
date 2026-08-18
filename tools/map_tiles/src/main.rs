@@ -13,7 +13,6 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use versatiles::{decompress_tile, GeoBounds, TileCompression, VersaTilesReader};

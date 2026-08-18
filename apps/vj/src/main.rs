@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Makepad VJ — live performance console over the Asset Server.
 //!
 //! Console window: five surfaces — VIDEO program tiles, MUSIC DJ decks, SFX
@@ -66,9 +67,9 @@ use makepad_asset_data::{
     AssetId, AssetKind, AssetManifest, AssetRevisionId, DeviceTier, FileRole, MediaType,
 };
 use makepad_show_control::{
-    is_vj_reserved_midi, ArtNetConfig, ColorControl, HazardArms, HazardControl, LightSample,
+    is_vj_reserved_midi, ColorControl, HazardArms, HazardControl, LightSample,
     MoverControl, PerformanceConfig, PerformanceState, PowerCaps, PresetBank, RoomShow,
-    SpatialLightSample, StrobeControl, VideoLightAnalyzer, ARTNET_BROADCAST_ADDR, SCENE_COUNT,
+    SpatialLightSample, StrobeControl, VideoLightAnalyzer, ARTNET_BROADCAST_ADDR,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
