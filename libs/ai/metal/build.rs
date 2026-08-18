@@ -36,6 +36,14 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_METAL_PRECOMPILE");
 
+    // shim.rs's non-macos CUDA bounce only compiles when makepad-ai-cuda
+    // actually built kernels (same links-metadata handshake models/common
+    // uses); otherwise a None-returning stub takes its place.
+    println!("cargo:rustc-check-cfg=cfg(makepad_ai_cuda_kernels)");
+    if env::var("DEP_MAKEPAD_AI_CUDA_KERNELS").as_deref() == Ok("1") {
+        println!("cargo:rustc-cfg=makepad_ai_cuda_kernels");
+    }
+
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "macos" {
         build_metallib();
