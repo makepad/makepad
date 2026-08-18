@@ -359,10 +359,14 @@ struct HostScratch {
 }
 
 impl HostScratch {
-    fn ensure(&mut self, size: usize, what: &str) -> Result<*mut u8> {
+    fn ensure(&mut self, size: usize, stream: cudaStream_t, what: &str) -> Result<*mut u8> {
         if self.size < size {
             unsafe {
                 if !self.ptr.is_null() {
+                    // Queued async copies may still be reading this pinned
+                    // buffer (write_inputs H2D stages through it and does not
+                    // sync); freeing it mid-flight is UB. Drain first.
+                    check(cudaStreamSynchronize(stream), "pinned realloc drain")?;
                     cudaFreeHost(self.ptr);
                     self.ptr = std::ptr::null_mut();
                     self.size = 0;
@@ -2252,8 +2256,14 @@ impl ExecView<'_> {
             .state
             .scratch_host
             .borrow_mut()
-            .ensure(total, "pinned input host")?;
+            .ensure(total, stream, "pinned input host")?;
         unsafe {
+            // The same pinned buffer carried the previous step's staged
+            // inputs / logits; overwriting it is only safe once every queued
+            // copy that touches it has drained. read_outputs syncs on the
+            // paths that read logits, but not every execute reads outputs —
+            // pay the (idle-stream, ~µs) sync unconditionally.
+            check(cudaStreamSynchronize(stream), "pinned stage drain")?;
             let mut cursor = 0usize;
             for (_, bytes) in writes {
                 if !bytes.is_empty() {
@@ -2315,7 +2325,7 @@ impl ExecView<'_> {
             .state
             .scratch_host
             .borrow_mut()
-            .ensure(total.max(1), "pinned logits host")?;
+            .ensure(total.max(1), stream, "pinned logits host")?;
         unsafe {
             let mut cursor = 0usize;
             for &tensor_id in wanted {
