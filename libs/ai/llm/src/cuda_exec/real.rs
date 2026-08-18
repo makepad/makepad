@@ -511,6 +511,15 @@ impl Runtime {
                 cudaStreamCreateWithFlags(&mut stream, CUDA_STREAM_NON_BLOCKING),
                 "stream create",
             )?;
+            // cuBLAS split-K reductions are run-to-run nondeterministic by
+            // default. That jitters the logits (measured ±10 on Qwen3.8-27B
+            // prefill on sm120a) and flips borderline first tokens to EOS —
+            // the qwen-chat empty-reply bug. The workspace config forces the
+            // deterministic reduction paths (same mechanism PyTorch uses);
+            // it must be set before the handle is created.
+            if std::env::var_os("CUBLAS_WORKSPACE_CONFIG").is_none() {
+                std::env::set_var("CUBLAS_WORKSPACE_CONFIG", ":4096:8");
+            }
             let mut blas: cublasHandle_t = std::ptr::null_mut();
             if cublasCreate_v2(&mut blas) != CUBLAS_STATUS_SUCCESS {
                 cudaStreamDestroy(stream);
