@@ -61,7 +61,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let w0 = session.debug_weights_fingerprint(16)?;
     println!("weights fingerprint cold:        {w0:016x}");
 
-    // 1. chat -> reset -> chat: identical streams required.
+    // 1. chat -> plain reset -> chat: identical streams required.
     let a = decode_run(&mut session, &vocab, CHAT_PROMPT, 32, "chat A")?;
     let w1 = session.debug_weights_fingerprint(16)?;
     println!("weights fingerprint after chatA: {w1:016x} (changed={})", w1 != w0);
@@ -74,6 +74,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         failures += 1;
         println!("FAIL chat->reset->chat DIVERGED");
+    }
+
+    // 1b. chat -> SCORCHED reset (zero every non-weight tensor) -> chat.
+    let cleared = session.debug_scorched_reset()?;
+    println!("scorched reset cleared {cleared} non-weight tensor ranges");
+    let sb = decode_run(&mut session, &vocab, CHAT_PROMPT, 32, "chat SB")?;
+    println!("chat SB ({} tok): {:?}", sb.len(), &sb);
+    if a == sb {
+        println!("PASS chat->scorched->chat matches cold run");
+    } else {
+        failures += 1;
+        println!("FAIL chat->scorched->chat STILL DIVERGED from cold");
     }
 
     // 2. long expand -> reset -> chat: must still match the clean chat run.
