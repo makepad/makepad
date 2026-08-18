@@ -331,17 +331,34 @@ impl ContentBackend for LlmBackend {
         let prompt_text = if is_chat {
             params.prompt.clone()
         } else {
-            let mut system = system_prompt_for(&params.target_domain, self.prompts_dir.as_deref());
-            if crate::protocol::model_uses_open_think(&self.model_id) {
-                system = format!(
-                    "{}\n\n{system}",
-                    crate::protocol::QWEN38_LOW_EFFORT
-                );
+            let system = format!(
+                "Target domain: {}.\n\n{}",
+                params.target_domain,
+                system_prompt_for(&params.target_domain, self.prompts_dir.as_deref())
+            );
+            let mut user = String::new();
+            if !params.identity_anchor.trim().is_empty() {
+                user.push_str("Identity anchor (repeat this exact text verbatim in the answer): ");
+                user.push_str(params.identity_anchor.trim());
+                user.push('\n');
             }
-            build_prompt_with_think(
+            if !params.style.trim().is_empty() {
+                user.push_str("Style direction: ");
+                user.push_str(params.style.trim());
+                user.push('\n');
+            }
+            user.push_str("Intent: ");
+            user.push_str(params.prompt.trim());
+            // Qwen3.8 chat-shaped open think is the path that actually
+            // decodes. The older expander ChatML + empty/seed </think>
+            // prefill made 3.8 emit EOS on the first token.
+            crate::protocol::assemble_chat_prompt_with_think(
                 &system,
-                params,
-                crate::protocol::think_prefill_for_expand(&self.model_id),
+                &[crate::protocol::ChatMessageJson {
+                    role: "user".to_string(),
+                    text: user,
+                }],
+                crate::protocol::think_prefill_for_model(&self.model_id),
             )
         };
 
@@ -850,14 +867,16 @@ mod tests {
         );
         assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n"));
         assert!(!prompt.contains("</think>"));
-        let expand = build_prompt_with_think(
-            "SYS",
-            &params("a pretty elf", "video"),
-            crate::protocol::think_prefill_for_expand("qwen3.8-27b"),
+        let expand = crate::protocol::assemble_chat_prompt_with_think(
+            "Target domain: video.\n\nSYS",
+            &[crate::protocol::ChatMessageJson {
+                role: "user".to_string(),
+                text: "Intent: a pretty elf".to_string(),
+            }],
+            crate::protocol::think_prefill_for_model("qwen3.8-27b"),
         );
-        assert!(expand.ends_with(
-            "<|im_start|>assistant\n<think>\nWrite the expanded generation prompt next.\n</think>\n\n"
-        ));
+        assert!(expand.ends_with("<|im_start|>assistant\n<think>\n"));
+        assert!(expand.contains("Intent: a pretty elf"));
     }
 
     #[test]
@@ -875,17 +894,18 @@ mod tests {
             let mut backend = LlmBackend::with_stub("qwen3.8-27b", Box::new(|_| Ok("x".into())));
             let mut sink = |_: &str, _: f64| {};
             let _ = backend.generate(&params("x", "video"), &mut sink, &CancelToken::new());
-            build_prompt_with_think(
-                default_system_prompt("video"),
-                &params("x", "video"),
-                crate::protocol::think_prefill_for_expand("qwen3.8-27b"),
+            crate::protocol::assemble_chat_prompt_with_think(
+                &format!("Target domain: video.\n\n{}", default_system_prompt("video")),
+                &[crate::protocol::ChatMessageJson {
+                    role: "user".to_string(),
+                    text: "Intent: x".to_string(),
+                }],
+                crate::protocol::think_prefill_for_model("qwen3.8-27b"),
             )
         };
         assert!(
-            qwen38.ends_with(
-                "<|im_start|>assistant\n<think>\nWrite the expanded generation prompt next.\n</think>\n\n"
-            ),
-            "Qwen3.8 expander must close think with a one-line seed, got {qwen38:?}"
+            qwen38.ends_with("<|im_start|>assistant\n<think>\n"),
+            "Qwen3.8 expander must leave <think> open, got {qwen38:?}"
         );
         // No style line when style is empty.
         let plain = build_prompt(default_system_prompt("mesh"), &params("x", "mesh"));
