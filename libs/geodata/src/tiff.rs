@@ -295,11 +295,8 @@ impl Tiff {
         let mut data = match self.compression {
             1 => raw,
             8 | 32946 => {
-                let mut out = Vec::with_capacity(expected);
-                flate2::read::ZlibDecoder::new(&raw[..])
-                    .read_to_end(&mut out)
-                    .map_err(|e| format!("tiff deflate: {e}"))?;
-                out
+                makepad_fast_inflate::zlib_decompress_vec(&raw)
+                    .map_err(|e| format!("tiff deflate: {e}"))?
             }
             5 => lzw_decode(&raw, expected)?,
             other => return Err(format!("unsupported tiff compression {other}")),

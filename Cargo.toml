@@ -1,20 +1,25 @@
 workspace.members = [
     # === app ===
     "apps/route",
-    # === arcade (game.md) ===
-    "apps/arcade",
+    "apps/asset-ui",
+    "apps/vj",
+    "libs/asset/importer",
+    # Game frontend is the private repo git@github.com:makepad/sandbox
+    # cloned into apps/sandbox (same ../../ path layout as before).
+    "apps/sandbox",
+    "apps/sandbox/tools/sandbox-eval",
+    "libs/asset/data",
+    "libs/asset/client",
+    "libs/asset/store",
+    "libs/asset/chat",
     "libs/game/math",
-    "libs/game/render",
+    "libs/render",
     "libs/game/sim",
-    "libs/game/blocks",
-    "libs/game/gen",
-    "libs/game/audio",
-    "libs/game/script",
-    "libs/game/net",
-    "libs/game/coedit",
-    "libs/game/pkg",
-    "libs/game/session",
-    "libs/game/assets",
+    "libs/show_control",
+    # === remesh (FaithC port) / xatlas (jpcy port) ===
+    "libs/pbr_paint",
+    "libs/remesh",
+    "libs/xatlas",
     # === examples ===
     "examples/hotload_ui",
     "examples/teamtalk",
@@ -26,6 +31,7 @@ workspace.members = [
     "examples/isolate",
     "examples/uizoo",
     "examples/video_player",
+    "examples/video_codec_test",
     "examples/charts",
     "examples/scratchpad",
     "examples/ddgo",
@@ -35,7 +41,6 @@ workspace.members = [
     "examples/comfyui",
     "examples/aichat",
     "examples/godot",
-    "examples/gamemaker",
     "examples/pdf",
     "examples/exf",
     "examples/shader",
@@ -59,18 +64,25 @@ workspace.members = [
     "studio/hub",
     "studio/desktop",
     # === necessary tools ===
+    "platform/video",
     "tools/cargo_makepad",
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
-    "tools/arcade_eval",
+    "tools/ao_bake",
     # === tests ===
     "platform/script/test",
 ]
 
 workspace.exclude = [
     "libs/terminal_core",
+    # standalone GPU generate service (own workspace, like diffusion)
+    "libs/asset/ai",
+    "libs/diffusion",
     "libs/ggml",
+    # standalone CUDA FFI workspace (own [workspace] table; reached as a
+    # target-specific path dep of libs/llama)
+    "libs/cuda",
     "libs/voice",
     "libs/voice2",
     "libs/tts",

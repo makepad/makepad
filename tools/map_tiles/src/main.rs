@@ -1,13 +1,13 @@
 mod bridge_bake;
 mod merge;
 mod mkmap;
+mod ocean;
 mod nav_build;
 mod native;
 mod pbf_audit;
 mod versatiles;
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -23,6 +23,7 @@ Usage:
   makepad-map-tiles versatiles <source.versatiles> <output.mbtiles> [options]
   makepad-map-tiles pbf-detail <source.osm.pbf> <output.mbtiles> --store <directory> [options]
   makepad-map-tiles pbf-base <source.osm.pbf> <output.mbtiles> --store <directory> [options]
+  makepad-map-tiles ocean-tiles <simplified.shp> <full.shp> <out-low.mbtiles> <out-high.mbtiles>
   makepad-map-tiles inspect-pbf <source.osm.pbf>
   makepad-map-tiles audit-pbf <source.osm.pbf>
   makepad-map-tiles probe-mbtiles <source.mbtiles> <z/x/y>
@@ -131,6 +132,9 @@ fn run() -> Result<(), String> {
         }
         let path = path.ok_or("verify-mbtiles needs an archive path")?;
         return verify_mbtiles(Path::new(&path), stride.max(1));
+    }
+    if args.first().is_some_and(|arg| arg == "ocean-tiles") {
+        return ocean::build_ocean(ocean::parse_ocean_options(&args)?);
     }
     if args.first().is_some_and(|arg| arg == "pbf-detail") {
         return native::convert_detail(parse_detail_options(&args)?);
@@ -745,13 +749,7 @@ fn mbtiles_pbf(source: &[u8], compression: TileCompression) -> Result<Vec<u8>, S
         return Ok(source.to_vec());
     }
     let pbf = decompress_tile(source, compression)?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder
-        .write_all(&pbf)
-        .map_err(|err| format!("write gzip stream: {err}"))?;
-    encoder
-        .finish()
-        .map_err(|err| format!("finish gzip stream: {err}"))
+    Ok(gzip_compress(&pbf, 1))
 }
 
 fn parse_options(args: Vec<String>) -> Result<Options, String> {

@@ -1,9 +1,0 @@
-[package]
-name = "makepad-game-pkg"
-version = "0.1.0"
-edition = "2021"
-description = "Game packaging, hardened extraction and registry client for Makepad Arcade (see game.md)"
-license = "MIT OR Apache-2.0"
-
-[dependencies]
-makepad-zip-file = { path = "../../zip_file", version = "1.0.0" }

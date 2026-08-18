@@ -1,0 +1,130 @@
+{
+    "8": {
+        "inputs": {
+            "samples": [
+                "31",
+                0
+            ],
+            "vae": [
+                "39",
+                0
+            ]
+        },
+        "class_type": "VAEDecode",
+        "_meta": {
+            "title": "VAE Decode"
+        }
+    },
+    "9": {
+        "inputs": {
+            "filename_prefix": "flux_schnell",
+            "images": [
+                "8",
+                0
+            ]
+        },
+        "class_type": "SaveImage",
+        "_meta": {
+            "title": "Save Image"
+        }
+    },
+    "27": {
+        "inputs": {
+            "width": 1024,
+            "height": 1024,
+            "batch_size": 1
+        },
+        "class_type": "EmptySD3LatentImage",
+        "_meta": {
+            "title": "EmptySD3LatentImage"
+        }
+    },
+    "31": {
+        "inputs": {
+            "seed": 42,
+            "steps": 4,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": [
+                "38",
+                0
+            ],
+            "positive": [
+                "41",
+                0
+            ],
+            "negative": [
+                "42",
+                0
+            ],
+            "latent_image": [
+                "27",
+                0
+            ]
+        },
+        "class_type": "KSampler",
+        "_meta": {
+            "title": "KSampler"
+        }
+    },
+    "38": {
+        "inputs": {
+            "unet_name": "flux1-schnell.safetensors",
+            "weight_dtype": "default"
+        },
+        "class_type": "UNETLoader",
+        "_meta": {
+            "title": "Load Diffusion Model"
+        }
+    },
+    "39": {
+        "inputs": {
+            "vae_name": "ae.safetensors"
+        },
+        "class_type": "VAELoader",
+        "_meta": {
+            "title": "Load VAE"
+        }
+    },
+    "40": {
+        "inputs": {
+            "clip_name1": "clip_l.safetensors",
+            "clip_name2": "t5xxl_fp16.safetensors",
+            "type": "flux",
+            "device": "default"
+        },
+        "class_type": "DualCLIPLoader",
+        "_meta": {
+            "title": "DualCLIPLoader"
+        }
+    },
+    "41": {
+        "inputs": {
+            "clip_l": "a red fox standing on a mossy rock in a misty forest at dawn, photorealistic",
+            "t5xxl": "a red fox standing on a mossy rock in a misty forest at dawn, photorealistic",
+            "guidance": 3.5,
+            "clip": [
+                "40",
+                0
+            ]
+        },
+        "class_type": "CLIPTextEncodeFlux",
+        "_meta": {
+            "title": "CLIPTextEncodeFlux"
+        }
+    },
+    "42": {
+        "inputs": {
+            "conditioning": [
+                "41",
+                0
+            ]
+        },
+        "class_type": "ConditioningZeroOut",
+        "_meta": {
+            "title": "ConditioningZeroOut"
+        }
+    }
+}

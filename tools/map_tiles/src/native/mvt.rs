@@ -27,6 +27,9 @@ pub enum Layer {
     BasePlaceLabels = 14,
     BaseBoundaries = 15,
     BasePois = 16,
+    /// ocean-tiles output: coastline-derived sea polygons (osmdata water
+    /// polygons). Not part of pbf-base; ships as a standalone overlay.
+    Ocean = 17,
 }
 
 impl Layer {
@@ -49,6 +52,7 @@ impl Layer {
             Self::BasePlaceLabels => "place_labels",
             Self::BaseBoundaries => "boundaries",
             Self::BasePois => "pois",
+            Self::Ocean => "ocean",
         }
     }
 
@@ -71,6 +75,7 @@ impl Layer {
             14 => Ok(Self::BasePlaceLabels),
             15 => Ok(Self::BaseBoundaries),
             16 => Ok(Self::BasePois),
+            17 => Ok(Self::Ocean),
         _ => Err(format!("unknown native tile layer {value}")),
         }
     }

@@ -7,7 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 brotli = "8.0"
-flate2 = "1.0"
 makepad-fast-inflate = { path = "../../libs/fast_inflate" }
 makepad-geodata = { path = "../../libs/geodata" }
 makepad-map-nav = { path = "../../libs/map_nav" }
