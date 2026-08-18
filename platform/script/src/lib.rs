@@ -48,6 +48,7 @@ pub mod opcodes_calls;
 pub mod opcodes_control;
 pub mod opcodes_loops;
 pub mod opcodes_ops;
+pub mod opcodes_slots;
 pub mod opcodes_vars;
 pub mod pod;
 pub mod pod_heap;

@@ -340,6 +340,27 @@ pub struct DrawShaderUniformBufferInput {
     pub buffer_index: usize,
 }
 
+/// The pixel format of the color attachment a shader renders into. Backends
+/// that bake the target format into their pipeline state (Metal, D3D,
+/// Vulkan) read this when building the pipeline; GL-family backends ignore
+/// it (the FBO's texture format decides). Declared in the shader DSL as
+/// `color_format: @Rf32`; the default is the swapchain's BGRA8.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub enum DrawShaderColorFormat {
+    #[default]
+    Bgra8Unorm,
+    /// BGRA8 with blending DISABLED: raw component writes for data passes
+    /// whose alpha channel is payload, not opacity (an SDF byte, a coverage
+    /// flag). Under the default premultiplied-over pipeline dst alpha can
+    /// only ever grow (`a_out = a_src + a_dst·(1-a_src)`), so alpha-as-data
+    /// is unwritable without this. Declared as `color_format: @Bgra8NoBlend`.
+    Bgra8NoBlend,
+    /// Single-channel 32-bit float (pairs with `TextureFormat::RenderRf32`).
+    /// Blending is disabled on such pipelines — float blending is not
+    /// universally supported and the consumers are data passes.
+    Rf32,
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags {
     pub debug_draw: bool,
@@ -381,6 +402,8 @@ pub struct CxDrawShaderMapping {
     /// Total f32 slots in the varying buffer (instances + explicit varyings).
     /// Set by the headless backend during shader compilation.
     pub varying_total_slots: usize,
+    /// The color-attachment format this shader's pipeline targets.
+    pub color_format: DrawShaderColorFormat,
 }
 
 impl CxDrawShaderMapping {
@@ -505,6 +528,16 @@ impl CxDrawShaderMapping {
             .value(source.as_object(), id!(async_compile).into(), NoTrap)
             .as_bool()
             == Some(true);
+        // Color-attachment format: `color_format: @Rf32` selects the float
+        // render-target pipeline; anything else keeps the BGRA8 default.
+        let color_format = match heap
+            .value(source.as_object(), id!(color_format).into(), NoTrap)
+            .as_id()
+        {
+            Some(id) if id == id!(Rf32) => DrawShaderColorFormat::Rf32,
+            Some(id) if id == id!(Bgra8NoBlend) => DrawShaderColorFormat::Bgra8NoBlend,
+            _ => DrawShaderColorFormat::Bgra8Unorm,
+        };
         // Use attribute packing for instances (they're vertex attributes)
         // instances contains ALL instance fields (dyn first, then rust)
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
@@ -827,6 +860,7 @@ impl CxDrawShaderMapping {
             scope_uniforms_buf,
             geometry_id,
             varying_total_slots: 0,
+            color_format,
         }
     }
 

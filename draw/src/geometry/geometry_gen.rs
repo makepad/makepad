@@ -132,6 +132,72 @@ pub struct GameMeshVertex {
     pub color: f32,
 }
 
+/// [`GameMeshVertex`] plus a second uv, into a baked ambient-occlusion atlas.
+///
+/// A separate type rather than a seventh lane on GameMeshVertex, because the
+/// shadow mesh shares that layout and has no use for an AO coordinate — it
+/// would pay four bytes a vertex for nothing. Props opt in; shadows do not.
+#[derive(Clone, Script, ScriptHook)]
+pub struct GameMeshVertexAo {
+    #[live]
+    pub px: f32,
+    #[live]
+    pub py: f32,
+    #[live]
+    pub pz: f32,
+    /// f16(oct.x) | f16(oct.y) — octahedral unit normal.
+    #[live]
+    pub nrm: f32,
+    /// f16(u) | f16(v) — colormap atlas.
+    #[live]
+    pub uv: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+    /// f16(u) | f16(v) — AO atlas. Per FRAGMENT occlusion: sampling this per
+    /// vertex instead would carry exactly as much information as a vertex
+    /// bake, which is the thing the atlas exists to escape.
+    #[live]
+    pub ao_uv: f32,
+}
+
+/// [`GameMeshVertex`] plus skinning influences, for GPU-skinned characters:
+/// the REST mesh uploads once and the vertex shader blends it against a
+/// joint-matrix texture, so the per-frame cost is a joint palette instead of
+/// a full posed vertex stream.
+///
+/// No colour lane — character rigs carry their colour in the atlas and the
+/// per-instance tint — and no AO lane, because a deforming mesh cannot carry
+/// a baked occlusion atlas (see GameMeshVertexAo).
+#[derive(Clone, Script, ScriptHook)]
+pub struct GameMeshVertexSkin {
+    #[live]
+    pub px: f32,
+    #[live]
+    pub py: f32,
+    #[live]
+    pub pz: f32,
+    /// f16(oct.x) | f16(oct.y) — octahedral unit normal, rest pose.
+    #[live]
+    pub nrm: f32,
+    /// f16(u) | f16(v) — colormap atlas.
+    #[live]
+    pub uv: f32,
+    /// unorm8x4 — four joint indices. u8 addresses 256 joints; the rigs in
+    /// play carry 7-41.
+    #[live]
+    pub joints: f32,
+    /// unorm8x4 — four blend weights, normalized on load.
+    #[live]
+    pub weights: f32,
+    /// unorm16x2 — uv into the rig's rest-pose AO chart atlas (same packing
+    /// as GameMeshVertexAo.ao_uv: f16 spacing near 1.0 is a whole texel).
+    /// Baked once per rig on the rest mesh; the occlusion rides the skinned
+    /// surface through every pose because topology never changes.
+    #[live]
+    pub ao_uv: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct CubeVertex {
     #[live]
@@ -199,6 +265,14 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.GameMeshVertex);
     let gmgen = shared(vm, id!(GameMeshGeom), GeometryGen::from_triangle_game_mesh);
     set_script_value!(vm, geom.GameMeshGeom = gmgen);
+    // Packed game mesh + AO atlas uv, for props that carry baked occlusion.
+    set_script_value_to_pod!(vm, geom.GameMeshVertexAo);
+    let gmaogen = shared(vm, id!(GameMeshAoGeom), GeometryGen::from_triangle_game_mesh_ao);
+    set_script_value!(vm, geom.GameMeshAoGeom = gmaogen);
+    // GPU-skinned mesh: packed rest vertices + joint indices/weights.
+    set_script_value_to_pod!(vm, geom.GameMeshVertexSkin);
+    let gmskin = shared(vm, id!(GameMeshSkinGeom), GeometryGen::from_triangle_game_mesh_skin);
+    set_script_value!(vm, geom.GameMeshSkinGeom = gmskin);
     // Cube geometry: unit cube in the old geom_pos/geom_normal/geom_uv layout.
     set_script_value_to_pod!(vm, geom.CubeVertex);
     let cgen = shared(vm, id!(CubeGeom), || {
@@ -304,6 +378,30 @@ impl GeometryGen {
             // pos, nrm(oct 0,0 = +y), uv, color(white)
             g.vertices
                 .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(u32::MAX)]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single triangle in the packed GameMeshVertexAo stride.
+    pub fn from_triangle_game_mesh_ao() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            // pos, nrm, uv, color(white), ao_uv
+            g.vertices
+                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(u32::MAX), 0.0]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single triangle in the packed GameMeshVertexSkin stride.
+    pub fn from_triangle_game_mesh_skin() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            // pos, nrm, uv, joints(0,0,0,0), weights(1,0,0,0), ao_uv(0,0)
+            g.vertices
+                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(0xff), 0.0]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

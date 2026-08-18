@@ -14,6 +14,7 @@ pub struct StackBases {
     pub stack: usize,
     pub scope: usize,
     pub mes: usize,
+    pub slots: usize,
 }
 
 #[derive(Debug)]
@@ -50,6 +51,10 @@ pub struct CallFrame {
     pub bases: StackBases,
     pub args: OpcodeArgs,
     pub return_ip: Option<ScriptIp>,
+    /// slot_base of the CALLER, restored when this frame is popped.
+    /// The callee's own frame is established by SLOTS_FRAME (slot-compiled
+    /// fns only); non-slotted fns never touch slot_base.
+    pub prev_slot_base: usize,
 }
 
 #[derive(Debug)]
@@ -99,6 +104,12 @@ pub struct ScriptThread {
     pub(crate) stack: Vec<ScriptValue>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
+    /// Frame-local variable slots for slot-compiled fn bodies. Lexically
+    /// resolved locals live here as `slots[slot_base + i]` instead of in
+    /// scope-object maps; GC marks the whole slab as roots.
+    pub(crate) slots: Vec<ScriptValue>,
+    /// Base of the CURRENT slot frame (see CallFrame::prev_slot_base).
+    pub(crate) slot_base: usize,
     pub(crate) instruction_limit_remaining: Option<usize>,
     pub trap: ScriptTrapInner,
     //pub(crate) last_err: ScriptValue,
@@ -121,6 +132,8 @@ impl ScriptThread {
             stack: Vec::with_capacity(1024),
             calls: Vec::with_capacity(64),
             mes: Vec::with_capacity(64),
+            slots: Vec::with_capacity(256),
+            slot_base: 0,
             instruction_limit_remaining: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
@@ -134,6 +147,7 @@ impl ScriptThread {
             stack: self.stack.len(),
             scope: self.scopes.len(),
             mes: self.mes.len(),
+            slots: self.slots.len(),
         }
     }
 
@@ -157,6 +171,27 @@ impl ScriptThread {
         self.stack.truncate(bases.stack);
         self.free_unreffed_scopes(&bases, heap);
         self.mes.truncate(bases.mes);
+        self.slots.truncate(bases.slots);
+    }
+
+    /// Read a slot of the current frame. Bounds-checked: the parser only
+    /// emits in-frame indices, but stay safe and trap instead of panicking.
+    #[inline]
+    pub fn slot(&mut self, index: u32) -> ScriptValue {
+        if let Some(v) = self.slots.get(self.slot_base + index as usize) {
+            return *v;
+        }
+        script_err_stack!(self.trap, "slot {} out of frame", index)
+    }
+
+    #[inline]
+    pub fn set_slot(&mut self, index: u32, value: ScriptValue) {
+        let at = self.slot_base + index as usize;
+        if let Some(v) = self.slots.get_mut(at) {
+            *v = value;
+        } else {
+            script_err_stack!(self.trap, "slot {} out of frame", index);
+        }
     }
 
     pub fn free_unreffed_scopes(&mut self, bases: &StackBases, heap: &mut ScriptHeap) {

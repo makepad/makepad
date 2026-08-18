@@ -25,6 +25,7 @@ pub mod gpu_texture;
 pub mod video_decode;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod video_encode;
+pub mod video_file;
 
 mod draw_list;
 mod draw_matrix;

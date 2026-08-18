@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod blocking_http;
 pub mod digest;
 pub mod http_server;
 pub mod plain_web_socket;

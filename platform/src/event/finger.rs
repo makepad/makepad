@@ -35,6 +35,11 @@ pub struct MouseDownEvent {
 #[derive(Clone, Debug)]
 pub struct MouseMoveEvent {
     pub abs: Vec2d,
+    /// Relative motion while the pointer is LOCKED (cx.lock_mouse_pointer):
+    /// the browser pointer-lock model — `abs` stays pinned at the lock point
+    /// (so widget routing is stable) and the true movement arrives here.
+    /// Always zero when unlocked or on platforms without lock support.
+    pub lock_delta: Vec2d,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64,

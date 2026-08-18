@@ -217,11 +217,27 @@ pub fn define_macos_window_delegate() -> *const Class {
     }
 
     extern "C" fn window_did_become_key(this: &Object, _: Sel, _: ObjcId) {
+        // macOS re-associates the cursor whenever the app deactivates, so a
+        // logically-locked pointer must re-apply its physical lock on every
+        // focus gain — GLFW's disabled-cursor mode does exactly this.
+        with_macos_app(|app| {
+            if app.mouse_pointer_lock {
+                app.apply_pointer_lock_effects(true);
+            }
+        });
         let cw = get_cocoa_window(this);
         cw.send_got_focus_event();
     }
 
     extern "C" fn window_did_resign_key(this: &Object, _: Sel, _: ObjcId) {
+        // Suspend (never unset) the lock while unfocused: the cursor comes
+        // back for whatever app took over, and returns to the lock when we
+        // regain key.
+        with_macos_app(|app| {
+            if app.mouse_pointer_lock {
+                app.apply_pointer_lock_effects(false);
+            }
+        });
         let cw = get_cocoa_window(this);
         cw.send_lost_focus_event();
     }
@@ -858,6 +874,18 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.do_callback(MacosEvent::DragEnd);
     }
 
+    /// External file drags always copy. Generated/library payloads remain
+    /// owned by the source application; a destination such as Messages must
+    /// never be allowed to negotiate a move and remove the managed file.
+    extern "C" fn dragging_session_source_operation_mask_for_dragging_context(
+        _this: &Object,
+        _: Sel,
+        _session: ObjcId,
+        _context: i64,
+    ) -> NSDragOperation {
+        NSDragOperation::Copy
+    }
+
     extern "C" fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
@@ -1157,6 +1185,11 @@ pub fn define_cocoa_view_class() -> *const Class {
         #[cfg(target_os = "macos")]
         {
             decl.add_method(
+                sel!(draggingSession: sourceOperationMaskForDraggingContext:),
+                dragging_session_source_operation_mask_for_dragging_context
+                    as extern "C" fn(&Object, Sel, ObjcId, i64) -> NSDragOperation,
+            );
+            decl.add_method(
                 sel!(draggingSession: endedAtPoint: operation:),
                 dragging_session_ended_at_point_operation
                     as extern "C" fn(&Object, Sel, ObjcId, NSPoint, NSDragOperation),
@@ -1187,5 +1220,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     decl.add_ivar::<ObjcId>("markedText");
     decl.add_protocol(&Protocol::get("NSTextInputClient").unwrap());
     decl.add_protocol(&Protocol::get("CALayerDelegate").unwrap());
+    #[cfg(target_os = "macos")]
+    decl.add_protocol(&Protocol::get("NSDraggingSource").unwrap());
     return decl.register();
 }

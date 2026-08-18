@@ -1600,6 +1600,7 @@ impl DrawVars {
 
             // Don't proceed if shader compilation had errors
             if output.has_errors {
+                DrawVars::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 
@@ -1789,14 +1790,31 @@ impl CxOsDrawShader {
 
             let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
             let color_attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0];
-            let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-            let () = msg_send![color_attachment, setBlendingEnabled: YES];
-            let () = msg_send![color_attachment, setRgbBlendOperation: MTLBlendOperation::Add];
-            let () = msg_send![color_attachment, setAlphaBlendOperation: MTLBlendOperation::Add];
-            let () = msg_send![color_attachment, setSourceRGBBlendFactor: MTLBlendFactor::One];
-            let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
-            let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
-            let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+            match mapping.color_format {
+                crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm => {
+                    let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+                    let () = msg_send![color_attachment, setBlendingEnabled: YES];
+                    let () = msg_send![color_attachment, setRgbBlendOperation: MTLBlendOperation::Add];
+                    let () = msg_send![color_attachment, setAlphaBlendOperation: MTLBlendOperation::Add];
+                    let () = msg_send![color_attachment, setSourceRGBBlendFactor: MTLBlendFactor::One];
+                    let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
+                    let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                    let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                }
+                crate::draw_shader::DrawShaderColorFormat::Bgra8NoBlend => {
+                    // Raw-write data pass: alpha is payload, and the over
+                    // blend can only ever GROW dst alpha.
+                    let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
+                }
+                crate::draw_shader::DrawShaderColorFormat::Rf32 => {
+                    // Float data target (TextureFormat::RenderRf32): no
+                    // blending — these are data passes, and float-target
+                    // blending is not universal across GPU families.
+                    let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::R32Float];
+                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
+                }
+            }
 
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
 
@@ -1931,6 +1949,72 @@ pub struct CxOsTexture {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     iosurface_id: IOSurfaceID,
 }
+impl Cx {
+    /// DEBUG ONLY: synchronous GPU->CPU readback of a render-target texture
+    /// (private storage), via a one-off blit to a shared staging texture.
+    /// Blocks until the GPU is done — strictly a diagnostics path (atlas
+    /// dumps, bake verification), never per-frame work. Returns raw bytes in
+    /// the texture's native layout (BGRA8 = 4 bytes/texel, R32F = 4).
+    pub fn debug_read_render_texture(
+        &mut self,
+        texture: &crate::texture::Texture,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        let cxtexture = &self.textures[texture.texture_id()];
+        let alloc = cxtexture.alloc.as_ref()?;
+        let (width, height) = (alloc.width, alloc.height);
+        let pixel = alloc.pixel.clone();
+        let mtl_tex = cxtexture.os.texture.as_ref()?.as_id();
+        unsafe {
+            let device: ObjcId = msg_send![mtl_tex, device];
+            let descriptor = RcObjcId::from_owned(NonNull::new(msg_send![
+                class!(MTLTextureDescriptor),
+                new
+            ])?);
+            let () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
+            let () = msg_send![descriptor.as_id(), setWidth: width as u64];
+            let () = msg_send![descriptor.as_id(), setHeight: height as u64];
+            let () = msg_send![descriptor.as_id(), setDepth: 1u64];
+            let () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared];
+            let () = msg_send![
+                descriptor.as_id(),
+                setPixelFormat: texture_pixel_to_mtl_pixel(&pixel)
+            ];
+            let staging: ObjcId = msg_send![device, newTextureWithDescriptor: descriptor.as_id()];
+            if staging == nil {
+                return None;
+            }
+            let queue: ObjcId = msg_send![device, newCommandQueue];
+            let command_buffer: ObjcId = msg_send![queue, commandBuffer];
+            let blit: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+            let () = msg_send![blit, copyFromTexture: mtl_tex toTexture: staging];
+            let () = msg_send![blit, endEncoding];
+            let () = msg_send![command_buffer, commit];
+            let () = msg_send![command_buffer, waitUntilCompleted];
+            let mut bytes = vec![0u8; width * height * 4];
+            let region = MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize {
+                    width: width as u64,
+                    height: height as u64,
+                    depth: 1,
+                },
+            };
+            let () = msg_send![
+                staging,
+                getBytes: bytes.as_mut_ptr()
+                bytesPerRow: width * 4
+                bytesPerImage: width * height * 4
+                fromRegion: region
+                mipmapLevel: 0
+                slice: 0
+            ];
+            let () = msg_send![staging, release];
+            let () = msg_send![queue, release];
+            Some((width, height, bytes))
+        }
+    }
+}
+
 fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
     match pix {
         TexturePixel::BGRAu8 => MTLPixelFormat::BGRA8Unorm,

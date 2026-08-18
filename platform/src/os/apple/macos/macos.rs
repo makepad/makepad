@@ -907,7 +907,8 @@ impl Cx {
 
                 self.windows[window_id].is_created = false;
                 if let Some(index) = metal_windows.iter().position(|w| w.window_id == window_id) {
-                    metal_windows.remove(index);
+                    let metal_window = metal_windows.remove(index);
+                    with_macos_app(|app| app.retire_cocoa_window(metal_window.cocoa_window));
                     if metal_windows.len() == 0 {
                         self.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit;
@@ -1021,16 +1022,34 @@ impl Cx {
                 self.handle_repaint(metal_windows, metal_cx);
             }
             MacosEvent::MouseDown(mut e) => {
+                if !self.windows.is_valid(e.window_id)
+                    || !self.windows[e.window_id].is_created
+                {
+                    return EventFlow::Wait;
+                }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()));
             }
             MacosEvent::MouseMove(mut e) => {
+                if !self.windows.is_valid(e.window_id)
+                    || !self.windows[e.window_id].is_created
+                {
+                    return EventFlow::Wait;
+                }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 let abs = e.abs;
                 let modifiers = e.modifiers;
                 self.call_event_handler(&Event::MouseMove(e.into()));
+                // AppKit requires beginDraggingSession to receive the live
+                // NSEvent that initiated the pointer drag. The ordinary
+                // platform-op drain happens at the start of the *next*
+                // callback, when currentEvent may already be a timer, paint,
+                // or mouse-up. Pull out only this explicit cross-app op now;
+                // every other platform operation keeps its established
+                // deferred semantics.
+                self.handle_pending_external_drag(metal_windows);
                 if let Some(items) = self.os.internal_drag_items.as_ref() {
                     self.call_event_handler(&Event::Drag(DragEvent {
                         modifiers,
@@ -1045,6 +1064,11 @@ impl Cx {
                 self.fingers.switch_captures();
             }
             MacosEvent::MouseUp(mut e) => {
+                if !self.windows.is_valid(e.window_id)
+                    || !self.windows[e.window_id].is_created
+                {
+                    return EventFlow::Wait;
+                }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 let abs = e.abs;
@@ -1067,10 +1091,20 @@ impl Cx {
                 }
             }
             MacosEvent::Scroll(mut e) => {
+                if !self.windows.is_valid(e.window_id)
+                    || !self.windows[e.window_id].is_created
+                {
+                    return EventFlow::Wait;
+                }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::Scroll(e.into()));
             }
             MacosEvent::WindowDragQuery(mut e) => {
+                if !self.windows.is_valid(e.window_id)
+                    || !self.windows[e.window_id].is_created
+                {
+                    return EventFlow::Wait;
+                }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::WindowDragQuery(e))
             }
@@ -1145,6 +1179,41 @@ impl Cx {
             // No work pending and timer is stopped - we can wait
             EventFlow::Wait
         }
+    }
+
+    fn start_external_drag_now(
+        &mut self,
+        metal_windows: &mut [MetalWindow],
+        window_id: WindowId,
+        items: Vec<DragItem>,
+    ) {
+        let started = metal_windows
+            .iter_mut()
+            .find(|window| window.window_id == window_id)
+            .is_some_and(|window| window.cocoa_window.start_external_dragging(items));
+        if !started {
+            crate::error!("could not start external file drag");
+            // A native session normally emits DragEnd from its AppKit source
+            // callback. A rejected start needs the same completion signal so
+            // application gesture guards can recover immediately.
+            self.call_event_handler(&Event::DragEnd);
+        }
+    }
+
+    fn handle_pending_external_drag(&mut self, metal_windows: &mut [MetalWindow]) {
+        let Some(index) = self
+            .platform_ops
+            .iter()
+            .rposition(|op| matches!(op, CxOsOp::StartExternalDragging { .. }))
+        else {
+            return;
+        };
+        let CxOsOp::StartExternalDragging { window_id, items } =
+            self.platform_ops.remove(index)
+        else {
+            unreachable!();
+        };
+        self.start_external_drag_now(metal_windows, window_id, items);
     }
 
     fn handle_platform_ops(
@@ -1342,6 +1411,15 @@ impl Cx {
                 CxOsOp::SetCursor(cursor) => {
                     with_macos_app(|app| app.set_mouse_cursor(cursor));
                 }
+                CxOsOp::LockMousePointer(lock) => {
+                    with_macos_app(|app| {
+                        app.mouse_pointer_lock = lock;
+                        app.apply_pointer_lock_effects(lock);
+                    });
+                }
+                CxOsOp::RepinMousePointer => {
+                    with_macos_app(|app| app.repin_pointer());
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,
@@ -1357,6 +1435,9 @@ impl Cx {
                     // from mouse move/up) instead of OS-level drag, which delays
                     // DragEnd by ~1 second due to the macOS fly-back animation.
                     self.os.internal_drag_items = Some(Arc::new(items));
+                }
+                CxOsOp::StartExternalDragging { window_id, items } => {
+                    self.start_external_drag_now(metal_windows, window_id, items);
                 }
                 CxOsOp::UpdateMacosMenu(menu) => with_macos_app(|app| app.update_macos_menu(&menu)),
                 CxOsOp::HttpRequest {

@@ -419,12 +419,15 @@ impl ShaderFnCompiler {
         if output.emitted_bytes > crate::shader_output::MAX_EMITTED_BYTES {
             if !output.size_exceeded {
                 output.size_exceeded = true;
-                output.has_errors = true;
-                script_err_not_allowed!(
-                    self.trap,
+                // Goes on the OUTPUT, not this compiler's trap: this early
+                // return skips the drain loop below, and a nested call's
+                // compiler (fresh per compile_shader_def) is dropped without
+                // anyone draining its trap — an error queued there was
+                // silently lost and the shader fell back to nothing drawn.
+                output.push_error(format!(
                     "shader too large: emitted source exceeded {} bytes (deeply nested or heavily branching function calls inline exponentially)",
                     crate::shader_output::MAX_EMITTED_BYTES
-                );
+                ));
             }
             return vm.bx.code.builtins.pod.pod_void;
         }
@@ -508,7 +511,15 @@ impl ShaderFnCompiler {
             }
             // alright lets see if we have a trap, ifso we can log it
             if let Some(err) = self.trap.err_pop_front() {
-                output.has_errors = true;
+                // Always capture the message on the output: the backend
+                // reports it with the shader's identity when it refuses to
+                // build the pipeline. Before this, an error whose value had
+                // no ip (or whose ip had no source location) set has_errors
+                // and vanished — the shader silently stopped drawing.
+                output.push_error(format!(
+                    "{} ({}:{})",
+                    err.message, err.origin_file, err.origin_line
+                ));
                 if let Some(ptr) = err.value.as_err() {
                     if let Some(loc2) = vm.bx.code.ip_to_loc(ptr.ip) {
                         log_with_level(
@@ -529,6 +540,16 @@ impl ShaderFnCompiler {
             self.trap.take_on();
         }
         output.emitted_bytes += self.out.len().saturating_sub(fn_start_len);
+        // Also check AFTER accumulating: the entry check above only trips
+        // when a fn STARTS past the ceiling, so a single oversized function
+        // body would blow the budget without ever being reported.
+        if output.emitted_bytes > crate::shader_output::MAX_EMITTED_BYTES && !output.size_exceeded {
+            output.size_exceeded = true;
+            output.push_error(format!(
+                "shader too large: emitted source exceeded {} bytes (deeply nested or heavily branching function calls inline exponentially)",
+                crate::shader_output::MAX_EMITTED_BYTES
+            ));
+        }
         let value = self.mes.pop();
         if let Some(ShaderMe::FnBody { ret, .. }) = value {
             return ret.unwrap_or(vm.bx.code.builtins.pod.pod_void);
@@ -1128,6 +1149,51 @@ impl ShaderFnCompiler {
             Opcode::AND => self.handle_arithmetic(vm, output, opargs, "&", true),
             Opcode::OR => self.handle_arithmetic(vm, output, opargs, "|", true),
             Opcode::XOR => self.handle_arithmetic(vm, output, opargs, "^", true),
+
+            // Frame-slot opcodes: shaders compile symbolically by NAME, so
+            // translate each slot form back to its dynamic equivalent. The
+            // [id] stream slot the dynamic forms use is still present
+            // (shape parity); only PUSH_SLOT needs the name table.
+            Opcode::SLOTS_FRAME | Opcode::ARGS_TO_SLOTS => {}
+            Opcode::PUSH_SLOT => {
+                let name = {
+                    let bodies = vm.bx.code.bodies.borrow();
+                    let body = &bodies[self.trap.ip.body as usize];
+                    let ip = self.trap.ip.index;
+                    body.parser
+                        .slot_frames
+                        .iter()
+                        .rev()
+                        .find(|(frame_ip, _)| *frame_ip < ip)
+                        .and_then(|(_, names)| names.get(opargs.to_u32() as usize).copied())
+                };
+                if let Some(name) = name {
+                    self.push_immediate(
+                        ScriptValue::from_id(name),
+                        &vm.bx.code.builtins.pod,
+                        &output.backend,
+                    );
+                } else {
+                    script_err_shader!(self.trap, "PUSH_SLOT: no slot name table for shader");
+                }
+            }
+            Opcode::LET_SLOT => self.handle_let_dyn(vm, output, OpcodeArgs::NONE),
+            Opcode::STORE_SLOT => self.handle_assign(vm, output),
+            Opcode::ASSIGN_SLOT_ADD => {
+                self.handle_arithmetic_assign(vm, output, OpcodeArgs::NONE, "+=", false);
+            }
+            Opcode::ASSIGN_SLOT_SUB => {
+                self.handle_arithmetic_assign(vm, output, OpcodeArgs::NONE, "-=", false);
+            }
+            Opcode::ASSIGN_SLOT_MUL => {
+                self.handle_arithmetic_assign(vm, output, OpcodeArgs::NONE, "*=", false);
+            }
+            Opcode::ASSIGN_SLOT_DIV => {
+                self.handle_arithmetic_assign(vm, output, OpcodeArgs::NONE, "/=", false);
+            }
+            Opcode::ASSIGN_SLOT_MOD => {
+                self.handle_arithmetic_assign(vm, output, OpcodeArgs::NONE, "%=", false);
+            }
 
             // ASSIGN
             Opcode::ASSIGN => self.handle_assign(vm, output),

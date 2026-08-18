@@ -869,28 +869,59 @@ export class WasmWebGL extends WasmWebBrowser {
         (this.textures[tgt.texture_id] = gl.createTexture());
       // resize or create texture
       clear_color = tgt.clear_color;
-      if (gl_tex._width != args.width || gl_tex._height != args.height) {
+      if (
+        gl_tex._width != args.width ||
+        gl_tex._height != args.height ||
+        gl_tex._format != tgt.format
+      ) {
         gl.bindTexture(gl.TEXTURE_2D, gl_tex);
 
         clear_flags |= gl.COLOR_BUFFER_BIT;
 
         gl_tex._width = args.width;
         gl_tex._height = args.height;
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texImage2D(
-          gl.TEXTURE_2D,
-          0,
-          gl.RGBA,
-          gl_tex._width,
-          gl_tex._height,
-          0,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          null,
-        );
+        gl_tex._format = tgt.format;
+        if (tgt.format === 1) {
+          // R32F data target (TextureFormat::RenderRf32). Color-renderable
+          // only with EXT_color_buffer_float; NEAREST because float
+          // filtering is a separate extension and consumers sample_nearest.
+          if (!this.ext_color_buffer_float) {
+            console.error(
+              "makepad: R32F render target requested but EXT_color_buffer_float is unavailable — the pass will not render correctly",
+            );
+          }
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.R32F,
+            gl_tex._width,
+            gl_tex._height,
+            0,
+            gl.RED,
+            gl.FLOAT,
+            null,
+          );
+        } else {
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            gl_tex._width,
+            gl_tex._height,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            null,
+          );
+        }
       } else if (!tgt.init_only) {
         clear_flags |= gl.COLOR_BUFFER_BIT;
       }
@@ -1185,6 +1216,17 @@ export class WasmWebGL extends WasmWebBrowser {
       span.innerHTML =
         "Sorry, makepad needs browser support for WebGL2 to run.<br/>Please update your browser or GPU drivers and try again.";
       return;
+    }
+
+    // Float color targets (RenderRf32): WebGL2 needs this extension for
+    // R32F to be color-renderable. Requested up front so a missing GPU
+    // capability is one hard, greppable error instead of a silent black
+    // texture deep in a bake.
+    this.ext_color_buffer_float = gl.getExtension("EXT_color_buffer_float");
+    if (!this.ext_color_buffer_float) {
+      console.error(
+        "makepad: EXT_color_buffer_float unavailable — float render targets (GPU lightmap bake) will not work on this device",
+      );
     }
 
     // check uniform count

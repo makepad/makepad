@@ -779,6 +779,10 @@ impl WaylandCx {
                 CxOsOp::StartDragging(items) => {
                     state.start_internal_drag(items);
                 }
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!("external file dragging is not implemented on Wayland");
+                    cx.call_event_handler(&Event::DragEnd);
+                }
                 CxOsOp::SetCursor(cursor) => {
                     if let Some(cursor_shape) = state.cursor_shape.as_ref() {
                         if let Some(serial) = state.pointer_serial.as_ref() {
