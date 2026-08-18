@@ -19,6 +19,15 @@ makepad-ai-loader = { path = "../ai/loader" }
 # split out of this one later can share them without depending on all of
 # diffusion.
 makepad-ai-common = { path = "../ai/models/common" }
+makepad-ai-h3 = { path = "../ai/models/h3" }
+makepad-ai-flux = { path = "../ai/models/flux" }
+makepad-ai-vision = { path = "../ai/models/vision" }
+makepad-ai-rig = { path = "../ai/models/rig" }
+makepad-ai-motion = { path = "../ai/models/motion" }
+makepad-ai-sfx = { path = "../ai/models/sfx" }
+makepad-ai-music = { path = "../ai/models/music" }
+makepad-ai-speech = { path = "../ai/models/speech" }
+makepad-ai-trellis = { path = "../ai/models/trellis" }
 makepad-gltf = { path = "../gltf" }
 makepad-micro-serde = { path = "../micro_serde" }
 makepad-zune-core = { path = "../zune/zune-core" }

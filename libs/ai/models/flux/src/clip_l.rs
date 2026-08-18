@@ -1204,7 +1204,7 @@ fn add_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     RowsTensor::new(lhs.rows, lhs.cols, output)
 }
 
-pub(crate) fn clip_cache_namespace(weights: &LoadedClipLWeights) -> String {
+pub fn clip_cache_namespace(weights: &LoadedClipLWeights) -> String {
     format!("clip_l:{}", weights.path.display())
 }
 

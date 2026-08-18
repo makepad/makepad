@@ -10,5 +10,14 @@ members = [
     "metal",
     "job",
     "models/common",
+    "models/h3",
+    "models/flux",
+    "models/vision",
+    "models/rig",
+    "models/motion",
+    "models/sfx",
+    "models/music",
+    "models/speech",
+    "models/trellis",
 ]
 resolver = "2"
