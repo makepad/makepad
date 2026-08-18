@@ -697,6 +697,10 @@ impl X11Cx {
                 CxOsOp::StartDragging(items) => {
                     self.internal_drag_items = Some(Arc::new(items));
                 }
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!("external file dragging is not implemented on X11");
+                    cx.call_event_handler(&Event::DragEnd);
+                }
                 CxOsOp::SetCursor(cursor) => {
                     xlib_app.set_mouse_cursor(cursor);
                 }

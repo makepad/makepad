@@ -565,8 +565,24 @@ impl DesktopRunView {
         }
 
         let Some(drawn) = swapchain.get_image(presentable_draw.target_id) else {
+            crate::log!("WINHOST: apply NO IMAGE for target={:?}", presentable_draw.target_id);
             return false;
         };
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static WINHOST_APPLY: AtomicUsize = AtomicUsize::new(0);
+            let n = WINHOST_APPLY.fetch_add(1, Ordering::Relaxed);
+            if n < 5 {
+                crate::log!("WINHOST: apply OK target={:?} {}x{}", presentable_draw.target_id, presentable_draw.width, presentable_draw.height);
+            }
+            // TEMP DIAGNOSTIC (strip before merge): host-device CPU readback of the shared
+            // texture — the closing experiment distinguishing child-renders-black /
+            // coherence-broken / studio-layout-bug. Sample early frames AND settled frames.
+            #[cfg(target_os = "windows")]
+            if n < 3 || (n % 60 == 0 && n <= 360) {
+                cx.debug_readback_shared_texture(&drawn.texture, &format!("apply#{}", n));
+            }
+        }
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         if let Some(buffer) = drawn.software_buffer.as_ref() {
@@ -595,6 +611,16 @@ impl DesktopRunView {
                 (swapchain.alloc_height as f32),
             ],
         );
+        // The `packed_header` shader path decodes an in-band size header from texel (0,0)/(1,0)
+        // and returns transparent when it decodes to <= 0. That header is only ever written by
+        // the Linux software-fallback path — the Windows (and macOS) hosted-app render never
+        // writes it — so on Windows the guard spuriously blanks the RunView whenever the app's
+        // top-left pixel is black. Use the host's known tex_scale (packed_header = 0) there.
+        #[cfg(target_os = "windows")]
+        draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(packed_header), &[0.0f32]);
+        #[cfg(not(target_os = "windows"))]
         draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
@@ -1039,6 +1065,20 @@ impl Widget for DesktopRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let dpi_factor = Self::host_dpi_factor(cx);
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
+        // TEMP DIAGNOSTIC (strip before merge): where does the RunView actually draw?
+        #[cfg(target_os = "windows")]
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static WINHOST_DRAW: AtomicUsize = AtomicUsize::new(0);
+            let n = WINHOST_DRAW.fetch_add(1, Ordering::Relaxed);
+            if n < 3 || (n % 120 == 0 && n <= 600) {
+                crate::log!(
+                    "WINHOST: draw_walk#{} rect=({:.0},{:.0} {:.0}x{:.0}) dpi={:.2} target={:?} pending={}",
+                    n, rect.pos.x, rect.pos.y, rect.size.x, rect.size.y, dpi_factor,
+                    self.current_target.is_some(), self.pending_draw.is_some()
+                );
+            }
+        }
         self.draw_bg.draw_abs(cx, rect);
 
         let target = self.current_target;

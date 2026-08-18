@@ -99,29 +99,9 @@ where
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let arr = vm.bx.heap.new_array();
-        let trap = vm.bx.threads.cur().trap.pass();
-        let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
-        // we swap the vec off of the heap to be able to script_to_value the rest
-        let mut vec_store = ScriptArrayStorage::ScriptValue(Default::default());
-        std::mem::swap(&mut vec_store, astore);
-        if let ScriptArrayStorage::ScriptValue(vec) = &mut vec_store {
-            vec.clear();
-            for v in self {
-                vec.push_back(v.script_to_value(vm));
-            }
-            let trap = vm.bx.threads.cur().trap.pass();
-            let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
-            std::mem::swap(&mut vec_store, astore);
-        } else {
-            let mut vec_store = ScriptArrayStorage::ScriptValue(Default::default());
-            if let ScriptArrayStorage::ScriptValue(vec) = &mut vec_store {
-                for v in self {
-                    vec.push_back(v.script_to_value(vm));
-                }
-                let trap = vm.bx.threads.cur().trap.pass();
-                let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
-                std::mem::swap(&mut vec_store, astore);
-            }
+        for value in self {
+            let value = value.script_to_value(vm);
+            vm.bx.heap.array_push_unchecked(arr, value);
         }
         arr.into()
     }
@@ -236,16 +216,7 @@ impl ScriptApply for Vec<u8> {
         }
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let arr = vm.bx.heap.new_array();
-        let trap = vm.bx.threads.cur().trap.pass();
-        let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
-        if let ScriptArrayStorage::U8(v) = astore {
-            v.clear();
-            v.extend(self)
-        } else {
-            *astore = ScriptArrayStorage::U8(self.clone());
-        }
-        arr.into()
+        vm.bx.heap.new_array_from_slice_u8(self).into()
     }
 }
 
@@ -326,13 +297,8 @@ impl ScriptApply for Vec<ScriptValue> {
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         let arr = vm.bx.heap.new_array();
-        let trap = vm.bx.threads.cur().trap.pass();
-        let astore = vm.bx.heap.array_mut(arr, trap).unwrap();
-        if let ScriptArrayStorage::ScriptValue(v) = astore {
-            v.clear();
-            v.extend(self)
-        } else {
-            *astore = ScriptArrayStorage::ScriptValue(self.iter().cloned().collect());
+        for value in self {
+            vm.bx.heap.array_push_unchecked(arr, *value);
         }
         arr.into()
     }
@@ -422,6 +388,13 @@ where
                     has_string_keys = true;
                 }
                 let value = value.script_to_value(vm);
+                if !vm.bx.heap.charge_object_map_entry(
+                    obj,
+                    key,
+                    "converting a Rust map to a script object",
+                ) {
+                    continue;
+                }
                 obj_map.insert(
                     key,
                     ScriptMapValue {
@@ -522,6 +495,13 @@ where
                     has_string_keys = true;
                 }
                 let value = value.script_to_value(vm);
+                if !vm.bx.heap.charge_object_map_entry(
+                    obj,
+                    key,
+                    "converting a Rust map to a script object",
+                ) {
+                    continue;
+                }
                 obj_map.insert(
                     key,
                     ScriptMapValue {

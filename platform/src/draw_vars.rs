@@ -127,6 +127,29 @@ impl ScriptHook for DrawVars {
 }
 
 impl DrawVars {
+    /// Loud report for a failed draw-shader compile. A shader that fails
+    /// must never fall back silently: the draw is skipped from then on and
+    /// the only on-screen symptom is a flat clear-color region where the
+    /// shader should have painted. Names the shader and lists every
+    /// collected compile error.
+    pub fn log_shader_compile_failure(
+        vm: &ScriptVm,
+        io_self: ScriptObject,
+        output: &crate::makepad_script::shader::ShaderOutput,
+    ) {
+        let name = vm
+            .bx
+            .heap
+            .object_type_name_in_chain(io_self)
+            .map(|id| format!("{}", id))
+            .unwrap_or_else(|| format!("<script object {}>", io_self.index()));
+        crate::error!(
+            "draw shader '{}' failed to compile and will NOT be drawn:\n{}",
+            name,
+            output.error_report()
+        );
+    }
+
     fn prune_stale_object_shader_cache(vm: &mut ScriptVm) {
         let object_reuse_epoch = vm.bx.heap.object_reuse_epoch();
         let cx = vm.host.cx_mut();
@@ -970,6 +993,7 @@ impl DrawVars {
             }
 
             if output.has_errors {
+                Self::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 

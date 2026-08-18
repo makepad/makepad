@@ -107,6 +107,7 @@ impl DrawVars {
             }
 
             if output.has_errors {
+                DrawVars::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 
@@ -277,6 +278,62 @@ impl DrawVars {
 }
 
 impl Cx {
+    /// CPU grab of a color render target (thumbnail icons). Temporary FBO +
+    /// `glReadPixels`. Returns packed BGRA8, origin top-left, matching Metal.
+    pub fn debug_read_render_texture(
+        &mut self,
+        texture: &Texture,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        let cxtexture = &self.textures[texture.texture_id()];
+        let alloc = cxtexture.alloc.as_ref()?;
+        let (width, height) = (alloc.width, alloc.height);
+        let gl_tex = cxtexture.os.gl_texture?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let mut rgba = vec![0u8; width * height * 4];
+        let gl = self.os.gl();
+        unsafe {
+            let mut fbo = 0u32;
+            (gl.glGenFramebuffers)(1, &mut fbo);
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, fbo);
+            (gl.glFramebufferTexture2D)(
+                gl_sys::FRAMEBUFFER,
+                gl_sys::COLOR_ATTACHMENT0,
+                gl_sys::TEXTURE_2D,
+                gl_tex,
+                0,
+            );
+            (gl.glPixelStorei)(gl_sys::PACK_ALIGNMENT, 1);
+            (gl.glReadPixels)(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                rgba.as_mut_ptr() as *mut _,
+            );
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+            (gl.glDeleteFramebuffers)(1, &fbo);
+        }
+        // GL origin is bottom-left; thumbnail encode expects top-left BGRA.
+        let mut bgra = vec![0u8; rgba.len()];
+        for y in 0..height {
+            let src = (height - 1 - y) * width * 4;
+            let dst = y * width * 4;
+            for x in 0..width {
+                let i = src + x * 4;
+                let o = dst + x * 4;
+                bgra[o] = rgba[i + 2];
+                bgra[o + 1] = rgba[i + 1];
+                bgra[o + 2] = rgba[i];
+                bgra[o + 3] = rgba[i + 3];
+            }
+        }
+        Some((width, height, bgra))
+    }
+
     pub(crate) fn render_view(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -3049,6 +3106,43 @@ impl CxTexture {
                             ptr::null(),
                         );
                     }
+                },
+                TexturePixel::Rf32 => unsafe {
+                    // Float data target (RenderRf32): NEAREST — float
+                    // filtering needs an extension and its consumers sample
+                    // with sample_nearest anyway. Requires
+                    // EXT_color_buffer_float on GLES3/WebGL2.
+                    (gl.glTexParameteri)(
+                        texture_target,
+                        gl_sys::TEXTURE_MIN_FILTER,
+                        gl_sys::NEAREST as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        texture_target,
+                        gl_sys::TEXTURE_MAG_FILTER,
+                        gl_sys::NEAREST as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        texture_target,
+                        gl_sys::TEXTURE_WRAP_S,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        texture_target,
+                        gl_sys::TEXTURE_WRAP_T,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
+                    (gl.glTexImage2D)(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::R32F as i32,
+                        width as i32,
+                        height as i32,
+                        0,
+                        gl_sys::RED,
+                        gl_sys::FLOAT,
+                        ptr::null(),
+                    );
                 },
                 _ => crate::error!(
                     "Unsupported texture pixel format for OpenGL render target allocation"

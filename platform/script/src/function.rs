@@ -110,11 +110,17 @@ impl ScriptHeap {
                         );
                     }
                 }
+                if !self.charge_object_map_entry(top_ptr, key, "binding a function argument") {
+                    return NIL;
+                }
                 self.objects[top_ptr].map_insert(key, value);
                 return NIL;
             }
         }
         // only allow if we are varargs
+        if !self.charge_object_vec_entries(1, "binding a variadic function argument") {
+            return NIL;
+        }
         self.objects[top_ptr]
             .vec
             .push(ScriptVecValue { key: NIL, value });
@@ -146,6 +152,13 @@ impl ScriptHeap {
                             format_value_type(self, kv.value),
                             format_value_type(self, value)
                         );
+                    }
+                    if !self.charge_object_map_entry(
+                        top_ptr,
+                        key,
+                        "binding a named function argument",
+                    ) {
+                        return NIL;
                     }
                     self.objects[top_ptr].map_insert(key, value);
                     return NIL;
@@ -187,8 +200,18 @@ impl ScriptHeap {
                             );
                         }
                     }
+                    if !self.charge_object_map_entry(
+                        top_ptr,
+                        key,
+                        "binding function arguments",
+                    ) {
+                        return NIL;
+                    }
                     self.objects[top_ptr].map_insert(key, *value);
                 } else {
+                    if !self.charge_object_vec_entries(1, "binding variadic function arguments") {
+                        return NIL;
+                    }
                     self.objects[top_ptr].vec.push(ScriptVecValue {
                         key: NIL,
                         value: *value,

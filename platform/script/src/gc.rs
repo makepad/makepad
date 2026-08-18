@@ -418,6 +418,10 @@ impl ScriptHeap {
                 for value in thread.stack.iter() {
                     self.mark_value(*value);
                 }
+                // Frame-local slot values
+                for value in thread.slots.iter() {
+                    self.mark_value(*value);
+                }
                 // Scopes
                 for scope in thread.scopes.iter() {
                     self.mark_value((*scope).into());

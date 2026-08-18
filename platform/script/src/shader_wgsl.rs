@@ -1075,7 +1075,10 @@ pub fn compile_draw_shader_wgsl_source(
     }
 
     if output.has_errors {
-        return Err("WGSL lowering reported shader errors".to_string());
+        return Err(format!(
+            "WGSL lowering reported shader errors:\n{}",
+            output.error_report()
+        ));
     }
 
     // Keep Vulkan shader IO layout in lockstep with the draw mapping produced by the

@@ -487,6 +487,78 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     native.add_method(
         heap,
         shader,
+        id_lut!(test_compile_draw_errors),
+        script_args!(io_self = NIL),
+        |vm, args| {
+            let io_self = script_value!(vm, args.io_self);
+
+            if let Some(io_self) = io_self.as_object() {
+                let mut output = ShaderOutput::default();
+                output.backend = ShaderBackend::Metal;
+                output.use_vulkan = false;
+
+                output.pre_collect_rust_instance_io(vm, io_self);
+                output.pre_collect_shader_io(vm, io_self);
+
+                if let Some(fnobj) = vm
+                    .bx
+                    .heap
+                    .object_method(
+                        io_self,
+                        id!(vertex).into(),
+                        vm.bx.threads.cur_ref().trap.pass(),
+                    )
+                    .as_object()
+                {
+                    output.mode = ShaderMode::Vertex;
+                    ShaderFnCompiler::compile_shader_def(
+                        vm,
+                        &mut output,
+                        NoTrap,
+                        id!(vertex),
+                        fnobj,
+                        ShaderType::IoSelf(io_self),
+                        vec![],
+                    );
+                }
+                if let Some(fnobj) = vm
+                    .bx
+                    .heap
+                    .object_method(
+                        io_self,
+                        id!(fragment).into(),
+                        vm.bx.threads.cur_ref().trap.pass(),
+                    )
+                    .as_object()
+                {
+                    output.mode = ShaderMode::Fragment;
+                    ShaderFnCompiler::compile_shader_def(
+                        vm,
+                        &mut output,
+                        NoTrap,
+                        id!(fragment),
+                        fnobj,
+                        ShaderType::IoSelf(io_self),
+                        vec![],
+                    );
+                }
+
+                // Contract under test: every compile failure must surface a
+                // human-readable message — a silently failing shader (gray
+                // fallback, no log) is itself the bug.
+                if output.has_errors {
+                    return output.error_report().script_to_value(vm);
+                }
+                return "".to_string().script_to_value(vm);
+            }
+
+            "no shader object".to_string().script_to_value(vm)
+        },
+    );
+
+    native.add_method(
+        heap,
+        shader,
         id_lut!(test_compile_draw_rust_contains),
         script_args!(io_self = NIL, needle = NIL),
         |vm, args| {

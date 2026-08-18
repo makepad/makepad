@@ -11,6 +11,17 @@ pub const TAG_SHELL_RUN: u8 = 0x03;
 /// the relative path. Server answers TAG_FILE_DATA (same encoding as the
 /// push direction) then TAG_EXIT_CODE 0, or TAG_ERROR.
 pub const TAG_FILE_PULL: u8 = 0x04;
+/// Start a hidden, job-breakaway process that survives this connection.
+/// Payload is one UTF-8 command line. Server replies with stdout text
+/// (`pid=…\nlog=…`) then TAG_EXIT_CODE 0, or TAG_ERROR. Requires `--all`.
+pub const TAG_SPAWN: u8 = 0x06;
+/// List processes. Optional payload is a case-insensitive substring filter
+/// on the image name. Reply is one `pid=… ppid=… name=…` line per match.
+/// Requires `--all`.
+pub const TAG_PS: u8 = 0x07;
+/// Kill a process. Payload is a decimal pid, optionally followed by `\ntree`
+/// to include descendants. Requires `--all`.
+pub const TAG_KILL: u8 = 0x08;
 
 // Server -> client response tags.
 pub const TAG_OUTPUT: u8 = 0x01;
@@ -51,9 +62,17 @@ pub fn read_msg(r: &mut dyn Read) -> io::Result<(u8, Vec<u8>)> {
     let mut tag_buf = [0u8; 1];
     r.read_exact(&mut tag_buf)?;
     let len = read_u32(r)? as usize;
-    let mut payload = vec![0u8; len];
+    // Grow with the bytes that actually arrive instead of trusting the
+    // header: a crafted 4GB length with no body must not allocate 4GB.
+    let mut payload = Vec::with_capacity(len.min(1024 * 1024));
     if len > 0 {
-        r.read_exact(&mut payload)?;
+        let got = r.take(len as u64).read_to_end(&mut payload)?;
+        if got != len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "message payload truncated",
+            ));
+        }
     }
     Ok((tag_buf[0], payload))
 }

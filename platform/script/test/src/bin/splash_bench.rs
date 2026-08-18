@@ -90,6 +90,39 @@ fn main() {
     let vm = &mut new_vm();
     let mut results = Vec::new();
 
+    // BENCH_DUMP=1: eval a probe script and dump its opcodes, then exit.
+    // Used to verify what the slot resolver emitted.
+    if std::env::var("BENCH_DUMP").is_ok() {
+        let v = vm.eval(script! {
+            let fib = |n| {
+                if n < 2 {
+                    return n
+                }
+                return fib(n - 1) + fib(n - 2)
+            }
+            let f = |dt| {
+                let total = 0.0
+                for a in 4 {
+                    let dx = a * 2.0
+                    let dz = a + 1.0
+                    let best = 100.0
+                    for b in 4 {
+                        let d = dx * dz + b
+                        if d < best { best = d }
+                    }
+                    total += best
+                }
+                total
+            }
+            f(0.016) + fib(6)
+        });
+        vm.drain_errors();
+        println!("eval result: {}", v);
+        let bodies = vm.bx.code.bodies.borrow();
+        bodies[0].parser.dump_opcodes();
+        return;
+    }
+
     // 1. Arithmetic in a for-range loop: loop machinery + scope + arith.
     results.push(bench_call(
         vm,

@@ -1,17 +1,20 @@
 # Studio Remote Runbook
 
 ## Execution Policy
-- Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
+- Use the Makepad Studio remote protocol by default when the agent needs to
+  inspect or automate a visual UI program. If the user explicitly asks for a
+  standalone/native run, honor that request and launch the release executable
+  directly from the relevant checkout instead.
 - Always use release builds for runtime validation, profiling, benchmarks, timing checks, or any performance-sensitive command. Use `--release` unless the user explicitly asks for a debug build.
 - Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
-- Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
+- Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when using the Studio flow. For an explicitly requested standalone run, build with `cargo build --release` and launch the resulting executable from that checkout so its provenance is unambiguous.
 - Do not use bridge `Cargo` requests to run applications. Only launch apps from runnable items via bridge `RunItem`.
 - For UI runnable targets, do not prebuild or precheck the app from the shell before launching it in Studio. Let the Studio `RunItem` build be the single build path so Cargo fingerprints, env vars, target dirs, and flags stay identical.
 - Before starting a new UI run for the same target, send `ClearBuild` for the previous build so Studio stops it and removes its run/log/profiler tabs.
 - `cargo check` or `cargo build` never counts as UI verification. After changing UI/runtime code, you must clear the old build and start a fresh Studio run before trusting screenshots, widget dumps, or interaction results.
 - Do not keep inspecting an older already-running app after code changes. Re-run the target and verify against the new `build_id`.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
-- Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
+- Prefer Studio remote control for automated widget queries, clicks, typing, or runtime UI inspection unless the user asks for standalone execution. A standalone app's built-in screenshot/capture hook is valid for visual inspection.
 - Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent Studio remote bridge process and reuse it for the entire interaction.
 - When adding a new example crate, update both the Cargo workspace and `makepad.splash` so Studio exposes the new example as a runnable item.
 
@@ -20,6 +23,12 @@
 - Studio remote target is `ip:port` only (no `http://`, no `ws://`), normally `127.0.0.1:8001`.
   - Use `127.0.0.1:8002` only if Studio reports fallback because `8001` is occupied.
 - Keep one persistent studio remote process for the whole interaction.
+
+## Standalone Launch
+- A direct user request for a standalone/native app overrides the default Studio launch flow for that run.
+- Build the requested app in release mode from the exact checkout being tested, then run its resulting executable directly.
+- Stop or replace an older standalone instance of the same target before launching a freshly built one.
+- Keep an interactive standalone app running when the user asks to play with it; use a separate self-terminating capture run only when a screenshot is also needed.
 
 ## Start Studio Remote
 - Command:

@@ -25,7 +25,9 @@ use {
             cx_native::EventFlow,
             macos::{macos_delegates::*, macos_event::*, macos_window::MacosWindow},
         },
+        window::WindowId,
     },
+    makepad_objc_sys::objc_block,
     std::{cell::RefCell, collections::HashMap, os::raw::c_void, rc::Rc, time::Instant},
 };
 
@@ -120,6 +122,10 @@ pub struct MacosApp {
     timers: Vec<CocoaTimer>,
     //pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
+    /// Cocoa owns/retains window delegates and views beyond `windowWillClose:`.
+    /// Keep their Rust callback targets alive for the same lifetime so a queued
+    /// native callback can never dereference a freed `MacosWindow`.
+    retired_cocoa_windows: Vec<Box<MacosWindow>>,
     last_key_mod: KeyModifiers,
     #[allow(unused)]
     pasteboard: ObjcId,
@@ -130,6 +136,20 @@ pub struct MacosApp {
 
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
+    /// Pointer lock (FPS mouse capture): while true the hardware cursor is
+    /// frozen+hidden and MouseMove positions are synthesized from NSEvent
+    /// deltas into `virtual_mouse` — downstream consumers never know.
+    pub mouse_pointer_lock: bool,
+    pub virtual_mouse: Option<Vec2d>,
+    /// Whether the lock's physical effects (hidden cursor, disassociation)
+    /// are currently applied. Diverges from `mouse_pointer_lock` while the
+    /// window is not key: macOS re-associates the cursor when the app
+    /// deactivates, so focus loss suspends the effects and focus gain
+    /// re-applies them — the same dance GLFW does for disabled-cursor mode.
+    pub pointer_lock_applied: bool,
+    /// The pin, cocoa global coords (bottom-left origin) — where the locked
+    /// cursor must stay.
+    pub lock_pin: Option<Vec2d>,
     //current_ns_event: Option<ObjcId>,
 
     /// Set by `send_command_event()` to avoid sending keyboard events
@@ -158,6 +178,7 @@ impl MacosApp {
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
+                retired_cocoa_windows: Vec::new(),
                 event_flow: EventFlow::Poll,
                 last_key_mod: KeyModifiers {
                     ..Default::default()
@@ -165,6 +186,10 @@ impl MacosApp {
                 event_callback: Some(event_callback),
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
+                mouse_pointer_lock: false,
+                virtual_mouse: None,
+                pointer_lock_applied: false,
+                lock_pin: None,
                 terminating_from_app_delegate: false,
                 //current_ns_event: None,
                 menu_command_fired: false,
@@ -731,6 +756,36 @@ impl MacosApp {
             with_macos_app(|app| app.event_callback = Some(callback));
         }
     }
+
+    /// Deliver `WindowClosed` after the current Cocoa delegate callback has
+    /// returned. Removing a `MetalWindow` synchronously from
+    /// `windowWillClose:` would otherwise drop the boxed `MacosWindow` while
+    /// that same object is still borrowed by the delegate callback.
+    pub fn defer_window_closed(window_id: WindowId) {
+        unsafe {
+            let main_thread_block = objc_block!(move || {
+                MacosApp::do_callback(MacosEvent::WindowClosed(
+                    crate::event::WindowClosedEvent { window_id },
+                ));
+            });
+            let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+            let block_operation: ObjcId =
+                msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let () = msg_send![main_queue, addOperation: block_operation];
+        }
+    }
+
+    /// Retire a closed window without invalidating the raw pointers stored in
+    /// its still-retained Cocoa view and delegate. Those native objects retain
+    /// their original `alloc` ownership until process teardown; keeping this
+    /// small Rust peer for the same lifetime closes the corresponding UAF.
+    pub fn retire_cocoa_window(&mut self, mut window: Box<MacosWindow>) {
+        window.retire();
+        let native_window = window.window;
+        self.cocoa_windows
+            .retain(|(window, _view)| *window != native_window);
+        self.retired_cocoa_windows.push(window);
+    }
     /*
     pub fn post_signal(signal: Signal) {
         unsafe {
@@ -764,6 +819,98 @@ impl MacosApp {
 
         }
     }*/
+
+    /// Apply or suspend the pointer lock's PHYSICAL effects, in GLFW's
+    /// proven order. Enable: hide → warp to the key window's centre (while
+    /// still associated — warping a disassociated cursor stalls event
+    /// delivery) → disassociate. Disable: re-associate → unhide. The logical
+    /// `mouse_pointer_lock` flag is managed by the caller; this only touches
+    /// the OS state, tracked in `pointer_lock_applied` so focus churn never
+    /// double-hides or double-shows the cursor.
+    pub fn apply_pointer_lock_effects(&mut self, on: bool) {
+        if self.pointer_lock_applied == on {
+            return;
+        }
+        self.pointer_lock_applied = on;
+        // THE deadzone bug: after every CGWarpMouseCursorPosition, macOS
+        // suppresses local hardware mouse events for 0.25s BY DEFAULT — so
+        // a moving locked mouse (drift repins = warps) had rolling windows
+        // where clicks reached no app at all, not even our own NSView's
+        // mouseDown. SDL zeroes this interval in Cocoa_InitMouse for
+        // exactly this reason; zero it before the first warp ever fires.
+        unsafe {
+            let _ = CGSetLocalEventsSuppressionInterval(0.0);
+        }
+        self.virtual_mouse = None;
+        unsafe {
+            if on {
+                let () = msg_send![class!(NSCursor), hide];
+                if let Some((win, _)) = self.cocoa_windows.first() {
+                    let frame: NSRect = msg_send![*win, frame];
+                    // Pin the cursor mid-way into the window's portion on
+                    // the PRIMARY screen — deterministic, never the seam or
+                    // an edge pixel (a cursor frozen on the screen edge has
+                    // its clicks eaten by macOS edge behaviour before they
+                    // ever reach the app). [win screen] was ambiguous on a
+                    // straddling/mirrored window and degenerated to the
+                    // frame centre = the exact edge.
+                    let screens0: ObjcId = msg_send![class!(NSScreen), screens];
+                    let wscreen: ObjcId = msg_send![screens0, firstObject];
+                    let svis: NSRect = if wscreen != nil {
+                        msg_send![wscreen, visibleFrame]
+                    } else {
+                        frame
+                    };
+                    let lo_x = frame.origin.x.max(svis.origin.x);
+                    let hi_x = (frame.origin.x + frame.size.width)
+                        .min(svis.origin.x + svis.size.width);
+                    let lo_y = frame.origin.y.max(svis.origin.y);
+                    let hi_y = (frame.origin.y + frame.size.height)
+                        .min(svis.origin.y + svis.size.height);
+                    let gx = if lo_x < hi_x { (lo_x + hi_x) * 0.5 } else { frame.origin.x + frame.size.width * 0.5 };
+                    let gy_cocoa = if lo_y < hi_y { (lo_y + hi_y) * 0.5 } else { frame.origin.y + frame.size.height * 0.5 };
+                    let screens: ObjcId = msg_send![class!(NSScreen), screens];
+                    let primary: ObjcId = msg_send![screens, firstObject];
+                    let sframe: NSRect = msg_send![primary, frame];
+                    let _ = CGWarpMouseCursorPosition(NSPoint {
+                        x: gx,
+                        y: sframe.size.height - gy_cocoa,
+                    });
+                    self.lock_pin = Some(Vec2d { x: gx, y: gy_cocoa });
+                }
+                CGAssociateMouseAndMouseCursorPosition(0);
+            } else {
+                CGAssociateMouseAndMouseCursorPosition(1);
+                let () = msg_send![class!(NSCursor), unhide];
+            }
+        }
+    }
+
+    /// Per-frame while locked: force the hardware cursor back onto the pin
+    /// and re-assert the disassociation. On systems where the association
+    /// silently drops (observed live: deadzones the size of the desktop
+    /// minus the window), this is the enforcement that actually holds.
+    pub fn repin_pointer(&mut self) {
+        if !self.mouse_pointer_lock || !self.pointer_lock_applied {
+            return;
+        }
+        let Some(pin) = self.lock_pin else { return };
+        unsafe {
+            // mouseLocation is cocoa global (bottom-left origin, points).
+            let loc: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+            let drift = (loc.x - pin.x).abs() + (loc.y - pin.y).abs();
+            if drift > 2.0 {
+                let screens: ObjcId = msg_send![class!(NSScreen), screens];
+                let primary: ObjcId = msg_send![screens, firstObject];
+                let sframe: NSRect = msg_send![primary, frame];
+                let _ = CGWarpMouseCursorPosition(NSPoint {
+                    x: pin.x,
+                    y: sframe.size.height - pin.y,
+                });
+                CGAssociateMouseAndMouseCursorPosition(0);
+            }
+        }
+    }
 
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor != cursor {

@@ -1672,6 +1672,7 @@ impl Win32Window {
     pub fn send_mouse_move(&mut self, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         self.do_callback(Win32Event::MouseMove(MouseMoveEvent {
+                lock_delta: Default::default(),
             window_id: self.window_id,
             abs: pos,
             modifiers: modifiers,

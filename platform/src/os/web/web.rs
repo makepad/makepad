@@ -24,6 +24,15 @@ use {
 };
 
 impl Cx {
+    /// WebGL cannot blit a private render target to CPU without an extra
+    /// readPixels path that this backend does not expose yet.
+    pub fn debug_read_render_texture(
+        &mut self,
+        _texture: &crate::texture::Texture,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        None
+    }
+
     fn normalize_web_pathname(pathname: &str) -> String {
         let trimmed = pathname.trim();
         if trimmed.is_empty() {
@@ -688,6 +697,10 @@ impl Cx {
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!("external file dragging is not implemented on Web");
+                    self.call_event_handler(&Event::DragEnd);
+                }
                 CxOsOp::SetCursor(cursor) => {
                     self.os.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 }

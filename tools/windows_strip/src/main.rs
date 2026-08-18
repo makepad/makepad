@@ -1438,24 +1438,13 @@ fn collect_imports_from_file(
     let mut explicit = HashSet::new();
     let mut globs = Vec::new();
 
-    let mut depth = 0isize;
     let mut i = 0usize;
     while i < tokens.len() {
-        match tokens[i].token {
-            FullToken::Open(_) => {
-                depth += 1;
-                i += 1;
-                continue;
-            }
-            FullToken::Close(_) => {
-                depth -= 1;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        if depth == 0 && ident_eq(&tokens, i, "use") {
+        // `use` declarations are collected at ANY nesting depth: function
+        // bodies legitimately contain `use windows::...` imports (e.g. the
+        // d3d11 shader cache helper) and skipping them silently drops their
+        // symbols from the regenerated bindings.
+        if ident_eq(&tokens, i, "use") {
             let mut j = i + 1;
             let mut local_depth = 0isize;
             while j < tokens.len() {

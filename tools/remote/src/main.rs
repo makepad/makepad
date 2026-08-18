@@ -7,7 +7,9 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+mod procs;
 mod protocol;
+use procs::SpawnRecord;
 use protocol::*;
 
 // --- Platform-specific process tree killing ---
@@ -127,6 +129,7 @@ struct RunningCargo {
 }
 
 type CargoState = Arc<Mutex<Option<RunningCargo>>>;
+type SpawnState = Arc<Mutex<Vec<SpawnRecord>>>;
 
 fn kill_previous(state: &CargoState) {
     let mut lock = state.lock().unwrap();
@@ -159,6 +162,7 @@ fn run_server(port: u16, allow_all: bool) -> io::Result<()> {
     eprintln!("server: listening on {}", addr);
 
     let state: CargoState = Arc::new(Mutex::new(None));
+    let spawns: SpawnState = Arc::new(Mutex::new(Vec::new()));
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -176,8 +180,9 @@ fn run_server(port: u16, allow_all: bool) -> io::Result<()> {
 
         let cwd = cwd.clone();
         let state = state.clone();
+        let spawns = spawns.clone();
         thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, &cwd, &state, allow_all) {
+            if let Err(e) = handle_connection(stream, &cwd, &state, &spawns, allow_all) {
                 eprintln!("server: connection error: {}", e);
             }
         });
@@ -224,6 +229,7 @@ fn handle_connection(
     mut stream: TcpStream,
     cwd: &Path,
     state: &CargoState,
+    spawns: &SpawnState,
     allow_all: bool,
 ) -> io::Result<()> {
     let run_args: Vec<String>;
@@ -236,6 +242,84 @@ fn handle_connection(
                 let full_path = validate_and_resolve_path(cwd, rel_path)?;
                 fs::write(&full_path, data)?;
                 eprintln!("server: wrote {} ({} bytes)", rel_path, data.len());
+            }
+            TAG_SPAWN => {
+                if !allow_all {
+                    let msg = "spawn not allowed (server not started with --all)";
+                    let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg));
+                }
+                let command = String::from_utf8(payload)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let command = command.trim();
+                if command.is_empty() {
+                    let msg = "spawn requires a command";
+                    let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
+                }
+                match spawn_detached(cwd, command) {
+                    Ok((pid, log)) => {
+                        if let Ok(mut list) = spawns.lock() {
+                            list.retain(|j| procs::is_alive(j.pid));
+                            list.push(SpawnRecord {
+                                pid,
+                                command: command.to_string(),
+                                log: log.clone(),
+                            });
+                        }
+                        let reply = format!("pid={pid}\nlog={}\n", log.display());
+                        eprintln!("server: spawn pid={pid} log={}", log.display());
+                        reply_text(&mut stream, &reply)?;
+                    }
+                    Err(e) => {
+                        let msg = format!("spawn failed: {e}");
+                        let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    }
+                }
+                return Ok(());
+            }
+            TAG_PS => {
+                if !allow_all {
+                    let msg = "ps not allowed (server not started with --all)";
+                    let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg));
+                }
+                let filter = String::from_utf8_lossy(&payload);
+                let filter = filter.trim();
+                match format_process_list(spawns, filter) {
+                    Ok(text) => reply_text(&mut stream, &text)?,
+                    Err(e) => {
+                        let _ = write_msg(
+                            &mut stream,
+                            TAG_ERROR,
+                            format!("ps failed: {e}").as_bytes(),
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            TAG_KILL => {
+                if !allow_all {
+                    let msg = "kill not allowed (server not started with --all)";
+                    let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg));
+                }
+                match parse_kill_payload(&payload) {
+                    Ok((pid, tree)) => match do_kill(spawns, pid, tree) {
+                        Ok(text) => reply_text(&mut stream, &text)?,
+                        Err(e) => {
+                            let _ = write_msg(
+                                &mut stream,
+                                TAG_ERROR,
+                                format!("kill failed: {e}").as_bytes(),
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        let _ = write_msg(&mut stream, TAG_ERROR, e.as_bytes());
+                    }
+                }
+                return Ok(());
             }
             TAG_FILE_PULL => {
                 let rel_path = String::from_utf8(payload)
@@ -402,7 +486,257 @@ fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
     }
 }
 
+fn reply_text(stream: &mut TcpStream, text: &str) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(1 + text.len());
+    payload.push(STREAM_STDOUT);
+    payload.extend_from_slice(text.as_bytes());
+    write_msg(stream, TAG_OUTPUT, &payload)?;
+    write_msg(stream, TAG_EXIT_CODE, &0i32.to_be_bytes())
+}
+
+fn format_process_list(spawns: &SpawnState, filter: &str) -> io::Result<String> {
+    let procs = procs::list_processes()?;
+    let spawned = spawns.lock().map(|mut list| {
+        list.retain(|j| procs::is_alive(j.pid));
+        list.clone()
+    }).unwrap_or_default();
+    let filter = filter.to_ascii_lowercase();
+    let mut lines = Vec::new();
+    for proc in procs {
+        let name_l = proc.name.to_ascii_lowercase();
+        if !filter.is_empty() && !name_l.contains(&filter) && !filter_matches_spawn(&spawned, proc.pid, &filter)
+        {
+            continue;
+        }
+        let rec = spawned.iter().find(|j| j.pid == proc.pid);
+        let mut line = format!(
+            "pid={} ppid={} name={}",
+            proc.pid, proc.ppid, proc.name
+        );
+        if let Some(rec) = rec {
+            line.push_str(" spawned=yes");
+            line.push_str(" log=");
+            line.push_str(&rec.log.display().to_string());
+            line.push_str(" cmd=");
+            line.push_str(&rec.command.replace('\n', " "));
+        } else {
+            line.push_str(" spawned=no");
+        }
+        lines.push(line);
+    }
+    lines.sort();
+    if lines.is_empty() {
+        lines.push("(none)".into());
+    }
+    lines.push(String::new());
+    Ok(lines.join("\n"))
+}
+
+fn filter_matches_spawn(spawned: &[SpawnRecord], pid: u32, filter: &str) -> bool {
+    spawned.iter().any(|j| {
+        j.pid == pid && j.command.to_ascii_lowercase().contains(filter)
+    })
+}
+
+fn parse_kill_payload(payload: &[u8]) -> Result<(u32, bool), String> {
+    let text = std::str::from_utf8(payload).map_err(|_| "kill pid must be utf-8".to_string())?;
+    let mut lines = text.lines().filter(|l| !l.is_empty());
+    let pid = lines
+        .next()
+        .ok_or_else(|| "kill requires a pid".to_string())?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "kill pid must be a number".to_string())?;
+    let tree = lines.any(|l| l.trim().eq_ignore_ascii_case("tree"));
+    Ok((pid, tree))
+}
+
+fn do_kill(spawns: &SpawnState, pid: u32, tree: bool) -> io::Result<String> {
+    let killed = if tree {
+        procs::kill_tree(pid)?
+    } else {
+        procs::kill_pid(pid)?;
+        vec![pid]
+    };
+    if let Ok(mut list) = spawns.lock() {
+        list.retain(|j| !killed.contains(&j.pid) && procs::is_alive(j.pid));
+    }
+    Ok(format!(
+        "killed {}\n",
+        killed
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    ))
+}
+
+// --- Detached spawn (survives this connection; no console window) ---
+
+static SPAWN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn spawn_detached(cwd: &Path, command: &str) -> io::Result<(u32, PathBuf)> {
+    let job_dir = cwd.join("remote-jobs");
+    fs::create_dir_all(&job_dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = SPAWN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let log_path = job_dir.join(format!("{stamp}-{seq}.log"));
+    let log = fs::File::create(&log_path)?;
+    let log_err = log.try_clone()?;
+    {
+        let mut header = log.try_clone()?;
+        let _ = writeln!(header, "spawn {stamp}\ncmd: {command}\n---");
+    }
+
+    let mut cmd = {
+        #[cfg(unix)]
+        {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(command);
+            c
+        }
+        #[cfg(windows)]
+        {
+            let mut c = Command::new("powershell");
+            c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ]);
+            c
+        }
+    };
+    cmd.current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                extern "C" {
+                    fn setpgid(pid: i32, pgid: i32) -> i32;
+                }
+                setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) if cfg!(windows) => {
+            // Some hosts reject BREAKAWAY when the parent is not in a job.
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                let log = fs::OpenOptions::new().append(true).open(&log_path)?;
+                let log_err = log.try_clone()?;
+                let mut retry = Command::new("powershell");
+                retry
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        command,
+                    ])
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(log_err))
+                    .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+                retry.spawn().map_err(|e2| {
+                    io::Error::new(
+                        e2.kind(),
+                        format!("spawn retry without breakaway: {e2} (first: {e})"),
+                    )
+                })?
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(e);
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    // Intentionally leak the Child: this process must outlive the TCP
+    // connection and must not be placed in the foreground job object.
+    let pid = child.id();
+    std::mem::forget(child);
+    Ok((pid, log_path))
+}
+
 // --- Client ---
+
+fn run_simple(addr: &str, tag: u8, payload: &[u8]) -> io::Result<i32> {
+    eprintln!("client: connecting to {addr}");
+    let mut stream = TcpStream::connect(addr)?;
+    eprintln!("client: connected");
+    write_msg(&mut stream, tag, payload)?;
+    let exit_code;
+    loop {
+        let (tag, payload) = read_msg(&mut stream)?;
+        match tag {
+            TAG_OUTPUT => {
+                if payload.is_empty() {
+                    continue;
+                }
+                let data = &payload[1..];
+                match payload.first().copied() {
+                    Some(STREAM_STDOUT) => {
+                        io::stdout().write_all(data)?;
+                        io::stdout().flush()?;
+                    }
+                    Some(STREAM_STDERR) => {
+                        io::stderr().write_all(data)?;
+                        io::stderr().flush()?;
+                    }
+                    _ => {}
+                }
+            }
+            TAG_EXIT_CODE => {
+                exit_code = if payload.len() >= 4 {
+                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                } else {
+                    1
+                };
+                break;
+            }
+            TAG_ERROR => {
+                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
+                exit_code = 1;
+                break;
+            }
+            _ => {
+                eprintln!("client: unknown tag 0x{tag:02x}");
+                exit_code = 1;
+                break;
+            }
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(exit_code)
+}
 
 fn run_client(addr: &str, cmd_args: &[String], is_shell: bool) -> io::Result<i32> {
     let files = get_changed_files()?;
@@ -560,7 +894,10 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  Server: makepad-remote --server [--port PORT] [--all]");
     eprintln!("  Client: makepad-remote <ip:port> cargo [args...]");
-    eprintln!("          makepad-remote <ip:port> shell <command...>  (requires --all on server)");
+    eprintln!("          makepad-remote <ip:port> shell <command...>  (requires --all)");
+    eprintln!("          makepad-remote <ip:port> spawn <command...>  (hidden, survives disconnect)");
+    eprintln!("          makepad-remote <ip:port> ps [filter]");
+    eprintln!("          makepad-remote <ip:port> kill [--tree] <pid>");
 }
 
 fn main() -> ExitCode {
@@ -599,16 +936,55 @@ fn main() -> ExitCode {
     } else {
         let addr = &args[0];
 
-        if args.len() < 2 || (args[1] != "cargo" && args[1] != "shell") {
-            eprintln!("client mode requires: <ip:port> cargo|shell [args...]");
+        if args.len() < 2 {
             print_usage();
             return ExitCode::from(1);
         }
+        let result = match args[1].as_str() {
+            "cargo" => run_client(addr, &args[2..], false),
+            "shell" => run_client(addr, &args[2..], true),
+            "spawn" => {
+                if args.len() < 3 {
+                    eprintln!("spawn requires a command");
+                    print_usage();
+                    return ExitCode::from(1);
+                }
+                run_simple(addr, TAG_SPAWN, args[2..].join(" ").as_bytes())
+            }
+            "ps" => {
+                let filter = args.get(2).cloned().unwrap_or_default();
+                run_simple(addr, TAG_PS, filter.as_bytes())
+            }
+            "kill" => {
+                let mut tree = false;
+                let mut pid = None;
+                for a in &args[2..] {
+                    if a == "--tree" {
+                        tree = true;
+                    } else {
+                        pid = Some(a.clone());
+                    }
+                }
+                let Some(pid) = pid else {
+                    eprintln!("kill requires a pid");
+                    print_usage();
+                    return ExitCode::from(1);
+                };
+                let payload = if tree {
+                    format!("{pid}\ntree")
+                } else {
+                    pid
+                };
+                run_simple(addr, TAG_KILL, payload.as_bytes())
+            }
+            _ => {
+                eprintln!("client mode requires: cargo|shell|spawn|ps|kill");
+                print_usage();
+                return ExitCode::from(1);
+            }
+        };
 
-        let is_shell = args[1] == "shell";
-        let cmd_args = &args[2..];
-
-        match run_client(addr, cmd_args, is_shell) {
+        match result {
             Ok(code) => {
                 if code == 0 {
                     ExitCode::SUCCESS
