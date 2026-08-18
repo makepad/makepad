@@ -194,9 +194,9 @@ fn run() -> Result<(), String> {
     let oracle_ids: Option<Vec<u32>> = if ids_path.is_file() {
         let text = std::fs::read_to_string(&ids_path).map_err(|err| err.to_string())?;
         Some(
-            text.trim_matches(|c| c == '[' || c == ']' || c == '\n' || c == ' ')
-                .split(',')
-                .filter_map(|part| part.trim().parse::<u32>().ok())
+            text.split(|c: char| !c.is_ascii_digit())
+                .filter(|part| !part.is_empty())
+                .filter_map(|part| part.parse::<u32>().ok())
                 .collect(),
         )
     } else {
