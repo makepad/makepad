@@ -402,7 +402,7 @@ mod tests {
     fn parses_split_flux_workflow() {
         let workflow = FluxWorkflow::from_json_str(
             "flux_dev_full_text_to_image.json",
-            include_str!("../../../examples/comfyui/flux_dev_full_text_to_image.json"),
+            include_str!("../workflows/flux_dev_full_text_to_image.json"),
         )
         .unwrap();
 
@@ -432,7 +432,7 @@ mod tests {
     fn parses_checkpoint_flux_workflow() {
         let workflow = FluxWorkflow::from_json_str(
             "flux_dev.json",
-            include_str!("../../../examples/comfyui/flux_dev.json"),
+            include_str!("../workflows/flux_dev.json"),
         )
         .unwrap();
 
