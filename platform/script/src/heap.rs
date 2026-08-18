@@ -16,6 +16,34 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::rc::Rc;
 
+/// Result of one execution-scoped script allocation budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptAllocationReport {
+    /// Logical heap bytes charged while the budget was installed.
+    pub allocated_bytes: usize,
+    /// True when an allocation was refused before growing its container.
+    pub exceeded: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ScriptAllocationBudget {
+    remaining: usize,
+    allocated: usize,
+    exceeded: bool,
+    error: Option<String>,
+}
+
+impl ScriptAllocationBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            remaining: limit,
+            allocated: 0,
+            exceeded: false,
+            error: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ScriptHeap {
     pub modules: ScriptObject,
@@ -56,9 +84,108 @@ pub struct ScriptHeap {
     pub(crate) regex_intern: HashMap<RegexInternKey, ScriptRegex>,
     pub(crate) regexes: GenVec<Option<ScriptRegexData>>,
     pub(crate) regexes_free: Vec<ScriptRegex>,
+
+    /// `None` is the trusted/default behavior. Sandboxed hosts install this
+    /// only around one eval or tick, so widget/Studio VMs keep their existing
+    /// unrestricted heap semantics.
+    pub(crate) allocation_budget: Option<ScriptAllocationBudget>,
+    /// Harmless immutable sentinels returned after the budget is exhausted.
+    /// They keep parser/native construction paths memory-safe until the VM
+    /// observes the pending hard-limit error and bails at the next opcode.
+    pub(crate) allocation_poison_object: ScriptObject,
+    pub(crate) allocation_poison_array: ScriptArray,
 }
 
 impl ScriptHeap {
+    pub(crate) fn begin_allocation_budget(
+        &mut self,
+        limit: usize,
+    ) -> Option<ScriptAllocationBudget> {
+        // Create the sentinels before the budget becomes active. They are
+        // static and frozen, so GC retains them and refused writes are inert.
+        if self.allocation_poison_object == ScriptObject::ZERO {
+            let object = self.new_object();
+            self.objects[object].tag.set_static();
+            self.objects[object].tag.freeze();
+            self.allocation_poison_object = object;
+        }
+        if self.allocation_poison_array == ScriptArray::default() {
+            let array = self.new_array();
+            self.arrays[array].tag.set_static();
+            self.arrays[array].tag.freeze();
+            self.allocation_poison_array = array;
+        }
+        self.allocation_budget
+            .replace(ScriptAllocationBudget::new(limit))
+    }
+
+    pub(crate) fn end_allocation_budget(
+        &mut self,
+        previous: Option<ScriptAllocationBudget>,
+    ) -> ScriptAllocationReport {
+        let current = self.allocation_budget.take();
+        self.allocation_budget = previous;
+        current.map_or_else(ScriptAllocationReport::default, |budget| {
+            ScriptAllocationReport {
+                allocated_bytes: budget.allocated,
+                exceeded: budget.exceeded,
+            }
+        })
+    }
+
+    /// Charge logical payload bytes before a script-controlled container
+    /// grows. Arithmetic is saturating so a hostile sparse index cannot wrap
+    /// into a small allocation request.
+    pub(crate) fn charge_allocation(&mut self, bytes: usize, operation: &'static str) -> bool {
+        let Some(budget) = self.allocation_budget.as_mut() else {
+            return true;
+        };
+        if budget.exceeded {
+            return false;
+        }
+        if bytes > budget.remaining {
+            budget.exceeded = true;
+            budget.error = Some(format!(
+                "script allocation limit exceeded while {operation}: requested {bytes} bytes, {} remaining",
+                budget.remaining
+            ));
+            return false;
+        }
+        budget.remaining -= bytes;
+        budget.allocated = budget.allocated.saturating_add(bytes);
+        true
+    }
+
+    pub(crate) fn has_allocation_budget(&self) -> bool {
+        self.allocation_budget.is_some()
+    }
+
+    pub(crate) fn allocation_remaining(&self) -> usize {
+        self.allocation_budget
+            .as_ref()
+            .map_or(usize::MAX, |budget| budget.remaining)
+    }
+
+    pub(crate) fn allocation_exceeded(&self) -> bool {
+        self.allocation_budget
+            .as_ref()
+            .is_some_and(|budget| budget.exceeded)
+    }
+
+    pub(crate) fn take_allocation_error(&mut self) -> Option<String> {
+        self.allocation_budget
+            .as_mut()
+            .and_then(|budget| budget.error.take())
+    }
+
+    pub(crate) fn is_allocation_poison_object(&self, object: ScriptObject) -> bool {
+        object == self.allocation_poison_object && object != ScriptObject::ZERO
+    }
+
+    pub(crate) fn is_allocation_poison_array(&self, array: ScriptArray) -> bool {
+        array == self.allocation_poison_array && array != ScriptArray::default()
+    }
+
     /// A stable, unique identity for this heap for its lifetime, matching
     /// [`ScriptObjectRef::heap_key`] for every ref minted here. Used to map a
     /// heap to its owning script VM so a widget's objects are always resolved
@@ -188,6 +315,22 @@ impl ScriptHeap {
             if let Some(object) = &self.type_check[index.0 as usize].object {
                 return object.name;
             }
+        }
+        None
+    }
+
+    /// Best-effort human name for an object: the registered Rust type name
+    /// of the object or of its nearest typed prototype. Used for
+    /// diagnostics — e.g. naming a draw shader in compile-error reports.
+    pub fn object_type_name_in_chain(&self, ptr: ScriptObject) -> Option<LiveId> {
+        let mut cur = Some(ptr);
+        while let Some(obj) = cur {
+            if let Some(type_id) = self.object_type_id(obj) {
+                if let Some(name) = self.type_name_by_id(type_id) {
+                    return Some(name);
+                }
+            }
+            cur = self.proto(obj).as_object();
         }
         None
     }
@@ -720,9 +863,138 @@ impl ScriptHeap {
     }
 
     pub fn to_json(&mut self, value: ScriptValue) -> ScriptValue {
-        self.new_string_with(|heap, s| {
-            heap.to_json_inner(value, s);
+        if !self.has_allocation_budget() {
+            return self.new_string_with(|heap, s| {
+                heap.to_json_inner(value, s);
+            });
+        }
+        let cap = self.allocation_remaining();
+        let Some(len) = self.to_json_len_bounded(value, &mut Vec::new(), cap) else {
+            let _ = self.charge_allocation(usize::MAX, "serializing JSON");
+            return NIL;
+        };
+        self.new_string_with_preflight(len, "serializing JSON", |heap, out| {
+            heap.to_json_inner(value, out);
         })
+    }
+
+    fn to_json_len_bounded(
+        &self,
+        value: ScriptValue,
+        recur: &mut Vec<ScriptValue>,
+        cap: usize,
+    ) -> Option<usize> {
+        fn add(len: &mut usize, additional: usize, cap: usize) -> Option<()> {
+            *len = len.checked_add(additional)?;
+            (*len <= cap).then_some(())
+        }
+
+        fn escaped_len(value: &str, cap: usize) -> Option<usize> {
+            let mut len = 0usize;
+            for ch in value.chars() {
+                let additional = match ch {
+                    '\x08' | '\x0c' | '\n' | '\r' | '"' | '\\' => 2,
+                    ch => ch.len_utf8(),
+                };
+                add(&mut len, additional, cap)?;
+            }
+            Some(len)
+        }
+
+        if recur.len() >= 128 || recur.contains(&value) {
+            return None;
+        }
+        if let Some(obj) = value.as_object() {
+            recur.push(value);
+            let mut len = 1usize; // {
+            let mut first = true;
+            let mut ptr = obj;
+            let mut proto_seen = Vec::new();
+            loop {
+                if proto_seen.contains(&ptr) {
+                    return None;
+                }
+                proto_seen.push(ptr);
+                let object = &self.objects[ptr];
+                for (key, map_value) in object.map.iter() {
+                    if !first {
+                        add(&mut len, 1, cap)?;
+                    }
+                    let key_len = self.to_json_len_bounded(*key, recur, cap - len)?;
+                    add(&mut len, key_len, cap)?;
+                    add(&mut len, 1, cap)?; // :
+                    let value_len =
+                        self.to_json_len_bounded(map_value.value, recur, cap - len)?;
+                    add(&mut len, value_len, cap)?;
+                    first = false;
+                }
+                for item in &object.vec {
+                    if !first {
+                        add(&mut len, 1, cap)?;
+                    }
+                    let key_len = self.to_json_len_bounded(item.key, recur, cap - len)?;
+                    add(&mut len, key_len, cap)?;
+                    add(&mut len, 1, cap)?;
+                    let value_len = self.to_json_len_bounded(item.value, recur, cap - len)?;
+                    add(&mut len, value_len, cap)?;
+                    first = false;
+                }
+                if let Some(next) = object.proto.as_object() {
+                    ptr = next;
+                } else {
+                    break;
+                }
+            }
+            add(&mut len, 1, cap)?; // }
+            recur.pop();
+            return Some(len);
+        }
+        if let Some(array) = value.as_array() {
+            recur.push(value);
+            let storage = &self.arrays[array].storage;
+            let mut len = 1usize; // [
+            let mut first = true;
+            for index in 0..storage.len() {
+                if let Some(item) = storage.index(index) {
+                    if !first {
+                        add(&mut len, 1, cap)?;
+                    }
+                    let item_len = self.to_json_len_bounded(item, recur, cap - len)?;
+                    add(&mut len, item_len, cap)?;
+                    first = false;
+                }
+            }
+            add(&mut len, 1, cap)?; // ]
+            recur.pop();
+            return Some(len);
+        }
+        if let Some(id) = value.as_id() {
+            let inner = id.as_string(|value| {
+                value.and_then(|value| escaped_len(value, cap.saturating_sub(2)))
+            })?;
+            return inner.checked_add(2).filter(|len| *len <= cap);
+        }
+        if let Some(string) = value.as_string() {
+            let inner = escaped_len(self.string(string), cap.saturating_sub(2))?;
+            return inner.checked_add(2).filter(|len| *len <= cap);
+        }
+        if let Some(inner) = value.as_inline_string(|string| {
+            escaped_len(string, cap.saturating_sub(2))
+        }) {
+            return inner?.checked_add(2).filter(|len| *len <= cap);
+        }
+        if let Some(value) = value.as_bool() {
+            return Some(if value { 4 } else { 5 }).filter(|len| *len <= cap);
+        }
+        if let Some(value) = value.as_number() {
+            let len = format!("{}", value).len();
+            return (len <= cap).then_some(len);
+        }
+        if let Some(value) = value.as_handle() {
+            let len = format!("Handle{:?}", value).len();
+            return (len <= cap).then_some(len);
+        }
+        (4 <= cap).then_some(4) // null
     }
 
     pub fn to_json_inner(&self, value: ScriptValue, out: &mut String) {

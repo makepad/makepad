@@ -261,6 +261,17 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
+    /// FPS-style pointer lock: `true` hides the cursor and freezes it in
+    /// place while mouse deltas keep arriving (as synthesized absolute
+    /// positions, so existing MouseMove consumers work unchanged); `false`
+    /// releases. Backends without support ignore it.
+    LockMousePointer(bool),
+    /// Per-frame lock maintenance, pushed by the captured app every frame:
+    /// re-pins the hardware cursor. Exists because OS-level disassociation
+    /// proves unreliable on some systems (it silently drops on app
+    /// deactivation and other events) — SDL's fallback is the same
+    /// warp-every-frame. No-op when unlocked or unsupported.
+    RepinMousePointer,
     /// Tints the system bar (status/navigation bar) icons: `true` requests
     /// dark icons, `false` requests light icons. Honored on Android and iOS
     /// (iOS only has a status bar).
@@ -286,6 +297,14 @@ pub enum CxOsOp {
     Quit,
 
     StartDragging(Vec<DragItem>),
+    /// Begin an operating-system drag whose destination may be another
+    /// application. This is deliberately separate from `StartDragging`:
+    /// several Makepad widgets use that operation for the framework's
+    /// immediate, synthetic in-window drag protocol.
+    StartExternalDragging {
+        window_id: WindowId,
+        items: Vec<DragItem>,
+    },
     UpdateMacosMenu(MacosMenu),
     ShowClipboardActions {
         has_selection: bool,
@@ -430,6 +449,8 @@ impl std::fmt::Debug for CxOsOp {
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
+            Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
+            Self::RepinMousePointer => write!(f, "RepinMousePointer"),
             Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
@@ -441,6 +462,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::Quit => write!(f, "Quit"),
 
             Self::StartDragging(..) => write!(f, "StartDragging"),
+            Self::StartExternalDragging { .. } => write!(f, "StartExternalDragging"),
             Self::UpdateMacosMenu(..) => write!(f, "UpdateMacosMenu"),
             Self::ShowClipboardActions { .. } => write!(f, "ShowClipboardActions"),
             Self::HideClipboardActions => write!(f, "HideClipboardActions"),
@@ -557,6 +579,13 @@ impl Cx {
     /// helper is dead code on those builds, hence the `allow(dead_code)`.
     #[allow(dead_code)]
     pub(crate) fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
+        // Native window callbacks can be delivered after a window has been
+        // destroyed.  In that case their Cocoa back-pointer no longer names a
+        // live Cx window.  Pointer events are best-effort, so never let a stale
+        // callback index the generational pool (and abort the whole app).
+        if !self.windows.is_valid(window_id) || !self.windows[window_id].is_created {
+            return;
+        }
         *pos = self.windows[window_id].remap_dpi_override(*pos);
     }
 
@@ -895,6 +924,19 @@ impl Cx {
 
     // Determines whether to show your application in the dock when it runs. The default value is true.
     // You can remove the dock icon by setting this value to false.
+    /// FPS mouse capture: lock hides and freezes the hardware cursor while
+    /// deltas keep flowing as MouseMove events; unlock restores the cursor.
+    /// Convention: lock on the game's own click, RELEASE ON ESCAPE.
+    pub fn lock_mouse_pointer(&mut self, lock: bool) {
+        self.platform_ops.push(CxOsOp::LockMousePointer(lock));
+    }
+
+    /// Call once per frame while holding the lock — keeps the hardware
+    /// cursor pinned even when the OS quietly drops the disassociation.
+    pub fn repin_mouse_pointer(&mut self) {
+        self.platform_ops.push(CxOsOp::RepinMousePointer);
+    }
+
     pub fn show_in_dock(&mut self, show: bool) {
         self.platform_ops.push_back(CxOsOp::ShowInDock(show));
     }
@@ -1105,6 +1147,25 @@ impl Cx {
             }
         });
         self.platform_ops.push_back(CxOsOp::StartDragging(items));
+    }
+
+    /// Starts a native drag-and-drop session that can leave the Makepad app.
+    ///
+    /// `FilePath` items must contain absolute paths to existing regular files
+    /// and must not carry an `internal_id`. The source window is explicit so
+    /// a multi-window application never starts the session from a stale Cocoa
+    /// event or the wrong native surface. Unsupported item/platform
+    /// combinations are rejected by the platform adapter. Every accepted or
+    /// rejected request completes with `Event::DragEnd`, allowing callers to
+    /// release gesture state without platform-specific timeouts.
+    pub fn start_external_dragging(&mut self, window_id: WindowId, items: Vec<DragItem>) {
+        self.platform_ops.iter().for_each(|op| {
+            if matches!(op, CxOsOp::StartExternalDragging { .. }) {
+                panic!("start external drag twice");
+            }
+        });
+        self.platform_ops
+            .push(CxOsOp::StartExternalDragging { window_id, items });
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
@@ -1809,6 +1870,35 @@ impl Cx {
 /// Possible values: `""` (cannot play), `"maybe"`, `"probably"`.
 pub fn can_play_type(mime: &str) -> &'static str {
     can_play_type_impl(mime)
+}
+
+#[cfg(test)]
+mod stale_window_tests {
+    use super::*;
+    use crate::window::WindowHandle;
+
+    #[test]
+    fn dpi_override_ignores_closed_and_out_of_range_windows() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        let window = WindowHandle::new(&mut cx);
+        let window_id = window.window_id();
+        cx.windows[window_id].is_created = true;
+        cx.windows[window_id].os_dpi_factor = Some(2.0);
+        cx.windows[window_id].dpi_override = Some(1.0);
+
+        let mut live_pos = dvec2(12.0, 8.0);
+        cx.dpi_override_scale(&mut live_pos, window_id);
+        assert_eq!(live_pos, dvec2(24.0, 16.0));
+
+        cx.windows[window_id].is_created = false;
+        let mut closed_pos = dvec2(12.0, 8.0);
+        cx.dpi_override_scale(&mut closed_pos, window_id);
+        assert_eq!(closed_pos, dvec2(12.0, 8.0));
+
+        let mut stale_pos = dvec2(12.0, 8.0);
+        cx.dpi_override_scale(&mut stale_pos, WindowId(usize::MAX, u64::MAX));
+        assert_eq!(stale_pos, dvec2(12.0, 8.0));
+    }
 }
 
 #[cfg(all(target_os = "linux", not(target_os = "android")))]

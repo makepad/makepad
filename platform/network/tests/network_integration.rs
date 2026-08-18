@@ -300,6 +300,81 @@ fn http_post_body_roundtrip_preserves_json_payload() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn http_get_range_header_is_sent_and_206_body_is_the_slice() {
+    let _guard = test_guard();
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let Some(port) = find_free_port() else {
+        eprintln!("http range test skipped: cannot allocate local test port");
+        return;
+    };
+
+    let (capture_tx, capture_rx) = mpsc::channel::<String>();
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind local tcp listener");
+    let server = std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut req = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let Ok(n) = stream.read(&mut tmp) else {
+                return;
+            };
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&tmp[..n]);
+            if find_header_end(&req).is_some() {
+                break;
+            }
+        }
+        let headers = String::from_utf8_lossy(&req).to_string();
+        let _ = capture_tx.send(headers);
+        let _ = stream.write_all(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-7/16\r\nContent-Length: 4\r\nConnection: close\r\n\r\nWXYZ",
+        );
+        let _ = stream.flush();
+    });
+
+    let request_id = LiveId::from_str("http.get.range.test");
+    let mut request = HttpRequest::new(format!("http://127.0.0.1:{port}/blob"), HttpMethod::GET);
+    request.set_header("Range".to_string(), "bytes=4-7".to_string());
+    runtime
+        .http_start(request_id, request)
+        .expect("http_start should succeed");
+
+    let event = wait_for_event(&runtime, Duration::from_secs(10), |event| {
+        matches!(event, NetworkResponse::HttpResponse { request_id: id, .. } if *id == request_id)
+            || matches!(event, NetworkResponse::HttpError { request_id: id, .. } if *id == request_id)
+    })
+    .expect("no http result event received");
+    match event {
+        NetworkResponse::HttpResponse { response, .. } => {
+            assert_eq!(
+                response.status_code, 206,
+                "range GET must surface 206, got {}",
+                response.status_code
+            );
+            assert_eq!(response.body(), Some(&b"WXYZ"[..]));
+        }
+        NetworkResponse::HttpError { error, .. } => {
+            panic!("unexpected http error: {}", error.message);
+        }
+        other => panic!("unexpected network event: {other:?}"),
+    }
+
+    let headers = capture_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("did not capture local request");
+    assert!(
+        headers.to_ascii_lowercase().contains("range: bytes=4-7"),
+        "Range header missing or rewritten: {headers}"
+    );
+    let _ = server.join();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn socket_stream_plain_tcp_large_roundtrip() {
     let _guard = test_guard();
     let Some(port) = find_free_port() else {

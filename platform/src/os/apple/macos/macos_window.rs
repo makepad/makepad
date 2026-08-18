@@ -4,8 +4,7 @@ use {
         event::{
             finger::MouseButton, DragItem, KeyModifiers, MouseDownEvent, MouseMoveEvent,
             MouseUpEvent, ScrollEvent, ScrollPhase, TextInputEvent, WindowCloseRequestedEvent,
-            WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom,
-            WindowGeomChangeEvent,
+            WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom, WindowGeomChangeEvent,
         },
         makepad_math::{Rect, Vec2d},
         os::{
@@ -21,7 +20,7 @@ use {
             WindowBackdrop, WindowId, WindowVisuals,
         },
     },
-    std::{cell::Cell, os::raw::c_void, rc::Rc},
+    std::{cell::Cell, os::raw::c_void, path::Path, rc::Rc},
 };
 
 #[derive(Clone)]
@@ -53,6 +52,11 @@ pub struct MacosWindow {
     /// Whether a scroll gesture or a real mouse press arrived during the current raw
     /// touch sequence, which disqualifies it from being a tap.
     touch_disqualified: bool,
+    /// The Cocoa view/delegate can receive queued callbacks after close. A
+    /// retired window stays allocated until its retained native peers go away,
+    /// but no longer forwards those callbacks into `Cx`.
+    retired: bool,
+    close_event_deferred: bool,
 }
 
 impl MacosWindow {
@@ -80,6 +84,8 @@ impl MacosWindow {
                 last_momentum_time: 0.0,
                 touch_began_time: 0.0,
                 touch_disqualified: false,
+                retired: false,
+                close_event_deferred: false,
                 ime_rect: Rect::default(),
                 last_mouse_pos: Vec2d::default(),
                 ime_active: false,
@@ -675,7 +681,21 @@ impl MacosWindow {
     }
 
     pub fn do_callback(&mut self, event: MacosEvent) {
-        MacosApp::do_callback(event);
+        if !self.retired {
+            MacosApp::do_callback(event);
+        }
+    }
+
+    pub(crate) fn retire(&mut self) {
+        self.retired = true;
+        unsafe {
+            if self.live_resize_timer != nil {
+                let () = msg_send![self.live_resize_timer, invalidate];
+                self.live_resize_timer = nil;
+            }
+            let () = msg_send![self.window, setAcceptsMouseMovedEvents: NO];
+            let () = msg_send![self.window, setDelegate: nil];
+        }
     }
 
     pub fn set_position(&mut self, pos: Vec2d) {
@@ -745,6 +765,9 @@ impl MacosWindow {
     }
 
     pub fn send_change_event(&mut self) {
+        if self.retired {
+            return;
+        }
         //return;
         let new_geom = self.get_window_geom();
         let old_geom = if let Some(old_geom) = &self.last_window_geom {
@@ -763,10 +786,16 @@ impl MacosWindow {
     }
 
     pub fn send_got_focus_event(&mut self) {
+        if self.retired {
+            return;
+        }
         self.do_callback(MacosEvent::WindowGotFocus(self.window_id));
     }
 
     pub fn send_lost_focus_event(&mut self) {
+        if self.retired {
+            return;
+        }
         if self.is_popup {
             self.do_callback(MacosEvent::PopupDismissed(
                 crate::event::window::PopupDismissedEvent {
@@ -780,6 +809,9 @@ impl MacosWindow {
     }
 
     pub fn mouse_down_can_drag_window(&mut self) -> bool {
+        if self.retired {
+            return false;
+        }
         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
         self.do_callback(MacosEvent::WindowDragQuery(WindowDragQueryEvent {
             window_id: self.window_id,
@@ -793,6 +825,9 @@ impl MacosWindow {
     }
 
     pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {
+        if self.retired {
+            return;
+        }
         // A real press arrived, so the current touch needs no synthesized tap.
         self.touch_disqualified = true;
         let () = unsafe { msg_send![self.window, makeFirstResponder: self.view] };
@@ -807,6 +842,9 @@ impl MacosWindow {
     }
 
     pub fn send_mouse_up(&mut self, button: MouseButton, modifiers: KeyModifiers) {
+        if self.retired {
+            return;
+        }
         self.do_callback(MacosEvent::MouseUp(MouseUpEvent {
             button,
             modifiers,
@@ -843,7 +881,29 @@ impl MacosWindow {
         }
     }
 
-    pub fn send_mouse_move(&mut self, _event: ObjcId, pos: Vec2d, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, event: ObjcId, pos: Vec2d, modifiers: KeyModifiers) {
+        if self.retired {
+            return;
+        }
+        // Pointer lock: the hardware cursor is frozen (its abs never moves),
+        // but NSEvent still reports per-event deltas — integrate them into a
+        // virtual position so every downstream MouseMove consumer works
+        // unchanged, captured-FPS style.
+        // Browser pointer-lock model: while locked, `abs` stays PINNED at
+        // the lock point (the position of the click that locked — inside
+        // the game view, so widget routing never wanders into other panels)
+        // and the true motion travels as `lock_delta`. An unbounded virtual
+        // position routed clicks into whatever UI it drifted over.
+        let (pos, lock_delta) = with_macos_app(|app| {
+            if !app.mouse_pointer_lock {
+                return (pos, Vec2d::default());
+            }
+            let (dx, dy): (f64, f64) = unsafe {
+                (msg_send![event, deltaX], msg_send![event, deltaY])
+            };
+            let pin = *app.virtual_mouse.get_or_insert(self.last_mouse_pos);
+            (pin, Vec2d { x: dx, y: dy })
+        });
         self.last_mouse_pos = pos;
 
         if !self.is_nonactivating_panel() {
@@ -853,6 +913,7 @@ impl MacosWindow {
         self.do_callback(MacosEvent::MouseMove(MouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
+            lock_delta,
             modifiers: modifiers,
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
@@ -868,6 +929,9 @@ impl MacosWindow {
         is_mouse: bool,
         phase: ScrollPhase,
     ) {
+        if self.retired {
+            return;
+        }
         match phase {
             // Only live momentum arms the tap synthesizer: after the stream ends,
             // macOS delivers taps itself and synthesizing one would double it.
@@ -908,9 +972,11 @@ impl MacosWindow {
     }
 
     pub fn send_window_closed_event(&mut self) {
-        self.do_callback(MacosEvent::WindowClosed(WindowClosedEvent {
-            window_id: self.window_id,
-        }))
+        if self.close_event_deferred {
+            return;
+        }
+        self.close_event_deferred = true;
+        MacosApp::defer_window_closed(self.window_id);
     }
 
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
@@ -926,76 +992,126 @@ impl MacosWindow {
         self.ime_active = active;
     }
 
+    /// Starts a Finder-compatible file drag from this exact native window.
+    /// Internal Makepad drags deliberately do not use this path: they need
+    /// immediate framework events rather than AppKit's nested drag session.
     #[cfg(target_os = "macos")]
-    pub fn start_dragging(&mut self, items: Vec<DragItem>) {
-        let ns_event: ObjcId = unsafe {
-            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            msg_send![ns_app, currentEvent]
-        };
-        let mut dragged_files = Vec::new();
-        for item in items {
-            match item {
-                DragItem::FilePath { path, internal_id } => {
-                    let pasteboard_item: ObjcId =
-                        unsafe { msg_send![class!(NSPasteboardItem), new] };
-                    let _: () = unsafe {
-                        msg_send![
-                            pasteboard_item,
-                            setString: str_to_nsstring(
-                                &if let Some(id) = internal_id{
-                                    format!("file://{}#makepad_internal_id={}", if path.len()==0{"makepad_internal_empty"}else {&path}, id.0)
-                                }
-                                else{
-                                    format!("file://{}",if path.len()==0{"makepad_internal_empty"}else {&path})
-                                }
-                            )
-                            forType: NSPasteboardTypeFileURL
-                        ]
-                    };
-                    let dragging_item: ObjcId = unsafe { msg_send![class!(NSDraggingItem), alloc] };
-                    let _: () = unsafe {
-                        msg_send![dragging_item, initWithPasteboardWriter: pasteboard_item]
-                    };
-                    let bounds: NSRect = unsafe { msg_send![self.view, bounds] };
-                    let _: () = unsafe {
-                        msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
-                    };
-                    dragged_files.push(dragging_item)
-                }
-                _ => {
-                    crate::error!("Dragging string not implemented on macos yet");
-                }
-            }
+    pub fn start_external_dragging(&mut self, items: Vec<DragItem>) -> bool {
+        if self.retired || items.is_empty() {
+            return false;
         }
 
-        let dragging_items: ObjcId = unsafe {
-            msg_send![
-                class!(NSArray),
-                arrayWithObjects: dragged_files.as_ptr()
-                count: dragged_files.len()
-            ]
+        let paths = items
+            .into_iter()
+            .map(|item| match item {
+                DragItem::FilePath {
+                    path,
+                    internal_id: None,
+                } => Some(path),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(paths) = paths else {
+            crate::error!("external drag accepts only public file paths");
+            return false;
         };
+        if paths.iter().any(|path| {
+            let path = Path::new(path);
+            !path.is_absolute() || !path.is_file()
+        }) {
+            crate::error!("external drag requires absolute paths to existing files");
+            return false;
+        }
 
         unsafe {
-            let _: ObjcId = msg_send![
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let ns_event: ObjcId = msg_send![ns_app, currentEvent];
+            if ns_event == nil {
+                return false;
+            }
+            let event_window: ObjcId = msg_send![ns_event, window];
+            if event_window == nil || event_window != self.window {
+                return false;
+            }
+            let event_type: NSEventType = msg_send![ns_event, type];
+            if !matches!(
+                event_type,
+                NSEventType::NSLeftMouseDown
+                    | NSEventType::NSLeftMouseDragged
+                    | NSEventType::NSRightMouseDown
+                    | NSEventType::NSRightMouseDragged
+                    | NSEventType::NSOtherMouseDown
+                    | NSEventType::NSOtherMouseDragged
+            ) {
+                return false;
+            }
+
+            let window_point: NSPoint = msg_send![ns_event, locationInWindow];
+            let view_point: NSPoint =
+                msg_send![self.view, convertPoint: window_point fromView: nil];
+            let workspace: ObjcId = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let mut dragging_items = Vec::with_capacity(paths.len());
+
+            for (index, path) in paths.iter().enumerate() {
+                let ns_path = str_to_nsstring(path);
+                let file_url: ObjcId =
+                    msg_send![class!(NSURL), fileURLWithPath: ns_path isDirectory: NO];
+                if file_url == nil {
+                    continue;
+                }
+                let item: ObjcId = msg_send![class!(NSDraggingItem), alloc];
+                let item: ObjcId = msg_send![item, initWithPasteboardWriter: file_url];
+                if item == nil {
+                    continue;
+                }
+
+                let icon: ObjcId = msg_send![workspace, iconForFile: ns_path];
+                let icon: ObjcId = if icon == nil {
+                    nil
+                } else {
+                    msg_send![icon, copy]
+                };
+                let offset = index as f64 * 3.0;
+                let frame = NSRect {
+                    origin: NSPoint {
+                        x: view_point.x - 24.0 + offset,
+                        y: view_point.y - 24.0 - offset,
+                    },
+                    size: NSSize {
+                        width: 48.0,
+                        height: 48.0,
+                    },
+                };
+                let _: () = msg_send![item, setDraggingFrame: frame contents: icon];
+                if icon != nil {
+                    let _: () = msg_send![icon, release];
+                }
+                dragging_items.push(item);
+            }
+
+            if dragging_items.is_empty() {
+                return false;
+            }
+            let array: ObjcId = msg_send![
+                class!(NSArray),
+                arrayWithObjects: dragging_items.as_ptr()
+                count: dragging_items.len()
+            ];
+            let session: ObjcId = msg_send![
                 self.view,
-                beginDraggingSessionWithItems: dragging_items
+                beginDraggingSessionWithItems: array
                 event: ns_event
                 source: self.view
             ];
+            if session != nil {
+                let _: () =
+                    msg_send![session, setAnimatesToStartingPositionsOnCancelOrFail: NO];
+            }
+            for item in dragging_items {
+                let _: () = msg_send![item, release];
+            }
+            session != nil
         }
-
-        /*
-         self.delegate?.cellClick(self ,index:self.index)
-        //
-        let pasteboardItem = NSPasteboardItem()
-        pasteboardItem.setString(zText!.stringValue, forType:.string)
-        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
-        draggingItem.setDraggingFrame(self.bounds, contents:self)
-        beginDraggingSession(with: [draggingItem], event: event, source: self.zIcon.image)
-        */
-
-        // TODO
     }
 }
 

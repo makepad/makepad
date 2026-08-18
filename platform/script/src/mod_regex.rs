@@ -1,4 +1,3 @@
-use crate::array::*;
 use crate::heap::*;
 use crate::makepad_live_id::live_id::*;
 use crate::makepad_live_id_macros::*;
@@ -139,28 +138,21 @@ pub fn define_regex_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
 
                         // Build captures array
                         let captures = vm.bx.heap.new_array();
-                        vm.bx
-                            .heap
-                            .array_mut_mut_self_with(captures, |heap, storage| {
-                                *storage = ScriptArrayStorage::ScriptValue(Default::default());
-                                if let ScriptArrayStorage::ScriptValue(vec) = storage {
-                                    // Group 0 = whole match
-                                    vec.push_back(heap.new_string_from_str(value));
-                                    // Groups 1..N
-                                    for i in 1..=num_captures {
-                                        let s = slots.get(i * 2).copied().flatten();
-                                        let e = slots.get(i * 2 + 1).copied().flatten();
-                                        match (s, e) {
-                                            (Some(s), Some(e)) => {
-                                                vec.push_back(
-                                                    heap.new_string_from_str(&input[s..e]),
-                                                );
-                                            }
-                                            _ => vec.push_back(NIL),
-                                        }
-                                    }
+                        // Group 0 = whole match
+                        let value = vm.bx.heap.new_string_from_str(value);
+                        vm.bx.heap.array_push_unchecked(captures, value);
+                        // Groups 1..N
+                        for i in 1..=num_captures {
+                            let s = slots.get(i * 2).copied().flatten();
+                            let e = slots.get(i * 2 + 1).copied().flatten();
+                            let value = match (s, e) {
+                                (Some(s), Some(e)) => {
+                                    vm.bx.heap.new_string_from_str(&input[s..e])
                                 }
-                            });
+                                _ => NIL,
+                            };
+                            vm.bx.heap.array_push_unchecked(captures, value);
+                        }
 
                         vm.bx
                             .heap

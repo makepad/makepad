@@ -161,6 +161,16 @@ impl Cx {
     #[cfg(target_os = "macos")]
     pub fn macos_activate_app(&mut self) {}
 
+    /// Diagnostics-only render-target readback (see the metal backend for the
+    /// real one). Headless callers get None, same as a texture that was never
+    /// allocated — every call site already handles that.
+    pub fn debug_read_render_texture(
+        &mut self,
+        _texture: &crate::texture::Texture,
+    ) -> Option<(usize, usize, Vec<u8>)> {
+        None
+    }
+
     #[cfg(target_os = "macos")]
     pub fn share_texture_for_presentable_image(&mut self, _texture: &crate::Texture) -> u32 {
         0
