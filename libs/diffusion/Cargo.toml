@@ -14,6 +14,11 @@ makepad-llama = { path = "../llama" }
 # ~89k LOC (chat/KV, qwen35moe, ...) has no consumers here. mlx itself stays
 # in the tree unbuilt until lane T3 deletes it.
 makepad-ai-loader = { path = "../ai/loader" }
+# DiffusionError/Result + the plain sharded-safetensors reader moved out to
+# the ai model workspace (lane T6a, /aiarch.md §1) so the family crates that
+# split out of this one later can share them without depending on all of
+# diffusion.
+makepad-ai-common = { path = "../ai/models/common" }
 makepad-gltf = { path = "../gltf" }
 makepad-micro-serde = { path = "../micro_serde" }
 makepad-zune-core = { path = "../zune/zune-core" }

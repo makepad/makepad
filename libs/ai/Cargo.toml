@@ -9,5 +9,6 @@ members = [
     "cuda",
     "metal",
     "job",
+    "models/common",
 ]
 resolver = "2"
