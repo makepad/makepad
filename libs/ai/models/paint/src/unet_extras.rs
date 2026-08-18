@@ -562,6 +562,21 @@ impl UnetFirst {
             eprintln!("[pbr-ra] {short} ref {}x{} rms={:.4}", res.ref_tokens.rows(), res.ref_tokens.cols(), rms(res.ref_tokens));
             eprintln!("[pbr-ra] {short} k={:.4} valb={:.4} q={:.4}", rms(&k), rms(&v_alb), rms(&alb_q));
             eprintln!("[pbr-ra] {short} oalb={:.4} tokens={:.4}", rms(&o_alb), rms(&tokens));
+            if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
+                let dump = |tag: &str, t: &GpuTensor| {
+                    if let Ok(v) = gpu_download(t) {
+                        let mut bytes = Vec::with_capacity(v.len() * 4);
+                        for x in &v {
+                            bytes.extend_from_slice(&x.to_le_bytes());
+                        }
+                        let _ = std::fs::write(format!("{dir}/ra_{short}_{tag}.f32"), bytes);
+                    }
+                };
+                dump("q", &alb_q);
+                dump("n1alb", &alb_n1);
+                dump("oalb", &o_alb);
+                dump("tokens_pre", &tokens);
+            }
         }
         for cfg in 0..n_cfg {
             let rs = ref_scales[cfg];
