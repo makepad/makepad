@@ -8,6 +8,11 @@
 use makepad_widgets::*;
 use std::sync::mpsc;
 
+/// Always-on ocean sidecars (sea from coastline-derived polygons; low serves
+/// open ocean via ancestor overzoom, high carries exact coastal tiles).
+pub const OCEAN_LOW_MBTILES: &str = "local/maps/ocean-low.mbtiles";
+pub const OCEAN_HIGH_MBTILES: &str = "local/maps/ocean-high.mbtiles";
+
 /// name → overlay mbtiles path (order = fixed toggle slots).
 pub const OVERLAY_LAYERS: [(&str, &str); 6] = [
     ("chargers", "local/overlays/nl-chargers.mbtiles?fast"),
@@ -130,13 +135,17 @@ impl LayerState {
     }
 
     pub fn overlay_paths(&self) -> String {
-        OVERLAY_LAYERS
-            .iter()
-            .zip(self.overlay_on.iter())
-            .filter(|(_, on)| **on)
-            .map(|((_, path), _)| *path)
-            .collect::<Vec<_>>()
-            .join(";")
+        // Ocean sidecars are always on: sea polygons are base data (the
+        // pbf-base schema has no coastline stage), not a toggleable layer.
+        let mut paths = vec![OCEAN_LOW_MBTILES, OCEAN_HIGH_MBTILES];
+        paths.extend(
+            OVERLAY_LAYERS
+                .iter()
+                .zip(self.overlay_on.iter())
+                .filter(|(_, on)| **on)
+                .map(|((_, path), _)| *path),
+        );
+        paths.join(";")
     }
 
     pub fn summary(&self) -> String {

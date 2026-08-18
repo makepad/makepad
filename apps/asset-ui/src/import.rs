@@ -1,0 +1,3337 @@
+//! Import surface: hardcoded open-pack modules, Kenney first.
+//!
+//! This is a catalog of packs we already name in-tree — not a generic zip
+//! drop zone. Each module owns its own identity, license blurb, official
+//! links, and an honest disk/import status. Kenney compiles through
+//! [`makepad_asset_importer::pack_import`]; other modules stay visible as
+//! not-provisioned cards until they get the same local-folder path.
+
+use makepad_asset_importer::ao_bake;
+use makepad_asset_importer::pack_import::{
+    self, kenney_pack, kenney_spec, KenneyPack, IMPORT_MANIFEST_FILE, KENNEY_ASSETS_HOME,
+    KENNEY_CREDITS, KENNEY_GITHUB, KENNEY_HOME, KENNEY_LICENSE, KENNEY_PACKS, KENNEY_SOURCE_ID,
+    KENNEY_SOURCE_TITLE,
+    SOURCE_COLLECTION_FILE, UPLOAD_PLAN_FILE,
+};
+use makepad_asset_client::{
+    AnnotationUpload, ApiEndpoints, AssetClient, ClientConfig,
+};
+use makepad_asset_data::{sha256, AssetKind, BlobId};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
+use std::thread;
+
+/// Import-card preview strip size.
+pub const IMPORT_PREVIEW_SLOTS: usize = 8;
+
+/// One serial import job. The UI queue runs these one at a time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportJob {
+    Kenney {
+        pack: String,
+        pack_index: usize,
+        path: String,
+    },
+    KenneyAll,
+    Freedoom {
+        path: String,
+    },
+    LibreQuake {
+        path: String,
+    },
+    Doom {
+        path: String,
+    },
+    Quake {
+        path: String,
+    },
+    Duke3d {
+        path: String,
+    },
+    Quake2 {
+        path: String,
+    },
+    Quake3 {
+        path: String,
+    },
+    DarkMod {
+        path: String,
+    },
+    KayKit,
+}
+
+impl ImportJob {
+    pub fn title(&self) -> String {
+        match self {
+            ImportJob::Kenney { pack, .. } => format!("Kenney · {pack}"),
+            ImportJob::KenneyAll => "Kenney · all packs".into(),
+            ImportJob::Freedoom { .. } => "Freedoom".into(),
+            ImportJob::LibreQuake { .. } => "LibreQuake".into(),
+            ImportJob::Doom { .. } => "Doom shareware".into(),
+            ImportJob::Quake { .. } => "Quake shareware".into(),
+            ImportJob::Duke3d { .. } => "Duke3D shareware".into(),
+            ImportJob::Quake2 { .. } => "Quake II shareware".into(),
+            ImportJob::Quake3 { .. } => "Quake III demo".into(),
+            ImportJob::DarkMod { .. } => "The Dark Mod".into(),
+            ImportJob::KayKit => "KayKit".into(),
+        }
+    }
+
+    /// Same pack already running or waiting — do not enqueue twice.
+    pub fn conflicts(&self, other: &ImportJob) -> bool {
+        match (self, other) {
+            (ImportJob::Kenney { pack: a, .. }, ImportJob::Kenney { pack: b, .. }) => a == b,
+            (ImportJob::KenneyAll, ImportJob::KenneyAll)
+            | (ImportJob::KenneyAll, ImportJob::Kenney { .. })
+            | (ImportJob::Kenney { .. }, ImportJob::KenneyAll)
+            | (ImportJob::Freedoom { .. }, ImportJob::Freedoom { .. })
+            | (ImportJob::LibreQuake { .. }, ImportJob::LibreQuake { .. })
+            | (ImportJob::Doom { .. }, ImportJob::Doom { .. })
+            | (ImportJob::Quake { .. }, ImportJob::Quake { .. })
+            | (ImportJob::Duke3d { .. }, ImportJob::Duke3d { .. })
+            | (ImportJob::Quake2 { .. }, ImportJob::Quake2 { .. })
+            | (ImportJob::Quake3 { .. }, ImportJob::Quake3 { .. })
+            | (ImportJob::DarkMod { .. }, ImportJob::DarkMod { .. })
+            | (ImportJob::KayKit, ImportJob::KayKit) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedImport {
+    pub id: u64,
+    pub job: ImportJob,
+}
+
+/// One-at-a-time import runner with a user-editable wait list.
+#[derive(Clone, Debug, Default)]
+pub struct ImportQueue {
+    next_id: u64,
+    pub active: Option<QueuedImport>,
+    pub pending: Vec<QueuedImport>,
+}
+
+impl ImportQueue {
+    pub fn enqueue(&mut self, job: ImportJob) -> Result<u64, String> {
+        if self
+            .active
+            .as_ref()
+            .map(|item| item.job.conflicts(&job))
+            .unwrap_or(false)
+            || self.pending.iter().any(|item| item.job.conflicts(&job))
+        {
+            return Err(format!("{} is already queued", job.title()));
+        }
+        self.next_id = self.next_id.saturating_add(1);
+        let id = self.next_id;
+        self.pending.push(QueuedImport { id, job });
+        Ok(id)
+    }
+
+    pub fn remove(&mut self, id: u64) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|item| item.id != id);
+        self.pending.len() != before
+    }
+
+    pub fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
+    pub fn finish_active(&mut self) {
+        self.active = None;
+    }
+
+    /// Move the next pending job into `active`. No-op while a job is active.
+    pub fn promote(&mut self) -> Option<QueuedImport> {
+        if self.active.is_some() {
+            return None;
+        }
+        if self.pending.is_empty() {
+            return None;
+        }
+        let item = self.pending.remove(0);
+        self.active = Some(item.clone());
+        Some(item)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.active.is_none() && self.pending.is_empty()
+    }
+
+    pub fn has_job(&self, job: &ImportJob) -> bool {
+        self.active
+            .as_ref()
+            .map(|item| item.job.conflicts(job))
+            .unwrap_or(false)
+            || self.pending.iter().any(|item| item.job.conflicts(job))
+    }
+
+    pub fn is_active(&self, job: &ImportJob) -> bool {
+        self.active
+            .as_ref()
+            .map(|item| item.job.conflicts(job))
+            .unwrap_or(false)
+    }
+
+    pub fn is_pending(&self, job: &ImportJob) -> bool {
+        self.pending.iter().any(|item| item.job.conflicts(job))
+    }
+}
+
+/// One hardcoded OSS pack module shown on the Import page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackModule {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub blurb: &'static str,
+    pub license: &'static str,
+    pub license_blurb: &'static str,
+    pub homepage: &'static str,
+    /// License / EULA page opened from the Import row Terms weblink.
+    pub terms_url: &'static str,
+    pub source_page: &'static str,
+    pub github: Option<&'static str>,
+    pub credits: &'static str,
+    /// True only when this module can run the local pack_import compiler.
+    pub import_wired: bool,
+}
+
+pub const KENNEY_MODULE: PackModule = PackModule {
+    id: KENNEY_SOURCE_ID,
+    title: KENNEY_SOURCE_TITLE,
+    blurb: "Low-poly 3D kits, UI, and game audio from kenney.nl. One collection (source_id kenney); each kit is a local folder you compile into a licensed upload plan. No network fetch — the pack must already be on disk.",
+    license: KENNEY_LICENSE,
+    license_blurb: "© Kenney (kenney.nl). CC BY 4.0 — attribution required on every copy and derivative. This Import module does not treat Kenney as CC0.",
+    homepage: KENNEY_HOME,
+    terms_url: "https://creativecommons.org/licenses/by/4.0/",
+    source_page: KENNEY_ASSETS_HOME,
+    github: Some(KENNEY_GITHUB),
+    credits: KENNEY_CREDITS,
+    import_wired: true,
+};
+
+pub const KAYKIT_MODULE: PackModule = PackModule {
+    id: "kaykit",
+    title: "KayKit / Kay Lousberg",
+    blurb: "Nine rigged adventurer and skeleton characters (41-joint KayKit rig) used by the sandbox play-mode cast. Local-folder import of the in-repo characters pack (CC0-1.0).",
+    license: "CC0-1.0",
+    license_blurb: "© Kay Lousberg / KayKit. CREDITS.toml records CC0 1.0 (public domain dedication). Attribution is not required; we still credit Kay Lousberg.",
+    homepage: "https://kaylousberg.com/",
+    terms_url: "https://creativecommons.org/publicdomain/zero/1.0/",
+    source_page: "https://kaylousberg.com/",
+    github: Some("https://github.com/KayKit-Game-Assets"),
+    credits: "Kay Lousberg / KayKit (kaylousberg.com)",
+    import_wired: true,
+};
+
+pub const NASA_SKY_MODULE: PackModule = PackModule {
+    id: "nasa-gsfc-svs",
+    title: "NASA GSFC SVS Deep Star Maps 2020",
+    blurb: "Galactic-coordinate star panorama used as the sandbox sky. A single public-domain EXR/PNG export, not a Kenney-style pack.",
+    license: "Public domain",
+    license_blurb: "NASA/GSFC SVS Deep Star Maps 2020 is U.S. government public domain. Credit NASA/GSFC SVS. Not a pack_import target.",
+    homepage: "https://svs.gsfc.nasa.gov/4851",
+    terms_url: "https://svs.gsfc.nasa.gov/4851",
+    source_page: "https://svs.gsfc.nasa.gov/4851",
+    github: None,
+    credits: "NASA/Goddard Space Flight Center Scientific Visualization Studio",
+    import_wired: false,
+};
+
+/// Core modules (Kenney + not-wired). Classic Freedoom/LibreQuake cards live
+/// in [`crate::import_classic`] so that path stays additive.
+pub const PACK_MODULES: &[PackModule] = &[KENNEY_MODULE, KAYKIT_MODULE, NASA_SKY_MODULE];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskProbe {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub is_dir: bool,
+    pub supported_files: usize,
+    pub unsupported_samples: Vec<String>,
+}
+
+impl DiskProbe {
+    pub fn ready(&self) -> bool {
+        self.exists && self.is_dir
+    }
+
+    pub fn line(&self) -> String {
+        if !self.exists {
+            return format!("not on disk · {}", self.path.display());
+        }
+        if !self.is_dir {
+            return format!("not a directory · {}", self.path.display());
+        }
+        if self.supported_files == 0 {
+            return format!(
+                "folder empty of png/jpeg/wav/mp4/glb · {}",
+                self.path.display()
+            );
+        }
+        if self.unsupported_samples.is_empty() {
+            return format!(
+                "on disk · {} supported files · {}",
+                self.supported_files,
+                self.path.display()
+            );
+        }
+        format!(
+            "on disk · {} supported · also has {} (compile will refuse unknown types) · {}",
+            self.supported_files,
+            self.unsupported_samples.join(", "),
+            self.path.display()
+        )
+    }
+}
+
+pub fn probe_dir(path: &Path) -> DiskProbe {
+    let meta = std::fs::symlink_metadata(path).ok();
+    let exists = meta.is_some();
+    let is_dir = meta.as_ref().is_some_and(|m| m.file_type().is_dir());
+    if !is_dir {
+        return DiskProbe {
+            path: path.to_path_buf(),
+            exists,
+            is_dir: false,
+            supported_files: 0,
+            unsupported_samples: Vec::new(),
+        };
+    }
+    let mut supported_files = 0usize;
+    let mut unsupported_samples = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            seen += 1;
+            if seen > 8192 {
+                break;
+            }
+            let p = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            match ext.as_str() {
+                "png" | "jpg" | "jpeg" | "wav" | "mp4" | "glb" => supported_files += 1,
+                other if !other.is_empty() => {
+                    let sample = format!(".{other}");
+                    if unsupported_samples.len() < 4
+                        && !unsupported_samples.iter().any(|s| s == &sample)
+                    {
+                        unsupported_samples.push(sample);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    DiskProbe {
+        path: path.to_path_buf(),
+        exists: true,
+        is_dir: true,
+        supported_files,
+        unsupported_samples,
+    }
+}
+
+pub fn kenney_packs() -> &'static [KenneyPack] {
+    KENNEY_PACKS
+}
+
+/// Godot starter-kit sample folders. Import uses the full Kenney.nl kits
+/// instead (`platformer-kit`, `city-kit-*`, `racing-kit`, `mini-arena`,
+/// `blaster-kit`). The slices stay on disk for the arcade downloader.
+const STARTER_KIT_SLICES: &[&str] = &["arena", "city", "fps", "platformer", "racing"];
+
+pub fn is_starter_kit_slice(name: &str) -> bool {
+    STARTER_KIT_SLICES.iter().any(|s| *s == name)
+}
+
+pub fn kenney_pack_labels() -> Vec<String> {
+    on_disk_kenney_packs()
+        .into_iter()
+        .map(|(name, _page)| {
+            let ver = kenney_pack(&name).map(|p| p.version).unwrap_or("1.0");
+            format!("{name}  {ver}")
+        })
+        .collect()
+}
+
+/// Candidate local folders for one Kenney pack, first existing dir wins.
+pub fn kenney_candidate_dirs(pack: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(root) = std::env::var("AI_CONTENT_PACK_ROOT") {
+        out.push(PathBuf::from(root).join("kenney").join(pack));
+    }
+    if let Ok(root) = std::env::var("KENNEY_PACK_ROOT") {
+        out.push(PathBuf::from(root).join(pack));
+    }
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    out.push(
+        repo.join("apps/sandbox/resources/models/kenney")
+            .join(pack),
+    );
+    out.push(
+        repo.join("apps/sandbox/resources/audio/kenney")
+            .join(pack),
+    );
+    out.push(repo.join("local/packs/kenney").join(pack));
+    out
+}
+
+pub fn resolve_kenney_dir(pack: &str, override_path: &str) -> PathBuf {
+    let typed = override_path.trim();
+    if !typed.is_empty() {
+        return PathBuf::from(typed);
+    }
+    for candidate in kenney_candidate_dirs(pack) {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    kenney_candidate_dirs(pack)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from(pack))
+}
+
+pub fn kaykit_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/sandbox/resources/characters")
+}
+
+pub fn nasa_sky_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/sandbox/resources/sky")
+}
+
+/// On-disk Kenney slugs: `(name, page)`. Catalogued packs first, then any
+/// extra kit folder under the sandbox Kenney roots.
+pub fn on_disk_kenney_packs() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for pack in KENNEY_PACKS {
+        if is_starter_kit_slice(pack.name) {
+            continue;
+        }
+        let dir = resolve_kenney_dir(pack.name, "");
+        if pack_has_importable_payload(&dir) && seen.insert(pack.name.to_string()) {
+            out.push((pack.name.to_string(), pack.page.to_string()));
+        }
+    }
+    let roots = [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/sandbox/resources/models/kenney"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/sandbox/resources/audio/kenney"),
+    ];
+    for root in roots {
+        let Ok(rd) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if is_starter_kit_slice(&name) {
+                continue;
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if kenney_spec(&name).is_err() {
+                continue;
+            }
+            if !pack_has_importable_payload(&path) {
+                continue;
+            }
+            let page = format!("https://kenney.nl/assets/{name}");
+            out.push((name, page));
+        }
+    }
+    out
+}
+
+/// Verified Asset Server session the Import thread may use. Absent = compile
+/// only; never pretend a pack landed in the catalog.
+#[derive(Clone, Debug)]
+pub struct ServerSession {
+    pub endpoints: ApiEndpoints,
+    pub token: String,
+    pub server_id: [u8; 16],
+}
+
+/// One GLB (or other payload) the UI thread should persist into the local
+/// library so ThumbnailRenderer can cache a sidecar. AO sidecars (if baked)
+/// sit beside `path` as `<stem>.aomesh` / `<stem>.ao.png` / `<stem>.shadowsdf`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryLanding {
+    pub path: PathBuf,
+    pub label: String,
+    pub domain: &'static str,
+    pub content_type: &'static str,
+    pub prompt: String,
+    /// Pre-made icon (anim sheet or still). Copied as the library thumb.
+    pub thumbnail: Option<PathBuf>,
+    /// `kenney` / `freedoom` / `librequake` / `kaykit` — never parsed from
+    /// the display label (classic titles are just `MAP27`).
+    pub source_id: String,
+    /// Pack slug inside the source (`space-kit`, `freedoom`, …).
+    pub pack: String,
+}
+
+/// Offline AO bake counts for one pack (honest; no invented success).
+pub use ao_bake::BakeStats;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportPhase {
+    Idle,
+    Compiling {
+        pack: String,
+        done: usize,
+        total: usize,
+        current: String,
+    },
+    /// Byte-level HTTP fetch (shareware zip / demo installer / zipsync span).
+    Downloading {
+        pack: String,
+        loaded: u64,
+        total: u64,
+        label: String,
+    },
+    /// A convert-time still for the queue strip. Does not change the phase.
+    PreviewThumb {
+        pack: String,
+        name: String,
+        png: Vec<u8>,
+    },
+    Publishing {
+        pack: String,
+        assets: usize,
+        blobs: usize,
+        /// Blobs finished uploading (0..blobs).
+        blob_done: usize,
+    },
+    Annotating {
+        pack: String,
+        assets: usize,
+        blobs: usize,
+        annotated: usize,
+        total: usize,
+    },
+    Baking {
+        pack: String,
+        assets: usize,
+        annotated: usize,
+        bake_done: usize,
+        bake_total: usize,
+        bake_skipped: usize,
+        bake_failed: usize,
+        current: String,
+    },
+    /// Compiled locally; Asset Server was down so nothing is in the catalog.
+    CompiledLocal {
+        pack: String,
+        assets: usize,
+        blobs: usize,
+        out: PathBuf,
+        library: Vec<LibraryLanding>,
+        bake: BakeStats,
+    },
+    /// Published + annotated on the Asset Server. `library` is what the UI
+    /// should persist for cached rendered thumbs.
+    Published {
+        pack: String,
+        assets: usize,
+        blobs: usize,
+        created: bool,
+        annotated: usize,
+        out: PathBuf,
+        library: Vec<LibraryLanding>,
+        bake: BakeStats,
+    },
+    /// One pack finished during Import all — land thumbs now, more may follow.
+    PackFinished {
+        pack: String,
+        assets: usize,
+        annotated: usize,
+        library: Vec<LibraryLanding>,
+        bake: BakeStats,
+        done: usize,
+        total: usize,
+        more: bool,
+    },
+    AllDone {
+        ok: Vec<String>,
+        failed: Vec<(String, String)>,
+        skipped: Vec<String>,
+    },
+    Failed {
+        pack: String,
+        message: String,
+    },
+    Cancelled {
+        pack: String,
+        message: String,
+    },
+}
+
+impl ImportPhase {
+    pub fn compiling(pack: impl Into<String>) -> Self {
+        ImportPhase::Compiling {
+            pack: pack.into(),
+            done: 0,
+            total: 0,
+            current: String::new(),
+        }
+    }
+}
+
+pub struct ImportPage {
+    pub kenney_pack_index: usize,
+    pub kenney_path: String,
+    pub kenney_phase: ImportPhase,
+    /// Landings waiting for the UI to consume (cleared by take_library_landings).
+    pending_landings: Vec<LibraryLanding>,
+    /// GLB library files this import session cares about for icon progress.
+    import_icon_files: BTreeSet<String>,
+    /// How many of `import_icon_files` already have a committed `.thumb`.
+    pub icons_done: usize,
+    /// Blank/unloadable captures — still count as finished work.
+    pub icons_failed: usize,
+    /// File the GPU is rendering right now (UI-thread).
+    pub icon_current: String,
+    /// Newest-first PNG previews for the Kenney card strip.
+    pub preview_thumbs: Vec<(String, Vec<u8>)>,
+    pub preview_dirty: bool,
+    cancel: Arc<AtomicBool>,
+    rx: Option<Receiver<ImportPhase>>,
+}
+
+impl Default for ImportPage {
+    fn default() -> Self {
+        Self {
+            kenney_pack_index: 0,
+            kenney_path: String::new(),
+            kenney_phase: ImportPhase::Idle,
+            pending_landings: Vec::new(),
+            import_icon_files: BTreeSet::new(),
+            icons_done: 0,
+            icons_failed: 0,
+            icon_current: String::new(),
+            preview_thumbs: Vec::new(),
+            preview_dirty: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+        }
+    }
+}
+
+impl ImportPage {
+    /// Selected full Kenney kit (name, official page).
+    pub fn selected_pack_id(&self) -> (String, String) {
+        let packs = on_disk_kenney_packs();
+        packs
+            .get(self.kenney_pack_index)
+            .cloned()
+            .or_else(|| packs.first().cloned())
+            .unwrap_or_else(|| {
+                (
+                    "space-kit".into(),
+                    "https://kenney.nl/assets/space-kit".into(),
+                )
+            })
+    }
+
+    pub fn set_pack_index(&mut self, index: usize) {
+        let n = on_disk_kenney_packs().len();
+        if n == 0 {
+            self.kenney_pack_index = 0;
+        } else if index < n {
+            self.kenney_pack_index = index;
+        }
+    }
+
+    pub fn kenney_probe(&self) -> DiskProbe {
+        let (pack, _) = self.selected_pack_id();
+        probe_dir(&resolve_kenney_dir(&pack, &self.kenney_path))
+    }
+
+    pub fn kenney_status_line(&self, server_connected: bool) -> String {
+        if self.cancel.load(Ordering::SeqCst) && self.compiling() {
+            let pack = match &self.kenney_phase {
+                ImportPhase::Compiling { pack, .. }
+                | ImportPhase::Publishing { pack, .. }
+                | ImportPhase::Annotating { pack, .. }
+                | ImportPhase::Baking { pack, .. }
+                | ImportPhase::PackFinished { pack, .. } => pack.as_str(),
+                _ => "import",
+            };
+            return format!("{pack}: stopping…");
+        }
+        match &self.kenney_phase {
+            ImportPhase::Downloading {
+                pack,
+                loaded,
+                total,
+                label,
+            } => {
+                if *total > 0 {
+                    format!(
+                        "{pack}: loading {} / {} · {label}",
+                        *loaded, *total
+                    )
+                } else {
+                    format!("{pack}: loading {loaded} bytes · {label}")
+                }
+            }
+            ImportPhase::Compiling { pack, done, total, current } => {
+                if *total > 0 {
+                    if current.is_empty() {
+                        format!("{pack}: converting {done}/{total}")
+                    } else {
+                        format!("{pack}: converting {done}/{total} · {current}")
+                    }
+                } else {
+                    format!("{pack}: compiling local pack — no network fetch…")
+                }
+            }
+            ImportPhase::Publishing {
+                pack,
+                assets,
+                blobs,
+                blob_done,
+            } => format!(
+                "{pack}: publish blob {blob_done}/{blobs} · {assets} assets compiled"
+            ),
+            ImportPhase::Annotating {
+                pack,
+                annotated,
+                total,
+                ..
+            } => format!("{pack}: annotate {annotated}/{total}"),
+            ImportPhase::Baking {
+                pack,
+                bake_done,
+                bake_total,
+                bake_skipped,
+                bake_failed,
+                current,
+                ..
+            } => {
+                let cores = ao_bake::bake_thread_count();
+                let mut line = format!(
+                    "{pack}: building AO {bake_done}/{bake_total} on {cores} cores"
+                );
+                if !current.is_empty() {
+                    line.push_str(" · ");
+                    line.push_str(current);
+                }
+                if *bake_skipped > 0 {
+                    line.push_str(&format!(" · {bake_skipped} already baked"));
+                }
+                if *bake_failed > 0 {
+                    line.push_str(&format!(" · {bake_failed} failed"));
+                }
+                line
+            }
+            ImportPhase::CompiledLocal {
+                pack,
+                assets,
+                blobs,
+                bake,
+                out,
+                ..
+            } => {
+                let catalog = if out.is_file() || out.is_dir() {
+                    "catalog skipped (server disconnected)".to_string()
+                } else {
+                    format!("catalog skipped ({})", out.display())
+                };
+                if self.icons_busy() {
+                    format!(
+                        "{pack}: {} · compiled {assets}/{blobs} locally · {catalog}",
+                        self.icon_status_fragment()
+                    )
+                } else {
+                    format!(
+                        "{pack}: compiled {assets} assets / {blobs} blobs · {} · {catalog}",
+                        bake_status_fragment(bake, &self.icon_status_fragment())
+                    )
+                }
+            }
+            ImportPhase::Published {
+                pack,
+                assets,
+                created,
+                annotated,
+                bake,
+                ..
+            } => {
+                let first = if *created {
+                    "published"
+                } else {
+                    "reimported"
+                };
+                if self.icons_busy() {
+                    format!(
+                        "{pack}: {} · {first} {assets} assets · {annotated} searchable",
+                        self.icon_status_fragment()
+                    )
+                } else {
+                    format!(
+                        "{pack}: {first} · {assets} assets · {annotated} searchable · {} · server {}",
+                        bake_status_fragment(bake, &self.icon_status_fragment()),
+                        if server_connected {
+                            "connected"
+                        } else {
+                            "dropped after publish"
+                        }
+                    )
+                }
+            }
+            ImportPhase::PackFinished {
+                pack,
+                done,
+                total,
+                annotated,
+                bake,
+                more,
+                ..
+            } => {
+                let tail = if *more {
+                    "next pack…"
+                } else {
+                    "all packs done"
+                };
+                format!(
+                    "import all {done}/{total} · {pack} ({annotated} annotated) · {} · {tail}",
+                    bake_status_fragment(bake, &self.icon_status_fragment())
+                )
+            }
+            ImportPhase::AllDone {
+                ok,
+                failed,
+                skipped,
+            } => {
+                let mut parts = vec![format!("{} packs imported", ok.len())];
+                if !failed.is_empty() {
+                    parts.push(format!("{} failed", failed.len()));
+                }
+                if !skipped.is_empty() {
+                    parts.push(format!("{} not on disk", skipped.len()));
+                }
+                format!(
+                    "{} · {}",
+                    parts.join(" · "),
+                    self.icon_status_fragment()
+                )
+            }
+            ImportPhase::Failed { pack, message } => format!("{pack}: {message}"),
+            ImportPhase::Cancelled { pack, message } => format!("{pack}: stopped — {message}"),
+            ImportPhase::PreviewThumb { pack, name, .. } => {
+                format!("{pack}: preview {name}")
+            }
+            ImportPhase::Idle => {
+                let probe = self.kenney_probe();
+                if !server_connected {
+                    format!(
+                        "server disconnected · compile possible, catalog publish will not run · {}",
+                        probe.line()
+                    )
+                } else if probe.ready() {
+                    format!("ready · {}", probe.line())
+                } else {
+                    format!("not provisioned · {}", probe.line())
+                }
+            }
+        }
+    }
+
+    fn icon_status_fragment(&self) -> String {
+        let total = self.import_icon_files.len();
+        if total == 0 {
+            return "icons ready".into();
+        }
+        let processed = self.icons_processed();
+        if processed >= total {
+            format!("icons {processed}/{total}")
+        } else {
+            let mut line = format!("rendering GPU icons {processed}/{total}");
+            if !self.icon_current.is_empty() {
+                line.push_str(" · ");
+                line.push_str(&self.icon_current);
+            }
+            line
+        }
+    }
+
+    pub fn icons_processed(&self) -> usize {
+        self.icons_done.saturating_add(self.icons_failed)
+    }
+
+    pub fn icons_busy(&self) -> bool {
+        let total = self.import_icon_files.len();
+        total > 0 && self.icons_processed() < total
+    }
+
+    /// Honest 0..1 progress from stage counts — no fake ETAs.
+    /// Compile/publish/AO are a short prefix; icon renders own most of the bar
+    /// because that is the slow, visible work (one GLB at a time).
+    pub fn progress_fraction(&self) -> f32 {
+        match &self.kenney_phase {
+            ImportPhase::Idle
+            | ImportPhase::Failed { .. }
+            | ImportPhase::Cancelled { .. }
+            | ImportPhase::PreviewThumb { .. } => {
+                if self.icons_busy() {
+                    let total = self.import_icon_files.len().max(1) as f32;
+                    0.20 + 0.80 * (self.icons_processed().min(self.import_icon_files.len()) as f32
+                        / total)
+                } else {
+                    0.0
+                }
+            }
+            ImportPhase::Downloading {
+                loaded, total, ..
+            } => {
+                if *total == 0 {
+                    0.04
+                } else {
+                    0.02 + 0.70 * (*loaded as f32 / *total as f32)
+                }
+            }
+            ImportPhase::Compiling { done, total, .. } => {
+                if *total == 0 {
+                    0.02
+                } else {
+                    0.02 + 0.70 * (*done as f32 / *total as f32)
+                }
+            }
+            ImportPhase::Publishing {
+                blob_done, blobs, ..
+            } => {
+                let n = (*blobs).max(1) as f32;
+                0.02 + 0.06 * ((*blob_done).min(*blobs) as f32 / n)
+            }
+            ImportPhase::Annotating {
+                annotated, total, ..
+            } => {
+                let n = (*total).max(1) as f32;
+                0.08 + 0.04 * ((*annotated).min(*total) as f32 / n)
+            }
+            ImportPhase::Baking {
+                bake_done,
+                bake_total,
+                ..
+            } => {
+                let n = (*bake_total).max(1) as f32;
+                0.12 + 0.08 * ((*bake_done).min(*bake_total) as f32 / n)
+            }
+            ImportPhase::Published { .. }
+            | ImportPhase::CompiledLocal { .. }
+            | ImportPhase::PackFinished { .. }
+            | ImportPhase::AllDone { .. } => {
+                let total = self.import_icon_files.len();
+                if total == 0 {
+                    1.0
+                } else {
+                    let done = self.icons_processed().min(total) as f32;
+                    0.20 + 0.80 * (done / total as f32)
+                }
+            }
+        }
+    }
+
+    /// True while the import thread is still driving compile/publish/bake.
+    /// Icon rendering after publish does not block a reimport click.
+    pub fn compiling(&self) -> bool {
+        matches!(
+            self.kenney_phase,
+            ImportPhase::Compiling { .. }
+                | ImportPhase::Publishing { .. }
+                | ImportPhase::Annotating { .. }
+                | ImportPhase::Baking { .. }
+                | ImportPhase::PackFinished { more: true, .. }
+        )
+    }
+
+    /// Consume landings once so re-poll cannot re-land the same pack.
+    pub fn take_library_landings(&mut self) -> Vec<LibraryLanding> {
+        std::mem::take(&mut self.pending_landings)
+    }
+
+    /// Register a library GLB for icon progress. Pass existing `.thumb` PNG
+    /// bytes when the sidecar is already on disk so the Import strip updates
+    /// immediately and the done count advances.
+    pub fn track_import_icon(&mut self, file: String, existing_png: Option<Vec<u8>>) {
+        let first = self.import_icon_files.insert(file.clone());
+        if let Some(png) = existing_png {
+            self.push_preview_thumb(file, png);
+            if first {
+                self.icons_done = self.icons_done.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn push_preview_thumb(&mut self, file: String, png: Vec<u8>) {
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return;
+        }
+        self.preview_thumbs.retain(|(f, _)| f != &file);
+        self.preview_thumbs.insert(0, (file, png));
+        if self.preview_thumbs.len() > IMPORT_PREVIEW_SLOTS {
+            self.preview_thumbs.truncate(IMPORT_PREVIEW_SLOTS);
+        }
+        self.preview_dirty = true;
+    }
+
+    /// A ThumbnailRenderer PNG landed for a tracked import icon.
+    pub fn note_rendered_icon(&mut self, file: &str, png: &[u8]) -> bool {
+        if !self.import_icon_files.contains(file) {
+            return false;
+        }
+        // Avoid double-counting if the strip already held this file.
+        let had = self.preview_thumbs.iter().any(|(f, _)| f == file);
+        self.push_preview_thumb(file.to_string(), png.to_vec());
+        if !had {
+            let total = self.import_icon_files.len();
+            if self.icons_done < total {
+                self.icons_done += 1;
+            }
+        }
+        if self.icon_current == file {
+            self.icon_current.clear();
+        }
+        true
+    }
+
+    pub fn note_failed_icon(&mut self, file: &str) -> bool {
+        if !self.import_icon_files.contains(file) {
+            return false;
+        }
+        let total = self.import_icon_files.len();
+        if self.icons_processed() < total {
+            self.icons_failed += 1;
+        }
+        if self.icon_current == file {
+            self.icon_current.clear();
+        }
+        true
+    }
+
+    pub fn set_icon_current(&mut self, file: Option<&str>) {
+        self.icon_current = file.unwrap_or("").to_string();
+    }
+
+    pub fn request_stop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stop_requested(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    pub fn mark_cancelled(&mut self, message: impl Into<String>) {
+        let pack = match &self.kenney_phase {
+            ImportPhase::Failed { pack, .. }
+            | ImportPhase::Cancelled { pack, .. }
+            | ImportPhase::Compiling { pack, .. }
+            | ImportPhase::Downloading { pack, .. }
+            | ImportPhase::Publishing { pack, .. }
+            | ImportPhase::Annotating { pack, .. }
+            | ImportPhase::Baking { pack, .. }
+            | ImportPhase::Published { pack, .. }
+            | ImportPhase::CompiledLocal { pack, .. }
+            | ImportPhase::PackFinished { pack, .. }
+            | ImportPhase::PreviewThumb { pack, .. } => pack.clone(),
+            ImportPhase::Idle | ImportPhase::AllDone { .. } => self.selected_pack_id().0,
+        };
+        self.kenney_phase = ImportPhase::Cancelled {
+            pack,
+            message: message.into(),
+        };
+        self.rx = None;
+        let leftover = self
+            .import_icon_files
+            .len()
+            .saturating_sub(self.icons_processed());
+        self.icons_failed = self.icons_failed.saturating_add(leftover);
+        self.icon_current.clear();
+    }
+
+    pub fn icons_total(&self) -> usize {
+        self.import_icon_files.len()
+    }
+
+    pub fn reset_session_ui(&mut self) {
+        self.pending_landings.clear();
+        self.import_icon_files.clear();
+        self.icons_done = 0;
+        self.icons_failed = 0;
+        self.icon_current.clear();
+        self.preview_thumbs.clear();
+        self.preview_dirty = true;
+    }
+
+    fn ingest_phase(&mut self, phase: ImportPhase) {
+        if self.cancel.load(Ordering::SeqCst) && !matches!(phase, ImportPhase::Cancelled { .. }) {
+            return;
+        }
+        match &phase {
+            ImportPhase::PreviewThumb { name, png, .. } => {
+                self.push_preview_thumb(name.clone(), png.clone());
+                return;
+            }
+            ImportPhase::Published { library, .. }
+            | ImportPhase::CompiledLocal { library, .. }
+            | ImportPhase::PackFinished { library, .. } => {
+                self.pending_landings.extend(library.iter().cloned());
+            }
+            _ => {}
+        }
+        self.kenney_phase = phase;
+    }
+
+    /// Fail-closed local compile, then publish when a server session is
+    /// provided. Never fetches pack bytes from the network. Reimport is
+    /// allowed after a finished phase (not while compiling).
+    pub fn start_kenney_import(
+        &mut self,
+        path_override: String,
+        server: Option<ServerSession>,
+    ) -> Result<(), String> {
+        if self.compiling() {
+            return Err("a Kenney compile is already running".into());
+        }
+        self.reset_session_ui();
+        self.cancel.store(false, Ordering::SeqCst);
+        self.kenney_path = path_override;
+        let (pack_name, pack_page) = self.selected_pack_id();
+        let dir = resolve_kenney_dir(&pack_name, &self.kenney_path);
+        if !dir.is_dir() {
+            let message = format!(
+                "pack is not on disk ({}) — import is local-folder only",
+                dir.display()
+            );
+            self.kenney_phase = ImportPhase::Failed {
+                pack: pack_name,
+                message: message.clone(),
+            };
+            return Err(message);
+        }
+        let spec = kenney_spec(&pack_name).map_err(|e| e.to_string())?;
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/ai_content_app/import/kenney")
+            .join(&pack_name);
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.kenney_phase = ImportPhase::compiling(pack_name.clone());
+        let cancel = self.cancel.clone();
+        thread::Builder::new()
+            .name("asset-ui-kenney-import".into())
+            .spawn(move || {
+                let phase = run_kenney_import(
+                    &dir,
+                    &out,
+                    spec,
+                    pack_name,
+                    pack_page,
+                    server,
+                    &tx,
+                    &cancel,
+                );
+                let _ = tx.send(phase);
+            })
+            .map_err(|e| format!("failed to start compile thread: {e}"))?;
+        Ok(())
+    }
+
+    /// Import the in-repo KayKit character folder (CC0-1.0).
+    pub fn start_kaykit_import(&mut self, server: Option<ServerSession>) -> Result<(), String> {
+        if self.compiling() {
+            return Err("an import is already running".into());
+        }
+        self.reset_session_ui();
+        self.cancel.store(false, Ordering::SeqCst);
+        let dir = kaykit_dir();
+        if !dir.is_dir() {
+            let message = format!(
+                "pack is not on disk ({}) — import is local-folder only",
+                dir.display()
+            );
+            self.kenney_phase = ImportPhase::Failed {
+                pack: "kaykit".into(),
+                message: message.clone(),
+            };
+            return Err(message);
+        }
+        let spec = kaykit_spec();
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/ai_content_app/import/kaykit");
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.kenney_phase = ImportPhase::compiling("kaykit");
+        let cancel = self.cancel.clone();
+        thread::Builder::new()
+            .name("asset-ui-kaykit-import".into())
+            .spawn(move || {
+                let phase = run_kaykit_import(&dir, &out, spec, server, &tx, &cancel);
+                let _ = tx.send(phase);
+            })
+            .map_err(|e| format!("failed to start KayKit import thread: {e}"))?;
+        Ok(())
+    }
+
+    /// Import every Kenney pack that is on disk. Missing catalog slugs are
+    /// skipped honestly; each present pack uses the same CC-BY-4.0 grant.
+    pub fn start_kenney_import_all(&mut self, server: Option<ServerSession>) -> Result<(), String> {
+        if self.compiling() {
+            return Err("a Kenney compile is already running".into());
+        }
+        self.reset_session_ui();
+        self.cancel.store(false, Ordering::SeqCst);
+        let present = on_disk_kenney_packs();
+        let skipped: Vec<String> = KENNEY_PACKS
+            .iter()
+            .filter(|p| present.iter().all(|(name, _)| name != p.name))
+            .map(|p| p.name.to_string())
+            .collect();
+        if present.is_empty() {
+            let message = String::from("no Kenney packs on disk — import is local-folder only");
+            self.kenney_phase = ImportPhase::Failed {
+                pack: "all".into(),
+                message: message.clone(),
+            };
+            return Err(message);
+        }
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.kenney_phase = ImportPhase::compiling("all");
+        let cancel = self.cancel.clone();
+        thread::Builder::new()
+            .name("asset-ui-kenney-import-all".into())
+            .spawn(move || {
+                let total = present.len();
+                let mut ok = Vec::new();
+                let mut failed = Vec::new();
+                for (index, (pack_name, pack_page)) in present.into_iter().enumerate() {
+                    if cancel.load(Ordering::SeqCst) {
+                        let _ = tx.send(ImportPhase::Cancelled {
+                            pack: "all".into(),
+                            message: format!("stopped after {index} packs"),
+                        });
+                        return;
+                    }
+                    let done = index + 1;
+                    let more = done < total;
+                    let spec = match kenney_spec(&pack_name) {
+                        Ok(spec) => spec,
+                        Err(error) => {
+                            failed.push((pack_name, error.to_string()));
+                            continue;
+                        }
+                    };
+                    let dir = resolve_kenney_dir(&pack_name, "");
+                    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../local/ai_content_app/import/kenney")
+                        .join(&pack_name);
+                    let phase = run_kenney_import(
+                        &dir,
+                        &out,
+                        spec,
+                        pack_name.clone(),
+                        pack_page,
+                        server.clone(),
+                        &tx,
+                        &cancel,
+                    );
+                    match phase {
+                        ImportPhase::Cancelled { pack, message } => {
+                            let _ = tx.send(ImportPhase::Cancelled { pack, message });
+                            return;
+                        }
+                        ImportPhase::Published {
+                            pack,
+                            assets,
+                            annotated,
+                            library,
+                            bake,
+                            ..
+                        } => {
+                            ok.push(pack.clone());
+                            let _ = tx.send(ImportPhase::PackFinished {
+                                pack,
+                                assets,
+                                annotated,
+                                library,
+                                bake,
+                                done,
+                                total,
+                                more,
+                            });
+                        }
+                        ImportPhase::CompiledLocal {
+                            pack,
+                            assets,
+                            library,
+                            bake,
+                            ..
+                        } => {
+                            ok.push(pack.clone());
+                            let _ = tx.send(ImportPhase::PackFinished {
+                                pack,
+                                assets,
+                                annotated: 0,
+                                library,
+                                bake,
+                                done,
+                                total,
+                                more,
+                            });
+                        }
+                        ImportPhase::Failed { pack, message } => {
+                            failed.push((pack, message));
+                        }
+                        other => {
+                            let _ = tx.send(other);
+                        }
+                    }
+                }
+                let _ = tx.send(ImportPhase::AllDone {
+                    ok,
+                    failed,
+                    skipped,
+                });
+            })
+            .map_err(|e| format!("failed to start import-all thread: {e}"))?;
+        Ok(())
+    }
+
+    /// Drain every pending phase message. Returns true when the phase changed.
+    pub fn poll(&mut self) -> bool {
+        if self.rx.is_none() {
+            return false;
+        }
+        let mut changed = false;
+        loop {
+            let msg = self.rx.as_ref().map(|rx| rx.try_recv());
+            match msg {
+                Some(Ok(phase)) => {
+                    self.ingest_phase(phase);
+                    changed = true;
+                }
+                Some(Err(TryRecvError::Empty)) | None => break,
+                Some(Err(TryRecvError::Disconnected)) => {
+                    if matches!(
+                        self.kenney_phase,
+                        ImportPhase::Compiling { .. }
+                            | ImportPhase::Publishing { .. }
+                            | ImportPhase::Annotating { .. }
+                            | ImportPhase::Baking { .. }
+                    ) {
+                        self.kenney_phase = ImportPhase::Failed {
+                            pack: self.selected_pack_id().0,
+                            message: "compile thread exited without a result".into(),
+                        };
+                        changed = true;
+                    }
+                    self.rx = None;
+                    break;
+                }
+            }
+        }
+        changed
+    }
+}
+
+fn bake_status_fragment(bake: &BakeStats, icons: &str) -> String {
+    let mut parts = Vec::new();
+    if bake.total > 0 {
+        parts.push(format!(
+            "AO {}/{} ({} fresh, {} failed)",
+            bake.baked + bake.skipped,
+            bake.total,
+            bake.skipped,
+            bake.failed
+        ));
+    }
+    parts.push(icons.to_string());
+    parts.join(" · ")
+}
+
+fn kaykit_spec() -> pack_import::PackSourceSpec {
+    let terms = b"KayKit CC0-1.0 public domain. Credit Kay Lousberg (kaylousberg.com).";
+    pack_import::PackSourceSpec {
+        source_id: Some("kaykit".into()),
+        source_title: Some("KayKit / Kay Lousberg".into()),
+        pack_name: Some("adventurers".into()),
+        pack_version: Some("1.0".into()),
+        license: Some("CC0-1.0".into()),
+        license_revision: None,
+        terms_digest: Some({
+            let d = sha256(terms);
+            let mut s = String::with_capacity(64);
+            for b in d {
+                s.push_str(&format!("{b:02x}"));
+            }
+            s
+        }),
+        terms_url: Some("https://creativecommons.org/publicdomain/zero/1.0/".into()),
+        credits: Some(KAYKIT_MODULE.credits.into()),
+        source: Some(KAYKIT_MODULE.homepage.into()),
+        source_archive: None,
+        redistribution: Some("allowed".into()),
+        derivatives: Some("allowed".into()),
+    }
+}
+
+fn run_kaykit_import(
+    pack_dir: &Path,
+    out: &Path,
+    spec: pack_import::PackSourceSpec,
+    server: Option<ServerSession>,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+    cancel: &AtomicBool,
+) -> ImportPhase {
+    let staged = out.join("work").join("source");
+    let dest_root = out.join("out");
+    if let Err(error) = std::fs::create_dir_all(&dest_root) {
+        return ImportPhase::Failed {
+            pack: "kaykit".into(),
+            message: format!("create out root: {error}"),
+        };
+    }
+    let bundle = dest_root.join("bundle");
+    if bundle.exists() {
+        let _ = std::fs::remove_dir_all(&bundle);
+    }
+    if let Err(error) = stage_source_pack(pack_dir, &staged) {
+        return ImportPhase::Failed {
+            pack: "kaykit".into(),
+            message: error,
+        };
+    }
+    ao_bake::seed_ao_from_source(pack_dir, &staged);
+    write_kaykit_anim_icons(&staged);
+    let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
+        Ok(report) => report,
+        Err(error) => {
+            let library = kaykit_library_landings(&staged);
+            return ImportPhase::CompiledLocal {
+                pack: "kaykit".into(),
+                assets: library.len(),
+                blobs: 0,
+                out: PathBuf::from(format!("pack_import: {error}")),
+                library,
+                bake: BakeStats::default(),
+            };
+        }
+    };
+    let library = kaykit_library_landings(&staged);
+    if cancel.load(Ordering::SeqCst) {
+        return ImportPhase::Cancelled {
+            pack: "kaykit".into(),
+            message: "stopped after compile".into(),
+        };
+    }
+    let publish_result = if let Some(session) = server {
+        let _ = tx.send(ImportPhase::Publishing {
+            pack: "kaykit".into(),
+            assets: report.assets,
+            blobs: report.blobs,
+            blob_done: 0,
+        });
+        match publish_compiled_pack(
+            &staged,
+            &bundle,
+            &session,
+            "kaykit",
+            KAYKIT_MODULE.homepage,
+            report.assets,
+            report.blobs,
+            tx,
+            cancel,
+        ) {
+            Ok(pair) => Some(Ok(pair)),
+            Err(error) => Some(Err(error)),
+        }
+    } else {
+        None
+    };
+    if let Some(Err(error)) = &publish_result {
+        return ImportPhase::CompiledLocal {
+            pack: "kaykit".into(),
+            assets: report.assets,
+            blobs: report.blobs,
+            out: PathBuf::from(error.clone()),
+            library,
+            bake: BakeStats::default(),
+        };
+    }
+    let bake = BakeStats::default();
+    let (created, annotated) = match publish_result {
+        Some(Ok(pair)) => pair,
+        _ => (false, 0),
+    };
+    if publish_result.is_none() {
+        return ImportPhase::CompiledLocal {
+            pack: "kaykit".into(),
+            assets: report.assets,
+            blobs: report.blobs,
+            out: report.plan_path,
+            library,
+            bake,
+        };
+    }
+    ImportPhase::Published {
+        pack: "kaykit".into(),
+        assets: report.assets,
+        blobs: report.blobs,
+        created,
+        annotated,
+        out: report.plan_path,
+        library,
+        bake,
+    }
+}
+
+fn write_kaykit_anim_icons(staged: &Path) {
+    let mut stack = vec![staged.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("glb") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if let Some(png) = makepad_asset_importer::anim_icon::skinned_anim_sheet(&bytes) {
+                let _ = std::fs::write(path.with_extension("png"), png);
+            }
+        }
+    }
+}
+
+fn kaykit_library_landings(staged: &Path) -> Vec<LibraryLanding> {
+    let mut out = Vec::new();
+    let mut stack = vec![staged.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("glb") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("character")
+                .to_string();
+            let thumb = path.with_extension("png");
+            out.push(LibraryLanding {
+                path,
+                label: makepad_asset_importer::stateful_billboard::mesh_title(&stem),
+                domain: "character",
+                content_type: "model/gltf-binary",
+                prompt: format!(
+                    "KayKit adventurers · character · {stem} · CC0-1.0 · {}",
+                    KAYKIT_MODULE.homepage
+                ),
+                thumbnail: thumb.is_file().then_some(thumb),
+                source_id: "kaykit".into(),
+                pack: "adventurers".into(),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out
+}
+
+fn run_kenney_import(
+    pack_dir: &Path,
+    out: &Path,
+    spec: pack_import::PackSourceSpec,
+    pack_name: String,
+    pack_page: String,
+    server: Option<ServerSession>,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+    cancel: &AtomicBool,
+) -> ImportPhase {
+    // pack_import refuses --out whose existing ancestor contains the pack
+    // (or vice versa). Source and bundle must be in sibling trees, and the
+    // bundle path itself must be absent so classify_out sees a new dest.
+    let staged = out.join("work").join("source");
+    let dest_root = out.join("out");
+    if let Err(error) = std::fs::create_dir_all(&dest_root) {
+        return ImportPhase::Failed {
+            pack: pack_name,
+            message: format!("create out root: {error}"),
+        };
+    }
+    let bundle = dest_root.join("bundle");
+    if bundle.exists() {
+        let _ = std::fs::remove_dir_all(&bundle);
+    }
+    if let Err(error) = stage_source_pack(pack_dir, &staged) {
+        return ImportPhase::Failed {
+            pack: pack_name,
+            message: error,
+        };
+    }
+    let library = library_landings(&staged, &pack_name, &pack_page);
+    if library.is_empty() {
+        return ImportPhase::Failed {
+            pack: pack_name,
+            message: "folder has no png/jpeg/wav/mp4/glb to import".into(),
+        };
+    }
+    // Catalog compile is fail-closed and refuses some real Kenney kits
+    // (multi-texture GLBs). The Asset UI library still lands those GLBs
+    // so icons and the viewer work; the status line keeps the compiler error.
+    let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
+        Ok(report) => report,
+        Err(error) => {
+            return kenney_local_done(
+                pack_name,
+                library.len(),
+                0,
+                PathBuf::from(format!("pack_import: {error}")),
+                library,
+                &staged,
+                pack_dir,
+                0,
+                tx,
+                cancel,
+            );
+        }
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return ImportPhase::Cancelled {
+            pack: pack_name,
+            message: "stopped after compile".into(),
+        };
+    }
+
+    // Publish (when connected) before AO bake so catalog work is not blocked
+    // by multi-minute bakes. Bake writes sidecars beside staged GLBs; the UI
+    // copies them onto library payloads at land time.
+    let publish_result = if let Some(session) = server {
+        let _ = tx.send(ImportPhase::Publishing {
+            pack: pack_name.clone(),
+            assets: report.assets,
+            blobs: report.blobs,
+            blob_done: 0,
+        });
+        match publish_compiled_pack(
+            &staged,
+            &bundle,
+            &session,
+            &pack_name,
+            &pack_page,
+            report.assets,
+            report.blobs,
+            tx,
+            cancel,
+        ) {
+            Ok(pair) => Some(Ok(pair)),
+            Err(error) => Some(Err(error)),
+        }
+    } else {
+        None
+    };
+
+    let (created, annotated, plan_path) = match publish_result {
+        Some(Err(error)) => {
+            return kenney_local_done(
+                pack_name,
+                report.assets,
+                report.blobs,
+                PathBuf::from(format!("publish: {error}")),
+                library,
+                &staged,
+                pack_dir,
+                0,
+                tx,
+                cancel,
+            );
+        }
+        Some(Ok(pair)) => (pair.0, pair.1, report.plan_path),
+        None => (false, 0usize, report.plan_path),
+    };
+
+    let bake = match kenney_bake_or_cancel(
+        pack_dir,
+        &staged,
+        &pack_name,
+        report.assets,
+        annotated,
+        tx,
+        cancel,
+    ) {
+        Ok(bake) => bake,
+        Err(phase) => return phase,
+    };
+
+    if publish_result.is_none() {
+        return ImportPhase::CompiledLocal {
+            pack: pack_name,
+            assets: report.assets,
+            blobs: report.blobs,
+            out: plan_path,
+            library,
+            bake,
+        };
+    }
+    ImportPhase::Published {
+        pack: pack_name,
+        assets: report.assets,
+        blobs: report.blobs,
+        created,
+        annotated,
+        out: plan_path,
+        library,
+        bake,
+    }
+}
+
+/// True when a Kenney folder has at least one file pack_import / the
+/// library can ingest. glTF-only kits (no `.glb`) stay off the Import list.
+fn pack_has_importable_payload(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(here) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            seen += 1;
+            if seen > 8192 {
+                return false;
+            }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "wav" | "mp4" | "glb") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn kenney_local_done(
+    pack_name: String,
+    assets: usize,
+    blobs: usize,
+    out: PathBuf,
+    library: Vec<LibraryLanding>,
+    staged: &Path,
+    pack_dir: &Path,
+    annotated: usize,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+    cancel: &AtomicBool,
+) -> ImportPhase {
+    match kenney_bake_or_cancel(
+        pack_dir, staged, &pack_name, assets, annotated, tx, cancel,
+    ) {
+        Ok(bake) => ImportPhase::CompiledLocal {
+            pack: pack_name,
+            assets,
+            blobs,
+            out,
+            library,
+            bake,
+        },
+        Err(phase) => phase,
+    }
+}
+
+fn kenney_bake_or_cancel(
+    pack_dir: &Path,
+    staged: &Path,
+    pack_name: &str,
+    assets: usize,
+    annotated: usize,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+    cancel: &AtomicBool,
+) -> Result<BakeStats, ImportPhase> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ImportPhase::Cancelled {
+            pack: pack_name.to_string(),
+            message: "stopped before AO bake".into(),
+        });
+    }
+    ao_bake::seed_ao_from_source(pack_dir, staged);
+    let bake = bake_staged_glbs(staged, pack_name, assets, annotated, tx, cancel);
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ImportPhase::Cancelled {
+            pack: pack_name.to_string(),
+            message: format!(
+                "stopped during AO bake ({}/{})",
+                bake.baked + bake.skipped,
+                bake.total
+            ),
+        });
+    }
+    Ok(bake)
+}
+
+/// Copy only pack-source files into `dest`. Engine-derived sidecars stay
+/// behind. Each GLB without a same-stem PNG/JPEG ≥ 512px gets a placeholder
+/// thumbnail so the fail-closed compiler can emit a valid manifest; the UI
+/// replaces that with a ThumbnailRenderer cache after publish.
+fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).map_err(|e| format!("clear staging {}: {e}", dest.display()))?;
+    }
+    std::fs::create_dir_all(dest).map_err(|e| format!("create staging {}: {e}", dest.display()))?;
+    let mut glbs = Vec::new();
+    let mut images = std::collections::BTreeSet::new();
+    let mut stack = vec![src.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let rd = std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+        for entry in rd.flatten() {
+            seen += 1;
+            if seen > 8192 {
+                return Err("pack walk exceeded 8192 entries".into());
+            }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".ao.png") || lower.ends_with(".aomesh") || lower.ends_with(".shadowsdf")
+            {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "wav" | "mp4" | "glb") {
+                continue;
+            }
+            // KayKit ships `name_texture.png` beside an already-embedded GLB.
+            // Copying it makes pack_import treat a second image as a payload.
+            if ext == "png" && lower.ends_with("_texture.png") {
+                continue;
+            }
+            let rel = path.strip_prefix(src).unwrap_or(&path);
+            let target = dest.join(rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            std::fs::copy(&path, &target)
+                .map_err(|e| format!("copy {} → {}: {e}", path.display(), target.display()))?;
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                if let Some(stem) = target.with_extension("").file_name() {
+                    images.insert(stem.to_os_string());
+                }
+            }
+            if ext == "glb" {
+                glbs.push(target);
+            }
+        }
+    }
+    for glb in &glbs {
+        let Ok(bytes) = std::fs::read(glb) else {
+            continue;
+        };
+        let Some(dir) = glb.parent() else {
+            continue;
+        };
+        match embed_glb_file_images(&bytes, dir) {
+            Ok(embedded) if embedded != bytes => {
+                std::fs::write(glb, embedded)
+                    .map_err(|e| format!("embed {}: {e}", glb.display()))?;
+            }
+            Ok(_) => {}
+            // Dummy / truncated files stay as-is; missing textures still fail
+            // the pack so we do not land untextured Kenney GLBs silently.
+            Err(err) if err.contains("not a GLB") => {}
+            Err(err) => {
+                return Err(format!(
+                    "{}: {err}",
+                    glb.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+    }
+    let placeholder = placeholder_png_512();
+    for glb in glbs {
+        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
+        if images.contains(&stem) {
+            continue;
+        }
+        let thumb = glb.with_extension("png");
+        std::fs::write(&thumb, &placeholder)
+            .map_err(|e| format!("write placeholder {}: {e}", thumb.display()))?;
+    }
+    Ok(())
+}
+
+fn library_landings(staged: &Path, pack: &str, page: &str) -> Vec<LibraryLanding> {
+    let mut out = Vec::new();
+    let mut stack = vec![staged.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("asset")
+                .to_string();
+            let (domain, content_type) = match ext.as_str() {
+                "glb" => ("mesh", "model/gltf-binary"),
+                "png" if !stem.ends_with(".ao") => ("image", "image/png"),
+                "jpg" | "jpeg" => ("image", "image/jpeg"),
+                "wav" => {
+                    let blob = format!("{pack}/{stem}").to_ascii_lowercase();
+                    if blob.contains("music") || blob.contains("jingle") || blob.contains("/bgm") {
+                        ("music", "audio/wav")
+                    } else {
+                        ("audio", "audio/wav")
+                    }
+                }
+                "mp4" => ("video", "video/mp4"),
+                _ => continue,
+            };
+            // Placeholder thumbs written beside GLBs are not library payloads.
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                let sibling = path.with_extension("glb");
+                if sibling.is_file() {
+                    continue;
+                }
+            }
+            let thumbnail = if ext == "glb" {
+                sibling_preview_png(&path)
+            } else {
+                None
+            };
+            out.push(LibraryLanding {
+                path,
+                label: format!("kenney/{pack}/{stem}"),
+                domain,
+                content_type,
+                prompt: format!("Kenney {pack} · {stem} · CC-BY-4.0 · {page}"),
+                thumbnail,
+                source_id: "kenney".into(),
+                pack: pack.to_string(),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out
+}
+
+/// Same-stem still that shipped with the pack (Kenney preview renders).
+/// The generated 512² placeholder is not a real icon — leave `None` so the
+/// GPU thumbnailer can replace it.
+fn sibling_preview_png(glb: &Path) -> Option<PathBuf> {
+    for ext in ["png", "jpg", "jpeg"] {
+        let preview = glb.with_extension(ext);
+        if !preview.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&preview) else {
+            continue;
+        };
+        if ext == "png" {
+            if is_blank_preview_png(&bytes) {
+                continue;
+            }
+        } else if bytes.len() < 32 {
+            continue;
+        }
+        return Some(preview);
+    }
+    None
+}
+
+/// True for the pack_import 512² black placeholder (any zlib encoding).
+pub fn is_blank_preview_png(bytes: &[u8]) -> bool {
+    if bytes == placeholder_png_512() {
+        return true;
+    }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.len() < 33 {
+        return false;
+    }
+    let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    if w != 512 || h != 512 {
+        return false;
+    }
+    png_idat_is_all_zero(bytes)
+}
+
+fn png_idat_is_all_zero(bytes: &[u8]) -> bool {
+    let mut off = 8usize;
+    let mut idat = Vec::new();
+    while off + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([
+            bytes[off],
+            bytes[off + 1],
+            bytes[off + 2],
+            bytes[off + 3],
+        ]) as usize;
+        if off + 12 + len > bytes.len() {
+            return false;
+        }
+        let typ = &bytes[off + 4..off + 8];
+        if typ == b"IDAT" {
+            idat.extend_from_slice(&bytes[off + 8..off + 8 + len]);
+        }
+        if typ == b"IEND" {
+            break;
+        }
+        off += 12 + len;
+    }
+    if idat.len() < 2 {
+        return false;
+    }
+    // Stored deflate (the placeholder writer): 0x78 0x01, then
+    // [final][len][~len][zeros] blocks. Reject only if every sample is 0.
+    let mut i = 2usize;
+    while i + 5 <= idat.len() {
+        let last = idat[i] & 1 != 0;
+        if idat[i] & 0x06 != 0 {
+            return false;
+        }
+        let n = u16::from_le_bytes([idat[i + 1], idat[i + 2]]) as usize;
+        i += 5;
+        if i + n > idat.len() {
+            return false;
+        }
+        if idat[i..i + n].iter().any(|&b| b != 0) {
+            return false;
+        }
+        i += n;
+        if last {
+            return true;
+        }
+    }
+    false
+}
+
+/// Kenney kits share one atlas as `Textures/colormap.png` beside the GLBs.
+/// Search the GLB folder, `Textures/`, and a few parents — not other packs.
+fn resolve_pack_texture(base_dir: &Path, uri: &str) -> Option<PathBuf> {
+    let name = Path::new(uri).file_name()?;
+    let mut dir = Some(base_dir);
+    for _ in 0..6 {
+        let Some(here) = dir else {
+            break;
+        };
+        for candidate in [
+            here.join(uri),
+            here.join(name),
+            here.join("Textures").join(name),
+            here.join("textures").join(name),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        dir = here.parent();
+    }
+    recover_kenney_colormap(base_dir, name)
+}
+
+/// Starter-kit Kenney folders were flattened from GitHub without `Textures/`.
+/// Re-fetch the official atlas for that pack (not another kit's palette).
+fn recover_kenney_colormap(base_dir: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
+    if name.to_string_lossy().to_ascii_lowercase() != "colormap.png" {
+        return None;
+    }
+    let mut dir = Some(base_dir);
+    let mut pack = None;
+    for _ in 0..8 {
+        let Some(here) = dir else {
+            break;
+        };
+        if let Some(n) = here.file_name().and_then(|s| s.to_str()) {
+            if matches!(n, "city" | "arena" | "fps" | "platformer" | "racing") {
+                pack = Some(n.to_string());
+                break;
+            }
+        }
+        dir = here.parent();
+    }
+    let pack = pack?;
+    let url = kenney_starter_colormap_url(&pack)?;
+    let dest = base_dir.join("Textures").join("colormap.png");
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let status = std::process::Command::new("curl")
+        .args(["-sSfL", "--globoff", "-o"])
+        .arg(&dest)
+        .arg(url)
+        .status()
+        .ok()?;
+    if status.success() && dest.is_file() {
+        let bytes = std::fs::read(&dest).ok()?;
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Some(dest);
+        }
+    }
+    let _ = std::fs::remove_file(&dest);
+    None
+}
+
+fn kenney_starter_colormap_url(pack: &str) -> Option<&'static str> {
+    Some(match pack {
+        "city" => {
+            "https://raw.githubusercontent.com/KenneyNL/Starter-Kit-City-Builder/4535092b740b378b700efd9df9e27a631815b84a/models/Textures/colormap.png"
+        }
+        "arena" => {
+            "https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Basic-Scene/a6927e66ff8dd8e173660ce4825abe773c65f683/sample/Mini%20Arena/Models/GLB%20format/Textures/colormap.png"
+        }
+        "fps" => {
+            "https://raw.githubusercontent.com/KenneyNL/Starter-Kit-FPS/185fd2326d74a5cf858cffc616f87cf9696f9cc0/models/Textures/colormap.png"
+        }
+        "platformer" => {
+            "https://raw.githubusercontent.com/KenneyNL/Starter-Kit-3D-Platformer/3fa8a04b1c01ab23db43123d4ce814a34c3fc7f0/models/Textures/colormap.png"
+        }
+        "racing" => {
+            "https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Racing/f5241ebdf00c25bc951bf4fdb7950bb1b78b4bcc/models/Textures/colormap.png"
+        }
+        _ => return None,
+    })
+}
+
+/// Inline `images[].uri` files next to the GLB so library copies (and the
+/// GPU thumbnailer, which loads with no base dir) stay self-contained.
+/// Kenney car-kit ships `Textures/colormap.png` outside the GLB.
+pub fn embed_glb_file_images(glb: &[u8], base_dir: &Path) -> Result<Vec<u8>, String> {
+    let (json, bin) = split_glb(glb)?;
+    let json_s = std::str::from_utf8(json).map_err(|e| e.to_string())?;
+    if !json_s.contains("\"uri\"") {
+        return Ok(glb.to_vec());
+    }
+    let uris = json_string_values(json_s, "uri");
+    let mut embeds: Vec<(String, Vec<u8>, &'static str)> = Vec::new();
+    for uri in &uris {
+        let lower = uri.to_ascii_lowercase();
+        let mime = if lower.ends_with(".png") {
+            "image/png"
+        } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            "image/jpeg"
+        } else {
+            continue;
+        };
+        let path = resolve_pack_texture(base_dir, uri).ok_or_else(|| {
+            format!(
+                "missing texture {uri} (looked next to the GLB and in Textures/). This Kenney folder is incomplete — re-extract the official pack so {uri} is on disk."
+            )
+        })?;
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        embeds.push((uri.clone(), bytes, mime));
+    }
+    if embeds.is_empty() {
+        return Ok(glb.to_vec());
+    }
+    let view_base = json_array_len(json_s, "bufferViews").unwrap_or(0);
+    let mut new_bin = bin.to_vec();
+    let mut views_json = String::new();
+    let mut image_repls: Vec<(String, String)> = Vec::new();
+    for (i, (uri, bytes, mime)) in embeds.iter().enumerate() {
+        while new_bin.len() % 4 != 0 {
+            new_bin.push(0);
+        }
+        let offset = new_bin.len();
+        new_bin.extend_from_slice(bytes);
+        if i > 0 {
+            views_json.push(',');
+        }
+        views_json.push_str(&format!(
+            "{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{}}}",
+            bytes.len()
+        ));
+        let view = view_base + i;
+        image_repls.push((
+            format!("\"uri\":\"{uri}\""),
+            format!("\"bufferView\":{view},\"mimeType\":\"{mime}\""),
+        ));
+    }
+    let mut json_out = json_s.to_string();
+    for (from, to) in &image_repls {
+        json_out = json_out.replacen(from, to, 1);
+    }
+    json_out = append_buffer_views(&json_out, &views_json)?;
+    json_out = set_first_buffer_byte_length(&json_out, new_bin.len())?;
+    Ok(write_glb(json_out.as_bytes(), &new_bin))
+}
+
+fn split_glb(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
+        return Err("not a GLB".into());
+    }
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    if bytes.len() < 20 + json_len || &bytes[16..20] != b"JSON" {
+        return Err("GLB JSON chunk truncated".into());
+    }
+    let json = &bytes[20..20 + json_len];
+    let bin_at = 20 + json_len;
+    if bin_at + 8 > bytes.len() {
+        return Ok((json, &[]));
+    }
+    if &bytes[bin_at + 4..bin_at + 8] != b"BIN\0" {
+        return Ok((json, &[]));
+    }
+    let bin_len = u32::from_le_bytes(bytes[bin_at..bin_at + 4].try_into().unwrap()) as usize;
+    if bin_at + 8 + bin_len > bytes.len() {
+        return Err("GLB BIN chunk truncated".into());
+    }
+    Ok((json, &bytes[bin_at + 8..bin_at + 8 + bin_len]))
+}
+
+fn write_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
+    let json_pad = (json.len() + 3) & !3;
+    let bin_pad = (bin.len() + 3) & !3;
+    let total = 12 + 8 + json_pad + 8 + bin_pad;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(json_pad as u32).to_le_bytes());
+    out.extend_from_slice(b"JSON");
+    out.extend_from_slice(json);
+    out.resize(12 + 8 + json_pad, b' ');
+    out.extend_from_slice(&(bin_pad as u32).to_le_bytes());
+    out.extend_from_slice(b"BIN\0");
+    out.extend_from_slice(bin);
+    out.resize(total, 0);
+    out
+}
+
+fn json_string_values(json: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\"");
+    let mut out = Vec::new();
+    let bytes = json.as_bytes();
+    let mut i = 0usize;
+    while i + needle.len() < json.len() {
+        let Some(rel) = json[i..].find(&needle) else {
+            break;
+        };
+        i += rel + needle.len();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b':' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'"' {
+            continue;
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i <= bytes.len() {
+            out.push(json[start..i].to_string());
+        }
+    }
+    out
+}
+
+fn json_array_len(json: &str, key: &str) -> Option<usize> {
+    let needle = format!("\"{key}\"");
+    let at = json.find(&needle)?;
+    let rest = &json[at + needle.len()..];
+    let bracket = rest.find('[')?;
+    let body = match_bracket(&rest[bracket..])?;
+    if body[1..body.len() - 1].trim().is_empty() {
+        return Some(0);
+    }
+    Some(body.matches('{').count())
+}
+
+fn match_bracket(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'[') && b.first() != Some(&b'{') {
+        return None;
+    }
+    let open = b[0];
+    let close = if open == b'[' { b']' } else { b'}' };
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, &c) in b.iter().enumerate() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            c if c == open => depth += 1,
+            c if c == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn append_buffer_views(json: &str, views: &str) -> Result<String, String> {
+    let needle = "\"bufferViews\"";
+    let at = json
+        .find(needle)
+        .ok_or_else(|| "GLB JSON missing bufferViews".to_string())?;
+    let after = &json[at + needle.len()..];
+    let br = after
+        .find('[')
+        .ok_or_else(|| "bufferViews is not an array".to_string())?;
+    let arr = match_bracket(&after[br..]).ok_or_else(|| "bufferViews array unclosed".to_string())?;
+    let inner_start = at + needle.len() + br + 1;
+    let inner_end = inner_start + arr.len() - 2;
+    let inner = json[inner_start..inner_end].trim();
+    let mut insert = views.to_string();
+    if !inner.is_empty() && !insert.is_empty() {
+        insert = format!("{inner},{insert}");
+    } else if inner.is_empty() {
+        // keep insert
+    } else {
+        insert = inner.to_string();
+    }
+    let mut out = String::with_capacity(json.len() + views.len() + 1);
+    out.push_str(&json[..inner_start]);
+    out.push_str(&insert);
+    out.push_str(&json[inner_end..]);
+    Ok(out)
+}
+
+fn set_first_buffer_byte_length(json: &str, len: usize) -> Result<String, String> {
+    let needle = "\"byteLength\"";
+    let Some(at) = json.find(needle) else {
+        return Err("GLB JSON missing byteLength".into());
+    };
+    let rest = &json[at + needle.len()..];
+    let colon = rest
+        .find(':')
+        .ok_or_else(|| "byteLength has no value".to_string())?;
+    let mut i = colon + 1;
+    let rb = rest.as_bytes();
+    while i < rb.len() && rb[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    while i < rb.len() && rb[i].is_ascii_digit() {
+        i += 1;
+    }
+    if start == i {
+        return Err("byteLength is not a number".into());
+    }
+    let abs = at + needle.len() + start;
+    let abs_end = at + needle.len() + i;
+    Ok(format!("{}{len}{}", &json[..abs], &json[abs_end..]))
+}
+
+fn publish_compiled_pack(
+    pack_root: &Path,
+    out: &Path,
+    session: &ServerSession,
+    pack_name: &str,
+    pack_page: &str,
+    assets: usize,
+    blob_total: usize,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+    cancel: &AtomicBool,
+) -> Result<(bool, usize), String> {
+    let collection = std::fs::read(out.join(SOURCE_COLLECTION_FILE))
+        .map_err(|e| format!("read source collection: {e}"))?;
+    let manifest = std::fs::read(out.join(IMPORT_MANIFEST_FILE))
+        .map_err(|e| format!("read import manifest: {e}"))?;
+    let plan_bytes =
+        std::fs::read(out.join(UPLOAD_PLAN_FILE)).map_err(|e| format!("read upload plan: {e}"))?;
+    let plan = makepad_asset_client::json::parse(&plan_bytes)
+        .map_err(|e| format!("upload plan json: {e}"))?;
+    let ns = plan
+        .get("namespace")
+        .and_then(makepad_asset_client::json::Value::as_str)
+        .ok_or("upload plan missing namespace")?
+        .to_string();
+    let blobs = plan
+        .get("blobs")
+        .and_then(makepad_asset_client::json::Value::as_arr)
+        .ok_or("upload plan missing blobs")?;
+
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../local/ai_content_app/import/cache");
+    let mut config = ClientConfig::new(cache);
+    config.token = Some(session.token.clone());
+    let client = AssetClient::connect(config, session.endpoints, Some(session.server_id))
+        .map_err(|e| format!("asset client: {e}"))?;
+    client
+        .register_source_collection(&collection)
+        .map_err(|e| format!("register source: {e}"))?;
+
+    let mut blob_done = 0usize;
+    for blob in blobs {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("stopped during blob upload".into());
+        }
+        let local = blob
+            .get("local_path")
+            .and_then(makepad_asset_client::json::Value::as_str)
+            .ok_or("blob missing local_path")?;
+        let expect = blob
+            .get("blob")
+            .and_then(makepad_asset_client::json::Value::as_str)
+            .ok_or("blob missing digest")?;
+        let bytes = std::fs::read(pack_root.join(local))
+            .map_err(|e| format!("read {local}: {e}"))?;
+        let digest = BlobId::hash_of(&bytes);
+        if digest.to_string() != expect {
+            return Err(format!(
+                "rehash mismatch for {local}: plan {expect} != sha256 {}",
+                digest
+            ));
+        }
+        if sha256(&bytes) != *digest.as_bytes() {
+            return Err(format!("sha256 drift for {local}"));
+        }
+        client
+            .upload_blob(&ns, &bytes)
+            .map_err(|e| format!("upload {local}: {e}"))?;
+        blob_done += 1;
+        let _ = tx.send(ImportPhase::Publishing {
+            pack: pack_name.to_string(),
+            assets,
+            blobs: blob_total,
+            blob_done,
+        });
+    }
+
+    let report = client
+        .run_import(&manifest)
+        .map_err(|e| format!("run import: {e}"))?;
+    let plan_kinds = plan_asset_kinds(&plan);
+    let annotate_total = report.entries.len();
+    let mut annotated = 0usize;
+    let _ = tx.send(ImportPhase::Annotating {
+        pack: pack_name.to_string(),
+        assets,
+        blobs: blob_total,
+        annotated: 0,
+        total: annotate_total,
+    });
+    for entry in &report.entries {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("stopped during annotate".into());
+        }
+        let key = entry.key.as_str();
+        let title = key.rsplit('/').next().unwrap_or(key);
+        let kind = plan_kinds
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| guess_kind(key));
+        let alias = entry
+            .alias
+            .as_ref()
+            .map(|a| a.as_str().to_string())
+            .unwrap_or_else(|| format!("kenney/{pack_name}/{title}"));
+        let mut tags = Vec::new();
+        for raw in [
+            "kenney",
+            pack_name,
+            "cc-by-4-0",
+            kind_tag(kind),
+            title,
+        ] {
+            if let Some(tag) = search_label(raw) {
+                if tags.iter().all(|t| t != &tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        for part in key.split('/') {
+            if let Some(tag) = search_label(part) {
+                if tags.iter().all(|t| t != &tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        if title.contains("character") {
+            if let Some(tag) = search_label("character") {
+                if tags.iter().all(|t| t != &tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        let ann = AnnotationUpload {
+            title: title.to_string(),
+            description: format!(
+                "Kenney {pack_name} · {alias} · {key} · CC-BY-4.0 · Kenney (kenney.nl)"
+            ),
+            kind: Some(kind),
+            categories: vec!["kenney".into(), pack_name.to_string()],
+            tags,
+            creator: KENNEY_CREDITS.to_string(),
+            generator: "pack_import".into(),
+            backend: "asset-ui".into(),
+            model: pack_name.to_string(),
+            prompt: format!("imported Kenney pack {pack_name} asset {key}"),
+            provenance: format!(
+                "Kenney (kenney.nl) · {pack_page} · license CC-BY-4.0 · credits Kenney (kenney.nl)"
+            ),
+            private: false,
+        };
+        client
+            .put_annotation(&entry.asset_id, &ann)
+            .map_err(|e| format!("annotate {key}: {e}"))?;
+        annotated += 1;
+        let _ = tx.send(ImportPhase::Annotating {
+            pack: pack_name.to_string(),
+            assets,
+            blobs: blob_total,
+            annotated,
+            total: annotate_total,
+        });
+    }
+    Ok((report.created, annotated))
+}
+
+/// Bake AO for every staged GLB (shared post-GLTF path). Fail-closed per mesh.
+fn bake_staged_glbs(
+    staged: &Path,
+    pack: &str,
+    assets: usize,
+    annotated: usize,
+    tx: &std::sync::mpsc::Sender<ImportPhase>,
+    cancel: &AtomicBool,
+) -> BakeStats {
+    let _ = (staged, pack, assets, annotated, tx, cancel);
+    BakeStats::default()
+}
+
+fn plan_asset_kinds(
+    plan: &makepad_asset_client::json::Value,
+) -> std::collections::BTreeMap<String, AssetKind> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(assets) = plan
+        .get("assets")
+        .and_then(makepad_asset_client::json::Value::as_arr)
+    else {
+        return out;
+    };
+    for asset in assets {
+        let Some(key) = asset
+            .get("key")
+            .and_then(makepad_asset_client::json::Value::as_str)
+        else {
+            continue;
+        };
+        let kind = asset
+            .get("kind")
+            .and_then(makepad_asset_client::json::Value::as_str)
+            .and_then(parse_kind)
+            .unwrap_or_else(|| guess_kind(key));
+        out.insert(key.to_string(), kind);
+    }
+    out
+}
+
+fn parse_kind(name: &str) -> Option<AssetKind> {
+    Some(match name {
+        "mesh" => AssetKind::Mesh,
+        "character" => AssetKind::Character,
+        "weapon" => AssetKind::Weapon,
+        "vehicle" => AssetKind::Vehicle,
+        "prop" => AssetKind::Prop,
+        "texture" => AssetKind::Texture,
+        "material" => AssetKind::Material,
+        "audio" => AssetKind::Audio,
+        "video" => AssetKind::Video,
+        "skybox" => AssetKind::Skybox,
+        "world" => AssetKind::World,
+        "prefab" => AssetKind::Prefab,
+        "billboard" => AssetKind::Billboard,
+        _ => return None,
+    })
+}
+
+/// Search labels are `[a-z0-9_-]`, must start alphanumeric. Dots (as in
+/// CC-BY-4.0) become dashes so annotation writes do not 400.
+fn search_label(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in raw.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+            out.push(c);
+        } else if c == '.' || c == ' ' || c == '/' {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty()
+        || out.len() > 128
+        || !(out.as_bytes()[0].is_ascii_lowercase() || out.as_bytes()[0].is_ascii_digit())
+    {
+        return None;
+    }
+    Some(out)
+}
+
+fn kind_tag(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Mesh => "mesh",
+        AssetKind::Character => "character",
+        AssetKind::Weapon => "weapon",
+        AssetKind::Vehicle => "vehicle",
+        AssetKind::Prop => "prop",
+        AssetKind::Texture => "texture",
+        AssetKind::Material => "material",
+        AssetKind::Audio => "audio",
+        AssetKind::Video => "video",
+        AssetKind::Skybox => "skybox",
+        AssetKind::World => "world",
+        AssetKind::Prefab => "prefab",
+        AssetKind::Billboard => "billboard",
+    }
+}
+
+fn guess_kind(key: &str) -> AssetKind {
+    if key.contains("texture") || key.ends_with(".png") || key.ends_with(".jpg") {
+        AssetKind::Texture
+    } else if key.contains("audio") || key.contains("sound") {
+        AssetKind::Audio
+    } else if key.contains("video") {
+        AssetKind::Video
+    } else if key.contains("sprite") || key.contains("billboard") {
+        AssetKind::Billboard
+    } else if key.contains("character") {
+        AssetKind::Character
+    } else if key.contains("vehicle") || key.contains("car") {
+        AssetKind::Vehicle
+    } else {
+        AssetKind::Mesh
+    }
+}
+
+/// Deterministic 512×512 opaque PNG used only as the pack_import-required
+/// mesh thumbnail. Replaced in the local library by ThumbnailRenderer.
+fn placeholder_png_512() -> Vec<u8> {
+    let w = 512u32;
+    let h = 512u32;
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let row = 1 + w * 3;
+    let raw_len = row as usize * h as usize;
+    let raw = vec![0u8; raw_len];
+    let mut zlib = vec![0x78, 0x01];
+    let mut off = 0usize;
+    while off < raw.len() {
+        let take = (raw.len() - off).min(65535);
+        let last = off + take == raw.len();
+        zlib.push(if last { 0x01 } else { 0x00 });
+        let n = take as u16;
+        zlib.extend_from_slice(&n.to_le_bytes());
+        zlib.extend_from_slice(&(!n).to_le_bytes());
+        zlib.extend_from_slice(&raw[off..off + take]);
+        off += take;
+    }
+    let mut s1 = 1u32;
+    let mut s2 = 0u32;
+    for &b in &raw {
+        s1 = (s1 + b as u32) % 65521;
+        s2 = (s2 + s1) % 65521;
+    }
+    zlib.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    push_png_chunk(&mut out, b"IHDR", &ihdr);
+    push_png_chunk(&mut out, b"IDAT", &zlib);
+    push_png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn push_png_chunk(out: &mut Vec<u8>, typ: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(typ);
+    out.extend_from_slice(data);
+    let mut crc_src = Vec::with_capacity(4 + data.len());
+    crc_src.extend_from_slice(typ);
+    crc_src.extend_from_slice(data);
+    out.extend_from_slice(&png_crc(&crc_src).to_be_bytes());
+}
+
+fn png_crc(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kenney_module_reuses_pack_import_cc_by_grant() {
+        assert_eq!(KENNEY_MODULE.id, "kenney");
+        assert_eq!(KENNEY_MODULE.license, "CC-BY-4.0");
+        assert_ne!(KENNEY_MODULE.license, "CC0-1.0");
+        assert!(KENNEY_MODULE.license_blurb.contains("attribution"));
+        assert!(KENNEY_MODULE.license_blurb.contains("does not treat Kenney as CC0"));
+        assert_eq!(KENNEY_MODULE.credits, "Kenney (kenney.nl)");
+        assert_eq!(KENNEY_MODULE.homepage, "https://kenney.nl");
+        assert_eq!(KENNEY_MODULE.github, Some("https://github.com/KenneyNL"));
+        assert!(KENNEY_MODULE.import_wired);
+        let names: Vec<&str> = kenney_packs().iter().map(|p| p.name).collect();
+        assert!(names.contains(&"space-kit"));
+        assert!(names.contains(&"ui-pack"));
+        assert!(names.contains(&"car-kit"));
+        assert!(names.contains(&"platformer-kit"));
+        assert!(!names.contains(&"platformer"));
+        assert!(!names.contains(&"city"));
+        assert!(!names.contains(&"arena"));
+    }
+
+    #[test]
+    fn import_list_uses_full_kits_not_starter_slices() {
+        for slice in STARTER_KIT_SLICES {
+            assert!(is_starter_kit_slice(slice));
+        }
+        let present = on_disk_kenney_packs();
+        for (name, _) in &present {
+            assert!(
+                !is_starter_kit_slice(name),
+                "starter slice leaked into import list: {name}"
+            );
+        }
+        assert!(
+            present.iter().any(|(n, _)| n == "platformer-kit"),
+            "full platformer-kit must be importable: {present:?}"
+        );
+        assert!(
+            present.iter().any(|(n, _)| n == "space-kit"),
+            "space-kit must stay importable: {present:?}"
+        );
+        assert!(
+            !present.iter().any(|(n, _)| n == "3d-road-tiles"),
+            "gltf-only 3d-road-tiles has no glb/png/wav and must stay off the list: {present:?}"
+        );
+    }
+
+    #[test]
+    fn multi_texture_kit_still_lands_library() {
+        let dir = resolve_kenney_dir("retro-fantasy-kit", "");
+        assert!(dir.is_dir(), "{}", dir.display());
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_import_retro_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mini = tmp.join("mini");
+        std::fs::create_dir_all(mini.join("Textures")).unwrap();
+        std::fs::copy(dir.join("barrels.glb"), mini.join("barrels.glb")).unwrap();
+        for name in ["barrel.png", "planks.png"] {
+            std::fs::copy(dir.join("Textures").join(name), mini.join("Textures").join(name))
+                .unwrap();
+        }
+        let staged = tmp.join("source");
+        let dest = tmp.join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        stage_source_pack(&mini, &staged).expect("stage multi-texture slice");
+        let landings = library_landings(
+            &staged,
+            "retro-fantasy-kit",
+            "https://kenney.nl/assets/retro-fantasy-kit",
+        );
+        assert!(
+            landings
+                .iter()
+                .any(|l| l.content_type.contains("gltf")),
+            "staged multi-texture Kenney GLB must still produce a library landing"
+        );
+        let spec = kenney_spec("retro-fantasy-kit").expect("spec");
+        let err = pack_import::compile_pack(&staged, &dest.join("bundle"), spec, None, false)
+            .expect_err("pack_import must refuse multi-texture Kenney GLBs");
+        assert!(
+            err.to_string().contains("multi-texture") || err.to_string().contains("unsupported"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn other_modules_are_visible_and_not_wired() {
+        assert_eq!(PACK_MODULES.len(), 3);
+        assert!(KAYKIT_MODULE.import_wired);
+        assert!(!NASA_SKY_MODULE.import_wired);
+        assert_eq!(KAYKIT_MODULE.license, "CC0-1.0");
+    }
+
+    #[test]
+    fn kaykit_landings_use_character_title_not_license() {
+        let tmp = std::env::temp_dir().join(format!("makepad-kaykit-landings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("knight.glb"), b"glTF").unwrap();
+        let landings = kaykit_library_landings(&tmp);
+        assert_eq!(landings.len(), 1);
+        assert_eq!(landings[0].label, "Knight");
+        assert!(landings[0].prompt.contains("knight"));
+        assert!(!landings[0].prompt.starts_with("KayKit knight"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn missing_folder_fails_closed() {
+        let mut page = ImportPage::default();
+        page.kenney_path = "/tmp/makepad-no-such-kenney-pack".into();
+        let err = page
+            .start_kenney_import(page.kenney_path.clone(), None)
+            .unwrap_err();
+        assert!(err.contains("not on disk"));
+        assert!(matches!(page.kenney_phase, ImportPhase::Failed { .. }));
+    }
+
+    #[test]
+    fn take_library_landings_consumes() {
+        let mut page = ImportPage::default();
+        page.pending_landings.push(LibraryLanding {
+            path: PathBuf::from("/tmp/x.glb"),
+            label: "kenney/space-kit/x".into(),
+            domain: "mesh",
+            content_type: "model/gltf-binary",
+            prompt: "test".into(),
+            thumbnail: None,
+            source_id: "kenney".into(),
+            pack: "space-kit".into(),
+        });
+        let first = page.take_library_landings();
+        assert_eq!(first.len(), 1);
+        assert!(page.take_library_landings().is_empty());
+    }
+
+    #[test]
+    fn reimport_allowed_after_published() {
+        let mut page = ImportPage::default();
+        page.kenney_phase = ImportPhase::Published {
+            pack: "space-kit".into(),
+            assets: 1,
+            blobs: 1,
+            created: false,
+            annotated: 1,
+            out: PathBuf::from("/tmp"),
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        };
+        assert!(!page.compiling());
+        // Path may be missing in CI; the gate under test is "not refused as
+        // already running" — a missing folder fails closed with its own error.
+        let result = page.start_kenney_import("/tmp/makepad-no-such-kenney-pack".into(), None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("not on disk"),
+            "reimport must not be refused as already running after Published"
+        );
+    }
+
+    #[test]
+    fn progress_fraction_is_honest_and_monotonic_across_stages() {
+        let mut page = ImportPage::default();
+        assert_eq!(page.progress_fraction(), 0.0);
+        page.kenney_phase = ImportPhase::compiling("space-kit");
+        let c = page.progress_fraction();
+        page.kenney_phase = ImportPhase::Publishing {
+            pack: "space-kit".into(),
+            assets: 10,
+            blobs: 10,
+            blob_done: 5,
+        };
+        let p = page.progress_fraction();
+        page.kenney_phase = ImportPhase::Annotating {
+            pack: "space-kit".into(),
+            assets: 10,
+            blobs: 10,
+            annotated: 5,
+            total: 10,
+        };
+        let a = page.progress_fraction();
+        page.kenney_phase = ImportPhase::Baking {
+            pack: "space-kit".into(),
+            assets: 10,
+            annotated: 10,
+            bake_done: 5,
+            bake_total: 10,
+            bake_skipped: 0,
+            bake_failed: 0,
+            current: "barrel.glb".into(),
+        };
+        let b = page.progress_fraction();
+        page.kenney_phase = ImportPhase::Published {
+            pack: "space-kit".into(),
+            assets: 10,
+            blobs: 10,
+            created: true,
+            annotated: 10,
+            out: PathBuf::from("/tmp"),
+            library: Vec::new(),
+            bake: BakeStats {
+                total: 10,
+                baked: 10,
+                skipped: 0,
+                failed: 0,
+            },
+        };
+        page.import_icon_files.insert("lib-1.glb".into());
+        page.import_icon_files.insert("lib-2.glb".into());
+        page.icons_done = 1;
+        let icons = page.progress_fraction();
+        page.icons_done = 2;
+        let done = page.progress_fraction();
+        assert!(c < p && p < a && a < b && b < icons && icons < done);
+        assert!((done - 1.0).abs() < 1e-3);
+        assert!(
+            b < 0.25,
+            "AO/compile must stay a short prefix so 153 icons are not a sliver: {b}"
+        );
+        assert!(
+            (icons - 0.60).abs() < 0.05,
+            "half the icons should own most of the bar: {icons}"
+        );
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("icons 2/2"), "{line}");
+        assert!(!line.contains("blank"));
+        assert!(!line.contains("thumbs rendering"));
+        page.icons_done = 0;
+        page.icons_failed = 0;
+        page.icon_current = "crate.glb".into();
+        let stuck = page.kenney_status_line(true);
+        assert!(stuck.contains("rendering GPU icons 0/2"), "{stuck}");
+        assert!(stuck.contains("crate.glb"), "{stuck}");
+        assert!(page.progress_fraction() < 0.25, "0/N icons is not a full bar");
+    }
+
+    #[test]
+    fn bake_skips_fresh_sidecars_and_fails_closed_on_non_glb() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_import_bake_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let glb = tmp.join("prop.glb");
+        // Valid-looking header only — parse will fail if bake is attempted.
+        std::fs::write(&glb, b"glTF\x02\x00\x00\x00").unwrap();
+        // Make sidecars newer than the glb.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(glb.with_extension("aomesh"), b"fake-aomesh").unwrap();
+        std::fs::write(glb.with_extension("ao.png"), b"fake-ao").unwrap();
+        let sun = ao_bake::default_sun();
+        assert_eq!(
+            ao_bake::bake_glb(&glb, &sun).unwrap(),
+            ao_bake::BakeOutcome::SkippedFresh
+        );
+
+        let not_glb = tmp.join("notes.txt");
+        std::fs::write(&not_glb, b"hello").unwrap();
+        let err = ao_bake::bake_glb(&not_glb, &sun).unwrap_err();
+        assert!(err.contains("not a glb"), "{err}");
+
+        let bad = tmp.join("broken.glb");
+        std::fs::write(&bad, b"not-gltf-bytes").unwrap();
+        let err = ao_bake::bake_glb(&bad, &sun).unwrap_err();
+        assert!(
+            err.contains("not a glTF") || err.contains("bake"),
+            "fail-closed: {err}"
+        );
+        assert!(!bad.with_extension("aomesh").exists());
+        assert!(!bad.with_extension("ao.png").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn status_line_bake_and_publish_counts() {
+        let mut page = ImportPage::default();
+        page.kenney_phase = ImportPhase::Publishing {
+            pack: "ui-pack".into(),
+            assets: 3,
+            blobs: 12,
+            blob_done: 4,
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("publish blob 4/12"), "{line}");
+        page.kenney_phase = ImportPhase::Baking {
+            pack: "ui-pack".into(),
+            assets: 3,
+            annotated: 3,
+            bake_done: 2,
+            bake_total: 5,
+            bake_skipped: 1,
+            bake_failed: 0,
+            current: "panel.glb".into(),
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("building AO 2/5"), "{line}");
+        assert!(line.contains("cores"), "{line}");
+        assert!(line.contains("panel.glb"), "{line}");
+    }
+
+    #[test]
+    fn probe_missing_and_existing_dirs() {
+        let missing = probe_dir(Path::new("/tmp/makepad-no-such-kenney-pack"));
+        assert!(!missing.ready());
+        assert!(missing.line().contains("not on disk"));
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_import_probe_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("panel.png"), b"not-a-real-png").unwrap();
+        std::fs::write(tmp.join("note.txt"), b"docs").unwrap();
+        let found = probe_dir(&tmp);
+        assert!(found.ready());
+        assert_eq!(found.supported_files, 1);
+        assert!(found.unsupported_samples.iter().any(|s| s == ".txt"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn stage_skips_derived_sidecars_and_writes_placeholder_thumbs() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_import_stage_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let pack = tmp.join("pack");
+        let dest = tmp.join("source");
+        std::fs::create_dir_all(&pack).unwrap();
+        let json = r#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":4}]}"#;
+        std::fs::write(pack.join("crate.glb"), write_glb(json.as_bytes(), &[1, 2, 3, 4])).unwrap();
+        std::fs::write(pack.join("crate.ao.png"), b"not-source").unwrap();
+        std::fs::write(pack.join("crate.aomesh"), b"ao").unwrap();
+        std::fs::write(pack.join("crate.shadowsdf"), b"sdf").unwrap();
+        stage_source_pack(&pack, &dest).unwrap();
+        assert!(dest.join("crate.glb").is_file());
+        assert!(dest.join("crate.png").is_file());
+        assert!(!dest.join("crate.ao.png").exists());
+        assert!(!dest.join("crate.aomesh").exists());
+        let png = std::fs::read(dest.join("crate.png")).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn landings_use_pack_preview_png_not_placeholder() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_import_land_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let staged = tmp.join("source");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("sedan.glb"), b"glTF").unwrap();
+        let preview = b"\x89PNG\r\n\x1a\nreal-preview";
+        std::fs::write(staged.join("sedan.png"), preview).unwrap();
+        std::fs::write(staged.join("crate.glb"), b"glTF").unwrap();
+        std::fs::write(staged.join("crate.png"), placeholder_png_512()).unwrap();
+        let landings = library_landings(&staged, "car-kit", "https://kenney.nl/assets/car-kit");
+        let sedan = landings.iter().find(|l| l.label.ends_with("/sedan")).unwrap();
+        let crate_ = landings.iter().find(|l| l.label.ends_with("/crate")).unwrap();
+        assert_eq!(
+            sedan.thumbnail.as_ref().map(|p| p.file_name().unwrap()),
+            Some(std::ffi::OsStr::new("sedan.png"))
+        );
+        assert_eq!(crate_.thumbnail, None, "placeholder must not become the icon");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn blank_placeholder_png_is_detected() {
+        assert!(is_blank_preview_png(&placeholder_png_512()));
+        assert!(!is_blank_preview_png(b"\x89PNG\r\n\x1a\nreal-preview"));
+    }
+
+    #[test]
+    fn embed_glb_inlines_sidecar_png() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_embed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(tmp.join("Textures")).unwrap();
+        let png = placeholder_png_512();
+        std::fs::write(tmp.join("Textures/colormap.png"), &png).unwrap();
+        let json = r#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":4}],"bufferViews":[{"buffer":0,"byteLength":4}],"images":[{"uri":"Textures/colormap.png","name":"colormap"}]}"#;
+        let glb = write_glb(json.as_bytes(), &[1, 2, 3, 4]);
+        let out = embed_glb_file_images(&glb, &tmp).unwrap();
+        let (js, bin) = split_glb(&out).unwrap();
+        let js = std::str::from_utf8(js).unwrap();
+        assert!(!js.contains("\"uri\""), "{js}");
+        assert!(js.contains("\"bufferView\":1"), "{js}");
+        assert!(js.contains("image/png"), "{js}");
+        assert!(bin.len() >= 4 + png.len());
+        assert_eq!(&bin[bin.len() - png.len()..], png.as_slice());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_all_sees_local_space_kit() {
+        let present = on_disk_kenney_packs();
+        assert!(
+            present.iter().any(|(name, _)| name == "space-kit"),
+            "sandbox space-kit should be on disk: {present:?}"
+        );
+    }
+
+    #[test]
+    fn compile_sandbox_space_kit() {
+        let dir = resolve_kenney_dir("space-kit", "");
+        assert!(dir.is_dir(), "{}", dir.display());
+        let tmp = std::env::temp_dir().join(format!(
+            "mp_import_spacekit_{}",
+            std::process::id()
+        ));
+        let staged = tmp.join("work").join("source");
+        let dest_root = tmp.join("out");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let bundle = dest_root.join("bundle");
+        stage_source_pack(&dir, &staged).expect("stage");
+        let spec = kenney_spec("space-kit").expect("spec");
+        let report = pack_import::compile_pack(&staged, &bundle, spec, None, false)
+            .unwrap_or_else(|e| panic!("compile space-kit: {e}"));
+        assert!(report.assets > 0, "expected mesh assets, got {}", report.assets);
+        println!(
+            "space-kit compile: {} assets / {} blobs",
+            report.assets, report.blobs
+        );
+        if let Some(session) = live_server_session() {
+            let dest_root = tmp.join("out");
+            let staged = tmp.join("work").join("source");
+            let (tx, _rx) = mpsc::channel();
+            let cancel = AtomicBool::new(false);
+            match publish_compiled_pack(
+                &staged,
+                &dest_root.join("bundle"),
+                &session,
+                "space-kit",
+                "https://kenney.nl/assets/space-kit",
+                report.assets,
+                report.blobs,
+                &tx,
+                &cancel,
+            ) {
+                Ok((created, annotated)) => {
+                    println!("space-kit publish: created={created} annotated={annotated}");
+                    assert!(annotated > 0);
+                }
+                Err(error) => panic!("publish space-kit: {error}"),
+            }
+        } else {
+            println!("no live Asset Server on 127.0.0.1:9701 — compile-only");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn live_server_session() -> Option<ServerSession> {
+        let token = std::fs::read_to_string(
+            dirs_home().join(".makepad-asset-ai/asset-server/admin-token"),
+        )
+        .ok()?
+        .trim()
+        .to_string();
+        if token.is_empty() {
+            return None;
+        }
+        let id = std::fs::read_to_string(
+            dirs_home().join(".makepad-asset-ai/asset-server/server-id"),
+        )
+        .ok()?;
+        let server_id = parse_hex16_local(id.trim())?;
+        Some(ServerSession {
+            endpoints: ApiEndpoints {
+                control: "127.0.0.1:9701".parse().ok()?,
+                data: "127.0.0.1:9702".parse().ok()?,
+            },
+            token,
+            server_id,
+        })
+    }
+
+    fn dirs_home() -> PathBuf {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir())
+    }
+
+    fn parse_hex16_local(text: &str) -> Option<[u8; 16]> {
+        if text.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        for i in 0..16 {
+            out[i] = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn import_queue_is_serial_and_editable() {
+        let mut queue = ImportQueue::default();
+        let id = queue
+            .enqueue(ImportJob::Freedoom { path: String::new() })
+            .unwrap();
+        queue
+            .enqueue(ImportJob::Kenney {
+                pack: "space-kit".into(),
+                pack_index: 0,
+                path: String::new(),
+            })
+            .unwrap();
+        assert!(queue
+            .enqueue(ImportJob::Freedoom { path: "/other".into() })
+            .unwrap_err()
+            .contains("already queued"));
+        assert!(queue
+            .enqueue(ImportJob::KenneyAll)
+            .unwrap_err()
+            .contains("already queued"));
+        let first = queue.promote().unwrap();
+        assert_eq!(first.id, id);
+        assert!(matches!(first.job, ImportJob::Freedoom { .. }));
+        assert!(queue.promote().is_none(), "must not promote while active");
+        assert!(queue.remove(queue.pending[0].id));
+        assert!(queue.pending.is_empty());
+        queue.finish_active();
+        assert!(queue.is_empty());
+    }
+}
