@@ -9,3 +9,4 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+makepad-show-control = { path = "../../libs/show_control" }
