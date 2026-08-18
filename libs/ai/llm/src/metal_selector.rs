@@ -7,7 +7,7 @@ use crate::graph::{Graph, NodeId};
 use crate::op::{GluOp, Op, UnaryOp};
 use crate::tensor::{ggml_type_size_for_type, Tensor, TensorFlags, TensorType};
 
-use super::{
+use makepad_ai_metal::{
     FunctionConstant, FunctionConstantValue, MetalDeviceFeatures, MetalPipelineDescriptor,
 };
 
@@ -19,14 +19,14 @@ const FC_FLASH_ATTN_EXT_VEC_REDUCE: i32 = 500;
 const FC_MUL_MV: i32 = 600;
 const FC_MUL_MM: i32 = 700;
 const FC_ROPE: i32 = 800;
-pub(super) const FC_SSM_CONV: i32 = 900;
+pub(crate) const FC_SSM_CONV: i32 = 900;
 const FC_SOLVE_TRI: i32 = 1000;
 const FC_COUNT_EQUAL: i32 = 1100;
 const FC_UNARY: i32 = 1200;
 const FC_BIN: i32 = 1300;
 const FC_SUM_ROWS: i32 = 1400;
 const FC_UPSCALE: i32 = 1500;
-pub(super) const FC_GATED_DELTA_NET: i32 = 1600;
+pub(crate) const FC_GATED_DELTA_NET: i32 = 1600;
 
 const OP_FLASH_ATTN_EXT_NQPSG: i32 = 8;
 const OP_FLASH_ATTN_EXT_NCPSG: i32 = 64;

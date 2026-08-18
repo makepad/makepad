@@ -3,7 +3,7 @@
 //! type-checks; `Runtime::new()` reports exactly why execution is
 //! unavailable, and the unreachable types are empty enums.
 
-use makepad_ggml::Context;
+use crate::Context;
 
 use super::CudaDeviceFeatures;
 use crate::error::{LlamaError, Result};
@@ -102,11 +102,11 @@ impl Runtime {
     pub(super) fn execute_raw_graph(
         &self,
         _ctx: &Context,
-        _graph: &makepad_ggml::Graph,
-        _pinned: &[makepad_ggml::TensorId],
-        _writes: &[(makepad_ggml::TensorId, Vec<u8>)],
-        _wanted: &[makepad_ggml::TensorId],
-    ) -> Result<std::collections::BTreeMap<makepad_ggml::TensorId, Vec<u8>>> {
+        _graph: &crate::Graph,
+        _pinned: &[crate::TensorId],
+        _writes: &[(crate::TensorId, Vec<u8>)],
+        _wanted: &[crate::TensorId],
+    ) -> Result<std::collections::BTreeMap<crate::TensorId, Vec<u8>>> {
         Err(LlamaError::unsupported(unavailable_reason()))
     }
 }

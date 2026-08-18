@@ -7,11 +7,11 @@ fn usage() -> ! {
 }
 
 fn f16_to_f32(bits: u16) -> f32 {
-    makepad_ggml::f16_to_f32(bits)
+    makepad_ai_common::f16_to_f32(bits)
 }
 
 fn bf16_to_f32(bits: u16) -> f32 {
-    makepad_ggml::bf16_to_f32(bits)
+    makepad_ai_common::bf16_to_f32(bits)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

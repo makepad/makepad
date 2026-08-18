@@ -40,7 +40,7 @@ use crate::backend::{
     gpu_gather_rows_colblock, gpu_gemm_f16acc_enabled, gpu_linear_nt_cached, gpu_upload,
     gpu_upload_u32, gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
 };
-use makepad_ggml::quant::{f32_to_f16, GGML_TYPE_F16};
+use makepad_ai_common::quant::{f32_to_f16, GGML_TYPE_F16};
 use std::collections::HashMap;
 use std::sync::Mutex;
 

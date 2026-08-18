@@ -634,6 +634,13 @@ pub struct MeshView {
     look: PreviewLook,
     #[rust(true)]
     show_ground: bool,
+    /// Cascaded sun shadows. Off is a full-sun debug view (no CSM, no SDF
+    /// quads) and does not kick an OnChange atlas bake.
+    #[rust(true)]
+    shadows_enabled: bool,
+    /// Night stage: dim sun, dark ground, dark sky.
+    #[rust(false)]
+    dark_enabled: bool,
     /// Bytes handed in by the pipeline, loaded on the next draw (needs Cx).
     #[rust]
     pending: Option<PendingModel>,
@@ -1036,7 +1043,10 @@ impl MeshView {
 
     fn sync_stage(&mut self) {
         if self.walk_cam.is_some() {
-            self.show_ground = false;
+            // Keep the statue slab + sky. Walk used to flip this off and
+            // PreviewStage::empty() killed the ground *and* the sky, which
+            // left maps in a black void.
+            self.show_ground = true;
             self.apply_walk_camera();
         } else if !self.show_ground && self.world_built {
             self.world_built = false;
@@ -1093,6 +1103,39 @@ impl MeshView {
         self.pbr.status.as_ref()
     }
 
+    pub fn shadows_enabled(&self) -> bool {
+        self.shadows_enabled
+    }
+
+    pub fn set_shadows_enabled(&mut self, cx: &mut Cx, on: bool) {
+        if self.shadows_enabled == on {
+            return;
+        }
+        self.shadows_enabled = on;
+        self.apply_shadow_mode();
+        self.area.redraw(cx);
+    }
+
+    pub fn dark_enabled(&self) -> bool {
+        self.dark_enabled
+    }
+
+    pub fn set_dark_enabled(&mut self, cx: &mut Cx, on: bool) {
+        if self.dark_enabled == on {
+            return;
+        }
+        self.dark_enabled = on;
+        self.area.redraw(cx);
+    }
+
+    fn apply_shadow_mode(&mut self) {
+        self.renderer.set_gpu_lightmap_mode(if self.shadows_enabled {
+            GpuLightmapMode::Realtime
+        } else {
+            GpuLightmapMode::Off
+        });
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
@@ -1122,8 +1165,7 @@ impl MeshView {
         cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
         // Same fast-GPU contract as the sandbox F8 / settings toggle:
         // per-frame cascaded shadows, every dynamic caster in the sun.
-        self.renderer
-            .set_gpu_lightmap_mode(GpuLightmapMode::Realtime);
+        self.apply_shadow_mode();
         // The fixed-step chain is armed by draw_walk once a character is
         // actually visible (pump_parked starts true), never here.
     }
@@ -1789,8 +1831,16 @@ impl Widget for MeshView {
                 sky: &mut self.draw_sky,
                 sky_analytic: None,
                 terrain: &mut self.draw_terrain,
-                shadow: Some(&mut self.draw_shadow),
-                shadow_sdf: Some(&mut self.draw_shadow_sdf),
+                shadow: if self.shadows_enabled {
+                    Some(&mut self.draw_shadow)
+                } else {
+                    None
+                },
+                shadow_sdf: if self.shadows_enabled {
+                    Some(&mut self.draw_shadow_sdf)
+                } else {
+                    None
+                },
                 firework: None,
                 flare: None,
                 water: None,
@@ -1798,11 +1848,12 @@ impl Widget for MeshView {
                 screen_instances: &screen_instances,
                 view_model: None,
             };
-            let stage = if self.show_ground {
+            let mut stage = if self.show_ground {
                 PreviewStage::statue()
             } else {
                 PreviewStage::empty()
             };
+            stage.dark = self.dark_enabled;
             self.renderer.draw_preview(
                 cx3d,
                 &mut self.draw_list,

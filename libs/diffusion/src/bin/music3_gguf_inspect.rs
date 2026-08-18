@@ -12,7 +12,7 @@ use makepad_diffusion::music3::{
 };
 use makepad_diffusion::music3_gguf::{topk_ids, FiniteStats, Music3GgufLm, Music3GgufRvq};
 use makepad_diffusion::music3_quant::{Music3GgufPack, Music3GgufRole};
-use makepad_ggml::quant::dequantize_q4_0;
+use makepad_ai_common::quant::dequantize_q4_0;
 use std::path::PathBuf;
 use std::time::Instant;
 

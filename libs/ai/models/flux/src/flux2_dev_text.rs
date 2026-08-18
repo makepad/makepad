@@ -35,7 +35,7 @@ use crate::flux2_text::{
     flux2_conditioning_concat, mistral3_rope_inv_freq, mistral3_rope_table_values,
 };
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_F8_E4M3;
+use makepad_ai_common::quant::GGML_TYPE_F8_E4M3;
 
 pub const FLUX2_DEV_TE_NAMESPACE: &str = "flux2-te-fp8::mistral3";
 pub const FLUX2_DEV_EMBED_TOKENS: &str = "model.embed_tokens.weight";

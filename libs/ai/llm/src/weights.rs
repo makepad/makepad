@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use makepad_ggml::{
+use crate::{
     ggml_pad, BufferUsage, Context, InitParams, MappedRegion, TensorId, GGML_MEM_ALIGN,
 };
 

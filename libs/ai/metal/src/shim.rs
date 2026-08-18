@@ -32,7 +32,7 @@ pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
-use crate::backend::prof;
+use makepad_ai_cuda::prof;
 
 fn prof_rec(cat: usize, start: std::time::Instant, f32_count: usize) {
     prof::record(cat, start, (f32_count * 4) as u64);
@@ -723,7 +723,7 @@ mod tests {
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use crate::backend::cuda;
+    use makepad_ai_cuda as cuda;
     use std::cell::RefCell;
     use std::mem::size_of;
 
@@ -1391,7 +1391,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use crate::quant::{
+    use makepad_ai_cuda::quant::{
         block_elements, block_size, f32_to_f16, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_F16,
         GGML_TYPE_F32, GGML_TYPE_I32, GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K,

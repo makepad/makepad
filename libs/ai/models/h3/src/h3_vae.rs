@@ -40,7 +40,7 @@ use crate::backend::{
 };
 use crate::h3::H3ShardedWeights;
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_F16;
+use makepad_ai_common::quant::GGML_TYPE_F16;
 use makepad_ai_loader::MlxDType;
 
 pub const H3_VAE_NAMESPACE: &str = "h3vae";
@@ -345,7 +345,7 @@ fn ensure_linear<'a>(
                     let value =
                         f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&makepad_ggml::quant::f32_to_f16(value).to_le_bytes());
+                        .copy_from_slice(&makepad_ai_common::quant::f32_to_f16(value).to_le_bytes());
                 }
             }
             MlxDType::BF16 => {
@@ -353,7 +353,7 @@ fn ensure_linear<'a>(
                     let word = u16::from_le_bytes([chunk[0], chunk[1]]);
                     let value = f32::from_bits((word as u32) << 16);
                     out[i * 2..i * 2 + 2]
-                        .copy_from_slice(&makepad_ggml::quant::f32_to_f16(value).to_le_bytes());
+                        .copy_from_slice(&makepad_ai_common::quant::f32_to_f16(value).to_le_bytes());
                 }
             }
             other => return Err(format!("h3 vae tensor '{name}': unsupported dtype {other:?}")),

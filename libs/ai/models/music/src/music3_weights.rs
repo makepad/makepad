@@ -113,12 +113,12 @@ impl Music3Shards {
     /// end to end; GGUF members answer per tensor (Q4_0 / BF16 / F32 / F16).
     pub fn linear_ggml_type(&self, name: &str) -> u32 {
         match &self.source {
-            Music3WeightSource::Safetensors { .. } => makepad_ggml::quant::GGML_TYPE_BF16,
+            Music3WeightSource::Safetensors { .. } => makepad_ai_common::quant::GGML_TYPE_BF16,
             Music3WeightSource::Gguf(file) => file
                 .file
                 .get_tensor(name)
                 .map(|info| info.tensor_type.ggml_type())
-                .unwrap_or(makepad_ggml::quant::GGML_TYPE_BF16),
+                .unwrap_or(makepad_ai_common::quant::GGML_TYPE_BF16),
         }
     }
 }

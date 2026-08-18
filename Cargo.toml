@@ -70,7 +70,6 @@ workspace.exclude = [
     # standalone GPU generate service (own workspace, like diffusion)
     "libs/asset/ai",
     "libs/diffusion",
-    "libs/ggml",
     # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
     "libs/ai",
     # standalone CUDA FFI workspace (own [workspace] table; reached as a

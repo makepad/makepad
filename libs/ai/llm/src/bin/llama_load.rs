@@ -1,12 +1,10 @@
 use std::time::Instant;
 
-use makepad_ggml::{
-    backend::metal::{
-        compile_prepared_graph, execute_compiled_graph, is_available as metal_available,
-        BufferStorageMode, MetalDeviceFeatures, MetalGraphTensorWrite, MetalRuntime,
-    },
-    TensorType,
+use makepad_ai_llm::metal_compiled::{
+    compile_prepared_graph, execute_compiled_graph, MetalGraphTensorWrite,
 };
+use makepad_ai_llm::TensorType;
+use makepad_ai_metal::{is_available as metal_available, BufferStorageMode, MetalDeviceFeatures, MetalRuntime};
 use makepad_ai_llm::{
     compile_attention_block_metal, compile_attention_decode_metal,
     compile_delta_net_recurrent_decode_metal, compile_hybrid_decode_metal,

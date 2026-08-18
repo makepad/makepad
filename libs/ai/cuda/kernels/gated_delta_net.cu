@@ -2,7 +2,7 @@
 #include <math.h>
 #include <stdint.h>
 
-static __global__ void makepad_ggml_cuda_gated_delta_net_f32_kernel(
+static __global__ void makepad_cuda_gated_delta_net_f32_kernel(
         const float * __restrict__ q,
         const float * __restrict__ k,
         const float * __restrict__ v,
@@ -117,7 +117,7 @@ static __global__ void makepad_ggml_cuda_gated_delta_net_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gated_delta_net_f32(
+extern "C" cudaError_t makepad_cuda_gated_delta_net_f32(
         const float * q,
         const float * k,
         const float * v,
@@ -148,7 +148,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_delta_net_f32(
     const uint32_t block = sv <= 32 ? 32 : (sv <= 64 ? 64 : 128);
     const dim3 grid(h, n_seqs, sv);
     const size_t shared_bytes = (sv + block) * sizeof(float);
-    makepad_ggml_cuda_gated_delta_net_f32_kernel<<<grid, block, shared_bytes, stream>>>(
+    makepad_cuda_gated_delta_net_f32_kernel<<<grid, block, shared_bytes, stream>>>(
         q,
         k,
         v,

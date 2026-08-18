@@ -2,11 +2,11 @@
 #include <math.h>
 #include <stdint.h>
 
-static __device__ __forceinline__ float makepad_ggml_cuda_silu(float x) {
+static __device__ __forceinline__ float makepad_cuda_silu(float x) {
     return x / (1.0f + expf(-x));
 }
 
-static __global__ void makepad_ggml_cuda_ssm_conv_f32_kernel(
+static __global__ void makepad_cuda_ssm_conv_f32_kernel(
         const float * __restrict__ src0,
         const float * __restrict__ src1,
         float * __restrict__ dst,
@@ -35,11 +35,11 @@ static __global__ void makepad_ggml_cuda_ssm_conv_f32_kernel(
             sum += seq_src[(token_idx + k) * src0_token_stride] * weight[k];
         }
         seq_dst[token_idx * dst_token_stride] =
-            apply_silu ? makepad_ggml_cuda_silu(sum) : sum;
+            apply_silu ? makepad_cuda_silu(sum) : sum;
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_ssm_conv_f32(
+extern "C" cudaError_t makepad_cuda_ssm_conv_f32(
         const float * src0,
         const float * src1,
         float * dst,
@@ -59,7 +59,7 @@ extern "C" cudaError_t makepad_ggml_cuda_ssm_conv_f32(
     }
     const uint32_t block = 128;
     const dim3 grid(n_seqs, (d_inner + block - 1) / block, 1);
-    makepad_ggml_cuda_ssm_conv_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_ssm_conv_f32_kernel<<<grid, block, 0, stream>>>(
         src0,
         src1,
         dst,

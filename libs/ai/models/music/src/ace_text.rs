@@ -214,7 +214,7 @@ pub fn ace_tokenize(tokenizer: &H3Tokenizer, text: &str, max_len: usize) -> Vec<
 // ---------------------------------------------------------------------------
 
 use makepad_ai_sfx::sa3::dev_err;
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed_causal_bf16, gpu_bf16_round, gpu_concat_cols, gpu_download,
     gpu_linear_nt_cached_bf16_mm, gpu_mul, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
     gpu_slice_cols, gpu_upload, GpuTensor,
@@ -246,9 +246,9 @@ impl TeBf16Weight {
         }
     }
 
-    fn part(&self) -> makepad_ggml::backend::cuda::GpuLinearPart<'_> {
-        makepad_ggml::backend::cuda::GpuLinearPart {
-            bt_ggml_type: makepad_ggml::quant::GGML_TYPE_BF16,
+    fn part(&self) -> makepad_ai_common::backend::cuda::GpuLinearPart<'_> {
+        makepad_ai_common::backend::cuda::GpuLinearPart {
+            bt_ggml_type: makepad_ai_common::quant::GGML_TYPE_BF16,
             n: self.n,
             cache_key: &self.key,
             bytes: &self.bytes,

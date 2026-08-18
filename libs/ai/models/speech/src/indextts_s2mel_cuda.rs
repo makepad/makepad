@@ -44,7 +44,7 @@ use crate::backend::{
     gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32, gpu_wavenet_gate,
     gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
 };
-use makepad_ggml::quant::{f32_to_f16, GGML_TYPE_F16};
+use makepad_ai_common::quant::{f32_to_f16, GGML_TYPE_F16};
 
 const NS: &str = "indextts_s2mel";
 /// AdaLN sites: per block attention_norm (2i) and ffn_norm (2i+1), plus the

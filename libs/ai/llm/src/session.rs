@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use makepad_ggml::{ggml_row_size_for_type, TensorType};
+use crate::{ggml_row_size_for_type, TensorType};
 
 use crate::error::{LlamaError, Result};
 use crate::exec::{CompiledHybridDecode, ExecContextBuffers, ExecRuntime};
@@ -131,7 +131,7 @@ impl SessionGraphSet {
 }
 
 fn shared_cache_ranges(
-    ctx: &makepad_ggml::Context,
+    ctx: &crate::Context,
     cache: &HybridSharedCacheTensorIds,
 ) -> Result<Vec<(usize, usize)>> {
     let mut tensor_ids = BTreeSet::new();
@@ -296,7 +296,7 @@ impl LlamaSession {
                 }
                 _ => {
                     for chunk in bytes.chunks_exact(2) {
-                        let v = makepad_ggml::quant::f16_to_f32(u16::from_le_bytes(
+                        let v = makepad_ai_cuda::quant::f16_to_f32(u16::from_le_bytes(
                             chunk.try_into().unwrap(),
                         ));
                         if v.is_nan() {

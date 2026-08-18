@@ -2,16 +2,18 @@
 name = "makepad-ai-metal"
 version = "0.1.0"
 edition = "2021"
-description = "THE Metal shader store for Makepad AI models: ggml-metal.metal + impl headers, the mlx steel_qmm kernels, and the metallib build (absorbed from libs/ggml). Rust Metal launch surface stays in makepad-ggml this lane (aiarch.md §8b ring 1)."
+description = "THE Metal store: shaders, metallib build, device/runtime, try_* shims."
 license = "MIT"
 links = "makepad_ai_metal"
 
 [features]
 default = []
-# Mirrors makepad-ggml's own `metal-precompile` feature (libs/ggml/Cargo.toml):
-# ggml forwards it here via `metal-precompile = ["makepad-ai-metal/metal-precompile"]`
-# so CARGO_FEATURE_METAL_PRECOMPILE reaches THIS crate's build.rs, which is
-# the one that now actually runs the xcrun metal/metallib build.
 metal-precompile = []
 
 [dependencies]
+makepad-ai-loader = { path = "../loader" }
+makepad-ai-cuda = { path = "../cuda" }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../../objc-sys", version = "1.0.0" }
+smallvec = { path = "../../smallvec" }

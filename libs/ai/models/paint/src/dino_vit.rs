@@ -286,7 +286,7 @@ pub use exec::DinoVit;
 mod exec {
     use super::*;
     use crate::safetensors;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_add, gpu_attention_packed, gpu_concat_rows, gpu_conv2d_planar_strided, gpu_device_available,
         gpu_download, gpu_layer_norm_pytorch, gpu_linear_f32_resident, gpu_silu, gpu_slice_cols,
         gpu_upload, GpuTensor,

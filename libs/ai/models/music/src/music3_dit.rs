@@ -15,7 +15,7 @@ use crate::music3::{
 };
 use crate::music3_weights::{Music3Shards, MUSIC3_DIT_NAMESPACE};
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::f32::consts::PI;
 
 const LN_EPS: f32 = 1e-5;

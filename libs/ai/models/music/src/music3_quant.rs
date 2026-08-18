@@ -13,10 +13,10 @@ use crate::music3::{
     MUSIC3_COND_OUT, MUSIC3_DIT_LAYERS, MUSIC3_LM_LAYERS,
 };
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::{
+use makepad_ai_common::quant::{
     block_size, f32_to_f16, get_rows_ggml_bytes_cpu, vec_dot_q4_0_f32, QK,
 };
-use makepad_ggml::tensor::{ggml_row_size_for_type, TensorType};
+use makepad_ai_common::tensor::{ggml_row_size_for_type, TensorType};
 use makepad_ai_llm::GgufFile;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -548,13 +548,13 @@ impl Music3GgufFile {
         &'a self,
         ns: &'a str,
         name: &'a str,
-    ) -> Option<makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix<'a>> {
+    ) -> Option<makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix<'a>> {
         let (_k, n, ty) = self.linear_kn(name).ok()?;
         if ty == TensorType::BF16 {
             return None;
         }
         Some(
-            makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
+            makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
                 bt_ggml_type: ty.ggml_type(),
                 n,
                 namespace: ns,
@@ -570,17 +570,17 @@ impl Music3GgufFile {
         ns: &'a str,
         ns_f16: &'a str,
         name: &'a str,
-    ) -> Option<makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix<'a>> {
+    ) -> Option<makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix<'a>> {
         let (_k, n, ty) = self.linear_kn(name).ok()?;
         Some(if ty == TensorType::BF16 {
-            makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
+            makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
                 bt_ggml_type: TensorType::F16.ggml_type(),
                 n,
                 namespace: ns_f16,
                 cache_key: name,
             }
         } else {
-            makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
+            makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
                 bt_ggml_type: ty.ggml_type(),
                 n,
                 namespace: ns,
@@ -627,16 +627,16 @@ impl Music3GgufFile {
                 specs.push((*name, ty.ggml_type(), n, false));
             }
         }
-        let mats: Vec<makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix<'_>> = specs
+        let mats: Vec<makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix<'_>> = specs
             .iter()
-            .map(|(name, ty, n, is_f16)| makepad_ggml::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
+            .map(|(name, ty, n, is_f16)| makepad_ai_common::backend::metal::MatmulNtGgmlBytesKeyedMatrix {
                 bt_ggml_type: *ty,
                 n: *n,
                 namespace: if *is_f16 { ns_f16.as_str() } else { ns.as_str() },
                 cache_key: name,
             })
             .collect();
-        makepad_ggml::backend::metal::try_matmul_nt_ggml_bytes_keyed_multi(
+        makepad_ai_common::backend::metal::try_matmul_nt_ggml_bytes_keyed_multi(
             a,
             m,
             k0,
@@ -661,7 +661,7 @@ impl Music3GgufFile {
                 n * k
             )));
         }
-        match makepad_ggml::backend::metal::try_matmul_nt_f32(a, &w, m, k, n) {
+        match makepad_ai_common::backend::metal::try_matmul_nt_f32(a, &w, m, k, n) {
             Some(y) if y.iter().any(|v| v.is_finite() && *v != 0.0) => Ok(y),
             _ => matmul_nt_f32_cpu(a, &w, m, k, n),
         }
@@ -679,7 +679,7 @@ impl Music3GgufFile {
         let ggml_type = ty.ggml_type();
         let ns = format!("music3-{}", self.role.as_str());
         let load = || self.read_bytes_uncached(name).map_err(|err| err.to_string());
-        makepad_ggml::backend::metal::try_matmul_nt_ggml_bytes_keyed(
+        makepad_ai_common::backend::metal::try_matmul_nt_ggml_bytes_keyed(
             a, ggml_type, m, k, n, &ns, name, load,
         )
     }
@@ -697,7 +697,7 @@ impl Music3GgufFile {
             self.bf16_as_f16_uncached(name)
                 .ok_or_else(|| format!("music3 bf16-as-f16 {name}"))
         };
-        makepad_ggml::backend::metal::try_matmul_nt_ggml_bytes_keyed(
+        makepad_ai_common::backend::metal::try_matmul_nt_ggml_bytes_keyed(
             a,
             TensorType::F16.ggml_type(),
             m,
@@ -793,7 +793,7 @@ impl Music3GgufFile {
                     ))
                 },
             )?;
-            let y = match makepad_ggml::backend::metal::try_matmul_nt_f32(a, &w, m, k, take) {
+            let y = match makepad_ai_common::backend::metal::try_matmul_nt_f32(a, &w, m, k, take) {
                 Some(y) if y.iter().any(|v| v.is_finite() && *v != 0.0) => y,
                 _ => matmul_nt_f32_cpu(a, &w, m, k, take)?,
             };

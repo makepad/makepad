@@ -7,7 +7,7 @@ use crate::backend::{
 };
 use crate::flux::FluxLatentShape;
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
-use makepad_ggml::{
+use makepad_ai_common::{
     f16_to_f32, f32_to_f16, ggml_pad, BufferUsage, Context, Graph, InitParams, Op, ScaleMode,
     Tensor, TensorDesc, TensorId, TensorLayout, TensorType, UnaryOp, GGML_MEM_ALIGN,
 };

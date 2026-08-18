@@ -20,7 +20,7 @@ use crate::flux2::{
 use crate::flux2_tokenizer::FLUX2_MAX_SEQUENCE_LENGTH;
 use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::path::Path;
 
 pub const FLUX2_KLEIN_TE_NAMESPACE: &str = "flux2-te-bf16::qwen3-4b";

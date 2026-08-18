@@ -1,7 +1,7 @@
 // Precise f32 kernels backing the diffusion (Flux) lazy path on CUDA.
 //
 // The pre-existing elementwise kernels in ops.cu truncate their results to
-// bf16 (makepad_ggml_cuda_bf16_round) to mirror the LLM runtime's storage
+// bf16 (makepad_cuda_bf16_round) to mirror the LLM runtime's storage
 // format. The diffusion pipeline mirrors Metal semantics, which are full-f32,
 // so this translation unit provides exact f32 variants plus the ops the
 // Metal compat layer needs that had no CUDA kernel at all
@@ -14,14 +14,14 @@
 #include <mma.h>
 #include <stdint.h>
 
-__device__ __forceinline__ float makepad_ggml_cuda_diff_warp_reduce_sum(float value) {
+__device__ __forceinline__ float makepad_cuda_diff_warp_reduce_sum(float value) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
         value += __shfl_down_sync(0xffffffffu, value, offset);
     }
     return value;
 }
 
-__device__ __forceinline__ float makepad_ggml_cuda_diff_warp_reduce_max(float value) {
+__device__ __forceinline__ float makepad_cuda_diff_warp_reduce_max(float value) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
         const float other = __shfl_down_sync(0xffffffffu, value, offset);
         value = value > other ? value : other;
@@ -29,39 +29,39 @@ __device__ __forceinline__ float makepad_ggml_cuda_diff_warp_reduce_max(float va
     return value;
 }
 
-__device__ __forceinline__ float makepad_ggml_cuda_diff_block_reduce_sum(float value) {
+__device__ __forceinline__ float makepad_cuda_diff_block_reduce_sum(float value) {
     __shared__ float shared[32];
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
-    value = makepad_ggml_cuda_diff_warp_reduce_sum(value);
+    value = makepad_cuda_diff_warp_reduce_sum(value);
     if (lane == 0) {
         shared[warp] = value;
     }
     __syncthreads();
     value = threadIdx.x < (blockDim.x + 31) / 32 ? shared[lane] : 0.0f;
     if (warp == 0) {
-        value = makepad_ggml_cuda_diff_warp_reduce_sum(value);
+        value = makepad_cuda_diff_warp_reduce_sum(value);
     }
     return value;
 }
 
-__device__ __forceinline__ float makepad_ggml_cuda_diff_block_reduce_max(float value) {
+__device__ __forceinline__ float makepad_cuda_diff_block_reduce_max(float value) {
     __shared__ float shared[32];
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
-    value = makepad_ggml_cuda_diff_warp_reduce_max(value);
+    value = makepad_cuda_diff_warp_reduce_max(value);
     if (lane == 0) {
         shared[warp] = value;
     }
     __syncthreads();
     value = threadIdx.x < (blockDim.x + 31) / 32 ? shared[lane] : -CUDART_INF_F;
     if (warp == 0) {
-        value = makepad_ggml_cuda_diff_warp_reduce_max(value);
+        value = makepad_cuda_diff_warp_reduce_max(value);
     }
     return value;
 }
 
-static __global__ void makepad_ggml_cuda_bf16_round_f32_kernel(
+static __global__ void makepad_cuda_bf16_round_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t n) {
@@ -71,7 +71,7 @@ static __global__ void makepad_ggml_cuda_bf16_round_f32_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_add_bf16_f32_kernel(
+static __global__ void makepad_cuda_add_bf16_f32_kernel(
         const float * __restrict__ left,
         const float * __restrict__ right,
         float * __restrict__ output,
@@ -82,7 +82,7 @@ static __global__ void makepad_ggml_cuda_add_bf16_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_bf16_round_f32(
+extern "C" cudaError_t makepad_cuda_bf16_round_f32(
         const float * input,
         float * output,
         uint32_t n,
@@ -92,11 +92,11 @@ extern "C" cudaError_t makepad_ggml_cuda_bf16_round_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_bf16_round_f32_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    makepad_cuda_bf16_round_f32_kernel<<<grid, block, 0, stream>>>(input, output, n);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_add_bf16_f32(
+extern "C" cudaError_t makepad_cuda_add_bf16_f32(
         const float * left,
         const float * right,
         float * output,
@@ -107,7 +107,7 @@ extern "C" cudaError_t makepad_ggml_cuda_add_bf16_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_add_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_add_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         left, right, output, n);
     return cudaGetLastError();
 }
@@ -118,7 +118,7 @@ extern "C" cudaError_t makepad_ggml_cuda_add_bf16_f32(
 // eps sits inside the sqrt — matching kernel_norm_mul_add_f32 in
 // ggml-metal.metal and the scalar reference in libs/diffusion. gamma_add
 // lets modulation scales stay device-resident (the host path pre-adds 1).
-static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_kernel(
+static __global__ void makepad_cuda_layer_norm_mul_add_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ gamma,
         const float * __restrict__ beta,
@@ -138,7 +138,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_kernel(
     for (uint32_t idx = threadIdx.x; idx < cols; idx += blockDim.x) {
         sum += row_in[idx];
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     __shared__ float shared_mean;
     __shared__ float shared_inv;
     if (threadIdx.x == 0) {
@@ -152,7 +152,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_kernel(
         const float centered = row_in[idx] - mean;
         sq_sum += centered * centered;
     }
-    sq_sum = makepad_ggml_cuda_diff_block_reduce_sum(sq_sum);
+    sq_sum = makepad_cuda_diff_block_reduce_sum(sq_sum);
     if (threadIdx.x == 0) {
         shared_inv = rsqrtf(sq_sum / static_cast<float>(cols) + eps);
     }
@@ -166,7 +166,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_kernel(
 
 // out[r][c] = residual[r][c] + gate[c] * update[r][c] in one pass (the
 // two-kernel mul_rows_vec + add recipe read the update twice).
-static __global__ void makepad_ggml_cuda_gated_residual_vec_f32_kernel(
+static __global__ void makepad_cuda_gated_residual_vec_f32_kernel(
         const float * __restrict__ residual,
         const float * __restrict__ update,
         const float * __restrict__ gate,
@@ -180,7 +180,7 @@ static __global__ void makepad_ggml_cuda_gated_residual_vec_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gated_residual_vec_f32(
+extern "C" cudaError_t makepad_cuda_gated_residual_vec_f32(
         const float * residual,
         const float * update,
         const float * gate,
@@ -194,7 +194,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_vec_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_gated_residual_vec_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gated_residual_vec_f32_kernel<<<grid, block, 0, stream>>>(
         residual, update, gate, output, row_count, cols);
     return cudaGetLastError();
 }
@@ -203,7 +203,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_vec_f32(
 // flux2 DiT rounds every residual join, and the separate bf16_round pass
 // costs a full extra read+write of the 30MB stream tensor. Same fmaf then
 // __float2bfloat16_rn — bit-identical to gated_residual_vec + bf16_round.
-static __global__ void makepad_ggml_cuda_gated_residual_vec_round_bf16_f32_kernel(
+static __global__ void makepad_cuda_gated_residual_vec_round_bf16_f32_kernel(
         const float * __restrict__ residual,
         const float * __restrict__ update,
         const float * __restrict__ gate,
@@ -218,7 +218,7 @@ static __global__ void makepad_ggml_cuda_gated_residual_vec_round_bf16_f32_kerne
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gated_residual_vec_round_bf16_f32(
+extern "C" cudaError_t makepad_cuda_gated_residual_vec_round_bf16_f32(
         const float * residual,
         const float * update,
         const float * gate,
@@ -232,12 +232,12 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_vec_round_bf16_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_gated_residual_vec_round_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gated_residual_vec_round_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         residual, update, gate, output, row_count, cols);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_add_f32_precise_kernel(
+static __global__ void makepad_cuda_add_f32_precise_kernel(
         const float * __restrict__ left,
         const float * __restrict__ right,
         float * __restrict__ output,
@@ -248,7 +248,7 @@ static __global__ void makepad_ggml_cuda_add_f32_precise_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_mul_f32_precise_kernel(
+static __global__ void makepad_cuda_mul_f32_precise_kernel(
         const float * __restrict__ left,
         const float * __restrict__ right,
         float * __restrict__ output,
@@ -260,7 +260,7 @@ static __global__ void makepad_ggml_cuda_mul_f32_precise_kernel(
 }
 
 // out[r][c] = a[r][c] * vec[c]  (row-broadcast multiply)
-static __global__ void makepad_ggml_cuda_mul_rows_vec_f32_kernel(
+static __global__ void makepad_cuda_mul_rows_vec_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ vec,
         float * __restrict__ output,
@@ -275,7 +275,7 @@ static __global__ void makepad_ggml_cuda_mul_rows_vec_f32_kernel(
 
 // Tanh-approximation GELU matching gelu_scalar in libs/diffusion and the
 // Metal kernel (GELU_COEF_A = 0.044715, sqrt(2/pi) below).
-static __global__ void makepad_ggml_cuda_gelu_f32_precise_kernel(
+static __global__ void makepad_cuda_gelu_f32_precise_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t n) {
@@ -288,7 +288,7 @@ static __global__ void makepad_ggml_cuda_gelu_f32_precise_kernel(
 }
 
 // Row softmax without the bf16 rounding of the ops.cu variant.
-static __global__ void makepad_ggml_cuda_softmax_rows_precise_f32_kernel(
+static __global__ void makepad_cuda_softmax_rows_precise_f32_kernel(
         const float * __restrict__ logits,
         float * __restrict__ probs,
         uint32_t row_count,
@@ -306,7 +306,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_precise_f32_kernel(
         const float value = row_in[idx];
         max_value = value > max_value ? value : max_value;
     }
-    max_value = makepad_ggml_cuda_diff_block_reduce_max(max_value);
+    max_value = makepad_cuda_diff_block_reduce_max(max_value);
     __shared__ float shared_max;
     __shared__ float shared_sum;
     if (threadIdx.x == 0) {
@@ -318,7 +318,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_precise_f32_kernel(
     for (uint32_t idx = threadIdx.x; idx < seq_len; idx += blockDim.x) {
         sum += expf(row_in[idx] - shared_max);
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     if (threadIdx.x == 0) {
         shared_sum = sum;
     }
@@ -333,7 +333,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_precise_f32_kernel(
 //   motion query -> motion keys within +/- band_radius and every text key
 //   text query   -> text keys only
 // Scores are laid out [head][query][key], hence query = row % seq_len.
-static __global__ void makepad_ggml_cuda_softmax_rows_motion_text_f32_kernel(
+static __global__ void makepad_cuda_softmax_rows_motion_text_f32_kernel(
         const float * __restrict__ logits,
         float * __restrict__ probs,
         uint32_t row_count,
@@ -360,7 +360,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_motion_text_f32_kernel(
             max_value = value > max_value ? value : max_value;
         }
     }
-    max_value = makepad_ggml_cuda_diff_block_reduce_max(max_value);
+    max_value = makepad_cuda_diff_block_reduce_max(max_value);
     __shared__ float shared_max;
     __shared__ float shared_sum;
     if (threadIdx.x == 0) {
@@ -378,7 +378,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_motion_text_f32_kernel(
             sum += expf(row_in[key] - shared_max);
         }
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     if (threadIdx.x == 0) {
         shared_sum = sum;
     }
@@ -395,7 +395,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_motion_text_f32_kernel(
 
 // Bidirectional sliding-window softmax: keep |query-key| <= window.
 // Scores are laid out [head][query][key], hence query = row % seq_len.
-static __global__ void makepad_ggml_cuda_softmax_rows_sliding_f32_kernel(
+static __global__ void makepad_cuda_softmax_rows_sliding_f32_kernel(
         const float * __restrict__ logits,
         float * __restrict__ probs,
         uint32_t row_count,
@@ -419,7 +419,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_sliding_f32_kernel(
             max_value = value > max_value ? value : max_value;
         }
     }
-    max_value = makepad_ggml_cuda_diff_block_reduce_max(max_value);
+    max_value = makepad_cuda_diff_block_reduce_max(max_value);
     __shared__ float shared_max;
     __shared__ float shared_sum;
     if (threadIdx.x == 0) {
@@ -433,7 +433,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_sliding_f32_kernel(
             sum += expf(row_in[key] - shared_max);
         }
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     if (threadIdx.x == 0) {
         shared_sum = sum > 1e-30f ? sum : 1e-30f;
     }
@@ -449,7 +449,7 @@ static __global__ void makepad_ggml_cuda_softmax_rows_sliding_f32_kernel(
 // Planar (channel-major, [c][y][x]) stride-1 "same" conv2d matching
 // apply_conv2d_spatial in libs/diffusion/src/flux_vae.rs. Weights are laid
 // out [out_c][in_c][kh][kw]; bias is per out channel.
-static __global__ void makepad_ggml_cuda_conv2d_planar_f32_kernel(
+static __global__ void makepad_cuda_conv2d_planar_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ weights,
         const float * __restrict__ bias,
@@ -494,7 +494,7 @@ static __global__ void makepad_ggml_cuda_conv2d_planar_f32_kernel(
     output[static_cast<size_t>(oc) * plane + static_cast<size_t>(y) * width + x] = acc;
 }
 
-static __global__ void makepad_ggml_cuda_conv2d_planar_strided_f32_kernel(
+static __global__ void makepad_cuda_conv2d_planar_strided_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ weights,
         const float * __restrict__ bias,
@@ -545,7 +545,7 @@ static __global__ void makepad_ggml_cuda_conv2d_planar_strided_f32_kernel(
 // Group norm over planar [c][y][x] data: pass 1 computes per-group mean and
 // inverse stddev (biased variance, f64 accumulation to match the CPU
 // reference), pass 2 normalizes with per-channel gamma/beta.
-static __global__ void makepad_ggml_cuda_group_norm_planar_stats_kernel(
+static __global__ void makepad_cuda_group_norm_planar_stats_kernel(
         const float * __restrict__ input,
         float * __restrict__ stats,   // [group] -> (mean, inv_std)
         uint32_t plane,               // width * height
@@ -583,7 +583,7 @@ static __global__ void makepad_ggml_cuda_group_norm_planar_stats_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_group_norm_planar_apply_kernel(
+static __global__ void makepad_cuda_group_norm_planar_apply_kernel(
         const float * __restrict__ input,
         const float * __restrict__ gamma,
         const float * __restrict__ beta,
@@ -604,7 +604,7 @@ static __global__ void makepad_ggml_cuda_group_norm_planar_apply_kernel(
     output[idx] = (input[idx] - mean) * inv_std * gamma[channel] + beta[channel];
 }
 
-static __global__ void makepad_ggml_cuda_silu_f32_precise_kernel(
+static __global__ void makepad_cuda_silu_f32_precise_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t n) {
@@ -615,7 +615,7 @@ static __global__ void makepad_ggml_cuda_silu_f32_precise_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_f32_to_f16_kernel(
+static __global__ void makepad_cuda_f32_to_f16_kernel(
         const float * __restrict__ input,
         uint16_t * __restrict__ output,
         uint32_t n) {
@@ -626,7 +626,7 @@ static __global__ void makepad_ggml_cuda_f32_to_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32(
+extern "C" cudaError_t makepad_cuda_layer_norm_mul_add_f32(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -641,7 +641,7 @@ extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_layer_norm_mul_add_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_layer_norm_mul_add_f32_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, output, row_count, cols, eps, gamma_add);
     return cudaGetLastError();
 }
@@ -652,26 +652,26 @@ extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32(
 // fixed tree, and evaluates gamma * (rstd * (x - mean)) + beta in precisely
 // that association. The generic two-pass LayerNorm above intentionally stays
 // unchanged for existing Makepad models.
-struct makepad_ggml_cuda_welford_ln {
+struct makepad_cuda_welford_ln {
     float mean;
     float sigma2;
     float count;
 };
 
-static __device__ __forceinline__ makepad_ggml_cuda_welford_ln
-makepad_ggml_cuda_welford_ln_online(
+static __device__ __forceinline__ makepad_cuda_welford_ln
+makepad_cuda_welford_ln_online(
         float value,
-        const makepad_ggml_cuda_welford_ln &current) {
+        const makepad_cuda_welford_ln &current) {
     const float delta = value - current.mean;
     const float new_count = current.count + 1.0f;
     const float new_mean = current.mean + delta * (1.0f / new_count);
     return {new_mean, current.sigma2 + delta * (value - new_mean), new_count};
 }
 
-static __device__ __forceinline__ makepad_ggml_cuda_welford_ln
-makepad_ggml_cuda_welford_ln_combine(
-        const makepad_ggml_cuda_welford_ln data_b,
-        const makepad_ggml_cuda_welford_ln data_a) {
+static __device__ __forceinline__ makepad_cuda_welford_ln
+makepad_cuda_welford_ln_combine(
+        const makepad_cuda_welford_ln data_b,
+        const makepad_cuda_welford_ln data_a) {
     const float delta = data_b.mean - data_a.mean;
     const float count = data_a.count + data_b.count;
     if (count <= 0.0f) {
@@ -686,7 +686,7 @@ makepad_ggml_cuda_welford_ln_combine(
     return {mean, sigma2, count};
 }
 
-static __global__ void makepad_ggml_cuda_layer_norm_pytorch_f32_kernel(
+static __global__ void makepad_cuda_layer_norm_pytorch_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ gamma,
         const float * __restrict__ beta,
@@ -705,21 +705,21 @@ static __global__ void makepad_ggml_cuda_layer_norm_pytorch_f32_kernel(
     float4 * output4 = reinterpret_cast<float4 *>(
         output + static_cast<size_t>(row) * cols);
 
-    makepad_ggml_cuda_welford_ln wd{0.0f, 0.0f, 0.0f};
+    makepad_cuda_welford_ln wd{0.0f, 0.0f, 0.0f};
     for (uint32_t index = flat_thread; index < vector_count; index += flat_threads) {
         const float4 data = input4[index];
-        wd = makepad_ggml_cuda_welford_ln_online(data.x, wd);
-        wd = makepad_ggml_cuda_welford_ln_online(data.y, wd);
-        wd = makepad_ggml_cuda_welford_ln_online(data.z, wd);
-        wd = makepad_ggml_cuda_welford_ln_online(data.w, wd);
+        wd = makepad_cuda_welford_ln_online(data.x, wd);
+        wd = makepad_cuda_welford_ln_online(data.y, wd);
+        wd = makepad_cuda_welford_ln_online(data.z, wd);
+        wd = makepad_cuda_welford_ln_online(data.w, wd);
     }
     for (int offset = 16; offset > 0; offset >>= 1) {
-        makepad_ggml_cuda_welford_ln other{
+        makepad_cuda_welford_ln other{
             __shfl_down_sync(0xffffffffu, wd.mean, offset),
             __shfl_down_sync(0xffffffffu, wd.sigma2, offset),
             __shfl_down_sync(0xffffffffu, wd.count, offset),
         };
-        wd = makepad_ggml_cuda_welford_ln_combine(wd, other);
+        wd = makepad_cuda_welford_ln_combine(wd, other);
     }
 
     // PyTorch allocates `warps * 3/2` floats and uses this deliberately
@@ -736,12 +736,12 @@ static __global__ void makepad_ggml_cuda_layer_norm_pytorch_f32_kernel(
         }
         __syncthreads();
         if (threadIdx.x == 0 && threadIdx.y < offset) {
-            const makepad_ggml_cuda_welford_ln other{
+            const makepad_cuda_welford_ln other{
                 mean_sigma[2 * threadIdx.y],
                 mean_sigma[2 * threadIdx.y + 1],
                 counts[threadIdx.y],
             };
-            wd = makepad_ggml_cuda_welford_ln_combine(wd, other);
+            wd = makepad_cuda_welford_ln_combine(wd, other);
         }
         __syncthreads();
     }
@@ -766,7 +766,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_pytorch_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_layer_norm_pytorch_f32(
+extern "C" cudaError_t makepad_cuda_layer_norm_pytorch_f32(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -783,12 +783,12 @@ extern "C" cudaError_t makepad_ggml_cuda_layer_norm_pytorch_f32(
     }
     const dim3 block(32, 4, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_layer_norm_pytorch_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_layer_norm_pytorch_f32_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, output, cols, eps);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_rpb_expand_f32_kernel(
+static __global__ void makepad_cuda_rpb_expand_f32_kernel(
         const float * ry,
         const float * rx,
         float * bias,
@@ -810,7 +810,7 @@ static __global__ void makepad_ggml_cuda_rpb_expand_f32_kernel(
     bias[(h * q1 + (q + 1)) * hw + pix] = v;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rpb_expand_f32(
+extern "C" cudaError_t makepad_cuda_rpb_expand_f32(
         const float * ry,
         const float * rx,
         float * bias,
@@ -829,12 +829,12 @@ extern "C" cudaError_t makepad_ggml_cuda_rpb_expand_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((height * width + block.x - 1) / block.x, queries, heads);
-    makepad_ggml_cuda_rpb_expand_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rpb_expand_f32_kernel<<<grid, block, 0, stream>>>(
         ry, rx, bias, (int)queries, (int)height, (int)width, (int)heads);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_add_f32_precise(
+extern "C" cudaError_t makepad_cuda_add_f32_precise(
         const float * left,
         const float * right,
         float * output,
@@ -845,11 +845,11 @@ extern "C" cudaError_t makepad_ggml_cuda_add_f32_precise(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_add_f32_precise_kernel<<<grid, block, 0, stream>>>(left, right, output, n);
+    makepad_cuda_add_f32_precise_kernel<<<grid, block, 0, stream>>>(left, right, output, n);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_mul_f32_precise(
+extern "C" cudaError_t makepad_cuda_mul_f32_precise(
         const float * left,
         const float * right,
         float * output,
@@ -860,11 +860,11 @@ extern "C" cudaError_t makepad_ggml_cuda_mul_f32_precise(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_mul_f32_precise_kernel<<<grid, block, 0, stream>>>(left, right, output, n);
+    makepad_cuda_mul_f32_precise_kernel<<<grid, block, 0, stream>>>(left, right, output, n);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_mul_rows_vec_f32(
+extern "C" cudaError_t makepad_cuda_mul_rows_vec_f32(
         const float * input,
         const float * vec,
         float * output,
@@ -877,12 +877,12 @@ extern "C" cudaError_t makepad_ggml_cuda_mul_rows_vec_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_mul_rows_vec_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_mul_rows_vec_f32_kernel<<<grid, block, 0, stream>>>(
         input, vec, output, row_count, cols);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gelu_f32_precise(
+extern "C" cudaError_t makepad_cuda_gelu_f32_precise(
         const float * input,
         float * output,
         uint32_t n,
@@ -892,11 +892,11 @@ extern "C" cudaError_t makepad_ggml_cuda_gelu_f32_precise(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_gelu_f32_precise_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    makepad_cuda_gelu_f32_precise_kernel<<<grid, block, 0, stream>>>(input, output, n);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_precise_f32(
+extern "C" cudaError_t makepad_cuda_softmax_rows_precise_f32(
         const float * logits,
         float * probs,
         uint32_t row_count,
@@ -908,12 +908,12 @@ extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_precise_f32(
     }
     const dim3 block(seq_len < 1024 ? 256 : 1024, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_softmax_rows_precise_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_softmax_rows_precise_f32_kernel<<<grid, block, 0, stream>>>(
         logits, probs, row_count, row_stride, seq_len);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_motion_text_f32(
+extern "C" cudaError_t makepad_cuda_softmax_rows_motion_text_f32(
         const float * logits,
         float * probs,
         uint32_t row_count,
@@ -930,12 +930,12 @@ extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_motion_text_f32(
     }
     const dim3 block(seq_len < 1024 ? 256 : 1024, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_softmax_rows_motion_text_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_softmax_rows_motion_text_f32_kernel<<<grid, block, 0, stream>>>(
         logits, probs, row_count, row_stride, seq_len, motion_tokens, band_radius);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_sliding_f32(
+extern "C" cudaError_t makepad_cuda_softmax_rows_sliding_f32(
         const float * logits,
         float * probs,
         uint32_t row_count,
@@ -948,12 +948,12 @@ extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_sliding_f32(
     }
     const dim3 block(seq_len < 1024 ? 256 : 1024, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_softmax_rows_sliding_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_softmax_rows_sliding_f32_kernel<<<grid, block, 0, stream>>>(
         logits, probs, row_count, row_stride, seq_len, window);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_snake_rows_f32_kernel(
+static __global__ void makepad_cuda_snake_rows_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ alpha,
         const float * __restrict__ inv_beta,
@@ -971,7 +971,7 @@ static __global__ void makepad_ggml_cuda_snake_rows_f32_kernel(
     output[idx] = x + inv_beta[c] * sn * sn;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_snake_rows_f32(
+extern "C" cudaError_t makepad_cuda_snake_rows_f32(
         const float * input,
         const float * alpha,
         const float * inv_beta,
@@ -985,12 +985,12 @@ extern "C" cudaError_t makepad_ggml_cuda_snake_rows_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<uint32_t>((n + 255) / 256), 1, 1);
-    makepad_ggml_cuda_snake_rows_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_snake_rows_f32_kernel<<<grid, block, 0, stream>>>(
         input, alpha, inv_beta, output, rows, cols);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_tconv_stitch_f32_kernel(
+static __global__ void makepad_cuda_tconv_stitch_f32_kernel(
         const float * __restrict__ y_hi,
         const float * __restrict__ y_lo,
         float * __restrict__ output,
@@ -1019,7 +1019,7 @@ static __global__ void makepad_ggml_cuda_tconv_stitch_f32_kernel(
     output[idx] = acc;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_tconv_stitch_f32(
+extern "C" cudaError_t makepad_cuda_tconv_stitch_f32(
         const float * y_hi,
         const float * y_lo,
         float * output,
@@ -1035,12 +1035,12 @@ extern "C" cudaError_t makepad_ggml_cuda_tconv_stitch_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<uint32_t>((n + 255) / 256), 1, 1);
-    makepad_ggml_cuda_tconv_stitch_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_tconv_stitch_f32_kernel<<<grid, block, 0, stream>>>(
         y_hi, y_lo, output, in_len, out_len, out_ch, stride, padding);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_conv2d_planar_f32(
+extern "C" cudaError_t makepad_cuda_conv2d_planar_f32(
         const float * input,
         const float * weights,
         const float * bias,
@@ -1062,13 +1062,13 @@ extern "C" cudaError_t makepad_ggml_cuda_conv2d_planar_f32(
         (width + block.x - 1) / block.x,
         (height + block.y - 1) / block.y,
         out_channels);
-    makepad_ggml_cuda_conv2d_planar_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_conv2d_planar_f32_kernel<<<grid, block, 0, stream>>>(
         input, weights, bias, output, width, height, in_channels, out_channels,
         kw, kh, pad_x, pad_y);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_conv2d_planar_strided_f32(
+extern "C" cudaError_t makepad_cuda_conv2d_planar_strided_f32(
         const float * input,
         const float * weights,
         const float * bias,
@@ -1097,13 +1097,13 @@ extern "C" cudaError_t makepad_ggml_cuda_conv2d_planar_strided_f32(
         (out_width + block.x - 1) / block.x,
         (out_height + block.y - 1) / block.y,
         out_channels);
-    makepad_ggml_cuda_conv2d_planar_strided_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_conv2d_planar_strided_f32_kernel<<<grid, block, 0, stream>>>(
         input, weights, bias, output, in_width, in_height, out_width, out_height,
         in_channels, out_channels, kw, kh, pad_x, pad_y, stride_x, stride_y);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_group_norm_planar_f32(
+extern "C" cudaError_t makepad_cuda_group_norm_planar_f32(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -1123,17 +1123,17 @@ extern "C" cudaError_t makepad_ggml_cuda_group_norm_planar_f32(
     }
     const uint32_t plane = width * height;
     const uint32_t channels_per_group = channels / groups;
-    makepad_ggml_cuda_group_norm_planar_stats_kernel<<<groups, 256, 0, stream>>>(
+    makepad_cuda_group_norm_planar_stats_kernel<<<groups, 256, 0, stream>>>(
         input, stats, plane, channels_per_group, eps);
     const size_t total = static_cast<size_t>(plane) * channels;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_group_norm_planar_apply_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_group_norm_planar_apply_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, stats, output, plane, channels, channels_per_group);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_silu_f32_precise(
+extern "C" cudaError_t makepad_cuda_silu_f32_precise(
         const float * input,
         float * output,
         uint32_t n,
@@ -1143,11 +1143,11 @@ extern "C" cudaError_t makepad_ggml_cuda_silu_f32_precise(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_silu_f32_precise_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    makepad_cuda_silu_f32_precise_kernel<<<grid, block, 0, stream>>>(input, output, n);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_f16_to_f32_precise_kernel(
+static __global__ void makepad_cuda_f16_to_f32_precise_kernel(
         const __half * __restrict__ input,
         float * __restrict__ output,
         uint32_t n) {
@@ -1160,7 +1160,7 @@ static __global__ void makepad_ggml_cuda_f16_to_f32_precise_kernel(
 // out[r][c] = f32(input_f16[r][c]) + bias[c] — the f16-accumulate gemm's
 // C-matrix convert and the bias broadcast in ONE pass (separate passes cost
 // an extra full read+write of the f32 output).
-static __global__ void makepad_ggml_cuda_f16_bias_to_f32_kernel(
+static __global__ void makepad_cuda_f16_bias_to_f32_kernel(
         const __half * __restrict__ input,
         const float * __restrict__ bias,
         float * __restrict__ output,
@@ -1173,7 +1173,7 @@ static __global__ void makepad_ggml_cuda_f16_bias_to_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_f16_bias_to_f32(
+extern "C" cudaError_t makepad_cuda_f16_bias_to_f32(
         const uint16_t * input,
         const float * bias,
         float * output,
@@ -1186,12 +1186,12 @@ extern "C" cudaError_t makepad_ggml_cuda_f16_bias_to_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_f16_bias_to_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_f16_bias_to_f32_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input), bias, output, row_count, cols);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_f16_to_f32_precise(
+extern "C" cudaError_t makepad_cuda_f16_to_f32_precise(
         const uint16_t * input,
         float * output,
         uint32_t n,
@@ -1201,12 +1201,12 @@ extern "C" cudaError_t makepad_ggml_cuda_f16_to_f32_precise(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_f16_to_f32_precise_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_f16_to_f32_precise_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input), output, n);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_f32_to_f16(
+extern "C" cudaError_t makepad_cuda_f32_to_f16(
         const float * input,
         uint16_t * output,
         uint32_t n,
@@ -1216,12 +1216,12 @@ extern "C" cudaError_t makepad_ggml_cuda_f32_to_f16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_f32_to_f16_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    makepad_cuda_f32_to_f16_kernel<<<grid, block, 0, stream>>>(input, output, n);
     return cudaGetLastError();
 }
 
 // out[r][c] = a[r][c] + vec[c]  (row-broadcast add; bias application)
-static __global__ void makepad_ggml_cuda_add_rows_vec_f32_kernel(
+static __global__ void makepad_cuda_add_rows_vec_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ vec,
         float * __restrict__ output,
@@ -1234,7 +1234,7 @@ static __global__ void makepad_ggml_cuda_add_rows_vec_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_add_rows_vec_f32(
+extern "C" cudaError_t makepad_cuda_add_rows_vec_f32(
         const float * input,
         const float * vec,
         float * output,
@@ -1247,7 +1247,7 @@ extern "C" cudaError_t makepad_ggml_cuda_add_rows_vec_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_add_rows_vec_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_add_rows_vec_f32_kernel<<<grid, block, 0, stream>>>(
         input, vec, output, row_count, cols);
     return cudaGetLastError();
 }
@@ -1256,7 +1256,7 @@ extern "C" cudaError_t makepad_ggml_cuda_add_rows_vec_f32(
 // libs/diffusion/src/flux_transformer.rs: data is token-major
 // [token][head][dim]; cos/sin tables are [token][half_dim] with
 // half_dim = dim / 2. Pairs are (2*p, 2*p+1) within each head.
-static __global__ void makepad_ggml_cuda_rope_interleaved_f32_kernel(
+static __global__ void makepad_cuda_rope_interleaved_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ cos_table,
         const float * __restrict__ sin_table,
@@ -1284,7 +1284,7 @@ static __global__ void makepad_ggml_cuda_rope_interleaved_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rope_interleaved_f32(
+extern "C" cudaError_t makepad_cuda_rope_interleaved_f32(
         const float * input,
         const float * cos_table,
         const float * sin_table,
@@ -1298,7 +1298,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_interleaved_f32(
     }
     const dim3 block(half_dim < 128 ? 32 : 128, 1, 1);
     const dim3 grid(token_count, head_count, 1);
-    makepad_ggml_cuda_rope_interleaved_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rope_interleaved_f32_kernel<<<grid, block, 0, stream>>>(
         input, cos_table, sin_table, output, token_count, head_count, half_dim);
     return cudaGetLastError();
 }
@@ -1313,7 +1313,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_interleaved_f32(
 // and half of the copy traffic disappear.
 
 // Per-head RMS norm, f16 storage (f32 math, f32 weights).
-static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f16_kernel(
+static __global__ void makepad_cuda_rms_norm_rows_weighted_f16_kernel(
         const __half * __restrict__ input,
         const float * __restrict__ weights_f32,
         __half * __restrict__ output,
@@ -1332,7 +1332,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f16_kernel(
         const float v = __half2float(row_in[idx]);
         sum += v * v;
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     __shared__ float inv_rms;
     if (threadIdx.x == 0) {
         inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
@@ -1344,7 +1344,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_weighted_f16(
+extern "C" cudaError_t makepad_cuda_rms_norm_rows_weighted_f16(
         const uint16_t * input,
         const float * weights_f32,
         uint16_t * output,
@@ -1357,14 +1357,14 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_weighted_f16(
         return cudaSuccess;
     }
     const dim3 block(n < 256 ? 32 : 256, 1, 1);
-    makepad_ggml_cuda_rms_norm_rows_weighted_f16_kernel<<<row_count, block, 0, stream>>>(
+    makepad_cuda_rms_norm_rows_weighted_f16_kernel<<<row_count, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input), weights_f32,
         reinterpret_cast<__half *>(output), row_count, row_stride, n, eps);
     return cudaGetLastError();
 }
 
 // Interleaved-pair RoPE, f16 storage (f32 tables and math).
-static __global__ void makepad_ggml_cuda_rope_interleaved_f16_kernel(
+static __global__ void makepad_cuda_rope_interleaved_f16_kernel(
         const __half * __restrict__ input,
         const float * __restrict__ cos_table,
         const float * __restrict__ sin_table,
@@ -1392,7 +1392,7 @@ static __global__ void makepad_ggml_cuda_rope_interleaved_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rope_interleaved_f16(
+extern "C" cudaError_t makepad_cuda_rope_interleaved_f16(
         const uint16_t * input,
         const float * cos_table,
         const float * sin_table,
@@ -1406,14 +1406,14 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_interleaved_f16(
     }
     const dim3 block(half_dim < 128 ? 32 : 128, 1, 1);
     const dim3 grid(token_count, head_count, 1);
-    makepad_ggml_cuda_rope_interleaved_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rope_interleaved_f16_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input), cos_table, sin_table,
         reinterpret_cast<__half *>(output), token_count, head_count, half_dim);
     return cudaGetLastError();
 }
 
 // LayerNorm + modulation with an f16 output (feeds the next linear's f16 A).
-static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out16_kernel(
+static __global__ void makepad_cuda_layer_norm_mul_add_f32_out16_kernel(
         const float * __restrict__ input,
         const float * __restrict__ gamma,
         const float * __restrict__ beta,
@@ -1433,7 +1433,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out16_kernel(
     for (uint32_t idx = threadIdx.x; idx < cols; idx += blockDim.x) {
         sum += row_in[idx];
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     __shared__ float shared_mean;
     __shared__ float shared_inv;
     if (threadIdx.x == 0) {
@@ -1447,7 +1447,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out16_kernel(
         const float centered = row_in[idx] - mean;
         sq_sum += centered * centered;
     }
-    sq_sum = makepad_ggml_cuda_diff_block_reduce_sum(sq_sum);
+    sq_sum = makepad_cuda_diff_block_reduce_sum(sq_sum);
     if (threadIdx.x == 0) {
         shared_inv = rsqrtf(sq_sum / static_cast<float>(cols) + eps);
     }
@@ -1460,7 +1460,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32_out16(
+extern "C" cudaError_t makepad_cuda_layer_norm_mul_add_f32_out16(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -1475,7 +1475,7 @@ extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32_out16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_layer_norm_mul_add_f32_out16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_layer_norm_mul_add_f32_out16_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, reinterpret_cast<__half *>(output), row_count, cols,
         eps, gamma_add);
     return cudaGetLastError();
@@ -1483,7 +1483,7 @@ extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32_out16(
 
 // Tanh-approximation GELU on f16 storage; optional f32 bias folded in (the
 // mlp.0 gemm defers its bias here so its C never leaves f16).
-static __global__ void makepad_ggml_cuda_gelu_f16_kernel(
+static __global__ void makepad_cuda_gelu_f16_kernel(
         const __half * __restrict__ input,
         const float * __restrict__ bias,
         __half * __restrict__ output,
@@ -1501,7 +1501,7 @@ static __global__ void makepad_ggml_cuda_gelu_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gelu_f16(
+extern "C" cudaError_t makepad_cuda_gelu_f16(
         const uint16_t * input,
         const float * bias,
         uint16_t * output,
@@ -1514,7 +1514,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gelu_f16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_gelu_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gelu_f16_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input), bias,
         reinterpret_cast<__half *>(output), row_count, cols);
     return cudaGetLastError();
@@ -1522,7 +1522,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gelu_f16(
 
 // In-place f32-bias broadcast onto an f16 C matrix (linear1's whole-row bias
 // before the f16 qkv/mlp consumers split it).
-static __global__ void makepad_ggml_cuda_f16_bias_inplace_kernel(
+static __global__ void makepad_cuda_f16_bias_inplace_kernel(
         __half * __restrict__ data,
         const float * __restrict__ bias,
         uint32_t row_count,
@@ -1534,7 +1534,7 @@ static __global__ void makepad_ggml_cuda_f16_bias_inplace_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_f16_bias_inplace(
+extern "C" cudaError_t makepad_cuda_f16_bias_inplace(
         uint16_t * data,
         const float * bias,
         uint32_t row_count,
@@ -1546,7 +1546,7 @@ extern "C" cudaError_t makepad_ggml_cuda_f16_bias_inplace(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_f16_bias_inplace_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_f16_bias_inplace_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<__half *>(data), bias, row_count, cols);
     return cudaGetLastError();
 }
@@ -1554,7 +1554,7 @@ extern "C" cudaError_t makepad_ggml_cuda_f16_bias_inplace(
 // Strided rows*cols block copy: dst[r*dst_stride + c] = src[r*src_stride + c].
 // Column/row offsets are folded into the base pointers by the caller, so this
 // one kernel backs slice_cols / concat_cols / slice_rows / concat_rows.
-static __global__ void makepad_ggml_cuda_copy_submatrix_f32_kernel(
+static __global__ void makepad_cuda_copy_submatrix_f32_kernel(
         const float * __restrict__ src,
         float * __restrict__ dst,
         uint32_t src_stride,
@@ -1572,7 +1572,7 @@ static __global__ void makepad_ggml_cuda_copy_submatrix_f32_kernel(
         src[static_cast<size_t>(row) * src_stride + col];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_copy_submatrix_f32(
+extern "C" cudaError_t makepad_cuda_copy_submatrix_f32(
         const float * src,
         float * dst,
         uint32_t src_stride,
@@ -1586,14 +1586,14 @@ extern "C" cudaError_t makepad_ggml_cuda_copy_submatrix_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_copy_submatrix_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_copy_submatrix_f32_kernel<<<grid, block, 0, stream>>>(
         src, dst, src_stride, dst_stride, row_count, cols);
     return cudaGetLastError();
 }
 
 // Nearest-neighbour 2x upsample on planar [c][y][x] data, matching
 // upscale_nearest(factor=2) in libs/diffusion/src/flux_vae.rs.
-static __global__ void makepad_ggml_cuda_upsample2x_planar_f32_kernel(
+static __global__ void makepad_cuda_upsample2x_planar_f32_kernel(
         const float * __restrict__ src,
         float * __restrict__ dst,
         uint32_t width,
@@ -1615,7 +1615,7 @@ static __global__ void makepad_ggml_cuda_upsample2x_planar_f32_kernel(
     dst[idx] = src[src_idx];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_upsample2x_planar_f32(
+extern "C" cudaError_t makepad_cuda_upsample2x_planar_f32(
         const float * src,
         float * dst,
         uint32_t width,
@@ -1628,14 +1628,14 @@ extern "C" cudaError_t makepad_ggml_cuda_upsample2x_planar_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_upsample2x_planar_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_upsample2x_planar_f32_kernel<<<grid, block, 0, stream>>>(
         src, dst, width, height, channels);
     return cudaGetLastError();
 }
 
 // Zero-pad each [y][x] plane by (pad_x, pad_y) and convert f32 -> f16, for
 // the implicit-GEMM planar conv path.
-static __global__ void makepad_ggml_cuda_pad_planar_f32_to_f16_kernel(
+static __global__ void makepad_cuda_pad_planar_f32_to_f16_kernel(
         const float * __restrict__ src,
         __half * __restrict__ dst,
         uint32_t width,
@@ -1663,7 +1663,7 @@ static __global__ void makepad_ggml_cuda_pad_planar_f32_to_f16_kernel(
     dst[idx] = __float2half(value);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_pad_planar_f32_to_f16(
+extern "C" cudaError_t makepad_cuda_pad_planar_f32_to_f16(
         const float * src,
         uint16_t * dst,
         uint32_t width,
@@ -1679,7 +1679,7 @@ extern "C" cudaError_t makepad_ggml_cuda_pad_planar_f32_to_f16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_pad_planar_f32_to_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_pad_planar_f32_to_f16_kernel<<<grid, block, 0, stream>>>(
         src, reinterpret_cast<__half *>(dst), width, height, channels, pad_x, pad_y);
     return cudaGetLastError();
 }
@@ -1687,7 +1687,7 @@ extern "C" cudaError_t makepad_ggml_cuda_pad_planar_f32_to_f16(
 // Extract the valid interior of a padded-plane conv accumulator and add the
 // per-channel bias: out[oc][y*W+x] = acc[oc*padded_plane + y*padded_width + x]
 // + bias[oc]. The accumulator rows beyond the interior are discarded.
-static __global__ void makepad_ggml_cuda_conv_extract_bias_f32_kernel(
+static __global__ void makepad_cuda_conv_extract_bias_f32_kernel(
         const float * __restrict__ acc,
         const float * __restrict__ bias,
         float * __restrict__ out,
@@ -1710,7 +1710,7 @@ static __global__ void makepad_ggml_cuda_conv_extract_bias_f32_kernel(
     out[idx] = acc[src] + bias[oc];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_conv_extract_bias_f32(
+extern "C" cudaError_t makepad_cuda_conv_extract_bias_f32(
         const float * acc,
         const float * bias,
         float * out,
@@ -1726,13 +1726,13 @@ extern "C" cudaError_t makepad_ggml_cuda_conv_extract_bias_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_conv_extract_bias_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_conv_extract_bias_f32_kernel<<<grid, block, 0, stream>>>(
         acc, bias, out, width, height, padded_width, padded_plane, out_channels);
     return cudaGetLastError();
 }
 
 // out[c][p] += vec[c] for planar data (per-plane bias add).
-static __global__ void makepad_ggml_cuda_add_planes_vec_f32_kernel(
+static __global__ void makepad_cuda_add_planes_vec_f32_kernel(
         float * __restrict__ data,
         const float * __restrict__ vec,
         uint32_t plane,
@@ -1745,7 +1745,7 @@ static __global__ void makepad_ggml_cuda_add_planes_vec_f32_kernel(
     data[idx] += vec[idx / plane];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_add_planes_vec_f32(
+extern "C" cudaError_t makepad_cuda_add_planes_vec_f32(
         float * data,
         const float * vec,
         uint32_t plane,
@@ -1757,7 +1757,7 @@ extern "C" cudaError_t makepad_ggml_cuda_add_planes_vec_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_add_planes_vec_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_add_planes_vec_f32_kernel<<<grid, block, 0, stream>>>(
         data, vec, plane, channels);
     return cudaGetLastError();
 }
@@ -1800,7 +1800,7 @@ constexpr size_t FA_SMEM_TOTAL = FA_SMEM_Q + FA_SMEM_K + FA_SMEM_V + FA_SMEM_S +
 
 // One cp.async 16-byte copy; src_bytes < 16 zero-fills the remainder (used to
 // zero rows past `seq` without a branch on the destination side).
-static __device__ __forceinline__ void makepad_ggml_cuda_fa_cp_async16(
+static __device__ __forceinline__ void makepad_cuda_fa_cp_async16(
         void * dst_shared,
         const void * src_global,
         int src_bytes) {
@@ -1813,7 +1813,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa_cp_async16(
 
 // Issue the cp.async copies for one 64x128 f16 tile: 4 threads per row, 64
 // bytes (4 x 16B) each. Rows past `seq` become zeros via src_bytes = 0.
-static __device__ __forceinline__ void makepad_ggml_cuda_fa_tile_async(
+static __device__ __forceinline__ void makepad_cuda_fa_tile_async(
         const __half * __restrict__ src,
         __half * __restrict__ dst,
         uint32_t row0,
@@ -1831,25 +1831,25 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa_tile_async(
     __half * out = dst + r * FA_LDQ + quarter * 32;
     #pragma unroll
     for (int i = 0; i < 4; i++) {
-        makepad_ggml_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
+        makepad_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
     }
 }
 
 // Load one 64x128 tile (rows row0..row0+64 of a token-major tensor, columns
 // col0..col0+128) into a shared f16 tile; rows past `seq` load as zeros.
 // 4 threads per row, 32 consecutive floats each (vectorized float4 reads).
-static __device__ __forceinline__ void makepad_ggml_cuda_fa_cp_commit() {
+static __device__ __forceinline__ void makepad_cuda_fa_cp_commit() {
     asm volatile("cp.async.commit_group;\n");
 }
 
 template <int PENDING>
-static __device__ __forceinline__ void makepad_ggml_cuda_fa_cp_wait() {
+static __device__ __forceinline__ void makepad_cuda_fa_cp_wait() {
     asm volatile("cp.async.wait_group %0;\n" : : "n"(PENDING));
 }
 
 // Synchronous f16 tile load (used once for the Q tile): 4 threads per row,
 // 32 halves (4 x uint4) each; rows past `seq` load as zeros.
-static __device__ __forceinline__ void makepad_ggml_cuda_fa_load_tile(
+static __device__ __forceinline__ void makepad_cuda_fa_load_tile(
         const __half * __restrict__ src,
         __half * __restrict__ dst,
         uint32_t row0,
@@ -1876,7 +1876,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa_load_tile(
     }
 }
 
-static __global__ void makepad_ggml_cuda_flash_attention_f32_kernel(
+static __global__ void makepad_cuda_flash_attention_f32_kernel(
         const __half * __restrict__ q,
         const __half * __restrict__ k,
         const __half * __restrict__ v,
@@ -1919,10 +1919,10 @@ static __global__ void makepad_ggml_cuda_flash_attention_f32_kernel(
 
     const uint32_t tiles = (seq + FA_BC - 1) / FA_BC;
     // Prologue: K(0) prefetch in flight while the Q tile loads synchronously.
-    makepad_ggml_cuda_fa_tile_async(k, k_ring, 0, seq, hidden, col0);
-    makepad_ggml_cuda_fa_cp_commit();
-    makepad_ggml_cuda_fa_load_tile(q, q_sh, q0, seq, hidden, col0);
-    makepad_ggml_cuda_fa_cp_wait<0>();
+    makepad_cuda_fa_tile_async(k, k_ring, 0, seq, hidden, col0);
+    makepad_cuda_fa_cp_commit();
+    makepad_cuda_fa_load_tile(q, q_sh, q0, seq, hidden, col0);
+    makepad_cuda_fa_cp_wait<0>();
     __syncthreads();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
@@ -1930,15 +1930,15 @@ static __global__ void makepad_ggml_cuda_flash_attention_f32_kernel(
         const __half * k_sh = k_ring + (tile & 1) * FA_K_STAGE;
         // V(tile) group: awaited just before the PV gemms, overlapping the
         // QK gemm and softmax below.
-        makepad_ggml_cuda_fa_tile_async(v, v_sh, k0, seq, hidden, col0);
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_fa_tile_async(v, v_sh, k0, seq, hidden, col0);
+        makepad_cuda_fa_cp_commit();
         // K(tile+1) group: awaited at the end of this iteration.
         if (tile + 1 < tiles) {
-            makepad_ggml_cuda_fa_tile_async(
+            makepad_cuda_fa_tile_async(
                 k, k_ring + ((tile + 1) & 1) * FA_K_STAGE,
                 k0 + FA_BC, seq, hidden, col0);
         }
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_fa_cp_commit();
 
         // S = Q K^T for this tile (f32 accumulators -> s_sh).
         {
@@ -2010,7 +2010,7 @@ static __global__ void makepad_ggml_cuda_flash_attention_f32_kernel(
 
         // The V(tile) prefetch must land before the PV gemms; K(tile+1) may
         // still be in flight (one outstanding group).
-        makepad_ggml_cuda_fa_cp_wait<1>();
+        makepad_cuda_fa_cp_wait<1>();
         __syncthreads();
 
         // O += P V, in two 64-column halves through the s_sh scratch tile.
@@ -2055,7 +2055,7 @@ static __global__ void makepad_ggml_cuda_flash_attention_f32_kernel(
             __syncthreads();
         }
         // K(tile+1) must be resident before the next iteration's QK gemm.
-        makepad_ggml_cuda_fa_cp_wait<0>();
+        makepad_cuda_fa_cp_wait<0>();
         __syncthreads();
     }
 
@@ -2076,7 +2076,7 @@ static __global__ void makepad_ggml_cuda_flash_attention_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention_f32(
+extern "C" cudaError_t makepad_cuda_flash_attention_f32(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2096,7 +2096,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention_f32(
     static bool fa_smem_configured = false;
     if (!fa_smem_configured) {
         const cudaError_t err = cudaFuncSetAttribute(
-            makepad_ggml_cuda_flash_attention_f32_kernel,
+            makepad_cuda_flash_attention_f32_kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(FA_SMEM_TOTAL));
         if (err != cudaSuccess) {
@@ -2106,7 +2106,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention_f32(
     }
     const dim3 block(FA_THREADS, 1, 1);
     const dim3 grid((seq + FA_BR - 1) / FA_BR, head_count, 1);
-    makepad_ggml_cuda_flash_attention_f32_kernel
+    makepad_cuda_flash_attention_f32_kernel
         <<<grid, block, FA_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
@@ -2141,7 +2141,7 @@ constexpr int FA2_STAGE = FA2_BC * FA_LDQ; // halves per K/V ring stage
 constexpr size_t FA2_SMEM_TOTAL =
     4 * static_cast<size_t>(FA2_STAGE) * sizeof(__half); // K ring x2 + V ring x2
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fa2_mma(
+static __device__ __forceinline__ void makepad_cuda_fa2_mma(
         float c[4], const uint32_t a[4], const uint32_t b0, const uint32_t b1) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
@@ -2150,7 +2150,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa2_mma(
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fa2_mma_bf16(
+static __device__ __forceinline__ void makepad_cuda_fa2_mma_bf16(
         float c[4], const uint32_t a[4], const uint32_t b0, const uint32_t b1) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
@@ -2159,7 +2159,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa2_mma_bf16(
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fa2_ldmatrix_x4(
+static __device__ __forceinline__ void makepad_cuda_fa2_ldmatrix_x4(
         uint32_t r[4], const __half * addr) {
     const unsigned p = static_cast<unsigned>(__cvta_generic_to_shared(addr));
     asm volatile(
@@ -2168,7 +2168,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa2_ldmatrix_x4(
         : "r"(p));
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fa2_ldmatrix_x4_trans(
+static __device__ __forceinline__ void makepad_cuda_fa2_ldmatrix_x4_trans(
         uint32_t r[4], const __half * addr) {
     const unsigned p = static_cast<unsigned>(__cvta_generic_to_shared(addr));
     asm volatile(
@@ -2177,20 +2177,20 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa2_ldmatrix_x4_trans(
         : "r"(p));
 }
 
-static __device__ __forceinline__ uint32_t makepad_ggml_cuda_fa2_pack(
+static __device__ __forceinline__ uint32_t makepad_cuda_fa2_pack(
         float a, float b) {
     const __half2 h = __floats2half2_rn(a, b);
     return *reinterpret_cast<const uint32_t *>(&h);
 }
 
-static __device__ __forceinline__ uint32_t makepad_ggml_cuda_fa2_pack_bf16(
+static __device__ __forceinline__ uint32_t makepad_cuda_fa2_pack_bf16(
         float a, float b) {
     const __nv_bfloat162 h = __floats2bfloat162_rn(a, b);
     return *reinterpret_cast<const uint32_t *>(&h);
 }
 
 template<bool Causal, bool UseBf16>
-static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
+static __global__ void makepad_cuda_flash_attention2_f32_kernel(
         const __half * __restrict__ q,
         const __half * __restrict__ k,
         const __half * __restrict__ v,
@@ -2221,10 +2221,10 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
     // --- Prologue: stage Q through the K ring, then park it in registers. --
     // Rows q0..q0+64 -> stage 0, q0+64..q0+128 -> stage 1 (zero-filled past
     // seq). Warp w reads its 16 rows (16w..16w+16) from stage (w >= 4).
-    makepad_ggml_cuda_fa_tile_async(q, k_ring, q0, seq, hidden, col0);
-    makepad_ggml_cuda_fa_tile_async(q, k_ring + FA2_STAGE, q0 + FA2_BC, seq, hidden, col0);
-    makepad_ggml_cuda_fa_cp_commit();
-    makepad_ggml_cuda_fa_cp_wait<0>();
+    makepad_cuda_fa_tile_async(q, k_ring, q0, seq, hidden, col0);
+    makepad_cuda_fa_tile_async(q, k_ring + FA2_STAGE, q0 + FA2_BC, seq, hidden, col0);
+    makepad_cuda_fa_cp_commit();
+    makepad_cuda_fa_cp_wait<0>();
     __syncthreads();
 
     uint32_t q_frag[8][4]; // 16 x 128 as 8 k-chunks of m16k16
@@ -2236,7 +2236,7 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
         for (int kk = 0; kk < 8; kk++) {
             // lanes 0..15: rows, halves 0-7; lanes 16..31: same rows, halves 8-15.
             const __half * addr = q_sh + (lane & 15) * FA_LDQ + kk * 16 + (lane >> 4) * 8;
-            makepad_ggml_cuda_fa2_ldmatrix_x4(q_frag[kk], addr);
+            makepad_cuda_fa2_ldmatrix_x4(q_frag[kk], addr);
         }
     }
     __syncthreads(); // all warps done with the staging area
@@ -2254,9 +2254,9 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
 
     const uint32_t tiles = (kv_len + FA2_BC - 1) / FA2_BC;
     // G(0): K/V tile 0 into ring stage 0.
-    makepad_ggml_cuda_fa_tile_async(k, k_ring, 0, kv_len, hidden, col0);
-    makepad_ggml_cuda_fa_tile_async(v, v_ring, 0, kv_len, hidden, col0);
-    makepad_ggml_cuda_fa_cp_commit();
+    makepad_cuda_fa_tile_async(k, k_ring, 0, kv_len, hidden, col0);
+    makepad_cuda_fa_tile_async(v, v_ring, 0, kv_len, hidden, col0);
+    makepad_cuda_fa_cp_commit();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
         const uint32_t k0 = tile * FA2_BC;
@@ -2265,14 +2265,14 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
         // target stage held tile-1, whose readers finished at the bottom
         // sync of the previous iteration.
         if (tile + 1 < tiles) {
-            makepad_ggml_cuda_fa_tile_async(
+            makepad_cuda_fa_tile_async(
                 k, k_ring + (stage ^ 1) * FA2_STAGE, k0 + FA2_BC, kv_len, hidden, col0);
-            makepad_ggml_cuda_fa_tile_async(
+            makepad_cuda_fa_tile_async(
                 v, v_ring + (stage ^ 1) * FA2_STAGE, k0 + FA2_BC, kv_len, hidden, col0);
-            makepad_ggml_cuda_fa_cp_commit();
-            makepad_ggml_cuda_fa_cp_wait<1>(); // G(tile) landed, G(tile+1) in flight
+            makepad_cuda_fa_cp_commit();
+            makepad_cuda_fa_cp_wait<1>(); // G(tile) landed, G(tile+1) in flight
         } else {
-            makepad_ggml_cuda_fa_cp_wait<0>();
+            makepad_cuda_fa_cp_wait<0>();
         }
         __syncthreads();
 
@@ -2299,13 +2299,13 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
                     + (8 * (j + (sel >> 1)) + (lane & 7)) * FA_LDQ
                     + kk * 16 + (sel & 1) * 8;
                 uint32_t b[4];
-                makepad_ggml_cuda_fa2_ldmatrix_x4(b, addr);
+                makepad_cuda_fa2_ldmatrix_x4(b, addr);
                 if constexpr (UseBf16) {
-                    makepad_ggml_cuda_fa2_mma_bf16(s[j], q_frag[kk], b[0], b[1]);
-                    makepad_ggml_cuda_fa2_mma_bf16(s[j + 1], q_frag[kk], b[2], b[3]);
+                    makepad_cuda_fa2_mma_bf16(s[j], q_frag[kk], b[0], b[1]);
+                    makepad_cuda_fa2_mma_bf16(s[j + 1], q_frag[kk], b[2], b[3]);
                 } else {
-                    makepad_ggml_cuda_fa2_mma(s[j], q_frag[kk], b[0], b[1]);
-                    makepad_ggml_cuda_fa2_mma(s[j + 1], q_frag[kk], b[2], b[3]);
+                    makepad_cuda_fa2_mma(s[j], q_frag[kk], b[0], b[1]);
+                    makepad_cuda_fa2_mma(s[j + 1], q_frag[kk], b[2], b[3]);
                 }
             }
         }
@@ -2370,15 +2370,15 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
             // C->A fragment identity: a0/a1 = rows (lo,hi) x keys 2q..2q+1 of
             // tile j0; a2/a3 = the same rows in tile j0+1 (keys +8).
             if constexpr (UseBf16) {
-                p_frag[kk2][0] = makepad_ggml_cuda_fa2_pack_bf16(p00, p01);
-                p_frag[kk2][1] = makepad_ggml_cuda_fa2_pack_bf16(p02, p03);
-                p_frag[kk2][2] = makepad_ggml_cuda_fa2_pack_bf16(p10, p11);
-                p_frag[kk2][3] = makepad_ggml_cuda_fa2_pack_bf16(p12, p13);
+                p_frag[kk2][0] = makepad_cuda_fa2_pack_bf16(p00, p01);
+                p_frag[kk2][1] = makepad_cuda_fa2_pack_bf16(p02, p03);
+                p_frag[kk2][2] = makepad_cuda_fa2_pack_bf16(p10, p11);
+                p_frag[kk2][3] = makepad_cuda_fa2_pack_bf16(p12, p13);
             } else {
-                p_frag[kk2][0] = makepad_ggml_cuda_fa2_pack(p00, p01);
-                p_frag[kk2][1] = makepad_ggml_cuda_fa2_pack(p02, p03);
-                p_frag[kk2][2] = makepad_ggml_cuda_fa2_pack(p10, p11);
-                p_frag[kk2][3] = makepad_ggml_cuda_fa2_pack(p12, p13);
+                p_frag[kk2][0] = makepad_cuda_fa2_pack(p00, p01);
+                p_frag[kk2][1] = makepad_cuda_fa2_pack(p02, p03);
+                p_frag[kk2][2] = makepad_cuda_fa2_pack(p10, p11);
+                p_frag[kk2][3] = makepad_cuda_fa2_pack(p12, p13);
             }
         }
         sum_lo += __shfl_xor_sync(0xffffffffu, sum_lo, 1);
@@ -2408,13 +2408,13 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
                     + (16 * kk2 + 8 * (sel & 1) + (lane & 7)) * FA_LDQ
                     + 8 * (jj + (sel >> 1));
                 uint32_t b[4];
-                makepad_ggml_cuda_fa2_ldmatrix_x4_trans(b, addr);
+                makepad_cuda_fa2_ldmatrix_x4_trans(b, addr);
                 if constexpr (UseBf16) {
-                    makepad_ggml_cuda_fa2_mma_bf16(o_acc[jj], p_frag[kk2], b[0], b[1]);
-                    makepad_ggml_cuda_fa2_mma_bf16(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
+                    makepad_cuda_fa2_mma_bf16(o_acc[jj], p_frag[kk2], b[0], b[1]);
+                    makepad_cuda_fa2_mma_bf16(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
                 } else {
-                    makepad_ggml_cuda_fa2_mma(o_acc[jj], p_frag[kk2], b[0], b[1]);
-                    makepad_ggml_cuda_fa2_mma(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
+                    makepad_cuda_fa2_mma(o_acc[jj], p_frag[kk2], b[0], b[1]);
+                    makepad_cuda_fa2_mma(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
                 }
             }
         }
@@ -2449,7 +2449,7 @@ static __global__ void makepad_ggml_cuda_flash_attention2_f32_kernel(
 }
 
 template<bool Causal, bool UseBf16>
-static cudaError_t makepad_ggml_cuda_flash_attention2_launch(
+static cudaError_t makepad_cuda_flash_attention2_launch(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2473,7 +2473,7 @@ static cudaError_t makepad_ggml_cuda_flash_attention2_launch(
     static bool smem_configured = false;
     if (!smem_configured) {
         const cudaError_t err = cudaFuncSetAttribute(
-            makepad_ggml_cuda_flash_attention2_f32_kernel<Causal, UseBf16>,
+            makepad_cuda_flash_attention2_f32_kernel<Causal, UseBf16>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(FA2_SMEM_TOTAL));
         if (err != cudaSuccess) {
@@ -2483,7 +2483,7 @@ static cudaError_t makepad_ggml_cuda_flash_attention2_launch(
     }
     const dim3 block(FA2_THREADS, 1, 1);
     const dim3 grid((q_len + FA2_BR - 1) / FA2_BR, head_count, 1);
-    makepad_ggml_cuda_flash_attention2_f32_kernel<Causal, UseBf16>
+    makepad_cuda_flash_attention2_f32_kernel<Causal, UseBf16>
         <<<grid, block, FA2_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
@@ -2492,7 +2492,7 @@ static cudaError_t makepad_ggml_cuda_flash_attention2_launch(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_f32(
+extern "C" cudaError_t makepad_cuda_flash_attention2_f32(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2502,14 +2502,14 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_f32(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_flash_attention2_launch<false, false>(
+    return makepad_cuda_flash_attention2_launch<false, false>(
         q, k, v, out, seq, seq, head_count, hidden, scale, 0, stream);
 }
 
 // Cross-attention flavor of the FA2 kernel: same body, kv length independent
 // of the query length (TRELLIS image-cond cross-attn: q = tokens, kv = the
 // fixed DINOv3 condition).
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_cross_f32(
+extern "C" cudaError_t makepad_cuda_flash_attention2_cross_f32(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2520,13 +2520,13 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_cross_f32(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_flash_attention2_launch<false, false>(
+    return makepad_cuda_flash_attention2_launch<false, false>(
         q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream);
 }
 
 // Decode (q_len=1) / cross FA2 with bf16 tensor-core operands. For a single
 // query at the end of a causal cache this is unmasked over the KV prefix.
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_cross_bf16(
+extern "C" cudaError_t makepad_cuda_flash_attention2_cross_bf16(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2537,14 +2537,14 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_cross_bf16(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_flash_attention2_launch<false, true>(
+    return makepad_cuda_flash_attention2_launch<false, true>(
         q, k, v, out, q_len, kv_len, head_count, hidden, scale, 0, stream);
 }
 
 // Causal decoder-LM FA2. Same recipe as official SDPA/FlashAttention:
 // online softmax, f16 or bf16 tensor-core QK/PV, f32 accumulators.
 // Used by Music3 Qwen3 prefill (head_dim 128).
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_causal_f32(
+extern "C" cudaError_t makepad_cuda_flash_attention2_causal_f32(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2554,11 +2554,11 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_causal_f32(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_flash_attention2_launch<true, false>(
+    return makepad_cuda_flash_attention2_launch<true, false>(
         q, k, v, out, seq, seq, head_count, hidden, scale, 0, stream);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_causal_bf16(
+extern "C" cudaError_t makepad_cuda_flash_attention2_causal_bf16(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2568,11 +2568,11 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_causal_bf16(
         uint32_t hidden,
         float scale,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_flash_attention2_launch<true, true>(
+    return makepad_cuda_flash_attention2_launch<true, true>(
         q, k, v, out, seq, seq, head_count, hidden, scale, 0, stream);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_sliding_bf16(
+extern "C" cudaError_t makepad_cuda_flash_attention2_sliding_bf16(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2583,7 +2583,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_sliding_bf16(
         float scale,
         int32_t window,
         cudaStream_t stream) {
-    return makepad_ggml_cuda_flash_attention2_launch<false, true>(
+    return makepad_cuda_flash_attention2_launch<false, true>(
         q, k, v, out, seq, seq, head_count, hidden, scale, window, stream);
 }
 
@@ -2610,7 +2610,7 @@ constexpr size_t FAB_SMEM_S = static_cast<size_t>(FAB_BR) * FAB_LDS * sizeof(flo
 constexpr size_t FAB_SMEM_P = static_cast<size_t>(FAB_BR) * FAB_LDS * sizeof(__nv_bfloat16);
 constexpr size_t FAB_SMEM_TOTAL = FAB_SMEM_Q + FAB_SMEM_K + FAB_SMEM_V + FAB_SMEM_S + FAB_SMEM_P;
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fab_tile_async(
+static __device__ __forceinline__ void makepad_cuda_fab_tile_async(
         const __nv_bfloat16 * __restrict__ src,
         __nv_bfloat16 * __restrict__ dst,
         uint32_t row0,
@@ -2626,11 +2626,11 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fab_tile_async(
     __nv_bfloat16 * out = dst + row_in_tile * FAB_LD + quarter * 16;
     #pragma unroll
     for (int i = 0; i < 2; i++) {
-        makepad_ggml_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
+        makepad_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
     }
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fab_load_tile(
+static __device__ __forceinline__ void makepad_cuda_fab_load_tile(
         const __nv_bfloat16 * __restrict__ src,
         __nv_bfloat16 * __restrict__ dst,
         uint32_t row0,
@@ -2657,7 +2657,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fab_load_tile(
     }
 }
 
-static __global__ void makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel(
+static __global__ void makepad_cuda_flash_attention_bf16_d64_f32_kernel(
         const __nv_bfloat16 * __restrict__ q,
         const __nv_bfloat16 * __restrict__ k,
         const __nv_bfloat16 * __restrict__ v,
@@ -2697,23 +2697,23 @@ static __global__ void makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel(
     float l_row = 0.0f;
 
     const uint32_t tiles = (kv_len + FAB_BC - 1) / FAB_BC;
-    makepad_ggml_cuda_fab_tile_async(k, k_ring, 0, kv_len, hidden, col0);
-    makepad_ggml_cuda_fa_cp_commit();
-    makepad_ggml_cuda_fab_load_tile(q, q_sh, q0, q_len, hidden, col0);
-    makepad_ggml_cuda_fa_cp_wait<0>();
+    makepad_cuda_fab_tile_async(k, k_ring, 0, kv_len, hidden, col0);
+    makepad_cuda_fa_cp_commit();
+    makepad_cuda_fab_load_tile(q, q_sh, q0, q_len, hidden, col0);
+    makepad_cuda_fa_cp_wait<0>();
     __syncthreads();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
         const uint32_t k0 = tile * FAB_BC;
         const __nv_bfloat16 * k_sh = k_ring + (tile & 1) * FAB_K_STAGE;
-        makepad_ggml_cuda_fab_tile_async(v, v_sh, k0, kv_len, hidden, col0);
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_fab_tile_async(v, v_sh, k0, kv_len, hidden, col0);
+        makepad_cuda_fa_cp_commit();
         if (tile + 1 < tiles) {
-            makepad_ggml_cuda_fab_tile_async(
+            makepad_cuda_fab_tile_async(
                 k, k_ring + ((tile + 1) & 1) * FAB_K_STAGE,
                 k0 + FAB_BC, kv_len, hidden, col0);
         }
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_fa_cp_commit();
 
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -2780,7 +2780,7 @@ static __global__ void makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel(
         }
         __syncthreads();
 
-        makepad_ggml_cuda_fa_cp_wait<1>();
+        makepad_cuda_fa_cp_wait<1>();
         __syncthreads();
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -2817,7 +2817,7 @@ static __global__ void makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel(
             }
         }
         __syncthreads();
-        makepad_ggml_cuda_fa_cp_wait<0>();
+        makepad_cuda_fa_cp_wait<0>();
         __syncthreads();
     }
 
@@ -2837,7 +2837,7 @@ static __global__ void makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention_bf16_d64_f32(
+extern "C" cudaError_t makepad_cuda_flash_attention_bf16_d64_f32(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -2854,7 +2854,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention_bf16_d64_f32(
     static bool configured = false;
     if (!configured) {
         const cudaError_t err = cudaFuncSetAttribute(
-            makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel,
+            makepad_cuda_flash_attention_bf16_d64_f32_kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(FAB_SMEM_TOTAL));
         if (err != cudaSuccess) {
@@ -2864,7 +2864,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention_bf16_d64_f32(
     }
     const dim3 block(FAB_THREADS, 1, 1);
     const dim3 grid((q_len + FAB_BR - 1) / FAB_BR, head_count, 1);
-    makepad_ggml_cuda_flash_attention_bf16_d64_f32_kernel
+    makepad_cuda_flash_attention_bf16_d64_f32_kernel
         <<<grid, block, FAB_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __nv_bfloat16 *>(q),
             reinterpret_cast<const __nv_bfloat16 *>(k),
@@ -2885,7 +2885,7 @@ constexpr size_t SDPA_SMEM_S = static_cast<size_t>(FAB_BR) * FAB_LDS * sizeof(fl
 constexpr size_t SDPA_SMEM_P = static_cast<size_t>(FAB_BR) * FAB_LDS * sizeof(__half);
 constexpr size_t SDPA_SMEM_TOTAL = SDPA_SMEM_Q + SDPA_SMEM_K + SDPA_SMEM_V + SDPA_SMEM_S + SDPA_SMEM_P;
 
-static __device__ __forceinline__ void makepad_ggml_cuda_sdpa_tile_async(
+static __device__ __forceinline__ void makepad_cuda_sdpa_tile_async(
         const __half * __restrict__ src,
         __half * __restrict__ dst,
         uint32_t row0,
@@ -2901,11 +2901,11 @@ static __device__ __forceinline__ void makepad_ggml_cuda_sdpa_tile_async(
     __half * out = dst + row_in_tile * FAB_LD + quarter * 16;
     #pragma unroll
     for (int i = 0; i < 2; i++) {
-        makepad_ggml_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
+        makepad_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
     }
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_sdpa_load_tile(
+static __device__ __forceinline__ void makepad_cuda_sdpa_load_tile(
         const __half * __restrict__ src,
         __half * __restrict__ dst,
         uint32_t row0,
@@ -2932,7 +2932,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_sdpa_load_tile(
     }
 }
 
-static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64_kernel(
+static __global__ void makepad_cuda_sdpa_flash_f16_d64_kernel(
         const __half * __restrict__ q,
         const __half * __restrict__ k,
         const __half * __restrict__ v,
@@ -2992,23 +2992,23 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64_kernel(
     float l_row = 0.0f;
 
     const uint32_t tiles = (kv_len + FAB_BC - 1) / FAB_BC;
-    makepad_ggml_cuda_sdpa_tile_async(k_bh, k_ring, 0, kv_len, k_row_stride, 0);
-    makepad_ggml_cuda_fa_cp_commit();
-    makepad_ggml_cuda_sdpa_load_tile(q_bh, q_sh, q0, q_len, q_row_stride, 0);
-    makepad_ggml_cuda_fa_cp_wait<0>();
+    makepad_cuda_sdpa_tile_async(k_bh, k_ring, 0, kv_len, k_row_stride, 0);
+    makepad_cuda_fa_cp_commit();
+    makepad_cuda_sdpa_load_tile(q_bh, q_sh, q0, q_len, q_row_stride, 0);
+    makepad_cuda_fa_cp_wait<0>();
     __syncthreads();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
         const uint32_t k0 = tile * FAB_BC;
         const __half * k_sh = k_ring + (tile & 1) * FAB_K_STAGE;
-        makepad_ggml_cuda_sdpa_tile_async(v_bh, v_sh, k0, kv_len, v_row_stride, 0);
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_sdpa_tile_async(v_bh, v_sh, k0, kv_len, v_row_stride, 0);
+        makepad_cuda_fa_cp_commit();
         if (tile + 1 < tiles) {
-            makepad_ggml_cuda_sdpa_tile_async(
+            makepad_cuda_sdpa_tile_async(
                 k_bh, k_ring + ((tile + 1) & 1) * FAB_K_STAGE,
                 k0 + FAB_BC, kv_len, k_row_stride, 0);
         }
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_fa_cp_commit();
 
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -3075,7 +3075,7 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64_kernel(
         }
         __syncthreads();
 
-        makepad_ggml_cuda_fa_cp_wait<1>();
+        makepad_cuda_fa_cp_wait<1>();
         __syncthreads();
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -3112,7 +3112,7 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64_kernel(
             }
         }
         __syncthreads();
-        makepad_ggml_cuda_fa_cp_wait<0>();
+        makepad_cuda_fa_cp_wait<0>();
         __syncthreads();
     }
 
@@ -3127,7 +3127,7 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64(
+extern "C" cudaError_t makepad_cuda_sdpa_flash_f16_d64(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -3156,7 +3156,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64(
     static bool configured = false;
     if (!configured) {
         const cudaError_t err = cudaFuncSetAttribute(
-            makepad_ggml_cuda_sdpa_flash_f16_d64_kernel,
+            makepad_cuda_sdpa_flash_f16_d64_kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(SDPA_SMEM_TOTAL));
         if (err != cudaSuccess) {
@@ -3166,7 +3166,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64(
     }
     const dim3 block(FAB_THREADS, 1, 1);
     const dim3 grid((q_len + FAB_BR - 1) / FAB_BR, heads, batch);
-    makepad_ggml_cuda_sdpa_flash_f16_d64_kernel
+    makepad_cuda_sdpa_flash_f16_d64_kernel
         <<<grid, block, SDPA_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
@@ -3182,7 +3182,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64(
 
 // Official RA `F.sdpa`: Q/K head_dim=64, V last-dim = 2C so head_dim_v=128.
 // Same WMMA / online-softmax class as d64; two V column passes share one P.
-static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel(
+static __global__ void makepad_cuda_sdpa_flash_f16_d64v128_kernel(
         const __half * __restrict__ q,
         const __half * __restrict__ k,
         const __half * __restrict__ v,
@@ -3247,23 +3247,23 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel(
     float l_row = 0.0f;
 
     const uint32_t tiles = (kv_len + FAB_BC - 1) / FAB_BC;
-    makepad_ggml_cuda_sdpa_tile_async(k_bh, k_ring, 0, kv_len, k_row_stride, 0);
-    makepad_ggml_cuda_fa_cp_commit();
-    makepad_ggml_cuda_sdpa_load_tile(q_bh, q_sh, q0, q_len, q_row_stride, 0);
-    makepad_ggml_cuda_fa_cp_wait<0>();
+    makepad_cuda_sdpa_tile_async(k_bh, k_ring, 0, kv_len, k_row_stride, 0);
+    makepad_cuda_fa_cp_commit();
+    makepad_cuda_sdpa_load_tile(q_bh, q_sh, q0, q_len, q_row_stride, 0);
+    makepad_cuda_fa_cp_wait<0>();
     __syncthreads();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
         const uint32_t k0 = tile * FAB_BC;
         const __half * k_sh = k_ring + (tile & 1) * FAB_K_STAGE;
-        makepad_ggml_cuda_sdpa_tile_async(v_bh, v_sh, k0, kv_len, v_row_stride, 0);
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_sdpa_tile_async(v_bh, v_sh, k0, kv_len, v_row_stride, 0);
+        makepad_cuda_fa_cp_commit();
         if (tile + 1 < tiles) {
-            makepad_ggml_cuda_sdpa_tile_async(
+            makepad_cuda_sdpa_tile_async(
                 k_bh, k_ring + ((tile + 1) & 1) * FAB_K_STAGE,
                 k0 + FAB_BC, kv_len, k_row_stride, 0);
         }
-        makepad_ggml_cuda_fa_cp_commit();
+        makepad_cuda_fa_cp_commit();
 
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -3331,7 +3331,7 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel(
         }
         __syncthreads();
 
-        makepad_ggml_cuda_fa_cp_wait<1>();
+        makepad_cuda_fa_cp_wait<1>();
         __syncthreads();
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -3369,10 +3369,10 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel(
         }
         __syncthreads();
 
-        makepad_ggml_cuda_sdpa_tile_async(v_bh, v_sh, k0, kv_len, v_row_stride, 64);
-        makepad_ggml_cuda_fa_cp_commit();
-        makepad_ggml_cuda_fa_cp_commit();
-        makepad_ggml_cuda_fa_cp_wait<1>();
+        makepad_cuda_sdpa_tile_async(v_bh, v_sh, k0, kv_len, v_row_stride, 64);
+        makepad_cuda_fa_cp_commit();
+        makepad_cuda_fa_cp_commit();
+        makepad_cuda_fa_cp_wait<1>();
         __syncthreads();
         {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -3409,7 +3409,7 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel(
             }
         }
         __syncthreads();
-        makepad_ggml_cuda_fa_cp_wait<0>();
+        makepad_cuda_fa_cp_wait<0>();
         __syncthreads();
     }
 
@@ -3426,7 +3426,7 @@ static __global__ void makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64v128(
+extern "C" cudaError_t makepad_cuda_sdpa_flash_f16_d64v128(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -3456,7 +3456,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64v128(
     static bool configured = false;
     if (!configured) {
         const cudaError_t err = cudaFuncSetAttribute(
-            makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel,
+            makepad_cuda_sdpa_flash_f16_d64v128_kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(SDPA_SMEM_TOTAL));
         if (err != cudaSuccess) {
@@ -3466,7 +3466,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64v128(
     }
     const dim3 block(FAB_THREADS, 1, 1);
     const dim3 grid((q_len + FAB_BR - 1) / FAB_BR, heads, batch);
-    makepad_ggml_cuda_sdpa_flash_f16_d64v128_kernel
+    makepad_cuda_sdpa_flash_f16_d64v128_kernel
         <<<grid, block, SDPA_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
@@ -3488,7 +3488,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sdpa_flash_f16_d64v128(
 // pixel p0+row. Zero where a tap falls outside the plane. Feeding this to one
 // plain f16 gemm per chunk replaces the 9-shift accumulator recipe whose
 // padded f32 accumulator was read+written per shift.
-static __global__ void makepad_ggml_cuda_im2col_planar_f32_to_f16_kernel(
+static __global__ void makepad_cuda_im2col_planar_f32_to_f16_kernel(
         const float * __restrict__ input,
         __half * __restrict__ output,
         uint32_t width,
@@ -3523,7 +3523,7 @@ static __global__ void makepad_ggml_cuda_im2col_planar_f32_to_f16_kernel(
     output[static_cast<size_t>(col) * m_chunk + row] = __float2half_rn(value);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_im2col_planar_f32_to_f16(
+extern "C" cudaError_t makepad_cuda_im2col_planar_f32_to_f16(
         const float * input,
         uint16_t * output,
         uint32_t width,
@@ -3541,7 +3541,7 @@ extern "C" cudaError_t makepad_ggml_cuda_im2col_planar_f32_to_f16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((m_chunk + block.x - 1) / block.x, k_total, 1);
-    makepad_ggml_cuda_im2col_planar_f32_to_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_im2col_planar_f32_to_f16_kernel<<<grid, block, 0, stream>>>(
         input, reinterpret_cast<__half *>(output), width, height, kw, kh,
         pad_x, pad_y, p0, m_chunk);
     return cudaGetLastError();
@@ -3553,7 +3553,7 @@ extern "C" cudaError_t makepad_ggml_cuda_im2col_planar_f32_to_f16(
 // each group over `chunk_count` blocks producing f64 partial sums; stage 2
 // combines them into the same (mean, inv_std) f32 stats the apply kernel
 // consumes. f64 accumulation matches the single-block kernel's precision.
-static __device__ __forceinline__ void makepad_ggml_cuda_gn_reduce_f64_pair(
+static __device__ __forceinline__ void makepad_cuda_gn_reduce_f64_pair(
         double * shared_sum,
         double * shared_sum_sq,
         double sum,
@@ -3570,7 +3570,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_gn_reduce_f64_pair(
     }
 }
 
-static __global__ void makepad_ggml_cuda_group_norm_planar_partials_kernel(
+static __global__ void makepad_cuda_group_norm_planar_partials_kernel(
         const float * __restrict__ input,
         double * __restrict__ partials, // [group][chunk] -> (sum, sum_sq)
         uint32_t plane,
@@ -3595,7 +3595,7 @@ static __global__ void makepad_ggml_cuda_group_norm_planar_partials_kernel(
     }
     __shared__ double shared_sum[256];
     __shared__ double shared_sum_sq[256];
-    makepad_ggml_cuda_gn_reduce_f64_pair(shared_sum, shared_sum_sq, sum, sum_sq);
+    makepad_cuda_gn_reduce_f64_pair(shared_sum, shared_sum_sq, sum, sum_sq);
     if (threadIdx.x == 0) {
         const size_t slot = (static_cast<size_t>(group) * chunk_count + chunk) * 2;
         partials[slot] = shared_sum[0];
@@ -3603,7 +3603,7 @@ static __global__ void makepad_ggml_cuda_group_norm_planar_partials_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_group_norm_planar_combine_kernel(
+static __global__ void makepad_cuda_group_norm_planar_combine_kernel(
         const double * __restrict__ partials,
         float * __restrict__ stats, // [group] -> (mean, inv_std)
         uint32_t chunk_count,
@@ -3620,7 +3620,7 @@ static __global__ void makepad_ggml_cuda_group_norm_planar_combine_kernel(
     }
     __shared__ double shared_sum[256];
     __shared__ double shared_sum_sq[256];
-    makepad_ggml_cuda_gn_reduce_f64_pair(shared_sum, shared_sum_sq, sum, sum_sq);
+    makepad_cuda_gn_reduce_f64_pair(shared_sum, shared_sum_sq, sum, sum_sq);
     if (threadIdx.x == 0) {
         const double count = static_cast<double>(plane) * channels_per_group;
         const float mean = static_cast<float>(shared_sum[0] / count);
@@ -3630,7 +3630,7 @@ static __global__ void makepad_ggml_cuda_group_norm_planar_combine_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_group_norm_planar_multi_f32(
+extern "C" cudaError_t makepad_cuda_group_norm_planar_multi_f32(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -3653,14 +3653,14 @@ extern "C" cudaError_t makepad_ggml_cuda_group_norm_planar_multi_f32(
     const uint32_t plane = width * height;
     const uint32_t channels_per_group = channels / groups;
     const dim3 stats_grid(groups, chunk_count, 1);
-    makepad_ggml_cuda_group_norm_planar_partials_kernel<<<stats_grid, 256, 0, stream>>>(
+    makepad_cuda_group_norm_planar_partials_kernel<<<stats_grid, 256, 0, stream>>>(
         input, partials, plane, channels_per_group, chunk_count);
-    makepad_ggml_cuda_group_norm_planar_combine_kernel<<<groups, 256, 0, stream>>>(
+    makepad_cuda_group_norm_planar_combine_kernel<<<groups, 256, 0, stream>>>(
         partials, stats, chunk_count, plane, channels_per_group, eps);
     const size_t total = static_cast<size_t>(plane) * channels;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_group_norm_planar_apply_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_group_norm_planar_apply_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, stats, output, plane, channels, channels_per_group);
     return cudaGetLastError();
 }
@@ -3678,7 +3678,7 @@ extern "C" cudaError_t makepad_ggml_cuda_group_norm_planar_multi_f32(
 // the rest pass through. cos/sin tables are [token][rot_half]; both rotated
 // halves share the same table entry (the reference duplicates the frequency
 // block, so cos[i + rot_half] == cos[i]).
-static __global__ void makepad_ggml_cuda_rope_half_f32_kernel(
+static __global__ void makepad_cuda_rope_half_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ cos_table,
         const float * __restrict__ sin_table,
@@ -3711,7 +3711,7 @@ static __global__ void makepad_ggml_cuda_rope_half_f32_kernel(
 // Qwen's BF16 RoPE operator rounds BOTH products to BF16 before their
 // addition/subtraction, then rounds the sum. A single fused f32 expression
 // followed by one BF16 cast differs materially at long positions.
-static __global__ void makepad_ggml_cuda_rope_half_bf16_f32_kernel(
+static __global__ void makepad_cuda_rope_half_bf16_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ cos_table,
         const float * __restrict__ sin_table,
@@ -3746,7 +3746,7 @@ static __global__ void makepad_ggml_cuda_rope_half_bf16_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rope_half_f32(
+extern "C" cudaError_t makepad_cuda_rope_half_f32(
         const float * input,
         const float * cos_table,
         const float * sin_table,
@@ -3761,12 +3761,12 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_half_f32(
     }
     const dim3 block(rot_half < 128 ? 64 : 128, 1, 1);
     const dim3 grid(token_count, head_count, 1);
-    makepad_ggml_cuda_rope_half_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rope_half_f32_kernel<<<grid, block, 0, stream>>>(
         input, cos_table, sin_table, output, token_count, head_count, head_dim, rot_half);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rope_half_bf16_f32(
+extern "C" cudaError_t makepad_cuda_rope_half_bf16_f32(
         const float * input,
         const float * cos_table,
         const float * sin_table,
@@ -3781,12 +3781,12 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_half_bf16_f32(
     }
     const dim3 block(rot_half < 128 ? 64 : 128, 1, 1);
     const dim3 grid(token_count, head_count, 1);
-    makepad_ggml_cuda_rope_half_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rope_half_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         input, cos_table, sin_table, output, token_count, head_count, head_dim, rot_half);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_rope_half_f16_kernel(
+static __global__ void makepad_cuda_rope_half_f16_kernel(
         const __half * __restrict__ input,
         const float * __restrict__ cos_table,
         const float * __restrict__ sin_table,
@@ -3816,7 +3816,7 @@ static __global__ void makepad_ggml_cuda_rope_half_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rope_half_f16(
+extern "C" cudaError_t makepad_cuda_rope_half_f16(
         const uint16_t * input,
         const float * cos_table,
         const float * sin_table,
@@ -3831,7 +3831,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_half_f16(
     }
     const dim3 block(rot_half < 128 ? 64 : 128, 1, 1);
     const dim3 grid(token_count, head_count, 1);
-    makepad_ggml_cuda_rope_half_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rope_half_f16_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input), cos_table, sin_table,
         reinterpret_cast<__half *>(output), token_count, head_count, head_dim, rot_half);
     return cudaGetLastError();
@@ -3842,7 +3842,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_half_f16(
 //   + table[idx[row]*stride + shift_off + c].
 // One block per row; f32 math, f32 or f16 output.
 template <typename OutT>
-static __global__ void makepad_ggml_cuda_rms_norm_mod_indexed_kernel(
+static __global__ void makepad_cuda_rms_norm_mod_indexed_kernel(
         const float * __restrict__ input,
         const float * __restrict__ weight,
         const float * __restrict__ table,
@@ -3898,7 +3898,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_mod_indexed_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rms_norm_mod_indexed_f32(
+extern "C" cudaError_t makepad_cuda_rms_norm_mod_indexed_f32(
         const float * input,
         const float * weight,
         const float * table,
@@ -3916,12 +3916,12 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_mod_indexed_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(rows, 1, 1);
-    makepad_ggml_cuda_rms_norm_mod_indexed_kernel<float><<<grid, block, 0, stream>>>(
+    makepad_cuda_rms_norm_mod_indexed_kernel<float><<<grid, block, 0, stream>>>(
         input, weight, table, idx, output, cols, table_stride, scale_off, shift_off, eps);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rms_norm_mod_indexed_out16(
+extern "C" cudaError_t makepad_cuda_rms_norm_mod_indexed_out16(
         const float * input,
         const float * weight,
         const float * table,
@@ -3939,14 +3939,14 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_mod_indexed_out16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(rows, 1, 1);
-    makepad_ggml_cuda_rms_norm_mod_indexed_kernel<__half><<<grid, block, 0, stream>>>(
+    makepad_cuda_rms_norm_mod_indexed_kernel<__half><<<grid, block, 0, stream>>>(
         input, weight, table, idx, reinterpret_cast<__half *>(output),
         cols, table_stride, scale_off, shift_off, eps);
     return cudaGetLastError();
 }
 
 // residual + table[idx[row]*stride + gate_off + c] * update, all f32.
-static __global__ void makepad_ggml_cuda_gated_residual_indexed_f32_kernel(
+static __global__ void makepad_cuda_gated_residual_indexed_f32_kernel(
         const float * __restrict__ residual,
         const float * __restrict__ update,
         const float * __restrict__ table,
@@ -3963,7 +3963,7 @@ static __global__ void makepad_ggml_cuda_gated_residual_indexed_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gated_residual_indexed_f32(
+extern "C" cudaError_t makepad_cuda_gated_residual_indexed_f32(
         const float * residual,
         const float * update,
         const float * table,
@@ -3979,7 +3979,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_indexed_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(rows, 1, 1);
-    makepad_ggml_cuda_gated_residual_indexed_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gated_residual_indexed_f32_kernel<<<grid, block, 0, stream>>>(
         residual, update, table, idx, output, cols, table_stride, gate_off);
     return cudaGetLastError();
 }
@@ -3987,7 +3987,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_indexed_f32(
 // Value-first SwiGLU split on row-major (rows, 2n) data:
 // out[row, c] = x[row, c] * silu(x[row, n + c]). (The qwen swiglu_split
 // kernels are gate-first; the diffusers SwiGLU is value-first.)
-static __global__ void makepad_ggml_cuda_swiglu_value_gate_f32_kernel(
+static __global__ void makepad_cuda_swiglu_value_gate_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t n,
@@ -4005,7 +4005,7 @@ static __global__ void makepad_ggml_cuda_swiglu_value_gate_f32_kernel(
     output[idx] = value * s;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_swiglu_value_gate_f32(
+extern "C" cudaError_t makepad_cuda_swiglu_value_gate_f32(
         const float * input,
         float * output,
         uint32_t rows,
@@ -4018,7 +4018,7 @@ extern "C" cudaError_t makepad_ggml_cuda_swiglu_value_gate_f32(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_swiglu_value_gate_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_swiglu_value_gate_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, n, total);
     return cudaGetLastError();
 }
@@ -4032,7 +4032,7 @@ extern "C" cudaError_t makepad_ggml_cuda_swiglu_value_gate_f32(
 
 // LayerNorm+mod with the RN-even bf16 store the next linear's staging would
 // have applied. Same mean/variance arithmetic as the f32 kernel above.
-static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16_kernel(
+static __global__ void makepad_cuda_layer_norm_mul_add_f32_out_bf16_kernel(
         const float * __restrict__ input,
         const float * __restrict__ gamma,
         const float * __restrict__ beta,
@@ -4052,7 +4052,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16_kernel(
     for (uint32_t idx = threadIdx.x; idx < cols; idx += blockDim.x) {
         sum += row_in[idx];
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     __shared__ float shared_mean;
     __shared__ float shared_inv;
     if (threadIdx.x == 0) {
@@ -4066,7 +4066,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16_kernel(
         const float centered = row_in[idx] - mean;
         sq_sum += centered * centered;
     }
-    sq_sum = makepad_ggml_cuda_diff_block_reduce_sum(sq_sum);
+    sq_sum = makepad_cuda_diff_block_reduce_sum(sq_sum);
     if (threadIdx.x == 0) {
         shared_inv = rsqrtf(sq_sum / static_cast<float>(cols) + eps);
     }
@@ -4080,7 +4080,7 @@ static __global__ void makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16(
+extern "C" cudaError_t makepad_cuda_layer_norm_mul_add_f32_out_bf16(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -4095,13 +4095,13 @@ extern "C" cudaError_t makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_layer_norm_mul_add_f32_out_bf16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_layer_norm_mul_add_f32_out_bf16_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, output, row_count, cols, eps, gamma_add);
     return cudaGetLastError();
 }
 
 // Expand a bf16 column slab into a contiguous f32 tensor (lossless).
-static __global__ void makepad_ggml_cuda_bf16_slab_to_f32_kernel(
+static __global__ void makepad_cuda_bf16_slab_to_f32_kernel(
         const uint16_t * __restrict__ input,
         float * __restrict__ output,
         uint32_t in_stride,
@@ -4118,7 +4118,7 @@ static __global__ void makepad_ggml_cuda_bf16_slab_to_f32_kernel(
     output[idx] = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(&bits));
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_bf16_slab_to_f32(
+extern "C" cudaError_t makepad_cuda_bf16_slab_to_f32(
         const uint16_t * input,
         float * output,
         uint32_t rows,
@@ -4136,7 +4136,7 @@ extern "C" cudaError_t makepad_ggml_cuda_bf16_slab_to_f32(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_bf16_slab_to_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_bf16_slab_to_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, in_stride, col_off, cols, total);
     return cudaGetLastError();
 }
@@ -4144,7 +4144,7 @@ extern "C" cudaError_t makepad_ggml_cuda_bf16_slab_to_f32(
 // Gate-first SwiGLU over a bf16 slab, storing bf16-RN (the bits the next
 // linear's staging would produce from the f32 result). Same silu/mul
 // arithmetic as the f32 kernels.
-static __global__ void makepad_ggml_cuda_swiglu_gate_first_bf16slab_kernel(
+static __global__ void makepad_cuda_swiglu_gate_first_bf16slab_kernel(
         const uint16_t * __restrict__ input,
         uint16_t * __restrict__ output,
         uint32_t in_stride,
@@ -4167,7 +4167,7 @@ static __global__ void makepad_ggml_cuda_swiglu_gate_first_bf16slab_kernel(
     output[idx] = *reinterpret_cast<const uint16_t *>(&h);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_swiglu_gate_first_bf16slab(
+extern "C" cudaError_t makepad_cuda_swiglu_gate_first_bf16slab(
         const uint16_t * input,
         uint16_t * output,
         uint32_t rows,
@@ -4185,14 +4185,14 @@ extern "C" cudaError_t makepad_ggml_cuda_swiglu_gate_first_bf16slab(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_swiglu_gate_first_bf16slab_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_swiglu_gate_first_bf16slab_kernel<<<grid, block, 0, stream>>>(
         input, output, in_stride, gate_offset, n, total);
     return cudaGetLastError();
 }
 
 // out[r] = [rn_bf16(a[r]) | b[r]]: the [attn | mlp_act] concat staged
 // straight into the down-projection's bf16 input layout.
-static __global__ void makepad_ggml_cuda_concat_f32rn_bf16_kernel(
+static __global__ void makepad_cuda_concat_f32rn_bf16_kernel(
         const float * __restrict__ a,
         const uint16_t * __restrict__ b,
         uint16_t * __restrict__ output,
@@ -4215,7 +4215,7 @@ static __global__ void makepad_ggml_cuda_concat_f32rn_bf16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_concat_f32rn_bf16(
+extern "C" cudaError_t makepad_cuda_concat_f32rn_bf16(
         const float * a,
         const uint16_t * b,
         uint16_t * output,
@@ -4230,7 +4230,7 @@ extern "C" cudaError_t makepad_ggml_cuda_concat_f32rn_bf16(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_concat_f32rn_bf16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_concat_f32rn_bf16_kernel<<<grid, block, 0, stream>>>(
         a, b, output, a_cols, b_cols, total);
     return cudaGetLastError();
 }
@@ -4240,7 +4240,7 @@ extern "C" cudaError_t makepad_ggml_cuda_concat_f32rn_bf16(
 // exact silu/mul arithmetic of the value_gate kernel above. Replaces the
 // slice+slice+swap-concat dance the flux2 DiT paid on every MLP: 4 launches
 // and ~3 full-tensor memory passes become one strided read.
-static __global__ void makepad_ggml_cuda_swiglu_gate_first_strided_f32_kernel(
+static __global__ void makepad_cuda_swiglu_gate_first_strided_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t in_stride,
@@ -4260,7 +4260,7 @@ static __global__ void makepad_ggml_cuda_swiglu_gate_first_strided_f32_kernel(
     output[idx] = value * s;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_swiglu_gate_first_strided_f32(
+extern "C" cudaError_t makepad_cuda_swiglu_gate_first_strided_f32(
         const float * input,
         float * output,
         uint32_t rows,
@@ -4278,14 +4278,14 @@ extern "C" cudaError_t makepad_ggml_cuda_swiglu_gate_first_strided_f32(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_swiglu_gate_first_strided_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_swiglu_gate_first_strided_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, in_stride, gate_offset, n, total);
     return cudaGetLastError();
 }
 
 // f16-input variant of the value-first SwiGLU (f32 output for the down gemm's
 // bf16 convert path, or fed straight back as f16 via the f32->f16 pass).
-static __global__ void makepad_ggml_cuda_swiglu_value_gate_f16_kernel(
+static __global__ void makepad_cuda_swiglu_value_gate_f16_kernel(
         const __half * __restrict__ input,
         __half * __restrict__ output,
         uint32_t n,
@@ -4303,7 +4303,7 @@ static __global__ void makepad_ggml_cuda_swiglu_value_gate_f16_kernel(
     output[idx] = __float2half(value * s);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_swiglu_value_gate_f16(
+extern "C" cudaError_t makepad_cuda_swiglu_value_gate_f16(
         const uint16_t * input,
         uint16_t * output,
         uint32_t rows,
@@ -4316,7 +4316,7 @@ extern "C" cudaError_t makepad_ggml_cuda_swiglu_value_gate_f16(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_swiglu_value_gate_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_swiglu_value_gate_f16_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __half *>(input),
         reinterpret_cast<__half *>(output), n, total);
     return cudaGetLastError();
@@ -4330,7 +4330,7 @@ extern "C" cudaError_t makepad_ggml_cuda_swiglu_value_gate_f16(
 // rms_norm_rows_weighted_f32_f32weights_precise + bf16_round. Identical
 // strided per-thread accumulation and block reduction (launched with the
 // same block-size rule), round moved onto the store.
-static __global__ void makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16_kernel(
+static __global__ void makepad_cuda_rms_norm_weighted_precise_round_bf16_kernel(
         const float * __restrict__ input,
         const float * __restrict__ weights_f32,
         float * __restrict__ output,
@@ -4349,7 +4349,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16_ke
         const float v = row_in[idx];
         sum += v * v;
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     __shared__ float inv_rms;
     if (threadIdx.x == 0) {
         inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
@@ -4361,7 +4361,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16_ke
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16(
+extern "C" cudaError_t makepad_cuda_rms_norm_weighted_precise_round_bf16(
         const float * input,
         const float * weights_f32,
         float * output,
@@ -4374,7 +4374,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16(
         return cudaErrorInvalidValue;
     }
     const uint32_t block = n < 1024 ? 256 : 1024;
-    makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16_kernel<<<row_count, block, 0, stream>>>(
+    makepad_cuda_rms_norm_weighted_precise_round_bf16_kernel<<<row_count, block, 0, stream>>>(
         input, weights_f32, output, row_count, row_stride, n, eps);
     return cudaGetLastError();
 }
@@ -4384,7 +4384,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_weighted_precise_round_bf16(
 //   out = fmaf(shift[c], 1.0f, fmaf(1.0f + scale[c], normed, 0.0f))
 // (1.0f + scale matches add_f32_precise; both fmafs match
 // gated_residual_vec against a +0 residual / a ones update).
-static __global__ void makepad_ggml_cuda_adaln_mod_f32_kernel(
+static __global__ void makepad_cuda_adaln_mod_f32_kernel(
         const float * __restrict__ normed,
         const float * __restrict__ mods_scale,
         const float * __restrict__ mods_shift,
@@ -4401,7 +4401,7 @@ static __global__ void makepad_ggml_cuda_adaln_mod_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_adaln_mod_f32(
+extern "C" cudaError_t makepad_cuda_adaln_mod_f32(
         const float * normed,
         const float * mods_scale,
         const float * mods_shift,
@@ -4415,7 +4415,7 @@ extern "C" cudaError_t makepad_ggml_cuda_adaln_mod_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_adaln_mod_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_adaln_mod_f32_kernel<<<grid, block, 0, stream>>>(
         normed, mods_scale, mods_shift, output, row_count, cols);
     return cudaGetLastError();
 }
@@ -4423,7 +4423,7 @@ extern "C" cudaError_t makepad_ggml_cuda_adaln_mod_f32(
 // rope_half_f32 + bf16_round: identical rotation expressions, round moved
 // onto the stores (the separate round pass rounded the same values,
 // pass-through channels included).
-static __global__ void makepad_ggml_cuda_rope_half_round_bf16_f32_kernel(
+static __global__ void makepad_cuda_rope_half_round_bf16_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ cos_table,
         const float * __restrict__ sin_table,
@@ -4455,7 +4455,7 @@ static __global__ void makepad_ggml_cuda_rope_half_round_bf16_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rope_half_round_bf16_f32(
+extern "C" cudaError_t makepad_cuda_rope_half_round_bf16_f32(
         const float * input,
         const float * cos_table,
         const float * sin_table,
@@ -4470,7 +4470,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_half_round_bf16_f32(
     }
     const dim3 block(rot_half < 128 ? 64 : 128, 1, 1);
     const dim3 grid(token_count, head_count, 1);
-    makepad_ggml_cuda_rope_half_round_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rope_half_round_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         input, cos_table, sin_table, output, token_count, head_count, head_dim, rot_half);
     return cudaGetLastError();
 }
@@ -4478,7 +4478,7 @@ extern "C" cudaError_t makepad_ggml_cuda_rope_half_round_bf16_f32(
 // gated_residual_vec(zeros, update, gate) + bf16_round + add_bf16:
 //   out = round_bf16(h + round_bf16(fmaf(gate[c], update, 0.0f)))
 // (+0.0f literal matches the +0.0 read from the zeros tensor).
-static __global__ void makepad_ggml_cuda_gated_residual_round_add_bf16_f32_kernel(
+static __global__ void makepad_cuda_gated_residual_round_add_bf16_f32_kernel(
         const float * __restrict__ h,
         const float * __restrict__ update,
         const float * __restrict__ gate,
@@ -4494,7 +4494,7 @@ static __global__ void makepad_ggml_cuda_gated_residual_round_add_bf16_f32_kerne
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gated_residual_round_add_bf16_f32(
+extern "C" cudaError_t makepad_cuda_gated_residual_round_add_bf16_f32(
         const float * h,
         const float * update,
         const float * gate,
@@ -4508,7 +4508,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_round_add_bf16_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_gated_residual_round_add_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gated_residual_round_add_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         h, update, gate, output, row_count, cols);
     return cudaGetLastError();
 }
@@ -4517,7 +4517,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gated_residual_round_add_bf16_f32(
 // the two-kernel staging recipe (bf16_round_f32 into f32 storage, then the
 // truncating f32_to_bf16 — truncating an exactly-representable bf16 value is
 // exact, so round-then-truncate == direct rn conversion).
-static __global__ void makepad_ggml_cuda_f32_to_bf16_rn_kernel(
+static __global__ void makepad_cuda_f32_to_bf16_rn_kernel(
         const float * __restrict__ input,
         uint16_t * __restrict__ output,
         uint32_t n) {
@@ -4532,7 +4532,7 @@ static __global__ void makepad_ggml_cuda_f32_to_bf16_rn_kernel(
 // operands, stored in the f16 encoding the FA2 f16 kernel consumes. Exact
 // for |x| in [2^-14, 65504] (bf16 mantissa 7 <= f16 mantissa 10); flux2
 // q/k post-RMS/rope and v activations sit well inside that range.
-static __global__ void makepad_ggml_cuda_f32_to_bf16_rn_f16_kernel(
+static __global__ void makepad_cuda_f32_to_bf16_rn_f16_kernel(
         const float * __restrict__ input,
         __half * __restrict__ output,
         uint32_t n) {
@@ -4542,7 +4542,7 @@ static __global__ void makepad_ggml_cuda_f32_to_bf16_rn_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_f32_to_bf16_rn_f16(
+extern "C" cudaError_t makepad_cuda_f32_to_bf16_rn_f16(
         const float * input,
         uint16_t * output,
         uint32_t n,
@@ -4552,12 +4552,12 @@ extern "C" cudaError_t makepad_ggml_cuda_f32_to_bf16_rn_f16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_f32_to_bf16_rn_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_f32_to_bf16_rn_f16_kernel<<<grid, block, 0, stream>>>(
         input, reinterpret_cast<__half *>(output), n);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_f32_to_bf16_rn(
+extern "C" cudaError_t makepad_cuda_f32_to_bf16_rn(
         const float * input,
         uint16_t * output,
         uint32_t n,
@@ -4567,14 +4567,14 @@ extern "C" cudaError_t makepad_ggml_cuda_f32_to_bf16_rn(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_f32_to_bf16_rn_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    makepad_cuda_f32_to_bf16_rn_kernel<<<grid, block, 0, stream>>>(input, output, n);
     return cudaGetLastError();
 }
 
 // silu_f32_precise + bf16_round + mul_f32_precise + bf16_round (the ACE
 // SwiGLU chain with PyTorch's bf16 boundary after both the activation and
 // the product).
-static __global__ void makepad_ggml_cuda_silu_round_mul_round_bf16_f32_kernel(
+static __global__ void makepad_cuda_silu_round_mul_round_bf16_f32_kernel(
         const float * __restrict__ gate,
         const float * __restrict__ up,
         float * __restrict__ output,
@@ -4588,7 +4588,7 @@ static __global__ void makepad_ggml_cuda_silu_round_mul_round_bf16_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_silu_round_mul_round_bf16_f32(
+extern "C" cudaError_t makepad_cuda_silu_round_mul_round_bf16_f32(
         const float * gate,
         const float * up,
         float * output,
@@ -4599,7 +4599,7 @@ extern "C" cudaError_t makepad_ggml_cuda_silu_round_mul_round_bf16_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_silu_round_mul_round_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_silu_round_mul_round_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         gate, up, output, n);
     return cudaGetLastError();
 }
@@ -4607,7 +4607,7 @@ extern "C" cudaError_t makepad_ggml_cuda_silu_round_mul_round_bf16_f32(
 // --- IndexTTS kernels -------------------------------------------------------
 // WaveNet cond gate on row-major (rows, 2n) data, biases already applied by
 // the producing GEMM: out[row, c] = tanh(x[row, c]) * sigmoid(x[row, n + c]).
-static __global__ void makepad_ggml_cuda_wavenet_gate_f32_kernel(
+static __global__ void makepad_cuda_wavenet_gate_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t n,
@@ -4625,7 +4625,7 @@ static __global__ void makepad_ggml_cuda_wavenet_gate_f32_kernel(
     output[idx] = a * s;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_wavenet_gate_f32(
+extern "C" cudaError_t makepad_cuda_wavenet_gate_f32(
         const float * input,
         float * output,
         uint32_t rows,
@@ -4638,7 +4638,7 @@ extern "C" cudaError_t makepad_ggml_cuda_wavenet_gate_f32(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_wavenet_gate_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_wavenet_gate_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, n, total);
     return cudaGetLastError();
 }
@@ -4658,7 +4658,7 @@ extern "C" cudaError_t makepad_ggml_cuda_wavenet_gate_f32(
 // the scatter frame, fed by the 6 taps kk = p, p+2, .., p+10 of parity
 // p = (u + 15) & 1 from input rows (j - kk) / 2 - 5 (clamped); the inner
 // loop runs input-ascending to reproduce the CPU accumulation order.
-static __global__ void makepad_ggml_cuda_alias_snake_updown2x_f32_kernel(
+static __global__ void makepad_cuda_alias_snake_updown2x_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ params,
         float * __restrict__ output,
@@ -4698,7 +4698,7 @@ static __global__ void makepad_ggml_cuda_alias_snake_updown2x_f32_kernel(
     output[idx] = sum;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_alias_snake_updown2x_f32(
+extern "C" cudaError_t makepad_cuda_alias_snake_updown2x_f32(
         const float * input,
         const float * params,
         float * output,
@@ -4714,7 +4714,7 @@ extern "C" cudaError_t makepad_ggml_cuda_alias_snake_updown2x_f32(
     const uint32_t total = static_cast<uint32_t>(total64);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_alias_snake_updown2x_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_alias_snake_updown2x_f32_kernel<<<grid, block, 0, stream>>>(
         input, params, output, t_in, ch, input_scale, total);
     return cudaGetLastError();
 }
@@ -4724,7 +4724,7 @@ extern "C" cudaError_t makepad_ggml_cuda_alias_snake_updown2x_f32(
 // weight vector spans heads*n and is selected by (row % heads)*n + idx —
 // the TRELLIS MultiHeadRMSNorm (F.normalize * sqrt(n) * gamma == rms * gamma)
 // with a DISTINCT gamma per head.
-static __global__ void makepad_ggml_cuda_rms_norm_perhead_f32_kernel(
+static __global__ void makepad_cuda_rms_norm_perhead_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ weights,
         float * __restrict__ output,
@@ -4744,7 +4744,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_perhead_f32_kernel(
         const float v = row_in[idx];
         sum += v * v;
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     __shared__ float inv_rms;
     if (threadIdx.x == 0) {
         inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
@@ -4755,7 +4755,7 @@ static __global__ void makepad_ggml_cuda_rms_norm_perhead_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_rms_norm_perhead_f32(
+extern "C" cudaError_t makepad_cuda_rms_norm_perhead_f32(
         const float * input,
         const float * weights,
         float * output,
@@ -4769,14 +4769,14 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_perhead_f32(
     }
     const dim3 block(n < 128 ? 32 : 128, 1, 1);
     const dim3 grid(row_count, 1, 1);
-    makepad_ggml_cuda_rms_norm_perhead_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_rms_norm_perhead_f32_kernel<<<grid, block, 0, stream>>>(
         input, weights, output, row_count, n, heads, eps);
     return cudaGetLastError();
 }
 
 // Exact (erf) GELU — the DINOv3 MLP activation. gpu_gelu is the tanh
 // approximation used by the DiT FFNs; DINOv3 needs the erf form.
-static __global__ void makepad_ggml_cuda_gelu_erf_f32_kernel(
+static __global__ void makepad_cuda_gelu_erf_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t total) {
@@ -4788,7 +4788,7 @@ static __global__ void makepad_ggml_cuda_gelu_erf_f32_kernel(
     output[idx] = 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gelu_erf_f32(
+extern "C" cudaError_t makepad_cuda_gelu_erf_f32(
         const float * input,
         float * output,
         uint32_t total,
@@ -4798,7 +4798,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gelu_erf_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_gelu_erf_f32_kernel<<<grid, block, 0, stream>>>(input, output, total);
+    makepad_cuda_gelu_erf_f32_kernel<<<grid, block, 0, stream>>>(input, output, total);
     return cudaGetLastError();
 }
 
@@ -4808,7 +4808,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gelu_erf_f32(
 // colblock_idx == nullptr the block index is 0 (plain row gather when
 // block_cols == src row width). Composes the TRELLIS dense conv3d (27
 // neighbor gathers), pixel-shuffle upsampling and the sparse C2S/S2C moves.
-static __global__ void makepad_ggml_cuda_gather_rows_colblock_f32_kernel(
+static __global__ void makepad_cuda_gather_rows_colblock_f32_kernel(
         const float * __restrict__ src,
         const uint32_t * __restrict__ row_idx,
         const uint32_t * __restrict__ colblock_idx,
@@ -4836,7 +4836,7 @@ static __global__ void makepad_ggml_cuda_gather_rows_colblock_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gather_rows_colblock_f32(
+extern "C" cudaError_t makepad_cuda_gather_rows_colblock_f32(
         const float * src,
         const uint32_t * row_idx,
         const uint32_t * colblock_idx,
@@ -4850,7 +4850,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gather_rows_colblock_f32(
     }
     const dim3 block(block_cols < 128 ? 32 : 128, 1, 1);
     const dim3 grid(out_rows, 1, 1);
-    makepad_ggml_cuda_gather_rows_colblock_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gather_rows_colblock_f32_kernel<<<grid, block, 0, stream>>>(
         src, row_idx, colblock_idx, output, out_rows, src_row_stride, block_cols);
     return cudaGetLastError();
 }
@@ -4860,7 +4860,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gather_rows_colblock_f32(
 // channel at once, which composes the H3 VAE encoder's reflect padding
 // (indices = reflected plane positions), the valid-region crop after a
 // pad-0 conv, and the stride-2 subsample of a stride-1 conv output.
-static __global__ void makepad_ggml_cuda_gather_cols_f32_kernel(
+static __global__ void makepad_cuda_gather_cols_f32_kernel(
         const float * __restrict__ src,
         const uint32_t * __restrict__ col_idx,
         float * __restrict__ output,
@@ -4876,7 +4876,7 @@ static __global__ void makepad_ggml_cuda_gather_cols_f32_kernel(
         src[static_cast<size_t>(row) * src_cols + col_idx[col]];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gather_cols_f32(
+extern "C" cudaError_t makepad_cuda_gather_cols_f32(
         const float * src,
         const uint32_t * col_idx,
         float * output,
@@ -4889,7 +4889,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gather_cols_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((out_cols + block.x - 1) / block.x, rows, 1);
-    makepad_ggml_cuda_gather_cols_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gather_cols_f32_kernel<<<grid, block, 0, stream>>>(
         src, col_idx, output, rows, src_cols, out_cols);
     return cudaGetLastError();
 }
@@ -4899,7 +4899,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gather_cols_f32(
 // converted to f16 for the single tensor-core gemm against the checkpoint's
 // already-[Co, 27*Ci] flex_gemm weight. Absent neighbors (idx u32::MAX) are
 // zero. `neighbors` is tap-major: neighbors[t * n_total + voxel].
-static __global__ void makepad_ggml_cuda_gather27_f16_kernel(
+static __global__ void makepad_cuda_gather27_f16_kernel(
         const float * __restrict__ src,
         const uint32_t * __restrict__ neighbors,
         __half * __restrict__ out,
@@ -4931,7 +4931,7 @@ static __global__ void makepad_ggml_cuda_gather27_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_gather27_f16(
+extern "C" cudaError_t makepad_cuda_gather27_f16(
         const float * src,
         const uint32_t * neighbors,
         uint16_t * out,
@@ -4945,7 +4945,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gather27_f16(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(rows, 1, 1);
-    makepad_ggml_cuda_gather27_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_gather27_f16_kernel<<<grid, block, 0, stream>>>(
         src, neighbors, reinterpret_cast<__half *>(out),
         row0, rows, n_total, ci);
     return cudaGetLastError();
@@ -4959,7 +4959,7 @@ extern "C" cudaError_t makepad_ggml_cuda_gather27_f16(
 // out = tanh(alpha * x) * gamma + beta. gamma/beta are `width` long,
 // alpha is a scalar. Used by the SA3 SAME-S autoencoder (block norms width
 // 768, per-head qk norms width 64).
-static __global__ void makepad_ggml_cuda_dyt_f32_kernel(
+static __global__ void makepad_cuda_dyt_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ gamma,
         const float * __restrict__ beta,
@@ -4978,7 +4978,7 @@ static __global__ void makepad_ggml_cuda_dyt_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_dyt_f32(
+extern "C" cudaError_t makepad_cuda_dyt_f32(
         const float * input,
         const float * gamma,
         const float * beta,
@@ -4992,7 +4992,7 @@ extern "C" cudaError_t makepad_ggml_cuda_dyt_f32(
     }
     const dim3 block(width < 128 ? 32 : 128, 1, 1);
     const dim3 grid(group_rows, 1, 1);
-    makepad_ggml_cuda_dyt_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_dyt_f32_kernel<<<grid, block, 0, stream>>>(
         input, gamma, beta, output, group_rows, width, alpha);
     return cudaGetLastError();
 }
@@ -5001,7 +5001,7 @@ extern "C" cudaError_t makepad_ggml_cuda_dyt_f32(
 // scores = softcap * tanh(scores / softcap) (+ key_mask[col] when given;
 // mask is 0 for valid keys, -inf for padded keys). Rows = heads * q_tokens,
 // cols = kv_tokens. The qk gemm already applied the 1/sqrt(d) scale.
-static __global__ void makepad_ggml_cuda_softcap_addmask_f32_kernel(
+static __global__ void makepad_cuda_softcap_addmask_f32_kernel(
         float * __restrict__ scores,
         const float * __restrict__ key_mask,
         uint32_t rows,
@@ -5021,7 +5021,7 @@ static __global__ void makepad_ggml_cuda_softcap_addmask_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_softcap_addmask_f32(
+extern "C" cudaError_t makepad_cuda_softcap_addmask_f32(
         float * scores,
         const float * key_mask,
         uint32_t rows,
@@ -5033,14 +5033,14 @@ extern "C" cudaError_t makepad_ggml_cuda_softcap_addmask_f32(
     }
     const dim3 block(cols < 128 ? 32 : 128, 1, 1);
     const dim3 grid(rows, 1, 1);
-    makepad_ggml_cuda_softcap_addmask_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_softcap_addmask_f32_kernel<<<grid, block, 0, stream>>>(
         scores, key_mask, rows, cols, softcap);
     return cudaGetLastError();
 }
 
 // GeGLU with tanh-approximated gelu (T5Gemma MLP): rows hold
 // [value(n), gate(n)]; out = value * gelu_tanh(gate).
-static __global__ void makepad_ggml_cuda_geglu_tanh_value_gate_f32_kernel(
+static __global__ void makepad_cuda_geglu_tanh_value_gate_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t n,
@@ -5059,7 +5059,7 @@ static __global__ void makepad_ggml_cuda_geglu_tanh_value_gate_f32_kernel(
     output[idx] = value * gelu;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_geglu_tanh_value_gate_f32(
+extern "C" cudaError_t makepad_cuda_geglu_tanh_value_gate_f32(
         const float * input,
         float * output,
         uint32_t rows,
@@ -5071,7 +5071,7 @@ extern "C" cudaError_t makepad_ggml_cuda_geglu_tanh_value_gate_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_geglu_tanh_value_gate_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_geglu_tanh_value_gate_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, n, total);
     return cudaGetLastError();
 }
@@ -5082,7 +5082,7 @@ extern "C" cudaError_t makepad_ggml_cuda_geglu_tanh_value_gate_f32(
 // device path keeps planes time-major: rows = samples, cols = channels).
 // ---------------------------------------------------------------------------
 
-static __global__ void makepad_ggml_cuda_snake_cols_f32_kernel(
+static __global__ void makepad_cuda_snake_cols_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ alpha,
         float * __restrict__ output,
@@ -5098,7 +5098,7 @@ static __global__ void makepad_ggml_cuda_snake_cols_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_snake_cols_f32(
+extern "C" cudaError_t makepad_cuda_snake_cols_f32(
         const float * input,
         const float * alpha,
         float * output,
@@ -5111,7 +5111,7 @@ extern "C" cudaError_t makepad_ggml_cuda_snake_cols_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_snake_cols_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_snake_cols_f32_kernel<<<grid, block, 0, stream>>>(
         input, alpha, output, row_count, cols);
     return cudaGetLastError();
 }
@@ -5123,7 +5123,7 @@ extern "C" cudaError_t makepad_ggml_cuda_snake_cols_f32(
 // materializing repeated K/V heads or a B*H*S score tensor.
 // ---------------------------------------------------------------------------
 
-static __global__ void makepad_ggml_cuda_beam_cache_reorder_append_f32_kernel(
+static __global__ void makepad_cuda_beam_cache_reorder_append_f32_kernel(
         const float * __restrict__ prior,
         const float * __restrict__ step,
         const uint32_t * __restrict__ parents,
@@ -5149,7 +5149,7 @@ static __global__ void makepad_ggml_cuda_beam_cache_reorder_append_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_beam_cache_reorder_append_f32(
+extern "C" cudaError_t makepad_cuda_beam_cache_reorder_append_f32(
         const float * prior,
         const float * step,
         const uint32_t * parents,
@@ -5164,12 +5164,12 @@ extern "C" cudaError_t makepad_ggml_cuda_beam_cache_reorder_append_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((total + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_beam_cache_reorder_append_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_beam_cache_reorder_append_f32_kernel<<<grid, block, 0, stream>>>(
         prior, step, parents, output, prior_sequence, output_beams, cols);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_attention_gqa_decode_bf16_f32_kernel(
+static __global__ void makepad_cuda_attention_gqa_decode_bf16_f32_kernel(
         const float * __restrict__ query,
         const float * __restrict__ key,
         const float * __restrict__ value,
@@ -5206,7 +5206,7 @@ static __global__ void makepad_ggml_cuda_attention_gqa_decode_bf16_f32_kernel(
     for (uint32_t position = 0; position < sequence; ++position) {
         const size_t k_index = (static_cast<size_t>(beam) * sequence + position) * kv_width
             + static_cast<size_t>(kv_head) * head_dim + dim;
-        float dot = makepad_ggml_cuda_diff_block_reduce_sum(q * key[k_index]);
+        float dot = makepad_cuda_diff_block_reduce_sum(q * key[k_index]);
         if (dim == 0) {
             maximum = fmaxf(maximum, dot * scale);
         }
@@ -5217,7 +5217,7 @@ static __global__ void makepad_ggml_cuda_attention_gqa_decode_bf16_f32_kernel(
     for (uint32_t position = 0; position < sequence; ++position) {
         const size_t k_index = (static_cast<size_t>(beam) * sequence + position) * kv_width
             + static_cast<size_t>(kv_head) * head_dim + dim;
-        float dot = makepad_ggml_cuda_diff_block_reduce_sum(q * key[k_index]);
+        float dot = makepad_cuda_diff_block_reduce_sum(q * key[k_index]);
         if (dim == 0) {
             denominator += expf(dot * scale - maximum);
         }
@@ -5230,7 +5230,7 @@ static __global__ void makepad_ggml_cuda_attention_gqa_decode_bf16_f32_kernel(
     for (uint32_t position = 0; position < sequence; ++position) {
         const size_t k_index = (static_cast<size_t>(beam) * sequence + position) * kv_width
             + static_cast<size_t>(kv_head) * head_dim + dim;
-        float dot = makepad_ggml_cuda_diff_block_reduce_sum(q * key[k_index]);
+        float dot = makepad_cuda_diff_block_reduce_sum(q * key[k_index]);
         if (dim == 0) {
             const float p = expf(dot * scale - maximum) / denominator;
             probability = __bfloat162float(__float2bfloat16_rn(p));
@@ -5245,7 +5245,7 @@ static __global__ void makepad_ggml_cuda_attention_gqa_decode_bf16_f32_kernel(
         + static_cast<size_t>(query_head) * head_dim + dim] = accumulator;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_bf16_f32(
+extern "C" cudaError_t makepad_cuda_attention_gqa_decode_bf16_f32(
         const float * query,
         const float * key,
         const float * value,
@@ -5263,13 +5263,13 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_bf16_f32(
     }
     const dim3 block(head_dim, 1, 1);
     const dim3 grid(beams, query_heads, 1);
-    makepad_ggml_cuda_attention_gqa_decode_bf16_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_attention_gqa_decode_bf16_f32_kernel<<<grid, block, 0, stream>>>(
         query, key, value, output, beams, sequence, query_heads, kv_heads, head_dim, scale);
     return cudaGetLastError();
 }
 
 // Pair (cond, uncond) GQA decode over two separate in-place KV caches.
-// Byte-identical math to makepad_ggml_cuda_attention_gqa_decode_bf16_f32 on
+// Byte-identical math to makepad_cuda_attention_gqa_decode_bf16_f32 on
 // the row-concatenated caches, restructured for parallelism: the serial
 // kernel above walks the sequence three times from beams*query_heads blocks
 // (~64 on this model), which is the O(seq) wall in Music3 AR decode. Here
@@ -5278,7 +5278,7 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_bf16_f32(
 // order-sensitive serial softmax/accumulate loops per (beam, head) — those
 // chains are short-latency scalar work, not block reductions.
 
-static __global__ void makepad_ggml_cuda_gqa_decode_pair_dots_f32_kernel(
+static __global__ void makepad_cuda_gqa_decode_pair_dots_f32_kernel(
         const float * __restrict__ query,
         const float * __restrict__ key0,
         const float * __restrict__ key1,
@@ -5307,7 +5307,7 @@ static __global__ void makepad_ggml_cuda_gqa_decode_pair_dots_f32_kernel(
         const uint32_t query_head = kv_head * group + g;
         const float q = query[static_cast<size_t>(beam) * query_width
             + static_cast<size_t>(query_head) * head_dim + dim];
-        float dot = makepad_ggml_cuda_diff_block_reduce_sum(q * k);
+        float dot = makepad_cuda_diff_block_reduce_sum(q * k);
         if (dim == 0) {
             dots[(static_cast<size_t>(beam) * query_heads + query_head)
                 * sequence + position] = dot;
@@ -5317,7 +5317,7 @@ static __global__ void makepad_ggml_cuda_gqa_decode_pair_dots_f32_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_gqa_decode_pair_out_f32_kernel(
+static __global__ void makepad_cuda_gqa_decode_pair_out_f32_kernel(
         const float * __restrict__ dots,
         const float * __restrict__ value0,
         const float * __restrict__ value1,
@@ -5421,7 +5421,7 @@ static __global__ void makepad_ggml_cuda_gqa_decode_pair_out_f32_kernel(
 
 // Fallback out-kernel for sequences too long for the shared-exp variant:
 // same serial order-sensitive loops, exp recomputed per pass (identical bits).
-static __global__ void makepad_ggml_cuda_gqa_decode_pair_out_noshared_f32_kernel(
+static __global__ void makepad_cuda_gqa_decode_pair_out_noshared_f32_kernel(
         const float * __restrict__ dots,
         const float * __restrict__ value0,
         const float * __restrict__ value1,
@@ -5467,7 +5467,7 @@ static __global__ void makepad_ggml_cuda_gqa_decode_pair_out_noshared_f32_kernel
         + static_cast<size_t>(query_head) * head_dim + dim] = accumulator;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_pair_bf16_f32(
+extern "C" cudaError_t makepad_cuda_attention_gqa_decode_pair_bf16_f32(
         const float * query,
         const float * key0,
         const float * value0,
@@ -5487,7 +5487,7 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_pair_bf16_f32(
     }
     const dim3 block(head_dim, 1, 1);
     const dim3 dots_grid(sequence, kv_heads, 2);
-    makepad_ggml_cuda_gqa_decode_pair_dots_f32_kernel<<<dots_grid, block, 0, stream>>>(
+    makepad_cuda_gqa_decode_pair_dots_f32_kernel<<<dots_grid, block, 0, stream>>>(
         query, key0, key1, dots, sequence, query_heads, kv_heads, head_dim);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -5496,10 +5496,10 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_pair_bf16_f32(
     const dim3 out_grid(query_heads, 2, 1);
     const size_t exp_bytes = static_cast<size_t>(sequence) * sizeof(float);
     if (exp_bytes <= 44000) {
-        makepad_ggml_cuda_gqa_decode_pair_out_f32_kernel<<<out_grid, block, exp_bytes, stream>>>(
+        makepad_cuda_gqa_decode_pair_out_f32_kernel<<<out_grid, block, exp_bytes, stream>>>(
             dots, value0, value1, output, sequence, query_heads, kv_heads, head_dim, scale);
     } else {
-        makepad_ggml_cuda_gqa_decode_pair_out_noshared_f32_kernel<<<out_grid, block, 0, stream>>>(
+        makepad_cuda_gqa_decode_pair_out_noshared_f32_kernel<<<out_grid, block, 0, stream>>>(
             dots, value0, value1, output, sequence, query_heads, kv_heads, head_dim, scale);
     }
     return cudaGetLastError();
@@ -5511,7 +5511,7 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_gqa_decode_pair_bf16_f32(
 // maps are planar [channel, y*x].  Keeping both layouts explicit avoids the
 // multi-gigabyte host round trips in the reference implementation.
 
-static __global__ void makepad_ggml_cuda_birefnet_relu_f32_kernel(
+static __global__ void makepad_cuda_birefnet_relu_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         size_t n) {
@@ -5521,7 +5521,7 @@ static __global__ void makepad_ggml_cuda_birefnet_relu_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_relu_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_relu_f32(
         const float * input,
         float * output,
         size_t n,
@@ -5529,11 +5529,11 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_relu_f32(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_birefnet_relu_f32_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    makepad_cuda_birefnet_relu_f32_kernel<<<grid, block, 0, stream>>>(input, output, n);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_birefnet_resize_bilinear_f32_kernel(
+static __global__ void makepad_cuda_birefnet_resize_bilinear_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t in_width,
@@ -5579,7 +5579,7 @@ static __global__ void makepad_ggml_cuda_birefnet_resize_bilinear_f32_kernel(
     output[i] = top * (1.0f - ly) + bottom * ly;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_resize_bilinear_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_resize_bilinear_f32(
         const float * input,
         float * output,
         uint32_t in_width,
@@ -5595,12 +5595,12 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_resize_bilinear_f32(
     const size_t n = static_cast<size_t>(out_width) * out_height * channels;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_birefnet_resize_bilinear_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_birefnet_resize_bilinear_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, in_width, in_height, out_width, out_height, channels, align_corners);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_birefnet_tokens_to_planar_f32_kernel(
+static __global__ void makepad_cuda_birefnet_tokens_to_planar_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t tokens,
@@ -5614,7 +5614,7 @@ static __global__ void makepad_ggml_cuda_birefnet_tokens_to_planar_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_tokens_to_planar_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_tokens_to_planar_f32(
         const float * input,
         float * output,
         uint32_t tokens,
@@ -5624,7 +5624,7 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_tokens_to_planar_f32(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_birefnet_tokens_to_planar_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_birefnet_tokens_to_planar_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, tokens, channels);
     return cudaGetLastError();
 }
@@ -5634,7 +5634,7 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_tokens_to_planar_f32(
 // sub-pixel feature order [channel][ky][kx].  The operation has no overlap
 // for this exact transposed-convolution contract, so it is a pure layout
 // transform plus the per-output-channel bias.
-static __global__ void makepad_ggml_cuda_pixel_shuffle_planar_f32_kernel(
+static __global__ void makepad_cuda_pixel_shuffle_planar_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ bias,
         float * __restrict__ output,
@@ -5662,7 +5662,7 @@ static __global__ void makepad_ggml_cuda_pixel_shuffle_planar_f32_kernel(
         + static_cast<size_t>(iy) * in_width + ix] + bias[channel];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_pixel_shuffle_planar_f32(
+extern "C" cudaError_t makepad_cuda_pixel_shuffle_planar_f32(
         const float * input,
         const float * bias,
         float * output,
@@ -5678,12 +5678,12 @@ extern "C" cudaError_t makepad_ggml_cuda_pixel_shuffle_planar_f32(
         * in_width * scale * in_height * scale;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_pixel_shuffle_planar_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_pixel_shuffle_planar_f32_kernel<<<grid, block, 0, stream>>>(
         input, bias, output, in_width, in_height, out_channels, scale);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_birefnet_image_to_patches_f32_kernel(
+static __global__ void makepad_cuda_birefnet_image_to_patches_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t image_width,
@@ -5711,7 +5711,7 @@ static __global__ void makepad_ggml_cuda_birefnet_image_to_patches_f32_kernel(
         + iw * out_width + x];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_image_to_patches_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_image_to_patches_f32(
         const float * input,
         float * output,
         uint32_t image_width,
@@ -5729,12 +5729,12 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_image_to_patches_f32(
         * out_height * out_width;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_birefnet_image_to_patches_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_birefnet_image_to_patches_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, image_width, image_height, out_width, out_height, channels);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_birefnet_global_avg_pool_f32_kernel(
+static __global__ void makepad_cuda_birefnet_global_avg_pool_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t plane) {
@@ -5743,23 +5743,23 @@ static __global__ void makepad_ggml_cuda_birefnet_global_avg_pool_f32_kernel(
     for (uint32_t p = threadIdx.x; p < plane; p += blockDim.x) {
         sum += input[static_cast<size_t>(channel) * plane + p];
     }
-    sum = makepad_ggml_cuda_diff_block_reduce_sum(sum);
+    sum = makepad_cuda_diff_block_reduce_sum(sum);
     if (threadIdx.x == 0) output[channel] = sum / static_cast<float>(plane);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_global_avg_pool_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_global_avg_pool_f32(
         const float * input,
         float * output,
         uint32_t plane,
         uint32_t channels,
         cudaStream_t stream) {
     if (!plane || !channels) return cudaErrorInvalidValue;
-    makepad_ggml_cuda_birefnet_global_avg_pool_f32_kernel<<<channels, 256, 0, stream>>>(
+    makepad_cuda_birefnet_global_avg_pool_f32_kernel<<<channels, 256, 0, stream>>>(
         input, output, plane);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_birefnet_broadcast_f32_kernel(
+static __global__ void makepad_cuda_birefnet_broadcast_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         uint32_t plane,
@@ -5768,7 +5768,7 @@ static __global__ void makepad_ggml_cuda_birefnet_broadcast_f32_kernel(
     if (i < n) output[i] = input[i / plane];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_broadcast_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_broadcast_f32(
         const float * input,
         float * output,
         uint32_t plane,
@@ -5778,12 +5778,12 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_broadcast_f32(
     if (!n) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_birefnet_broadcast_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_birefnet_broadcast_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, plane, n);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32_kernel(
+static __global__ void makepad_cuda_birefnet_mul_sigmoid_mask_f32_kernel(
         const float * __restrict__ input,
         const float * __restrict__ logits,
         float * __restrict__ output,
@@ -5796,7 +5796,7 @@ static __global__ void makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_mul_sigmoid_mask_f32(
         const float * input,
         const float * logits,
         float * output,
@@ -5807,12 +5807,12 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32(
     if (!n) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_birefnet_mul_sigmoid_mask_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_birefnet_mul_sigmoid_mask_f32_kernel<<<grid, block, 0, stream>>>(
         input, logits, output, plane, n);
     return cudaGetLastError();
 }
 
-__device__ __forceinline__ float makepad_ggml_cuda_birefnet_bilinear(
+__device__ __forceinline__ float makepad_cuda_birefnet_bilinear(
         const float * image, uint32_t height, uint32_t width, float y, float x) {
     if (y <= -1.0f || y >= static_cast<float>(height)
             || x <= -1.0f || x >= static_cast<float>(width)) return 0.0f;
@@ -5835,7 +5835,7 @@ __device__ __forceinline__ float makepad_ggml_cuda_birefnet_bilinear(
 }
 
 // Output is column-major [m_chunk, Cin*K*K], ready for one tensor-core GEMM.
-static __global__ void makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16_kernel(
+static __global__ void makepad_cuda_birefnet_deform_im2col_f32_to_f16_kernel(
         const float * __restrict__ input,
         const float * __restrict__ offset,
         const float * __restrict__ modulator,
@@ -5866,12 +5866,12 @@ static __global__ void makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16_kerne
         + static_cast<int>(ky)) + dy;
     const float sx = static_cast<float>(static_cast<int>(ox) - static_cast<int>(padding)
         + static_cast<int>(kx)) + dx;
-    const float sampled = makepad_ggml_cuda_birefnet_bilinear(
+    const float sampled = makepad_cuda_birefnet_bilinear(
         input + static_cast<size_t>(channel) * plane, height, width, sy, sx);
     output[static_cast<size_t>(col) * m_chunk + row] = __float2half_rn(sampled * mask);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16(
+extern "C" cudaError_t makepad_cuda_birefnet_deform_im2col_f32_to_f16(
         const float * input,
         const float * offset,
         const float * modulator,
@@ -5888,7 +5888,7 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16(
     const uint32_t k_total = channels * kernel * kernel;
     const dim3 block(256, 1, 1);
     const dim3 grid((m_chunk + block.x - 1) / block.x, k_total, 1);
-    makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_birefnet_deform_im2col_f32_to_f16_kernel<<<grid, block, 0, stream>>>(
         input, offset, modulator, reinterpret_cast<__half *>(output), width, height,
         kernel, padding, p0, m_chunk);
     return cudaGetLastError();
@@ -5897,7 +5897,7 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_deform_im2col_f32_to_f16(
 // One warp owns one (window, head, query) row.  Swin-L has head_dim=32 and
 // window_tokens=144, so materializing the O(nW*heads*144^2) score tensor is
 // avoidable and this fused kernel remains comfortably bounded at stage zero.
-static __global__ void makepad_ggml_cuda_birefnet_swin_attention_f32_kernel(
+static __global__ void makepad_cuda_birefnet_swin_attention_f32_kernel(
         const float * __restrict__ q,
         const float * __restrict__ k,
         const float * __restrict__ v,
@@ -5926,7 +5926,7 @@ static __global__ void makepad_ggml_cuda_birefnet_swin_attention_f32_kernel(
         const uint32_t key_row = window * window_tokens + key_pos;
         const size_t k_index = static_cast<size_t>(key_row) * hidden
             + static_cast<size_t>(head) * head_dim + dim;
-        float dot = makepad_ggml_cuda_diff_warp_reduce_sum(q_value * k[k_index]);
+        float dot = makepad_cuda_diff_warp_reduce_sum(q_value * k[k_index]);
         if (dim == 0) {
             float score = dot * scale
                 + relative_bias[(static_cast<size_t>(head) * window_tokens + query_pos)
@@ -5962,7 +5962,7 @@ static __global__ void makepad_ggml_cuda_birefnet_swin_attention_f32_kernel(
     output[q_index] = accumulator;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_birefnet_swin_attention_f32(
+extern "C" cudaError_t makepad_cuda_birefnet_swin_attention_f32(
         const float * q,
         const float * k,
         const float * v,
@@ -5979,7 +5979,7 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_swin_attention_f32(
         return cudaErrorInvalidValue;
     }
     const uint32_t work = windows * heads * window_tokens;
-    makepad_ggml_cuda_birefnet_swin_attention_f32_kernel<<<work, head_dim, 0, stream>>>(
+    makepad_cuda_birefnet_swin_attention_f32_kernel<<<work, head_dim, 0, stream>>>(
         q, k, v, relative_bias, regions, output, heads, window_tokens, head_dim, scale);
     return cudaGetLastError();
 }
@@ -5989,7 +5989,7 @@ extern "C" cudaError_t makepad_ggml_cuda_birefnet_swin_attention_f32(
 // device-resident (sine query embed, axial box-RPB inputs, sigmoid-space box
 // refinement). Math mirrors the former host helpers in sam3_model.rs.
 
-static __global__ void makepad_ggml_cuda_sam3_sine_embed_f32_kernel(
+static __global__ void makepad_cuda_sam3_sine_embed_f32_kernel(
         const float * __restrict__ ref,
         float * __restrict__ out,
         uint32_t queries,
@@ -6010,7 +6010,7 @@ static __global__ void makepad_ggml_cuda_sam3_sine_embed_f32_kernel(
     dest[2u * pair + 1u] = cosf(raw);
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_sam3_sine_embed_f32(
+extern "C" cudaError_t makepad_cuda_sam3_sine_embed_f32(
         const float * ref,
         float * out,
         uint32_t queries,
@@ -6022,17 +6022,17 @@ extern "C" cudaError_t makepad_ggml_cuda_sam3_sine_embed_f32(
     const uint32_t total = queries * 4u * (half / 2u);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_sam3_sine_embed_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_sam3_sine_embed_f32_kernel<<<grid, block, 0, stream>>>(
         ref, out, queries, half);
     return cudaGetLastError();
 }
 
-static __device__ __forceinline__ float makepad_ggml_cuda_sam3_log_scale(float d) {
+static __device__ __forceinline__ float makepad_cuda_sam3_log_scale(float d) {
     return copysignf(1.0f, d * 8.0f) * log2f(fabsf(d) * 8.0f + 1.0f)
         * 0.33333333333333333f;
 }
 
-static __global__ void makepad_ggml_cuda_sam3_rpb_axial_f32_kernel(
+static __global__ void makepad_cuda_sam3_rpb_axial_f32_kernel(
         const float * __restrict__ ref,
         float * __restrict__ dx,
         float * __restrict__ dy,
@@ -6051,18 +6051,18 @@ static __global__ void makepad_ggml_cuda_sam3_rpb_axial_f32_kernel(
     if (r < width) {
         const float xw = (float)r / (float)width;
         float * row = dx + ((size_t)q * width + r) * 2u;
-        row[0] = makepad_ggml_cuda_sam3_log_scale(xw - (cx - 0.5f * bw));
-        row[1] = makepad_ggml_cuda_sam3_log_scale(xw - (cx + 0.5f * bw));
+        row[0] = makepad_cuda_sam3_log_scale(xw - (cx - 0.5f * bw));
+        row[1] = makepad_cuda_sam3_log_scale(xw - (cx + 0.5f * bw));
     } else {
         const uint32_t y = r - width;
         const float yh = (float)y / (float)height;
         float * row = dy + ((size_t)q * height + y) * 2u;
-        row[0] = makepad_ggml_cuda_sam3_log_scale(yh - (cy - 0.5f * bh));
-        row[1] = makepad_ggml_cuda_sam3_log_scale(yh - (cy + 0.5f * bh));
+        row[0] = makepad_cuda_sam3_log_scale(yh - (cy - 0.5f * bh));
+        row[1] = makepad_cuda_sam3_log_scale(yh - (cy + 0.5f * bh));
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_sam3_rpb_axial_f32(
+extern "C" cudaError_t makepad_cuda_sam3_rpb_axial_f32(
         const float * ref,
         float * dx,
         float * dy,
@@ -6076,12 +6076,12 @@ extern "C" cudaError_t makepad_ggml_cuda_sam3_rpb_axial_f32(
     const uint32_t total = queries * (width + height);
     const dim3 block(256, 1, 1);
     const dim3 grid((total + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_sam3_rpb_axial_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_sam3_rpb_axial_f32_kernel<<<grid, block, 0, stream>>>(
         ref, dx, dy, queries, width, height);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_sam3_refine_boxes_f32_kernel(
+static __global__ void makepad_cuda_sam3_refine_boxes_f32_kernel(
         const float * __restrict__ ref,
         const float * __restrict__ delta,
         float * __restrict__ out,
@@ -6095,7 +6095,7 @@ static __global__ void makepad_ggml_cuda_sam3_refine_boxes_f32_kernel(
     out[i] = 1.0f / (1.0f + expf(-z));
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_sam3_refine_boxes_f32(
+extern "C" cudaError_t makepad_cuda_sam3_refine_boxes_f32(
         const float * ref,
         const float * delta,
         float * out,
@@ -6106,7 +6106,7 @@ extern "C" cudaError_t makepad_ggml_cuda_sam3_refine_boxes_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_sam3_refine_boxes_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_sam3_refine_boxes_f32_kernel<<<grid, block, 0, stream>>>(
         ref, delta, out, n);
     return cudaGetLastError();
 }
@@ -6127,7 +6127,7 @@ constexpr int FA64_STAGE = FA64_BC * FA64_LDQ;
 constexpr size_t FA64_SMEM_TOTAL =
     4 * static_cast<size_t>(FA64_STAGE) * sizeof(__half); // K ring x2 + V ring x2
 
-static __device__ __forceinline__ void makepad_ggml_cuda_fa64_tile_async(
+static __device__ __forceinline__ void makepad_cuda_fa64_tile_async(
         const __half * __restrict__ src,
         __half * __restrict__ dst,
         uint32_t row0,
@@ -6143,11 +6143,11 @@ static __device__ __forceinline__ void makepad_ggml_cuda_fa64_tile_async(
     __half * out = dst + r * FA64_LDQ + quarter * 16;
     #pragma unroll
     for (int i = 0; i < 2; i++) {
-        makepad_ggml_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
+        makepad_cuda_fa_cp_async16(out + i * 8, in + i * 8, src_bytes);
     }
 }
 
-static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
+static __global__ void makepad_cuda_flash_attention2_d64_f32_kernel(
         const __half * __restrict__ q,
         const __half * __restrict__ k,
         const __half * __restrict__ v,
@@ -6172,10 +6172,10 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
     const int lane_quad = lane & 3;
 
     // Prologue: stage Q through the K ring, then park it in registers.
-    makepad_ggml_cuda_fa64_tile_async(q, k_ring, q0, seq, hidden, col0);
-    makepad_ggml_cuda_fa64_tile_async(q, k_ring + FA64_STAGE, q0 + FA64_BC, seq, hidden, col0);
-    makepad_ggml_cuda_fa_cp_commit();
-    makepad_ggml_cuda_fa_cp_wait<0>();
+    makepad_cuda_fa64_tile_async(q, k_ring, q0, seq, hidden, col0);
+    makepad_cuda_fa64_tile_async(q, k_ring + FA64_STAGE, q0 + FA64_BC, seq, hidden, col0);
+    makepad_cuda_fa_cp_commit();
+    makepad_cuda_fa_cp_wait<0>();
     __syncthreads();
 
     uint32_t q_frag[4][4]; // 16 x 64 as 4 k-chunks of m16k16
@@ -6186,7 +6186,7 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
         #pragma unroll
         for (int kk = 0; kk < 4; kk++) {
             const __half * addr = q_sh + (lane & 15) * FA64_LDQ + kk * 16 + (lane >> 4) * 8;
-            makepad_ggml_cuda_fa2_ldmatrix_x4(q_frag[kk], addr);
+            makepad_cuda_fa2_ldmatrix_x4(q_frag[kk], addr);
         }
     }
     __syncthreads();
@@ -6203,22 +6203,22 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
     float l_lo = 0.0f, l_hi = 0.0f;
 
     const uint32_t tiles = (kv_len + FA64_BC - 1) / FA64_BC;
-    makepad_ggml_cuda_fa64_tile_async(k, k_ring, 0, kv_len, hidden, col0);
-    makepad_ggml_cuda_fa64_tile_async(v, v_ring, 0, kv_len, hidden, col0);
-    makepad_ggml_cuda_fa_cp_commit();
+    makepad_cuda_fa64_tile_async(k, k_ring, 0, kv_len, hidden, col0);
+    makepad_cuda_fa64_tile_async(v, v_ring, 0, kv_len, hidden, col0);
+    makepad_cuda_fa_cp_commit();
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
         const uint32_t k0 = tile * FA64_BC;
         const int stage = tile & 1;
         if (tile + 1 < tiles) {
-            makepad_ggml_cuda_fa64_tile_async(
+            makepad_cuda_fa64_tile_async(
                 k, k_ring + (stage ^ 1) * FA64_STAGE, k0 + FA64_BC, kv_len, hidden, col0);
-            makepad_ggml_cuda_fa64_tile_async(
+            makepad_cuda_fa64_tile_async(
                 v, v_ring + (stage ^ 1) * FA64_STAGE, k0 + FA64_BC, kv_len, hidden, col0);
-            makepad_ggml_cuda_fa_cp_commit();
-            makepad_ggml_cuda_fa_cp_wait<1>();
+            makepad_cuda_fa_cp_commit();
+            makepad_cuda_fa_cp_wait<1>();
         } else {
-            makepad_ggml_cuda_fa_cp_wait<0>();
+            makepad_cuda_fa_cp_wait<0>();
         }
         __syncthreads();
 
@@ -6242,9 +6242,9 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
                     + (8 * (j + (sel >> 1)) + (lane & 7)) * FA64_LDQ
                     + kk * 16 + (sel & 1) * 8;
                 uint32_t b[4];
-                makepad_ggml_cuda_fa2_ldmatrix_x4(b, addr);
-                makepad_ggml_cuda_fa2_mma(s[j], q_frag[kk], b[0], b[1]);
-                makepad_ggml_cuda_fa2_mma(s[j + 1], q_frag[kk], b[2], b[3]);
+                makepad_cuda_fa2_ldmatrix_x4(b, addr);
+                makepad_cuda_fa2_mma(s[j], q_frag[kk], b[0], b[1]);
+                makepad_cuda_fa2_mma(s[j + 1], q_frag[kk], b[2], b[3]);
             }
         }
 
@@ -6284,10 +6284,10 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
             const float p13 = expf(s[j0 + 1][3] - m_new_hi);
             sum_lo += p00 + p01 + p10 + p11;
             sum_hi += p02 + p03 + p12 + p13;
-            p_frag[kk2][0] = makepad_ggml_cuda_fa2_pack(p00, p01);
-            p_frag[kk2][1] = makepad_ggml_cuda_fa2_pack(p02, p03);
-            p_frag[kk2][2] = makepad_ggml_cuda_fa2_pack(p10, p11);
-            p_frag[kk2][3] = makepad_ggml_cuda_fa2_pack(p12, p13);
+            p_frag[kk2][0] = makepad_cuda_fa2_pack(p00, p01);
+            p_frag[kk2][1] = makepad_cuda_fa2_pack(p02, p03);
+            p_frag[kk2][2] = makepad_cuda_fa2_pack(p10, p11);
+            p_frag[kk2][3] = makepad_cuda_fa2_pack(p12, p13);
         }
         sum_lo += __shfl_xor_sync(0xffffffffu, sum_lo, 1);
         sum_lo += __shfl_xor_sync(0xffffffffu, sum_lo, 2);
@@ -6314,9 +6314,9 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
                     + (16 * kk2 + 8 * (sel & 1) + (lane & 7)) * FA64_LDQ
                     + 8 * (jj + (sel >> 1));
                 uint32_t b[4];
-                makepad_ggml_cuda_fa2_ldmatrix_x4_trans(b, addr);
-                makepad_ggml_cuda_fa2_mma(o_acc[jj], p_frag[kk2], b[0], b[1]);
-                makepad_ggml_cuda_fa2_mma(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
+                makepad_cuda_fa2_ldmatrix_x4_trans(b, addr);
+                makepad_cuda_fa2_mma(o_acc[jj], p_frag[kk2], b[0], b[1]);
+                makepad_cuda_fa2_mma(o_acc[jj + 1], p_frag[kk2], b[2], b[3]);
             }
         }
         __syncthreads();
@@ -6348,7 +6348,7 @@ static __global__ void makepad_ggml_cuda_flash_attention2_d64_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_d64_f32(
+extern "C" cudaError_t makepad_cuda_flash_attention2_d64_f32(
         const uint16_t * q,
         const uint16_t * k,
         const uint16_t * v,
@@ -6370,7 +6370,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_d64_f32(
     }
     const dim3 block(FA64_THREADS, 1, 1);
     const dim3 grid((seq + FA64_BR - 1) / FA64_BR, head_count, 1);
-    makepad_ggml_cuda_flash_attention2_d64_f32_kernel
+    makepad_cuda_flash_attention2_d64_f32_kernel
         <<<grid, block, FA64_SMEM_TOTAL, stream>>>(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
@@ -6383,7 +6383,7 @@ extern "C" cudaError_t makepad_ggml_cuda_flash_attention2_d64_f32(
 // (batch 1), the same decoder layout as the BiRefNet block above.  Both ops
 // are pure elementwise passes; convolutions ride the shared conv2d paths.
 
-static __global__ void makepad_ggml_cuda_realesrgan_lrelu_f32_kernel(
+static __global__ void makepad_cuda_realesrgan_lrelu_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
         size_t n,
@@ -6395,7 +6395,7 @@ static __global__ void makepad_ggml_cuda_realesrgan_lrelu_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_realesrgan_lrelu_f32(
+extern "C" cudaError_t makepad_cuda_realesrgan_lrelu_f32(
         const float * input,
         float * output,
         size_t n,
@@ -6404,12 +6404,12 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_lrelu_f32(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_realesrgan_lrelu_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_realesrgan_lrelu_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, n, slope);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_realesrgan_scale_add_f32_kernel(
+static __global__ void makepad_cuda_realesrgan_scale_add_f32_kernel(
         const float * __restrict__ base,
         const float * __restrict__ delta,
         float * __restrict__ output,
@@ -6421,7 +6421,7 @@ static __global__ void makepad_ggml_cuda_realesrgan_scale_add_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_realesrgan_scale_add_f32(
+extern "C" cudaError_t makepad_cuda_realesrgan_scale_add_f32(
         const float * base,
         const float * delta,
         float * output,
@@ -6431,7 +6431,7 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_scale_add_f32(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_realesrgan_scale_add_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_realesrgan_scale_add_f32_kernel<<<grid, block, 0, stream>>>(
         base, delta, output, n, scale);
     return cudaGetLastError();
 }
@@ -6440,7 +6440,7 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_scale_add_f32(
 // planar f16 buffer; cuDNN convs write raw (biasless) rows into it and these
 // epilogues fold bias, LeakyReLU, and the 0.2-scaled residuals in place.
 
-static __global__ void makepad_ggml_cuda_realesrgan_bias_lrelu_f16_kernel(
+static __global__ void makepad_cuda_realesrgan_bias_lrelu_f16_kernel(
         __half * __restrict__ data,
         const float * __restrict__ bias,
         size_t plane,
@@ -6453,7 +6453,7 @@ static __global__ void makepad_ggml_cuda_realesrgan_bias_lrelu_f16_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_realesrgan_bias_lrelu_f16(
+extern "C" cudaError_t makepad_cuda_realesrgan_bias_lrelu_f16(
         __half * data,
         const float * bias,
         size_t plane,
@@ -6463,7 +6463,7 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_bias_lrelu_f16(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_realesrgan_bias_lrelu_f16_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_realesrgan_bias_lrelu_f16_kernel<<<grid, block, 0, stream>>>(
         data, bias, plane, n, slope);
     return cudaGetLastError();
 }
@@ -6473,7 +6473,7 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_bias_lrelu_f16(
 // into the f16 working buffer (the conv-input view).  Keeping the RRDB/trunk
 // accumulation chain in f32 stops spine rounding from compounding across the
 // 23 blocks.
-static __global__ void makepad_ggml_cuda_realesrgan_spine_axpb_kernel(
+static __global__ void makepad_cuda_realesrgan_spine_axpb_kernel(
         const float * __restrict__ base,
         const float * __restrict__ delta32,
         const __half * __restrict__ delta16,
@@ -6497,7 +6497,7 @@ static __global__ void makepad_ggml_cuda_realesrgan_spine_axpb_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_realesrgan_spine_axpb(
+extern "C" cudaError_t makepad_cuda_realesrgan_spine_axpb(
         const float * base,
         const float * delta32,
         const __half * delta16,
@@ -6511,13 +6511,13 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_spine_axpb(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_realesrgan_spine_axpb_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_realesrgan_spine_axpb_kernel<<<grid, block, 0, stream>>>(
         base, delta32, delta16, bias, dst32, dst16, plane, n, scale);
     return cudaGetLastError();
 }
 
 // f32 twin of the bias+LeakyReLU epilogue for the true-f32 head convs.
-static __global__ void makepad_ggml_cuda_realesrgan_bias_lrelu_f32_kernel(
+static __global__ void makepad_cuda_realesrgan_bias_lrelu_f32_kernel(
         float * __restrict__ data,
         const float * __restrict__ bias,
         size_t plane,
@@ -6530,7 +6530,7 @@ static __global__ void makepad_ggml_cuda_realesrgan_bias_lrelu_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_realesrgan_bias_lrelu_f32(
+extern "C" cudaError_t makepad_cuda_realesrgan_bias_lrelu_f32(
         float * data,
         const float * bias,
         size_t plane,
@@ -6540,12 +6540,12 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_bias_lrelu_f32(
     if (n == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_realesrgan_bias_lrelu_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_realesrgan_bias_lrelu_f32_kernel<<<grid, block, 0, stream>>>(
         data, bias, plane, n, slope);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_realesrgan_quantize_rgb8_f32_kernel(
+static __global__ void makepad_cuda_realesrgan_quantize_rgb8_f32_kernel(
         const float * __restrict__ input,
         unsigned char * __restrict__ output,
         size_t plane) {
@@ -6560,7 +6560,7 @@ static __global__ void makepad_ggml_cuda_realesrgan_quantize_rgb8_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_realesrgan_quantize_rgb8_f32(
+extern "C" cudaError_t makepad_cuda_realesrgan_quantize_rgb8_f32(
         const float * input,
         unsigned char * output,
         size_t plane,
@@ -6568,7 +6568,7 @@ extern "C" cudaError_t makepad_ggml_cuda_realesrgan_quantize_rgb8_f32(
     if (plane == 0) return cudaSuccess;
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((plane + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_realesrgan_quantize_rgb8_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_realesrgan_quantize_rgb8_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, plane);
     return cudaGetLastError();
 }

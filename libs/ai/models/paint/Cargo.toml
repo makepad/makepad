@@ -11,10 +11,10 @@ license = "MIT OR Apache-2.0"
 default = []
 # Validation taps for the first experimental CUDA graph section. This is not a
 # complete Hunyuan executor and deliberately does not register a model backend.
-cuda-taps = ["dep:makepad-ggml"]
+cuda-taps = ["dep:makepad-ai-common"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-makepad-ggml = { path = "../../../ggml", optional = true }
+makepad-ai-common = { path = "../common", optional = true }
 
 [[bin]]
 name = "pbr-cuda-taps"

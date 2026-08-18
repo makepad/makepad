@@ -1227,7 +1227,7 @@ mod combined_fp8_tests {
         // Rank-1 F8 promotes to exact F32 on load (anchor bytes 448/-448).
         let single_scale = weights.tensor_id("single_blocks.0.norm.key_norm.scale").unwrap();
         let tensor = weights.ctx.tensor(single_scale).unwrap();
-        assert_eq!(tensor.desc.ty, makepad_ggml::TensorType::F32);
+        assert_eq!(tensor.desc.ty, makepad_ai_common::TensorType::F32);
         let bytes = weights.ctx.tensor_data(single_scale).unwrap();
         let values: Vec<f32> = bytes
             .chunks_exact(4)
@@ -1237,7 +1237,7 @@ mod combined_fp8_tests {
         // Rank-2 F8 stays raw 1-byte resident.
         let txt_in = weights.tensor_id("txt_in.weight").unwrap();
         let tensor = weights.ctx.tensor(txt_in).unwrap();
-        assert_eq!(tensor.desc.ty, makepad_ggml::TensorType::F8E4M3);
+        assert_eq!(tensor.desc.ty, makepad_ai_common::TensorType::F8E4M3);
         assert_eq!(weights.ctx.tensor_data(txt_in).unwrap(), &[0x38u8; 32][..]);
 
         let _ = std::fs::remove_file(path);

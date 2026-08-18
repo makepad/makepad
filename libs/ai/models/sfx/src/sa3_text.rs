@@ -259,7 +259,7 @@ pub fn apply_learned_padding(hidden: &mut [f32], mask: &[bool], padding_embeddin
 // ---------------------------------------------------------------------------
 
 use crate::sa3::{dev_err, F16Weight};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed_softcap, gpu_download, gpu_geglu_tanh_value_gate,
     gpu_linear_nt_cached, gpu_rms_norm_mul, gpu_rope_half, gpu_upload,
 };

@@ -17,7 +17,7 @@ static __device__ __forceinline__ float bf16_round_f32(const float value) {
 }
 
 template <typename T>
-static __device__ __forceinline__ T makepad_ggml_cuda_warp_reduce_sum(T value) {
+static __device__ __forceinline__ T makepad_cuda_warp_reduce_sum(T value) {
     for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
         value += __shfl_down_sync(0xffffffffu, value, offset);
     }
@@ -25,24 +25,24 @@ static __device__ __forceinline__ T makepad_ggml_cuda_warp_reduce_sum(T value) {
 }
 
 template <typename T>
-static __device__ __forceinline__ T makepad_ggml_cuda_block_reduce_sum(T value) {
+static __device__ __forceinline__ T makepad_cuda_block_reduce_sum(T value) {
     __shared__ T shared[32];
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
-    value = makepad_ggml_cuda_warp_reduce_sum(value);
+    value = makepad_cuda_warp_reduce_sum(value);
     if (lane == 0) {
         shared[warp] = value;
     }
     __syncthreads();
     value = threadIdx.x < (blockDim.x + 31) / 32 ? shared[lane] : T(0);
     if (warp == 0) {
-        value = makepad_ggml_cuda_warp_reduce_sum(value);
+        value = makepad_cuda_warp_reduce_sum(value);
     }
     return value;
 }
 
 template <int MAX_SLOTS>
-static __device__ __forceinline__ void makepad_ggml_cuda_block_reduce_sum_slots(
+static __device__ __forceinline__ void makepad_cuda_block_reduce_sum_slots(
     float (&values)[MAX_SLOTS]
 ) {
     __shared__ float shared[MAX_SLOTS * 32];
@@ -52,7 +52,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_block_reduce_sum_slots(
 
     #pragma unroll
     for (int slot = 0; slot < MAX_SLOTS; ++slot) {
-        values[slot] = makepad_ggml_cuda_warp_reduce_sum(values[slot]);
+        values[slot] = makepad_cuda_warp_reduce_sum(values[slot]);
         if (lane == 0) {
             shared[slot * 32 + warp] = values[slot];
         }
@@ -63,12 +63,12 @@ static __device__ __forceinline__ void makepad_ggml_cuda_block_reduce_sum_slots(
         #pragma unroll
         for (int slot = 0; slot < MAX_SLOTS; ++slot) {
             values[slot] = lane < warp_count ? shared[slot * 32 + lane] : 0.0f;
-            values[slot] = makepad_ggml_cuda_warp_reduce_sum(values[slot]);
+            values[slot] = makepad_cuda_warp_reduce_sum(values[slot]);
         }
     }
 }
 
-static __device__ __forceinline__ int makepad_ggml_cuda_dp4a_i8(
+static __device__ __forceinline__ int makepad_cuda_dp4a_i8(
     const int a,
     const int b,
     const int c
@@ -86,15 +86,15 @@ static __device__ __forceinline__ int makepad_ggml_cuda_dp4a_i8(
 #endif
 }
 
-static __device__ __forceinline__ int makepad_ggml_cuda_center_q8_bytes(const uint32_t packed) {
+static __device__ __forceinline__ int makepad_cuda_center_q8_bytes(const uint32_t packed) {
     return static_cast<int>(packed ^ 0x80808080u);
 }
 
-static __device__ __forceinline__ int makepad_ggml_cuda_center_q4_bytes(const uint32_t packed) {
+static __device__ __forceinline__ int makepad_cuda_center_q4_bytes(const uint32_t packed) {
     return static_cast<int>(__vsub4(packed, 0x08080808u));
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_affine_accum_q4_word(
+static __device__ __forceinline__ void makepad_cuda_affine_accum_q4_word(
     const uint32_t packed,
     const float2 x01,
     const float2 x23,
@@ -121,7 +121,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_affine_accum_q4_word(
     group_accum = __fadd_rn(group_accum, __fmul_rn(x67.y, q7));
 }
 
-static __device__ __forceinline__ void makepad_ggml_cuda_affine_accum_q8_word(
+static __device__ __forceinline__ void makepad_cuda_affine_accum_q8_word(
     const uint32_t packed,
     const float2 x01,
     const float2 x23,
@@ -143,7 +143,7 @@ static __device__ __forceinline__ void makepad_ggml_cuda_affine_accum_q8_word(
     group_accum = __fadd_rn(group_accum, __fmul_rn(x23.y, q3));
 }
 
-static inline uint32_t makepad_ggml_cuda_affine_block_size(const uint32_t qparams_per_row) {
+static inline uint32_t makepad_cuda_affine_block_size(const uint32_t qparams_per_row) {
     if (qparams_per_row <= 32) {
         return 32;
     }
@@ -154,7 +154,7 @@ static inline uint32_t makepad_ggml_cuda_affine_block_size(const uint32_t qparam
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_qmv_kernel(
+static __global__ void makepad_cuda_affine_qmv_kernel(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -218,7 +218,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_kernel(
         const float biased = bf16_round_f32(__fmul_rn(bias, group_sum));
         thread_total = __fadd_rn(thread_total, __fadd_rn(scaled, biased));
     }
-    thread_total = makepad_ggml_cuda_block_reduce_sum(thread_total);
+    thread_total = makepad_cuda_block_reduce_sum(thread_total);
 
     if (tid == 0) {
         const float rounded = bf16_round_f32(thread_total);
@@ -227,7 +227,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_kernel(
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_kernel(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -291,7 +291,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_kernel(
         const float biased = bf16_round_f32(__fmul_rn(bias, group_sum));
         thread_total = __fadd_rn(thread_total, __fadd_rn(scaled, biased));
     }
-    thread_total = makepad_ggml_cuda_block_reduce_sum(thread_total);
+    thread_total = makepad_cuda_block_reduce_sum(thread_total);
 
     if (tid == 0) {
         output_f32[row] = bf16_round_f32(thread_total);
@@ -299,7 +299,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_kernel(
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_precise_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const uint32_t * __restrict__ packed_weights_u32,
     const uint16_t * __restrict__ scales_bf16_words,
@@ -356,14 +356,14 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_precise_kernel(
                     const float2 x67 = __bfloat1622float2(
                         *reinterpret_cast<const __nv_bfloat162 *>(input_bf16_words + x_index + 6)
                     );
-                    makepad_ggml_cuda_affine_accum_q8_word(
+                    makepad_cuda_affine_accum_q8_word(
                         packed0,
                         x01,
                         x23,
                         group_sum,
                         group_accum
                     );
-                    makepad_ggml_cuda_affine_accum_q8_word(
+                    makepad_cuda_affine_accum_q8_word(
                         packed1,
                         x45,
                         x67,
@@ -382,7 +382,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_precise_kernel(
                         const float2 x23 = __bfloat1622float2(
                             *reinterpret_cast<const __nv_bfloat162 *>(input_bf16_words + x_index + 2)
                         );
-                        makepad_ggml_cuda_affine_accum_q8_word(
+                        makepad_cuda_affine_accum_q8_word(
                             packed,
                             x01,
                             x23,
@@ -434,7 +434,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_precise_kernel(
                     group_sum = __fadd_rn(group_sum, x45.y);
                     group_sum = __fadd_rn(group_sum, x67.x);
                     group_sum = __fadd_rn(group_sum, x67.y);
-                    makepad_ggml_cuda_affine_accum_q4_word(
+                    makepad_cuda_affine_accum_q4_word(
                         packed,
                         x01,
                         x23,
@@ -469,7 +469,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_precise_kernel(
             __fadd_rn(__fmul_rn(scale, group_accum), __fmul_rn(bias, group_sum))
         );
     }
-    thread_total = makepad_ggml_cuda_block_reduce_sum(thread_total);
+    thread_total = makepad_cuda_block_reduce_sum(thread_total);
 
     if (tid == 0) {
         output_f32[row] = thread_total;
@@ -477,7 +477,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_precise_kernel(
 }
 
 template <int BITS, int ROW_TILE>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_rows_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const uint32_t * __restrict__ packed_weights_u32,
     const uint16_t * __restrict__ scales_bf16_words,
@@ -551,14 +551,14 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel(
                         const float2 x67 = __bfloat1622float2(
                             *reinterpret_cast<const __nv_bfloat162 *>(batch_input + x_index + 6)
                         );
-                        makepad_ggml_cuda_affine_accum_q8_word(
+                        makepad_cuda_affine_accum_q8_word(
                             packed0,
                             x01,
                             x23,
                             group_sum[slot],
                             group_accum[slot]
                         );
-                        makepad_ggml_cuda_affine_accum_q8_word(
+                        makepad_cuda_affine_accum_q8_word(
                             packed1,
                             x45,
                             x67,
@@ -585,7 +585,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel(
                             const float2 x23 = __bfloat1622float2(
                                 *reinterpret_cast<const __nv_bfloat162 *>(batch_input + x_index + 2)
                             );
-                            makepad_ggml_cuda_affine_accum_q8_word(
+                            makepad_cuda_affine_accum_q8_word(
                                 packed,
                                 x01,
                                 x23,
@@ -653,7 +653,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel(
                         group_sum[slot] = __fadd_rn(group_sum[slot], x45.y);
                         group_sum[slot] = __fadd_rn(group_sum[slot], x67.x);
                         group_sum[slot] = __fadd_rn(group_sum[slot], x67.y);
-                        makepad_ggml_cuda_affine_accum_q4_word(
+                        makepad_cuda_affine_accum_q4_word(
                             packed,
                             x01,
                             x23,
@@ -703,7 +703,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel(
             );
         }
     }
-    makepad_ggml_cuda_block_reduce_sum_slots<ROW_TILE>(thread_total);
+    makepad_cuda_block_reduce_sum_slots<ROW_TILE>(thread_total);
 
     if (tid == 0) {
         #pragma unroll
@@ -717,7 +717,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel(
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_q8_1_qmv_f32_precise_kernel(
+static __global__ void makepad_cuda_affine_q8_1_qmv_f32_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const block_q8_1 * __restrict__ input_q8_1,
     const uint32_t * __restrict__ packed_weights_u32,
@@ -777,10 +777,10 @@ static __global__ void makepad_ggml_cuda_affine_q8_1_qmv_f32_precise_kernel(
                 int dot = 0;
                 #pragma unroll
                 for (uint32_t word = 0; word < q8_words_per_block; ++word) {
-                    const int centered = makepad_ggml_cuda_center_q8_bytes(
+                    const int centered = makepad_cuda_center_q8_bytes(
                         packed_weights_u32[group_start + q8_block * q8_words_per_block + word]
                     );
-                    dot = makepad_ggml_cuda_dp4a_i8(centered, input_words[word], dot);
+                    dot = makepad_cuda_dp4a_i8(centered, input_words[word], dot);
                 }
                 group_accum = __fadd_rn(group_accum, __fmul_rn(input_scale, static_cast<float>(dot)));
             }
@@ -797,11 +797,11 @@ static __global__ void makepad_ggml_cuda_affine_q8_1_qmv_f32_precise_kernel(
                 for (uint32_t word = 0; word < q4_words_per_block; ++word) {
                     const uint32_t packed =
                         packed_weights_u32[group_start + q8_block * q4_words_per_block + word];
-                    const int low = makepad_ggml_cuda_center_q4_bytes(packed & 0x0F0F0F0Fu);
+                    const int low = makepad_cuda_center_q4_bytes(packed & 0x0F0F0F0Fu);
                     const int high =
-                        makepad_ggml_cuda_center_q4_bytes((packed >> 4) & 0x0F0F0F0Fu);
-                    dot = makepad_ggml_cuda_dp4a_i8(low, input_words[word * 2 + 0], dot);
-                    dot = makepad_ggml_cuda_dp4a_i8(high, input_words[word * 2 + 1], dot);
+                        makepad_cuda_center_q4_bytes((packed >> 4) & 0x0F0F0F0Fu);
+                    dot = makepad_cuda_dp4a_i8(low, input_words[word * 2 + 0], dot);
+                    dot = makepad_cuda_dp4a_i8(high, input_words[word * 2 + 1], dot);
                 }
                 group_accum = __fadd_rn(group_accum, __fmul_rn(input_scale, static_cast<float>(dot)));
             }
@@ -816,14 +816,14 @@ static __global__ void makepad_ggml_cuda_affine_q8_1_qmv_f32_precise_kernel(
         );
     }
 
-    thread_total = makepad_ggml_cuda_block_reduce_sum(thread_total);
+    thread_total = makepad_cuda_block_reduce_sum(thread_total);
     if (tid == 0) {
         output_f32[row] = thread_total;
     }
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_select_plane_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const uint32_t * __restrict__ packed_weights_u32,
     const uint16_t * __restrict__ scales_bf16_words,
@@ -902,7 +902,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_ker
                     group_sum = __fadd_rn(group_sum, x45.y);
                     group_sum = __fadd_rn(group_sum, x67.x);
                     group_sum = __fadd_rn(group_sum, x67.y);
-                    makepad_ggml_cuda_affine_accum_q4_word(
+                    makepad_cuda_affine_accum_q4_word(
                         packed,
                         x01,
                         x23,
@@ -955,7 +955,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_ker
         );
     }
 
-    thread_total = makepad_ggml_cuda_block_reduce_sum(thread_total);
+    thread_total = makepad_cuda_block_reduce_sum(thread_total);
 
     if (tid == 0) {
         output_f32[row] = thread_total;
@@ -963,7 +963,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_ker
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_select_plane_rows_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const uint32_t * __restrict__ packed_weights_u32,
     const uint16_t * __restrict__ scales_bf16_words,
@@ -1038,14 +1038,14 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
                     const float2 x67 = __bfloat1622float2(
                         *reinterpret_cast<const __nv_bfloat162 *>(batch_input + x_index + 6)
                     );
-                    makepad_ggml_cuda_affine_accum_q8_word(
+                    makepad_cuda_affine_accum_q8_word(
                         packed0,
                         x01,
                         x23,
                         group_sum,
                         group_accum
                     );
-                    makepad_ggml_cuda_affine_accum_q8_word(
+                    makepad_cuda_affine_accum_q8_word(
                         packed1,
                         x45,
                         x67,
@@ -1064,7 +1064,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
                         const float2 x23 = __bfloat1622float2(
                             *reinterpret_cast<const __nv_bfloat162 *>(batch_input + x_index + 2)
                         );
-                        makepad_ggml_cuda_affine_accum_q8_word(
+                        makepad_cuda_affine_accum_q8_word(
                             packed,
                             x01,
                             x23,
@@ -1117,7 +1117,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
                     group_sum = __fadd_rn(group_sum, x45.y);
                     group_sum = __fadd_rn(group_sum, x67.x);
                     group_sum = __fadd_rn(group_sum, x67.y);
-                    makepad_ggml_cuda_affine_accum_q4_word(
+                    makepad_cuda_affine_accum_q4_word(
                         packed,
                         x01,
                         x23,
@@ -1156,7 +1156,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
         );
     }
 
-    thread_total = makepad_ggml_cuda_block_reduce_sum(thread_total);
+    thread_total = makepad_cuda_block_reduce_sum(thread_total);
 
     if (tid == 0) {
         output_f32[batch * out_rows + row] = thread_total;
@@ -1164,7 +1164,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
 }
 
 template <int BITS, int MAX_SLOTS, int FIXED_SELECTED_COUNT = 0, bool KNOWN_VALID = false>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_select_planes_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const uint32_t * __restrict__ packed_weights_u32,
     const uint16_t * __restrict__ scales_bf16_words,
@@ -1285,7 +1285,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_ke
                     #pragma unroll
                     for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
                         if (slot_active[slot]) {
-                            makepad_ggml_cuda_affine_accum_q4_word(
+                            makepad_cuda_affine_accum_q4_word(
                                 packed[slot],
                                 x01,
                                 x23,
@@ -1364,7 +1364,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_ke
         }
     }
 
-    makepad_ggml_cuda_block_reduce_sum_slots(thread_total);
+    makepad_cuda_block_reduce_sum_slots(thread_total);
 
     if (tid == 0) {
         #pragma unroll
@@ -1379,7 +1379,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_ke
 }
 
 template <int BITS, int MAX_SLOTS, int FIXED_SELECTED_COUNT = 0, bool KNOWN_VALID = false>
-static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel(
+static __global__ void makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel(
     const uint16_t * __restrict__ input_bf16_words,
     const uint32_t input_words_per_slot,
     const uint32_t * __restrict__ packed_weights_u32,
@@ -1505,7 +1505,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
                             group_sum[slot] = __fadd_rn(group_sum[slot], x45.y);
                             group_sum[slot] = __fadd_rn(group_sum[slot], x67.x);
                             group_sum[slot] = __fadd_rn(group_sum[slot], x67.y);
-                            makepad_ggml_cuda_affine_accum_q4_word(
+                            makepad_cuda_affine_accum_q4_word(
                                 packed[slot],
                                 x01,
                                 x23,
@@ -1579,7 +1579,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
         }
     }
 
-    makepad_ggml_cuda_block_reduce_sum_slots(thread_total);
+    makepad_cuda_block_reduce_sum_slots(thread_total);
 
     if (tid == 0) {
         #pragma unroll
@@ -1593,7 +1593,7 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_bf16(
+extern "C" cudaError_t makepad_cuda_affine_qmv_bf16(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -1606,12 +1606,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_bf16(
     uint32_t bits,
     cudaStream_t stream
 ) {
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_kernel<4><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1624,7 +1624,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_bf16(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_kernel<8><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1643,7 +1643,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_bf16(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -1656,12 +1656,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32(
     uint32_t bits,
     cudaStream_t stream
 ) {
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_kernel<4><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1674,7 +1674,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_kernel<8><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1693,7 +1693,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_precise(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -1706,12 +1706,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_precise(
     uint32_t bits,
     cudaStream_t stream
 ) {
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_precise_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_precise_kernel<4><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1724,7 +1724,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_precise(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_precise_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_precise_kernel<8><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1743,7 +1743,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_precise(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_q8_1_qmv_f32_precise(
+extern "C" cudaError_t makepad_cuda_affine_q8_1_qmv_f32_precise(
     const uint16_t * input_bf16_words,
     const uint8_t * input_q8_1_bytes,
     const uint32_t * packed_weights_u32,
@@ -1761,12 +1761,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_q8_1_qmv_f32_precise(
         return cudaErrorInvalidValue;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_q8_1_qmv_f32_precise_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_q8_1_qmv_f32_precise_kernel<4><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 reinterpret_cast<const block_q8_1 *>(input_q8_1_bytes),
                 packed_weights_u32,
@@ -1779,7 +1779,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_q8_1_qmv_f32_precise(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_q8_1_qmv_f32_precise_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_q8_1_qmv_f32_precise_kernel<8><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 reinterpret_cast<const block_q8_1 *>(input_q8_1_bytes),
                 packed_weights_u32,
@@ -1798,7 +1798,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_q8_1_qmv_f32_precise(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_rows_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_rows_precise(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -1817,12 +1817,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_rows_precise(
     }
 
     constexpr uint32_t row_tile = 8;
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, (input_rows + row_tile - 1) / row_tile, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel<4, row_tile><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_rows_precise_kernel<4, row_tile><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1836,7 +1836,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_rows_precise(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_rows_precise_kernel<8, row_tile><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_rows_precise_kernel<8, row_tile><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1855,7 +1855,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_rows_precise(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_select_plane_precise(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -1877,12 +1877,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
         return cudaSuccess;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_plane_precise_kernel<4><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1900,7 +1900,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_plane_precise_kernel<8><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1924,7 +1924,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_select_plane_rows_precise(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -1948,12 +1948,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
         return cudaSuccess;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, input_rows, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_plane_rows_precise_kernel<4><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1973,7 +1973,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precise_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_plane_rows_precise_kernel<8><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -1999,7 +1999,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_rows_precis
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_select_planes_precise(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -2024,13 +2024,13 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
         return cudaErrorInvalidValue;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
             if (selected_count <= 4) {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 4, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 4, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     packed_weights_u32,
                     scales_bf16_words,
@@ -2047,7 +2047,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
                     plane_count
                 );
             } else {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 8, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 8, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     packed_weights_u32,
                     scales_bf16_words,
@@ -2067,7 +2067,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
             break;
         case 8:
             if (selected_count <= 4) {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 4, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 4, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     packed_weights_u32,
                     scales_bf16_words,
@@ -2084,7 +2084,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
                     plane_count
                 );
             } else {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 8, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 8, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     packed_weights_u32,
                     scales_bf16_words,
@@ -2109,7 +2109,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_fixed8_known_valid_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_select_planes_fixed8_known_valid_precise(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
@@ -2129,12 +2129,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_fixed8_kno
         return cudaSuccess;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 8, 8, true><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 8, 8, true><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -2152,7 +2152,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_fixed8_kno
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 8, 8, true><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 8, 8, true><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 packed_weights_u32,
                 scales_bf16_words,
@@ -2176,7 +2176,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_fixed8_kno
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
     const uint16_t * input_bf16_words,
     uint32_t input_words_per_slot,
     const uint32_t * packed_weights_u32,
@@ -2202,13 +2202,13 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
         return cudaErrorInvalidValue;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
             if (selected_count <= 4) {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 4, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 4, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     input_words_per_slot,
                     packed_weights_u32,
@@ -2226,7 +2226,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
                     plane_count
                 );
             } else {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 8, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 8, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     input_words_per_slot,
                     packed_weights_u32,
@@ -2247,7 +2247,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
             break;
         case 8:
             if (selected_count <= 4) {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 4, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 4, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     input_words_per_slot,
                     packed_weights_u32,
@@ -2265,7 +2265,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
                     plane_count
                 );
             } else {
-                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 8, 0, false><<<grid, block, 0, stream>>>(
+                makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 8, 0, false><<<grid, block, 0, stream>>>(
                     input_bf16_words,
                     input_words_per_slot,
                     packed_weights_u32,
@@ -2291,7 +2291,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_fixed8_known_valid_precise(
+extern "C" cudaError_t makepad_cuda_affine_qmv_f32_select_planes_input_offsets_fixed8_known_valid_precise(
     const uint16_t * input_bf16_words,
     uint32_t input_words_per_slot,
     const uint32_t * packed_weights_u32,
@@ -2312,12 +2312,12 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
         return cudaSuccess;
     }
 
-    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 block(makepad_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 8, 8, true><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 8, 8, true><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 input_words_per_slot,
                 packed_weights_u32,
@@ -2336,7 +2336,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 8, 8, true><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 8, 8, true><<<grid, block, 0, stream>>>(
                 input_bf16_words,
                 input_words_per_slot,
                 packed_weights_u32,
@@ -2362,7 +2362,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offs
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_get_row_f32_kernel(
+static __global__ void makepad_cuda_affine_get_row_f32_kernel(
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
     const uint16_t * biases_bf16_words,
@@ -2399,7 +2399,7 @@ static __global__ void makepad_ggml_cuda_affine_get_row_f32_kernel(
 }
 
 template <int BITS>
-static __global__ void makepad_ggml_cuda_affine_get_row_f32_device_u32_kernel(
+static __global__ void makepad_cuda_affine_get_row_f32_device_u32_kernel(
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
     const uint16_t * biases_bf16_words,
@@ -2436,7 +2436,7 @@ static __global__ void makepad_ggml_cuda_affine_get_row_f32_device_u32_kernel(
     output_f32[idx] = bf16_round_f32(__fadd_rn(__fmul_rn(scale, q), bias));
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32(
+extern "C" cudaError_t makepad_cuda_affine_get_row_f32(
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
     const uint16_t * biases_bf16_words,
@@ -2457,7 +2457,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32(
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_get_row_f32_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_get_row_f32_kernel<4><<<grid, block, 0, stream>>>(
                 packed_weights_u32,
                 scales_bf16_words,
                 biases_bf16_words,
@@ -2468,7 +2468,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_get_row_f32_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_get_row_f32_kernel<8><<<grid, block, 0, stream>>>(
                 packed_weights_u32,
                 scales_bf16_words,
                 biases_bf16_words,
@@ -2485,7 +2485,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32_device_u32(
+extern "C" cudaError_t makepad_cuda_affine_get_row_f32_device_u32(
     const uint32_t * packed_weights_u32,
     const uint16_t * scales_bf16_words,
     const uint16_t * biases_bf16_words,
@@ -2506,7 +2506,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32_device_u32(
 
     switch (bits) {
         case 4:
-            makepad_ggml_cuda_affine_get_row_f32_device_u32_kernel<4><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_get_row_f32_device_u32_kernel<4><<<grid, block, 0, stream>>>(
                 packed_weights_u32,
                 scales_bf16_words,
                 biases_bf16_words,
@@ -2517,7 +2517,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_get_row_f32_device_u32(
             );
             break;
         case 8:
-            makepad_ggml_cuda_affine_get_row_f32_device_u32_kernel<8><<<grid, block, 0, stream>>>(
+            makepad_cuda_affine_get_row_f32_device_u32_kernel<8><<<grid, block, 0, stream>>>(
                 packed_weights_u32,
                 scales_bf16_words,
                 biases_bf16_words,

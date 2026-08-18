@@ -2,7 +2,7 @@
 //! extras: LayerNorm, self-attn, cross-attn, GEGLU-erf feed-forward.
 
 use crate::unet_first::{paint_fast, UnetFirst, ATTN_GN_EPS, GN_GROUPS, LN_EPS, NS};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_cross, gpu_attention_packed_flash_bf16,
     gpu_download, gpu_gelu_erf, gpu_group_norm_planar, gpu_layer_norm_mul_add_cached, gpu_mul,
     gpu_paint_attn_batched_self, gpu_paint_ref_attn_wide_v, gpu_paint_scale, gpu_sdpa_flash_f16,

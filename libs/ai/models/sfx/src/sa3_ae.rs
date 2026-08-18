@@ -347,7 +347,7 @@ impl Sa3AeDecoder {
 // ---------------------------------------------------------------------------
 
 use crate::sa3::{dev_err, F16Weight};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed, gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_dyt,
     gpu_gated_residual, gpu_gather_rows_colblock, gpu_linear_nt_cached, gpu_rope_half,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32, GpuTensor,
