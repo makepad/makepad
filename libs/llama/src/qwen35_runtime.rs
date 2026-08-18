@@ -50,7 +50,7 @@ impl Qwen35Dims {
             vocab_size: u32::try_from(vocab_size).map_err(|_| {
                 LlamaError::format(format!("vocab size {} does not fit in u32", vocab_size))
             })?,
-            block_count: cfg.block_count,
+            block_count: cfg.main_block_count()?,
             embedding_length: cfg.embedding_length,
             feed_forward_length: cfg.feed_forward_length,
             attention_head_count: cfg.attention_head_count,
