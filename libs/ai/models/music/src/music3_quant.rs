@@ -17,7 +17,7 @@ use makepad_ggml::quant::{
     block_size, f32_to_f16, get_rows_ggml_bytes_cpu, vec_dot_q4_0_f32, QK,
 };
 use makepad_ggml::tensor::{ggml_row_size_for_type, TensorType};
-use makepad_llama::GgufFile;
+use makepad_ai_llm::GgufFile;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
@@ -198,7 +198,7 @@ impl Music3GgufFile {
             .collect()
     }
 
-    pub fn require(&self, name: &str) -> Result<&makepad_llama::GgufTensorInfo> {
+    pub fn require(&self, name: &str) -> Result<&makepad_ai_llm::GgufTensorInfo> {
         self.file.get_tensor(name).ok_or_else(|| {
             DiffusionError::model(format!(
                 "music3 {} missing tensor {name}",
@@ -904,7 +904,7 @@ impl Music3GgufPack {
         }
     }
 
-    pub fn find_tensor(&self, name: &str) -> Option<(&Music3GgufFile, &makepad_llama::GgufTensorInfo)> {
+    pub fn find_tensor(&self, name: &str) -> Option<(&Music3GgufFile, &makepad_ai_llm::GgufTensorInfo)> {
         for role in [
             Music3GgufRole::LanguageModel,
             Music3GgufRole::Rvq,

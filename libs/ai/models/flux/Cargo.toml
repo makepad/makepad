@@ -10,7 +10,7 @@ makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 makepad-ggml = { path = "../../../ggml", features = ["metal-precompile"] }
 makepad-micro-serde = { path = "../../../micro_serde" }
-makepad-llama = { path = "../../../llama" }
+makepad-ai-llm = { path = "../../llm" }
 makepad-zune-core = { path = "../../../zune/zune-core" }
 makepad-zune-png = { path = "../../../zune/zune-png" }
 makepad-ai-h3 = { path = "../h3" }

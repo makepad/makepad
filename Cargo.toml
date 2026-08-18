@@ -13,7 +13,6 @@ workspace.members = [
     "libs/sim/math",
     "libs/show_control",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
-    "libs/pbr_paint",
     "libs/remesh",
     "libs/xatlas",
     # === examples ===
