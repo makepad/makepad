@@ -92,6 +92,24 @@ pub struct Entity {
     /// invisible — the same class of trap as the rng that defaulted to a
     /// zero seed and the bodies that defaulted to zero gravity.
     pub hidden: bool,
+    /// Retained visual identity with no gameplay presence. The entity still
+    /// replicates and renders (for example, a corpse finishing its skinned
+    /// death pose), but queries, collision separation and touch collection
+    /// must ignore it. Distinct from `hidden`: presentation is the reason it
+    /// remains alive. Default false keeps ordinary entities interactive.
+    pub non_interactive: bool,
+    /// AIM-LOCKED locomotion (a first-person walker): the body's yaw is the
+    /// player's AIM, written by their rig every tick, and facing must never
+    /// be derived from travel — walking backwards means backpedaling, not
+    /// turning around. Skins read this to face the aim and to reverse the
+    /// walk cycle on negative longitudinal speed; replication reads it to
+    /// treat yaw as authored state rather than Derived tier.
+    pub aim_locked: bool,
+    /// Excluded from the light bake's occluder set. Mesh-voxel physics
+    /// colliders set this: dozens of stepped boxes per model smear baked
+    /// shadows, and the clean occluder boxes come from the mask/kit path.
+    /// Physics and light want different simplifications of the same mesh.
+    pub bake_skip: bool,
     pub gravity_scale: f32,
     pub on_floor: bool,
     /// Entity id this mover rests on (for kinematic carry), 0 = none.
@@ -150,6 +168,67 @@ pub struct Entity {
     /// divide by zero when two of them met. Same discipline as `hidden` over
     /// `visible`: the value a `Default` lands on must be the sane one.
     pub push_mass: f32,
+    /// Walkable top surface for a STATIC prop collider (a house's roof).
+    /// Movers resolve their floor against this grid instead of the entity's
+    /// box, which drops out of their sweeps but stays for rigid dynamics and
+    /// raycasts — see [`crate::surface`]. Not replicated: only the simulating
+    /// host steps movers against props. `Arc`'d so world snapshots stay cheap.
+    pub surface: Option<std::sync::Arc<crate::surface::SurfaceGrid>>,
+    /// Ticks left flat on the ground after a rigid body hit this mover (D4:
+    /// car-hits-walker). Set by the contact pipeline
+    /// ([`crate::dynamics::apply_mover_contacts`]), decremented once per tick
+    /// by step_world, read by controllers/brains to suppress walking and play
+    /// the ragdoll-ish pose. Shared replication tier — it rides in the
+    /// entity-state flags' upper byte, which is why its cap
+    /// ([`crate::dynamics::KNOCKDOWN_MAX_TICKS`]) stays below 256.
+    pub knocked_down: u16,
+    /// Queryable surface type index (F10): becomes the box3d shape's
+    /// `user_material_id`, so `game.raycast` and contact events can tell
+    /// tarmac from grass from ice per entity. 0 = default surface. Purely an
+    /// id — friction/restitution stay their own fields.
+    pub material: u8,
+    /// Unit normal of the surface this mover stands on (P2: general slopes).
+    /// Written by the sweep whenever `on_floor` is set — up for flat boxes
+    /// and prop roofs, the true slope normal for wedges and terrain — and
+    /// zeroed when airborne, so `floor_normal != 0 ⇔ on_floor` on the mover
+    /// path. Derived tier: recomputed every tick from geometry, never
+    /// replicated. Read through [`floor_normal_of`], which maps the zero
+    /// default to straight up (same discipline as `push_mass`).
+    pub floor_normal: Vec3f,
+    /// Unit normal of the wall the sweep clamped against this tick (points
+    /// AWAY from the wall, back at the mover). Zero when nothing was hit —
+    /// transient like `hit_wall`, and set alongside it. Wall jumps and wall
+    /// slides read this; the AABB sweep reports axis-aligned normals, the
+    /// capsule path (P3) true plane normals.
+    pub wall_normal: Vec3f,
+    /// Opt-in capsule collider (P3, D2's "later, optional upgrade"): this
+    /// mover's motion routes through box3d `world_collide_mover` +
+    /// `solve_planes` — real wall sliding, smooth corners, true contact
+    /// normals — instead of the axis-separated AABB sweep. Default false:
+    /// existing worlds keep the sweep byte-for-byte.
+    pub capsule_collider: bool,
+}
+
+impl Entity {
+    /// Current horizontal facing, regardless of which motion tier owns it.
+    ///
+    /// Movers and statics author `yaw` directly. A rigid body, however,
+    /// receives its full quaternion from box3d every tick and its historical
+    /// `yaw` field remains the spawn heading. Cameras, AI and attachments that
+    /// follow a turning car must therefore derive heading from `orient` rather
+    /// than silently tracking the stale spawn value.
+    pub fn visual_heading(&self) -> f32 {
+        if self.orient == Quat::default() {
+            return self.yaw;
+        }
+        let q = self.orient;
+        let v = vec3f(0.0, 0.0, -1.0);
+        let u = vec3f(q.x, q.y, q.z);
+        let forward = u * (2.0 * u.dot(v))
+            + v * (q.w * q.w - u.dot(u))
+            + Vec3f::cross(u, v) * (2.0 * q.w);
+        crate::forward_to_heading(forward)
+    }
 }
 
 /// Effective shove resistance, applying the zero-reads-as-one rule.
@@ -158,6 +237,47 @@ pub fn push_mass_of(e: &Entity) -> f32 {
         e.push_mass
     } else {
         1.0
+    }
+}
+
+#[cfg(test)]
+mod facing_tests {
+    use super::*;
+
+    #[test]
+    fn rigid_visual_heading_comes_from_orientation_not_stale_spawn_yaw() {
+        let yaw = 0.73f32;
+        let (s, c) = crate::math::sincos(yaw * 0.5);
+        let entity = Entity {
+            yaw: -1.2,
+            orient: Quat {
+                x: 0.0,
+                y: s,
+                z: 0.0,
+                w: c,
+            },
+            ..Default::default()
+        };
+        assert!((crate::heading_delta(entity.visual_heading(), yaw)).abs() < 1.0e-5);
+
+        let authored = Entity {
+            yaw,
+            ..Default::default()
+        };
+        assert_eq!(authored.visual_heading(), yaw);
+    }
+}
+
+/// Effective floor normal, applying the zero-reads-as-up rule: a grounded
+/// mover whose floor never wrote a normal (default-constructed state, worlds
+/// stepped by an older engine) stands on flat ground as far as any slope
+/// logic is concerned.
+pub fn floor_normal_of(e: &Entity) -> Vec3f {
+    let n = e.floor_normal;
+    if n.x * n.x + n.y * n.y + n.z * n.z > 1.0e-6 {
+        n
+    } else {
+        vec3f(0.0, 1.0, 0.0)
     }
 }
 
@@ -337,4 +457,14 @@ pub struct PadState {
     /// Gamepad Y — the "reset my car" action (keyboard R).
     pub reset: bool,
     pub reset_pressed: bool,
+    /// The fighting actions (mix.md §3.3/K3). Wire bits existed since S4;
+    /// these are the LOCAL device's lanes for them, so a pad punch reads
+    /// through `action_held`/`PlayerInput::held` exactly like a pad jump.
+    /// Throw deliberately reuses `grab` and needs no field of its own.
+    pub punch: bool,
+    pub punch_pressed: bool,
+    pub kick: bool,
+    pub kick_pressed: bool,
+    pub guard: bool,
+    pub guard_pressed: bool,
 }

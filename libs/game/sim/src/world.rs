@@ -26,15 +26,20 @@ use crate::CallbackSlot;
 pub struct GameWorld {
     pub entities: Vec<Entity>,
     /// The player roster (M2). Slot 0 is always this device, and its input
-    /// still lives in the `held`/`pressed`/`pad`/`cam_yaw` fields below — a
-    /// single-player world therefore evaluates exactly the expressions it did
-    /// before players existed, which is what keeps input tapes byte-identical.
+    /// still lives in the `held`/`pressed`/`pad`/`cam_yaw`/`cam_pitch` fields
+    /// below — a single-player world therefore evaluates exactly the
+    /// expressions it did before players existed, which is what keeps input
+    /// tapes byte-identical.
     /// Remote and bot players carry their own input in the roster.
     pub players: crate::player::Players,
     /// box3d dynamics layer (M1a): mirrored statics/kinematics + rigid
     /// bodies. Reconciled against `entities` each tick — never mutated by
     /// spawn/remove paths directly.
     pub dynamics: crate::dynamics::RigidDynamics,
+    /// Derived walkability grid (mix.md D6): chunked, lazily derived from
+    /// terrain + statics + water, dirty-flagged. Never replicated — only the
+    /// simulating host runs brains/units. See [`crate::nav`].
+    pub nav: crate::nav::NavMap,
     pub next_id: u64,
     pub gravity: f32,
     pub on_tick: Option<CallbackSlot>,
@@ -106,6 +111,22 @@ pub struct GameWorld {
     pub labels: Vec<LabelDef>,
     /// Smooth heightfield ground (game.terrain smooth mode).
     pub terrain: Option<Terrain>,
+    /// Per-cell surface materials for `terrain` (F10). None = uniform default
+    /// surface, byte-identical to the pre-materials mirror. Bump
+    /// `terrain.revision` after changing this — the box3d heightfield only
+    /// rebuilds when the revision moves.
+    pub terrain_materials: Option<TerrainMaterials>,
+    /// Editable voxel terrain (mix.md D5/T1-T7), layered over the authored
+    /// heightfield. None until `game.terrain_volume` declares a region —
+    /// worlds that never do carry a null pointer and every pre-voxel code
+    /// path byte-identically.
+    pub voxel: Option<Box<crate::voxel::VoxelField>>,
+    /// Water volumes with an analytic wave surface (mix.md D7/W1). None
+    /// until `game.water` declares one — same null-pointer contract as
+    /// `voxel`: worlds without it run every pre-water path byte-identically.
+    /// (The legacy `terrain water:` sheet is NOT in here — it stays the flat
+    /// sensor slab it always was.)
+    pub water: Option<Box<crate::water::WaterState>>,
     /// Sky/fog, enabled by game.sky().
     pub sky: Option<SkyConfig>,
     /// What game.sun() asked for; the renderer resolves it (see SunConfig).
@@ -174,6 +195,9 @@ impl GameWorld {
             x if x == live_id!(shoot) => self.pad.shoot,
             x if x == live_id!(grab) => self.pad.grab,
             x if x == live_id!(reset) => self.pad.reset,
+            x if x == live_id!(punch) => self.pad.punch,
+            x if x == live_id!(kick) => self.pad.kick,
+            x if x == live_id!(guard) => self.pad.guard,
             x if x == live_id!(left) => self.pad.axis_x < -0.5,
             x if x == live_id!(right) => self.pad.axis_x > 0.5,
             x if x == live_id!(up) => self.pad.axis_z < -0.5,
@@ -191,6 +215,9 @@ impl GameWorld {
             x if x == live_id!(shoot) => self.pad.shoot_pressed,
             x if x == live_id!(grab) => self.pad.grab_pressed,
             x if x == live_id!(reset) => self.pad.reset_pressed,
+            x if x == live_id!(punch) => self.pad.punch_pressed,
+            x if x == live_id!(kick) => self.pad.kick_pressed,
+            x if x == live_id!(guard) => self.pad.guard_pressed,
             _ => false,
         }
     }
@@ -203,12 +230,13 @@ impl GameWorld {
     /// copies *out* of them, never into them.
     pub fn sync_local_player(&mut self) {
         let (held, pressed, pad) = (self.held.clone(), self.pressed.clone(), self.pad);
-        let (yaw, dx, dy) = (self.cam_yaw, self.look_dx, self.look_dy);
+        let (yaw, pitch, dx, dy) = (self.cam_yaw, self.cam_pitch, self.look_dx, self.look_dy);
         let local = self.players.local_mut();
         local.input.held = held;
         local.input.pressed = pressed;
         local.input.pad = pad;
         local.input.cam_yaw = yaw;
+        local.input.cam_pitch = pitch;
         local.input.look_dx = dx;
         local.input.look_dy = dy;
     }
@@ -240,9 +268,8 @@ impl GameWorld {
     /// rotation uses *that player's* `cam_yaw`, which for a remote player
     /// arrived inside their input packet, so nothing about the camera rig has
     /// to replicate. For player 0 the yaw is the world camera's and the
-    /// expression is character-for-character the one the input object has
-    /// always evaluated — including the `f32::cos` widened to f64, which is
-    /// why this helper exists rather than a "tidier" shared formula.
+    /// expression keeps the original f32 trig domain widened to f64, but now
+    /// evaluates it through game-math so peers agree bit-for-bit.
     pub fn player_move(&self, player: crate::player::PlayerId) -> (f64, f64) {
         let (axis_x, axis_z, yaw) = if player.is_local_slot() {
             let key = |name: LiveId| self.held.contains(&name);
@@ -274,6 +301,15 @@ impl GameWorld {
         self.parts.clear();
         self.labels.clear();
         self.terrain = None;
+        self.terrain_materials = None;
+        // Voxel EDITS survive a re-eval — they are player state, like
+        // save_data (mix.md D5: "edits survive script hot-reload"). Script
+        // content (volumes, palette) clears and the new script re-declares.
+        if let Some(voxel) = self.voxel.as_mut() {
+            voxel.on_reset_content();
+        }
+        // Water is script content: the new eval re-declares its volumes.
+        self.water = None;
         self.sky = None;
         self.sun = SunConfig::default();
         self.next_id = 0;
@@ -306,6 +342,8 @@ impl GameWorld {
         // Fresh box3d world; the mirror rebuilds from entities at the next
         // reconcile, so rollback/reset can never leak orphan bodies.
         self.dynamics = crate::dynamics::RigidDynamics::new();
+        // Nav re-derives from the rebuilt world on first query.
+        self.nav = crate::nav::NavMap::default();
         // Players are connections, not world content: an edit must not kick
         // the room. Their bodies are gone though, so the references go with
         // them — script re-spawns and re-assigns during the same eval.
@@ -361,6 +399,17 @@ impl GameWorld {
         self.entities.push(entity);
     }
 
+    /// Begin one authored simulation tick.
+    ///
+    /// Immediate-mode presentation primitives must be cleared before script
+    /// callbacks run, not inside [`step_world`]: callbacks then repopulate the
+    /// exact set the renderer should see for this tick. Keeping this boundary
+    /// on the world also gives every host (local, LAN authority, or tests) the
+    /// same lifecycle contract.
+    pub fn begin_tick(&mut self) {
+        self.beams.clear();
+    }
+
     /// Debug-only full check of the sorted-by-id invariant (used once per
     /// tick; push_entity covers the incremental case).
     pub fn entities_sorted_by_id(&self) -> bool {
@@ -376,9 +425,55 @@ impl GameWorld {
         self.render_rev = self.render_rev.wrapping_add(1);
     }
 
+    /// Bring the box3d mirror up to date for an exact query (F7): entities
+    /// spawned or teleported since the last tick get their bodies before the
+    /// cast runs, so `game.raycast` sees the world the script just built —
+    /// the same immediacy the old AABB march had. A merge walk over already-
+    /// synced state is near-free, so verbs call this unconditionally.
+    ///
+    /// One known lag, documented: a MOVER's capsule reaches a pose during
+    /// the box3d step, so a mover moved by script mid-tick answers queries
+    /// at its last stepped pose until the next step_world.
+    pub fn sync_queries(&mut self) {
+        let GameWorld {
+            dynamics,
+            entities,
+            terrain,
+            terrain_materials,
+            voxel,
+            gravity,
+            ..
+        } = self;
+        crate::dynamics::reconcile(
+            dynamics,
+            entities,
+            terrain.as_ref(),
+            terrain_materials.as_ref(),
+            voxel.as_deref(),
+            *gravity,
+        );
+    }
+
     /// Does a mutation of this entity id invalidate the static slab?
     pub fn is_static_visual(&self, id: u64) -> bool {
         self.entity(id).map_or(false, |e| e.kind == BodyKind::Static)
+    }
+
+    /// Apply one voxel edit op with full authority: materialize chunks from
+    /// the base heightfield under the brush, mutate, queue for replication.
+    /// The verb layer and the host both come through here, in tick order —
+    /// which IS the determinism story (mix.md D5: edits are ops). No-op
+    /// without a field (declare a `terrain_volume` first).
+    pub fn apply_voxel_op(&mut self, op: crate::voxel::VoxelOp) {
+        let GameWorld {
+            voxel,
+            terrain,
+            log_pending,
+            ..
+        } = self;
+        if let Some(field) = voxel.as_mut() {
+            field.apply_op(op, terrain.as_ref(), true, true, log_pending);
+        }
     }
 }
 
@@ -391,9 +486,9 @@ impl GameWorld {
 /// expression is how one of them ends up mirrored — the same class of bug as
 /// the inverted steering, which is why [`crate::heading`] exists.
 ///
-/// The `f32::cos` widened to f64 is deliberate and load-bearing: it reproduces
-/// the original input-object expression character-for-character, so the numbers
-/// do not move.
+/// The deterministic f32 sine/cosine results are deliberately widened to f64:
+/// this preserves the input object's numeric domain while removing platform
+/// libm from replicated movement.
 ///
 /// # The yaw is a VIEW yaw, not a heading
 ///
@@ -405,9 +500,11 @@ impl GameWorld {
 /// here. With a view yaw, `axis_z = −1` ("forward") comes out along the camera's
 /// own look direction, which is the whole point of the function.
 pub fn camera_relative_move(axis_x: f64, axis_z: f64, yaw: f32) -> (f64, f64) {
+    let (sin_yaw, cos_yaw) = crate::math::sincos(yaw);
+    let (sin_yaw, cos_yaw) = (sin_yaw as f64, cos_yaw as f64);
     (
-        axis_x * yaw.cos() as f64 - axis_z * yaw.sin() as f64,
-        axis_x * yaw.sin() as f64 + axis_z * yaw.cos() as f64,
+        axis_x * cos_yaw - axis_z * sin_yaw,
+        axis_x * sin_yaw + axis_z * cos_yaw,
     )
 }
 
@@ -443,6 +540,32 @@ mod id_lookup_tests {
         assert!(w.entity(5).is_none());
         assert_eq!(w.entity_mut(12).map(|e| e.id), Some(12));
         assert_eq!(entity_index_sorted(&w.entities, 9), Some(2));
+    }
+
+    #[test]
+    fn tick_begin_clears_immediate_mode_beams() {
+        let mut w = GameWorld::default();
+        w.beams.push(Beam {
+            from: vec3f(0.0, 0.0, 0.0),
+            to: vec3f(1.0, 0.0, 0.0),
+            size: 0.1,
+            color: vec4f(1.0, 1.0, 1.0, 1.0),
+            glow: 0.0,
+        });
+
+        w.begin_tick();
+
+        assert!(w.beams.is_empty());
+    }
+
+    #[test]
+    fn camera_relative_move_has_stable_bits() {
+        // This input is intentionally near zero: common libm implementations
+        // round its sine one bit away from the fixed game-math kernel.
+        let yaw = f32::from_bits(0x3ad9_099e);
+        let (x, z) = camera_relative_move(0.375, -0.8125, yaw);
+        assert_eq!(x.to_bits(), 0x3fd8_1608_d156_0000);
+        assert_eq!(z.to_bits(), 0xbfe9_fae7_7076_0000);
     }
 
     #[test]

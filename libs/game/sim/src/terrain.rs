@@ -22,6 +22,37 @@ pub struct Terrain {
 /// Reported as the hit id when a sweep stops against the terrain.
 pub const TERRAIN_ID: u64 = u64::MAX;
 
+/// One terrain surface type: the physical response box3d applies where a
+/// cell's material index points at it. The index itself is what queries
+/// report (`user_material_id`), so a tire model can read "this triangle is
+/// gravel" without the sim caring what gravel means.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainSurface {
+    pub friction: f32,
+    pub restitution: f32,
+}
+
+/// Per-cell surface materials for the terrain heightfield (F10, fixes B6:
+/// the mirror used to write all-zero material indices, making per-surface
+/// friction impossible). Lives on [`crate::world::GameWorld`] rather than
+/// inside [`Terrain`] so the many existing `Terrain { .. }` literals stay
+/// untouched.
+///
+/// The box3d mirror is rebuilt when `Terrain::revision` moves — bump the
+/// revision after editing materials or the solver keeps the old ones.
+#[derive(Clone, Debug, Default)]
+pub struct TerrainMaterials {
+    /// One material index per grid CELL, row-major, `(cells-1)²` entries —
+    /// same layout box3d's heightfield takes. `0xFF` is box3d's hole value
+    /// (the cell stops existing physically) and is passed through untouched;
+    /// other indices are clamped into `surfaces`. Shorter/longer vectors are
+    /// tolerated: missing cells read as material 0.
+    pub indices: Vec<u8>,
+    /// The material table the indices point into. Empty = single default
+    /// surface (friction 0.6), which is exactly the pre-F10 behavior.
+    pub surfaces: Vec<TerrainSurface>,
+}
+
 impl Terrain {
     /// Piecewise-planar ground height at (x, z): the two triangles per cell,
     /// same split the mesh uses, so collision and pixels agree. None outside.
@@ -84,7 +115,7 @@ impl Terrain {
         };
         let normal = Vec3f::cross(b - a, c - a);
         let normal = if normal.y < 0.0 { normal * -1.0 } else { normal };
-        let len = normal.length();
+        let len = crate::vec3_len(normal);
         if len <= 1.0e-6 {
             return Some(vec3f(0.0, 1.0, 0.0));
         }

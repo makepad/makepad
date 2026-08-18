@@ -214,11 +214,12 @@ script_mod! {
 
     startup() do #(App::script_component(vm)){
         ui:  XrRoot{
-            window.inner_size: vec2(1400, 900)
+            window.inner_size: vec2(480, 300)
             pass.clear_color: #x0b1118
-            camera.fov_y: 38.0
-            camera.desktop_target: vec3(0.05, 0.10, -0.72)
-            camera.distance: 1.85
+            camera.fov_y: 52.0
+            camera.desktop_target: vec3(0.037, -0.201, -0.535)
+            camera.distance: 0.16
+            camera.distance_min: 0.05
             env.gravity: 9.8
             env.env_cube: true
             env.depth_mesh: false
@@ -226,7 +227,23 @@ script_mod! {
             scene_select := XrSelect{
                 pos: vec3(0.0, -0.02, -0.62)
                 scale: vec3(0.5, 0.5, 0.5)
-                active_child: @tanks_scene
+                active_child: @splat_scene
+
+                splat_scene := XrNode{
+                    splat := ViewSplat{
+                        src: crate_resource("self://../../local/coastal_world.ply")
+                        position: vec3(0.0, 0.0, -0.6)
+                        scale: vec3(1.0, 1.0, 1.0)
+                        normalize_fit: 2.2
+                        max_splats: 0
+                        radius_scale: 1.1
+                        min_radius: 0.0012
+                        draw_splat +: {
+                            max_pixel_radius: 48.0
+                            alpha_cutoff: 0.02
+                        }
+                    }
+                }
 
                 test_scene := XrNode{
                     on_render: ||{
@@ -592,7 +609,7 @@ script_mod! {
 
             control_strip := XrView{
                 visible: false
-                show_in_non_xr: true
+                show_in_non_xr: false
                 pos: vec3(0.05, 0.44, -0.78)
                 wrist_left: true
                 logical_size: vec2(1220, 700)

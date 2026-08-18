@@ -1,0 +1,1228 @@
+//! Navigation — derived walkability grid, A*, and flow fields (mix.md D6).
+//!
+//! Pathfinding is not an RTS feature: it is the missing half of every NPC in
+//! the engine. The grid here is **derived**, never authored — recomputed from
+//! terrain slope, static entities and water, so it can never disagree with the
+//! world the way a baked navmesh does. It is chunk-aligned with the D5 voxel
+//! plan (32 cells of 0.5 units = the 16-unit chunk footprint), so a terrain
+//! edit can dirty exactly the nav chunks it touched ([`GameWorld::nav_mark_dirty`]
+//! is the API-level hook; the terrain-edit producer lands in another track).
+//!
+//! Determinism rules: integer cells, fixed iteration order, `total_cmp` for
+//! every float sort, no HashMap anywhere. Two derivations of the same world
+//! hash identically ([`GameWorld::nav_grid_hash`] is the gate).
+//!
+//! Consumers: [`NavAgent`] (single-agent path following — brains and NPCs),
+//! [`FlowField`] (group orders — the RTS unit block). Script never sees any of
+//! this: it sees goals and events, the engine does the per-tick steering.
+
+use std::sync::Arc;
+
+use makepad_math::*;
+
+use crate::entity::{BodyKind, Entity, Shape};
+use crate::queries::{wedge_surface_at, Solid};
+use crate::terrain::Terrain;
+use crate::world::GameWorld;
+
+/// Cell edge in world units. Matches D5's 0.5 m voxel cell so nav chunks and
+/// future terrain-edit chunks address the same 16-unit tiles.
+pub const NAV_CELL: f32 = 0.5;
+/// Cells per chunk edge (32 × 0.5 = 16 units — the D5 chunk footprint).
+pub const NAV_CHUNK: i32 = 32;
+/// The mover sweep's step-up contract: anything this much above the floor is
+/// a kerb, not a wall.
+pub const NAV_STEP: f32 = 0.55;
+/// Max floor-height change between adjacent cells that still counts as
+/// traversable ground. Terrain has no hard slope limit in the sweep (CLIMB
+/// walks anything), so this is a *legibility* limit: past ~61° a slope reads
+/// as a cliff and paths should go around it.
+pub const NAV_EDGE_RISE: f32 = 0.9;
+/// Headroom a walker needs. A solid whose underside is closer to the floor
+/// than this is a wall; higher is a bridge overhead.
+pub const NAV_CLEARANCE: f32 = 1.8;
+/// Grid span cap per axis, in cells (512 units). Worlds larger than this get
+/// nav coverage over the min-corner-anchored window; consumers fall back to
+/// straight-line steering outside coverage, which is exactly the pre-nav
+/// behavior.
+pub const NAV_MAX_SPAN: i32 = 1024;
+
+/// A body of this footprint or less can walk anywhere WALKABLE; wider agents
+/// (the standard 0.8–1.0-unit walker) plan on CLEAR, which erodes one cell
+/// off every wall.
+pub const FLAG_WALKABLE: u8 = 1;
+/// Walkable AND all 8 neighbours walkable — safe for ~1-unit-wide agents.
+pub const FLAG_CLEAR: u8 = 2;
+
+const CHUNK_AREA: usize = (NAV_CHUNK * NAV_CHUNK) as usize;
+/// A* / flow-field working-region span cap per axis, in cells (160 units).
+const SEARCH_SPAN: i32 = 320;
+/// A* expansion budget. On overrun the plan fails and the consumer keeps its
+/// straight-line fallback — bounded cost beats a perfect path.
+const ASTAR_BUDGET: usize = 20000;
+/// How far (in cells, Chebyshev) an endpoint may be snapped onto the grid.
+const SNAP_RADIUS: i32 = 6;
+
+/// Fixed neighbour order — load-bearing for determinism (tie-breaks in A*
+/// and flow-field descent resolve by first-in-this-order).
+const NEIGHBORS: [(i32, i32, u32); 8] = [
+    (1, 0, 10),
+    (-1, 0, 10),
+    (0, 1, 10),
+    (0, -1, 10),
+    (1, 1, 14),
+    (1, -1, 14),
+    (-1, 1, 14),
+    (-1, -1, 14),
+];
+
+/// One 32×32 tile of derived cells. `Arc`'d so world snapshots stay cheap.
+pub struct NavChunk {
+    /// FLAG_* bits, row-major `z * 32 + x`.
+    pub flags: [u8; CHUNK_AREA],
+    /// Walk-surface height per cell (undefined where not WALKABLE).
+    pub floor: [f32; CHUNK_AREA],
+}
+
+/// The world's walkability grid: chunked, lazily derived, dirty-flagged.
+/// Lives on [`GameWorld`] beside `dynamics` — derived state, reconciled
+/// against the entities, never replicated (only the simulating host runs
+/// brains and units). Cloning shares the built chunks.
+#[derive(Clone, Default)]
+pub struct NavMap {
+    /// Grid origin in CELL coordinates: cell (0,0) covers world
+    /// `[min_cx·0.5, min_cx·0.5 + 0.5)`. Chunk-aligned (multiple of 32) so
+    /// chunk addressing is world-absolute.
+    min_cx: i32,
+    min_cz: i32,
+    /// Grid size in cells (multiples of 32). 0 = no coverage.
+    w: i32,
+    h: i32,
+    /// Row-major chunk slots; `None` = dirty / not yet derived.
+    chunks: Vec<Option<Arc<NavChunk>>>,
+    /// What the current layout was derived against.
+    built_render_rev: u64,
+    built_terrain_rev: u64,
+    synced_once: bool,
+    /// Bumped whenever coverage or content is invalidated — path caches and
+    /// flow fields key on it to know when to re-plan.
+    pub generation: u64,
+}
+
+/// The world geometry a derivation reads. Borrowed out of [`GameWorld`] by
+/// the wrapper methods (same split-borrow pattern as `sync_queries`).
+pub struct NavSrc<'a> {
+    pub entities: &'a [Entity],
+    pub terrain: Option<&'a Terrain>,
+    pub render_rev: u64,
+}
+
+impl NavMap {
+    /// Cells per axis of current coverage (diagnostics).
+    pub fn size_cells(&self) -> (i32, i32) {
+        (self.w, self.h)
+    }
+
+    /// Bytes held by built chunks (diagnostics / budget reporting).
+    pub fn built_bytes(&self) -> usize {
+        self.chunks.iter().flatten().count() * std::mem::size_of::<NavChunk>()
+    }
+
+    /// Dirty every chunk overlapping the world-space box — the terrain-edit
+    /// hook (API-level; the producer lands in another track). Also records
+    /// the terrain revision so the next sync does NOT full-invalidate: the
+    /// caller told us exactly what moved.
+    pub fn mark_dirty(&mut self, min: Vec3f, max: Vec3f, terrain_rev: u64) {
+        if self.w == 0 {
+            return;
+        }
+        let c0x = ((min.x / NAV_CELL).floor() as i32 - self.min_cx).div_euclid(NAV_CHUNK);
+        let c0z = ((min.z / NAV_CELL).floor() as i32 - self.min_cz).div_euclid(NAV_CHUNK);
+        let c1x = ((max.x / NAV_CELL).ceil() as i32 - self.min_cx).div_euclid(NAV_CHUNK);
+        let c1z = ((max.z / NAV_CELL).ceil() as i32 - self.min_cz).div_euclid(NAV_CHUNK);
+        let (cw, ch) = (self.w / NAV_CHUNK, self.h / NAV_CHUNK);
+        // The 1-cell derivation apron means an edit inside a chunk can change
+        // its neighbours' border cells too — dirty one chunk outward.
+        for cz in (c0z - 1).max(0)..=(c1z + 1).min(ch - 1) {
+            for cx in (c0x - 1).max(0)..=(c1x + 1).min(cw - 1) {
+                self.chunks[(cz * cw + cx) as usize] = None;
+            }
+        }
+        self.built_terrain_rev = terrain_rev;
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+// ── derivation ──────────────────────────────────────────────────────────
+
+/// Bring layout up to date. Static-entity churn (`render_rev`) or a terrain
+/// revision we were not told about (no `mark_dirty` call) full-invalidates;
+/// coverage bounds are recomputed then, chunks re-derive lazily on demand.
+fn sync(map: &mut NavMap, src: &NavSrc) {
+    let trev = src.terrain.map_or(0, |t| t.revision);
+    if map.synced_once
+        && map.built_render_rev == src.render_rev
+        && map.built_terrain_rev == trev
+    {
+        return;
+    }
+    map.synced_once = true;
+    map.built_render_rev = src.render_rev;
+    map.built_terrain_rev = trev;
+    map.generation = map.generation.wrapping_add(1);
+
+    // Coverage = terrain extent ∪ static solids, padded. No geometry at all
+    // = no coverage: every query answers None and consumers keep their
+    // straight-line steering, which is what makes empty worlds zero-cost.
+    let mut min = vec2f(f32::MAX, f32::MAX);
+    let mut max = vec2f(f32::MIN, f32::MIN);
+    let mut any = false;
+    if let Some(t) = src.terrain {
+        let span = (t.cells.saturating_sub(1)) as f32 * t.cell_size;
+        min = vec2f(t.origin, t.origin);
+        max = vec2f(t.origin + span, t.origin + span);
+        any = true;
+    }
+    for e in src.entities {
+        if e.kind != BodyKind::Static || e.sensor || !e.collide {
+            continue;
+        }
+        min.x = min.x.min(e.pos.x - e.half.x);
+        min.y = min.y.min(e.pos.z - e.half.z);
+        max.x = max.x.max(e.pos.x + e.half.x);
+        max.y = max.y.max(e.pos.z + e.half.z);
+        any = true;
+    }
+    if !any {
+        map.w = 0;
+        map.h = 0;
+        map.chunks.clear();
+        return;
+    }
+    const PAD: f32 = 2.0;
+    let align_down = |v: f32| {
+        let c = ((v - PAD) / NAV_CELL).floor() as i32;
+        c.div_euclid(NAV_CHUNK) * NAV_CHUNK
+    };
+    let align_up_span = |lo: i32, v: f32| {
+        let c = ((v + PAD) / NAV_CELL).ceil() as i32;
+        let span = ((c - lo).max(NAV_CHUNK) + NAV_CHUNK - 1).div_euclid(NAV_CHUNK) * NAV_CHUNK;
+        span.min(NAV_MAX_SPAN)
+    };
+    map.min_cx = align_down(min.x);
+    map.min_cz = align_down(min.y);
+    map.w = align_up_span(map.min_cx, max.x);
+    map.h = align_up_span(map.min_cz, max.y);
+    map.chunks.clear();
+    map.chunks
+        .resize(((map.w / NAV_CHUNK) * (map.h / NAV_CHUNK)) as usize, None);
+}
+
+/// Walk-surface height and blocked-ness at one cell centre. This is THE
+/// definition of walkable; everything else in the module is bookkeeping.
+fn derive_cell(src: &NavSrc, cx: i32, cz: i32) -> (Option<f32>, bool) {
+    let x = (cx as f32 + 0.5) * NAV_CELL;
+    let z = (cz as f32 + 0.5) * NAV_CELL;
+    let mut floor: Option<f32> = src.terrain.and_then(|t| t.height_at(x, z));
+    let inflate = NAV_CELL * 0.5;
+    // (top, bottom) of every static solid over this cell. Entities are sorted
+    // by id; the sort below is by height with total_cmp — fully deterministic.
+    let mut solids: Vec<(f32, f32)> = Vec::new();
+    let mut water_top: Option<f32> = None;
+    for e in src.entities {
+        if (x - e.pos.x).abs() >= e.half.x + inflate || (z - e.pos.z).abs() >= e.half.z + inflate {
+            continue;
+        }
+        if e.sensor {
+            if e.tag == "water" {
+                let top = e.pos.y + e.half.y;
+                water_top = Some(water_top.map_or(top, |w: f32| w.max(top)));
+            }
+            continue;
+        }
+        if e.kind != BodyKind::Static || !e.collide {
+            continue;
+        }
+        // A wedge is a ramp: its walk surface here is GROUND, like terrain —
+        // it seeds the floor rather than stepping from whatever lies beneath
+        // it (a mid-ramp cell compared against the slab under the ramp would
+        // read as a wall). Cell-to-cell rise still catches slopes that are
+        // genuinely too steep.
+        if e.shape == Shape::Wedge {
+            if let Some(surface) = wedge_surface_at(&Solid::from(e), x, z) {
+                floor = Some(floor.map_or(surface, |f: f32| f.max(surface)));
+            }
+            continue;
+        }
+        solids.push((e.pos.y + e.half.y, e.pos.y - e.half.y));
+    }
+    solids.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut blocked = false;
+    for (top, bottom) in solids {
+        match floor {
+            // First solid from below is the ground here (worlds without
+            // terrain stand everything on a big static slab).
+            None => floor = Some(top),
+            Some(f) => {
+                if top <= f + NAV_STEP {
+                    // A kerb: walk surface steps up.
+                    if top > f {
+                        floor = Some(top);
+                    }
+                } else if bottom < f + NAV_CLEARANCE {
+                    // Rises past step-up within headroom: a wall.
+                    blocked = true;
+                }
+                // else: overhead — a bridge you walk under.
+            }
+        }
+    }
+    if let (Some(f), Some(wt)) = (floor, water_top) {
+        // Water above the walk surface makes the cell unwalkable (D6: the
+        // grid derives from terrain + statics + water). Swimming is a wave-3
+        // block; nav routes armies around the bay, not through it.
+        if wt > f + 0.05 {
+            blocked = true;
+        }
+    }
+    (floor, blocked)
+}
+
+/// Derive one chunk. A 1-cell apron is derived alongside so the CLEAR
+/// erosion never depends on neighbouring chunks' build state — every chunk
+/// is a pure function of the world, which is what makes the grid hash
+/// independent of build ORDER.
+fn build_chunk(src: &NavSrc, base_cx: i32, base_cz: i32) -> NavChunk {
+    const N: usize = (NAV_CHUNK + 2) as usize;
+    let mut floor = [0.0f32; N * N];
+    let mut walk = [false; N * N];
+    for az in 0..N {
+        for ax in 0..N {
+            let (f, blocked) = derive_cell(
+                src,
+                base_cx - 1 + ax as i32,
+                base_cz - 1 + az as i32,
+            );
+            let i = az * N + ax;
+            walk[i] = f.is_some() && !blocked;
+            floor[i] = f.unwrap_or(0.0);
+        }
+    }
+    let mut chunk = NavChunk {
+        flags: [0; CHUNK_AREA],
+        floor: [0.0; CHUNK_AREA],
+    };
+    for z in 0..NAV_CHUNK as usize {
+        for x in 0..NAV_CHUNK as usize {
+            let a = (z + 1) * N + (x + 1);
+            let out = z * NAV_CHUNK as usize + x;
+            chunk.floor[out] = floor[a];
+            if !walk[a] {
+                continue;
+            }
+            let mut flags = FLAG_WALKABLE;
+            let clear = walk[a - 1]
+                && walk[a + 1]
+                && walk[a - N]
+                && walk[a + N]
+                && walk[a - N - 1]
+                && walk[a - N + 1]
+                && walk[a + N - 1]
+                && walk[a + N + 1];
+            if clear {
+                flags |= FLAG_CLEAR;
+            }
+            chunk.flags[out] = flags;
+        }
+    }
+    chunk
+}
+
+#[inline]
+fn in_bounds(map: &NavMap, cx: i32, cz: i32) -> bool {
+    map.w > 0
+        && cx >= map.min_cx
+        && cz >= map.min_cz
+        && cx < map.min_cx + map.w
+        && cz < map.min_cz + map.h
+}
+
+/// Flags + floor at a cell, deriving its chunk on first touch.
+fn cell(map: &mut NavMap, src: &NavSrc, cx: i32, cz: i32) -> (u8, f32) {
+    debug_assert!(in_bounds(map, cx, cz));
+    let lx = cx - map.min_cx;
+    let lz = cz - map.min_cz;
+    let cw = map.w / NAV_CHUNK;
+    let ci = ((lz / NAV_CHUNK) * cw + lx / NAV_CHUNK) as usize;
+    if map.chunks[ci].is_none() {
+        let base_cx = map.min_cx + (lx / NAV_CHUNK) * NAV_CHUNK;
+        let base_cz = map.min_cz + (lz / NAV_CHUNK) * NAV_CHUNK;
+        map.chunks[ci] = Some(Arc::new(build_chunk(src, base_cx, base_cz)));
+    }
+    let chunk = map.chunks[ci].as_ref().expect("just built");
+    let i = ((lz % NAV_CHUNK) * NAV_CHUNK + lx % NAV_CHUNK) as usize;
+    (chunk.flags[i], chunk.floor[i])
+}
+
+#[inline]
+pub fn cell_of(p: Vec3f) -> (i32, i32) {
+    (
+        (p.x / NAV_CELL).floor() as i32,
+        (p.z / NAV_CELL).floor() as i32,
+    )
+}
+
+#[inline]
+fn cell_center(cx: i32, cz: i32, y: f32) -> Vec3f {
+    vec3f(
+        (cx as f32 + 0.5) * NAV_CELL,
+        y,
+        (cz as f32 + 0.5) * NAV_CELL,
+    )
+}
+
+// ── queries ─────────────────────────────────────────────────────────────
+
+/// Is the straight ground line from `a` to `b` passable for a standard
+/// agent? `None` = no coverage there (caller falls back to legacy straight
+/// steering — the bit-identical path). Walks the supercover cells; every
+/// cell must carry `mask` and consecutive floors must be within
+/// [`NAV_EDGE_RISE`].
+pub fn line_passable(map: &mut NavMap, src: &NavSrc, a: Vec3f, b: Vec3f, mask: u8) -> Option<bool> {
+    sync(map, src);
+    let (ax, az) = cell_of(a);
+    let (bx, bz) = cell_of(b);
+    if !in_bounds(map, ax, az) || !in_bounds(map, bx, bz) {
+        return None;
+    }
+    let (mut cx, mut cz) = (ax, az);
+    let (flags, mut last_floor) = cell(map, src, cx, cz);
+    if flags & mask == 0 {
+        return Some(false);
+    }
+    let dx = b.x - a.x;
+    let dz = b.z - a.z;
+    let step_x: i32 = if dx > 0.0 { 1 } else { -1 };
+    let step_z: i32 = if dz > 0.0 { 1 } else { -1 };
+    // Parametric distance to the next cell border per axis (Amanatides-Woo).
+    let next_border = |c: i32, step: i32| -> f32 {
+        (if step > 0 { (c + 1) as f32 } else { c as f32 }) * NAV_CELL
+    };
+    let mut t_max_x = if dx != 0.0 {
+        (next_border(cx, step_x) - a.x) / dx
+    } else {
+        f32::MAX
+    };
+    let mut t_max_z = if dz != 0.0 {
+        (next_border(cz, step_z) - a.z) / dz
+    } else {
+        f32::MAX
+    };
+    let t_delta_x = if dx != 0.0 { NAV_CELL / dx.abs() } else { f32::MAX };
+    let t_delta_z = if dz != 0.0 { NAV_CELL / dz.abs() } else { f32::MAX };
+    let mut guard = (map.w + map.h) * 2;
+    while (cx, cz) != (bx, bz) && guard > 0 {
+        guard -= 1;
+        if t_max_x < t_max_z {
+            t_max_x += t_delta_x;
+            cx += step_x;
+        } else {
+            t_max_z += t_delta_z;
+            cz += step_z;
+        }
+        if !in_bounds(map, cx, cz) {
+            return None;
+        }
+        let (flags, floor) = cell(map, src, cx, cz);
+        if flags & mask == 0 || (floor - last_floor).abs() > NAV_EDGE_RISE {
+            return Some(false);
+        }
+        last_floor = floor;
+    }
+    Some(true)
+}
+
+/// Nearest cell within [`SNAP_RADIUS`] carrying `mask`, scanning rings in a
+/// fixed order (radius, then z, then x) so the snap is deterministic.
+fn snap(map: &mut NavMap, src: &NavSrc, cx: i32, cz: i32, mask: u8) -> Option<(i32, i32)> {
+    for r in 0..=SNAP_RADIUS {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dz.abs()) != r {
+                    continue;
+                }
+                let (nx, nz) = (cx + dx, cz + dz);
+                if !in_bounds(map, nx, nz) {
+                    continue;
+                }
+                if cell(map, src, nx, nz).0 & mask != 0 {
+                    return Some((nx, nz));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A* from `from` to `to` over the grid, string-pulled. Returns false (and
+/// clears `out`) when there is no coverage or no route — the caller keeps
+/// its straight-line fallback. On success `out` holds smoothed waypoints
+/// ending exactly at `to`.
+pub fn find_path(map: &mut NavMap, src: &NavSrc, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> bool {
+    out.clear();
+    sync(map, src);
+    let (fx, fz) = cell_of(from);
+    let (tx, tz) = cell_of(to);
+    if !in_bounds(map, fx, fz) || !in_bounds(map, tx, tz) {
+        return false;
+    }
+    // Plan on CLEAR (eroded) cells; if either end has no CLEAR nearby or no
+    // route exists, retry on the raw WALKABLE mask so narrow gaps stay usable.
+    for mask in [FLAG_CLEAR, FLAG_WALKABLE] {
+        let Some(start) = snap(map, src, fx, fz, mask) else {
+            continue;
+        };
+        let Some(goal) = snap(map, src, tx, tz, mask) else {
+            continue;
+        };
+        if astar(map, src, start, goal, mask, out) {
+            string_pull(map, src, from, to, mask, out);
+            return true;
+        }
+    }
+    false
+}
+
+/// Grid A*: 10/14 costs, octile heuristic, deterministic tie-break (lower
+/// f, then lower cell index). Bounded to a working region around the
+/// endpoints so cost never scales with world size.
+fn astar(
+    map: &mut NavMap,
+    src: &NavSrc,
+    start: (i32, i32),
+    goal: (i32, i32),
+    mask: u8,
+    out: &mut Vec<Vec3f>,
+) -> bool {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    // Working region: endpoints' bounding box inflated, clamped to coverage
+    // and to SEARCH_SPAN (anchored on the box centre; endpoints outside a
+    // clamped region mean the route is longer than we search — fail fast).
+    let margin = 32;
+    let bx0 = start.0.min(goal.0) - margin;
+    let bz0 = start.1.min(goal.1) - margin;
+    let bx1 = start.0.max(goal.0) + margin;
+    let bz1 = start.1.max(goal.1) + margin;
+    let (cx, cz) = ((bx0 + bx1) / 2, (bz0 + bz1) / 2);
+    let half_w = ((bx1 - bx0).min(SEARCH_SPAN)) / 2;
+    let half_h = ((bz1 - bz0).min(SEARCH_SPAN)) / 2;
+    let rx0 = (cx - half_w).max(map.min_cx);
+    let rz0 = (cz - half_h).max(map.min_cz);
+    let rx1 = (cx + half_w).min(map.min_cx + map.w - 1);
+    let rz1 = (cz + half_h).min(map.min_cz + map.h - 1);
+    let rw = rx1 - rx0 + 1;
+    let rh = rz1 - rz0 + 1;
+    let inside = |x: i32, z: i32| x >= rx0 && z >= rz0 && x <= rx1 && z <= rz1;
+    if !inside(start.0, start.1) || !inside(goal.0, goal.1) {
+        return false;
+    }
+    let idx = |x: i32, z: i32| ((z - rz0) * rw + (x - rx0)) as usize;
+    let cells = (rw * rh) as usize;
+    let mut g = vec![u32::MAX; cells];
+    let mut came: Vec<u32> = vec![u32::MAX; cells];
+    let octile = |x: i32, z: i32| -> u32 {
+        let dx = (x - goal.0).abs() as u32;
+        let dz = (z - goal.1).abs() as u32;
+        let (lo, hi) = (dx.min(dz), dx.max(dz));
+        14 * lo + 10 * (hi - lo)
+    };
+    let mut open: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    let si = idx(start.0, start.1);
+    g[si] = 0;
+    open.push(Reverse((octile(start.0, start.1), si as u32)));
+    let mut pops = 0usize;
+    let mut found = false;
+    while let Some(Reverse((f, ci))) = open.pop() {
+        let ci = ci as usize;
+        let x = rx0 + (ci as i32 % rw);
+        let z = rz0 + (ci as i32 / rw);
+        if f > g[ci].saturating_add(octile(x, z)) {
+            continue; // stale entry
+        }
+        if (x, z) == goal {
+            found = true;
+            break;
+        }
+        pops += 1;
+        if pops > ASTAR_BUDGET {
+            return false;
+        }
+        let (_, here_floor) = cell(map, src, x, z);
+        for &(dx, dz, cost) in NEIGHBORS.iter() {
+            let (nx, nz) = (x + dx, z + dz);
+            if !inside(nx, nz) {
+                continue;
+            }
+            let (nf, nfloor) = cell(map, src, nx, nz);
+            if nf & mask == 0 || (nfloor - here_floor).abs() > NAV_EDGE_RISE {
+                continue;
+            }
+            // No corner cutting: diagonals need both orthogonal cells open.
+            if dx != 0 && dz != 0 {
+                let (ax, _) = cell(map, src, x + dx, z);
+                let (az, _) = cell(map, src, x, z + dz);
+                if ax & mask == 0 || az & mask == 0 {
+                    continue;
+                }
+            }
+            let ni = idx(nx, nz);
+            let ng = g[ci] + cost;
+            if ng < g[ni] {
+                g[ni] = ng;
+                came[ni] = ci as u32;
+                open.push(Reverse((ng + octile(nx, nz), ni as u32)));
+            }
+        }
+    }
+    if !found {
+        return false;
+    }
+    // Reconstruct goal→start, then reverse.
+    let mut ci = idx(goal.0, goal.1);
+    loop {
+        let x = rx0 + (ci as i32 % rw);
+        let z = rz0 + (ci as i32 / rw);
+        let (_, floor) = cell(map, src, x, z);
+        out.push(cell_center(x, z, floor));
+        if ci == si {
+            break;
+        }
+        ci = came[ci] as usize;
+    }
+    out.reverse();
+    true
+}
+
+/// String-pulling: greedily keep only waypoints the previous kept point
+/// cannot see past, so movement doesn't look grid-locked. Ends exactly at
+/// the caller's `to`.
+fn string_pull(map: &mut NavMap, src: &NavSrc, from: Vec3f, to: Vec3f, mask: u8, path: &mut Vec<Vec3f>) {
+    let raw = std::mem::take(path);
+    let mut cur = from;
+    let mut i = 0usize;
+    while i < raw.len() {
+        let mut j = i;
+        while j + 1 < raw.len() && line_passable(map, src, cur, raw[j + 1], mask) == Some(true) {
+            j += 1;
+        }
+        path.push(raw[j]);
+        cur = raw[j];
+        i = j + 1;
+    }
+    // The final leg heads for the exact goal point, not its cell centre.
+    if let Some(last) = path.last_mut() {
+        if line_passable(map, src, cur, to, mask) == Some(true) {
+            *last = to;
+        } else {
+            path.push(to);
+        }
+    } else {
+        path.push(to);
+    }
+}
+
+// ── flow fields (group orders) ──────────────────────────────────────────
+
+/// A Dijkstra integration field over a working region, descended by every
+/// unit in a group order — one solve serves a hundred units, which is the
+/// whole point (per-unit A* at RTS scale would burn the tick budget).
+#[derive(Clone, Debug, Default)]
+pub struct FlowField {
+    min_cx: i32,
+    min_cz: i32,
+    w: i32,
+    h: i32,
+    /// Integration cost per cell; `u16::MAX` = unreachable.
+    cost: Vec<u16>,
+    /// Descent direction per cell: index into [`NEIGHBORS`], 8 = at target.
+    dir: Vec<u8>,
+    /// The world-space goal this field descends toward.
+    pub target: Vec3f,
+    /// Nav generation this field was derived from — stale when it moves.
+    pub generation: u64,
+}
+
+impl FlowField {
+    /// Direction to walk from `p` (unit-length on the ground plane) and the
+    /// remaining integration cost. None = outside the field or unreachable.
+    pub fn sample(&self, p: Vec3f) -> Option<(Vec3f, u16)> {
+        let (cx, cz) = cell_of(p);
+        if self.w == 0
+            || cx < self.min_cx
+            || cz < self.min_cz
+            || cx >= self.min_cx + self.w
+            || cz >= self.min_cz + self.h
+        {
+            return None;
+        }
+        let i = ((cz - self.min_cz) * self.w + (cx - self.min_cx)) as usize;
+        let cost = self.cost[i];
+        if cost == u16::MAX {
+            return None;
+        }
+        let dir = match self.dir[i] {
+            8 => vec3f(0.0, 0.0, 0.0),
+            d => {
+                let (dx, dz, cost) = NEIGHBORS[d as usize];
+                let s = if cost == 14 {
+                    std::f32::consts::FRAC_1_SQRT_2
+                } else {
+                    1.0
+                };
+                vec3f(dx as f32 * s, 0.0, dz as f32 * s)
+            }
+        };
+        Some((dir, cost))
+    }
+
+    pub fn cells(&self) -> usize {
+        self.cost.len()
+    }
+}
+
+/// Build a flow field descending to `target`, covering `around` (the group)
+/// plus margin. Deterministic: Dijkstra with (cost, cell-index) tie-break,
+/// descent direction by first-lowest in the fixed neighbour order.
+pub fn build_flow(map: &mut NavMap, src: &NavSrc, target: Vec3f, around: &[Vec3f]) -> Option<FlowField> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    sync(map, src);
+    let (tx, tz) = cell_of(target);
+    if !in_bounds(map, tx, tz) {
+        return None;
+    }
+    let goal = snap(map, src, tx, tz, FLAG_CLEAR)
+        .or_else(|| snap(map, src, tx, tz, FLAG_WALKABLE))?;
+    // Region: target ∪ group, inflated, clamped to coverage and to
+    // SEARCH_SPAN anchored on the target (the far side of a huge group goes
+    // uncovered; those units fall back to single-agent pathing).
+    let margin = 16;
+    let (mut bx0, mut bz0, mut bx1, mut bz1) = (goal.0, goal.1, goal.0, goal.1);
+    for p in around {
+        let (cx, cz) = cell_of(*p);
+        bx0 = bx0.min(cx);
+        bz0 = bz0.min(cz);
+        bx1 = bx1.max(cx);
+        bz1 = bz1.max(cz);
+    }
+    let rx0 = (bx0 - margin).max(goal.0 - SEARCH_SPAN / 2).max(map.min_cx);
+    let rz0 = (bz0 - margin).max(goal.1 - SEARCH_SPAN / 2).max(map.min_cz);
+    let rx1 = (bx1 + margin)
+        .min(goal.0 + SEARCH_SPAN / 2)
+        .min(map.min_cx + map.w - 1);
+    let rz1 = (bz1 + margin)
+        .min(goal.1 + SEARCH_SPAN / 2)
+        .min(map.min_cz + map.h - 1);
+    let rw = rx1 - rx0 + 1;
+    let rh = rz1 - rz0 + 1;
+    if rw <= 0 || rh <= 0 {
+        return None;
+    }
+    let cells = (rw * rh) as usize;
+    let idx = |x: i32, z: i32| ((z - rz0) * rw + (x - rx0)) as usize;
+    let inside = |x: i32, z: i32| x >= rx0 && z >= rz0 && x <= rx1 && z <= rz1;
+    let mut cost = vec![u32::MAX; cells];
+    let mut open: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    let gi = idx(goal.0, goal.1);
+    cost[gi] = 0;
+    open.push(Reverse((0, gi as u32)));
+    while let Some(Reverse((c, ci))) = open.pop() {
+        let ci = ci as usize;
+        if c > cost[ci] {
+            continue;
+        }
+        let x = rx0 + (ci as i32 % rw);
+        let z = rz0 + (ci as i32 / rw);
+        let (_, here_floor) = cell(map, src, x, z);
+        for &(dx, dz, step) in NEIGHBORS.iter() {
+            let (nx, nz) = (x + dx, z + dz);
+            if !inside(nx, nz) {
+                continue;
+            }
+            let (nf, nfloor) = cell(map, src, nx, nz);
+            if nf & FLAG_WALKABLE == 0 || (nfloor - here_floor).abs() > NAV_EDGE_RISE {
+                continue;
+            }
+            if dx != 0 && dz != 0 {
+                let (ax, _) = cell(map, src, x + dx, z);
+                let (az, _) = cell(map, src, x, z + dz);
+                if ax & FLAG_WALKABLE == 0 || az & FLAG_WALKABLE == 0 {
+                    continue;
+                }
+            }
+            let ni = idx(nx, nz);
+            let nc = c + step;
+            if nc < cost[ni] {
+                cost[ni] = nc;
+                open.push(Reverse((nc, ni as u32)));
+            }
+        }
+    }
+    // Descent directions: for every reachable cell, the first neighbour (in
+    // fixed order) with the lowest integration cost.
+    let mut dir = vec![8u8; cells];
+    let mut cost16 = vec![u16::MAX; cells];
+    for ci in 0..cells {
+        if cost[ci] == u32::MAX {
+            continue;
+        }
+        cost16[ci] = cost[ci].min(u16::MAX as u32 - 1) as u16;
+        if ci == gi {
+            continue;
+        }
+        let x = rx0 + (ci as i32 % rw);
+        let z = rz0 + (ci as i32 / rw);
+        let mut best = cost[ci];
+        let mut best_dir = 8u8;
+        for (d, &(dx, dz, _)) in NEIGHBORS.iter().enumerate() {
+            let (nx, nz) = (x + dx, z + dz);
+            if !inside(nx, nz) {
+                continue;
+            }
+            if dx != 0 && dz != 0 {
+                // Same no-corner-cutting rule on the way DOWN the field.
+                let ai = idx(x + dx, z);
+                let bi = idx(x, z + dz);
+                if cost[ai] == u32::MAX || cost[bi] == u32::MAX {
+                    continue;
+                }
+            }
+            let nc = cost[idx(nx, nz)];
+            if nc < best {
+                best = nc;
+                best_dir = d as u8;
+            }
+        }
+        dir[ci] = best_dir;
+    }
+    Some(FlowField {
+        min_cx: rx0,
+        min_cz: rz0,
+        w: rw,
+        h: rh,
+        cost: cost16,
+        dir,
+        target,
+        generation: map.generation,
+    })
+}
+
+// ── single-agent path following ─────────────────────────────────────────
+
+/// Path cache + steering for one agent — the shared machinery that upgrades
+/// `chase`/`patrol`/`wander`, the NPC utility AI, and off-field units. The
+/// contract that keeps existing games bit-identical: **when the straight
+/// line to the goal is passable (or nav has no coverage), `steer` returns
+/// the goal itself** and the caller's math sees numbers indistinguishable
+/// from the pre-nav engine.
+#[derive(Clone, Debug, Default)]
+pub struct NavAgent {
+    path: Vec<Vec3f>,
+    at: usize,
+    goal: Vec3f,
+    generation: u64,
+    /// Re-plan cooldown (ticks) for moving targets, so a chase does not
+    /// solve A* sixty times a second.
+    cool: u16,
+}
+
+/// How far a goal may drift from the planned one before a re-plan (moving
+/// chase targets).
+const REPLAN_DRIFT: f32 = 2.0;
+const REPLAN_COOLDOWN: u16 = 15;
+/// A waypoint within this planar distance counts as consumed.
+const WAYPOINT_REACHED: f32 = 0.7;
+
+impl NavAgent {
+    /// Currently routing around something?
+    pub fn active(&self) -> bool {
+        !self.path.is_empty()
+    }
+
+    pub fn reset(&mut self) {
+        self.path.clear();
+        self.at = 0;
+        self.cool = 0;
+    }
+
+    /// The point to steer straight at this tick, given where the agent
+    /// ultimately wants to go.
+    pub fn steer(&mut self, world: &mut GameWorld, pos: Vec3f, goal: Vec3f) -> Vec3f {
+        match world.nav_line_clear(pos, goal) {
+            None | Some(true) => {
+                // Straight line is fine (or no coverage): legacy steering,
+                // bit-identical to the pre-nav brains.
+                if !self.path.is_empty() {
+                    self.reset();
+                }
+                goal
+            }
+            Some(false) => {
+                if self.cool > 0 {
+                    self.cool -= 1;
+                }
+                let drifted = planar(goal, self.goal) > REPLAN_DRIFT;
+                let stale = self.generation != world.nav.generation;
+                if self.path.is_empty() || stale || (drifted && self.cool == 0) {
+                    self.cool = REPLAN_COOLDOWN;
+                    self.goal = goal;
+                    self.generation = world.nav.generation;
+                    self.at = 0;
+                    let mut path = std::mem::take(&mut self.path);
+                    if !world.nav_find_path(pos, goal, &mut path) {
+                        path.clear();
+                    }
+                    self.path = path;
+                }
+                if self.path.is_empty() {
+                    // No route: keep the legacy head-straight-at-it behavior
+                    // (the stuck/give-up machinery above this stays in charge).
+                    return goal;
+                }
+                while self.at < self.path.len() && planar(pos, self.path[self.at]) < WAYPOINT_REACHED
+                {
+                    self.at += 1;
+                }
+                // Waypoint skip: if the one after next is already visible,
+                // cut the corner — this is what keeps paths from looking
+                // grid-locked while the agent walks them.
+                if self.at + 1 < self.path.len()
+                    && world.nav_line_clear(pos, self.path[self.at + 1]) == Some(true)
+                {
+                    self.at += 1;
+                }
+                if self.at >= self.path.len() {
+                    goal
+                } else {
+                    self.path[self.at]
+                }
+            }
+        }
+    }
+}
+
+fn planar(a: Vec3f, b: Vec3f) -> f32 {
+    let dx = a.x - b.x;
+    let dz = a.z - b.z;
+    crate::math::sqrt(dx * dx + dz * dz)
+}
+
+// ── world-facing wrappers ───────────────────────────────────────────────
+
+impl GameWorld {
+    fn nav_src(&mut self) -> (&mut NavMap, NavSrc<'_>) {
+        let GameWorld {
+            nav,
+            entities,
+            terrain,
+            render_rev,
+            ..
+        } = self;
+        (
+            nav,
+            NavSrc {
+                entities,
+                terrain: terrain.as_ref(),
+                render_rev: *render_rev,
+            },
+        )
+    }
+
+    /// Straight-line passability for a standard agent; None = no coverage.
+    pub fn nav_line_clear(&mut self, a: Vec3f, b: Vec3f) -> Option<bool> {
+        let (map, src) = self.nav_src();
+        line_passable(map, &src, a, b, FLAG_CLEAR)
+    }
+
+    /// A* route, string-pulled. False = no coverage or no route.
+    pub fn nav_find_path(&mut self, from: Vec3f, to: Vec3f, out: &mut Vec<Vec3f>) -> bool {
+        let (map, src) = self.nav_src();
+        find_path(map, &src, from, to, out)
+    }
+
+    /// Flow field toward `target` covering the group at `around`.
+    pub fn nav_flow_field(&mut self, target: Vec3f, around: &[Vec3f]) -> Option<FlowField> {
+        let (map, src) = self.nav_src();
+        build_flow(map, &src, target, around)
+    }
+
+    /// Terrain-edit dirty hook: re-derive only the chunks under this box.
+    /// Call AFTER bumping `Terrain::revision` — the ack stored here is what
+    /// stops the next query from full-invalidating.
+    pub fn nav_mark_dirty(&mut self, min: Vec3f, max: Vec3f) {
+        let trev = self.terrain.as_ref().map_or(0, |t| t.revision);
+        // Make sure layout exists before dirtying regions of it.
+        let (map, src) = self.nav_src();
+        sync(map, &src);
+        map.mark_dirty(min, max, trev);
+    }
+
+    /// Fully derive the grid and hash it — the determinism gate. Chunk build
+    /// order cannot matter (each chunk derives from the world alone), and
+    /// this hashes in fixed row-major order regardless.
+    pub fn nav_grid_hash(&mut self) -> u64 {
+        let (map, src) = self.nav_src();
+        sync(map, &src);
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        };
+        mix(map.min_cx as u64);
+        mix(map.min_cz as u64);
+        mix(map.w as u64);
+        mix(map.h as u64);
+        for cz in 0..(map.h / NAV_CHUNK) {
+            for cx in 0..(map.w / NAV_CHUNK) {
+                // Touch one cell to force the chunk build.
+                let _ = cell(map, &src, map.min_cx + cx * NAV_CHUNK, map.min_cz + cz * NAV_CHUNK);
+                let chunk = map.chunks[(cz * (map.w / NAV_CHUNK) + cx) as usize]
+                    .as_ref()
+                    .expect("built above");
+                for i in 0..CHUNK_AREA {
+                    mix(chunk.flags[i] as u64);
+                    if chunk.flags[i] & FLAG_WALKABLE != 0 {
+                        mix(chunk.floor[i].to_bits() as u64);
+                    }
+                }
+            }
+        }
+        h
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Entity;
+
+    fn solid(id: u64, pos: Vec3f, half: Vec3f) -> Entity {
+        Entity {
+            id,
+            kind: BodyKind::Static,
+            pos,
+            half,
+            collide: true,
+            ..Default::default()
+        }
+    }
+
+    /// A 40×40 plaza slab with a wall across the middle, one 3-unit gap.
+    fn plaza() -> GameWorld {
+        let mut world = GameWorld::new();
+        world.push_entity(solid(1, vec3f(0.0, -0.5, 0.0), vec3f(20.0, 0.5, 20.0)));
+        // Wall along z=0 from x=-20..-1.5 and x=1.5..20, 2 high.
+        world.push_entity(solid(2, vec3f(-10.75, 1.0, 0.0), vec3f(9.25, 1.0, 0.5)));
+        world.push_entity(solid(3, vec3f(10.75, 1.0, 0.0), vec3f(9.25, 1.0, 0.5)));
+        world
+    }
+
+    #[test]
+    fn walls_block_and_gaps_pass() {
+        let mut world = plaza();
+        // Straight across the wall: blocked.
+        assert_eq!(
+            world.nav_line_clear(vec3f(-5.0, 0.5, -8.0), vec3f(-5.0, 0.5, 8.0)),
+            Some(false)
+        );
+        // Through the gap: clear.
+        assert_eq!(
+            world.nav_line_clear(vec3f(0.0, 0.5, -8.0), vec3f(0.0, 0.5, 8.0)),
+            Some(true)
+        );
+        // Open floor: clear.
+        assert_eq!(
+            world.nav_line_clear(vec3f(-8.0, 0.5, -8.0), vec3f(8.0, 0.5, -8.0)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn path_routes_through_the_gap() {
+        let mut world = plaza();
+        let from = vec3f(-6.0, 0.5, -8.0);
+        let to = vec3f(-6.0, 0.5, 8.0);
+        let mut path = Vec::new();
+        assert!(world.nav_find_path(from, to, &mut path), "route exists");
+        assert!(path.len() >= 2, "must detour, not beeline: {path:?}");
+        // Every waypoint funnels through the gap region on the wall line.
+        let crossing = path
+            .windows(2)
+            .find(|w| (w[0].z <= 0.0) != (w[1].z <= 0.0))
+            .expect("path crosses the wall line");
+        let t = (0.0 - crossing[0].z) / (crossing[1].z - crossing[0].z);
+        let x_at_wall = crossing[0].x + (crossing[1].x - crossing[0].x) * t;
+        assert!(
+            x_at_wall.abs() < 1.5,
+            "crossing must be inside the gap, was x={x_at_wall}"
+        );
+        assert_eq!(*path.last().unwrap(), to, "path ends at the exact goal");
+    }
+
+    #[test]
+    fn kerbs_walk_walls_do_not() {
+        let mut world = GameWorld::new();
+        world.push_entity(solid(1, vec3f(0.0, -0.5, 0.0), vec3f(20.0, 0.5, 20.0)));
+        // A kerb 0.4 high: within step-up, stays walkable.
+        world.push_entity(solid(2, vec3f(0.0, 0.2, -5.0), vec3f(4.0, 0.2, 1.0)));
+        // A wall 2 high at +5.
+        world.push_entity(solid(3, vec3f(0.0, 1.0, 5.0), vec3f(4.0, 1.0, 1.0)));
+        assert_eq!(
+            world.nav_line_clear(vec3f(0.0, 0.5, -8.0), vec3f(0.0, 0.5, -2.0)),
+            Some(true),
+            "kerb is a step, not a wall"
+        );
+        assert_eq!(
+            world.nav_line_clear(vec3f(0.0, 0.5, 2.0), vec3f(0.0, 0.5, 8.0)),
+            Some(false),
+            "wall blocks"
+        );
+    }
+
+    #[test]
+    fn water_is_unwalkable() {
+        let mut world = plaza();
+        world.push_entity(Entity {
+            id: 9,
+            kind: BodyKind::Static,
+            pos: vec3f(8.0, 0.25, -8.0),
+            half: vec3f(3.0, 0.5, 3.0),
+            sensor: true,
+            collide: false,
+            tag: "water".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            world.nav_line_clear(vec3f(2.0, 0.5, -8.0), vec3f(14.0, 0.5, -8.0)),
+            Some(false),
+            "pond blocks the straight line"
+        );
+        let mut path = Vec::new();
+        assert!(
+            world.nav_find_path(vec3f(2.0, 0.5, -8.0), vec3f(14.0, 0.5, -8.0), &mut path),
+            "routes around the pond"
+        );
+    }
+
+    #[test]
+    fn empty_world_has_no_coverage() {
+        let mut world = GameWorld::new();
+        assert_eq!(world.nav_line_clear(vec3f(0.0, 0.0, 0.0), vec3f(5.0, 0.0, 5.0)), None);
+        let mut path = Vec::new();
+        assert!(!world.nav_find_path(vec3f(0.0, 0.0, 0.0), vec3f(5.0, 0.0, 5.0), &mut path));
+    }
+
+    #[test]
+    fn grid_hash_is_deterministic_and_order_independent() {
+        let mut a = plaza();
+        // Warm some chunks in a query-driven (partial, different) order first.
+        let _ = a.nav_line_clear(vec3f(-5.0, 0.5, -8.0), vec3f(-5.0, 0.5, 8.0));
+        let ha = a.nav_grid_hash();
+        let mut b = plaza();
+        let hb = b.nav_grid_hash();
+        assert_eq!(ha, hb, "two derivations of the same world must hash equal");
+        // A second full pass over already-built chunks is stable too.
+        assert_eq!(ha, a.nav_grid_hash());
+    }
+
+    #[test]
+    fn dirty_region_rederives_after_world_change() {
+        let mut world = plaza();
+        assert_eq!(
+            world.nav_line_clear(vec3f(-5.0, 0.5, -8.0), vec3f(-5.0, 0.5, 8.0)),
+            Some(false)
+        );
+        let gen_before = world.nav.generation;
+        // Knock the west wall down (static change bumps render_rev via the
+        // caller contract — mark_render_dirty is what the DSL does).
+        world.entities.retain(|e| e.id != 2);
+        world.mark_render_dirty();
+        assert_eq!(
+            world.nav_line_clear(vec3f(-5.0, 0.5, -8.0), vec3f(-5.0, 0.5, 8.0)),
+            Some(true),
+            "grid re-derived after the wall came down"
+        );
+        assert!(world.nav.generation > gen_before, "generation moved");
+    }
+
+    #[test]
+    fn mark_dirty_rederives_only_touched_chunks() {
+        let mut world = plaza();
+        let _ = world.nav_grid_hash(); // build everything
+        let built = world.nav.built_bytes();
+        world.nav_mark_dirty(vec3f(-2.0, 0.0, -2.0), vec3f(2.0, 0.0, 2.0));
+        assert!(
+            world.nav.built_bytes() < built,
+            "some chunks dropped for re-derivation"
+        );
+        // Queries still work and re-derive lazily.
+        assert_eq!(
+            world.nav_line_clear(vec3f(0.0, 0.5, -8.0), vec3f(0.0, 0.5, 8.0)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn flow_field_descends_to_target() {
+        let mut world = plaza();
+        let target = vec3f(0.0, 0.5, 8.0);
+        let group = [vec3f(-6.0, 0.5, -8.0), vec3f(6.0, 0.5, -8.0)];
+        let flow = world.nav_flow_field(target, &group).expect("field builds");
+        // Walk a probe down the field from each group position; it must
+        // reach the target cell.
+        for start in group {
+            let mut p = start;
+            let mut cost_prev = u16::MAX;
+            for _ in 0..2000 {
+                let Some((dir, cost)) = flow.sample(p) else {
+                    panic!("probe left the field at {p:?}");
+                };
+                if cost == 0 {
+                    break;
+                }
+                assert!(cost <= cost_prev, "integration cost must not rise");
+                cost_prev = cost;
+                p = p + dir * (NAV_CELL * 0.9);
+            }
+            assert!(
+                planar(p, target) < 2.0,
+                "probe from {start:?} ended at {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wedge_ramps_are_walkable_slopes() {
+        let mut world = GameWorld::new();
+        world.push_entity(solid(1, vec3f(0.0, -0.5, 0.0), vec3f(20.0, 0.5, 20.0)));
+        // A ramp from ground (front, -z) up to 1.6 (back, +z), long enough
+        // that the per-cell rise stays under NAV_EDGE_RISE.
+        world.push_entity(Entity {
+            id: 2,
+            kind: BodyKind::Static,
+            pos: vec3f(0.0, 0.8, 5.0),
+            half: vec3f(2.0, 0.8, 3.0),
+            collide: true,
+            shape: Shape::Wedge,
+            ..Default::default()
+        });
+        assert_eq!(
+            world.nav_line_clear(vec3f(0.0, 0.5, 0.0), vec3f(0.0, 2.0, 7.0)),
+            Some(true),
+            "ramp reads as slope, not wall"
+        );
+    }
+}

@@ -53,7 +53,7 @@ pub fn obstacle_ahead(
     dir: Vec3f,
     reach: f32,
 ) -> Option<Obstacle> {
-    let len = (dir.x * dir.x + dir.z * dir.z).sqrt();
+    let len = crate::math::sqrt(dir.x * dir.x + dir.z * dir.z);
     if len <= 1.0e-6 || reach <= 0.0 {
         return None;
     }
@@ -96,7 +96,7 @@ pub fn ground_ahead(
     dir: Vec3f,
     ahead: f32,
 ) -> Option<f32> {
-    let len = (dir.x * dir.x + dir.z * dir.z).sqrt();
+    let len = crate::math::sqrt(dir.x * dir.x + dir.z * dir.z);
     if len <= 1.0e-6 {
         return None;
     }
@@ -141,7 +141,7 @@ pub fn side_clearance(
     side: f32,
     offset: f32,
 ) -> bool {
-    let len = (dir.x * dir.x + dir.z * dir.z).sqrt();
+    let len = crate::math::sqrt(dir.x * dir.x + dir.z * dir.z);
     if len <= 1.0e-6 {
         return false;
     }
