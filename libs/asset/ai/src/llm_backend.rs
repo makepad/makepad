@@ -141,12 +141,42 @@ pub fn build_prompt_with_think(
 /// block (the prefill disables it, but be tolerant), surrounding quotes, and
 /// whitespace.
 pub fn clean_expansion(text: &str) -> String {
-    let text = text.split("</think>").last().unwrap_or(text).trim();
-    let text = text
-        .strip_prefix('"')
+    let after_think = text.split("</think>").last().unwrap_or(text).trim();
+    if text.contains("</think>") && !after_think.is_empty() {
+        return strip_wrapping_quotes(after_think);
+    }
+    // Qwen3.8 often spends the whole decode inside <think> and drafts the
+    // prompt in quotes. Prefer the last long quoted paragraph over the
+    // reasoning dump so Flux/H3/Trellis get an actual prompt.
+    if let Some(quoted) = last_quoted_paragraph(text) {
+        return quoted;
+    }
+    strip_wrapping_quotes(after_think)
+}
+
+fn strip_wrapping_quotes(text: &str) -> String {
+    text.strip_prefix('"')
         .and_then(|t| t.strip_suffix('"'))
-        .unwrap_or(text);
-    text.trim().to_string()
+        .unwrap_or(text)
+        .trim()
+        .to_string()
+}
+
+fn last_quoted_paragraph(text: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else {
+            break;
+        };
+        let chunk = after[..end].trim();
+        if chunk.split_whitespace().count() >= 20 {
+            best = Some(chunk.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    best
 }
 
 #[derive(SerJson)]
@@ -927,6 +957,8 @@ mod tests {
             "the prompt"
         );
         assert_eq!(clean_expansion("\"quoted prompt\""), "quoted prompt");
+        let think_draft = "Let me draft:\n\n\"A red fox stands alert on moss, russet coat catching late afternoon light through the canopy, white-tipped tail curled, amber eyes watching the treeline.\"\n\nToo short, retry:\n\n\"A red fox stands alert on a mossy forest floor, its russet coat catching late afternoon light filtering through the canopy, white-tipped tail curling behind it, amber eyes fixed just beyond the frame.\"";
+        assert!(clean_expansion(think_draft).starts_with("A red fox stands alert on a mossy forest floor"));
     }
 
     #[test]
