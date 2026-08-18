@@ -492,6 +492,23 @@ impl UnetFirst {
         let view_blk = n_views * plane;
         let inner = format!("{prefix}.transformer_blocks.0.transformer");
         let tb = format!("{prefix}.transformer_blocks.0");
+        // First-block sub-op taps (MAKEPAD_PBR_UNET_TAP), first walk only.
+        let sub_tap_dir = std::env::var("MAKEPAD_PBR_UNET_TAP").ok().filter(|dir| {
+            prefix == "unet.down_blocks.0.attentions.0"
+                && !std::path::Path::new(&format!("{dir}/unet_tap_DONE")).exists()
+        });
+        let sub_tap = |name: &str, t: &GpuTensor| {
+            if let Some(dir) = &sub_tap_dir {
+                if let Ok(v) = gpu_download(t) {
+                    let mut bytes = Vec::with_capacity(v.len() * 4);
+                    for f in &v {
+                        bytes.extend_from_slice(&f.to_le_bytes());
+                    }
+                    let _ = std::fs::write(format!("{dir}/unet_sub_{name}.f32"), bytes);
+                    eprintln!("[pbr-unet-sub] {name} {}x{}", t.rows(), t.cols());
+                }
+            }
+        };
         let nw = self.get(&format!("{prefix}.norm.weight"))?;
         let nb = self.get(&format!("{prefix}.norm.bias"))?;
         let residual = x.clone_act()?;
@@ -510,6 +527,7 @@ impl UnetFirst {
         let packed = gpu_nchw_to_tokens(&gn, channels, x.w, x.h)?;
         let mut tokens = self.linear_tokens(&packed, &format!("{prefix}.proj_in"), true)?;
         let n1 = self.layer_norm(&tokens, &format!("{inner}.norm1"))?;
+        sub_tap("norm1", &n1);
 
         let alb_n1 = gather_pbr(&n1, n_cfg, n_views, 0, plane)?;
         let mr_n1 = gather_pbr(&n1, n_cfg, n_views, 1, plane)?;
@@ -534,6 +552,7 @@ impl UnetFirst {
             scale,
         )?;
         tokens = scatter_add_pbr(&tokens, &alb_attn, &mr_attn, n_cfg, n_views, plane)?;
+        sub_tap("after_mda", &tokens);
 
         let alb_q = self.linear_tokens(&alb_n1, &format!("{tb}.attn_refview.to_q"), false)?;
         let (k, v_alb) = self.encoder_kv(res.ref_tokens, &format!("{tb}.attn_refview"), "ref")?;
@@ -591,6 +610,7 @@ impl UnetFirst {
             o_mr = replace_block(&o_mr, cfg * view_blk, &mr)?;
         }
         tokens = scatter_add_pbr(&tokens, &o_alb, &o_mr, n_cfg, n_views, plane)?;
+        sub_tap("after_ra", &tokens);
 
         if n_views > 1 {
             let (q, k, v) = self.linear_qkv(
@@ -618,9 +638,11 @@ impl UnetFirst {
             };
             tokens = gpu_add(&tokens, &attn)?;
         }
+        sub_tap("after_ma", &tokens);
 
         let packed = tokens;
         let n2 = self.layer_norm(&packed, &format!("{inner}.norm2"))?;
+        sub_tap("norm2", &n2);
         let q_all = self.linear_tokens(&n2, &format!("{inner}.attn2.to_q"), false)?;
         let cross = self.cross_cfg_groups(
             &q_all,
@@ -635,6 +657,7 @@ impl UnetFirst {
             res.enc_mr,
         )?;
         let tokens = gpu_add(&packed, &cross)?;
+        sub_tap("after_cross", &tokens);
         let q_dino = self.linear_tokens(&n2, &format!("{tb}.attn_dino.to_q"), false)?;
         let dino = self.dino_cfg_groups(
             &q_dino,
@@ -648,7 +671,9 @@ impl UnetFirst {
             res.dino,
         )?;
         let tokens = gpu_add(&tokens, &dino)?;
+        sub_tap("after_dino", &tokens);
         let n3 = self.layer_norm(&tokens, &format!("{inner}.norm3"))?;
+        sub_tap("norm3", &n3);
         let ff = self.geglu_ff(&n3, &inner)?;
         let tokens = gpu_add(&tokens, &ff)?;
         let tokens = self.linear_tokens(&tokens, &format!("{prefix}.proj_out"), true)?;
