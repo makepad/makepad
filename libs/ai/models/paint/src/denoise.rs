@@ -267,6 +267,26 @@ impl DenoiseBatch {
         let uncond = &v_three_branches[..branch];
         let ref_only = &v_three_branches[branch..2 * branch];
         let full = &v_three_branches[2 * branch..];
+        if std::env::var("MAKEPAD_PBR_CFG_DEBUG").as_deref() == Ok("1") {
+            // Conditioning liveness probe: if the three branches are nearly
+            // identical, the reference/DINO tokens never reached attention.
+            let l2 = |v: &[f32]| (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>()).sqrt();
+            let d = |a: &[f32], b: &[f32]| {
+                (a.iter()
+                    .zip(b)
+                    .map(|(x, y)| ((*x - *y) as f64).powi(2))
+                    .sum::<f64>())
+                .sqrt()
+            };
+            eprintln!(
+                "[pbr-cfg] t={t} |uncond|={:.3} |ref|={:.3} |full|={:.3} d(u,r)={:.4} d(r,f)={:.4}",
+                l2(uncond),
+                l2(ref_only),
+                l2(full),
+                d(uncond, ref_only),
+                d(ref_only, full),
+            );
+        }
         let guided = guidance_combine(uncond, ref_only, full, self.guidance, &self.view_scales, row);
         self.sample = sched.ddim_step(&self.sample, &guided, t, self.steps);
         Ok(())
