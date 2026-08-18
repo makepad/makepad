@@ -47,3 +47,7 @@ path = "src/bin/vlm_vision_probe.rs"
 [[bin]]
 name = "vlm-probe"
 path = "src/bin/vlm_probe.rs"
+
+[[bin]]
+name = "llama-reset-probe"
+path = "src/bin/llama_reset_probe.rs"
