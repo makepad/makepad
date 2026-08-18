@@ -72,11 +72,7 @@ workspace.exclude = [
     "libs/diffusion",
     # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
     "libs/ai",
-    # standalone CUDA FFI workspace (own [workspace] table; reached as a
-    # target-specific path dep of libs/llama)
-    "libs/cuda",
     "libs/voice",
-    "libs/tts",
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",

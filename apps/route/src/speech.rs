@@ -4,7 +4,7 @@
 //! text is spoken sentence-by-sentence so the voice keeps pace with
 //! generation; nav turn instructions go through `say` directly.
 
-use makepad_tts::Speaker;
+use makepad_ai_speech::Speaker;
 use makepad_widgets::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};

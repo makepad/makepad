@@ -1,9 +1,0 @@
-[package]
-name = "makepad-llama"
-version = "0.1.0"
-edition = "2021"
-description = "Facade: GGUF LLM now lives in makepad-ai-llm (aiarch.md §1)."
-license = "MIT"
-
-[dependencies]
-makepad-ai-llm = { path = "../ai/llm" }
