@@ -721,7 +721,7 @@ mod tests {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), makepad_ai_cuda_kernels))]
 mod imp {
     use makepad_ai_cuda as cuda;
     use std::cell::RefCell;
@@ -1388,6 +1388,358 @@ mod imp {
         })
     }
 }
+
+// CUDA kernels absent (no nvcc at build time): every bounce reports
+// "not handled" so callers fall back to their CPU paths, matching the
+// old makepad-ggml stub semantics. See makepad-ai-cuda/build.rs for the
+// links-metadata handshake that drives the cfg.
+#[cfg(all(not(target_os = "macos"), not(makepad_ai_cuda_kernels)))]
+#[allow(unused_variables)]
+mod imp {
+    pub(super) fn try_matmul_nn_f32(
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_f32(
+        a: &[f32],
+        bt: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_f32_bytes(
+        _a: &[f32],
+        _bt_bytes: &[u8],
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_f16_bytes(
+        _a: &[f32],
+        _bt_f16_bytes: &[u8],
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes(
+        _a: &[f32],
+        _bt_bytes: &[u8],
+        _bt_ggml_type: u32,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_keyed<F>(
+        _a: &[f32],
+        _bt_ggml_type: u32,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+        _namespace: &str,
+        _cache_key: &str,
+        _load: F,
+    ) -> Option<Vec<f32>>
+    where
+        F: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_multi(
+        _a: &[f32],
+        _m: usize,
+        _k: usize,
+        _matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
+    ) -> Option<Vec<Vec<f32>>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_keyed_multi<F>(
+        _a: &[f32],
+        _m: usize,
+        _k: usize,
+        _matrices: &[super::MatmulNtGgmlBytesKeyedMatrix<'_>],
+        _load: F,
+    ) -> Option<Vec<Vec<f32>>>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_ar_pre_attn<F>(
+        _hidden: Option<&[f32]>,
+        _m: usize,
+        _hidden_w: usize,
+        _head_dim: usize,
+        _in_norm: &[f32],
+        _qk_norm: Option<(&[f32], &[f32], &str, &str)>,
+        _in_norm_key: &str,
+        _eps: f32,
+        _q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _v: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _load: F,
+    ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_ar_post_attn<F>(
+        _attn: &[f32],
+        _m: usize,
+        _hidden_w: usize,
+        _post_norm: &[f32],
+        _post_norm_key: &str,
+        _eps: f32,
+        _o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _gate: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _down: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _load: F,
+    ) -> Option<()>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_ar_final_rms(
+        _m: usize,
+        _hidden_w: usize,
+        _gamma: &[f32],
+        _gamma_key: &str,
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn ar_resident_clear() {}
+
+    pub(super) fn transient_pool_clear() {}
+
+    pub(super) fn try_dit_ffn_resident<F>(
+        _normed: &[f32],
+        _m: usize,
+        _hidden_w: usize,
+        _ff_dim: usize,
+        _ff_in_b: &[f32],
+        _ff_out_b: &[f32],
+        _ff_in_b_key: &str,
+        _ff_out_b_key: &str,
+        _swap: bool,
+        _ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
+        _load: F,
+    ) -> Option<Vec<f32>>
+    where
+        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_add_bias(
+        _a: &[f32],
+        _bt_bytes: &[u8],
+        _bt_ggml_type: u32,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+        _bias: &[f32],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_vision_mlp_bf16_fused(
+        _x: &[f32],
+        _gate_up_weight_bytes: &[u8],
+        _down_weight_bytes: &[u8],
+        _rows: usize,
+        _hidden_size: usize,
+        _intermediate_size: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_flash_attn_f32_packed(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q: usize,
+        n_kv: usize,
+        n_head: usize,
+        d: usize,
+        scale: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn clear_decoder_kv_cache() {}
+
+    pub(super) fn try_flash_attn_f32_self_kv_cache(
+        _layer: usize,
+        _q: &[f32],
+        _k_all: &[f32],
+        _v_all: &[f32],
+        _n_kv: usize,
+        _n_head: usize,
+        _d: usize,
+        _scale: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_flash_attn_f32_cross_kv_cache(
+        _layer: usize,
+        _q: &[f32],
+        _k_cross: &[f32],
+        _v_cross: &[f32],
+        _n_q: usize,
+        _n_kv: usize,
+        _n_head: usize,
+        _d: usize,
+        _scale: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_add_f32(
+        a: &[f32],
+        a_shape: &[usize],
+        b: &[f32],
+        b_shape: &[usize],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_mul_f32(
+        a: &[f32],
+        a_shape: &[usize],
+        b: &[f32],
+        b_shape: &[usize],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_gelu_f32(a: &[f32], shape: &[usize]) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_layer_norm_f32(_x: &[f32], _shape: &[usize], _eps: f32) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_rms_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_rms_norm_mul_f32(
+        x: &[f32],
+        x_shape: &[usize],
+        mul: &[f32],
+        mul_shape: &[usize],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_attention_softmax_weighted_sum_f32(
+        logits: &[f32],
+        values: &[f32],
+        query_count: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_layer_norm_mul_add_f32(
+        x: &[f32],
+        x_shape: &[usize],
+        mul: &[f32],
+        mul_shape: &[usize],
+        add: &[f32],
+        add_shape: &[usize],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_get_rows_ggml_bytes(
+        _src: &[u8],
+        _src_ggml_type: u32,
+        _n_cols: usize,
+        _n_rows: usize,
+        _row_indices: &[i32],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_im2col_1d_f32(
+        _input: &[f32],
+        _ic: usize,
+        _iw: usize,
+        _kw: usize,
+        _stride: usize,
+        _pad: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_conv2d_planar_f32(
+        input: &[f32],
+        width: usize,
+        height: usize,
+        in_channels: usize,
+        weights: &[f32],
+        bias: &[f32],
+        out_channels: usize,
+        kw: usize,
+        kh: usize,
+        pad_x: usize,
+        pad_y: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_group_norm_planar_f32(
+        input: &[f32],
+        width: usize,
+        height: usize,
+        channels: usize,
+        groups: usize,
+        gamma: &[f32],
+        beta: &[f32],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_silu_f32(a: &[f32]) -> Option<Vec<f32>> {
+        None
+    }
+}
+
 
 #[cfg(target_os = "macos")]
 mod imp {
