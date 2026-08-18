@@ -476,7 +476,7 @@ mod tests {
             height: Some(64),
             seed: 1,
             steps: Some(1),
-            guidance: 1.0,
+            guidance: Some(1.0),
             delay_ms: 0,
             inputs: Vec::new(),
             pull_only: false,

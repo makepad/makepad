@@ -7,12 +7,15 @@
 use crate::backend::gpu_device_available;
 use crate::flux2::{
     flux2_concat_ref_tokens, flux2_image_ids, flux2_ref_time_offset, flux2_schedule, flux2_text_ids,
-    Flux2PackedLatents, Flux2PosId, Flux2WeightFile, Qwen3TextConfig,
+    Flux2PackedLatents, Flux2PosId, Flux2WeightFile, Mistral3TextConfig, Qwen3TextConfig,
+    FLUX2_SYSTEM_MESSAGE,
 };
+use crate::flux2_dev_text::{flux2_dev_text_encode, Flux2DevTextPrepared};
 use crate::flux2_klein_text::{
     flux2_klein_text_encode, flux2_klein_text_release, flux2_klein_tokenize, flux2_klein_tokenizer_load,
     Flux2KleinTextPrepared,
 };
+use crate::flux2_tokenizer::{Flux2Tokenizer, FLUX2_MAX_SEQUENCE_LENGTH};
 use crate::flux2_transformer::{
     flux2_dit_clear_pool, flux2_euler_step, flux2_transformer_forward, Flux2TransformerWeights,
 };
@@ -203,6 +206,7 @@ impl Flux2KleinPipeline {
                 &prompt_embeds,
                 &txt_ids,
                 sigmas[step],
+                None,
                 gen_tokens,
             )?;
             if step == request.steps / 2 || step == 0 {
@@ -353,6 +357,330 @@ pub fn flux2_klein_paths_from_root(root: impl AsRef<Path>) -> Result<Flux2KleinP
         )));
     }
     Ok(Flux2KleinPaths {
+        transformer,
+        text_encoder,
+        tokenizer,
+        vae,
+    })
+}
+
+// --- FLUX.2-dev text-to-image -----------------------------------------------
+
+pub const FLUX2_DEV_DEFAULT_STEPS: usize = 20;
+pub const FLUX2_DEV_DEFAULT_SIZE: u32 = 1024;
+pub const FLUX2_DEV_DEFAULT_GUIDANCE: f32 = 4.0;
+
+pub struct Flux2DevPaths {
+    /// `flux2_dev_fp8mixed.safetensors` (Comfy fp8mixed single file).
+    pub transformer: PathBuf,
+    /// `mistral_3_small_flux2_fp8.safetensors` (Comfy pruned fp8 TE).
+    pub text_encoder: PathBuf,
+    /// HF `tokenizer/` dir (tokenizer.json, Tekken).
+    pub tokenizer: PathBuf,
+    /// `flux2-vae.safetensors`.
+    pub vae: PathBuf,
+}
+
+pub struct Flux2DevPipeline {
+    pub paths: Flux2DevPaths,
+    pub transformer: Flux2TransformerWeights,
+    pub text_encoder: Flux2WeightFile,
+    pub text_prepared: Flux2DevTextPrepared,
+    pub tokenizer: Flux2Tokenizer,
+    pub vae: Flux2VaeWeights,
+    /// Conditioning cache: prompt -> (padded 512x15360 embeds, token ids).
+    /// Mirrors the reference server's node cache — a warm generate with an
+    /// unchanged prompt never re-runs the TE.
+    cached_prompt: Option<(String, Vec<f32>, Vec<u32>)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Flux2GenerateRequest {
+    pub prompt: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: usize,
+    pub guidance: f32,
+    pub seed: u64,
+    /// Optional teacher noise (token-major `[gen_tokens, 128]`) from an
+    /// oracle dump (the oracle's step-0 x IS the noise at sigma 1.0).
+    pub noise: Option<Vec<f32>>,
+    /// Optional oracle conditioning, ALREADY zero-left-padded `[512, 15360]`.
+    pub teacher_embeds: Option<Vec<f32>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Flux2GenerateResult {
+    pub image: Flux2VaeImage,
+    pub png: Vec<u8>,
+    pub packed_latents: Flux2PackedLatents,
+    pub input_ids: Vec<u32>,
+    /// The DiT-side conditioning (512 rows, zero-left-padded).
+    pub prompt_embeds: Vec<f32>,
+    /// Predictions captured at step 0 and the final step (oracle gates).
+    pub step_predictions: Vec<(usize, Vec<f32>)>,
+    pub sigmas: Vec<f32>,
+    pub te_ms: f64,
+    pub denoise_ms: f64,
+    pub decode_ms: f64,
+    pub png_ms: f64,
+    pub total_ms: f64,
+}
+
+/// Zero-LEFT-pad `(seq, width)` conditioning rows to `(target, width)` —
+/// comfy `Flux2.extra_conds`: pad rows FIRST, real conditioning last.
+pub fn flux2_dev_pad_conditioning(
+    conditioning: &[f32],
+    seq: usize,
+    width: usize,
+    target: usize,
+) -> Result<Vec<f32>> {
+    if conditioning.len() != seq * width {
+        return Err(DiffusionError::workflow(format!(
+            "flux2 dev conditioning expected {} values, got {}",
+            seq * width,
+            conditioning.len()
+        )));
+    }
+    if seq > target {
+        return Err(DiffusionError::workflow(format!(
+            "flux2 dev conditioning {seq} rows exceeds the {target} window"
+        )));
+    }
+    let mut out = vec![0.0f32; target * width];
+    out[(target - seq) * width..].copy_from_slice(conditioning);
+    Ok(out)
+}
+
+impl Flux2DevPipeline {
+    pub fn load(paths: Flux2DevPaths) -> Result<Self> {
+        if !gpu_device_available() {
+            return Err(DiffusionError::workflow(
+                "flux2-dev requires CUDA (MAKEPAD_GGML_REQUIRE_CUDA=1)",
+            ));
+        }
+        let tokenizer = Flux2Tokenizer::load(&paths.tokenizer)?;
+        let text_encoder = Flux2WeightFile::load(&paths.text_encoder)?;
+        let text_prepared =
+            Flux2DevTextPrepared::prepare(&text_encoder, Mistral3TextConfig::flux2_dev())?;
+        let vae = Flux2VaeWeights::load(&paths.vae)?;
+        let transformer = Flux2TransformerWeights::load(&paths.transformer)?;
+        if !transformer.config.guidance_embed {
+            return Err(DiffusionError::model(
+                "flux2-dev loader received a guidance_embed=false transformer",
+            ));
+        }
+        Ok(Self {
+            paths,
+            transformer,
+            text_encoder,
+            text_prepared,
+            tokenizer,
+            vae,
+            cached_prompt: None,
+        })
+    }
+
+    pub fn generate(&mut self, request: &Flux2GenerateRequest) -> Result<Flux2GenerateResult> {
+        self.generate_with_hooks(request, None)
+    }
+
+    pub fn generate_with_hooks(
+        &mut self,
+        request: &Flux2GenerateRequest,
+        mut on_stage: Option<&mut dyn FnMut(&str, usize, usize)>,
+    ) -> Result<Flux2GenerateResult> {
+        if request.width % 16 != 0 || request.height % 16 != 0 {
+            return Err(DiffusionError::workflow(format!(
+                "flux2 dev size must be a multiple of 16, got {}x{}",
+                request.width, request.height
+            )));
+        }
+        if request.steps == 0 {
+            return Err(DiffusionError::workflow("flux2 dev needs at least 1 step"));
+        }
+        let total_started = std::time::Instant::now();
+
+        let width = FLUX2_MAX_SEQUENCE_LENGTH;
+        let cond_width = Mistral3TextConfig::flux2_dev().conditioning_dim() as usize;
+        let (prompt_embeds, input_ids) = if let Some(embeds) = &request.teacher_embeds {
+            if embeds.len() != width * cond_width {
+                return Err(DiffusionError::workflow(format!(
+                    "flux2 dev teacher embeds expected {} values, got {}",
+                    width * cond_width,
+                    embeds.len()
+                )));
+            }
+            (embeds.clone(), Vec::new())
+        } else if let Some((prompt, embeds, ids)) = self
+            .cached_prompt
+            .as_ref()
+            .filter(|(prompt, _, _)| *prompt == request.prompt)
+        {
+            let _ = prompt;
+            (embeds.clone(), ids.clone())
+        } else {
+            let ids = self
+                .tokenizer
+                .encode_t2i_unpadded(FLUX2_SYSTEM_MESSAGE, &request.prompt);
+            let mut te_hook = on_stage
+                .as_deref_mut()
+                .map(|hook| move |done: usize, total: usize| hook("text-encode", done, total));
+            let (conditioning, _) = flux2_dev_text_encode(
+                &self.text_encoder,
+                &self.text_prepared,
+                &ids,
+                te_hook
+                    .as_mut()
+                    .map(|hook| hook as &mut dyn FnMut(usize, usize)),
+                false,
+            )?;
+            drop(te_hook);
+            let padded = flux2_dev_pad_conditioning(&conditioning, ids.len(), cond_width, width)?;
+            self.cached_prompt = Some((request.prompt.clone(), padded.clone(), ids.clone()));
+            (padded, ids)
+        };
+        let te_ms = total_started.elapsed().as_secs_f64() * 1000.0;
+
+        let packed_w = (request.width / 16) as usize;
+        let packed_h = (request.height / 16) as usize;
+        let gen_tokens = packed_w * packed_h;
+        let channels = 128usize;
+        let mut sample = match &request.noise {
+            Some(noise) => {
+                if noise.len() != gen_tokens * channels {
+                    return Err(DiffusionError::workflow(format!(
+                        "flux2 dev noise expected {} values, got {}",
+                        gen_tokens * channels,
+                        noise.len()
+                    )));
+                }
+                noise.clone()
+            }
+            None => splitmix_noise(request.seed, gen_tokens * channels),
+        };
+        let gen_ids = flux2_image_ids(packed_w, packed_h, 0);
+        let txt_ids = flux2_text_ids(width);
+        let sigmas = flux2_schedule(request.steps, gen_tokens)?;
+
+        let prof = std::env::var_os("MAKEPAD_GPU_PROF").is_some();
+        if prof {
+            let _ = makepad_ggml::backend::prof::report_and_reset("");
+        }
+        let denoise_started = std::time::Instant::now();
+        let mut step_predictions = Vec::new();
+        for step in 0..request.steps {
+            let step_started = std::time::Instant::now();
+            if let Some(hook) = on_stage.as_deref_mut() {
+                hook("denoise", step + 1, request.steps);
+            }
+            let run = flux2_transformer_forward(
+                &self.transformer,
+                &sample,
+                &gen_ids,
+                &prompt_embeds,
+                &txt_ids,
+                sigmas[step],
+                Some(request.guidance),
+                gen_tokens,
+            )?;
+            if step == 0 || step + 1 == request.steps {
+                step_predictions.push((step, run.prediction.clone()));
+            }
+            flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
+            if prof {
+                eprintln!(
+                    "flux2dev prof step{step} ms={:.1}",
+                    step_started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+        let denoise_ms = denoise_started.elapsed().as_secs_f64() * 1000.0;
+        if prof {
+            eprint!(
+                "{}",
+                makepad_ggml::backend::prof::report_and_reset("flux2dev prof denoise ")
+            );
+        }
+        flux2_dit_clear_pool();
+        // Decode transients (~2-3GB at 1024px) plus the resident DiT sit at
+        // the 32GB WDDM cliff; the ring slots are the cheapest headroom —
+        // freed here, re-primed on the next forward.
+        let _ = crate::backend::gpu_stream_ring_release_slots();
+
+        let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
+        let decode_started = std::time::Instant::now();
+        if let Some(hook) = on_stage.as_deref_mut() {
+            hook("decode", 0, 1);
+        }
+        let image = flux2_vae_decode(&self.vae, &packed)?;
+        let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+        if prof {
+            eprintln!("flux2dev prof vae_decode ms={decode_ms:.1}");
+            eprint!(
+                "{}",
+                makepad_ggml::backend::prof::report_and_reset("flux2dev prof vae ")
+            );
+        }
+        let png_started = std::time::Instant::now();
+        let rgb = flux2_image_to_rgb_u8(&image);
+        let png = encode_png_rgb(
+            &planar_rgb_to_whcb(&rgb, image.width, image.height),
+            image.width,
+            image.height,
+        )?;
+        let png_ms = png_started.elapsed().as_secs_f64() * 1000.0;
+        Ok(Flux2GenerateResult {
+            image,
+            png,
+            packed_latents: packed,
+            input_ids,
+            prompt_embeds,
+            step_predictions,
+            sigmas,
+            te_ms,
+            denoise_ms,
+            decode_ms,
+            png_ms,
+            total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+/// Resolve the dev weight layout under one root: the three Comfy files plus
+/// the HF tokenizer dir.
+pub fn flux2_dev_paths_from_root(root: impl AsRef<Path>) -> Result<Flux2DevPaths> {
+    let root = root.as_ref();
+    let transformer = root.join("flux2_dev_fp8mixed.safetensors");
+    let text_encoder = root.join("mistral_3_small_flux2_fp8.safetensors");
+    let tokenizer = root.join("tokenizer");
+    let vae = [
+        root.join("flux2-vae.safetensors"),
+        root.join("vae/diffusion_pytorch_model.safetensors"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+    .ok_or_else(|| {
+        DiffusionError::workflow(format!("flux2-dev vae not found under {}", root.display()))
+    })?;
+    for (label, path) in [
+        ("transformer", &transformer),
+        ("text_encoder", &text_encoder),
+    ] {
+        if !path.is_file() {
+            return Err(DiffusionError::workflow(format!(
+                "flux2-dev {label} missing: {}",
+                path.display()
+            )));
+        }
+    }
+    if !tokenizer.is_dir() {
+        return Err(DiffusionError::workflow(format!(
+            "flux2-dev tokenizer dir missing: {}",
+            tokenizer.display()
+        )));
+    }
+    Ok(Flux2DevPaths {
         transformer,
         text_encoder,
         tokenizer,

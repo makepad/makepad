@@ -207,7 +207,7 @@ impl ContentBackend for FluxBackend {
                 steps,
                 cfg: 1.0,
                 denoise: 1.0,
-                guidance: params.guidance,
+                guidance: params.guidance.unwrap_or(3.5),
                 sampler_name: "euler".to_string(),
                 scheduler: "simple".to_string(),
             },
@@ -230,7 +230,7 @@ impl ContentBackend for FluxBackend {
             height,
             seed: params.seed,
             steps: steps as usize,
-            guidance: params.guidance,
+            guidance: params.guidance.unwrap_or(3.5),
         };
         let (generation, worker) = self.worker.as_ref().expect("flux worker just acquired");
         let run = match worker.generate(job, cancel.clone(), progress) {

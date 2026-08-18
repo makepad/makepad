@@ -154,6 +154,54 @@
    ]
   },
   {
+   "id": "flux2-dev",
+   "domain": "image",
+   "backend": "flux2",
+   "available": true,
+   "gated": false,
+   "vram_gb": 31.0,
+   "min_vram_gb": 30.0,
+   "note": "FLUX.2-dev (32B guidance-distilled) text-to-image through the in-repo CUDA port of the official 32GB-card fp8 recipe (Comfy fp8mixed DiT resident 1-byte, Mistral-Small-3.2-24B fp8 TE taps [10,20,30] streamed per layer, flux2-vae, euler 20 steps guidance 4.0, 1024px default). Tekken tokenizer from the ungated Mistral-Small-3.1 repo (byte-identical to the gated BFL bundle). CUDA-only; fails closed without a GPU device. Request: prompt (+ optional width/height/steps/guidance/seed).",
+   "files": [
+    {
+     "role": "transformer",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/diffusion_models/flux2_dev_fp8mixed.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/flux2_dev_fp8mixed.safetensors",
+     "size": 35455599592,
+     "sha256": "863a82e4ff950a42a6b0e80bea824828f129eb1a8fbbdbd9e8cb29859127b486"
+    },
+    {
+     "role": "text-encoder",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/mistral_3_small_flux2_fp8.safetensors",
+     "size": 18034640095,
+     "sha256": "e3467b7d912a234fb929cdf215dc08efdb011810b44bc21081c4234cc75b370e"
+    },
+    {
+     "role": "vae",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/vae/flux2-vae.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "tokenizer",
+     "repo": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+     "path": "tokenizer.json",
+     "revision": "68faf511d618ef198fef186659617cfd2eb8e33a",
+     "cache_as": "flux2-dev/tokenizer/tokenizer.json",
+     "size": 17078037,
+     "sha256": "b76085f9923309d873994d444989f7eb6ec074b06f25b58f1e8d7b7741070949"
+    }
+   ]
+  },
+  {
    "id": "trellis-2",
    "domain": "mesh",
    "backend": "trellis",
@@ -1892,7 +1940,7 @@
    "available": true,
    "gated": false,
    "vram_gb": 12.0,
-   "note": "MiniMax Music 3 NATIVE QUANTIZED 24GB tier: official audio.cpp GGUF export (audio-cpp/MiniMax-Music3-GGUF, architecture 'audiocpp', native HF tensor names), default mix Q4_0 8B LM + Q4_0 2.4B DiT + BF16 RVQ depth decoder + F32 condition encoder + F32 Flow-VAE vocoder (~9.0 GB pull vs 28.5 GB bf16). Same generate contract as minimax-music3 (lyrics + prompt + seconds + seed -> stereo 44.1 kHz wav) on the in-repo CUDA stack: Q4_0 block streams stay resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine; pack import is fail-closed (architecture + tensor census + python shape canaries). Native engine only — the Python ModularPipeline cannot serve a GGUF pack. License: MiniMax-Music3 COMMUNITY LICENSE (same terms as the bf16 tree; LICENSE file pinned below).",
+   "note": "MiniMax Music 3 NATIVE QUANTIZED 24GB tier: official audio.cpp GGUF export (audio-cpp/MiniMax-Music3-GGUF, architecture 'audiocpp', native HF tensor names), default mix Q4_0 8B LM + Q4_0 2.4B DiT + BF16 RVQ depth decoder + F32 condition encoder + F32 Flow-VAE vocoder (~9.0 GB pull vs 28.5 GB bf16). Same generate contract as minimax-music3 (lyrics + prompt + seconds + seed -> stereo 44.1 kHz wav) on the in-repo CUDA stack: Q4_0 block streams stay resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine; pack import is fail-closed (architecture + tensor census + python shape canaries). Native engine only \u2014 the Python ModularPipeline cannot serve a GGUF pack. License: MiniMax-Music3 COMMUNITY LICENSE (same terms as the bf16 tree; LICENSE file pinned below).",
    "files": [
     {
      "role": "license",

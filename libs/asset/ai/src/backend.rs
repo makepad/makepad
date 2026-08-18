@@ -28,7 +28,8 @@ pub struct GenerateParams {
     pub height: Option<u32>,
     pub seed: u64,
     pub steps: Option<u32>,
-    pub guidance: f32,
+    /// None = model default (flux1 3.5, flux2-dev 4.0, ...).
+    pub guidance: Option<f32>,
     /// Test hook (testpattern backend only): artificial generation time.
     pub delay_ms: u64,
     /// Download/verify files then stop before generating (pull job).
@@ -228,7 +229,7 @@ impl GenerateParams {
             height: request.height.map(|v| v.clamp(16, 8192)),
             seed,
             steps: request.steps.map(|v| v.clamp(1, 200)),
-            guidance: request.guidance.unwrap_or(3.5) as f32,
+            guidance: request.guidance.map(|v| v as f32),
             delay_ms: request.delay_ms.unwrap_or(0).min(60_000),
             pull_only: request.pull_only.unwrap_or(false),
 
