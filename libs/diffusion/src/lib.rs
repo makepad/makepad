@@ -1,117 +1,48 @@
 mod error;
 
-mod assets;
-
 pub use makepad_ai_common::backend;
 pub use makepad_ai_common::metal_accel;
 pub use makepad_ai_common::torch_pth;
-pub mod birefnet;
-pub mod realesrgan;
-mod realesrgan_model;
-mod birefnet_model;
-pub mod sam3;
-mod sam3_model;
-pub mod clip;
-pub mod clip_l;
-pub mod comfy;
-pub mod da3;
-pub mod flux;
-pub mod flux_gguf;
-pub mod flux_pipeline;
-pub mod flux_schedule;
-pub mod flux_text;
-pub mod flux_transformer;
-pub mod flux_vae;
-pub mod flux2;
-pub mod flux2_dev_text;
-pub mod flux2_klein_text;
-pub mod flux2_pipeline;
-pub mod flux2_text;
-pub mod flux2_tokenizer;
-pub mod flux2_transformer;
-pub mod flux2_vae;
-pub mod h3;
-pub mod h3_audio_vae;
-pub mod h3_image;
-pub mod h3_pipeline;
-pub mod h3_quant;
-pub mod h3_text;
-pub mod h3_tokenizer;
-pub mod h3_transformer;
-pub mod h3_vae;
-pub mod hy_motion;
-pub mod hy_motion_clip;
-pub mod hy_motion_decode;
-pub mod hy_motion_pipeline;
-pub mod hy_motion_text;
-pub mod hy_motion_transformer;
-pub mod hy_motion_weights;
-pub mod indextts;
-pub mod indextts_bigvgan;
-pub mod indextts_campplus;
-pub mod indextts_codec;
-pub mod indextts_gpt;
-pub mod indextts_mel;
-pub mod indextts_pipeline;
-pub mod indextts_s2mel;
-pub mod indextts_tokenizer;
-pub mod indextts_w2v;
-pub mod moss;
-pub mod moss_dac;
-pub mod music3;
-pub mod music3_ar;
-pub mod music3_dit;
-pub mod music3_gguf;
-pub mod music3_gguf_gen;
-pub mod music3_lm;
-pub mod music3_pipeline;
-pub mod music3_quant;
-pub mod music3_rvq;
-pub mod music3_vocoder;
-pub mod music3_weights;
-pub mod moss_dit;
-pub mod moss_pipeline;
-pub mod moss_text;
-pub mod sa3;
-pub mod sa3_ae;
-pub mod sa3_pipeline;
-pub mod sa3_text;
-pub mod sa3_tokenizer;
-pub mod sa3_transformer;
-pub mod skin_tokens;
-pub mod skin_tokens_condition;
-pub mod skin_tokens_convert;
-pub mod skin_tokens_decode;
-pub mod skin_tokens_mesh;
-pub mod skin_tokens_neural;
-pub mod skin_tokens_output;
-pub mod skin_tokens_pipeline;
-pub mod skin_tokens_qwen;
-pub mod skin_tokens_tokenizer;
-pub mod t5;
-pub mod t5_encoder;
-pub mod woosh;
-pub mod woosh_ae;
-pub mod woosh_dit;
-pub mod woosh_pipeline;
-pub mod woosh_text;
-pub mod woosh_tokenizer;
-pub mod ace;
-pub mod ace_dit;
-pub mod ace_pipeline;
-pub mod ace_text;
-pub mod ace_vae;
-pub mod trellis;
-pub mod trellis_dino;
-pub mod trellis_dit;
-pub mod trellis_image;
-pub mod trellis_mesh;
-pub mod trellis_pipeline;
-pub mod trellis_slat;
-pub mod trellis_vae;
-
 pub use error::{DiffusionError, Result};
 pub use makepad_ai_common::{
     band_progress, emit_byte_progress, emit_progress, hook_ref, BoxedProgressHook, ProgressHook,
     BYTE_PROGRESS_STEP,
+};
+
+pub use makepad_ai_h3::{
+    h3, h3_audio_vae, h3_image, h3_pipeline, h3_quant, h3_text, h3_tokenizer, h3_transformer,
+    h3_vae,
+};
+pub use makepad_ai_flux::{
+    clip, clip_l, comfy, flux, flux2, flux2_dev_text, flux2_klein_text, flux2_pipeline, flux2_text,
+    flux2_tokenizer, flux2_transformer, flux2_vae, flux_gguf, flux_pipeline, flux_schedule,
+    flux_text, flux_transformer, flux_vae, t5, t5_encoder,
+};
+pub use makepad_ai_vision::{birefnet, da3, realesrgan, sam3};
+pub use makepad_ai_rig::{
+    skin_tokens, skin_tokens_condition, skin_tokens_convert, skin_tokens_decode, skin_tokens_mesh,
+    skin_tokens_neural, skin_tokens_output, skin_tokens_pipeline, skin_tokens_qwen,
+    skin_tokens_tokenizer,
+};
+pub use makepad_ai_motion::{
+    hy_motion, hy_motion_clip, hy_motion_decode, hy_motion_pipeline, hy_motion_text,
+    hy_motion_transformer, hy_motion_weights,
+};
+pub use makepad_ai_sfx::{
+    moss, moss_dac, moss_dit, moss_pipeline, moss_text, sa3, sa3_ae, sa3_pipeline, sa3_text,
+    sa3_tokenizer, sa3_transformer, woosh, woosh_ae, woosh_dit, woosh_pipeline, woosh_text,
+    woosh_tokenizer,
+};
+pub use makepad_ai_music::{
+    ace, ace_dit, ace_pipeline, ace_text, ace_vae, music3, music3_ar, music3_dit, music3_gguf,
+    music3_gguf_gen, music3_lm, music3_pipeline, music3_quant, music3_rvq, music3_vocoder,
+    music3_weights,
+};
+pub use makepad_ai_speech::{
+    indextts, indextts_bigvgan, indextts_campplus, indextts_codec, indextts_gpt, indextts_mel,
+    indextts_pipeline, indextts_s2mel, indextts_tokenizer, indextts_w2v,
+};
+pub use makepad_ai_trellis::{
+    trellis, trellis_dino, trellis_dit, trellis_image, trellis_mesh, trellis_pipeline, trellis_slat,
+    trellis_vae,
 };
