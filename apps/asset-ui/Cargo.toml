@@ -1,0 +1,33 @@
+[package]
+name = "makepad-app-asset-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Asset UI: catalog, licensed pack import, viewers, and fleet generation over the Asset Server"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+# Service wire types + fleet/affinity scheduler (transport here is
+# cx.http_request; the lib's blocking client is for worker-thread consumers).
+makepad-asset-ai = { path = "../../libs/asset/ai", default-features = false }
+makepad-micro-serde = { path = "../../libs/micro_serde" }
+makepad-base64 = { path = "../../libs/base64" }
+# Mesh viewer: Renderer stage for a single GLB.
+makepad-render = { path = "../../libs/render" }
+# Animated-character viewer: base-color texture extraction from the GLB
+# (skin.rs ignores materials by design — the caller binds the texture).
+makepad-gltf = { path = "../../libs/gltf" }
+# Splat viewer: ViewSplat + XrSceneView desktop host.
+makepad-xr = { path = "../../xr" }
+# REAL Asset Server frontend: shared session lifecycle (discovery/auth/
+# retry), catalog runtimes, committed-event subscriber, verified cache. The
+# VJ worker owns these crates; this app consumes the public API only.
+makepad-asset-client = { path = "../../libs/asset/client" }
+makepad-asset-data = { path = "../../libs/asset/data" }
+makepad-asset-chat = { path = "../../libs/asset/chat" }
+# Embedded catalog/chat broker for now: the app starts the real Asset
+# Server in-process instead of waiting for a LAN beacon.
+makepad-asset-store = { path = "../../libs/asset/store" }
+# Local licensed-pack compiler (Kenney Import). Same fail-closed walk as
+# `makepad-asset-importer --import-pack`; no network fetch.
+makepad-asset-importer = { path = "../../libs/asset/importer" }

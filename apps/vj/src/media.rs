@@ -1,0 +1,1640 @@
+//! Media decode: video slot players, audio track/pad decoding, waveforms.
+//!
+//! The video path adapts the proven sandbox/ai-content pattern
+//! (`apps/asset-ui/src/video_player.rs`): one decode thread per slot pulls
+//! frames + audio from the platform video-file seam (hardware codecs on
+//! macOS), keeps a small BGRA ring paced by pts against a pause-aware wall
+//! clock, and pushes PCM into this slot's mixer bus (never a process
+//! global — VJ crossfades two slots with independent gains). Extensions over
+//! the copied pattern: pre-roll signalling, pause, loop-by-reopen,
+//! seek-by-reopen (the platform decoder has no native seek), and position
+//! reporting. Teardown is a stop flag + detached thread — never a join on
+//! the UI thread.
+//!
+//! Audio tracks (music decks) and SFX pads decode fully to memory on a small
+//! worker pool: WAV through a bounded RIFF parser, MP4/M4A audio through the
+//! platform decoder. Everything is budgeted.
+
+use crate::cue::SlotId;
+use crate::decks::DeckId;
+use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE};
+use crate::pads::PadKey;
+use makepad_asset_data::{AssetRevisionId, MediaType};
+use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const RING_FRAMES: usize = 3;
+const AUDIO_AHEAD_SECS: f64 = 1.0;
+/// Enough decoded audio to survive UI/display-link jitter after a beat start.
+const PREROLL_AUDIO_LEAD_SECS: f64 = 0.25;
+/// Some platform decoders advertise audio before producing it. Do not leave a
+/// cue armed forever: expose that degraded readiness honestly after this bound.
+const PREROLL_AUDIO_TIMEOUT: Duration = Duration::from_millis(1_500);
+static DECODER_ALIAS_ID: AtomicU64 = AtomicU64::new(0);
+/// Longest fully decoded track (music deck), frames: 15 min at 48 kHz.
+pub const MAX_TRACK_FRAMES: usize = 48_000 * 60 * 15;
+/// Longest fully decoded SFX sample, frames: 30 s at 48 kHz.
+pub const MAX_PAD_FRAMES: usize = 48_000 * 30;
+/// Waveform resolution (min/max columns) computed at decode time.
+pub const WAVE_COLS: usize = 2048;
+
+// ---------------------------------------------------------------------------
+// video slot player
+// ---------------------------------------------------------------------------
+
+/// Platform media frameworks use a path's extension as a container type
+/// hint. Asset-cache objects intentionally have digest-only names, so an
+/// otherwise valid MP4 is reported as having no video track by AVURLAsset.
+///
+/// Give the decoder an extension-bearing hard link beside (but outside) the
+/// cache's content-addressed `objects/` tree. A hard link does not duplicate
+/// a potentially large clip. The decode thread owns this lease and removes
+/// the link only after every reopen/loop has stopped, which keeps detached
+/// slot teardown safe.
+struct DecoderInput {
+    path: String,
+    alias: Option<PathBuf>,
+}
+
+impl DecoderInput {
+    fn prepare(source: &Path, media: MediaType) -> Result<Self, String> {
+        let extension = match media {
+            MediaType::Mp4 => "mp4",
+            other => return Err(format!("unsupported video media {other:?}")),
+        };
+        if !source.is_file() {
+            return Err(format!("media file not found: {}", source.display()));
+        }
+        if source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            return Ok(Self {
+                path: source
+                    .to_str()
+                    .ok_or_else(|| format!("non-utf8 media path: {}", source.display()))?
+                    .to_string(),
+                alias: None,
+            });
+        }
+
+        // Cache paths are `<root>/objects/<prefix>/<digest>`. Keep aliases
+        // under `<root>/decoder-input/`; for a non-cache source, use a
+        // sibling private directory. Either choice is on the source volume,
+        // so hard-linking never needs a byte-copy fallback.
+        let parent = source.parent().ok_or("media path has no parent")?;
+        let objects = parent.parent();
+        let alias_dir = match objects {
+            Some(objects) if objects.file_name().is_some_and(|name| name == "objects") => objects
+                .parent()
+                .unwrap_or(parent)
+                .join("decoder-input"),
+            _ => parent.join(".makepad-decoder-input"),
+        };
+        std::fs::create_dir_all(&alias_dir)
+            .map_err(|e| format!("create decoder input directory: {e}"))?;
+        let ticket = DECODER_ALIAS_ID.fetch_add(1, Ordering::Relaxed);
+        let alias = alias_dir.join(format!(
+            "decoder-{}-{ticket}.{extension}",
+            std::process::id()
+        ));
+        std::fs::hard_link(source, &alias)
+            .map_err(|e| format!("create typed decoder link: {e}"))?;
+        let path = match alias.to_str() {
+            Some(path) => path.to_string(),
+            None => {
+                let _ = std::fs::remove_file(&alias);
+                return Err(format!("non-utf8 decoder path: {}", alias.display()));
+            }
+        };
+        Ok(Self { path, alias: Some(alias) })
+    }
+}
+
+impl Drop for DecoderInput {
+    fn drop(&mut self) {
+        if let Some(alias) = self.alias.take() {
+            let _ = std::fs::remove_file(alias);
+        }
+    }
+}
+
+struct Frame {
+    pts_100ns: i64,
+    bgra: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrerollStatus {
+    WaitingVideo = 0,
+    WaitingAudio = 1,
+    Ready = 2,
+    /// The source advertised audio, but its complete (short) audio track is
+    /// smaller than the normal lead target.
+    ReadyAudioExhausted = 3,
+    /// The source advertised audio but did not produce a bounded lead in
+    /// time. Playback may start, while the UI can surface degraded A/V sync.
+    ReadyAudioTimeout = 4,
+}
+
+impl PrerollStatus {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::WaitingAudio,
+            2 => Self::Ready,
+            3 => Self::ReadyAudioExhausted,
+            4 => Self::ReadyAudioTimeout,
+            _ => Self::WaitingVideo,
+        }
+    }
+
+    pub fn is_ready(self) -> bool {
+        matches!(
+            self,
+            Self::Ready | Self::ReadyAudioExhausted | Self::ReadyAudioTimeout
+        )
+    }
+}
+
+fn preroll_status(
+    video_ready: bool,
+    has_audio: bool,
+    audio_buffered_secs: f64,
+    audio_eos: bool,
+    timed_out: bool,
+) -> PrerollStatus {
+    if !video_ready {
+        return PrerollStatus::WaitingVideo;
+    }
+    if !has_audio || audio_buffered_secs >= PREROLL_AUDIO_LEAD_SECS {
+        return PrerollStatus::Ready;
+    }
+    if audio_eos {
+        return PrerollStatus::ReadyAudioExhausted;
+    }
+    if timed_out {
+        return PrerollStatus::ReadyAudioTimeout;
+    }
+    PrerollStatus::WaitingAudio
+}
+
+struct SlotShared {
+    stop: AtomicBool,
+    paused: AtomicBool,
+    loop_on: AtomicBool,
+    /// Pending seek target in 100ns units; negative = none.
+    seek_100ns: AtomicI64,
+    /// Presentation position (pts of the last frame handed to the UI).
+    position_100ns: AtomicI64,
+    video_ready: AtomicBool,
+    preroll_status: AtomicU8,
+    playback_rate_bits: AtomicU64,
+    end_of_stream: AtomicBool,
+    frames: Mutex<VecDeque<Frame>>,
+    failure: Mutex<Option<String>>,
+}
+
+/// One playback slot: decode thread + frame ring + pts pacing.
+pub struct SlotPlayer {
+    pub width: u32,
+    pub height: u32,
+    pub duration_secs: f64,
+    shared: Arc<SlotShared>,
+    /// Pause-aware presentation clock: media time at `clock_base` was
+    /// `base_media_100ns`.
+    clock_base: Option<Instant>,
+    base_media_100ns: i64,
+    last_pts: i64,
+    slot: SlotId,
+    mixer: Mixer,
+}
+
+impl SlotPlayer {
+    /// Probe + spawn the decode thread. Fails fast on unopenable files; the
+    /// pre-roll becomes ready only after the first frame and a bounded audio
+    /// lead (when the source has audio). The mixer bus stays paused, so this
+    /// preparation never consumes a sample before the device-clock start.
+    pub fn open(
+        slot: SlotId,
+        path: &str,
+        media: MediaType,
+        mixer: Mixer,
+        loop_on: bool,
+        start_paused: bool,
+    ) -> Result<SlotPlayer, String> {
+        let input = DecoderInput::prepare(Path::new(path), media)?;
+        let info = VideoFileDecoder::open(&input.path)
+            .map_err(|e| e.to_string())?
+            .info()
+            .clone();
+        if info.width == 0 || info.height == 0 {
+            return Err(format!("video reports zero size: {}x{}", info.width, info.height));
+        }
+        let shared = Arc::new(SlotShared {
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(start_paused),
+            loop_on: AtomicBool::new(loop_on),
+            seek_100ns: AtomicI64::new(-1),
+            position_100ns: AtomicI64::new(0),
+            video_ready: AtomicBool::new(false),
+            preroll_status: AtomicU8::new(PrerollStatus::WaitingVideo as u8),
+            playback_rate_bits: AtomicU64::new(1.0f64.to_bits()),
+            end_of_stream: AtomicBool::new(false),
+            frames: Mutex::new(VecDeque::new()),
+            failure: Mutex::new(None),
+        });
+        mixer.set_slot_playback_rate(slot, 1.0);
+        mixer.set_slot_paused(slot, start_paused);
+        let thread_shared = shared.clone();
+        let thread_mixer = mixer.clone();
+        std::thread::Builder::new()
+            .name(format!("vj-slot-{:?}", slot))
+            .spawn(move || decode_loop(slot, input, thread_mixer, thread_shared))
+            .map_err(|e| e.to_string())?;
+        Ok(SlotPlayer {
+            width: info.width,
+            height: info.height,
+            duration_secs: info.duration_100ns.max(0) as f64 / 10_000_000.0,
+            shared,
+            clock_base: None,
+            base_media_100ns: 0,
+            last_pts: 0,
+            slot,
+            mixer,
+        })
+    }
+
+    pub fn preroll_ready(&self) -> bool {
+        self.preroll_status().is_ready()
+    }
+
+    pub fn preroll_status(&self) -> PrerollStatus {
+        PrerollStatus::from_u8(self.shared.preroll_status.load(Ordering::Acquire))
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.shared.failure.lock().unwrap().clone()
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        let was = self.shared.paused.load(Ordering::Acquire);
+        if was == paused {
+            return;
+        }
+        if paused {
+            // Freeze: remember where the clock stood.
+            self.base_media_100ns = self.media_now_100ns();
+            self.clock_base = None;
+        }
+        self.shared.paused.store(paused, Ordering::Release);
+        self.mixer.set_slot_paused(self.slot, paused);
+        // Unpause re-bases lazily on the next take_due_frame.
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.shared.paused.load(Ordering::Acquire)
+    }
+
+    /// Whether frame-paced pumping is still useful. A settled paused slot
+    /// and an exhausted slot with an empty ring need no display-link loop.
+    pub fn needs_frame_pump(&self) -> bool {
+        !self.shared.paused.load(Ordering::Acquire)
+            && (!self.shared.end_of_stream.load(Ordering::Acquire)
+                || !self.shared.frames.lock().unwrap().is_empty())
+    }
+
+    pub fn set_loop(&mut self, loop_on: bool) {
+        self.shared.loop_on.store(loop_on, Ordering::Release);
+    }
+
+    /// Set coherent picture/audio pacing for this video slot. No reverse or
+    /// wide time-stretch is pretended: the rate is clamped to the musically
+    /// safe loop-fit range shared with the mixer.
+    pub fn set_playback_rate(&mut self, rate: f64) -> f64 {
+        let now = self.media_now_100ns();
+        let rate = rate.clamp(MIN_VIDEO_PLAYBACK_RATE, MAX_VIDEO_PLAYBACK_RATE);
+        self.base_media_100ns = now;
+        if !self.is_paused() && self.clock_base.is_some() {
+            self.clock_base = Some(Instant::now());
+        }
+        self.shared.playback_rate_bits.store(rate.to_bits(), Ordering::Release);
+        self.mixer.set_slot_playback_rate(self.slot, rate)
+    }
+
+    pub fn playback_rate(&self) -> f64 {
+        f64::from_bits(self.shared.playback_rate_bits.load(Ordering::Acquire))
+            .clamp(MIN_VIDEO_PLAYBACK_RATE, MAX_VIDEO_PLAYBACK_RATE)
+    }
+
+    /// Position of the frame currently on screen, seconds.
+    pub fn position_secs(&self) -> f64 {
+        self.shared.position_100ns.load(Ordering::Acquire).max(0) as f64 / 10_000_000.0
+    }
+
+    /// Seek by reopening the stream and discarding up to the target. The
+    /// decode thread does the work; playback resumes from the target.
+    pub fn seek_fraction(&mut self, fraction: f64) {
+        let target =
+            (fraction.clamp(0.0, 1.0) * self.duration_secs * 10_000_000.0) as i64;
+        self.shared.seek_100ns.store(target.max(0), Ordering::Release);
+        self.shared.end_of_stream.store(false, Ordering::Release);
+        // Re-base the presentation clock at the target.
+        self.base_media_100ns = target;
+        self.clock_base = None;
+        self.last_pts = target;
+    }
+
+    /// Wall-clock media time, honoring pause.
+    fn media_now_100ns(&self) -> i64 {
+        match (self.shared.paused.load(Ordering::Acquire), self.clock_base) {
+            (true, _) | (false, None) => self.base_media_100ns,
+            (false, Some(base)) => {
+                self.base_media_100ns
+                    + ((base.elapsed().as_nanos() as f64 / 100.0) * self.playback_rate()) as i64
+            }
+        }
+    }
+
+    /// The newest due frame (call once per UI frame); `None` keeps the
+    /// current texture. Rebases the clock on stream restarts (loop/seek).
+    pub fn take_due_frame(&mut self) -> Option<Vec<u32>> {
+        if self.shared.paused.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut frames = self.shared.frames.lock().unwrap();
+        let first_pts = frames.front()?.pts_100ns;
+        // A large backward pts jump means the stream restarted (loop or
+        // seek): rebase the clock there.
+        if first_pts + 5_000_000 < self.last_pts {
+            self.base_media_100ns = first_pts;
+            self.clock_base = Some(Instant::now());
+        }
+        if self.clock_base.is_none() {
+            self.base_media_100ns = self.base_media_100ns.max(first_pts.min(self.base_media_100ns + 10_000_000));
+            self.clock_base = Some(Instant::now());
+        }
+        let media = self.media_now_100ns();
+        let mut due = None;
+        while frames.front().is_some_and(|f| f.pts_100ns <= media) {
+            due = frames.pop_front();
+        }
+        if let Some(frame) = &due {
+            self.last_pts = frame.pts_100ns;
+            self.shared.position_100ns.store(frame.pts_100ns, Ordering::Release);
+        }
+        due.map(|f| f.bgra)
+    }
+}
+
+impl Drop for SlotPlayer {
+    fn drop(&mut self) {
+        // Detached teardown: flag it and walk away; the thread exits on its
+        // own (never a UI-thread join).
+        self.shared.stop.store(true, Ordering::Release);
+    }
+}
+
+fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<SlotShared>) {
+    let path = &input.path;
+    let mut decoder = match VideoFileDecoder::open(path) {
+        Ok(d) => d,
+        Err(e) => {
+            *shared.failure.lock().unwrap() = Some(e.to_string());
+            return;
+        }
+    };
+    let info = decoder.info().clone();
+    let mut audio_eos = !info.has_audio;
+    let mut rgb_scratch = Vec::new();
+    let preroll_deadline = Instant::now() + PREROLL_AUDIO_TIMEOUT;
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            return;
+        }
+        // Seek: reopen and discard up to the target.
+        let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
+        if seek >= 0 {
+            match VideoFileDecoder::open(&path) {
+                Ok(d) => {
+                    decoder = d;
+                    audio_eos = !info.has_audio;
+                    shared.frames.lock().unwrap().clear();
+                    mixer.flush_slot_audio(slot);
+                    // Discard video frames strictly before the target.
+                    loop {
+                        if shared.stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match decoder.next_frame() {
+                            Ok(Some(frame)) if frame.pts_100ns + 400_000 < seek => continue,
+                            Ok(Some(frame)) => {
+                                push_frame(&shared, frame, &mut rgb_scratch);
+                                break;
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                *shared.failure.lock().unwrap() = Some(e.to_string());
+                                return;
+                            }
+                        }
+                    }
+                    // Discard audio strictly before the target.
+                    while !audio_eos {
+                        if shared.stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match decoder.next_audio() {
+                            Ok(Some(chunk)) if chunk.pts_100ns < seek => continue,
+                            Ok(Some(chunk)) => {
+                                mixer.push_slot_audio(
+                                    slot,
+                                    &chunk.samples,
+                                    chunk.channels,
+                                    chunk.sample_rate,
+                                );
+                                break;
+                            }
+                            Ok(None) => {
+                                audio_eos = true;
+                            }
+                            Err(_) => {
+                                audio_eos = true;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    *shared.failure.lock().unwrap() = Some(e.to_string());
+                    return;
+                }
+            }
+        }
+        if shared.paused.load(Ordering::Acquire) {
+            // True preroll: hold one video frame plus a bounded audio lead.
+            // The bus is paused, so decoding fills the queue without moving
+            // its source cursor.
+            if shared.frames.lock().unwrap().is_empty() {
+                match decoder.next_frame() {
+                    Ok(Some(frame)) => push_frame(&shared, frame, &mut rgb_scratch),
+                    Ok(None) => {
+                        shared.end_of_stream.store(true, Ordering::Release);
+                        *shared.failure.lock().unwrap() =
+                            Some("video ended before producing a preroll frame".into());
+                        return;
+                    }
+                    Err(e) => {
+                        *shared.failure.lock().unwrap() = Some(e.to_string());
+                        return;
+                    }
+                }
+            }
+            let mut buffered = mixer.slot_buffered_secs(slot);
+            if info.has_audio
+                && !audio_eos
+                && buffered < PREROLL_AUDIO_LEAD_SECS
+                && Instant::now() < preroll_deadline
+            {
+                match decoder.next_audio() {
+                    Ok(Some(chunk)) => {
+                        if !mixer.push_slot_audio(
+                            slot,
+                            &chunk.samples,
+                            chunk.channels,
+                            chunk.sample_rate,
+                        ) {
+                            return;
+                        }
+                        buffered = mixer.slot_buffered_secs(slot);
+                    }
+                    Ok(None) | Err(_) => audio_eos = true,
+                }
+            }
+            let status = preroll_status(
+                shared.video_ready.load(Ordering::Acquire),
+                info.has_audio,
+                buffered,
+                audio_eos,
+                Instant::now() >= preroll_deadline,
+            );
+            shared.preroll_status.store(status as u8, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(8));
+            continue;
+        }
+        // Keep this slot's mixer bus fed ~1s ahead.
+        if !audio_eos {
+            while mixer.slot_buffered_secs(slot) < AUDIO_AHEAD_SECS {
+                match decoder.next_audio() {
+                    Ok(Some(chunk)) => {
+                        mixer.push_slot_audio(
+                            slot,
+                            &chunk.samples,
+                            chunk.channels,
+                            chunk.sample_rate,
+                        );
+                    }
+                    Ok(None) | Err(_) => {
+                        audio_eos = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        }
+        match decoder.next_frame() {
+            Ok(Some(frame)) => {
+                push_frame(&shared, frame, &mut rgb_scratch);
+                if shared.preroll_status.load(Ordering::Acquire)
+                    != PrerollStatus::Ready as u8
+                {
+                    shared
+                        .preroll_status
+                        .store(PrerollStatus::Ready as u8, Ordering::Release);
+                }
+            }
+            Ok(None) => {
+                if shared.loop_on.load(Ordering::Acquire) {
+                    match VideoFileDecoder::open(&path) {
+                        Ok(d) => {
+                            decoder = d;
+                            audio_eos = !info.has_audio;
+                            continue;
+                        }
+                        Err(e) => {
+                            *shared.failure.lock().unwrap() = Some(e.to_string());
+                            return;
+                        }
+                    }
+                }
+                // Play once: drain the audio tail (bounded by the mixer's
+                // queue cap) and hold the last frame.
+                while !audio_eos {
+                    if shared.stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if mixer.slot_buffered_secs(slot) > AUDIO_AHEAD_SECS {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
+                    match decoder.next_audio() {
+                        Ok(Some(chunk)) => {
+                            mixer.push_slot_audio(
+                                slot,
+                                &chunk.samples,
+                                chunk.channels,
+                                chunk.sample_rate,
+                            );
+                        }
+                        Ok(None) | Err(_) => audio_eos = true,
+                    }
+                }
+                shared.end_of_stream.store(true, Ordering::Release);
+                // Wait for loop/seek/stop instead of exiting: a later loop
+                // toggle or seek revives the slot.
+                loop {
+                    if shared.stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if shared.loop_on.load(Ordering::Acquire) {
+                        shared.end_of_stream.store(false, Ordering::Release);
+                        break;
+                    }
+                    if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
+                        shared.end_of_stream.store(false, Ordering::Release);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                match VideoFileDecoder::open(&path) {
+                    Ok(d) => {
+                        decoder = d;
+                        audio_eos = !info.has_audio;
+                    }
+                    Err(e) => {
+                        *shared.failure.lock().unwrap() = Some(e.to_string());
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                *shared.failure.lock().unwrap() = Some(e.to_string());
+                return;
+            }
+        }
+    }
+}
+
+fn push_frame(
+    shared: &Arc<SlotShared>,
+    frame: makepad_widgets::makepad_platform::video_file::DecodedVideoFrame,
+    rgb_scratch: &mut Vec<u8>,
+) {
+    nv12::nv12_to_rgb8(&frame.nv12, frame.width, frame.height, rgb_scratch);
+    let mut bgra = Vec::with_capacity((frame.width * frame.height) as usize);
+    for px in rgb_scratch.chunks_exact(3) {
+        bgra.push(
+            0xff00_0000 | ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32,
+        );
+    }
+    shared
+        .frames
+        .lock()
+        .unwrap()
+        .push_back(Frame { pts_100ns: frame.pts_100ns, bgra });
+    shared.video_ready.store(true, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// audio decode (music tracks + sfx pads)
+// ---------------------------------------------------------------------------
+
+/// Minimal bounded RIFF/WAVE parse (PCM16 + float32), same shape as the
+/// ai-content player's parser, emitting interleaved stereo i16.
+fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".into());
+    }
+    let mut format = 0u16;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits = 0u16;
+    let mut data: Option<&[u8]> = None;
+    let mut at = 12usize;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body_end = (at + 8 + size).min(bytes.len());
+        let body = &bytes[at + 8..body_end];
+        match id {
+            b"fmt " if body.len() >= 16 => {
+                format = u16::from_le_bytes(body[0..2].try_into().unwrap());
+                channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
+                sample_rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+            }
+            b"data" => data = Some(body),
+            _ => {}
+        }
+        at = body_end + (size & 1);
+    }
+    let data = data.ok_or("wav: no data chunk")?;
+    if channels == 0 || sample_rate == 0 {
+        return Err("wav: no fmt chunk".into());
+    }
+    let ch = channels as usize;
+    let mut frames: Vec<[i16; 2]> = Vec::new();
+    let push = |frames: &mut Vec<[i16; 2]>, l: i16, r: i16| -> Result<(), String> {
+        if frames.len() >= max_frames {
+            return Err("audio clip exceeds the decode budget".into());
+        }
+        frames.push([l, r]);
+        Ok(())
+    };
+    match (format, bits) {
+        (1, 16) => {
+            for frame in data.chunks_exact(2 * ch) {
+                let sample = |i: usize| {
+                    i16::from_le_bytes(frame[i * 2..i * 2 + 2].try_into().unwrap())
+                };
+                push(&mut frames, sample(0), sample(ch - 1))?;
+            }
+        }
+        (3, 32) => {
+            for frame in data.chunks_exact(4 * ch) {
+                let sample = |i: usize| {
+                    let v = f32::from_le_bytes(frame[i * 4..i * 4 + 4].try_into().unwrap());
+                    (v.clamp(-1.0, 1.0) * 32767.0) as i16
+                };
+                push(&mut frames, sample(0), sample(ch - 1))?;
+            }
+        }
+        other => return Err(format!("wav: unsupported format {other:?}")),
+    }
+    if frames.is_empty() {
+        return Err("wav: empty data".into());
+    }
+    Ok(TrackPcm { frames, sample_rate })
+}
+
+/// Decode an audio clip fully to memory. WAV parses directly; MP4/M4A pulls
+/// the platform decoder's audio track; OGG is honestly unsupported.
+pub fn decode_audio_clip(
+    path: &PathBuf,
+    media: MediaType,
+    max_frames: usize,
+) -> Result<TrackPcm, String> {
+    match media {
+        MediaType::Wav => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            parse_wav(&bytes, max_frames)
+        }
+        MediaType::Mp4 => {
+            let path_str = path.to_str().ok_or("non-utf8 path")?;
+            let mut decoder = VideoFileDecoder::open(path_str).map_err(|e| e.to_string())?;
+            if !decoder.info().has_audio {
+                return Err("mp4 has no audio track".into());
+            }
+            let mut frames: Vec<[i16; 2]> = Vec::new();
+            let mut sample_rate = decoder.info().audio_sample_rate.max(1);
+            loop {
+                match decoder.next_audio().map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        sample_rate = chunk.sample_rate.max(1);
+                        let ch = chunk.channels.max(1) as usize;
+                        for frame in chunk.samples.chunks_exact(ch) {
+                            if frames.len() >= max_frames {
+                                return Err("audio clip exceeds the decode budget".into());
+                            }
+                            frames.push([frame[0], frame[ch - 1]]);
+                        }
+                    }
+                }
+            }
+            if frames.is_empty() {
+                return Err("mp4 audio decoded to zero frames".into());
+            }
+            Ok(TrackPcm { frames, sample_rate })
+        }
+        MediaType::Ogg => Err("ogg decode not supported".into()),
+        other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+/// Min/max waveform columns over the whole clip.
+pub fn wave_peaks(pcm: &TrackPcm, cols: usize) -> Vec<(f32, f32)> {
+    let cols = cols.max(1);
+    let mut out = Vec::with_capacity(cols);
+    if pcm.frames.is_empty() {
+        return vec![(0.0, 0.0); cols];
+    }
+    let per_col = pcm.frames.len() as f64 / cols as f64;
+    for col in 0..cols {
+        let start = ((col as f64 * per_col) as usize).min(pcm.frames.len() - 1);
+        let end = (((col + 1) as f64 * per_col) as usize)
+            .clamp(start + 1, pcm.frames.len());
+        let (mut lo, mut hi) = (0.0f32, 0.0f32);
+        for frame in &pcm.frames[start..end] {
+            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            lo = lo.min(mono);
+            hi = hi.max(mono);
+        }
+        out.push((lo, hi));
+    }
+    out
+}
+
+/// Render a waveform strip with played/unplayed regions and a playhead
+/// column, as BGRA pixels for a texture.
+pub fn waveform_bgra(
+    peaks: &[(f32, f32)],
+    width: usize,
+    height: usize,
+    played_fraction: f64,
+) -> Vec<u32> {
+    const BG: u32 = 0xff14_181c;
+    const UNPLAYED: u32 = 0xff2f_6e5e;
+    const PLAYED: u32 = 0xff58_c4a0;
+    const MID: u32 = 0xff2a_3238;
+    const HEAD: u32 = 0xffe8_e8e8;
+    let mut out = vec![BG; width * height];
+    if width == 0 || height == 0 || peaks.is_empty() {
+        return out;
+    }
+    let mid_y = height / 2;
+    for x in 0..width {
+        out[mid_y * width + x] = MID;
+    }
+    let head_x = ((played_fraction.clamp(0.0, 1.0) * width as f64) as usize).min(width - 1);
+    for x in 0..width {
+        let peak = peaks[(x * peaks.len()) / width.max(1)];
+        let color = if x <= head_x { PLAYED } else { UNPLAYED };
+        let half = (height / 2) as f32;
+        let y0 = (mid_y as f32 - peak.1.clamp(-1.0, 1.0) * (half - 1.0)) as usize;
+        let y1 = (mid_y as f32 - peak.0.clamp(-1.0, 1.0) * (half - 1.0)) as usize;
+        for y in y0.min(height - 1)..=y1.min(height - 1) {
+            out[y * width + x] = color;
+        }
+    }
+    for y in 0..height {
+        out[y * width + head_x] = HEAD;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// decode worker pool
+// ---------------------------------------------------------------------------
+
+pub enum DecodeJob {
+    Deck { deck: DeckId, gen: u64, path: PathBuf, media: MediaType },
+    Pad { pad: PadKey, gen: u64, revision: AssetRevisionId, path: PathBuf, media: MediaType },
+    /// Read + parse + fully prepare a GLB for the 3D program slot: the UI
+    /// thread only uploads the finished result.
+    MeshPrep { gen: u64, path: PathBuf },
+    /// Same prep, destined for a program slot (A/B overlay).
+    SlotMesh { gen: u64, slot: usize, path: PathBuf },
+    /// Decode a still (PNG/JPEG) for a program slot.
+    Still { gen: u64, slot: usize, path: PathBuf },
+    Billboard { gen: u64, slot: usize, path: PathBuf },
+    /// Read + decode a tile thumbnail into BGRA pixels (bounded); the UI
+    /// thread only creates the texture.
+    Thumb { revision: AssetRevisionId, path: PathBuf },
+}
+
+/// Largest GLB the mesh lane will lift into memory.
+pub const MAX_MESH_BYTES: u64 = 256 * 1024 * 1024;
+/// Mesh admission gates before anything reaches the UI thread.
+pub const MAX_MESH_JOINTS: usize = 256;
+pub const MAX_MESH_VERTICES: usize = 2_000_000;
+pub const MAX_MESH_CLIPS: usize = 64;
+/// Largest encoded thumbnail the grid will download/decode, and the pixel
+/// dimension cap (catalog publications should stay well under both).
+pub const MAX_THUMB_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_THUMB_DIM: usize = 2048;
+/// Stills on A/B can be larger than grid thumbs.
+pub const MAX_STILL_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_STILL_DIM: usize = 4096;
+
+/// Everything the 3D slot needs, prepared off-thread. The UI's remaining
+/// work is GPU-only: upload the rest bundle / decode-free texture create.
+pub enum PreparedMesh {
+    Skinned {
+        model: Box<makepad_render::skin::SkinnedModel>,
+        rest: makepad_render::skin::SkinRestGpu,
+        clip: usize,
+        scale: f32,
+        lift: f32,
+        /// Embedded base-color image bytes (PNG/JPEG), when present.
+        base_color: Option<Vec<u8>>,
+    },
+    /// Unskinned fallback: the statue path still needs the renderer's own
+    /// loader (a UI-side parse of capped bytes).
+    Statue { glb: Vec<u8>, base_color: Option<Vec<u8>> },
+}
+
+pub enum DecodeDone {
+    Deck {
+        deck: DeckId,
+        gen: u64,
+        result: Result<(Arc<TrackPcm>, Vec<(f32, f32)>), String>,
+    },
+    Pad {
+        pad: PadKey,
+        gen: u64,
+        revision: AssetRevisionId,
+        result: Result<Arc<TrackPcm>, String>,
+    },
+    MeshPrep {
+        gen: u64,
+        result: Result<Box<PreparedMesh>, String>,
+    },
+    SlotMesh {
+        gen: u64,
+        slot: usize,
+        result: Result<Box<PreparedMesh>, String>,
+    },
+    Still {
+        gen: u64,
+        slot: usize,
+        result: Result<(Vec<u32>, usize, usize), String>,
+    },
+    Billboard {
+        gen: u64,
+        slot: usize,
+        result: Result<Box<crate::billboard::PreparedBillboard>, String>,
+    },
+    Thumb {
+        revision: AssetRevisionId,
+        result: Result<ThumbPixels, String>,
+    },
+}
+
+/// Admission gate for parsed skinned meshes — checked on the worker BEFORE
+/// any CPU-heavy preparation or UI upload.
+pub fn mesh_gate(bytes: u64, joints: usize, vertices: usize, clips: usize) -> Result<(), String> {
+    if bytes > MAX_MESH_BYTES {
+        return Err(format!("glb over budget: {bytes} bytes"));
+    }
+    if joints > MAX_MESH_JOINTS {
+        return Err(format!("too many joints: {joints}"));
+    }
+    if vertices > MAX_MESH_VERTICES {
+        return Err(format!("too many vertices: {vertices}"));
+    }
+    if clips > MAX_MESH_CLIPS {
+        return Err(format!("too many clips: {clips}"));
+    }
+    Ok(())
+}
+
+/// Clip preference for the dance lane: dance first, then common loops.
+pub const CLIP_PREFERENCE: [&str; 4] = ["dance", "idle", "walk", "run"];
+
+fn prepare_mesh(path: &PathBuf) -> Result<Box<PreparedMesh>, String> {
+    use makepad_render::skin::{SkinnedModel, SKIN_VERTEX_FLOATS};
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_MESH_BYTES {
+        return Err(format!("glb over budget: {} bytes", meta.len()));
+    }
+    let glb = std::fs::read(path).map_err(|e| e.to_string())?;
+    let base_color = extract_base_color(&glb);
+    let model = SkinnedModel::parse_glb(&glb).map_err(|e| format!("mesh parse failed: {e}"))?;
+    let playable =
+        model.joint_count() > 0 && model.joint_count() <= MAX_MESH_JOINTS && !model.clips.is_empty();
+    if !playable {
+        return Ok(Box::new(PreparedMesh::Statue { glb, base_color }));
+    }
+    mesh_gate(
+        meta.len(),
+        model.joint_count(),
+        model.vertex_count(),
+        model.clips.len(),
+    )?;
+    let clip = model.clip_index_any(&CLIP_PREFERENCE).unwrap_or(0);
+    // Measure the rest pose (CPU-skin once) for human height + ground lift.
+    let (scale, lift) = {
+        let rest = model.rest_pose();
+        let mut palette = Vec::new();
+        model.palette(&rest, &mut palette);
+        let mut packed = Vec::new();
+        model.skin_to_packed(&palette, &mut packed);
+        let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+        for v in packed.chunks_exact(SKIN_VERTEX_FLOATS) {
+            min_y = min_y.min(v[1]);
+            max_y = max_y.max(v[1]);
+        }
+        let height = (max_y - min_y).max(0.01);
+        let scale = 1.75 / height;
+        (scale, -min_y * scale)
+    };
+    // Flat-AO rest bundle built off-thread; the UI only uploads it.
+    let rest = model.rest_gpu_flat();
+    Ok(Box::new(PreparedMesh::Skinned {
+        model: Box::new(model),
+        rest,
+        clip,
+        scale,
+        lift,
+        base_color,
+    }))
+}
+
+/// Base-color image bytes out of a GLB, when it embeds one (material 0's
+/// baseColorTexture source, else image 0).
+pub fn extract_base_color(glb: &[u8]) -> Option<Vec<u8>> {
+    let loaded = makepad_gltf::load_gltf_from_bytes(glb, None).ok()?;
+    let doc = &loaded.document;
+    let image_index = doc
+        .materials_slice()
+        .first()
+        .and_then(|m| m.pbr_metallic_roughness.as_ref())
+        .and_then(|pbr| pbr.base_color_texture.as_ref())
+        .and_then(|info| doc.textures_slice().get(info.index))
+        .and_then(|tex| tex.source)
+        .or(if doc.images_slice().is_empty() { None } else { Some(0) })?;
+    makepad_gltf::load_image_bytes(&loaded, image_index).ok()
+}
+
+#[derive(Debug)]
+pub struct ThumbPixels {
+    pub bgra: Vec<u32>,
+    pub width: usize,
+    pub height: usize,
+    /// Native-size frames when this is a 128² anim sheet or a `.billboard`.
+    /// Each tuple is `(bgra, width, height)` so later frames can differ.
+    pub frames: Vec<(Vec<u32>, usize, usize)>,
+    pub fps: f32,
+}
+
+/// Read + decode a thumbnail into BGRA, refusing oversized or malformed
+/// images before any pixel reaches the UI thread. Only the 128² packed
+/// sheets asset-ui already splits become multi-frame previews — native
+/// sprites stay one texture at their authored aspect.
+fn decode_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
+    if path.extension().and_then(|e| e.to_str()) == Some("billboard") {
+        return decode_billboard_thumb(path);
+    }
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_THUMB_BYTES {
+        return Err(format!("thumbnail over byte budget: {}", meta.len()));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let image = if bytes.starts_with(&[0xff, 0xd8]) {
+        makepad_widgets::ImageBuffer::from_jpg(&bytes)
+    } else {
+        makepad_widgets::ImageBuffer::from_png(&bytes)
+    }
+    .map_err(|e| format!("thumbnail decode failed: {e:?}"))?;
+    let (w, h) = (image.width, image.height);
+    if w == 0 || h == 0 || w > MAX_THUMB_DIM || h > MAX_THUMB_DIM {
+        return Err(format!("thumbnail dimensions out of bounds: {w}x{h}"));
+    }
+    let mut data = image.data;
+    if data.len() > w * h {
+        data.truncate(w * h);
+    }
+    key_sprite_alpha(&mut data);
+    if let Some(frames) = split_sheet_bgra(w, h, &data) {
+        let first = frames.first().cloned().unwrap_or_default();
+        let seq = frames
+            .into_iter()
+            .map(|frame| (frame, SHEET_TILE, SHEET_TILE))
+            .collect::<Vec<_>>();
+        return Ok(ThumbPixels {
+            bgra: first,
+            width: SHEET_TILE,
+            height: SHEET_TILE,
+            frames: seq,
+            fps: 8.0,
+        });
+    }
+    Ok(ThumbPixels {
+        width: w,
+        height: h,
+        frames: Vec::new(),
+        fps: 0.0,
+        bgra: data,
+    })
+}
+
+fn decode_billboard_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let bb = crate::billboard::Manifest::parse(&text)?;
+    let root = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut frames = Vec::new();
+    for frame in bb.preview_frames() {
+        if let Ok(pix) = crate::billboard::decode_frame(&root.join(&frame.file)) {
+            frames.push(pix);
+        }
+    }
+    let (bgra, width, height) = frames.first().cloned().ok_or("billboard empty")?;
+    Ok(ThumbPixels {
+        bgra,
+        width,
+        height,
+        frames,
+        fps: bb.preview_fps(),
+    })
+}
+
+const SHEET_TILE: usize = 128;
+const SHEET_W: usize = 1024;
+/// Studio-clear padding used by packed 128² sheets (asset-ui `anim_icon`).
+const SHEET_CLEAR: u32 = 0xFF1A1F29;
+
+/// True for the 1024-wide packed sheet, or any single-row 128-tall strip
+/// with at least two tiles. Regular square thumbs (256/512/1024) stay still.
+fn is_anim_sheet(width: usize, height: usize) -> bool {
+    if width < SHEET_TILE * 2 || height < SHEET_TILE {
+        return false;
+    }
+    if width % SHEET_TILE != 0 || height % SHEET_TILE != 0 {
+        return false;
+    }
+    height == SHEET_TILE || width == SHEET_W
+}
+
+fn is_sheet_clear(p: u32) -> bool {
+    let a = (p >> 24) & 0xff;
+    a == 0 || p == SHEET_CLEAR
+}
+
+/// Split a decoded BGRA sheet into 128² frames. Matches asset-ui
+/// `anim_icon::split_sheet_bgra` — no greedy contact-sheet guess.
+fn split_sheet_bgra(width: usize, height: usize, data: &[u32]) -> Option<Vec<Vec<u32>>> {
+    if !is_anim_sheet(width, height) || data.len() < width * height {
+        return None;
+    }
+    let cols = width / SHEET_TILE;
+    let rows = height / SHEET_TILE;
+    let mut frames = Vec::new();
+    for row in 0..rows {
+        for col in 0..cols {
+            let mut tile = vec![0u32; SHEET_TILE * SHEET_TILE];
+            for y in 0..SHEET_TILE {
+                let src = (row * SHEET_TILE + y) * width + col * SHEET_TILE;
+                let dst = y * SHEET_TILE;
+                tile[dst..dst + SHEET_TILE].copy_from_slice(&data[src..src + SHEET_TILE]);
+            }
+            let painted = tile.iter().filter(|&&p| !is_sheet_clear(p)).count();
+            if painted >= 16 {
+                frames.push(tile);
+            }
+        }
+    }
+    (frames.len() > 1).then_some(frames)
+}
+
+fn decode_still(path: &PathBuf) -> Result<(Vec<u32>, usize, usize), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_STILL_BYTES {
+        return Err(format!("still over byte budget: {}", meta.len()));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let image = if bytes.starts_with(&[0xff, 0xd8]) {
+        makepad_widgets::ImageBuffer::from_jpg(&bytes)
+    } else {
+        makepad_widgets::ImageBuffer::from_png(&bytes)
+    }
+    .map_err(|e| format!("still decode failed: {e:?}"))?;
+    let (w, h) = (image.width, image.height);
+    if w == 0 || h == 0 || w > MAX_STILL_DIM || h > MAX_STILL_DIM {
+        return Err(format!("still dimensions out of bounds: {w}x{h}"));
+    }
+    let mut data = image.data;
+    key_sprite_alpha(&mut data);
+    Ok((data, w, h))
+}
+
+/// Classic Build/Doom sprites key out magenta (and keep real PNG alpha).
+/// Pixels are `0xAARRGGBB`.
+pub fn key_sprite_alpha(pixels: &mut [u32]) {
+    for px in pixels {
+        let a = (*px >> 24) & 0xff;
+        let r = (*px >> 16) & 0xff;
+        let g = (*px >> 8) & 0xff;
+        let b = *px & 0xff;
+        let magenta = r >= 200 && b >= 200 && g <= 48;
+        if magenta || a < 8 {
+            *px = 0;
+        }
+    }
+}
+
+/// Two decode workers: deck loads and pad preloads never block the UI, and
+/// at most two files decode at once (bounded memory + CPU).
+pub struct DecodePool {
+    tx: Sender<DecodeJob>,
+    rx: Receiver<DecodeDone>,
+}
+
+impl Default for DecodePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DecodePool {
+    pub fn new() -> DecodePool {
+        let (tx, job_rx) = channel::<DecodeJob>();
+        let (done_tx, rx) = channel::<DecodeDone>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        for i in 0..2 {
+            let jobs = job_rx.clone();
+            let done = done_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("vj-decode-{i}"))
+                .spawn(move || loop {
+                    let job = {
+                        let guard = jobs.lock().unwrap();
+                        guard.recv()
+                    };
+                    let Ok(job) = job else { return };
+                    let out = match job {
+                        DecodeJob::Deck { deck, gen, path, media } => {
+                            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES)
+                                .map(|pcm| {
+                                    let peaks = wave_peaks(&pcm, WAVE_COLS);
+                                    (Arc::new(pcm), peaks)
+                                });
+                            DecodeDone::Deck { deck, gen, result }
+                        }
+                        DecodeJob::Pad { pad, gen, revision, path, media } => {
+                            let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES)
+                                .map(Arc::new);
+                            DecodeDone::Pad { pad, gen, revision, result }
+                        }
+                        DecodeJob::MeshPrep { gen, path } => {
+                            let result = prepare_mesh(&path);
+                            DecodeDone::MeshPrep { gen, result }
+                        }
+                        DecodeJob::SlotMesh { gen, slot, path } => {
+                            let result = prepare_mesh(&path);
+                            DecodeDone::SlotMesh { gen, slot, result }
+                        }
+                        DecodeJob::Still { gen, slot, path } => {
+                            let result = decode_still(&path);
+                            DecodeDone::Still { gen, slot, result }
+                        }
+                        DecodeJob::Billboard { gen, slot, path } => {
+                            let result = crate::billboard::prepare(&path).map(Box::new);
+                            DecodeDone::Billboard { gen, slot, result }
+                        }
+                        DecodeJob::Thumb { revision, path } => {
+                            let result = decode_thumb(&path);
+                            DecodeDone::Thumb { revision, result }
+                        }
+                    };
+                    if done.send(out).is_err() {
+                        return;
+                    }
+                });
+        }
+        DecodePool { tx, rx }
+    }
+
+    pub fn submit(&self, job: DecodeJob) {
+        let _ = self.tx.send(job);
+    }
+
+    pub fn poll(&self) -> Vec<DecodeDone> {
+        let mut out = Vec::new();
+        loop {
+            match self.rx.try_recv() {
+                Ok(done) => out.push(done),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> PathBuf {
+        let ticket = DECODER_ALIAS_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "makepad-vj-{label}-{}-{ticket}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn typed_decoder_input_hard_links_and_cleans_up() {
+        let root = test_dir("decoder-link");
+        let object_dir = root.join("objects/ab");
+        std::fs::create_dir_all(&object_dir).unwrap();
+        let source = object_dir.join(
+            "ab00000000000000000000000000000000000000000000000000000000000000",
+        );
+        std::fs::write(&source, b"mp4 bytes stand in").unwrap();
+
+        let input = DecoderInput::prepare(&source, MediaType::Mp4).unwrap();
+        let alias = PathBuf::from(&input.path);
+        assert_eq!(alias.extension().and_then(|e| e.to_str()), Some("mp4"));
+        assert_eq!(alias.parent(), Some(root.join("decoder-input").as_path()));
+        assert_eq!(std::fs::read(&alias).unwrap(), std::fs::read(&source).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&alias).unwrap().ino(),
+                std::fs::metadata(&source).unwrap().ino(),
+                "decoder input must not copy a large media blob"
+            );
+        }
+        drop(input);
+        assert!(!alias.exists(), "the decode-thread lease removes its hard link");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn pump_test_player(paused: bool, end_of_stream: bool, queued_frames: usize) -> SlotPlayer {
+        let mut frames = VecDeque::new();
+        for index in 0..queued_frames {
+            frames.push_back(Frame {
+                pts_100ns: index as i64,
+                bgra: vec![0xff00_0000],
+            });
+        }
+        let mixer = Mixer::new();
+        mixer.open_slot(SlotId::A);
+        SlotPlayer {
+            width: 1,
+            height: 1,
+            duration_secs: 1.0,
+            shared: Arc::new(SlotShared {
+                stop: AtomicBool::new(false),
+                paused: AtomicBool::new(paused),
+                loop_on: AtomicBool::new(false),
+                seek_100ns: AtomicI64::new(-1),
+                position_100ns: AtomicI64::new(0),
+                video_ready: AtomicBool::new(false),
+                preroll_status: AtomicU8::new(PrerollStatus::WaitingVideo as u8),
+                playback_rate_bits: AtomicU64::new(1.0f64.to_bits()),
+                end_of_stream: AtomicBool::new(end_of_stream),
+                frames: Mutex::new(frames),
+                failure: Mutex::new(None),
+            }),
+            clock_base: None,
+            base_media_100ns: 0,
+            last_pts: 0,
+            slot: SlotId::A,
+            mixer,
+        }
+    }
+
+    #[test]
+    fn frame_pump_sleeps_when_idle_but_drains_an_eos_ring() {
+        assert!(pump_test_player(false, false, 0).needs_frame_pump());
+        assert!(!pump_test_player(true, false, 1).needs_frame_pump());
+        assert!(!pump_test_player(false, true, 0).needs_frame_pump());
+        assert!(pump_test_player(false, true, 1).needs_frame_pump());
+    }
+
+    #[test]
+    fn preroll_requires_video_and_bounded_audio_lead() {
+        assert_eq!(
+            preroll_status(false, true, PREROLL_AUDIO_LEAD_SECS, false, false),
+            PrerollStatus::WaitingVideo
+        );
+        assert_eq!(
+            preroll_status(true, true, 0.0, false, false),
+            PrerollStatus::WaitingAudio
+        );
+        assert_eq!(
+            preroll_status(true, true, PREROLL_AUDIO_LEAD_SECS, false, false),
+            PrerollStatus::Ready
+        );
+        assert_eq!(
+            preroll_status(true, false, 0.0, false, false),
+            PrerollStatus::Ready
+        );
+        assert_eq!(
+            preroll_status(true, true, 0.05, true, false),
+            PrerollStatus::ReadyAudioExhausted
+        );
+        assert_eq!(
+            preroll_status(true, true, 0.0, false, true),
+            PrerollStatus::ReadyAudioTimeout
+        );
+    }
+
+    #[test]
+    fn slot_player_rate_is_capped_and_updates_only_its_video_bus() {
+        let mut player = pump_test_player(true, false, 1);
+        player.mixer.install_deck(
+            DeckId::A,
+            Arc::new(TrackPcm { frames: vec![[1, 1]; 100], sample_rate: 48_000 }),
+        );
+        let deck_before = player.mixer.deck_position(DeckId::A);
+        assert_eq!(player.set_playback_rate(99.0), MAX_VIDEO_PLAYBACK_RATE);
+        assert_eq!(player.playback_rate(), MAX_VIDEO_PLAYBACK_RATE);
+        assert_eq!(
+            player.mixer.slot_playback_rate(SlotId::A),
+            MAX_VIDEO_PLAYBACK_RATE
+        );
+        assert_eq!(player.mixer.deck_position(DeckId::A), deck_before);
+        assert_eq!(player.set_playback_rate(0.0), MIN_VIDEO_PLAYBACK_RATE);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extensionless_cached_mp4_opens_through_typed_decoder_input() {
+        use makepad_widgets::makepad_platform::video_file::{
+            VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
+        };
+
+        let root = test_dir("decoder-mp4");
+        let object_dir = root.join("objects/cd");
+        std::fs::create_dir_all(&object_dir).unwrap();
+        let encoded = root.join("encoded.mp4");
+        let (width, height) = (64u32, 64u32);
+        let mut encoder = VideoFileEncoder::new(
+            encoded.to_str().unwrap(),
+            VideoFileEncoderOptions {
+                codec: VideoFileCodec::H264,
+                width,
+                height,
+                fps_num: 24,
+                fps_den: 1,
+                video_bitrate_bps: 1_000_000,
+                audio: None,
+            },
+        )
+        .expect("video encoder");
+        let rgb = vec![180u8; (width * height * 3) as usize];
+        for _ in 0..6 {
+            encoder.push_frame_rgb8(&rgb, None).expect("encode frame");
+        }
+        encoder.finish().expect("finish mp4");
+        let source = object_dir.join(
+            "cd00000000000000000000000000000000000000000000000000000000000000",
+        );
+        std::fs::rename(encoded, &source).unwrap();
+
+        let input = DecoderInput::prepare(&source, MediaType::Mp4).unwrap();
+        let mut decoder = VideoFileDecoder::open(&input.path).expect("typed MP4 path opens");
+        assert_eq!((decoder.info().width, decoder.info().height), (width, height));
+        assert!(decoder.next_frame().unwrap().is_some());
+        drop(decoder);
+        drop(input);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn wav_pcm16(frames: &[(i16, i16)], rate: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        for (l, r) in frames {
+            data.extend_from_slice(&l.to_le_bytes());
+            data.extend_from_slice(&r.to_le_bytes());
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // pcm
+        out.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 4).to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    fn wav_parse_roundtrip_budget_and_refusals() {
+        let frames: Vec<(i16, i16)> = (0..100).map(|i| (i * 100, -i * 100)).collect();
+        let bytes = wav_pcm16(&frames, 24_000);
+        let pcm = parse_wav(&bytes, 1000).unwrap();
+        assert_eq!(pcm.sample_rate, 24_000);
+        assert_eq!(pcm.frames.len(), 100);
+        assert_eq!(pcm.frames[3], [300, -300]);
+        assert!((pcm.seconds() - 100.0 / 24_000.0).abs() < 1e-9);
+        // Budget refusal.
+        assert!(parse_wav(&bytes, 50).is_err());
+        // Garbage refusal.
+        assert!(parse_wav(b"garbage", 1000).is_err());
+        let mut bad = bytes.clone();
+        bad[0] = b'X';
+        assert!(parse_wav(&bad, 1000).is_err());
+    }
+
+    #[test]
+    fn wave_peaks_and_strip_render_are_bounded() {
+        let frames: Vec<[i16; 2]> =
+            (0..1000).map(|i| if i < 500 { [16384, 16384] } else { [-8192, -8192] }).collect();
+        let pcm = TrackPcm { frames, sample_rate: 48_000 };
+        let peaks = wave_peaks(&pcm, 10);
+        assert_eq!(peaks.len(), 10);
+        assert!(peaks[0].1 > 0.4 && peaks[0].0 >= 0.0);
+        assert!(peaks[9].0 < -0.2 && peaks[9].1 <= 0.0);
+        // Render never panics at odd sizes and marks the playhead.
+        let bgra = waveform_bgra(&peaks, 63, 17, 0.5);
+        assert_eq!(bgra.len(), 63 * 17);
+        // A clip shorter than the strip is wide still renders.
+        let tiny = TrackPcm { frames: vec![[1000, 1000]; 3], sample_rate: 8000 };
+        let bgra = waveform_bgra(&wave_peaks(&tiny, 8), 32, 8, 0.0);
+        assert_eq!(bgra.len(), 32 * 8);
+    }
+
+    #[test]
+    fn mesh_gate_refuses_hostile_dimensions() {
+        assert!(mesh_gate(1_000, 28, 400_000, 3).is_ok());
+        assert!(mesh_gate(MAX_MESH_BYTES + 1, 1, 1, 1).is_err());
+        assert!(mesh_gate(1_000, MAX_MESH_JOINTS + 1, 1, 1).is_err());
+        assert!(mesh_gate(1_000, 1, MAX_MESH_VERTICES + 1, 1).is_err());
+        assert!(mesh_gate(1_000, 1, 1, MAX_MESH_CLIPS + 1).is_err());
+    }
+
+    #[test]
+    fn thumb_decode_refuses_oversized_and_malformed() {
+        let dir = std::env::temp_dir().join(format!("vj_thumb_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Malformed bytes refuse with a typed error.
+        let bad = dir.join("bad.png");
+        std::fs::write(&bad, b"not an image at all").unwrap();
+        assert!(decode_thumb(&bad).is_err());
+        // Over the byte budget refuses BEFORE decode.
+        let huge = dir.join("huge.png");
+        std::fs::write(&huge, vec![0u8; (MAX_THUMB_BYTES + 1) as usize]).unwrap();
+        let err = decode_thumb(&huge).unwrap_err();
+        assert!(err.contains("byte budget"), "{err}");
+        // Mesh prep on garbage refuses too (worker-side, never the UI).
+        let junk = dir.join("junk.glb");
+        std::fs::write(&junk, b"gLTF-not-really").unwrap();
+        assert!(prepare_mesh(&junk).is_err());
+    }
+
+    #[test]
+    fn decode_pool_decodes_wav_and_reports_errors() {
+        let dir = std::env::temp_dir().join(format!("vj_media_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.wav");
+        std::fs::write(&good, wav_pcm16(&[(1000, -1000); 50], 22_050)).unwrap();
+        let bad = dir.join("bad.wav");
+        std::fs::write(&bad, b"not a wav").unwrap();
+
+        let pool = DecodePool::new();
+        pool.submit(DecodeJob::Deck { deck: DeckId::A, gen: 7, path: good, media: MediaType::Wav });
+        pool.submit(DecodeJob::Pad {
+            pad: PadKey::from_bytes([2; 16]),
+            gen: 9,
+            revision: AssetRevisionId::from_bytes([3; 32]),
+            path: bad,
+            media: MediaType::Wav,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut results = Vec::new();
+        while results.len() < 2 && std::time::Instant::now() < deadline {
+            results.extend(pool.poll());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(results.len(), 2);
+        for done in results {
+            match done {
+                DecodeDone::Deck { deck, gen, result } => {
+                    assert_eq!((deck, gen), (DeckId::A, 7));
+                    let (pcm, peaks) = result.expect("good wav decodes");
+                    assert_eq!(pcm.frames.len(), 50);
+                    assert_eq!(peaks.len(), WAVE_COLS);
+                }
+                DecodeDone::Pad { gen, result, .. } => {
+                    assert_eq!(gen, 9);
+                    assert!(result.is_err(), "bad wav must fail");
+                }
+                DecodeDone::MeshPrep { .. }
+                | DecodeDone::SlotMesh { .. }
+                | DecodeDone::Still { .. }
+                | DecodeDone::Billboard { .. }
+                | DecodeDone::Thumb { .. } => {
+                    panic!("no mesh/thumb job submitted")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_128_packed_sheets_split() {
+        // A native sprite with lots of keyed/clear pixels must stay one frame.
+        let mut sprite = vec![0u32; 64 * 128];
+        for y in 20..100 {
+            for x in 16..48 {
+                sprite[y * 64 + x] = 0xFF2244AAu32;
+            }
+        }
+        assert!(split_sheet_bgra(64, 128, &sprite).is_none());
+
+        // A 256² photograph-like thumb is not a sheet even if it divides by 128.
+        assert!(split_sheet_bgra(256, 256, &vec![0xFF808080u32; 256 * 256]).is_none());
+
+        // 1024×128 packed sheet: two painted tiles, the rest studio-clear.
+        let mut sheet = vec![SHEET_CLEAR; SHEET_W * SHEET_TILE];
+        for tile in 0..2 {
+            for y in 0..SHEET_TILE {
+                for x in 0..SHEET_TILE {
+                    sheet[y * SHEET_W + tile * SHEET_TILE + x] = 0xFF3366CCu32;
+                }
+            }
+        }
+        let frames = split_sheet_bgra(SHEET_W, SHEET_TILE, &sheet).expect("two painted tiles");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].len(), SHEET_TILE * SHEET_TILE);
+    }
+
+    fn library_billboard(name: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/ai_content_library")
+            .join(name);
+        path.exists().then_some(path)
+    }
+
+    #[test]
+    fn billboard_thumb_keeps_native_sizes_and_front_facing() {
+        let Some(path) = library_billboard("lib-17232.billboard") else {
+            return;
+        };
+        let thumb = decode_billboard_thumb(&path).expect("forceripple decodes");
+        assert!(thumb.frames.len() > 1, "idle cycle should play");
+        let sizes: Vec<(usize, usize)> = thumb
+            .frames
+            .iter()
+            .map(|(_, w, h)| (*w, *h))
+            .collect();
+        assert!(
+            sizes.windows(2).any(|pair| pair[0] != pair[1]),
+            "later frames must keep authored size, got {sizes:?}"
+        );
+        assert_eq!(sizes[0], (thumb.width, thumb.height));
+
+        let Some(troop) = library_billboard("lib-17234.billboard") else {
+            return;
+        };
+        let prepared = crate::billboard::prepare(&troop).expect("liztroop prepares");
+        let walk = prepared
+            .states
+            .iter()
+            .find(|s| s.name == "walk")
+            .expect("walk state");
+        assert!(
+            walk.frames.len() < 10,
+            "walk must be front-facing letters, not every rotation ({})",
+            walk.frames.len()
+        );
+    }
+}
