@@ -549,6 +549,27 @@ impl UnetFirst {
             &format!("{tb}.attn_refview.processor.to_out_mr.0"),
             true,
         )?;
+        if std::env::var("MAKEPAD_PBR_RA_DEBUG").as_deref() == Ok("1") {
+            let rms = |t: &GpuTensor| -> f64 {
+                match gpu_download(t) {
+                    Ok(v) if !v.is_empty() => {
+                        (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
+                    }
+                    _ => f64::NAN,
+                }
+            };
+            eprintln!(
+                "[pbr-ra] {tb} ref_tokens {}x{} rms={:.4} | k rms={:.4} v_alb rms={:.4} | q rms={:.4} | o_alb rms={:.4} | tokens rms={:.4}",
+                res.ref_tokens.rows(),
+                res.ref_tokens.cols(),
+                rms(res.ref_tokens),
+                rms(&k),
+                rms(&v_alb),
+                rms(&alb_q),
+                rms(&o_alb),
+                rms(&tokens),
+            );
+        }
         for cfg in 0..n_cfg {
             let rs = ref_scales[cfg];
             if (rs - 1.0).abs() < 1e-6 {
