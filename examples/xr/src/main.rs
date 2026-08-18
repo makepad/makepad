@@ -1,5 +1,3 @@
-pub use makepad_widgets_dll as makepad_widgets;
-
 use makepad_widgets::*;
 use makepad_xr::obj::Tank;
 use makepad_xr::scene::*;
