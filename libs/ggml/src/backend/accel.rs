@@ -1,28 +1,10 @@
+//! Cross-backend host-path dispatch (Metal first, then CUDA).
+//! Spec types live in `makepad-ai-cuda::accel`.
+
 use super::{cuda, metal, prof};
-use crate::quant::bf16_to_f32;
+use makepad_ai_cuda::quant::bf16_to_f32;
 
-#[derive(Clone, Copy, Debug)]
-pub struct AffineQuantizedMatmulSpec<'a> {
-    pub input_bf16_words: &'a [u16],
-    pub out_rows: usize,
-    pub weight_words_per_row: usize,
-    pub qparams_per_row: usize,
-    pub bits: u32,
-    pub group_size: u64,
-    pub cache_namespace: &'a str,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct AffineQuantizedMatmulRowsSpec<'a> {
-    pub input_bf16_words: &'a [u16],
-    pub input_rows: usize,
-    pub out_rows: usize,
-    pub weight_words_per_row: usize,
-    pub qparams_per_row: usize,
-    pub bits: u32,
-    pub group_size: u64,
-    pub cache_namespace: &'a str,
-}
+pub use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
 pub fn try_matmul_nt_ggml_bytes(
     a: &[f32],
