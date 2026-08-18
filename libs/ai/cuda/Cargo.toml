@@ -7,6 +7,7 @@ license = "MIT"
 links = "makepad_ai_cuda"
 
 [dependencies]
+makepad-ai-loader = { path = "../loader" }
 
 [[bin]]
 name = "cudnn-v8-bench"

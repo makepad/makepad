@@ -1,7 +1,6 @@
 mod accel;
-pub mod prof;
-
 pub use accel::*;
+pub use makepad_ai_cuda::prof;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum BackendKind {
@@ -32,5 +31,5 @@ pub struct BackendInfo {
 }
 
 pub mod cuda;
-pub mod llm_ops;
+pub use makepad_ai_cuda::llm_ops;
 pub mod metal;
