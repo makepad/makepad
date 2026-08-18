@@ -350,9 +350,23 @@ mod imp {
     const METAL_INIT_ATTEMPTS: usize = 12;
     const METAL_INIT_RETRY_DELAY_MS: u64 = 100;
 
-    const GGML_METAL_SOURCE_RAW: &str = include_str!("ggml/ggml-metal.metal");
-    const GGML_COMMON_H: &str = include_str!("ggml/ggml-common.h");
-    const GGML_METAL_IMPL_H: &str = include_str!("ggml/ggml-metal-impl.h");
+    // Shader tree now lives in makepad-ai-metal (libs/ai/metal, lane T5,
+    // /aiarch.md §1 + §8b); reached via the MAKEPAD_GGML_METAL_SHADER_DIR
+    // env, re-emitted by this crate's build.rs from the
+    // DEP_MAKEPAD_AI_METAL_SHADER_DIR links-metadata handshake. File
+    // contents are byte-identical to before the move.
+    const GGML_METAL_SOURCE_RAW: &str = include_str!(concat!(
+        env!("MAKEPAD_GGML_METAL_SHADER_DIR"),
+        "/ggml-metal.metal"
+    ));
+    const GGML_COMMON_H: &str = include_str!(concat!(
+        env!("MAKEPAD_GGML_METAL_SHADER_DIR"),
+        "/ggml-common.h"
+    ));
+    const GGML_METAL_IMPL_H: &str = include_str!(concat!(
+        env!("MAKEPAD_GGML_METAL_SHADER_DIR"),
+        "/ggml-metal-impl.h"
+    ));
     const GGML_METALLIB_BYTES: &[u8] = include_bytes!(env!("MAKEPAD_GGML_METALLIB"));
 
     #[link(name = "Metal", kind = "framework")]
