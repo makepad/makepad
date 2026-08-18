@@ -641,6 +641,23 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
             };
             dump("albedo", &multiview.albedo);
             dump("mr", &multiview.mr);
+            for (index, view) in views.iter().enumerate() {
+                for (tag, rgb) in [
+                    ("cond_normal", &view.normal_map_rgb),
+                    ("cond_position", &view.position_map_rgb),
+                ] {
+                    let png = crate::png::encode_png(
+                        view.size,
+                        view.size,
+                        crate::png::PngColor::Rgb,
+                        rgb,
+                    );
+                    let path = format!("{dir}/view_{tag}_{index}.png");
+                    if let Err(error) = std::fs::write(&path, png) {
+                        eprintln!("MAKEPAD_PBR_DUMP_VIEWS write {path}: {error}");
+                    }
+                }
+            }
         }
 
         // ---- Bake albedo and MR into the input mesh's UV atlas.
