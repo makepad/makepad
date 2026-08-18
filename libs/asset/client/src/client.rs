@@ -32,6 +32,7 @@ use makepad_asset_data::{
     DerivedVariantId, DerivedVariantManifest, GameAlias, GameId, GameRevisionId,
     GameRevisionManifest, ImportRevisionId, ResolvedVariantMap, VariantSetId, VariantSetManifest,
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -153,6 +154,9 @@ pub struct CatalogEventsPage {
 pub struct AssetClient {
     api: Api,
     cache: ContentCache,
+    /// Verified blobs kept in process memory. The end-application streams
+    /// here; the server already owns the disk cache.
+    ram: HashMap<[u8; 32], Vec<u8>>,
     server_id: [u8; 16],
     protocol_version: u16,
     max_transfer_attempts: u32,
@@ -204,6 +208,7 @@ impl AssetClient {
         Ok(AssetClient {
             api,
             cache,
+            ram: HashMap::new(),
             server_id: health.server_id,
             protocol_version: health.protocol_version,
             max_transfer_attempts: config.max_transfer_attempts,
@@ -943,15 +948,108 @@ impl AssetClient {
     }
 
     /// Fetch a blob and return its verified bytes in memory.
+    ///
+    /// Streams from the server into RAM. Does not write the payload to the
+    /// client disk cache — the asset server already owns that.
     pub fn fetch_blob_bytes(
         &mut self,
         blob: &BlobId,
         expected_len: Option<u64>,
     ) -> ClientResult<Vec<u8>> {
-        self.fetch_blob(blob, expected_len, None)?;
-        self.cache
-            .read_verified(blob.as_bytes(), now_ms())?
-            .ok_or(ClientError::Protocol { what: "committed blob vanished" })
+        let digest = *blob.as_bytes();
+        if let Some(bytes) = self.ram.get(&digest) {
+            return Ok(bytes.clone());
+        }
+        if let Some(bytes) = self.cache.read_verified(&digest, now_ms())? {
+            self.ram.insert(digest, bytes.clone());
+            return Ok(bytes);
+        }
+        let bytes = self.stream_blob_memory(blob, expected_len)?;
+        self.ram.insert(digest, bytes.clone());
+        Ok(bytes)
+    }
+
+    fn stream_blob_memory(
+        &self,
+        blob: &BlobId,
+        expected_len: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        if expected_len == Some(0) {
+            return Err(ClientError::InvalidInput { what: "expected_len zero" });
+        }
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match self.stream_blob_memory_once(blob, expected_len) {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    let retryable = matches!(
+                        e,
+                        ClientError::Io { .. }
+                            | ClientError::Timeout { .. }
+                            | ClientError::DigestMismatch { .. }
+                    );
+                    if !retryable || attempt >= self.max_transfer_attempts {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    fn stream_blob_memory_once(
+        &self,
+        blob: &BlobId,
+        expected_len: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        let mut resp = self.api.blob_get(blob, None, self.blob_body_deadline_ms)?;
+        if resp.head().status != 200 {
+            return Err(ClientError::Protocol { what: "unexpected blob status" });
+        }
+        let declared = resp.head().content_length;
+        if let Some(len) = expected_len {
+            if declared != len {
+                return Err(ClientError::SizeMismatch {
+                    what: "blob declared length",
+                    expected: len,
+                    found: declared,
+                });
+            }
+        }
+        if declared > self.cache.budgets().max_object_bytes {
+            return Err(ClientError::CacheAdmission {
+                what: "object over per-object budget",
+                limit: self.cache.budgets().max_object_bytes,
+                found: declared,
+            });
+        }
+        let mut hasher = makepad_asset_data::Sha256::new();
+        let mut out = Vec::with_capacity(declared as usize);
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = resp.read_chunk(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&chunk[..n]);
+            out.extend_from_slice(&chunk[..n]);
+        }
+        if out.len() as u64 != declared {
+            return Err(ClientError::SizeMismatch {
+                what: "blob received bytes",
+                expected: declared,
+                found: out.len() as u64,
+            });
+        }
+        let found = hasher.finalize();
+        if &found != blob.as_bytes() {
+            return Err(ClientError::DigestMismatch {
+                what: "memory blob",
+                expected: *blob.as_bytes(),
+                found,
+            });
+        }
+        Ok(out)
     }
 
     /// Verified local path if (and only if) the blob is already cached; no

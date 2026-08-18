@@ -30,7 +30,7 @@
 //!
 //! The wire contract (route paths, beacon layout, token shape, budgets)
 //! lives in [`wire`] — the single coordination surface with the server
-//! process (`libs/game/asset-store`).
+//! process (`libs/asset/store`).
 
 pub mod api;
 pub mod cache;
