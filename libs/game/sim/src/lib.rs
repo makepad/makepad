@@ -18,28 +18,61 @@
 pub mod dynamics;
 pub mod entity;
 pub mod heading;
+pub mod nav;
 pub mod particles;
 pub mod player;
 pub mod queries;
 pub mod sense;
 pub mod step;
+pub mod surface;
 pub mod terrain;
+pub mod voxel;
+pub mod water;
 pub mod world;
 
 pub use dynamics::*;
 pub use entity::*;
 pub use heading::*;
+pub use nav::{FlowField, NavAgent, NavMap};
 pub use particles::*;
 pub use player::*;
 pub use queries::*;
 pub use step::*;
+pub use surface::*;
 pub use terrain::*;
+// Selective: the voxel module's short names (CHUNK, AIR, ...) stay scoped.
+pub use voxel::{
+    update_world_voxel, BaseSample, ChunkKey, ChunkMesh, DigMode, VoxelChunk, VoxelField, VoxelMode, VoxelOp,
+};
+pub use water::{dispersion_speed, BuoyancyApplied, WaterState, WaterVolume, WaterWave, MAX_WAVES};
 pub use world::*;
 
 pub use makepad_game_math as math;
 
 pub const TICK_HZ: u32 = 60;
 pub const TICK_DT: f32 = 1.0 / 60.0;
+
+/// Deterministic length for authoritative 3D simulation vectors.
+///
+/// `makepad_math::Vec3f::length` reaches `f32::sqrt` directly. Keep shared
+/// state on the game-math boundary so an innocent vector helper cannot bypass
+/// the sim's deterministic-math audit.
+#[inline]
+pub(crate) fn vec3_len(v: makepad_math::Vec3f) -> f32 {
+    math::sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+}
+
+/// Deterministic counterpart to `Vec3f::normalize` for vectors that can feed
+/// authoritative queries or state.
+#[inline]
+pub(crate) fn vec3_normalize(v: makepad_math::Vec3f) -> makepad_math::Vec3f {
+    let len = vec3_len(v);
+    if len > 0.0 {
+        v * (1.0 / len)
+    } else {
+        makepad_math::Vec3f::default()
+    }
+}
 
 // ------------------------------------------------------------------ entities
 

@@ -610,6 +610,13 @@ fn run_depth_sort_worker(
 }
 
 impl ViewSplat {
+    /// Node-transform scale; hosts use it to fix per-source axis conventions
+    /// (generated worlds are y-up, scan-class plys are y-down and need a
+    /// (1,-1,1) flip). Takes effect on the next draw — no re-mesh needed.
+    pub fn set_scale(&mut self, scale: Vec3f) {
+        self.scale = scale;
+    }
+
     fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
         let resource = resources

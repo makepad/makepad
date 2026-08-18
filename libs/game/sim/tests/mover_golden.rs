@@ -66,7 +66,7 @@ fn ridged_terrain(cells: usize) -> Terrain {
             let fx = x as f32 * 0.35;
             let fz = z as f32 * 0.21;
             // Deterministic ridges: no rng, no libm beyond the sim's own.
-            let hgt = (fx.sin() * 1.4 + fz.cos() * 0.9 + 1.0).max(0.0);
+            let hgt = (math::sin(fx) * 1.4 + math::cos(fz) * 0.9 + 1.0).max(0.0);
             heights.push(hgt);
             colors.push(vec4f(0.35, 0.55, 0.3, 1.0));
         }
@@ -154,15 +154,23 @@ fn mover_path_matches_golden() {
         let _ = collect_touches(&w);
     }
     let got = hash_world(&w);
-    // Recorded on aarch64. Re-baselined once, deliberately: CONTACT_SKIN made
-    // resting contact stop a hair short of flush, which shifts every clamped
-    // position by 1e-3. That was a bug fix — flush contact let a falling mover
-    // be resolved UP onto a crate it had walked into, ignoring the 0.55
-    // step-up contract — so the movement it describes is now correct, not
-    // merely different. Any FURTHER change to this hash needs the same
-    // justification.
+    // Recorded on aarch64. Re-baselined twice, deliberately:
+    // 1. CONTACT_SKIN made resting contact stop a hair short of flush, which
+    //    shifts every clamped position by 1e-3 — a bug fix (flush contact
+    //    let a falling mover be resolved UP onto a crate it had walked into,
+    //    ignoring the 0.55 step-up contract).
+    // 2. Box step-up: the 0.55 CLIMB contract now covers BOX solids, not
+    //    just terrain terraces and wedges. A mover pressed against a solid
+    //    whose top is within step reach climbs onto it instead of clamping
+    //    forever — the fix for generated interiors reading as fields of
+    //    invisible ankle-high walls (the arena playtest's door-to-den walk
+    //    is the behavioural gate). Scenarios where a mover leaned on a low
+    //    ledge now step onto it, which is the intended movement.
+    // 3. Authoritative distance, facing, contact, terrain-normal, and water
+    //    math now crosses makepad-game-math instead of platform float helpers.
+    // Any FURTHER change to this hash needs the same justification.
     assert_eq!(
-        got, 0x4461e8c70ceaf60e,
+        got, 0x1ffa9f88c246b459,
         "mover/terrain/attach path changed observable results (got {got:#x})"
     );
 }
@@ -221,8 +229,13 @@ fn mover_is_blocked_by_a_rigid_body() {
     let mut w = GameWorld::new();
     w.reset_content();
     w.push_entity(ent(1, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(20.0, 0.5, 20.0)));
-    // A crate sitting on the ground, directly in the walker's path.
-    w.push_entity(ent(2, BodyKind::Rigid, vec3f(2.0, 0.5, 0.0), vec3f(0.5, 0.5, 0.5)));
+    // A crate sitting on the ground, directly in the walker's path. HEAVY on
+    // purpose since D4/F8: a walker now SHOVES light rigids along (that is a
+    // feature, tested in mix_core), so this test's "you cannot walk through
+    // a rigid" contract needs a crate the mass-ratio push cannot move.
+    let mut crate_e = ent(2, BodyKind::Rigid, vec3f(2.0, 0.5, 0.0), vec3f(0.5, 0.5, 0.5));
+    crate_e.density = 50.0;
+    w.push_entity(crate_e);
     let mut walker = ent(3, BodyKind::Mover, vec3f(0.0, 0.5, 0.0), vec3f(0.3, 0.5, 0.3));
     walker.vel = vec3f(3.0, 0.0, 0.0);
     w.push_entity(walker);
