@@ -248,6 +248,35 @@ impl LlamaSession {
         Ok(())
     }
 
+    /// Debug: fingerprint the read-only (weights) region of the live device
+    /// buffer by sampling `samples` evenly spaced 1 MiB windows. Two calls
+    /// returning different values mean something WROTE INTO THE WEIGHTS
+    /// between them (an out-of-bounds kernel store) — state that no cache
+    /// clear can ever undo.
+    pub fn debug_weights_fingerprint(&self, samples: usize) -> Result<u64> {
+        const WINDOW: usize = 1 << 20;
+        let ro = self.weights.ctx.ro_split();
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let samples = samples.max(1);
+        for i in 0..samples {
+            let offset = (ro / samples) * i;
+            let len = WINDOW.min(ro - offset);
+            if len == 0 {
+                continue;
+            }
+            let bytes = self.graphs.shared_runtime.read_state_range(
+                &self.graphs.shared_buffers,
+                offset,
+                len,
+            )?;
+            for chunk in bytes.chunks_exact(8) {
+                hash ^= u64::from_le_bytes(chunk.try_into().unwrap());
+                hash = hash.wrapping_mul(0x1000_0000_01b3);
+            }
+        }
+        Ok(hash)
+    }
+
     /// Debug (MAKEPAD_LLM_RESET_VERIFY=1): read every shared cache tensor
     /// back from the live device buffer and report any that still holds
     /// nonzero bytes after `reset`. Catches a clear that silently missed the
