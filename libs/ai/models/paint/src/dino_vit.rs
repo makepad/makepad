@@ -333,7 +333,7 @@ mod exec {
     use super::*;
     use crate::safetensors;
     use makepad_ai_common::backend::cuda::{
-        gpu_add, gpu_attention_packed, gpu_concat_rows, gpu_conv2d_planar_strided, gpu_device_available,
+        gpu_add, gpu_attention_packed_f32, gpu_concat_rows, gpu_conv2d_planar_strided, gpu_device_available,
         gpu_download, gpu_layer_norm_pytorch, gpu_linear_f32_resident, gpu_silu, gpu_slice_cols,
         gpu_upload, GpuTensor,
     };
@@ -607,7 +607,13 @@ mod exec {
             let q = block.q.apply(&n1)?;
             let k = block.k.apply(&n1)?;
             let v = block.v.apply(&n1)?;
-            let attn = gpu_attention_packed(&q, &k, &v, HEADS, ATTN_SCALE)?;
+            // f32 QK/PV/softmax always. DINOv2-giant carries massive-activation
+            // outlier tokens (|x| in the hundreds by mid-depth); the default
+            // FLUX_ATTN_F16 composite path saturates them and the error grows
+            // 0.25 -> 280 max_abs across layers 16..39 (oracle bisect on the
+            // elf reference), which starves the paint UNet of reference
+            // structure. HF fp16 SDPA accumulates in f32; so must we.
+            let attn = gpu_attention_packed_f32(&q, &k, &v, HEADS, ATTN_SCALE)?;
             let attn = block.proj.apply(&attn)?;
             let attn = Self::scale_tokens(&attn, &block.ls1)?;
             let h = gpu_add(x, &attn)?;
