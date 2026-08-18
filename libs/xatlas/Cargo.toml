@@ -1,0 +1,8 @@
+[package]
+name = "makepad-xatlas"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of jpcy/xatlas (MIT): unique UV atlas / mesh parameterization"
+license = "MIT"
+
+[dependencies]
