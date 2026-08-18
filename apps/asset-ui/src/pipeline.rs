@@ -42,6 +42,8 @@ pub const IMAGE_STEPS: &[u32] = &[4, 8, 12, 20, 28, 50];
 /// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
 /// larger atlases trade bake time and device memory for sharper materials.
 pub const MESH_TEXTURE_SIZES: &[u32] = &[1024, 2048, 4096];
+/// QEM face-count presets. Index 0 is Auto (12k objects / 20k characters).
+pub const MESH_FACE_COUNTS: &[u32] = &[0, 12_000, 20_000, 40_000, 80_000, 160_000];
 /// Video canvas presets; entry 0 is the small default.
 pub const VIDEO_SIZES: &[(u32, u32)] = &[(640, 352), (864, 480), (960, 544)];
 /// Video (frames, steps) presets at 16 fps; entry 0 is the default.
@@ -77,12 +79,15 @@ pub fn format_clock(seconds: f64) -> String {
 }
 
 fn music_expansion_max_tokens(seconds: u32) -> u32 {
+    // Official MiniMax Structured Captions are ~250-450 words in Arrangement
+    // alone, plus tagged lyrics that scale with duration. The old 500-700
+    // budget truncated mid-caption and never reached `Lyrics:`.
     match seconds.clamp(MUSIC_MIN_SECONDS, MUSIC_MAX_SECONDS) {
-        0..=60 => 500,
-        61..=120 => 600,
-        121..=180 => 700,
-        181..=240 => 900,
-        _ => 1_100,
+        0..=60 => 1_100,
+        61..=120 => 1_400,
+        121..=180 => 1_600,
+        181..=240 => 1_800,
+        _ => 2_200,
     }
 }
 
@@ -93,6 +98,8 @@ pub struct GenParams {
     /// None = model default (schnell 4, dev-class ~20).
     pub image_steps: Option<u32>,
     pub mesh_texture_size: u32,
+    /// QEM face target. `None` = auto (12k objects, 20k when a rig stage follows).
+    pub mesh_faces: Option<u32>,
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
@@ -107,6 +114,7 @@ impl Default for GenParams {
             image_size: IMAGE_SIZES[0],
             image_steps: None,
             mesh_texture_size: MESH_TEXTURE_SIZES[0],
+            mesh_faces: None,
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
@@ -325,16 +333,8 @@ pub const PRESETS: &[Preset] = &[
     Preset::linear("image", &["image"], &[]),
     Preset::linear("expand → image", &["text", "image"], &[]),
     Preset::linear("text expand only", &["text"], &[]),
-    // Named-model presets PIN that exact model. A preset that says
-    // "(kokoro)" must never affinity-route to whichever other speech
-    // backend happens to be resident (see tests below).
-    Preset::linear("speech (kokoro)", &["speech"], &[("speech", "kokoro")]),
-    Preset::linear(
-        "speech clone (indextts-2.5)",
-        &["speech"],
-        &[("speech", "indextts-2.5")],
-    ),
-    Preset::linear("audio sfx (sa3)", &["audio"], &[("audio", "sa3-sfx")]),
+    Preset::linear("speech", &["speech"], &[]),
+    Preset::linear("audio sfx", &["audio"], &[]),
     Preset::linear("video (small)", &["video"], &[]),
     Preset::linear("expand → video", &["text", "video"], &[]),
     Preset::linear("image → mesh", &["image", "mesh"], &[]),
@@ -343,19 +343,11 @@ pub const PRESETS: &[Preset] = &[
     // volume PBR (texture:false); paint retextures from the source image
     // onto xatlas UV0. Two generators, one chain.
     Preset::linear(
-        "image → mesh → hunyuan PBR",
+        "image → mesh → PBR",
         &["image", "mesh", "paint"],
         &[
             ("mesh", CHARACTER_MESH_MODEL),
             ("paint", "hunyuan3d-paint-2.1"),
-        ],
-    ),
-    Preset::linear(
-        "image → mesh → PBR (testpattern)",
-        &["image", "mesh", "paint"],
-        &[
-            ("mesh", CHARACTER_MESH_MODEL),
-            ("paint", "pbr-testpattern"),
         ],
     ),
     Preset::linear(
@@ -383,15 +375,10 @@ pub const PRESETS: &[Preset] = &[
     ),
     Preset::linear("image → world (splat)", &["image", "world"], &[]),
     Preset::linear("expand → image → world", &["text", "image", "world"], &[]),
-    Preset::linear("expand → sfx (sa3)", &["text", "audio"], &[("audio", "sa3-sfx")]),
-    Preset::linear("audio sfx (moss)", &["audio"], &[("audio", "moss-sfx")]),
-    Preset::linear("expand → sfx (moss)", &["text", "audio"], &[("audio", "moss-sfx")]),
-    Preset::linear("audio sfx (woosh)", &["audio"], &[("audio", "woosh-sfx")]),
-    Preset::linear("expand → sfx (woosh)", &["text", "audio"], &[("audio", "woosh-sfx")]),
-    Preset::linear("music (minimax-music3)", &["music"], &[("music", "minimax-music3")]),
-    Preset::linear("expand → music (minimax-music3)", &["text", "music"], &[("music", "minimax-music3")]),
-    Preset::linear("music (ace-step-1.5-xl)", &["music"], &[("music", "ace-step-1.5-xl")]),
-    Preset::linear("expand → music (ace-step-1.5-xl)", &["text", "music"], &[("music", "ace-step-1.5-xl")]),
+    Preset::linear("expand → sfx", &["text", "audio"], &[]),
+    // Model is chosen in the settings panel, not baked into the type.
+    Preset::linear("music", &["music"], &[]),
+    Preset::linear("expand → music", &["text", "music"], &[]),
     Preset::linear("image → cutout (alpha)", &["image", "matte"], &[]),
     Preset::linear("image → depthmap", &["image", "depth"], &[]),
     Preset::linear("image → segment", &["image", "segment"], &[("segment", "sam3-1-multiplex")]),
@@ -432,8 +419,8 @@ pub const PRESETS: &[Preset] = &[
             ("motion", CHARACTER_MOTION_MODEL),
         ],
     ),
-    // Same playable chain with Hunyuan (or testpattern) on the TRELLIS
-    // mesh before SkinTokens. Rig/motion consume the painted GLB.
+    // Same playable chain with Hunyuan on the TRELLIS mesh before
+    // SkinTokens. Rig/motion consume the painted GLB.
     Preset::linear(
         "character (playable + hunyuan PBR)",
         &["text", "image", "matte", "mesh", "paint", "rig", "motion"],
@@ -443,19 +430,6 @@ pub const PRESETS: &[Preset] = &[
             ("matte", CHARACTER_MATTE_MODEL),
             ("mesh", CHARACTER_MESH_MODEL),
             ("paint", "hunyuan3d-paint-2.1"),
-            ("rig", CHARACTER_RIG_MODEL),
-            ("motion", CHARACTER_MOTION_MODEL),
-        ],
-    ),
-    Preset::linear(
-        "character (playable + PBR test)",
-        &["text", "image", "matte", "mesh", "paint", "rig", "motion"],
-        &[
-            ("text", CHARACTER_LLM_MODEL),
-            ("image", CHARACTER_IMAGE_MODEL),
-            ("matte", CHARACTER_MATTE_MODEL),
-            ("mesh", CHARACTER_MESH_MODEL),
-            ("paint", "pbr-testpattern"),
             ("rig", CHARACTER_RIG_MODEL),
             ("motion", CHARACTER_MOTION_MODEL),
         ],
@@ -719,9 +693,11 @@ pub struct Pipeline {
     /// Retained candidate groups are part of run provenance, including after
     /// a choice is committed and the linear chain resumes.
     pub candidate_sets: Vec<CandidateSet>,
-    /// When the user pinned a concrete model in the selector it applies to
-    /// stages of that model's domain; other stages use domain affinity.
-    pub model_override: Option<(String, String)>, // (domain, model)
+    /// Interactive per-domain model picks from the settings panel
+    /// (`image model`, `music model`, …). An entry wins over the preset
+    /// pin for that domain; missing domains fall through to pins, then
+    /// affinity.
+    pub model_overrides: Vec<(String, String)>,
     /// Preset-baked model pins, (domain, model) — one-click buttons like
     /// "SFX (moss)" carry their model choice here. The interactive selector
     /// override wins over these; both win over affinity.
@@ -767,7 +743,7 @@ impl Pipeline {
         prompt: &str,
         domains: &[&str],
         preset_pins: &[(&str, &str)],
-        model_override: Option<(String, String)>,
+        model_overrides: Vec<(String, String)>,
         box_override: Option<String>,
         voice: Option<String>,
         gen: GenParams,
@@ -799,7 +775,7 @@ impl Pipeline {
             current: 0,
             finished: false,
             candidate_sets: Vec::new(),
-            model_override,
+            model_overrides,
             preset_pins: preset_pins
                 .iter()
                 .map(|(d, m)| (d.to_string(), m.to_string()))
@@ -1265,7 +1241,11 @@ impl Pipeline {
                 request.remesh_resolution = Some(512);
                 let is_character = self.stages.iter().any(|s| s.domain == "rig");
                 let hunyuan_paint = self.stages.iter().any(|s| s.domain == "paint");
-                request.decimation_target = Some(if is_character { 20_000 } else { 12_000 });
+                request.decimation_target = Some(self.gen.mesh_faces.unwrap_or(if is_character {
+                    20_000
+                } else {
+                    12_000
+                }));
                 request.texture_size = Some(self.gen.mesh_texture_size);
                 // Hunyuan retextures from the photo. Skip TRELLIS volume PBR
                 // so the mesh stage is geometry + xatlas UV0 only.
@@ -1352,14 +1332,16 @@ impl Pipeline {
     // -- stage lifecycle ----------------------------------------------------
 
     fn pinned_model_for_domain(&self, domain: &str) -> Option<String> {
-        match &self.model_override {
-            Some((override_domain, model)) if override_domain == domain => Some(model.clone()),
-            _ => self
-                .preset_pins
-                .iter()
-                .find(|(pin_domain, _)| pin_domain == domain)
-                .map(|(_, model)| model.clone()),
-        }
+        self.model_overrides
+            .iter()
+            .find(|(override_domain, _)| override_domain == domain)
+            .map(|(_, model)| model.clone())
+            .or_else(|| {
+                self.preset_pins
+                    .iter()
+                    .find(|(pin_domain, _)| pin_domain == domain)
+                    .map(|(_, model)| model.clone())
+            })
     }
 
     fn stable_id_hash(parts: &[&str]) -> u64 {
@@ -1675,9 +1657,9 @@ impl Pipeline {
         // character preset's documented 9B fallback, but never an explicit
         // model chosen in the UI and never before live /models says ready.
         let has_interactive_model_override = self
-            .model_override
-            .as_ref()
-            .is_some_and(|(override_domain, _)| override_domain == &domain);
+            .model_overrides
+            .iter()
+            .any(|(override_domain, _)| override_domain == &domain);
         let pinned_model = self.pinned_model_for_domain(&domain);
         let prefer_ready_qwen38 = domain == "text"
             && !has_interactive_model_override
@@ -2999,6 +2981,17 @@ impl Pipeline {
                 }
             }
             Req::Poll(stage) => {
+                if response.is_some_and(|r| r.status_code == 404)
+                    || response
+                        .and_then(|r| r.get_string_body())
+                        .is_some_and(|body| body.contains("no such job"))
+                {
+                    return self.fail_stage(
+                        stage,
+                        "box lost the job (service restarted or the job expired)".to_string(),
+                        events,
+                    );
+                }
                 let parsed = response
                     .filter(|_| !failed)
                     .and_then(|r| r.get_string_body())
@@ -3148,9 +3141,9 @@ impl Pipeline {
         cx.http_request(LiveId::unique(), request);
     }
 
-    /// True while the current stage's job is queued OR running on its box:
-    /// queued jobs drop immediately; running jobs raise the job's cancel
-    /// flag and the backend unwinds at the next step/tile boundary.
+    /// True while the current stage is in-flight. A missing job id still
+    /// counts: that is the defunct case after a box restart, and Stop must
+    /// be able to clear it locally.
     pub fn can_cancel_current(&self) -> bool {
         if self.finished {
             return false;
@@ -3165,16 +3158,17 @@ impl Pipeline {
                 });
         }
         self.stages.get(self.current).is_some_and(|s| {
-            !s.job_id.is_empty()
-                && matches!(
-                    s.state,
-                    StageState::Submitting | StageState::Polling | StageState::Fetching
-                )
+            matches!(
+                s.state,
+                StageState::Submitting | StageState::Polling | StageState::Fetching
+            )
         })
     }
 
-    /// Fire-and-forget `POST /job/<id>/cancel` for the current stage; a
-    /// later poll sees the job in state "cancelled" and fails the stage.
+    /// Ask the box to unwind, then fail the local stage immediately.
+    /// Waiting for the box to ack is how a restarted or hard-hung worker
+    /// left Stop looking dead: the job id is gone, polls keep retrying,
+    /// and cancel has nothing to cancel.
     pub fn cancel_current(&mut self, cx: &mut Cx) -> bool {
         if !self.can_cancel_current() {
             return false;
@@ -3186,15 +3180,19 @@ impl Pipeline {
             for (endpoint, job_id) in &jobs {
                 Self::send_cancel_request(cx, endpoint, job_id);
             }
+            let _ = self.fail_stage(self.current, "cancelled".to_string(), Vec::new());
             return true;
         }
         let stage = &self.stages[self.current];
-        let url = format!("{}/job/{}/cancel", stage.box_url, stage.job_id);
-        let mut request = crate::http::request(url, HttpMethod::POST);
-        request.set_header("Content-Type".to_string(), "application/json".to_string());
-        // The in-repo HttpServer 500s on body-less POSTs; send an empty object.
-        request.set_body(b"{}".to_vec());
-        cx.http_request(LiveId::unique(), request);
+        if !stage.job_id.is_empty() && !stage.box_url.is_empty() {
+            let url = format!("{}/job/{}/cancel", stage.box_url, stage.job_id);
+            let mut request = crate::http::request(url, HttpMethod::POST);
+            request.set_header("Content-Type".to_string(), "application/json".to_string());
+            // The in-repo HttpServer 500s on body-less POSTs; send an empty object.
+            request.set_body(b"{}".to_vec());
+            cx.http_request(LiveId::unique(), request);
+        }
+        let _ = self.fail_stage(self.current, "cancelled".to_string(), Vec::new());
         true
     }
 
@@ -3286,7 +3284,7 @@ mod tests {
             intent,
             preset.domains,
             preset.pins,
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3352,7 +3350,7 @@ mod tests {
             "a moonlit harbor",
             &["image", "video"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3393,6 +3391,7 @@ mod tests {
                 capabilities: Some(vec!["image".to_string()]),
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
+                fleet: None,
             }),
             models: vec![ModelInfoJson {
                 id: "flux1-schnell".to_string(),
@@ -3435,6 +3434,7 @@ mod tests {
                 capabilities: Some(vec!["text".to_string()]),
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
+                fleet: None,
             }),
             models: models
                 .iter()
@@ -3690,6 +3690,32 @@ mod tests {
     }
 
     #[test]
+    fn defunct_polling_stage_can_still_be_stopped() {
+        let mut pipeline = Pipeline::new(
+            "x",
+            &["image", "mesh", "paint"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.current = 1;
+        pipeline.stages[1].state = StageState::Polling;
+        pipeline.stages[1].job_id.clear();
+        pipeline.stages[1].box_url = "http://10.0.0.169:8123".into();
+        assert!(pipeline.can_cancel_current());
+        assert!(pipeline.is_running());
+        let _ = pipeline.fail_stage(1, "cancelled".into(), Vec::new());
+        assert!(!pipeline.is_running());
+        assert!(!pipeline.can_cancel_current());
+        assert!(matches!(
+            pipeline.stages[1].state,
+            StageState::Failed(ref e) if e == "cancelled"
+        ));
+    }
+
+    #[test]
     fn fleet_choice_presets_declare_the_gate_stage_explicitly() {
         let direct = PRESETS
             .iter()
@@ -3750,12 +3776,13 @@ mod tests {
                 ("motion", "hy-motion"),
             ]
         );
-        let test = PRESETS
-            .iter()
-            .find(|preset| preset.name == "character (playable + PBR test)")
-            .unwrap();
-        assert_eq!(test.domains, preset.domains);
-        assert!(test.pins.iter().any(|pin| *pin == ("paint", "pbr-testpattern")));
+        assert!(PRESETS.iter().all(|preset| {
+            !preset.name.contains("testpattern")
+                && !preset
+                    .pins
+                    .iter()
+                    .any(|pin| *pin == ("paint", "pbr-testpattern"))
+        }));
     }
 
     #[test]
@@ -3764,7 +3791,7 @@ mod tests {
             "an upbeat synth-pop song about finding home",
             &["text", "music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -3772,7 +3799,7 @@ mod tests {
 
         let expand = pipeline.request_for_stage(0).unwrap();
         assert_eq!(expand.target_domain.as_deref(), Some("music"));
-        assert_eq!(expand.max_tokens, Some(700));
+        assert_eq!(expand.max_tokens, Some(1_600));
         assert!(expand
             .style
             .as_deref()
@@ -3811,7 +3838,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "dub instrumental",
             &["music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             one_minute,
@@ -3823,7 +3850,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "an extended roots-reggae song",
             &["text", "music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             five_minutes,
@@ -3832,7 +3859,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         // Two concurrently held run objects retain their own selection.
         assert_eq!(one_minute.request_for_stage(0).unwrap().seconds, Some(60.0));
         let long_expand = five_minutes.request_for_stage(0).unwrap();
-        assert_eq!(long_expand.max_tokens, Some(1_100));
+        assert_eq!(long_expand.max_tokens, Some(2_200));
         assert!(long_expand
             .style
             .as_deref()
@@ -3844,7 +3871,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "sting",
             &["music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             below_model_minimum,
@@ -3860,7 +3887,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "long song",
             &["music"],
             &[("music", "minimax-music3")],
-            None,
+            vec![],
             None,
             None,
             above_model_maximum,
@@ -3895,7 +3922,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "a tree",
             &["image"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4019,7 +4046,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "a teapot",
             &["image", "mesh"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4174,6 +4201,28 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(pipeline.request_for_stage(1).unwrap().texture_size, None);
         assert_eq!(pipeline.request_for_stage(2).unwrap().texture_size, None);
         assert_eq!(pipeline.request_for_stage(3).unwrap().texture_size, Some(4096));
+        assert_eq!(
+            pipeline.request_for_stage(3).unwrap().decimation_target,
+            Some(20_000)
+        );
+    }
+
+    #[test]
+    fn selected_mesh_faces_override_auto_character_target() {
+        let mut pipeline = character_pipeline("yoshi");
+        pipeline.gen.mesh_faces = Some(80_000);
+        put_output(
+            &mut pipeline,
+            0,
+            "text/plain; charset=utf-8",
+            YOSHI_BRIEF.as_bytes(),
+        );
+        put_output(&mut pipeline, 1, "image/png", b"flux-png");
+        put_output(&mut pipeline, 2, "image/png", b"rgba-cutout");
+        assert_eq!(
+            pipeline.request_for_stage(3).unwrap().decimation_target,
+            Some(80_000)
+        );
     }
 
     #[test]
@@ -4217,7 +4266,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "dancing elf",
             &["video"],
             &[("video", "minimax-h3")],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4268,9 +4317,9 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("motion", "hy-motion-oracle"),
             ("music", "minimax-music3"),
             ("music", "minimax-music3-python"),
+            ("music", "minimax-music3-q4"),
             ("music", "ace-step-1.5-xl"),
             ("paint", "hunyuan3d-paint-2.1"),
-            ("paint", "pbr-testpattern"),
             ("rig", "skintokens"),
             ("rig", "skintokens-oracle"),
             ("segment", "sam3-1-multiplex"),
@@ -4363,7 +4412,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "hello there",
             &["speech"],
             &[("speech", "indextts-2.5")],
-            None,
+            vec![],
             None,
             Some("af_heart".to_string()),
             GenParams::default(),
@@ -4382,7 +4431,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             "a weathered fishing trawler",
             domains,
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4416,7 +4465,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         // outright — it must never silently regenerate from prompt alone
         // while claiming to transform the selection.
         let mut mesh_only = Pipeline::new(
-            "x", &["mesh"], &[], None, None, None, GenParams::default(),
+            "x", &["mesh"], &[], vec![], None, None, GenParams::default(),
         );
         assert!(mesh_only
             .set_seed_input("audio/wav".into(), b"riff".to_vec())
@@ -4428,7 +4477,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
 
         // GLB-consuming chains refuse images the same way.
         let mut rig_only = Pipeline::new(
-            "x", &["rig", "motion"], &[], None, None, None, GenParams::default(),
+            "x", &["rig", "motion"], &[], vec![], None, None, GenParams::default(),
         );
         assert!(rig_only
             .set_seed_input("image/png".into(), b"png".to_vec())
@@ -4463,7 +4512,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
                 ("mesh", CHARACTER_MESH_MODEL),
                 ("paint", "hunyuan3d-paint-2.1"),
             ],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -4498,7 +4547,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
                 ("rig", CHARACTER_RIG_MODEL),
                 ("motion", CHARACTER_MOTION_MODEL),
             ],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),

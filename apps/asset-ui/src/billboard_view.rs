@@ -417,37 +417,43 @@ impl Widget for BillboardView {
                 self.next_frame = cx.new_next_frame();
             }
         }
-        match event {
-            Event::MouseDown(me)
-                if self.view_rect.contains(me.abs) && me.button.is_primary() =>
-            {
+        // Raw mouse only while orbit-dragging. Clicks start through hits()
+        // so a dropdown over/near this pane keeps its FingerDown.
+        if self.orbit_last_abs.is_some() {
+            match event {
+                Event::MouseMove(me) => {
+                    if let Some(last) = self.orbit_last_abs {
+                        let delta = me.abs - last;
+                        self.orbit_yaw -= delta.x as f32 * 0.01;
+                        self.orbit_pitch =
+                            (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.2, 1.2);
+                        self.orbit_last_abs = Some(me.abs);
+                        self.area.redraw(cx);
+                    }
+                }
+                Event::MouseUp(me) if me.button.is_primary() => {
+                    self.orbit_last_abs = None;
+                }
+                _ => {}
+            }
+        }
+
+        match event.hits(cx, self.area) {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 let mut hit_chip = false;
                 for (i, rect) in self.chip_rects.iter().enumerate() {
-                    if rect.contains(me.abs) {
+                    if rect.contains(fe.abs) {
                         self.set_state(cx, i);
                         hit_chip = true;
                         break;
                     }
                 }
                 if !hit_chip {
-                    self.orbit_last_abs = Some(me.abs);
+                    self.orbit_last_abs = Some(fe.abs);
                     cx.set_cursor(MouseCursor::Grabbing);
                 }
             }
-            Event::MouseMove(me) => {
-                if let Some(last) = self.orbit_last_abs {
-                    let delta = me.abs - last;
-                    self.orbit_yaw -= delta.x as f32 * 0.01;
-                    self.orbit_pitch =
-                        (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.2, 1.2);
-                    self.orbit_last_abs = Some(me.abs);
-                    self.area.redraw(cx);
-                }
-            }
-            Event::MouseUp(me) if me.button.is_primary() => {
-                self.orbit_last_abs = None;
-            }
-            Event::Scroll(se) if self.view_rect.contains(se.abs) => {
+            Hit::FingerScroll(se) => {
                 let axis = if se.scroll.y.abs() > f64::EPSILON {
                     se.scroll.y
                 } else {
@@ -459,6 +465,9 @@ impl Widget for BillboardView {
                         (self.look.distance * factor).clamp(1.2, 12.0);
                     self.area.redraw(cx);
                 }
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Grab);
             }
             _ => {}
         }

@@ -1626,7 +1626,7 @@ fn run_classic_import(
         Some(Err(_)) => unreachable!(),
     };
 
-    // AO parked — convert.bake is empty. Do not re-walk the tree.
+    // Classic AO stays off (convert.bake is empty). Kenney still bakes.
     let bake = BakeStats {
         total: convert.bake.total,
         baked: convert.bake.baked,
@@ -1666,7 +1666,9 @@ fn classic_library_landings(
     let mut seen_icons = std::collections::BTreeSet::new();
     let mut seen_titles = std::collections::BTreeSet::new();
     for asset in assets {
-        if matches!(asset.kind, AssetKind::Texture) {
+        if matches!(asset.kind, AssetKind::Texture)
+            && !matches!(source, classic_import::ClassicSource::Quake3)
+        {
             continue;
         }
         if matches!(source, classic_import::ClassicSource::Duke3d)
@@ -1690,6 +1692,7 @@ fn classic_library_landings(
             AssetKind::Character => (path, "model/gltf-binary", "character"),
             AssetKind::Weapon => (path, "model/gltf-binary", "weapon"),
             AssetKind::Prop => (path, "model/gltf-binary", "prop"),
+            AssetKind::Texture => (path, "image/png", "image"),
             AssetKind::Audio => {
                 let music = asset.key.starts_with("music/")
                     || asset.tags.iter().any(|t| t.eq_ignore_ascii_case("music"));
@@ -1736,25 +1739,34 @@ fn classic_library_landings(
             .next()
             .unwrap_or(asset.key.as_str())
             .to_string();
-        let title = match asset.kind {
-            AssetKind::Billboard => {
-                makepad_asset_importer::stateful_billboard::sprite_title(&stem)
+        let title = if matches!(source, classic_import::ClassicSource::Quake3) {
+            // Full key so gothic_floor/wood and gothic_wall/wood stay two cards.
+            asset.key.replace('/', " · ")
+        } else {
+            match asset.kind {
+                AssetKind::Billboard => {
+                    makepad_asset_importer::stateful_billboard::sprite_title(&stem)
+                }
+                AssetKind::World => {
+                    makepad_asset_importer::stateful_billboard::world_title(&asset.key)
+                }
+                AssetKind::Character | AssetKind::Weapon | AssetKind::Prop => {
+                    makepad_asset_importer::stateful_billboard::mesh_title(&asset.key)
+                }
+                _ => stem.clone(),
             }
-            AssetKind::World => {
-                makepad_asset_importer::stateful_billboard::world_title(&asset.key)
-            }
-            AssetKind::Character | AssetKind::Weapon | AssetKind::Prop => {
-                makepad_asset_importer::stateful_billboard::mesh_title(&asset.key)
-            }
-            _ => stem.clone(),
         };
-        if title.to_ascii_lowercase().contains("shareware") {
+        if !matches!(source, classic_import::ClassicSource::Quake3)
+            && title.to_ascii_lowercase().contains("shareware")
+        {
             continue;
         }
-        if matches!(
-            asset.kind,
-            AssetKind::Billboard | AssetKind::Audio | AssetKind::Texture
-        ) && !seen_titles.insert(title.clone())
+        if !matches!(source, classic_import::ClassicSource::Quake3)
+            && matches!(
+                asset.kind,
+                AssetKind::Billboard | AssetKind::Audio | AssetKind::Texture
+            )
+            && !seen_titles.insert(title.clone())
         {
             continue;
         }
@@ -1786,7 +1798,7 @@ fn classic_library_landings(
 
 fn kind_word(kind: AssetKind) -> &'static str {
     match kind {
-        AssetKind::World => "world",
+        AssetKind::World => "map",
         AssetKind::Character => "character",
         AssetKind::Weapon => "weapon",
         AssetKind::Prop => "prop",

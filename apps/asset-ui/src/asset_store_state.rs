@@ -18,11 +18,11 @@
 //!   unset = LAN discovery on the standard beacon port.
 //! - `ASSET_UI_ASSET_SERVER_ID=<32 hex>` — pin the server identity.
 //! - Token: `ASSET_UI_ASSET_TOKEN`, then `ASSET_UI_ASSET_TOKEN_FILE`, then
-//!   `~/.makepad-asset-ai/asset-server/admin-token` (the running server's
-//!   bootstrap token), then `~/.makepad-asset-ai/asset-server.token`.
+//!   `local/asset-ui/asset-server/admin-token` (the running server's
+//!   bootstrap token), then `local/asset-ui/asset-server.token`.
 //!   No token = anonymous probe.
 //! - `ASSET_UI_ASSET_CACHE=<dir>` — cache parent, default
-//!   `~/.makepad-asset-ai`.
+//!   `local/asset-ui`.
 
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogHit, CatalogQuery,
@@ -504,14 +504,23 @@ struct RunningServer {
     token: Option<String>,
 }
 
+fn checkout_root() -> PathBuf {
+    if let Ok(root) = std::env::var("MAKEPAD_ROOT") {
+        return PathBuf::from(root);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Checkout-local Asset UI home (`local/asset-ui`). Never `$HOME`.
+pub fn asset_ui_home() -> PathBuf {
+    checkout_root().join("local/asset-ui")
+}
+
 fn default_asset_server_root() -> PathBuf {
     if let Ok(root) = std::env::var("AI_CONTENT_ASSET_ROOT") {
         return PathBuf::from(root);
     }
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    home.join(".makepad-asset-ai").join("asset-server")
+    asset_ui_home().join("asset-server")
 }
 
 /// When the catalog root is already locked, read the live server's listen
@@ -563,10 +572,7 @@ fn start_embedded_asset_server() -> Result<(makepad_asset_store::AssetServer, St
 }
 
 pub fn session_config_from_env() -> SessionConfig {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let app_home = home.join(".makepad-asset-ai");
+    let app_home = asset_ui_home();
     let cache_parent = env_alias(&["ASSET_UI_ASSET_CACHE", "AI_CONTENT_ASSET_CACHE"])
         .map(PathBuf::from)
         .unwrap_or_else(|| app_home.clone());
@@ -671,7 +677,17 @@ impl LocalLibraryFilters {
                 .iter()
                 .any(|have| have.eq_ignore_ascii_case(want))
         });
-        category_matches && kind_matches && query_matches && tag_matches
+        // Texture / atlas cards stay in the index. Hide the `images` shelf
+        // unless the user asks for it — those files are usually the
+        // colormap a GLB already embeds.
+        let wants_images = self
+            .tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("images"));
+        let is_image_card = library_type(domain, content_type) == "images"
+            || domain.eq_ignore_ascii_case("image");
+        let image_ok = wants_images || !is_image_card;
+        category_matches && kind_matches && query_matches && tag_matches && image_ok
     }
 }
 
@@ -832,6 +848,39 @@ mod tests {
             tags: Vec::new(),
         };
         assert!(untagged.matches("x", "", "mesh", "model/gltf-binary", &[]));
+        assert!(
+            !untagged.matches(
+                "colormap",
+                "Kenney space-kit · colormap",
+                "image",
+                "image/png",
+                &["images".into(), "kenney".into()],
+            ),
+            "loose pack textures stay hidden until the images tag is on"
+        );
+        let images_on = LocalLibraryFilters {
+            query: String::new(),
+            category: None,
+            kind: None,
+            tags: vec!["images".into()],
+        };
+        assert!(images_on.matches(
+            "colormap",
+            "Kenney space-kit · colormap",
+            "image",
+            "image/png",
+            &["images".into(), "kenney".into()],
+        ));
+        assert!(
+            untagged.matches(
+                "TILE-2070",
+                "billboard",
+                "billboard",
+                "image/png",
+                &["billboards".into()],
+            ),
+            "billboard sheets are not the images shelf"
+        );
     }
 
     #[test]

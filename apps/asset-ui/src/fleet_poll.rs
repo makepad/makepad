@@ -393,6 +393,7 @@ mod tests {
         DiscoveredNode {
             base_url: base_url.to_string(),
             node_id,
+            fleet: makepad_asset_ai::discovery::DEFAULT_FLEET.to_string(),
         }
     }
 

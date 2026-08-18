@@ -611,7 +611,9 @@ pub fn history_tiles(entries: Vec<GalleryEntry>) -> Vec<HistoryTile> {
             .iter()
             .filter(|member| member.meta.group_id.as_deref() == Some(id))
             .collect();
-        let mut representative = entry.clone();
+        // Newest-first, but prefer the textured mesh over paint maps / JSON
+        // so clicking the run tile opens something you can judge in 3D.
+        let mut representative = group_tile_representative(&members).clone();
         representative.selected = members.iter().any(|member| member.selected);
         tiles.push(HistoryTile {
             entry: representative,
@@ -620,6 +622,27 @@ pub fn history_tiles(entries: Vec<GalleryEntry>) -> Vec<HistoryTile> {
         });
     }
     tiles
+}
+
+fn group_tile_representative<'a>(members: &[&'a GalleryEntry]) -> &'a GalleryEntry {
+    let ct = |entry: &&GalleryEntry| entry.meta.content_type.to_ascii_lowercase();
+    members
+        .iter()
+        .copied()
+        .find(|entry| ct(entry).contains("gltf"))
+        .or_else(|| {
+            members
+                .iter()
+                .copied()
+                .find(|entry| ct(entry).starts_with("image/"))
+        })
+        .or_else(|| {
+            members.iter().copied().find(|entry| {
+                let ct = ct(entry);
+                !ct.starts_with("application/json") && !ct.starts_with("text/")
+            })
+        })
+        .unwrap_or(members[0])
 }
 
 /// Virtualized, horizontally scrolling History strip: one compact tile per
@@ -1563,7 +1586,7 @@ mod tests {
             "a weathered fishing trawler",
             &["text", "image"],
             &[],
-            None,
+            vec![],
             None,
             None,
             GenParams::default(),
@@ -1718,6 +1741,26 @@ mod tests {
                 "lib-6.txt:None:1",
             ]
         );
+    }
+
+    #[test]
+    fn paint_run_tile_opens_the_textured_glb_not_the_manifest() {
+        let mut manifest = entry("lib-5.json", Some("run-pbr"), Some("pbr"));
+        manifest.meta.content_type = "application/json".into();
+        manifest.meta.domain = "paint".into();
+        let mut albedo = entry("lib-4.png", Some("run-pbr"), Some("pbr"));
+        albedo.meta.domain = "paint".into();
+        let mut painted = entry("lib-3.glb", Some("run-pbr"), Some("pbr"));
+        painted.meta.content_type = "model/gltf-binary".into();
+        painted.meta.domain = "paint".into();
+        let mut mesh = entry("lib-2.glb", Some("run-pbr"), Some("pbr"));
+        mesh.meta.content_type = "model/gltf-binary".into();
+        mesh.meta.domain = "mesh".into();
+        let tiles = history_tiles(vec![manifest, albedo, painted, mesh]);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].count, 4);
+        assert_eq!(tiles[0].entry.meta.file, "lib-3.glb");
+        assert_eq!(tiles[0].entry.meta.domain, "paint");
     }
 
     #[test]

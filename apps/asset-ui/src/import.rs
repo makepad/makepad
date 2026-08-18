@@ -2604,8 +2604,18 @@ fn bake_staged_glbs(
     tx: &std::sync::mpsc::Sender<ImportPhase>,
     cancel: &AtomicBool,
 ) -> BakeStats {
-    let _ = (staged, pack, assets, annotated, tx, cancel);
-    BakeStats::default()
+    ao_bake::bake_glb_tree_ex(staged, Some(cancel), |done, total, current| {
+        let _ = tx.send(ImportPhase::Baking {
+            pack: pack.to_string(),
+            assets,
+            annotated,
+            bake_done: done,
+            bake_total: total,
+            bake_skipped: 0,
+            bake_failed: 0,
+            current: current.to_string(),
+        });
+    })
 }
 
 fn plan_asset_kinds(
@@ -3274,7 +3284,9 @@ mod tests {
 
     fn live_server_session() -> Option<ServerSession> {
         let token = std::fs::read_to_string(
-            dirs_home().join(".makepad-asset-ai/asset-server/admin-token"),
+            crate::asset_store_state::asset_ui_home()
+                .join("asset-server")
+                .join("admin-token"),
         )
         .ok()?
         .trim()
@@ -3283,7 +3295,9 @@ mod tests {
             return None;
         }
         let id = std::fs::read_to_string(
-            dirs_home().join(".makepad-asset-ai/asset-server/server-id"),
+            crate::asset_store_state::asset_ui_home()
+                .join("asset-server")
+                .join("server-id"),
         )
         .ok()?;
         let server_id = parse_hex16_local(id.trim())?;
@@ -3295,12 +3309,6 @@ mod tests {
             token,
             server_id,
         })
-    }
-
-    fn dirs_home() -> PathBuf {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir())
     }
 
     fn parse_hex16_local(text: &str) -> Option<[u8; 16]> {

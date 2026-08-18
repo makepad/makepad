@@ -501,22 +501,49 @@ impl Library {
         if asset_key.is_empty() {
             return None;
         }
-        let stem = asset_key
-            .rsplit('/')
-            .next()
-            .unwrap_or(asset_key)
-            .to_ascii_lowercase();
+        let key = asset_key.replace('\\', "/").to_ascii_lowercase();
+        let stem = key.rsplit('/').next().unwrap_or(key.as_str());
         if stem.is_empty() {
             return None;
         }
         let needle = format!(" · {stem} · ");
         let needle_end = format!(" · {stem}");
-        let item = self.index.items.iter().rev().find(|item| {
+        let dotted = key.replace('/', " · ");
+        let score = |item: &LibraryMeta| -> i32 {
             let prompt = item.prompt.to_ascii_lowercase();
-            prompt.contains(&needle)
+            let label = item.label.to_ascii_lowercase();
+            let ct = item.content_type.to_ascii_lowercase();
+            let domain = item.domain.to_ascii_lowercase();
+            let matched = label == stem
+                || label == dotted
+                || prompt.contains(&needle)
                 || prompt.ends_with(&needle_end)
-                || item.label.eq_ignore_ascii_case(&stem)
-        })?;
+                || prompt.contains(&dotted);
+            if !matched {
+                return -1;
+            }
+            let mesh = ct.contains("gltf")
+                || matches!(
+                    domain.as_str(),
+                    "mesh" | "character" | "weapon" | "prop" | "world" | "map"
+                );
+            if mesh {
+                2
+            } else {
+                0
+            }
+        };
+        let item = self
+            .index
+            .items
+            .iter()
+            .rev()
+            .filter_map(|item| {
+                let s = score(item);
+                (s >= 0).then_some((s, item))
+            })
+            .max_by_key(|(s, _)| *s)?
+            .1;
         self.payload_path(&item.file).ok()
     }
 
