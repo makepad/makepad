@@ -11,16 +11,6 @@
    "files": []
   },
   {
-   "id": "pbr-testpattern",
-   "domain": "paint",
-   "backend": "paint-test",
-   "available": true,
-   "gated": false,
-   "vram_gb": 0.0,
-   "note": "Deterministic PBR paint tier: named inputs mesh (GLB) + reference_image (PNG) -> PBR-textured GLB + albedo/normal/ORM maps + provenance manifest via the native geometry pipeline with a mock diffusion executor. No GPU, no downloads; exercises the full paint artifact contract end-to-end.",
-   "files": []
-  },
-  {
    "id": "hunyuan3d-paint-2.1",
    "domain": "paint",
    "backend": "paint",

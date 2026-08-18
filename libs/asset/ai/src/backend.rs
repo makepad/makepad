@@ -582,9 +582,8 @@ pub fn backend_provisioned(name: &str) -> bool {
         "flux" => crate::flux_backend::flux_fp8_provisioned(),
         #[cfg(feature = "flux")]
         "flux2" => crate::flux2_backend::flux2_cuda_provisioned(),
-        // The deterministic paint tier ("paint-test") runs anywhere; the real
-        // Hunyuan backend ("paint") fails closed until its native CUDA
-        // executor and pinned checkpoints are present on this machine.
+        // CUDA Hunyuan Paint is default-on for Windows/Linux `paint-cuda`
+        // builds. Weights may still be absent until first pull.
         #[cfg(feature = "paint")]
         "paint" => crate::paint_backend::hunyuan_native_provisioned(),
         #[cfg(not(feature = "paint"))]

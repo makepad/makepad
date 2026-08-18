@@ -668,6 +668,28 @@ mod tests {
         // Music: the MiniMax-Music3 diffusers file set must stay fully
         // pinned (immutable revision + size + sha256 on every file) so pull
         // jobs are reproducible and resumable on any box.
+        assert!(
+            registry.find("pbr-testpattern").is_none(),
+            "deterministic paint-test is crate-internal and must not advertise"
+        );
+        let hunyuan = registry.find("hunyuan3d-paint-2.1").unwrap();
+        assert_eq!(hunyuan.domain, Domain::Paint);
+        assert_eq!(hunyuan.backend, "paint");
+        assert_eq!(hunyuan.files.len(), 3);
+        for role in ["unet", "vae", "dino-conditioner"] {
+            let file = hunyuan.file_by_role(role).unwrap();
+            assert!(file.size.is_some() && file.sha256.is_some(), "{role}");
+            assert!(
+                file.cache_as.starts_with("paint21/"),
+                "{role} cache_as {}",
+                file.cache_as
+            );
+        }
+        assert_eq!(
+            hunyuan.file_by_role("vae").unwrap().cache_as,
+            "paint21/vae/diffusion_pytorch_model.bin"
+        );
+
         let music3 = registry.find("minimax-music3").unwrap();
         assert_eq!(music3.domain, Domain::Music);
         assert_eq!(music3.backend, "music3");

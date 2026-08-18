@@ -38,10 +38,11 @@ python-backends = []
 flux = ["dep:makepad-diffusion"]
 # The generative-PBR paint domain: mesh GLB + reference image -> PBR-textured
 # GLB + semantic maps + provenance manifest. Ships the deterministic
-# "paint-test" tier everywhere; the real Hunyuan Paint backend fails closed
-# until its native CUDA executor and pinned checkpoints are provisioned.
+# "paint-test" tier everywhere. Default also enables `paint-cuda`, so a
+# Windows/Linux fleet box advertises Hunyuan Paint and downloads weights
+# like any other registry model.
 paint = ["dep:makepad-pbr-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
-# Windows/Linux CUDA Hunyuan executor (VAE live, UNet graph still fail-closed).
+# Windows/Linux CUDA Hunyuan executor (in default).
 paint-cuda = ["paint", "makepad-pbr-paint/cuda-taps"]
 # Real LLM prompt expansion via libs/llama (Qwen3.5/3.6 family GGUF on
 # makepad-ggml). Off by default: the prompt assembly + artifact shaping in
