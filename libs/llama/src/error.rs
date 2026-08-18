@@ -35,4 +35,19 @@ impl From<std::io::Error> for LlamaError {
     }
 }
 
+// gguf.rs moved to makepad-ai-loader (lane T2, /aiarch.md §1); it can't
+// depend back on this crate, so it raises its own `GgufError` (same shape
+// as LlamaError). This conversion is what keeps every existing
+// `gguf.something()?` call site in this crate compiling unchanged.
+impl From<makepad_ai_loader::formats::gguf::GgufError> for LlamaError {
+    fn from(value: makepad_ai_loader::formats::gguf::GgufError) -> Self {
+        use makepad_ai_loader::formats::gguf::GgufError as E;
+        match value {
+            E::Io(err) => Self::Io(err),
+            E::Format(msg) => Self::Format(msg),
+            E::Unsupported(msg) => Self::Unsupported(msg),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, LlamaError>;

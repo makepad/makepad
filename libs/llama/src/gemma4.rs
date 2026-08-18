@@ -221,7 +221,7 @@ fn visit_optional<'a>(
 }
 
 fn required_tensor(model: &LlamaModel, name: &str) -> Result<GgufTensorInfo> {
-    model.gguf.require_tensor(name).cloned()
+    Ok(model.gguf.require_tensor(name).cloned()?)
 }
 
 fn optional_tensor(model: &LlamaModel, name: &str) -> Option<GgufTensorInfo> {

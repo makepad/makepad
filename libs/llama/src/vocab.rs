@@ -1237,7 +1237,7 @@ fn encode_bpe_word_bytes(word: &str) -> String {
 fn optional_utf8_string(gguf: &GgufFile, key: &str) -> Result<Option<String>> {
     match gguf.get_value(key) {
         None => Ok(None),
-        Some(GgufValue::String(value)) => value.try_utf8().map(|s| Some(s.to_owned())),
+        Some(GgufValue::String(value)) => Ok(value.try_utf8().map(|s| Some(s.to_owned()))?),
         Some(other) => Err(LlamaError::format(format!(
             "gguf key '{}' has type {}, expected string",
             key,
@@ -1256,7 +1256,7 @@ fn optional_string_array(gguf: &GgufFile, key: &str) -> Result<Option<Vec<String
         None => Ok(None),
         Some(GgufValue::Array(GgufArray::String(strings))) => strings
             .iter()
-            .map(|value| value.try_utf8().map(str::to_owned))
+            .map(|value| value.try_utf8().map(str::to_owned).map_err(LlamaError::from))
             .collect::<Result<Vec<_>>>()
             .map(Some),
         Some(other) => Err(LlamaError::format(format!(
