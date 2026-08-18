@@ -1,0 +1,47 @@
+[package]
+name = "makepad-pbr-paint"
+version = "0.1.0"
+edition = "2021"
+description = "Generative PBR material contract, deterministic test backend, and experimental Hunyuan3D-Paint-2.1 pipeline planning"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[features]
+default = []
+# Validation taps for the first experimental CUDA graph section. This is not a
+# complete Hunyuan executor and deliberately does not register a model backend.
+cuda-taps = ["dep:makepad-ggml"]
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ggml = { path = "../ggml", optional = true }
+
+[[bin]]
+name = "pbr-cuda-taps"
+path = "src/bin/cuda_taps.rs"
+required-features = ["cuda-taps"]
+
+[[bin]]
+name = "pbr-vae-canary"
+path = "src/bin/vae_canary.rs"
+required-features = ["cuda-taps"]
+
+[[bin]]
+name = "pbr-unet-canary"
+path = "src/bin/unet_canary.rs"
+required-features = ["cuda-taps"]
+
+[[bin]]
+name = "pbr-dino-canary"
+path = "src/bin/dino_canary.rs"
+required-features = ["cuda-taps"]
+
+[[bin]]
+name = "pbr-exec-canary"
+path = "src/bin/exec_canary.rs"
+required-features = ["cuda-taps"]
+
+[[bin]]
+name = "pbr-pipeline-canary"
+path = "src/bin/pipeline_canary.rs"
+required-features = ["cuda-taps"]
