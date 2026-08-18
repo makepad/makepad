@@ -16,7 +16,7 @@ use crate::{emit_byte_progress, DiffusionError, ProgressHook, Result};
 use makepad_ggml::{
     ggml_pad, BufferUsage, Context, MappedRegion, GGML_MEM_ALIGN,
 };
-use makepad_llama::{GgufFile, GgufTensorInfo};
+use makepad_ai_llm::{GgufFile, GgufTensorInfo};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;

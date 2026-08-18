@@ -1,0 +1,51 @@
+[package]
+name = "makepad-ai-llm"
+version = "0.1.0"
+edition = "2021"
+description = "GGUF LLM family (Qwen). Graph builders + Metal/CUDA exec. Was libs/llama (aiarch.md §1)."
+license = "MIT"
+
+[dependencies]
+# Bake the metallib at build time. Without this, MetalRuntime::new() compiles
+# the 13k-line shader source on the GPU and can stall WindowServer.
+makepad-ggml = { path = "../../ggml", features = ["metal-precompile"] }
+makepad-ai-loader = { path = "../loader" }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ai-cuda = { path = "../cuda" }
+
+[[bin]]
+name = "llama-load"
+path = "src/bin/llama_load.rs"
+
+[[bin]]
+name = "llama-graph-census"
+path = "src/bin/llama_graph_census.rs"
+
+[[bin]]
+name = "llama-cuda-canary"
+path = "src/bin/llama_cuda_canary.rs"
+
+[[bin]]
+name = "llama-compare"
+path = "src/bin/llama_compare.rs"
+
+[[bin]]
+name = "llama-generate"
+path = "src/bin/llama_generate.rs"
+
+[[bin]]
+name = "llama-tokenize"
+path = "src/bin/llama_tokenize.rs"
+
+[[bin]]
+name = "llama-batch-probe"
+path = "src/bin/llama_batch_probe.rs"
+
+[[bin]]
+name = "vlm-vision-probe"
+path = "src/bin/vlm_vision_probe.rs"
+
+[[bin]]
+name = "vlm-probe"
+path = "src/bin/vlm_probe.rs"
