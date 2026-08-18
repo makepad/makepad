@@ -7,7 +7,10 @@ license = "MIT"
 
 [features]
 default = []
-metal-precompile = []
+# Forwarded to makepad-ai-metal's own `metal-precompile` feature so
+# CARGO_FEATURE_METAL_PRECOMPILE reaches ITS build.rs — the metallib build
+# (build_metallib + helpers) moved there in lane T5 (/aiarch.md §1 + §8b).
+metal-precompile = ["makepad-ai-metal/metal-precompile"]
 
 [dependencies]
 # Must not be target-specific: when this crate is a path dep of another
@@ -21,6 +24,14 @@ makepad-cuda = { path = "../cuda" }
 # /aiarch.md §1 + §4. Same "must not be target-specific" reasoning as
 # makepad-cuda above.
 makepad-ai-cuda = { path = "../ai/cuda" }
+# THE Metal shader store (ggml-metal.metal + impl headers + mlx steel_qmm +
+# the metallib build), absorbed lane T5, /aiarch.md §1 + §8b. Direct dep so
+# its `links = "makepad_ai_metal"` metadata reaches this crate's build.rs
+# as DEP_MAKEPAD_AI_METAL_METALLIB / DEP_MAKEPAD_AI_METAL_SHADER_DIR.
+# Unconditional (not target-gated): same cargo-1.92 "must not be
+# target-specific" reasoning as makepad-cuda above — on non-macos targets
+# makepad-ai-metal's build.rs is a clean no-op (no metallib, no shader_dir).
+makepad-ai-metal = { path = "../ai/metal" }
 # TensorType/GGML_TYPE_*/block_size/block_elements/MappedRegion live in the
 # loader now (lane T2, /aiarch.md §1); this crate re-exports them at their
 # original paths. Own `[workspace]` like ../mlx, reached via path dep.

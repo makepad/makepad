@@ -231,6 +231,21 @@ this instead of today's per-backend ad-hoc progress strings. Load progress
    is the merge gate.
 5. Land on rik2 as a commit series: moves separated from edits.
 
+## 8b. Execution staging (2026-08-18, this swoop)
+
+To keep every lane compile-gated, the swoop lands the structure in two
+rings. Ring 1 (this pass, before the user's first model test): loader
+crate + all parsers moved; dead code deleted; ai-cuda = driver + all .cu
+kernels + nvcc build (ggml keeps the Rust launch surface behind its
+existing cfg, fed by a links-metadata handshake); ai-metal = shaders +
+metallib build (Rust metal modules likewise stay in ggml); model family
+crates split out; asset-ai re-pointed. Ring 2 (post-test refinement):
+move the Rust launch surfaces into the stores and split the cuda monolith
+by family, merge the two Metal device stacks, merge the three CUDA weight
+caches, WeightSet adoption + host-retention deletion, Metal eviction,
+flux Compiled/Lazy deletion + affine verify-delete, job-contract wiring,
+final ggml dissolution.
+
 ## 9. Out of scope
 
 python worker scripts, asset-store/importer/chat surfaces (except the job
