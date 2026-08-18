@@ -1,0 +1,17 @@
+# Asset Server client + verified cache (work package D), registered in the
+# root workspace (the former standalone empty [workspace] table was removed
+# at registration, same as libs/asset/data).
+#
+# Dependency policy: only the committed content contract crate
+# (makepad-asset-data) plus std. No HTTP library, no async runtime, no JSON
+# crate, no database: every parser that faces server bytes is in this crate,
+# bounded and fail-closed, because a client must treat the network as hostile
+# even when the peer is our own server.
+
+[package]
+name = "makepad-asset-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-asset-data = { path = "../data" }
