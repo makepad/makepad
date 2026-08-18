@@ -666,6 +666,43 @@ mod exec {
             gpu_download(&gpu_add(&tokens, &pos)?)
         }
 
+        /// Isolated block with sub-op taps: returns (norm1, attn_out_scaled,
+        /// h_after_attn, norm2, mlp_out_scaled, out). Debug/bisect only.
+        pub fn block_taps_at(
+            &self,
+            hidden: &[f32],
+            layer: usize,
+        ) -> Result<[Vec<f32>; 6], String> {
+            if layer >= self.layers.len() {
+                return Err(format!("layer {layer} >= {}", self.layers.len()));
+            }
+            if hidden.len() != TOKENS * HIDDEN {
+                return Err(format!("hidden {} vs {TOKENS}x{HIDDEN}", hidden.len()));
+            }
+            let block = &self.layers[layer];
+            let x = gpu_upload(hidden, TOKENS, HIDDEN)?;
+            let n1 = Self::layer_norm(&x, &block.n1_w, &block.n1_b)?;
+            let q = block.q.apply(&n1)?;
+            let k = block.k.apply(&n1)?;
+            let v = block.v.apply(&n1)?;
+            let attn = gpu_attention_packed_f32(&q, &k, &v, HEADS, ATTN_SCALE)?;
+            let attn = block.proj.apply(&attn)?;
+            let attn = Self::scale_tokens(&attn, &block.ls1)?;
+            let h = gpu_add(&x, &attn)?;
+            let n2 = Self::layer_norm(&h, &block.n2_w, &block.n2_b)?;
+            let mlp = Self::swiglu(&n2, block)?;
+            let mlp = Self::scale_tokens(&mlp, &block.ls2)?;
+            let out = gpu_add(&h, &mlp)?;
+            Ok([
+                gpu_download(&n1)?,
+                gpu_download(&attn)?,
+                gpu_download(&h)?,
+                gpu_download(&n2)?,
+                gpu_download(&mlp)?,
+                gpu_download(&out)?,
+            ])
+        }
+
         pub fn block_at(&self, hidden: &[f32], layer: usize) -> Result<Vec<f32>, String> {
             if layer >= self.layers.len() {
                 return Err(format!("layer {layer} >= {}", self.layers.len()));
