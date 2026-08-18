@@ -7,6 +7,7 @@
 members = [
     "loader",
     "cuda",
+    "metal",
     "job",
 ]
 resolver = "2"
