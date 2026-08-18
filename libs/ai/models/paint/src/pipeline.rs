@@ -24,13 +24,40 @@ use crate::raster::{normal_map_rgb8, position_map_rgb8, render_gbuffer};
 use crate::test_backend::{PbrError, PbrProgress, PbrStage};
 use crate::view_select::bake_view_selection;
 
+/// Flip an interleaved `width x width x channels` u8 image vertically.
+fn flip_rows_u8(data: &mut [u8], width: usize, channels: usize) {
+    let row = width * channels;
+    let (mut top, mut bottom) = (0usize, width.saturating_sub(1));
+    while top < bottom {
+        for k in 0..row {
+            data.swap(top * row + k, bottom * row + k);
+        }
+        top += 1;
+        bottom -= 1;
+    }
+}
+
+/// Flip an interleaved `width x width x channels` f32 image vertically.
+fn flip_rows_f32(data: &mut [f32], width: usize, channels: usize) {
+    let row = width * channels;
+    let (mut top, mut bottom) = (0usize, width.saturating_sub(1));
+    while top < bottom {
+        for k in 0..row {
+            data.swap(top * row + k, bottom * row + k);
+        }
+        top += 1;
+        bottom -= 1;
+    }
+}
+
 /// Upstream `MeshRender` mesh-normalization scale factor: after centering,
 /// the largest radial distance becomes `PAINT_SCALE_FACTOR / 2`, and the
 /// position conditioning encodes `0.5 - p / PAINT_SCALE_FACTOR`.
 pub const PAINT_SCALE_FACTOR: f32 = 1.15;
-/// Background for normal conditioning maps (mid-gray = zero vector).
-/// Exact upstream background is re-verified at oracle-parity time.
-pub const CONDITIONING_BG: [u8; 3] = [128, 128, 128];
+/// Background for normal conditioning maps: WHITE — verified against the
+/// official renderer 2026-08-18 (`MeshRender.render_normal` default
+/// `bg_color=[1, 1, 1]`).
+pub const CONDITIONING_BG: [u8; 3] = [255, 255, 255];
 /// Background for position conditioning maps: WHITE, pinned — the upstream
 /// voxel-index masking treats a pixel as background exactly when all three
 /// channels equal 1.0 (`compute_discrete_voxel_indice`'s `position != 1`).
@@ -511,10 +538,12 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
         // `0.5 - p / PAINT_SCALE_FACTOR` lands in [0,1] and the Z-up camera
         // ring actually orbits the character's vertical axis.
         let mut mesh = inputs.mesh.clone();
-        if mesh.normals.len() != mesh.positions.len() {
-            mesh.compute_vertex_normals();
-        }
         mesh.apply_paint_frame();
+        // Recompute normals from the TRANSFORMED winding: the frame change is
+        // a reflection (det -1), and upstream derives its shading normals
+        // from cross products of the transformed triangles, which flips the
+        // sign relative to mapping the authored normals through the frame.
+        mesh.compute_vertex_normals();
         mesh.normalize_paint_radial(PAINT_SCALE_FACTOR);
         mesh.validate(true).map_err(|error| {
             PbrError::InvalidParams(format!("normalized mesh invalid: {error}"))
@@ -556,13 +585,22 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
             let cand = candidates[cand_idx];
             let mv = model_view_matrix(cand.elev, cand.azim, CAMERA_DISTANCE, [0.0; 3]);
             let gbuf = render_gbuffer(&mesh, &mv, &proj, cfg.resolution as usize, cfg.resolution as usize);
+            // The official stack rasterizes GL-style (row 0 = NDC bottom) and
+            // hands that buffer to PIL unflipped, so the model was trained on
+            // vertically flipped renders relative to our top-down row order.
+            // Flip the conditioning to the model's orientation; the model's
+            // outputs are flipped back before the bake below.
+            let mut normal_map_rgb = normal_map_rgb8(&gbuf, CONDITIONING_BG);
+            let mut position_map_rgb = position_map_rgb8(&gbuf, PAINT_SCALE_FACTOR, POSITION_BG);
+            flip_rows_u8(&mut normal_map_rgb, cfg.resolution as usize, 3);
+            flip_rows_u8(&mut position_map_rgb, cfg.resolution as usize, 3);
             views.push(ViewConditioning {
                 azim: cand.azim,
                 elev: cand.elev,
                 weight: cand.weight,
                 size: cfg.resolution,
-                normal_map_rgb: normal_map_rgb8(&gbuf, CONDITIONING_BG),
-                position_map_rgb: position_map_rgb8(&gbuf, PAINT_SCALE_FACTOR, POSITION_BG),
+                normal_map_rgb,
+                position_map_rgb,
             });
             view_mats.push(mv);
         }
@@ -666,6 +704,13 @@ impl<E: PaintModelExec> HunyuanPaintPipeline<E> {
                     }
                 }
             }
+        }
+
+        // The model works in the flipped (official) orientation; bring its
+        // views back into our raster row order before the bake projections.
+        let mut multiview = multiview;
+        for img in multiview.albedo.iter_mut().chain(multiview.mr.iter_mut()) {
+            flip_rows_f32(img, multiview.size as usize, 3);
         }
 
         // ---- Bake albedo and MR into the input mesh's UV atlas.
