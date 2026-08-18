@@ -61,6 +61,8 @@ pub const CUBLAS_OP_T: cublasOperation_t = 1;
 pub const CUDA_R_32F: cudaDataType = 0;
 pub const CUDA_R_16F: cudaDataType = 2;
 pub const CUDA_R_16BF: cudaDataType = 14;
+/// Signed FP8 E4M3 (torch float8_e4m3fn) — cuda.h `CUDA_R_8F_E4M3`.
+pub const CUDA_R_8F_E4M3: cudaDataType = 28;
 pub const CUBLAS_COMPUTE_16F: cublasComputeType_t = 64;
 pub const CUBLAS_COMPUTE_32F: cublasComputeType_t = 68;
 pub const CUBLAS_COMPUTE_32F_FAST_16BF: cublasComputeType_t = 75;
@@ -73,6 +75,10 @@ pub const CUBLASLT_MATMUL_DESC_TRANSA: cublasLtMatmulDescAttributes_t = 3;
 pub const CUBLASLT_MATMUL_DESC_TRANSB: cublasLtMatmulDescAttributes_t = 4;
 pub const CUBLASLT_MATMUL_DESC_EPILOGUE: cublasLtMatmulDescAttributes_t = 7;
 pub const CUBLASLT_MATMUL_DESC_BIAS_POINTER: cublasLtMatmulDescAttributes_t = 8;
+/// Device f32 dequant-scale pointers for narrow-precision (FP8) matmuls:
+/// D = alpha * a_scale * b_scale * (A x B). cublasLt.h enum values 17/18.
+pub const CUBLASLT_MATMUL_DESC_A_SCALE_POINTER: cublasLtMatmulDescAttributes_t = 17;
+pub const CUBLASLT_MATMUL_DESC_B_SCALE_POINTER: cublasLtMatmulDescAttributes_t = 18;
 pub const CUBLASLT_EPILOGUE_BIAS: cublasLtEpilogue_t = 4;
 pub const CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES:
     cublasLtMatmulPreferenceAttributes_t = 1;
@@ -124,6 +130,11 @@ unsafe extern "C" {
     pub fn cudaEventCreate(event: *mut cudaEvent_t) -> cudaError_t;
     pub fn cudaEventDestroy(event: cudaEvent_t) -> cudaError_t;
     pub fn cudaEventRecord(event: cudaEvent_t, stream: cudaStream_t) -> cudaError_t;
+    pub fn cudaStreamWaitEvent(
+        stream: cudaStream_t,
+        event: cudaEvent_t,
+        flags: c_uint,
+    ) -> cudaError_t;
     pub fn cudaEventSynchronize(event: cudaEvent_t) -> cudaError_t;
     pub fn cudaEventElapsedTime(ms: *mut f32, start: cudaEvent_t, end: cudaEvent_t) -> cudaError_t;
     pub fn cudaStreamBeginCapture(stream: cudaStream_t, mode: cudaStreamCaptureMode)
@@ -839,6 +850,32 @@ pub unsafe fn host_alloc_mapped(size: usize) -> Result<NonNull<c_void>, CudaErro
     let mut ptr = ptr::null_mut();
     check(cudaHostAlloc(&mut ptr, size, CUDA_HOST_ALLOC_MAPPED))?;
     NonNull::new(ptr).ok_or(CudaError { code: -1 })
+}
+
+/// Plain pinned (page-locked) host memory for fast async H2D staging.
+pub unsafe fn host_alloc_pinned(size: usize) -> Result<NonNull<c_void>, CudaError> {
+    let mut ptr = ptr::null_mut();
+    check(cudaHostAlloc(&mut ptr, size, 0))?;
+    NonNull::new(ptr).ok_or(CudaError { code: -1 })
+}
+
+pub fn event_create() -> Result<cudaEvent_t, CudaError> {
+    let mut event: cudaEvent_t = ptr::null_mut();
+    unsafe { check(cudaEventCreate(&mut event))? };
+    Ok(event)
+}
+
+pub fn event_destroy(event: cudaEvent_t) -> Result<(), CudaError> {
+    unsafe { check(cudaEventDestroy(event)) }
+}
+
+pub fn event_record(event: cudaEvent_t, stream: cudaStream_t) -> Result<(), CudaError> {
+    unsafe { check(cudaEventRecord(event, stream)) }
+}
+
+/// Make `stream` wait for `event` (cross-stream ordering, no host sync).
+pub fn stream_wait_event(stream: cudaStream_t, event: cudaEvent_t) -> Result<(), CudaError> {
+    unsafe { check(cudaStreamWaitEvent(stream, event, 0)) }
 }
 
 pub unsafe fn free_host(ptr: NonNull<c_void>) -> Result<(), CudaError> {
