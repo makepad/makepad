@@ -199,6 +199,10 @@ name = "flux2-edit-validate"
 path = "src/bin/flux2_edit_validate.rs"
 
 [[bin]]
+name = "flux2-dev-validate"
+path = "src/bin/flux2_dev_validate.rs"
+
+[[bin]]
 name = "h3-gguf-validate"
 path = "src/bin/h3_gguf_validate.rs"
 
