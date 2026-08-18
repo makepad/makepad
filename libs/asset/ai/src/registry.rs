@@ -705,6 +705,47 @@ mod tests {
             music3.files.iter().map(|f| f.cache_as.as_str()).collect::<Vec<_>>()
         );
 
+        // Music Q4 tier: the official audio.cpp GGUF pack (default mix
+        // Q4_0 LM + Q4_0 DiT + BF16 RVQ + F32 cond/vocoder + sidecar
+        // tokenizer + LICENSE), every file pinned to one immutable revision.
+        let music3_q4 = registry.find("minimax-music3-q4").unwrap();
+        assert_eq!(music3_q4.domain, Domain::Music);
+        assert_eq!(music3_q4.backend, "music3");
+        assert!(music3_q4.available && !music3_q4.gated);
+        assert_eq!(music3_q4.files.len(), 8);
+        for file in &music3_q4.files {
+            assert_eq!(file.repo, "audio-cpp/MiniMax-Music3-GGUF");
+            assert_eq!(
+                file.revision.as_deref(),
+                Some("ed915d0748225e39b2b9b4eab354a20f66e30bc2"),
+                "{} must pin the audited revision",
+                file.cache_as
+            );
+            assert!(file.size.is_some() && file.sha256.is_some(), "{}", file.cache_as);
+            assert!(file.role.is_some(), "{}", file.cache_as);
+            assert!(
+                file.cache_as.starts_with("music/MiniMax-Music3-Q4/"),
+                "{}",
+                file.cache_as
+            );
+        }
+        // The default audio.cpp mix exactly — no q8/q4_k alternates in the
+        // pull set, and the LICENSE ships with the weights.
+        let q4_lm = music3_q4.file_by_role("lm-gguf").unwrap();
+        assert_eq!(q4_lm.path, "language_model_q4_0.gguf");
+        assert_eq!(q4_lm.size, Some(6_006_866_496));
+        assert_eq!(
+            music3_q4.file_by_role("dit-gguf").unwrap().path,
+            "transformer_q4_0.gguf"
+        );
+        assert_eq!(
+            music3_q4.file_by_role("rvq-gguf").unwrap().path,
+            "rvq_depth_decoder_bf16.gguf"
+        );
+        assert!(music3_q4.file_by_role("license").is_some());
+        let q4_total: u64 = music3_q4.files.iter().map(|f| f.size.unwrap()).sum();
+        assert_eq!(q4_total, 9_024_133_343);
+
         let ace = registry.find("ace-step-1.5-xl").unwrap();
         assert_eq!(ace.domain, Domain::Music);
         assert_eq!(ace.backend, "ace");

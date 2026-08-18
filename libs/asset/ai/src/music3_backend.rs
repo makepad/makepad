@@ -47,6 +47,14 @@ const WORKER_PY: &str = include_str!("../python/music3_worker.py");
 /// prefix for `minimax-music3`.
 const MODEL_CACHE_SUBDIR: &str = "music/MiniMax-Music3";
 
+/// Cache-relative root of the audio.cpp GGUF pack; must match the registry
+/// entry's `cache_as` prefix for `minimax-music3-q4`.
+const MODEL_CACHE_SUBDIR_Q4: &str = "music/MiniMax-Music3-Q4";
+
+/// The registry id whose weights are the audio.cpp GGUF pack. Native engine
+/// only — the Python ModularPipeline cannot serve a GGUF pack.
+const MODEL_ID_Q4: &str = "minimax-music3-q4";
+
 /// Song duration bounds per the official model card: full songs up to five
 /// minutes (generation stops earlier on the model's end-of-audio token).
 pub const MIN_SECONDS: f64 = 5.0;
@@ -478,17 +486,26 @@ impl ContentBackend for Music3Backend {
 
     fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
         // Registry-managed weights: downloads/verifies the pinned
-        // MiniMaxAI/MiniMax-Music3 diffusers file set on first use (or via a
-        // pull job); a box with verified files skips straight through.
+        // MiniMaxAI/MiniMax-Music3 diffusers file set (or the audio.cpp GGUF
+        // pack for `minimax-music3-q4`) on first use (or via a pull job); a
+        // box with verified files skips straight through.
         ctx.ensure_files()?;
-        self.model_dir = Some(ctx.cache_dir.join(
+        let subdir = if self.model_id == MODEL_ID_Q4 {
+            MODEL_CACHE_SUBDIR_Q4
+        } else {
             MODEL_CACHE_SUBDIR
-                .split('/')
-                .collect::<PathBuf>(),
-        ));
+        };
+        self.model_dir = Some(ctx.cache_dir.join(subdir.split('/').collect::<PathBuf>()));
         self.tmp_dir = Some(ctx.cache_dir.join("tmp").join("music3"));
         if self.uses_native() {
             return Ok(());
+        }
+        if self.model_id == MODEL_ID_Q4 {
+            return Err(AssetAiError::Unavailable(
+                "minimax-music3-q4 is a GGUF pack: it needs the native engine \
+                 ('audio' feature + GPU device); the Python worker cannot serve it"
+                    .into(),
+            ));
         }
         if !self.python.exists() {
             return Err(AssetAiError::Unavailable(format!(
@@ -524,6 +541,13 @@ impl ContentBackend for Music3Backend {
                 progress,
                 cancel,
             );
+        }
+        if self.model_id == MODEL_ID_Q4 {
+            return Err(AssetAiError::Unavailable(
+                "minimax-music3-q4 is a GGUF pack: it needs the native engine \
+                 ('audio' feature + GPU device); the Python worker cannot serve it"
+                    .into(),
+            ));
         }
 
         let tmp = self.tmp_dir()?.to_path_buf();

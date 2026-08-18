@@ -13,11 +13,53 @@ use crate::music3::{
 use crate::music3_ar::music3_ar_sample_with_progress;
 use crate::music3_dit::{music3_dit_sample_window, Music3DitPrepared};
 use crate::music3_lm::Music3LmPrepared;
+use crate::music3_quant::{
+    load_condition_encoder_from, load_vocoder_from, Music3GgufFile, Music3GgufPack,
+    Music3GgufPaths,
+};
 use crate::music3_rvq::Music3RvqPrepared;
 use crate::music3_vocoder::Music3Vocoder;
 use crate::music3_weights::Music3Shards;
 use crate::{DiffusionError, Result};
 use std::path::Path;
+
+/// The audio.cpp GGUF pack members the render tail loads lazily after AR
+/// (DiT, condition encoder, vocoder), split off the pack so the LM/RVQ
+/// shards can own their members up front.
+struct Music3PackTail {
+    transformer: Music3GgufFile,
+    condition: Music3GgufFile,
+    vocoder: Music3GgufFile,
+}
+
+/// Open + fail-closed-validate the official audio.cpp GGUF pack if
+/// `model_dir` holds one (architecture `audiocpp`, tensor census, python
+/// shape canaries). Returns LM/RVQ sources plus the lazy render tail.
+fn open_gguf_pack(model_dir: &Path) -> Result<Option<(Music3Shards, Music3Shards, Music3PackTail)>> {
+    let paths = Music3GgufPaths::default_mix(model_dir);
+    if !paths.language_model.exists() {
+        return Ok(None);
+    }
+    let pack = Music3GgufPack::open_paths(paths)?;
+    pack.validate_python_shapes()?;
+    let Music3GgufPack {
+        language_model,
+        rvq,
+        transformer,
+        condition,
+        vocoder,
+        ..
+    } = pack;
+    Ok(Some((
+        Music3Shards::from_gguf(language_model),
+        Music3Shards::from_gguf(rvq),
+        Music3PackTail {
+            transformer,
+            condition,
+            vocoder,
+        },
+    )))
+}
 
 pub struct Music3Generate {
     pub caption: String,
@@ -58,9 +100,15 @@ pub fn music3_generate_with_progress(
     progress("load lm", 0.04);
     let bench = std::env::var_os("MAKEPAD_MUSIC3_BENCH").is_some();
     let t_load = std::time::Instant::now();
-    let lm = Music3Shards::load(model_dir.join("language_model"))?;
+    let (lm, rvq, pack_tail) = match open_gguf_pack(model_dir)? {
+        Some((lm, rvq, tail)) => (lm, rvq, Some(tail)),
+        None => (
+            Music3Shards::load(model_dir.join("language_model"))?,
+            Music3Shards::load(model_dir.join("rvq_depth_decoder"))?,
+            None,
+        ),
+    };
     let lm_prep = Music3LmPrepared::prepare(&lm)?;
-    let rvq = Music3Shards::load(model_dir.join("rvq_depth_decoder"))?;
     let rvq_prep = Music3RvqPrepared::prepare(&rvq)?;
     if bench {
         eprintln!("BENCH lm_load_wall={:.3}", t_load.elapsed().as_secs_f64());
@@ -108,12 +156,23 @@ pub fn music3_generate_with_progress(
     let after_ar = (0.06 + 0.82 * (frames as f64 / max_frames.max(1) as f64)).clamp(0.06, 0.88);
     progress("cond", after_ar);
     let t_render = std::time::Instant::now();
-    let enc = Music3ConditionEncoder::load(model_dir)?;
+    let enc = match &pack_tail {
+        Some(tail) => load_condition_encoder_from(&tail.condition)?,
+        None => Music3ConditionEncoder::load(model_dir)?,
+    };
     let dit0 = after_ar + 0.40 * (0.96 - after_ar).max(0.02);
     progress("dit", dit0);
-    let dit = Music3Shards::load(model_dir.join("transformer"))?;
+    let (dit, voc) = match pack_tail {
+        Some(tail) => (
+            Music3Shards::from_gguf(tail.transformer),
+            load_vocoder_from(&tail.vocoder)?,
+        ),
+        None => (
+            Music3Shards::load(model_dir.join("transformer"))?,
+            Music3Vocoder::load(model_dir)?,
+        ),
+    };
     let dit_prep = Music3DitPrepared::prepare(&dit)?;
-    let voc = Music3Vocoder::load(model_dir)?;
     let audio = official_chunk_denoise_decode(
         &enc,
         &dit,
@@ -153,10 +212,19 @@ pub fn music3_render_hiddens(
     if frames == 0 || hiddens.len() != frames * width {
         return Err(DiffusionError::model("music3 render hiddens width"));
     }
-    let enc = Music3ConditionEncoder::load(model_dir)?;
-    let dit = Music3Shards::load(model_dir.join("transformer"))?;
+    let (enc, dit, voc) = match open_gguf_pack(model_dir)? {
+        Some((_, _, tail)) => (
+            load_condition_encoder_from(&tail.condition)?,
+            Music3Shards::from_gguf(tail.transformer),
+            load_vocoder_from(&tail.vocoder)?,
+        ),
+        None => (
+            Music3ConditionEncoder::load(model_dir)?,
+            Music3Shards::load(model_dir.join("transformer"))?,
+            Music3Vocoder::load(model_dir)?,
+        ),
+    };
     let dit_prep = Music3DitPrepared::prepare(&dit)?;
-    let voc = Music3Vocoder::load(model_dir)?;
     official_chunk_denoise_decode(
         &enc,
         &dit,

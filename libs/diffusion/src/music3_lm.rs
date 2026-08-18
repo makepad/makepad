@@ -12,11 +12,12 @@ use crate::backend::{
     gpu_bf16_round,
     gpu_concat_cols,
     gpu_concat_rows, gpu_copy_into, gpu_device_available, gpu_download,
-    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_rms_norm_mul,
+    gpu_linear_nt_cached, gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm,
+    gpu_quant_linear_type_supported, gpu_rms_norm_mul,
     gpu_rms_norm_qwen3, gpu_rope_half, gpu_rope_half_bf16,
     gpu_slice_cols,
     gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
 };
 
 /// Full official Python stack (bf16 Linear/RMS/resid/rope/KV + MATH SDPA).
@@ -51,12 +52,21 @@ fn ensure_linear<'a>(
     k: usize,
     m: usize,
 ) -> Result<GpuLinearPart<'a>> {
-    let ggml_type = weights.linear_ggml_type();
+    let ggml_type = weights.linear_ggml_type(name);
     let _ = m;
-    gpu_weight_cache_ensure(MUSIC3_LM_NAMESPACE, name, ggml_type, n, k, false, || {
-        weights.tensor_bytes(name).map_err(|err| err.to_string())
-    })
-    .map_err(DiffusionError::model)?;
+    if gpu_quant_linear_type_supported(ggml_type) {
+        // Q4_0 pack: the packed block stream stays resident; the gemm
+        // bulk-dequantizes into bf16 scratch (same f32-accumulate contract).
+        gpu_weight_cache_ensure_quant(MUSIC3_LM_NAMESPACE, name, ggml_type, n, k, || {
+            weights.tensor_bytes(name).map_err(|err| err.to_string())
+        })
+        .map_err(DiffusionError::model)?;
+    } else {
+        gpu_weight_cache_ensure(MUSIC3_LM_NAMESPACE, name, ggml_type, n, k, false, || {
+            weights.tensor_bytes(name).map_err(|err| err.to_string())
+        })
+        .map_err(DiffusionError::model)?;
+    }
     Ok(GpuLinearPart {
         bt_ggml_type: ggml_type,
         n,
@@ -72,6 +82,10 @@ fn linear_cached(
     n: usize,
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
+    if gpu_quant_linear_type_supported(part.bt_ggml_type) {
+        return gpu_linear_nt_cached(x, MUSIC3_LM_NAMESPACE, &[part], &[])
+            .map_err(DiffusionError::model);
+    }
     if official_py() {
         return gpu_linear_nt_cached_bf16_mm(x, MUSIC3_LM_NAMESPACE, &[part])
             .map_err(DiffusionError::model);
@@ -87,6 +101,10 @@ fn linear_qk(
     n: usize,
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
+    if gpu_quant_linear_type_supported(part.bt_ggml_type) {
+        return gpu_linear_nt_cached(x, MUSIC3_LM_NAMESPACE, &[part], &[])
+            .map_err(DiffusionError::model);
+    }
     if qk_official() {
         return gpu_linear_nt_cached_bf16_mm(x, MUSIC3_LM_NAMESPACE, &[part])
             .map_err(DiffusionError::model);
@@ -869,8 +887,12 @@ pub fn music3_lm_head_last(
     // Official mm lm_head left last_hidden unchanged and widened f12
     // logit gap 0.077→0.125; tokens still sem[15]/RVQ[12,2]. Revert.
     let part = ensure_linear(weights, "lm_head.weight", MUSIC3_LM_VOCAB, MUSIC3_LM_HIDDEN, 1)?;
-    let y = gpu_linear_nt_cached_bf16_f32acc(&x, MUSIC3_LM_NAMESPACE, &[part], &[])
-        .map_err(DiffusionError::model)?;
+    let y = if gpu_quant_linear_type_supported(part.bt_ggml_type) {
+        gpu_linear_nt_cached(&x, MUSIC3_LM_NAMESPACE, &[part], &[])
+    } else {
+        gpu_linear_nt_cached_bf16_f32acc(&x, MUSIC3_LM_NAMESPACE, &[part], &[])
+    }
+    .map_err(DiffusionError::model)?;
     gpu_download(&y).map_err(DiffusionError::model)
 }
 
@@ -886,12 +908,20 @@ pub fn music3_lm_head_audio(
     let lo = MUSIC3_AUDIO_END_TOKEN_ID as usize;
     let n = (MUSIC3_AUDIO_CODE_OFFSET as usize + MUSIC3_SEMANTIC_VOCAB) - lo;
     const AUDIO_HEAD: &str = "lm_head.weight.audio";
-    let ggml_type = weights.linear_ggml_type();
-    gpu_weight_cache_ensure(MUSIC3_LM_NAMESPACE, AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, false, || {
+    let ggml_type = weights.linear_ggml_type("lm_head.weight");
+    let quant = gpu_quant_linear_type_supported(ggml_type);
+    let load = || {
         weights
             .tensor_row_range_bytes("lm_head.weight", lo as u64, n as u64)
             .map_err(|err| err.to_string())
-    })
+    };
+    if quant {
+        // Q4_0 rows are self-contained block runs, so the head slice stays
+        // packed on device just like the full linears.
+        gpu_weight_cache_ensure_quant(MUSIC3_LM_NAMESPACE, AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, load)
+    } else {
+        gpu_weight_cache_ensure(MUSIC3_LM_NAMESPACE, AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, false, load)
+    }
     .map_err(DiffusionError::model)?;
     let part = GpuLinearPart {
         bt_ggml_type: ggml_type,
@@ -899,8 +929,12 @@ pub fn music3_lm_head_audio(
         cache_key: AUDIO_HEAD,
         bytes: &[],
     };
-    let y = gpu_linear_nt_cached_bf16_f32acc(hidden, MUSIC3_LM_NAMESPACE, &[part], &[])
-        .map_err(DiffusionError::model)?;
+    let y = if quant {
+        gpu_linear_nt_cached(hidden, MUSIC3_LM_NAMESPACE, &[part], &[])
+    } else {
+        gpu_linear_nt_cached_bf16_f32acc(hidden, MUSIC3_LM_NAMESPACE, &[part], &[])
+    }
+    .map_err(DiffusionError::model)?;
     let slim = gpu_download(&y).map_err(DiffusionError::model)?;
     let end = slim[0];
     let sem_off = MUSIC3_AUDIO_CODE_OFFSET as usize - lo;

@@ -1886,6 +1886,89 @@
    ]
   },
   {
+   "id": "minimax-music3-q4",
+   "domain": "music",
+   "backend": "music3",
+   "available": true,
+   "gated": false,
+   "vram_gb": 12.0,
+   "note": "MiniMax Music 3 NATIVE QUANTIZED 24GB tier: official audio.cpp GGUF export (audio-cpp/MiniMax-Music3-GGUF, architecture 'audiocpp', native HF tensor names), default mix Q4_0 8B LM + Q4_0 2.4B DiT + BF16 RVQ depth decoder + F32 condition encoder + F32 Flow-VAE vocoder (~9.0 GB pull vs 28.5 GB bf16). Same generate contract as minimax-music3 (lyrics + prompt + seconds + seed -> stereo 44.1 kHz wav) on the in-repo CUDA stack: Q4_0 block streams stay resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine; pack import is fail-closed (architecture + tensor census + python shape canaries). Native engine only — the Python ModularPipeline cannot serve a GGUF pack. License: MiniMax-Music3 COMMUNITY LICENSE (same terms as the bf16 tree; LICENSE file pinned below).",
+   "files": [
+    {
+     "role": "license",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "LICENSE",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/LICENSE",
+     "size": 7373,
+     "sha256": "b21d12df2adae59dad3fcf80c1d81492654c662342f497d9a9770198c9317e58"
+    },
+    {
+     "role": "lm-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "language_model_q4_0.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/language_model_q4_0.gguf",
+     "size": 6006866496,
+     "sha256": "6f621dd636320403c03e9f755b3e2047f5754d055e0fcc6c0c444ae52ffbfa90"
+    },
+    {
+     "role": "dit-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "transformer_q4_0.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/transformer_q4_0.gguf",
+     "size": 1396392768,
+     "sha256": "18d3b2461a2988f59e197ccf05dc3931663099290b42443baa2a30e4fd15e506"
+    },
+    {
+     "role": "rvq-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "rvq_depth_decoder_bf16.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/rvq_depth_decoder_bf16.gguf",
+     "size": 1292061152,
+     "sha256": "7f7adfb54a9e156682555dc7ddc575c20a6f038c8d036e364881a3ea80400fd0"
+    },
+    {
+     "role": "cond-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "condition_encoder.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/condition_encoder.gguf",
+     "size": 100677184,
+     "sha256": "7f9414097b1f6ad154dae08ed69ce88fd0db6d7fd422f4d1a847216ca28ba1bf"
+    },
+    {
+     "role": "vocoder-gguf",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "vocoder.gguf",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/vocoder.gguf",
+     "size": 216704192,
+     "sha256": "0a768b596516678fc850da1aff36556b8bc6bafcb7b42bc7ba7cb46cb9927a42"
+    },
+    {
+     "role": "tokenizer-json",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "tokenizer/tokenizer.json",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/tokenizer/tokenizer.json",
+     "size": 11423801,
+     "sha256": "b1537fa9e59a537276ecbc2e12d0438edff635a1f4a4948e679774b5feb3e610"
+    },
+    {
+     "role": "tokenizer-config",
+     "repo": "audio-cpp/MiniMax-Music3-GGUF",
+     "path": "tokenizer/tokenizer_config.json",
+     "revision": "ed915d0748225e39b2b9b4eab354a20f66e30bc2",
+     "cache_as": "music/MiniMax-Music3-Q4/tokenizer/tokenizer_config.json",
+     "size": 377,
+     "sha256": "1689852cc9c45010de040c8302a8acdc0d2c4c6c740dd7e9dd0a8c704e16eada"
+    }
+   ]
+  },
+  {
    "id": "ace-step-1.5-xl",
    "domain": "music",
    "backend": "ace",

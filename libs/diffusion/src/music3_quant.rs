@@ -1002,34 +1002,44 @@ impl Music3GgufPack {
     /// CPU F32 condition encoder from the pack (same math as the Python
     /// ModularPipeline encoder).
     pub fn load_condition_encoder(&self) -> Result<Music3ConditionEncoder> {
-        let logits = self.condition.read_f32("layer_weight_logits")?;
-        let scale = self.condition.read_f32("layer_scale")?;
-        let weight = self.condition.read_f32("proj.weight")?;
-        let bias = self.condition.read_f32("proj.bias")?;
-        if weight.len() != MUSIC3_COND_OUT * MUSIC3_COND_HIDDEN * 3 {
-            return Err(DiffusionError::model(format!(
-                "cond proj.weight {} values, expected {}",
-                weight.len(),
-                MUSIC3_COND_OUT * MUSIC3_COND_HIDDEN * 3
-            )));
-        }
-        if logits.len() != MUSIC3_COND_LAYERS {
-            return Err(DiffusionError::model(format!(
-                "cond layer_weight_logits {}, expected {MUSIC3_COND_LAYERS}",
-                logits.len()
-            )));
-        }
-        Music3ConditionEncoder::from_parts(
-            logits,
-            scale.first().copied().unwrap_or(1.0),
-            weight,
-            bias,
-        )
+        load_condition_encoder_from(&self.condition)
     }
 
     pub fn load_vocoder(&self) -> Result<crate::music3_vocoder::Music3Vocoder> {
-        crate::music3_vocoder::Music3Vocoder::load_with(|name| self.vocoder.read_f32(name))
+        load_vocoder_from(&self.vocoder)
     }
+}
+
+/// [`Music3GgufPack::load_condition_encoder`] on a lone `condition_encoder.gguf`
+/// member (the CUDA pipeline destructures the pack and loads stages lazily).
+pub fn load_condition_encoder_from(condition: &Music3GgufFile) -> Result<Music3ConditionEncoder> {
+    let logits = condition.read_f32("layer_weight_logits")?;
+    let scale = condition.read_f32("layer_scale")?;
+    let weight = condition.read_f32("proj.weight")?;
+    let bias = condition.read_f32("proj.bias")?;
+    if weight.len() != MUSIC3_COND_OUT * MUSIC3_COND_HIDDEN * 3 {
+        return Err(DiffusionError::model(format!(
+            "cond proj.weight {} values, expected {}",
+            weight.len(),
+            MUSIC3_COND_OUT * MUSIC3_COND_HIDDEN * 3
+        )));
+    }
+    if logits.len() != MUSIC3_COND_LAYERS {
+        return Err(DiffusionError::model(format!(
+            "cond layer_weight_logits {}, expected {MUSIC3_COND_LAYERS}",
+            logits.len()
+        )));
+    }
+    Music3ConditionEncoder::from_parts(
+        logits,
+        scale.first().copied().unwrap_or(1.0),
+        weight,
+        bias,
+    )
+}
+
+pub fn load_vocoder_from(vocoder: &Music3GgufFile) -> Result<crate::music3_vocoder::Music3Vocoder> {
+    crate::music3_vocoder::Music3Vocoder::load_with(|name| vocoder.read_f32(name))
 }
 
 fn decode_ggml_f32(

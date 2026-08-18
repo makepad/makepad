@@ -19,17 +19,35 @@ fn ensure_linear<'a>(
     n: usize,
     k: usize,
 ) -> Result<GpuLinearPart<'a>> {
-    let ggml_type = weights.linear_ggml_type();
-    gpu_weight_cache_ensure(MUSIC3_RVQ_NAMESPACE, name, ggml_type, n, k, false, || {
-        weights.tensor_bytes(name).map_err(|err| err.to_string())
-    })
-    .map_err(DiffusionError::model)?;
+    let ggml_type = weights.linear_ggml_type(name);
+    if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
+        crate::backend::gpu_weight_cache_ensure_quant(MUSIC3_RVQ_NAMESPACE, name, ggml_type, n, k, || {
+            weights.tensor_bytes(name).map_err(|err| err.to_string())
+        })
+        .map_err(DiffusionError::model)?;
+    } else {
+        gpu_weight_cache_ensure(MUSIC3_RVQ_NAMESPACE, name, ggml_type, n, k, false, || {
+            weights.tensor_bytes(name).map_err(|err| err.to_string())
+        })
+        .map_err(DiffusionError::model)?;
+    }
     Ok(GpuLinearPart {
         bt_ggml_type: ggml_type,
         n,
         cache_key: name,
         bytes: &[],
     })
+}
+
+fn linear_parts(
+    x: &GpuTensor,
+    parts: &[GpuLinearPart<'_>],
+) -> Result<GpuTensor> {
+    if crate::backend::gpu_quant_linear_type_supported(parts[0].bt_ggml_type) {
+        return crate::backend::gpu_linear_nt_cached(x, MUSIC3_RVQ_NAMESPACE, parts, &[])
+            .map_err(DiffusionError::model);
+    }
+    gpu_linear_nt_cached_bf16_f32acc(x, MUSIC3_RVQ_NAMESPACE, parts, &[]).map_err(DiffusionError::model)
 }
 
 fn linear(
@@ -39,7 +57,7 @@ fn linear(
     n: usize,
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols())?;
-    gpu_linear_nt_cached_bf16_f32acc(x, MUSIC3_RVQ_NAMESPACE, &[part], &[]).map_err(DiffusionError::model)
+    linear_parts(x, &[part])
 }
 
 pub struct Music3RvqPrepared {
@@ -96,8 +114,7 @@ fn layer_forward(
         ensure_linear(weights, &k_name, MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_HIDDEN)?,
         ensure_linear(weights, &v_name, MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_HIDDEN)?,
     ];
-    let qkv = gpu_linear_nt_cached_bf16_f32acc(&normed, MUSIC3_RVQ_NAMESPACE, &parts, &[])
-        .map_err(DiffusionError::model)?;
+    let qkv = linear_parts(&normed, &parts)?;
     drop(normed);
     let q = crate::backend::gpu_slice_cols(&qkv, 0, MUSIC3_RVQ_HIDDEN).map_err(DiffusionError::model)?;
     let k = crate::backend::gpu_slice_cols(&qkv, MUSIC3_RVQ_HIDDEN, MUSIC3_RVQ_HIDDEN)
@@ -152,8 +169,7 @@ fn layer_forward(
         ensure_linear(weights, &up_name, MUSIC3_RVQ_FF, MUSIC3_RVQ_HIDDEN)?,
         ensure_linear(weights, &gate_name, MUSIC3_RVQ_FF, MUSIC3_RVQ_HIDDEN)?,
     ];
-    let up_gate = gpu_linear_nt_cached_bf16_f32acc(&normed, MUSIC3_RVQ_NAMESPACE, &parts, &[])
-        .map_err(DiffusionError::model)?;
+    let up_gate = linear_parts(&normed, &parts)?;
     drop(normed);
     let ff = crate::backend::gpu_swiglu_value_gate(&up_gate).map_err(DiffusionError::model)?;
     drop(up_gate);
