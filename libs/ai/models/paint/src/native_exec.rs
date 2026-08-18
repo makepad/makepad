@@ -579,6 +579,22 @@ impl PaintModelExec for NativeHunyuanExec {
         let parts = unpack_planar_host(&sample_host, 4, n_rows, hw)
             .map_err(PbrError::Internal)?;
         batch.sample = parts.into_iter().flatten().collect();
+        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
+            // Final scaled latents, planar [n_pbr*n_views][4][hw]: decode with
+            // the official VAE to split "denoise wrong" from "decoder wrong".
+            let mut bytes = Vec::with_capacity(batch.sample.len() * 4);
+            for v in &batch.sample {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let _ = std::fs::write(format!("{dir}/final_latents.f32"), bytes);
+            eprintln!(
+                "[pbr-final] latents {} f32 = {} rows x 4 x {}x{}",
+                batch.sample.len(),
+                n_rows,
+                encoded.lat_w,
+                encoded.lat_h
+            );
+        }
         if std::env::var_os("MAKEPAD_GPU_PROF").is_some() {
             let perf = makepad_ai_common::backend::cuda::gpu_perf_stats(false);
             eprint!(
