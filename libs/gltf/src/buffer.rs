@@ -64,6 +64,11 @@ pub fn decode_mesh_primitive(
     } else {
         None
     };
+    let colors0 = if let Some(color_accessor_index) = primitive.attributes.get("COLOR_0") {
+        Some(read_accessor_colors_rgba(loaded, *color_accessor_index)?)
+    } else {
+        None
+    };
 
     if let Some(normals) = &normals {
         if normals.len() != positions.len() {
@@ -92,6 +97,15 @@ pub fn decode_mesh_primitive(
             )));
         }
     }
+    if let Some(colors0) = &colors0 {
+        if colors0.len() != positions.len() {
+            return Err(GltfError::Validation(format!(
+                "COLOR_0 vertex count {} does not match POSITION count {} for mesh {mesh_index} primitive {primitive_index}",
+                colors0.len(),
+                positions.len()
+            )));
+        }
+    }
 
     let indices = if let Some(indices_accessor_index) = primitive.indices {
         read_accessor_indices_u32(loaded, indices_accessor_index)?
@@ -104,9 +118,48 @@ pub fn decode_mesh_primitive(
         normals,
         tangents,
         texcoords0,
+        colors0,
         indices,
         material: primitive.material,
     })
+}
+
+/// Reads a COLOR_0-style accessor into normalized RGBA f32: VEC3 or VEC4 of
+/// FLOAT, or normalized UNSIGNED_BYTE / UNSIGNED_SHORT (per the glTF spec's
+/// allowed color types). VEC3 sources get alpha 1.0.
+pub fn read_accessor_colors_rgba(
+    loaded: &LoadedGltf,
+    accessor_index: usize,
+) -> Result<Vec<[f32; 4]>, GltfError> {
+    let view = AccessorView::new(&loaded.document, &loaded.buffers, accessor_index)?;
+    let lanes = view.component_count;
+    if lanes != 3 && lanes != 4 {
+        return Err(GltfError::Unsupported(format!(
+            "color accessor[{accessor_index}] must be VEC3 or VEC4, got {}",
+            view.accessor.accessor_type
+        )));
+    }
+    let mut out = Vec::with_capacity(view.accessor.count);
+    for i in 0..view.accessor.count {
+        let item = view.item_bytes(i)?;
+        let mut rgba = [0.0f32, 0.0, 0.0, 1.0];
+        for (lane, value) in rgba.iter_mut().enumerate().take(lanes) {
+            *value = match view.accessor.component_type {
+                GLTF_COMPONENT_TYPE_FLOAT => read_f32_le(item, lane * 4)?,
+                GLTF_COMPONENT_TYPE_UNSIGNED_BYTE => item[lane] as f32 / 255.0,
+                GLTF_COMPONENT_TYPE_UNSIGNED_SHORT => {
+                    read_u16_le(item, lane * 2)? as f32 / 65535.0
+                }
+                other => {
+                    return Err(GltfError::Unsupported(format!(
+                        "color accessor[{accessor_index}] component type {other} is unsupported"
+                    )))
+                }
+            };
+        }
+        out.push(rgba);
+    }
+    Ok(out)
 }
 
 pub fn read_accessor_f32x2(
