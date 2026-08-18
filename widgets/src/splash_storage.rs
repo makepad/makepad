@@ -341,14 +341,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 }
                 names.sort();
                 let array = vm.bx.heap.new_array();
-                vm.bx.heap.array_mut_mut_self_with(array, |heap, storage| {
-                    *storage = ScriptArrayStorage::ScriptValue(Default::default());
-                    if let ScriptArrayStorage::ScriptValue(vec) = storage {
-                        for name in &names {
-                            vec.push_back(heap.new_string_from_str(name));
-                        }
-                    }
-                });
+                for name in &names {
+                    let name = vm.bx.heap.new_string_from_str(name);
+                    vm.bx.heap.array_push_unchecked(array, name);
+                }
                 array.into()
             }
             Err(e) => script_err_io!(vm.trap(), "{}", e),

@@ -198,6 +198,15 @@ pub enum TextureFormat {
         size: TextureSize,
         initial: bool,
     },
+    /// Single-channel float render target (R32F). Added for GPU baking
+    /// passes that need real float precision (depth scratch maps) — sampled
+    /// with `sample_nearest` (32-bit float filtering is not universal).
+    /// Draw shaders rendering into it must declare `color_format: @Rf32`
+    /// so their pipeline state matches the attachment format.
+    RenderRf32 {
+        size: TextureSize,
+        initial: bool,
+    },
 
     SharedBGRAu8 {
         width: usize,
@@ -268,6 +277,9 @@ impl std::fmt::Debug for TextureFormat {
             }
             TextureFormat::RenderRGBAf32 { size, .. } => {
                 write!(f, "TextureFormat::RenderRGBAf32(size:{:?})", size)
+            }
+            TextureFormat::RenderRf32 { size, .. } => {
+                write!(f, "TextureFormat::RenderRf32(size:{:?})", size)
             }
             TextureFormat::SharedBGRAu8 { width, height, .. } => write!(
                 f,
@@ -465,6 +477,7 @@ impl CxTexture {
             TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
+            TextureFormat::RenderRf32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
             _ => panic!(),
         }
@@ -492,6 +505,7 @@ impl CxTexture {
             TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
+            TextureFormat::RenderRf32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
             _ => panic!(),
         } = initial;
@@ -610,6 +624,7 @@ impl TextureFormat {
             Self::RenderCubeBGRAu8 { .. } => true,
             Self::RenderRGBAf16 { .. } => true,
             Self::RenderRGBAf32 { .. } => true,
+            Self::RenderRf32 { .. } => true,
             _ => false,
         }
     }
@@ -743,6 +758,15 @@ impl TextureFormat {
                     width,
                     height,
                     pixel: TexturePixel::RGBAf32,
+                    category: TextureCategory::Render,
+                })
+            }
+            Self::RenderRf32 { size, .. } => {
+                let (width, height) = size.width_height(width, height);
+                Some(TextureAlloc {
+                    width,
+                    height,
+                    pixel: TexturePixel::Rf32,
                     category: TextureCategory::Render,
                 })
             }

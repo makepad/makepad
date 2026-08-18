@@ -59,6 +59,7 @@ pub mod window_menu;
 mod window_voice_input;
 
 pub mod drop_down;
+pub mod drop_down2;
 pub mod popup_menu;
 pub mod slider;
 pub mod text_input;
@@ -148,6 +149,7 @@ pub use crate::{
     dock::*,
 
     drop_down::*,
+    drop_down2::*,
     expandable_panel::*,
     file_tree::*,
     flat_list::*,
@@ -549,6 +551,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::popup_menu::script_mod(vm);
     crate::drop_down::script_mod(vm);
+    crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
 

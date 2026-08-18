@@ -756,6 +756,7 @@ impl RawInput {
             _ => return (),
         }
         dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+                lock_delta: Default::default(),
             abs: self.abs,
             window_id,
             modifiers: self.modifiers,
@@ -788,6 +789,7 @@ impl RawInput {
             _ => return (),
         }
         dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+                lock_delta: Default::default(),
             abs: self.abs,
             window_id,
             modifiers: self.modifiers,

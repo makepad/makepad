@@ -811,6 +811,19 @@ pub fn fill_color_for_tags(
         // zoo enclosures, dunes, riverbanks — carto's pale sand tan.
         return theme.landuse_fills.get("sand").copied().or(theme.landuse_default);
     }
+    // Nature reserves are a designation overlay, not landcover: the ground
+    // inside carries its own natural/landuse fill (resolved above when
+    // present), and Natura-2000 reserves mapped over the SEA (Noordzee-
+    // kustzone, Bergen–Texel) must not plate the ocean over. carto leaves
+    // them unfilled too. Reaches here as landuse=nature_reserve (the land
+    // layer's kind normalization) or leisure=nature_reserve — guard both
+    // BEFORE the landuse default swallows the value into fallback gray.
+    if tag_is(tags, "landuse", "nature_reserve")
+        || tag_is(tags, "leisure", "nature_reserve")
+        || tag_is(tags, "boundary", "protected_area")
+    {
+        return None;
+    }
     if let Some(landuse) = tags.get("landuse") {
         let key = landuse.trim().to_ascii_lowercase();
         if let Some(color) = theme.landuse_fills.get(&key) {
@@ -1640,6 +1653,36 @@ mod tests {
             ("layer".to_string(), layer.to_string()),
             ("highway".to_string(), "motorway".to_string()),
         ])
+    }
+
+    #[test]
+    fn nature_reserve_polygons_never_fill() {
+        let mut theme = probe_compiled_theme();
+        // The landuse fallback is the gray that plated the sea; give it a
+        // real value so the guard is what keeps the reserve unfilled.
+        theme.landuse_default = Some(0x777777);
+        theme.landuse_fills.insert("forest".to_string(), 0x00ff00);
+        // Exact tag set of the Noordzeekustzone feature after the land
+        // layer's kind normalization (world archive, cell-004 13/4199/2676):
+        // kind copied into landuse, plus the original leisure tag.
+        let reserve = HashMap::from([
+            ("layer".to_string(), "land".to_string()),
+            ("kind".to_string(), "nature_reserve".to_string()),
+            ("landuse".to_string(), "nature_reserve".to_string()),
+            ("leisure".to_string(), "nature_reserve".to_string()),
+        ]);
+        assert_eq!(fill_color_for_tags(&theme, &reserve, true, 13), None);
+        // Real landcover keeps filling — both mapped and fallback values.
+        let forest = HashMap::from([
+            ("layer".to_string(), "land".to_string()),
+            ("landuse".to_string(), "forest".to_string()),
+        ]);
+        assert_eq!(fill_color_for_tags(&theme, &forest, true, 13), Some(0x00ff00));
+        let unknown = HashMap::from([
+            ("layer".to_string(), "land".to_string()),
+            ("landuse".to_string(), "brownfield".to_string()),
+        ]);
+        assert_eq!(fill_color_for_tags(&theme, &unknown, true, 13), Some(0x777777));
     }
 
     #[test]

@@ -211,6 +211,21 @@ extern "C" {
     ) -> ObjcId;
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayPixelsHigh(display: u32) -> u64;
+    /// Pointer lock (FPS mouse capture): 0 freezes the hardware cursor
+    /// while NSEvent deltaX/deltaY keep flowing; nonzero restores normal
+    /// cursor-follows-mouse behaviour. boolean_t is a 32-BIT int — declared
+    /// as Rust `bool` the register's undefined upper bits made `false`
+    /// arrive nonzero and the disassociation silently never engaged.
+    pub fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32;
+    pub fn CGDisplayHideCursor(display: u32) -> i32;
+    pub fn CGDisplayShowCursor(display: u32) -> i32;
+    /// Global display coordinates, top-left origin. Generates no events.
+    pub fn CGWarpMouseCursorPosition(point: NSPoint) -> i32;
+    /// After a warp, macOS suppresses local hardware events for 0.25s by
+    /// default — freezing look deltas after every recapture. Zeroing the
+    /// interval is the standard pointer-lock companion call (deprecated but
+    /// universally used; SDL does the same).
+    pub fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32;
     pub fn CGColorCreateGenericRGB(red: f64, green: f64, blue: f64, alpha: f64) -> ObjcId;
 }
 
@@ -238,6 +253,30 @@ extern "C" {
     pub static AVAudioSessionRouteChangeNotification: ObjcId;
     pub static AVCaptureDeviceWasConnectedNotification: ObjcId;
     pub static AVCaptureDeviceWasDisconnectedNotification: ObjcId;
+}
+
+// AVAssetReader / AVAssetWriter settings keys for the video FILE codec seam
+// (platform/src/os/apple/video_file_{encoder,decoder}.rs).
+#[link(name = "AVFoundation", kind = "framework")]
+extern "C" {
+    pub static AVFileTypeMPEG4: ObjcId;
+    pub static AVVideoCodecKey: ObjcId;
+    pub static AVVideoWidthKey: ObjcId;
+    pub static AVVideoHeightKey: ObjcId;
+    pub static AVVideoCompressionPropertiesKey: ObjcId;
+    pub static AVVideoAverageBitRateKey: ObjcId;
+    pub static AVVideoExpectedSourceFrameRateKey: ObjcId;
+    pub static AVVideoMaxKeyFrameIntervalKey: ObjcId;
+    pub static AVVideoCodecTypeHEVC: ObjcId;
+    pub static AVVideoCodecTypeH264: ObjcId;
+    pub static AVFormatIDKey: ObjcId;
+    pub static AVSampleRateKey: ObjcId;
+    pub static AVNumberOfChannelsKey: ObjcId;
+    pub static AVEncoderBitRateKey: ObjcId;
+    pub static AVLinearPCMBitDepthKey: ObjcId;
+    pub static AVLinearPCMIsFloatKey: ObjcId;
+    pub static AVLinearPCMIsBigEndianKey: ObjcId;
+    pub static AVLinearPCMIsNonInterleaved: ObjcId;
 }
 
 #[link(name = "CoreLocation", kind = "framework")]
@@ -268,6 +307,7 @@ pub type CMFormatDescriptionRef = ObjcId;
 pub const kCMPixelFormat_422YpCbCr8: u32 = four_char_as_u32("2vuy");
 pub const kCMPixelFormat_422YpCbCr8_yuvs: u32 = four_char_as_u32("yuvs");
 pub const kCMVideoCodecType_H264: u32 = four_char_as_u32("avc1");
+pub const kCMVideoCodecType_HEVC: u32 = four_char_as_u32("hvc1");
 pub const kCMVideoCodecType_JPEG: u32 = four_char_as_u32("jpeg");
 pub const kCMVideoCodecType_JPEG_OpenDML: u32 = four_char_as_u32("dmb1");
 pub const kCMPixelFormat_8IndexedGray_WhiteIsZero: u32 = 0x00000028;
@@ -451,6 +491,41 @@ extern "C" {
 
     pub fn CMTimeMakeWithSeconds(seconds: f64, preferredTimescale: i32) -> CMTime;
     pub fn CMTimeGetSeconds(time: CMTime) -> f64;
+
+    // Video file codec seam (AVAssetReader/Writer backends).
+    pub fn CMAudioFormatDescriptionCreate(
+        allocator: *const c_void,
+        asbd: *const CAudioStreamBasicDescription,
+        layoutSize: usize,
+        layout: *const c_void,
+        magicCookieSize: usize,
+        magicCookie: *const c_void,
+        extensions: CFDictionaryRef,
+        formatDescriptionOut: *mut CMFormatDescriptionRef,
+    ) -> OSStatus;
+
+    pub fn CMAudioFormatDescriptionGetStreamBasicDescription(
+        desc: CMFormatDescriptionRef,
+    ) -> *const CAudioStreamBasicDescription;
+
+    pub fn CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+        allocator: *const c_void,
+        dataBuffer: CMBlockBufferRef,
+        formatDescription: CMFormatDescriptionRef,
+        numSamples: isize,
+        presentationTimeStamp: CMTime,
+        packetDescriptions: *const c_void,
+        sampleBufferOut: *mut CMSampleBufferRef,
+    ) -> OSStatus;
+
+    pub fn CMBlockBufferAssureBlockMemory(theBuffer: CMBlockBufferRef) -> OSStatus;
+
+    pub fn CMBlockBufferReplaceDataBytes(
+        sourceBytes: *const c_void,
+        destinationBuffer: CMBlockBufferRef,
+        offsetIntoDestination: usize,
+        dataLength: usize,
+    ) -> OSStatus;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -649,6 +724,19 @@ extern "C" {
 
     pub fn VTIsHardwareEncodeSupported(codecType: u32) -> BOOL;
     pub fn VTIsHardwareDecodeSupported(codecType: u32) -> BOOL;
+
+    // Video file codec seam: hardware-encoder probe (the public API —
+    // VTIsHardwareEncodeSupported above is NOT an exported symbol on macOS,
+    // see apple_media.rs's dlsym workaround).
+    pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: CFStringRef;
+    pub fn VTCopySupportedPropertyDictionaryForEncoder(
+        width: i32,
+        height: i32,
+        codecType: u32,
+        encoderSpecification: CFDictionaryRef,
+        encoderIDOut: *mut CFStringRef,
+        supportedPropertiesOut: *mut CFDictionaryRef,
+    ) -> OSStatus;
 }
 
 // Foundation

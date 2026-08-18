@@ -278,6 +278,7 @@ pub struct ToWasmMouseMove {
 impl From<ToWasmMouseMove> for MouseMoveEvent {
     fn from(v: ToWasmMouseMove) -> Self {
         Self {
+            lock_delta: Default::default(),
             abs: dvec2(v.mouse.x, v.mouse.y),
             window_id: CxWindowPool::id_zero(),
             modifiers: unpack_key_modifier(v.mouse.modifiers),

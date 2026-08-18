@@ -53,32 +53,33 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add("s . out . push (").chr(']').add(") ;");
             } else if let Some(fields) = parser.eat_all_struct_fields() {
-                let fields_len = fields.len();
                 tb.add("s . st_pre ( ) ;");
-                // named struct
-                for (i, field) in fields.iter().enumerate() {
+                // named struct. Commas are emitted BEFORE each field behind a
+                // runtime first-field flag: skipped `Option: None` fields used
+                // to leave a trailing comma when they were last (valid for our
+                // own DeJson, rejected by strict parsers - python json,
+                // PowerShell ConvertFrom-Json, serde).
+                tb.add("let mut _first_field = true ;");
+                for field in fields.iter() {
                     let json_name = get_json_field_name(field);
                     if field.ty.clone().into_iter().next().unwrap().to_string() == "Option" {
                         tb.add("if let Some ( t ) = ")
                             .add("& self .")
                             .ident(&field.name)
                             .add("{");
+                        tb.add("if _first_field { _first_field = false ; } else { s . conl ( ) ; }");
                         tb.add("s . field ( d + 1 ,").string(&json_name).add(") ;");
                         tb.add("t . ser_json ( d + 1 , s ) ;");
-                        if i != fields_len - 1 {
-                            tb.add("s . conl ( ) ;");
-                        }
                         tb.add("} ;");
                     } else {
+                        tb.add("if _first_field { _first_field = false ; } else { s . conl ( ) ; }");
                         tb.add("s . field ( d + 1 ,").string(&json_name).add(" ) ;");
                         tb.add("self .")
                             .ident(&field.name)
                             .add(". ser_json ( d + 1 , s ) ;");
-                        if i != fields_len - 1 {
-                            tb.add("s . conl ( ) ;");
-                        }
                     }
                 }
+                tb.add("let _ = _first_field ;");
                 tb.add("s . st_post ( d ) ;");
             } else {
                 return parser.unexpected();

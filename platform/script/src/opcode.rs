@@ -218,6 +218,21 @@ impl Opcode {
     pub const LET_DESTRUCT_ARRAY_EL: Self = Self(128); // arg = index; stack: [source, id] -> [source], binds id = source[index]
     pub const LET_DESTRUCT_OBJECT_EL: Self = Self(129); // stack: [source, id] -> [source], binds id = source[id]
     pub const ARRAY_INDEX_NIL: Self = Self(130);
+
+    // Frame-slot opcodes: lexically resolved fn locals (see thread.slots).
+    // Each slot form occupies exactly the same opcode-stream shape as the
+    // dynamic form it replaces, so the parser can patch back in place when a
+    // body turns out to be ineligible (closure, use, scope, ...).
+    pub const SLOTS_FRAME: Self = Self(131); // arg = slot count; establish frame
+    pub const ARGS_TO_SLOTS: Self = Self(132); // arg = declared arg count; copy args scope->slots 0..n
+    pub const PUSH_SLOT: Self = Self(133); // arg = slot; push slots[base+slot]
+    pub const LET_SLOT: Self = Self(134); // arg = slot; stack [id, value] -> [], slot = value
+    pub const STORE_SLOT: Self = Self(135); // arg = slot; stack [id, value] -> [nil], slot = value
+    pub const ASSIGN_SLOT_ADD: Self = Self(136); // arg = slot; stack [id, value] -> [nil]
+    pub const ASSIGN_SLOT_SUB: Self = Self(137);
+    pub const ASSIGN_SLOT_MUL: Self = Self(138);
+    pub const ASSIGN_SLOT_DIV: Self = Self(139);
+    pub const ASSIGN_SLOT_MOD: Self = Self(140);
 }
 
 impl fmt::Debug for OpcodeArgs {
@@ -401,6 +416,16 @@ impl fmt::Display for Opcode {
             Self::LET_DESTRUCT_ARRAY_EL => return write!(f, "let_arr_el"),
             Self::LET_DESTRUCT_OBJECT_EL => return write!(f, "let_obj_el"),
             Self::ARRAY_INDEX_NIL => return write!(f, "?[]"),
+            Self::SLOTS_FRAME => return write!(f, "slots_frame"),
+            Self::ARGS_TO_SLOTS => return write!(f, "args_to_slots"),
+            Self::PUSH_SLOT => return write!(f, "push_slot"),
+            Self::LET_SLOT => return write!(f, "let_slot"),
+            Self::STORE_SLOT => return write!(f, "store_slot"),
+            Self::ASSIGN_SLOT_ADD => return write!(f, "slot+="),
+            Self::ASSIGN_SLOT_SUB => return write!(f, "slot-="),
+            Self::ASSIGN_SLOT_MUL => return write!(f, "slot*="),
+            Self::ASSIGN_SLOT_DIV => return write!(f, "slot/="),
+            Self::ASSIGN_SLOT_MOD => return write!(f, "slot%="),
             _ => return write!(f, "OP{}", self.0),
         }
     }

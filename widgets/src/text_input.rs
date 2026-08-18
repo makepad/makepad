@@ -2166,13 +2166,15 @@ impl Widget for TextInput {
                 let trap = vm.bx.threads.cur().trap.pass();
                 let value = vm.bx.heap.vec_value(args_obj, 0, trap);
                 if !value.is_err() {
-                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
-                        heap.cast_to_string(value, out);
-                        out.to_string()
-                    });
-                    vm.with_cx_mut(|cx| {
-                        self.set_text(cx, &new_text);
-                    });
+                    if let Some(new_text) = vm
+                        .bx
+                        .heap
+                        .cast_to_owned_string(value, "copying text input contents")
+                    {
+                        vm.with_cx_mut(|cx| {
+                            self.set_text(cx, &new_text);
+                        });
+                    }
                 }
             }
             return ScriptAsyncResult::Return(NIL);

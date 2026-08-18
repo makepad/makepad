@@ -89,6 +89,7 @@ impl DrawVars {
             }
 
             if output.has_errors {
+                DrawVars::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 

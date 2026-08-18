@@ -14,6 +14,15 @@ const TAG_CARGO_RUN: u8 = 0x02;
 const TAG_SHELL_RUN: u8 = 0x03;
 const TAG_STDIN_DATA: u8 = 0x04;
 const TAG_STDIN_CLOSE: u8 = 0x05;
+// The makepad-remote server (tools/remote) interprets tag 0x04 as a file-pull
+// request instead of stdin data: payload is a relative path, the server
+// answers TAG_FILE_DATA followed by TAG_EXIT_CODE (or TAG_ERROR). The pull
+// and push verbs below speak that dialect; they never stream stdin, so the
+// overlapping tag value is unambiguous per connection.
+const TAG_FILE_PULL: u8 = 0x04;
+const TAG_SPAWN: u8 = 0x06;
+const TAG_PS: u8 = 0x07;
+const TAG_KILL: u8 = 0x08;
 
 const TAG_OUTPUT: u8 = 0x01;
 const TAG_EXIT_CODE: u8 = 0x02;
@@ -336,6 +345,30 @@ fn handle_connection(
                 is_shell = true;
                 break;
             }
+            // 0x04 doubles as TAG_STDIN_DATA, but stdin frames only flow
+            // AFTER a run tag opens a process — in this pre-run loop the
+            // byte can only mean a pull. Same wire shape as the
+            // tools/remote server: reply TAG_OUTPUT carrying the
+            // (path, bytes) file-data encoding, then an exit code.
+            TAG_FILE_PULL => {
+                let rel_path = std::str::from_utf8(&payload)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                    .to_string();
+                let full_path = validate_and_resolve_path(cwd, &rel_path)?;
+                match fs::read(&full_path) {
+                    Ok(data) => {
+                        eprintln!("server: pull {} ({} bytes)", rel_path, data.len());
+                        let reply = encode_file_data(&rel_path, &data);
+                        write_msg(&mut stream, TAG_OUTPUT, &reply)?;
+                        write_msg(&mut stream, TAG_EXIT_CODE, &0i32.to_be_bytes())?;
+                    }
+                    Err(e) => {
+                        let msg = format!("pull {} failed: {}", rel_path, e);
+                        let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
+                    }
+                }
+                return Ok(());
+            }
             _ => {
                 let msg = format!("unknown tag: 0x{:02x}", tag);
                 let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
@@ -488,6 +521,56 @@ fn stream_stdin(mut reader: TcpStream, mut writer: impl Write) {
 
 // --- Client ---
 
+fn run_simple(addr: &str, tag: u8, payload: &[u8]) -> io::Result<i32> {
+    eprintln!("client: connecting to {addr}");
+    let mut stream = TcpStream::connect(addr)?;
+    eprintln!("client: connected");
+    write_msg(&mut stream, tag, payload)?;
+    let exit_code;
+    loop {
+        let (tag, payload) = read_msg(&mut stream)?;
+        match tag {
+            TAG_OUTPUT => {
+                if payload.is_empty() {
+                    continue;
+                }
+                let data = &payload[1..];
+                match payload.first().copied() {
+                    Some(STREAM_STDOUT) => {
+                        io::stdout().write_all(data)?;
+                        io::stdout().flush()?;
+                    }
+                    Some(STREAM_STDERR) => {
+                        io::stderr().write_all(data)?;
+                        io::stderr().flush()?;
+                    }
+                    _ => {}
+                }
+            }
+            TAG_EXIT_CODE => {
+                exit_code = if payload.len() >= 4 {
+                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                } else {
+                    1
+                };
+                break;
+            }
+            TAG_ERROR => {
+                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
+                exit_code = 1;
+                break;
+            }
+            _ => {
+                eprintln!("client: unknown tag 0x{tag:02x}");
+                exit_code = 1;
+                break;
+            }
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(exit_code)
+}
+
 fn run_client(
     addr: &str,
     cmd_args: &[String],
@@ -609,6 +692,216 @@ fn run_client(
     Ok(exit_code)
 }
 
+fn run_pull(addr: &str, remote_path: &str, local_path: &str) -> io::Result<i32> {
+    eprintln!("client: connecting to {}", addr);
+    let mut stream = TcpStream::connect(addr)?;
+    eprintln!("client: pull {} -> {}", remote_path, local_path);
+    write_msg(&mut stream, TAG_FILE_PULL, remote_path.as_bytes())?;
+
+    let mut exit_code = 1;
+    loop {
+        let (tag, payload) = match read_msg(&mut stream) {
+            Ok(msg) => msg,
+            Err(_) => break,
+        };
+        match tag {
+            TAG_OUTPUT => {
+                // Server implementations reuse 0x01 for pulled file data; the
+                // makepad-remote server encodes it as (path, bytes).
+                let (_rel, data) = decode_file_data(&payload)?;
+                if let Some(parent) = Path::new(local_path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent)?;
+                    }
+                }
+                fs::write(local_path, data)?;
+                eprintln!("client: wrote {} ({} bytes)", local_path, data.len());
+                exit_code = 0;
+            }
+            TAG_EXIT_CODE => {
+                if payload.len() >= 4 && exit_code == 0 {
+                    exit_code =
+                        i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                }
+                break;
+            }
+            TAG_ERROR => {
+                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
+                exit_code = 1;
+                break;
+            }
+            _ => {
+                eprintln!("client: unknown tag 0x{:02x}", tag);
+                exit_code = 1;
+                break;
+            }
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(exit_code)
+}
+
+fn run_push(addr: &str, local_path: &str, remote_path: &str) -> io::Result<i32> {
+    let data = fs::read(local_path)?;
+    eprintln!("client: connecting to {}", addr);
+    let mut stream = TcpStream::connect(addr)?;
+    eprintln!(
+        "client: push {} -> {} ({} bytes)",
+        local_path,
+        remote_path,
+        data.len()
+    );
+    let payload = encode_file_data(remote_path, &data);
+    write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
+    // Ask the server to echo so we get a positive confirmation + exit code
+    // instead of just closing the socket after the write.
+    write_msg(&mut stream, TAG_SHELL_RUN, b"echo push-ok")?;
+
+    let mut exit_code = 1;
+    loop {
+        let (tag, payload) = match read_msg(&mut stream) {
+            Ok(msg) => msg,
+            Err(_) => break,
+        };
+        match tag {
+            TAG_OUTPUT => {}
+            TAG_EXIT_CODE => {
+                exit_code = if payload.len() >= 4 {
+                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                } else {
+                    1
+                };
+                break;
+            }
+            TAG_ERROR => {
+                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
+                break;
+            }
+            _ => break,
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(exit_code)
+}
+
+/// Push a local script file and execute it, in ONE connection: TAG_FILE_DATA
+/// stages it into the server's cwd, TAG_SHELL_RUN launches the right
+/// interpreter, output streams back as usual. Exists so remote scripting
+/// never needs stdin piping (absent on the tools/remote server variant) or
+/// -EncodedCommand base64 blobs (unreadable and token-hostile). The staged
+/// name is fixed per extension — reruns overwrite, nothing accumulates.
+fn run_script(
+    addr: &str,
+    local_script: &str,
+    script_args: &[String],
+) -> io::Result<i32> {
+    let data = fs::read(local_script)?;
+    let ext = Path::new(local_script)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let stamp = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let staged_owned;
+    let (staged, interpreter): (&str, String) = match ext.as_str() {
+        "ps1" => {
+            staged_owned = format!("_tunnel_staged_{stamp}.ps1");
+            (
+                staged_owned.as_str(),
+                format!(
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File {staged_owned}"
+                ),
+            )
+        }
+        "py" => {
+            staged_owned = format!("_tunnel_staged_{stamp}.py");
+            (staged_owned.as_str(), format!("python {staged_owned}"))
+        }
+        "bat" | "cmd" => {
+            staged_owned = format!("_tunnel_staged_{stamp}.bat");
+            (staged_owned.as_str(), staged_owned.clone())
+        }
+        "sh" => {
+            staged_owned = format!("_tunnel_staged_{stamp}.sh");
+            (staged_owned.as_str(), format!("sh {staged_owned}"))
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("run: unsupported script extension .{other} (ps1/py/bat/sh)"),
+            ))
+        }
+    };
+    let mut shell_line = interpreter;
+    for a in script_args {
+        shell_line.push(' ');
+        shell_line.push_str(a);
+    }
+
+    eprintln!("client: connecting to {}", addr);
+    let mut stream = TcpStream::connect(addr)?;
+    eprintln!(
+        "client: run {} ({} bytes) as `{}`",
+        local_script,
+        data.len(),
+        shell_line
+    );
+    let payload = encode_file_data(staged, &data);
+    write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
+    write_msg(&mut stream, TAG_SHELL_RUN, shell_line.as_bytes())?;
+
+    let exit_code;
+    loop {
+        let (tag, payload) = read_msg(&mut stream)?;
+        match tag {
+            TAG_OUTPUT => {
+                if payload.is_empty() {
+                    continue;
+                }
+                let data = &payload[1..];
+                match payload[0] {
+                    STREAM_STDOUT => {
+                        io::stdout().write_all(data)?;
+                        io::stdout().flush()?;
+                    }
+                    STREAM_STDERR => {
+                        io::stderr().write_all(data)?;
+                        io::stderr().flush()?;
+                    }
+                    _ => {}
+                }
+            }
+            TAG_EXIT_CODE => {
+                exit_code = if payload.len() >= 4 {
+                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
+                } else {
+                    1
+                };
+                break;
+            }
+            TAG_ERROR => {
+                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
+                exit_code = 1;
+                break;
+            }
+            _ => {
+                eprintln!("client: unknown tag 0x{:02x}", tag);
+                exit_code = 1;
+                break;
+            }
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(exit_code)
+}
+
 fn forward_stdin(stream: &mut TcpStream) -> io::Result<()> {
     let mut stdin = io::stdin();
     let mut buf = [0u8; 8192];
@@ -675,6 +968,20 @@ fn print_usage() {
     eprintln!(
         "          cargo makepad tunnel <ip:port> [--no-sync] shell <command...>  (requires --all on server)"
     );
+    eprintln!(
+        "          cargo makepad tunnel <ip:port> pull <remote-rel-path> <local-path>"
+    );
+    eprintln!(
+        "          cargo makepad tunnel <ip:port> push <local-path> <remote-rel-path>"
+    );
+    eprintln!(
+        "          cargo makepad tunnel <ip:port> [--no-sync] run <script.(ps1|py|bat|sh)> [args...]  (stage + execute, requires --all)"
+    );
+    eprintln!(
+        "          cargo makepad tunnel <ip:port> [--no-sync] spawn <command...>  (hidden, survives disconnect)"
+    );
+    eprintln!("          cargo makepad tunnel <ip:port> [--no-sync] ps [filter]");
+    eprintln!("          cargo makepad tunnel <ip:port> [--no-sync] kill [--tree] <pid>");
 }
 
 pub fn handle_tunnel(args: &[String]) -> Result<(), String> {
@@ -725,10 +1032,94 @@ pub fn handle_tunnel(args: &[String]) -> Result<(), String> {
             break;
         }
 
+        if mode_idx < args.len() && args[mode_idx] == "pull" {
+            let rest = &args[mode_idx + 1..];
+            if rest.len() != 2 {
+                print_usage();
+                return Err("pull requires: <remote-rel-path> <local-path>".to_string());
+            }
+            return match run_pull(addr, &rest[0], &rest[1]) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
+                Err(e) => Err(format!("client error: {e}")),
+            };
+        }
+        if mode_idx < args.len() && args[mode_idx] == "push" {
+            let rest = &args[mode_idx + 1..];
+            if rest.len() != 2 {
+                print_usage();
+                return Err("push requires: <local-path> <remote-rel-path>".to_string());
+            }
+            return match run_push(addr, &rest[0], &rest[1]) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
+                Err(e) => Err(format!("client error: {e}")),
+            };
+        }
+        if mode_idx < args.len() && args[mode_idx] == "run" {
+            let rest = &args[mode_idx + 1..];
+            if rest.is_empty() {
+                print_usage();
+                return Err("run requires: <script> [args...]".to_string());
+            }
+            return match run_script(addr, &rest[0], &rest[1..]) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
+                Err(e) => Err(format!("client error: {e}")),
+            };
+        }
+        if mode_idx < args.len() && args[mode_idx] == "spawn" {
+            let rest = &args[mode_idx + 1..];
+            if rest.is_empty() {
+                print_usage();
+                return Err("spawn requires a command".to_string());
+            }
+            return match run_simple(addr, TAG_SPAWN, rest.join(" ").as_bytes()) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
+                Err(e) => Err(format!("client error: {e}")),
+            };
+        }
+        if mode_idx < args.len() && args[mode_idx] == "ps" {
+            let filter = args.get(mode_idx + 1).cloned().unwrap_or_default();
+            return match run_simple(addr, TAG_PS, filter.as_bytes()) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
+                Err(e) => Err(format!("client error: {e}")),
+            };
+        }
+        if mode_idx < args.len() && args[mode_idx] == "kill" {
+            let rest = &args[mode_idx + 1..];
+            let mut tree = false;
+            let mut pid = None;
+            for a in rest {
+                if a == "--tree" {
+                    tree = true;
+                } else {
+                    pid = Some(a.as_str());
+                }
+            }
+            let Some(pid) = pid else {
+                print_usage();
+                return Err("kill requires a pid".to_string());
+            };
+            let payload = if tree {
+                format!("{pid}\ntree")
+            } else {
+                pid.to_string()
+            };
+            return match run_simple(addr, TAG_KILL, payload.as_bytes()) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
+                Err(e) => Err(format!("client error: {e}")),
+            };
+        }
+
         if mode_idx >= args.len() || (args[mode_idx] != "cargo" && args[mode_idx] != "shell") {
             print_usage();
             return Err(
-                "client mode requires: <ip:port> [--no-sync] cargo|shell [args...]".to_string(),
+                "client mode requires: <ip:port> [--no-sync] cargo|shell|spawn|ps|kill|run [args...]"
+                    .to_string(),
             );
         }
 

@@ -418,6 +418,12 @@ impl Cx {
                 CxOsOp::CopyToClipboard(content) => {
                     Self::stdin_send_to_host(AppToStudio::SetClipboard(content));
                 }
+                CxOsOp::StartExternalDragging { .. } => {
+                    crate::error!(
+                        "external file dragging is not available in the Studio stdin runtime"
+                    );
+                    self.call_event_handler(&Event::DragEnd);
+                }
                 _ => (), /*
                          CxOsOp::CloseWindow(_window_id) => {},
                          CxOsOp::MinimizeWindow(_window_id) => {},
