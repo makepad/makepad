@@ -2467,7 +2467,7 @@ impl SkinRestGpu {
         for _ in 0..nverts * SKIN_GPU_VERTEX_FLOATS {
             vertices.push(f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?));
         }
-        let mut read_u32s = |at: &mut usize, n: usize| -> Option<Vec<u32>> {
+        let read_u32s = |at: &mut usize, n: usize| -> Option<Vec<u32>> {
             let mut v = Vec::with_capacity(n);
             for _ in 0..n {
                 v.push(u32::from_le_bytes(take(at, 4)?.try_into().ok()?));
@@ -2493,6 +2493,7 @@ const _: () = assert!(
 /// Standard sphere->octahedron->square unfolding; ~1 degree of error at f16,
 /// far below what flat-shaded game geometry can show.
 /// f16-pair unpack, the shader's `unpack2f16` on the CPU (tests/oracles).
+#[allow(dead_code)]
 pub(crate) fn unpack2f16_pub(f: f32) -> (f32, f32) {
     let half = |h: u32| -> f32 {
         let (s, e, m) = ((h >> 15) & 1, (h >> 10) & 0x1f, h & 0x3ff);
@@ -2508,6 +2509,7 @@ pub(crate) fn unpack2f16_pub(f: f32) -> (f32, f32) {
 }
 
 /// Octahedral decode, the shader's `oct_decode` on the CPU (tests/oracles).
+#[allow(dead_code)]
 pub(crate) fn oct_decode_pub(ox: f32, oy: f32) -> makepad_draw::makepad_math::Vec3f {
     let nz = 1.0 - ox.abs() - oy.abs();
     let t = (0.0 - nz).max(0.0);

@@ -343,7 +343,7 @@ mod tests {
     #[test]
     #[ignore = "loads the real Kokoro model (~327 MB); needs MAKEPAD_TTS_* paths"]
     fn lazily_loaded_speaker_still_produces_audio() {
-        let mut speech = SpeechOutput::new("bm_fable.mkvoice");
+        let speech = SpeechOutput::new("bm_fable.mkvoice");
         speech.enqueue("Testing the lazy speech path.");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::time::Instant::now() < deadline {

@@ -1,4 +1,0 @@
-#[test]
-fn main() {
-    // todo :)
-}

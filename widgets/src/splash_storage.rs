@@ -32,7 +32,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::makepad_draw::makepad_platform::makepad_script;
-use crate::widget_async::SplashVmId;
 use makepad_script::*;
 
 /// Largest single file the jail accepts (write or append result).

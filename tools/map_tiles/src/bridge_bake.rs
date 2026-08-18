@@ -25,7 +25,6 @@ use makepad_fast_inflate::{gzip_compress, gzip_decompress_vec};
 use makepad_geodata::tiff::Tiff;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::native::mvt::{

@@ -90,8 +90,8 @@ cargo run -p makepad-example-map --release
 For built-in maps and voice support, download the assets first:
 
 ```bash
-./download_map.sh
-./download_voice.sh
+./tools/download_map.sh
+./tools/download_voice.sh
 ```
 
 ## Run A WASM App
