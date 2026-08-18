@@ -16,8 +16,8 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run() -> Result<(), String> {
-    use makepad_pbr_paint::native_exec::NativeHunyuanExec;
-    use makepad_pbr_paint::pipeline::{PaintCondition, PaintModelExec, ViewConditioning};
+    use makepad_ai_paint::native_exec::NativeHunyuanExec;
+    use makepad_ai_paint::pipeline::{PaintCondition, PaintModelExec, ViewConditioning};
     use std::time::Instant;
 
     let size = std::env::var("MAKEPAD_PBR_EXEC_SIZE")
@@ -123,7 +123,7 @@ fn dump_exec_pngs(
     albedo: &[Vec<f32>],
     mr: &[Vec<f32>],
 ) -> Result<(), String> {
-    use makepad_pbr_paint::png::{encode_png, PngColor};
+    use makepad_ai_paint::png::{encode_png, PngColor};
     std::fs::create_dir_all(dir).map_err(|e| format!("dump dir {dir}: {e}"))?;
     let to_u8 = |img: &[f32]| -> Vec<u8> {
         img.iter()

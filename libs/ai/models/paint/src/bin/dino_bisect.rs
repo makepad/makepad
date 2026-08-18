@@ -18,7 +18,7 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run() -> Result<(), String> {
-    use makepad_pbr_paint::dino_vit::{default_snapshot_path, DinoVit, HIDDEN, TOKENS};
+    use makepad_ai_paint::dino_vit::{default_snapshot_path, DinoVit, HIDDEN, TOKENS};
     use std::path::PathBuf;
 
     let weights = std::env::var("MAKEPAD_DINO_PATH")

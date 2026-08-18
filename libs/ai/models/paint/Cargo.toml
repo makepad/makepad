@@ -49,3 +49,4 @@ required-features = ["cuda-taps"]
 [[bin]]
 name = "pbr-dino-bisect"
 path = "src/bin/dino_bisect.rs"
+required-features = ["cuda-taps"]

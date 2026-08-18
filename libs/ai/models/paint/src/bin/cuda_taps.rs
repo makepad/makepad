@@ -9,11 +9,11 @@ use makepad_ai_common::backend::cuda::{
     gpu_slice_rows, gpu_upload, GpuTensor,
 };
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use makepad_pbr_paint::cuda_unet::{
+use makepad_ai_paint::cuda_unet::{
     add_rows_broadcast_compat, f16_bytes, resnet_block, Planar,
 };
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use makepad_pbr_paint::numerical_fixtures::{
+use makepad_ai_paint::numerical_fixtures::{
     compare, digest_f32, resnet_section_inputs, resnet_section_reference, AttentionTap, BinaryTap,
     FrozenTensor, RopeTap, TapMismatch, UnaryTap, ADD_ROWS_BROADCAST, CROSS_ATTENTION, GEGLU_ERF,
     MUL, RESNET_SECTION_DIGEST, ROPE_INTERLEAVED,

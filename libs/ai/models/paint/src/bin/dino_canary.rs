@@ -16,7 +16,7 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run() -> Result<(), String> {
-    use makepad_pbr_paint::dino_vit::{
+    use makepad_ai_paint::dino_vit::{
         default_snapshot_path, preprocess_official, ramp_rgb8, DinoVit, HIDDEN, PROC_CROP, TOKENS,
     };
     use std::path::PathBuf;
@@ -85,7 +85,7 @@ fn run() -> Result<(), String> {
             )
         });
     if unet.is_file() {
-        let proj = makepad_pbr_paint::dino_proj::DinoProj::load_from_unet_bin(&unet)?;
+        let proj = makepad_ai_paint::dino_proj::DinoProj::load_from_unet_bin(&unet)?;
         let got = proj.forward(&last, TOKENS)?;
         let exp = proj.forward(&official_last, TOKENS)?;
         report("proj_from_hidden", &got, &exp, 5e-3)?;
@@ -119,7 +119,7 @@ fn load_f32(path: &std::path::Path, n: usize) -> Result<Vec<f32>, String> {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn report(name: &str, got: &[f32], exp: &[f32], limit: f32) -> Result<(), String> {
-    use makepad_pbr_paint::dino_vit::{HIDDEN, TOKENS};
+    use makepad_ai_paint::dino_vit::{HIDDEN, TOKENS};
     if got.len() != exp.len() {
         return Err(format!("{name} len {} vs {}", got.len(), exp.len()));
     }

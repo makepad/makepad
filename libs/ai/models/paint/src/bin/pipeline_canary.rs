@@ -17,10 +17,10 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run() -> Result<(), String> {
-    use makepad_pbr_paint::hunyuan::{acknowledge_license, LICENSE_TEXT_SHA256};
-    use makepad_pbr_paint::mesh::TriMesh;
-    use makepad_pbr_paint::native_exec::NativeHunyuanExec;
-    use makepad_pbr_paint::pipeline::{
+    use makepad_ai_paint::hunyuan::{acknowledge_license, LICENSE_TEXT_SHA256};
+    use makepad_ai_paint::mesh::TriMesh;
+    use makepad_ai_paint::native_exec::NativeHunyuanExec;
+    use makepad_ai_paint::pipeline::{
         HunyuanPaintPipeline, MemoryProfile, PaintConfig, PaintInputs,
     };
     use std::time::Instant;
@@ -127,9 +127,9 @@ fn dump_pipeline_pngs(
     reference_rgb: &[u8],
     ref_w: u32,
     ref_h: u32,
-    set: &makepad_pbr_paint::contract::PbrMaterialSet,
+    set: &makepad_ai_paint::contract::PbrMaterialSet,
 ) -> Result<(), String> {
-    use makepad_pbr_paint::png::{encode_png, PngColor};
+    use makepad_ai_paint::png::{encode_png, PngColor};
     std::fs::create_dir_all(dir).map_err(|e| format!("dump dir {dir}: {e}"))?;
     let write = |name: &str, w: u32, h: u32, color: PngColor, data: &[u8]| -> Result<(), String> {
         let path = format!("{dir}/{name}");

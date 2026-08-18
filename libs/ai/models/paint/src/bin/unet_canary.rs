@@ -16,9 +16,9 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn run() -> Result<(), String> {
-    use makepad_pbr_paint::dino_proj::DinoProj;
-    use makepad_pbr_paint::unet_extras::{ExtraFlags, ExtraInputs};
-    use makepad_pbr_paint::unet_first::{arange_nchw_planar, UnetFirst};
+    use makepad_ai_paint::dino_proj::DinoProj;
+    use makepad_ai_paint::unet_extras::{ExtraFlags, ExtraInputs};
+    use makepad_ai_paint::unet_first::{arange_nchw_planar, UnetFirst};
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -72,20 +72,20 @@ fn run() -> Result<(), String> {
     println!(
         "PBR_UNET_CONV_IN_S {:.4} digest={} head={:?}",
         t0.elapsed().as_secs_f64(),
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&conv),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&conv),
         &conv[..8]
     );
     let temb = unet.timestep_embedding(999.0)?;
     println!(
         "PBR_UNET_TEMB digest={}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&temb)
+        makepad_ai_paint::numerical_fixtures::digest_f32(&temb)
     );
     let t0 = Instant::now();
     let res0 = unet.resnet0(&conv, h, h, &temb)?;
     println!(
         "PBR_UNET_RESNET0_S {:.4} digest={} head={:?}",
         t0.elapsed().as_secs_f64(),
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&res0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&res0),
         &res0[..8]
     );
     let t0 = Instant::now();
@@ -100,7 +100,7 @@ fn run() -> Result<(), String> {
     println!(
         "PBR_UNET_RESNET1_S {:.4} digest={} head={:?}",
         t0.elapsed().as_secs_f64(),
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&res1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&res1),
         &res1[..8]
     );
     let t0 = Instant::now();
@@ -114,7 +114,7 @@ fn run() -> Result<(), String> {
     println!(
         "PBR_UNET_DOWN_S {:.4} shape=320x{dw}x{dh} digest={} head={:?}",
         t0.elapsed().as_secs_f64(),
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&down),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&down),
         &down[..8]
     );
     let encoder = unet.learned_text_clip_albedo()?;
@@ -132,7 +132,7 @@ fn run() -> Result<(), String> {
     println!(
         "PBR_UNET_ATTN0_S {:.4} digest={} head={:?}",
         t0.elapsed().as_secs_f64(),
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&attn0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&attn0),
         &attn0[..8]
     );
     let attn1 = unet.transformer2d(
@@ -147,7 +147,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_ATTN1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&attn1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&attn1),
         &attn1[..8]
     );
     let d1_res0 = unet.resnet(
@@ -160,7 +160,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D1_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d1_res0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d1_res0),
         &d1_res0[..8]
     );
     let d1_res1 = unet.resnet(
@@ -173,7 +173,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D1_RES1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d1_res1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d1_res1),
         &d1_res1[..8]
     );
     let d1_attn0 = unet.transformer2d(
@@ -188,7 +188,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D1_ATTN0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d1_attn0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d1_attn0),
         &d1_attn0[..8]
     );
     let d1_attn1 = unet.transformer2d(
@@ -203,7 +203,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D1_ATTN1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d1_attn1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d1_attn1),
         &d1_attn1[..8]
     );
     let (d1_down, d1w, d1h) = unet.downsample(
@@ -215,7 +215,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D1_DOWN shape=640x{d1w}x{d1h} digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d1_down),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d1_down),
         &d1_down[..8]
     );
     let d2_res0 = unet.resnet(
@@ -228,7 +228,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D2_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d2_res0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d2_res0),
         &d2_res0[..8]
     );
     let d2_res1 = unet.resnet(
@@ -241,7 +241,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D2_RES1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d2_res1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d2_res1),
         &d2_res1[..8]
     );
     let d2_attn0 = unet.transformer2d(
@@ -256,7 +256,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D2_ATTN0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d2_attn0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d2_attn0),
         &d2_attn0[..8]
     );
     let (d2_down, d2w, d2h) = unet.downsample(
@@ -268,7 +268,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D2_DOWN shape=1280x{d2w}x{d2h} digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d2_down),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d2_down),
         &d2_down[..8]
     );
     let d3_res0 = unet.resnet(
@@ -281,7 +281,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D3_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d3_res0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d3_res0),
         &d3_res0[..8]
     );
     let d3_res1 = unet.resnet(
@@ -294,13 +294,13 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_D3_RES1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&d3_res1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&d3_res1),
         &d3_res1[..8]
     );
     let mid_res0 = unet.resnet(&d3_res1, d2w, d2h, &temb, "unet.mid_block.resnets.0", 1280)?;
     println!(
         "PBR_UNET_MID_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&mid_res0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&mid_res0),
         &mid_res0[..8]
     );
     let mid_attn = unet.transformer2d(
@@ -315,13 +315,13 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_MID_ATTN digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&mid_attn),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&mid_attn),
         &mid_attn[..8]
     );
     let mid_res1 = unet.resnet(&mid_attn, d2w, d2h, &temb, "unet.mid_block.resnets.1", 1280)?;
     println!(
         "PBR_UNET_MID_RES1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&mid_res1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&mid_res1),
         &mid_res1[..8]
     );
     let enc_mr = unet.learned_text_clip_mr()?;
@@ -331,7 +331,7 @@ fn run() -> Result<(), String> {
     let dino_tok = DinoProj::load_from_unet_bin(&weights)?.forward(&dino_raw, 1)?;
     println!(
         "PBR_UNET_DINO_PROJ digest={}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&dino_tok)
+        makepad_ai_paint::numerical_fixtures::digest_f32(&dino_tok)
     );
     let prefix0 = "unet.down_blocks.0.attentions.0";
     let mda = unet.transformer2d_extras(ExtraInputs {
@@ -361,7 +361,7 @@ fn run() -> Result<(), String> {
     let mda_cat = UnetFirst::concat_planar(&mda[0], &mda[1]);
     println!(
         "PBR_UNET_MDA digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&mda_cat),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&mda_cat),
         &mda_cat[..8]
     );
     let dino_only = unet.transformer2d_extras(ExtraInputs {
@@ -391,7 +391,7 @@ fn run() -> Result<(), String> {
     let dino_cat = UnetFirst::concat_planar(&dino_only[0], &dino_only[1]);
     println!(
         "PBR_UNET_DINO digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&dino_cat),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&dino_cat),
         &dino_cat[..8]
     );
     let mda_dino = unet.transformer2d_extras(ExtraInputs {
@@ -422,7 +422,7 @@ fn run() -> Result<(), String> {
     let mda_dino_cat = UnetFirst::concat_planar(&mda_dino[0], &mda_dino[1]);
     println!(
         "PBR_UNET_MDA_DINO digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&mda_dino_cat),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&mda_dino_cat),
         &mda_dino_cat[..8]
     );
     let refs: [&[f32]; 1] = [&ref_in];
@@ -453,7 +453,7 @@ fn run() -> Result<(), String> {
     let ra_cat = UnetFirst::concat_planar(&ra[0], &ra[1]);
     println!(
         "PBR_UNET_REF digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&ra_cat),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&ra_cat),
         &ra_cat[..8]
     );
     let v2: Vec<f32> = res0.iter().map(|v| v * 0.8 + 0.02).collect();
@@ -501,7 +501,7 @@ fn run() -> Result<(), String> {
             });
         println!(
             "PBR_UNET_MA digest={} head={:?}",
-            makepad_pbr_paint::numerical_fixtures::digest_f32(&cat),
+            makepad_ai_paint::numerical_fixtures::digest_f32(&cat),
             &cat[..8]
         );
         Some(cat)
@@ -520,7 +520,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP0_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up0_r0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up0_r0),
         &up0_r0[..8]
     );
     let up_cat1 = UnetFirst::concat_planar(&up0_r0, &d3_res0);
@@ -534,7 +534,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP0_RES1 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up0_r1),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up0_r1),
         &up0_r1[..8]
     );
     let up_cat2 = UnetFirst::concat_planar(&up0_r1, &d2_down);
@@ -548,7 +548,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP0_RES2 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up0_r2),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up0_r2),
         &up0_r2[..8]
     );
     let (up0_up, upw, uph) = unet.upsample(
@@ -560,7 +560,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP0_UP shape=1280x{upw}x{uph} digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up0_up),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up0_up),
         &up0_up[..8]
     );
     let up1_r0 = unet.resnet(
@@ -573,7 +573,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP1_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up1_r0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up1_r0),
         &up1_r0[..8]
     );
     let up1_a0 = unet.transformer2d(
@@ -588,7 +588,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP1_ATTN0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up1_a0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up1_a0),
         &up1_a0[..8]
     );
     let up1_r1 = unet.resnet(
@@ -636,7 +636,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP1_UP shape=1280x{u1w}x{u1h} digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up1_up),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up1_up),
         &up1_up[..8]
     );
     let up2_r0 = unet.resnet(
@@ -649,7 +649,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP2_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up2_r0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up2_r0),
         &up2_r0[..8]
     );
     let up2_a0 = unet.transformer2d(
@@ -707,7 +707,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP2_UP shape=640x{u2w}x{u2h} digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up2_up),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up2_up),
         &up2_up[..8]
     );
     let up3_r0 = unet.resnet(
@@ -720,7 +720,7 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP3_RES0 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up3_r0),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up3_r0),
         &up3_r0[..8]
     );
     let up3_a0 = unet.transformer2d(
@@ -771,13 +771,13 @@ fn run() -> Result<(), String> {
     )?;
     println!(
         "PBR_UNET_UP3_ATTN2 digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up3_a2),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up3_a2),
         &up3_a2[..8]
     );
     let chained = unet.conv_head(&up3_a2, u2w, u2h)?;
     println!(
         "PBR_UNET_CHAINED_HEAD shape=4x{u2w}x{u2h} digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&chained),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&chained),
         &chained[..8]
     );
     let up1_mr: Vec<f32> = up1_r0.iter().map(|v| v * 0.7 + 0.05).collect();
@@ -808,7 +808,7 @@ fn run() -> Result<(), String> {
     let up1_mda_cat = UnetFirst::concat_planar(&up1_mda[0], &up1_mda[1]);
     println!(
         "PBR_UNET_UP1_MDA digest={} head={:?}",
-        makepad_pbr_paint::numerical_fixtures::digest_f32(&up1_mda_cat),
+        makepad_ai_paint::numerical_fixtures::digest_f32(&up1_mda_cat),
         &up1_mda_cat[..8]
     );
     if let Ok(path) = std::env::var("PBR_UNET_ORACLE") {
@@ -1446,7 +1446,7 @@ fn voxel_table(
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn extras_on_attn_refs(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     refs: &[Vec<f32>],
     width: usize,
@@ -1460,7 +1460,7 @@ fn extras_on_attn_refs(
     voxels: &[[u32; 3]],
     voxel_res: usize,
 ) -> Result<Vec<Vec<f32>>, String> {
-    use makepad_pbr_paint::unet_extras::{ExtraFlags, ExtraInputs};
+    use makepad_ai_paint::unet_extras::{ExtraFlags, ExtraInputs};
     if xs.len() != 4 || refs.len() != 2 {
         return Err(format!(
             "{prefix} extras-on module expects 4 samples + 2 refs, got {} / {}",
@@ -1498,7 +1498,7 @@ fn extras_on_attn_refs(
 }
 
 fn map_n_resnet(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1512,7 +1512,7 @@ fn map_n_resnet(
 }
 
 fn map_n_attn_off(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1527,7 +1527,7 @@ fn map_n_attn_off(
 }
 
 fn map_n_down(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1542,7 +1542,7 @@ fn map_n_down(
 }
 
 fn map_n_up(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1565,7 +1565,7 @@ fn write2_from(v0: &[f32], v1: &[f32]) -> Vec<Vec<f32>> {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn extras_on_attn(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     width: usize,
     height: usize,
@@ -1578,7 +1578,7 @@ fn extras_on_attn(
     voxels: &[[u32; 3]],
     voxel_res: usize,
 ) -> Result<Vec<Vec<f32>>, String> {
-    use makepad_pbr_paint::unet_extras::{ExtraFlags, ExtraInputs};
+    use makepad_ai_paint::unet_extras::{ExtraFlags, ExtraInputs};
     if xs.len() != 4 {
         return Err(format!("{prefix} extras-on expects 4 samples, got {}", xs.len()));
     }
@@ -1614,7 +1614,7 @@ fn extras_on_attn(
 }
 
 fn map4_resnet(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1628,7 +1628,7 @@ fn map4_resnet(
 }
 
 fn map4_down(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1648,7 +1648,7 @@ fn map4_down(
 }
 
 fn map4_up(
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     xs: &[Vec<f32>],
     w: usize,
     h: usize,
@@ -1671,14 +1671,14 @@ fn cat_skip4(hidden: &[Vec<f32>], skip: &[Vec<f32>]) -> Vec<Vec<f32>> {
     hidden
         .iter()
         .zip(skip)
-        .map(|(h, s)| makepad_pbr_paint::unet_first::UnetFirst::concat_planar(h, s))
+        .map(|(h, s)| makepad_ai_paint::unet_first::UnetFirst::concat_planar(h, s))
         .collect()
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn compare_module_chain(
     fails: &mut Vec<String>,
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     acts: &std::collections::HashMap<String, Vec<f32>>,
     temb: &[f32],
     enc: &[f32],
@@ -1755,15 +1755,15 @@ fn compare_module_chain(
 
     // up0: UpBlock2D, 3 resnets, skip order LIFO = d3r1, d3r0, d2out
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s1, s1, temb, "unet.up_blocks.0.resnets.0", 2560,
     )?;
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s1, s1, temb, "unet.up_blocks.0.resnets.1", 2560,
     )?;
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s1, s1, temb, "unet.up_blocks.0.resnets.2", 2560,
     )?;
     let up0 = unet.upsample(&h, s1, s1, "unet.up_blocks.0.upsamplers.0.conv", 1280)?;
@@ -1771,17 +1771,17 @@ fn compare_module_chain(
     isolated(fails, "MOD_UP0", &h, need(acts, "mod_up0")?, 5e-3);
 
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s2, s2, temb, "unet.up_blocks.1.resnets.0", 2560,
     )?;
     h = unet.transformer2d(&h, s2, s2, enc, 77, "unet.up_blocks.1.attentions.0", 1280, 20)?;
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s2, s2, temb, "unet.up_blocks.1.resnets.1", 2560,
     )?;
     h = unet.transformer2d(&h, s2, s2, enc, 77, "unet.up_blocks.1.attentions.1", 1280, 20)?;
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s2, s2, temb, "unet.up_blocks.1.resnets.2", 1920,
     )?;
     h = unet.transformer2d(&h, s2, s2, enc, 77, "unet.up_blocks.1.attentions.2", 1280, 20)?;
@@ -1790,17 +1790,17 @@ fn compare_module_chain(
     isolated(fails, "MOD_UP1", &h, need(acts, "mod_up1")?, 2e-2);
 
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s4, s4, temb, "unet.up_blocks.2.resnets.0", 1920,
     )?;
     h = unet.transformer2d(&h, s4, s4, enc, 77, "unet.up_blocks.2.attentions.0", 640, 10)?;
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s4, s4, temb, "unet.up_blocks.2.resnets.1", 1280,
     )?;
     h = unet.transformer2d(&h, s4, s4, enc, 77, "unet.up_blocks.2.attentions.1", 640, 10)?;
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s4, s4, temb, "unet.up_blocks.2.resnets.2", 960,
     )?;
     h = unet.transformer2d(&h, s4, s4, enc, 77, "unet.up_blocks.2.attentions.2", 640, 10)?;
@@ -1809,19 +1809,19 @@ fn compare_module_chain(
     isolated(fails, "MOD_UP2", &h, need(acts, "mod_up2")?, 2e-2);
 
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s8, s8, temb, "unet.up_blocks.3.resnets.0", 960,
     )?;
     h = unet.transformer2d(&h, s8, s8, enc, 77, "unet.up_blocks.3.attentions.0", 320, 5)?;
     isolated(fails, "MOD_U3A0", &h, need(acts, "mod_u3a0")?, 5e-3);
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s8, s8, temb, "unet.up_blocks.3.resnets.1", 640,
     )?;
     h = unet.transformer2d(&h, s8, s8, enc, 77, "unet.up_blocks.3.attentions.1", 320, 5)?;
     isolated(fails, "MOD_U3A1", &h, need(acts, "mod_u3a1")?, 5e-3);
     h = unet.resnet(
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&h, &skips.pop().unwrap()),
         s8, s8, temb, "unet.up_blocks.3.resnets.2", 640,
     )?;
     h = unet.transformer2d(&h, s8, s8, enc, 77, "unet.up_blocks.3.attentions.2", 320, 5)?;
@@ -1839,7 +1839,7 @@ fn compare_module_chain(
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn compare_extras_on_module(
     fails: &mut Vec<String>,
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     acts: &std::collections::HashMap<String, Vec<f32>>,
     temb: &[f32],
     enc_alb: &[f32],
@@ -2089,7 +2089,7 @@ fn compare_extras_on_module(
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn compare_extras_on(
     fails: &mut Vec<String>,
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     acts: &std::collections::HashMap<String, Vec<f32>>,
     temb: &[f32],
     enc_alb: &[f32],
@@ -2353,7 +2353,7 @@ fn remap_dump_dual_cache(
     acts: &std::collections::HashMap<String, Vec<f32>>,
 ) -> std::collections::HashMap<String, Vec<f32>> {
     let mut out = std::collections::HashMap::new();
-    for name in makepad_pbr_paint::dual_stream::write_layer_names() {
+    for name in makepad_ai_paint::dual_stream::write_layer_names() {
         if let Some(v) = acts.get(&format!("dual_{name}")).or_else(|| acts.get(name)) {
             out.insert(name.to_string(), v.clone());
         }
@@ -2364,7 +2364,7 @@ fn remap_dump_dual_cache(
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn compare_dual_write(
     fails: &mut Vec<String>,
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     acts: &std::collections::HashMap<String, Vec<f32>>,
     s8: usize,
 ) -> Result<(), String> {
@@ -2378,14 +2378,14 @@ fn compare_dual_write(
     isolated(
         fails,
         "DUAL_CONV",
-        &makepad_pbr_paint::unet_first::UnetFirst::concat_planar(&conv0, &conv1),
+        &makepad_ai_paint::unet_first::UnetFirst::concat_planar(&conv0, &conv1),
         need(acts, "dual_conv")?,
         5e-3,
     );
     let temb = unet.timestep_embedding_named(0.0, "unet_dual.time_embedding")?;
     isolated(fails, "DUAL_TEMB", &temb, need(acts, "dual_temb")?, 5e-3);
-    let cache = makepad_pbr_paint::unet_forward::write_dual_cache(unet, &[&v0, &v1], s8, s8)?;
-    for name in makepad_pbr_paint::dual_stream::write_layer_names() {
+    let cache = makepad_ai_paint::unet_forward::write_dual_cache(unet, &[&v0, &v1], s8, s8)?;
+    for name in makepad_ai_paint::dual_stream::write_layer_names() {
         let tag = format!("DUAL_{}", name.to_ascii_uppercase());
         let got = cache
             .get(name)
@@ -2419,14 +2419,14 @@ fn ddim_noise_rows(h: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn compare_ddim(
     fails: &mut Vec<String>,
-    unet: &makepad_pbr_paint::unet_first::UnetFirst,
+    unet: &makepad_ai_paint::unet_first::UnetFirst,
     acts: &std::collections::HashMap<String, Vec<f32>>,
     s8: usize,
 ) -> Result<(), String> {
-    use makepad_pbr_paint::cond_assembly::pack_view_latent;
-    use makepad_pbr_paint::denoise::DenoiseBatch;
-    use makepad_pbr_paint::schedule::DdimVpredZsnr;
-    use makepad_pbr_paint::unet_forward::{
+    use makepad_ai_paint::cond_assembly::pack_view_latent;
+    use makepad_ai_paint::denoise::DenoiseBatch;
+    use makepad_ai_paint::schedule::DdimVpredZsnr;
+    use makepad_ai_paint::unet_forward::{
         forward_extras_on, predict_v_cfg_three_branch, VoxelLevel, VoxelPyramid,
     };
 
