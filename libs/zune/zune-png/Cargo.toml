@@ -13,7 +13,7 @@ description = "A fast, correct and safe png decoder"
 
 [features]
 sse = []
-std = ["makepad-zune-core/std"]
+std = ["makepad-zune-core/std", "dep:makepad-fast-inflate"]
 log = ["makepad-zune-core/log"]
 portable-simd = []
 default = ["sse", "std"]
@@ -21,3 +21,4 @@ default = ["sse", "std"]
 [dependencies]
 makepad-zune-core = { path = "../zune-core", version = "0.5.1" }
 makepad-zune-inflate = { path = "../zune-inflate", version = "0.2.54", default-features = false, features = ["zlib"] }
+makepad-fast-inflate = { path = "../../fast_inflate", optional = true }

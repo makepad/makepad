@@ -95,13 +95,9 @@ pub fn find_layer(id: &str) -> Option<Box<dyn Layer>> {
 
 /// Helper: run a closure over a gzip file's decompressed bytes.
 pub fn read_gz(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    flate2::read::GzDecoder::new(file)
-        .read_to_end(&mut out)
-        .map_err(|e| format!("gunzip {}: {e}", path.display()))?;
-    Ok(out)
+    let bytes = std::fs::read(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    makepad_fast_inflate::gzip_decompress_vec(&bytes)
+        .map_err(|e| format!("gunzip {}: {e}", path.display()))
 }
 
 /// Extract every .gpkg inside a zip into the cache dir (skipping members that
