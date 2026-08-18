@@ -2,13 +2,10 @@
 name = "makepad-cuda"
 version = "0.1.0"
 edition = "2021"
-description = "Minimal CUDA runtime FFI for Makepad"
+description = "Minimal CUDA runtime FFI for Makepad — facade over makepad-ai-cuda (libs/ai/cuda), the CUDA warehouse (aiarch.md lane T4)"
 license = "MIT"
 
 [dependencies]
-
-[[bin]]
-name = "cudnn-v8-bench"
-path = "src/bin/cudnn_v8_bench.rs"
+makepad-ai-cuda = { path = "../ai/cuda" }
 
 [workspace]
