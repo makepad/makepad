@@ -9,8 +9,7 @@
 use crate::geo::{self, NormBBox};
 use crate::mvt::{command, zigzag, AttrVal, GeomType, PreFeature, TileEnc, EXTENT};
 use crate::wkb::Geometry;
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::MbtilesWriter;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -449,9 +448,7 @@ pub(crate) fn note_fields(
 }
 
 pub(crate) fn gzip_tile(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let mut gz = GzEncoder::new(Vec::new(), Compression::new(6));
-    gz.write_all(raw).map_err(|e| format!("gzip: {e}"))?;
-    gz.finish().map_err(|e| format!("gzip: {e}"))
+    Ok(gzip_compress(raw, 6))
 }
 
 pub(crate) fn create_writer(

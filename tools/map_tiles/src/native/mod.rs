@@ -1,6 +1,6 @@
 pub(crate) mod bake;
 pub(crate) mod base;
-mod geom;
+pub(crate) mod geom;
 pub(crate) mod mvt;
 pub(crate) mod schema;
 mod spool;
@@ -8,8 +8,7 @@ mod store;
 
 pub use base::{convert_base, default_base_options, BaseOptions, ProgressBaseline};
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use makepad_fast_inflate::gzip_compress;
 use geom::{
     emit_point, group_polygon_rings, project_decimicro, project_node,
     project_path, PolygonPart, SourcePath,
@@ -1603,12 +1602,7 @@ fn finish_tiles(
         let sorted = SortedBlock::prepare(&spool.dir, block, Some(sort_memory), false)?;
         let mut sorted = records_to_tiles(sorted, block, |x, y, features| {
             let pbf = encode_tile(features)?;
-            let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
-            gzip.write_all(&pbf)
-                .map_err(|err| format!("gzip tile {}/{x}/{y}: {err}", options.zoom))?;
-            let tile = gzip
-                .finish()
-                .map_err(|err| format!("finish gzip tile {}/{x}/{y}: {err}", options.zoom))?;
+            let tile = gzip_compress(&pbf, 1);
             writer
                 .write_tile_xyz(options.zoom, x, y, &tile)
                 .map_err(|err| format!("write tile {}/{x}/{y}: {err}", options.zoom))
