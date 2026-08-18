@@ -363,7 +363,17 @@ impl ContentBackend for LlmBackend {
             );
             let job = ExpandJob {
                 prompt_text: prompt_text.clone(),
-                max_tokens: params.max_tokens,
+                // Qwen3.8 leaves <think> open. A 220-token fleet request
+                // can spend the whole budget inside the think block; after
+                // clean_expansion strips it the expansion is empty and the
+                // image/video/mesh pipeline has nothing to feed forward.
+                max_tokens: if is_chat {
+                    params.max_tokens
+                } else if crate::protocol::model_uses_open_think(&self.model_id) {
+                    params.max_tokens.max(512)
+                } else {
+                    params.max_tokens
+                },
                 // Greedy decode would make every variant identical; sampled
                 // variants past the first get a floor temperature.
                 temperature: if index == 0 {
@@ -888,6 +898,30 @@ mod tests {
             "the prompt"
         );
         assert_eq!(clean_expansion("\"quoted prompt\""), "quoted prompt");
+    }
+
+    #[test]
+    fn qwen38_expander_floors_token_budget() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let seen_job = seen.clone();
+        let mut backend = LlmBackend::with_stub(
+            "qwen3.8-27b",
+            Box::new(move |job: &ExpandJob| {
+                *seen_job.lock().unwrap() = job.max_tokens;
+                Ok("<think>\nplan\n</think>\n\na red fox in morning light".into())
+            }),
+        );
+        let mut p = params("a red fox", "image");
+        p.max_tokens = 64;
+        let mut sink = |_: &str, _: f64| {};
+        let artifacts = backend
+            .generate(&p, &mut sink, &CancelToken::new())
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), 512);
+        assert_eq!(
+            String::from_utf8(artifacts[0].bytes.clone()).unwrap(),
+            "a red fox in morning light"
+        );
     }
 
     #[test]
