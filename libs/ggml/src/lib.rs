@@ -4,15 +4,9 @@ pub mod core;
 pub mod graph;
 pub mod mmap;
 pub mod op;
-pub mod plan;
 pub mod quant;
-pub mod runtime;
 pub mod tensor;
 
-pub use backend::{
-    Backend, BackendBuffer, BackendBufferType, BackendBufferUsage, BackendDeviceCaps,
-    BackendDeviceProps, BackendDeviceType, BackendEvent, BackendGraphPlan,
-};
 pub use backend::llm_ops;
 pub use backend::{BackendCapabilities, BackendInfo, BackendKind};
 pub use context::Context;
@@ -30,9 +24,7 @@ pub use op::{
     ggml_glu_op_name, ggml_op_name, ggml_op_symbol, ggml_unary_op_name, Ftype, GluOp, Op, Prec,
     UnaryOp,
 };
-pub use plan::{BufferSlice, ExecutionPlan};
 pub use quant::*;
-pub use runtime::{CompiledGraph, RuntimeConfig};
 pub use tensor::{
     ggml_blck_size_for_type, ggml_ftype_to_tensor_type, ggml_row_size_for_type,
     ggml_type_size_for_type, BufferUsage, Tensor, TensorDesc, TensorFlags, TensorId, TensorLayout,
