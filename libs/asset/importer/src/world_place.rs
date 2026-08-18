@@ -220,6 +220,105 @@ pub fn doom_thing_actor(typ: u16) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// Quake III classname → (kind, catalog key). Empty asset = spawn / no mesh.
+/// Keys match `convert_md3` / `assemble_players_and_weapons` slugs.
+pub fn q3_class_actor(class: &str) -> Option<(&'static str, &'static str)> {
+    Some(match class {
+        "info_player_start" | "info_player_deathmatch" | "info_player_intermission" => {
+            ("player", "")
+        }
+        "weapon_shotgun" => ("weapon", "weapons/shotgun"),
+        "weapon_rocketlauncher" => ("weapon", "weapons/rocketl"),
+        "weapon_grenadelauncher" => ("weapon", "weapons/grenadel"),
+        "weapon_plasmagun" => ("weapon", "weapons/plasma"),
+        "weapon_machinegun" => ("weapon", "weapons/machinegun"),
+        "weapon_lightning" => ("weapon", "weapons/lightning"),
+        "weapon_railgun" => ("weapon", "weapons/railgun"),
+        "weapon_bfg" => ("weapon", "weapons/bfg"),
+        "weapon_gauntlet" => ("weapon", "weapons/gauntlet"),
+        "weapon_grapplinghook" => ("weapon", "weapons/grapple"),
+        "item_armor_shard" => ("pickup", "props/armor-shard"),
+        "item_armor_combat" => ("pickup", "props/armor-armor_yel"),
+        "item_armor_body" => ("pickup", "props/armor-armor_red"),
+        "item_health_small" => ("pickup", "props/health-small_cross"),
+        "item_health" => ("pickup", "props/health-medium_cross"),
+        "item_health_large" => ("pickup", "props/health-large_cross"),
+        "item_health_mega" => ("pickup", "props/health-mega_cross"),
+        "item_quad" => ("pickup", "props/instant-quad"),
+        "item_enviro" => ("pickup", "props/instant-enviro"),
+        "item_haste" => ("pickup", "props/instant-haste"),
+        "item_invis" => ("pickup", "props/instant-invis"),
+        "item_regen" => ("pickup", "props/instant-regen"),
+        "item_flight" => ("pickup", "props/instant-flight"),
+        "holdable_teleporter" => ("pickup", "props/holdable-teleporter"),
+        "holdable_medkit" => ("pickup", "props/holdable-medkit"),
+        "ammo_shells" => ("pickup", "props/ammo-shotgunam"),
+        "ammo_bullets" => ("pickup", "props/ammo-machinegunam"),
+        "ammo_grenades" => ("pickup", "props/ammo-grenadeam"),
+        "ammo_rockets" => ("pickup", "props/ammo-rocketam"),
+        "ammo_lightning" => ("pickup", "props/ammo-lightningam"),
+        "ammo_slugs" => ("pickup", "props/ammo-railgunam"),
+        "ammo_cells" => ("pickup", "props/ammo-plasmaam"),
+        "ammo_bfg" => ("pickup", "props/ammo-bfgam"),
+        "team_CTF_redflag" => ("prop", "props/flags-r_flag"),
+        "team_CTF_blueflag" => ("prop", "props/flags-b_flag"),
+        _ => return None,
+    })
+}
+
+/// Catalog key for a Q3 `.md3` path (`models/mapobjects/storch/tall_torch.md3`
+/// → `props/storch-tall_torch`; assembled guns stay `weapons/shotgun`).
+pub fn q3_md3_catalog_key(rel: &str) -> String {
+    let lower = rel.replace('\\', "/").to_ascii_lowercase();
+    let lower = lower.trim_start_matches('/');
+    if let Some(rest) = lower.strip_prefix("models/weapons2/") {
+        if let Some((gun, file)) = rest.split_once('/') {
+            let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+            if stem == gun {
+                return format!("weapons/{gun}");
+            }
+        }
+    }
+    if let Some(rest) = lower.strip_prefix("models/players/") {
+        if let Some((who, _)) = rest.split_once('/') {
+            return format!("characters/{who}");
+        }
+    }
+    let folder = if lower.contains("/players/") || lower.starts_with("players/") {
+        "characters"
+    } else if lower.contains("/weapons/")
+        || lower.starts_with("weapons/")
+        || lower.contains("/weapon")
+    {
+        "weapons"
+    } else {
+        "props"
+    };
+    let n = lower.rsplit_once('.').map(|(s, _)| s).unwrap_or(lower);
+    let parts: Vec<&str> = n.split('/').filter(|s| !s.is_empty()).collect();
+    let take = if parts.len() >= 2 {
+        &parts[parts.len() - 2..]
+    } else {
+        &parts[..]
+    };
+    let mut slug = String::new();
+    for c in take.join("-").chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug = "asset".into();
+    }
+    format!("{folder}/{slug}")
+}
+
 /// Quake / LibreQuake classname → (kind, asset key relative to convert_mdl).
 pub fn quake_class_actor(class: &str) -> Option<(&'static str, &'static str)> {
     Some(match class {
@@ -297,5 +396,21 @@ mod tests {
         assert_eq!(parsed.places.len(), 2);
         assert_eq!(parsed.places[1].asset, "billboards/freedoom2/poss");
         assert!(parsed.places[0].asset.is_empty());
+    }
+
+    #[test]
+    fn q3_keys_match_assembled_weapons_and_mapobjects() {
+        assert_eq!(
+            q3_class_actor("weapon_rocketlauncher"),
+            Some(("weapon", "weapons/rocketl"))
+        );
+        assert_eq!(
+            q3_md3_catalog_key("models/mapobjects/storch/tall_torch.md3"),
+            "props/storch-tall_torch"
+        );
+        assert_eq!(
+            q3_md3_catalog_key("models/weapons2/shotgun/shotgun.md3"),
+            "weapons/shotgun"
+        );
     }
 }

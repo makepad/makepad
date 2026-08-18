@@ -4,7 +4,7 @@
 //! ships `.pk3` / `.bsp` / `.md3` as asset types:
 //!
 //! - PK3 (zip) → extracted files for the parsers below
-//! - BSP `IBSP` version 46 → one flat `World` GLB (visible faces + atlas)
+//! - BSP `IBSP` version 46 → one `World` GLB (one primitive per shader, tiling UVs)
 //! - MD3 → `Character` / `Weapon` / `Prop` GLB (first mesh, first frame)
 //! - TGA (and stored PNG) → atlas tiles / `Texture` PNG
 //! - WAV is copied by [`crate::classic_import`] after expand
@@ -27,9 +27,11 @@
 use crate::classic_import::{decode_png_stored, encode_png_rgba, ClassicAsset};
 use crate::vertex_skin;
 use makepad_asset_data::AssetKind;
-use makepad_gltf::{write_glb_mesh_textured, GlbTexturedMesh};
+use makepad_gltf::{
+    write_glb_mesh_textured, write_glb_mesh_textured_parts, GlbTexturedMesh, GlbTexturedPart,
+};
 use makepad_zip_file::zip_read_central_directory;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 pub const QUAKE3_SOURCE_ID: &str = "quake3";
@@ -48,7 +50,10 @@ const LUMP_TEXTURES: usize = 1;
 const LUMP_VERTICES: usize = 10;
 const LUMP_MESHVERTS: usize = 11;
 const LUMP_FACES: usize = 13;
+const LUMP_LIGHTMAPS: usize = 14;
 const LUMP_COUNT: usize = 17;
+const LIGHTMAP_W: usize = 128;
+const LIGHTMAP_BYTES: usize = LIGHTMAP_W * LIGHTMAP_W * 3;
 
 const TEX_SIZE: usize = 72;
 const VERT_SIZE: usize = 44;
@@ -58,6 +63,7 @@ const FACE_POLYGON: i32 = 1;
 const FACE_PATCH: i32 = 2;
 const FACE_MESH: i32 = 3;
 
+#[allow(dead_code)]
 const SURF_SKY: i32 = 0x4;
 const SURF_NODRAW: i32 = 0x80;
 const SURF_SKIP: i32 = 0x200;
@@ -92,6 +98,28 @@ pub struct Q3TexBank {
     pub files: BTreeMap<String, PathBuf>,
     /// Material / shader name → diffusemap path (from `.mtr`).
     pub aliases: BTreeMap<String, String>,
+    /// Shader `detail` stage: high-frequency overlay + `tcMod scale`.
+    pub details: BTreeMap<String, ShaderDetail>,
+    /// Multi-stage look (alpha-over underlayer, additive fire).
+    pub surfaces: BTreeMap<String, ShaderSurface>,
+}
+
+/// Q3 / Unreal-style close-up overlay. Mean ~0.5 so `2 * dest * src` is identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShaderDetail {
+    pub map: String,
+    pub scale: [f32; 2],
+}
+
+/// Baked Q3 stage stack used when a single albedo PNG has to stand in
+/// for `animMap` / `blendFunc` / scrolled underlayers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShaderSurface {
+    pub albedo: String,
+    pub under: Option<String>,
+    pub under_scale: [f32; 2],
+    pub additive: bool,
+    pub two_sided: bool,
 }
 
 impl Q3TexBank {
@@ -119,6 +147,52 @@ impl Q3TexBank {
             self.files.entry(k).or_insert(v);
         }
         self.aliases.extend(other.aliases);
+        self.details.extend(other.details);
+        self.surfaces.extend(other.surfaces);
+    }
+
+    pub fn detail_for(&self, name: &str) -> Option<&ShaderDetail> {
+        for key in candidate_tex_keys(name) {
+            if let Some(d) = self.details.get(&key) {
+                return Some(d);
+            }
+        }
+        None
+    }
+
+    pub fn surface_for(&self, name: &str) -> Option<&ShaderSurface> {
+        for key in candidate_tex_keys(name) {
+            if let Some(s) = self.surfaces.get(&key) {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    /// Albedo for a BSP shader: follows aliases, composites an alpha
+    /// underlayer (blood / fire holes), and punches additive fire.
+    pub fn bake(&self, name: &str) -> Option<Q3Image> {
+        let surf = self.surface_for(name);
+        let albedo_name = surf
+            .map(|s| s.albedo.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(name);
+        let mut img = self
+            .resolve(albedo_name)
+            .or_else(|| self.resolve(name))?;
+        if let Some(s) = surf {
+            if let Some(under_name) = s.under.as_ref() {
+                if let Some(under) = self.resolve(under_name) {
+                    img = composite_under(&img, &under, s.under_scale);
+                } else {
+                    force_opaque(&mut img);
+                }
+            }
+            if s.additive {
+                img = luma_to_alpha(img);
+            }
+        }
+        Some(img)
     }
 
     /// Decoded image for a shader / material / file path. Follows `.mtr`
@@ -297,6 +371,388 @@ pub fn load_tex_bank(root: &Path) -> Q3TexBank {
         insert_decoded(&mut bank.images, &key, img);
     }
     bank
+}
+
+/// `.shader` `map` / `qer_editorimage` → albedo path aliases.
+pub fn apply_shader_aliases(bank: &mut Q3TexBank, root: &Path) {
+    if !root.exists() {
+        return;
+    }
+    let mut files = Vec::new();
+    walk_files(root, &mut files, 0);
+    for path in files {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext != "shader" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        parse_shader_aliases(&text, bank);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ShaderStage {
+    map: String,
+    additive: bool,
+    alpha: bool,
+    scale: [f32; 2],
+}
+
+fn parse_shader_aliases(text: &str, bank: &mut Q3TexBank) {
+    let mut shader = String::new();
+    let mut depth = 0i32;
+    let mut editor = String::new();
+    let mut stages: Vec<ShaderStage> = Vec::new();
+    let mut detail_map = String::new();
+    let mut detail_scale = [1.0f32, 1.0];
+    let mut stage_map = String::new();
+    let mut stage_detail = false;
+    let mut stage_additive = false;
+    let mut stage_alpha = false;
+    let mut stage_scale = [1.0f32, 1.0];
+    let mut cull_none = false;
+    let flush = |shader: &str,
+                 stages: &[ShaderStage],
+                 editor: &str,
+                 detail_map: &str,
+                 detail_scale: [f32; 2],
+                 cull_none: bool,
+                 bank: &mut Q3TexBank| {
+        if shader.is_empty() {
+            return;
+        }
+        // Prefer the last non-additive surface (stone / lava / sky).
+        // Additive-only stacks (animMap flame) fall back to the first frame.
+        let albedo_idx = stages
+            .iter()
+            .rposition(|s| !s.additive)
+            .or_else(|| stages.first().map(|_| 0));
+        let albedo = albedo_idx
+            .map(|i| stages[i].map.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(editor);
+        if !albedo.is_empty() {
+            bank.add_alias(shader, albedo);
+        }
+        if !detail_map.is_empty() {
+            bank.details.insert(
+                normalize_tex_name(shader),
+                ShaderDetail {
+                    map: normalize_tex_name(detail_map),
+                    scale: detail_scale,
+                },
+            );
+        }
+        if let Some(i) = albedo_idx {
+            let a = &stages[i];
+            let mut surface = ShaderSurface {
+                albedo: normalize_tex_name(&a.map),
+                under: None,
+                under_scale: [1.0, 1.0],
+                additive: a.additive,
+                two_sided: cull_none || a.additive,
+            };
+            if a.alpha {
+                if let Some(under) = stages[..i].iter().rev().find(|s| !s.additive && !s.alpha) {
+                    surface.under = Some(normalize_tex_name(&under.map));
+                    surface.under_scale = under.scale;
+                }
+            }
+            if surface.under.is_some() || surface.additive || surface.two_sided {
+                bank.surfaces.insert(normalize_tex_name(shader), surface);
+            }
+        }
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if depth == 0 && !line.starts_with('{') && !line.starts_with('}') {
+            if !shader.is_empty() {
+                flush(
+                    &shader,
+                    &stages,
+                    &editor,
+                    &detail_map,
+                    detail_scale,
+                    cull_none,
+                    bank,
+                );
+            }
+            shader = line.split_whitespace().next().unwrap_or("").to_string();
+            editor.clear();
+            stages.clear();
+            detail_map.clear();
+            detail_scale = [1.0, 1.0];
+            cull_none = false;
+            continue;
+        }
+        if line.starts_with('{') {
+            depth += 1;
+            if depth == 2 {
+                stage_map.clear();
+                stage_detail = false;
+                stage_additive = false;
+                stage_alpha = false;
+                stage_scale = [1.0, 1.0];
+            }
+            continue;
+        }
+        if line.starts_with('}') {
+            if depth == 2 {
+                if stage_detail && !stage_map.is_empty() {
+                    detail_map = stage_map.clone();
+                    detail_scale = stage_scale;
+                } else if !stage_map.is_empty() {
+                    stages.push(ShaderStage {
+                        map: stage_map.clone(),
+                        additive: stage_additive,
+                        alpha: stage_alpha,
+                        scale: stage_scale,
+                    });
+                }
+            }
+            depth = (depth - 1).max(0);
+            if depth == 0 {
+                flush(
+                    &shader,
+                    &stages,
+                    &editor,
+                    &detail_map,
+                    detail_scale,
+                    cull_none,
+                    bank,
+                );
+                shader.clear();
+                editor.clear();
+                stages.clear();
+                detail_map.clear();
+                detail_scale = [1.0, 1.0];
+                cull_none = false;
+            }
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if depth == 1 && lower.starts_with("qer_editorimage") {
+            if let Some(p) = line.split_whitespace().nth(1) {
+                editor = p.to_string();
+            }
+            continue;
+        }
+        if depth == 1 && (lower == "cull none" || lower == "cull disable"
+            || lower.starts_with("cull none")
+            || lower.starts_with("cull disable"))
+        {
+            cull_none = true;
+            continue;
+        }
+        if depth != 2 {
+            continue;
+        }
+        if lower == "detail" || lower.starts_with("detail ") {
+            stage_detail = true;
+            continue;
+        }
+        if lower.starts_with("blendfunc") {
+            let kind = classify_blend(&lower);
+            stage_additive = kind == BlendKind::Additive;
+            stage_alpha = kind == BlendKind::Alpha;
+            continue;
+        }
+        if lower.starts_with("tcmod scale") || lower.starts_with("tcmod  scale") {
+            let mut it = line.split_whitespace();
+            let _ = it.next();
+            let _ = it.next();
+            let sx = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let sy = it.next().and_then(|s| s.parse().ok()).unwrap_or(sx);
+            stage_scale = [sx, sy];
+            continue;
+        }
+        if lower.starts_with("animmap ") {
+            let mut it = line.split_whitespace();
+            let _ = it.next();
+            let _ = it.next();
+            if let Some(p) = it.next() {
+                let pl = p.to_ascii_lowercase();
+                if !pl.starts_with('$') {
+                    stage_map = p.to_string();
+                }
+            }
+            continue;
+        }
+        if lower.starts_with("map ") || lower.starts_with("clampmap ") {
+            if let Some(p) = line.split_whitespace().nth(1) {
+                let pl = p.to_ascii_lowercase();
+                if !pl.starts_with('$') {
+                    stage_map = p.to_string();
+                }
+            }
+        }
+    }
+    flush(
+        &shader,
+        &stages,
+        &editor,
+        &detail_map,
+        detail_scale,
+        cull_none,
+        bank,
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlendKind {
+    Replace,
+    Alpha,
+    Additive,
+    Other,
+}
+
+fn classify_blend(lower: &str) -> BlendKind {
+    let mut it = lower.split_whitespace();
+    let _ = it.next();
+    let a = it.next().unwrap_or("");
+    let b = it.next().unwrap_or("");
+    if a == "add" || (a == "gl_one" && b == "gl_one") {
+        return BlendKind::Additive;
+    }
+    if a == "blend"
+        || (a == "gl_src_alpha" && b == "gl_one_minus_src_alpha")
+        || (a.contains("src_alpha") && b.contains("one_minus_src_alpha"))
+    {
+        return BlendKind::Alpha;
+    }
+    if a == "gl_one" && b == "gl_zero" {
+        return BlendKind::Replace;
+    }
+    BlendKind::Other
+}
+
+fn composite_under(over: &Q3Image, under: &Q3Image, scale: [f32; 2]) -> Q3Image {
+    let (ow, oh) = (over.w as usize, over.h as usize);
+    let (uw, uh) = (under.w as usize, under.h as usize);
+    if ow == 0 || oh == 0 || uw == 0 || uh == 0 {
+        let mut img = over.clone();
+        force_opaque(&mut img);
+        return img;
+    }
+    let sx = if scale[0].abs() < 1e-4 { 1.0 } else { scale[0] };
+    let sy = if scale[1].abs() < 1e-4 { 1.0 } else { scale[1] };
+    let mut rgba = over.rgba.clone();
+    for y in 0..oh {
+        for x in 0..ow {
+            let i = (y * ow + x) * 4;
+            let a = rgba[i + 3] as f32 / 255.0;
+            if a >= 0.995 {
+                rgba[i + 3] = 255;
+                continue;
+            }
+            let ux = ((x as f32 + 0.5) / ow as f32 * sx * uw as f32).rem_euclid(uw as f32) as usize;
+            let uy = ((y as f32 + 0.5) / oh as f32 * sy * uh as f32).rem_euclid(uh as f32) as usize;
+            let ui = (uy.min(uh - 1) * uw + ux.min(uw - 1)) * 4;
+            let ua = 1.0 - a;
+            for c in 0..3 {
+                let o = rgba[i + c] as f32;
+                let u = under.rgba[ui + c] as f32;
+                rgba[i + c] = (o * a + u * ua).round().clamp(0.0, 255.0) as u8;
+            }
+            rgba[i + 3] = 255;
+        }
+    }
+    Q3Image {
+        w: over.w,
+        h: over.h,
+        rgba,
+    }
+}
+
+fn force_opaque(img: &mut Q3Image) {
+    for px in img.rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+}
+
+fn luma_to_alpha(mut img: Q3Image) -> Q3Image {
+    // Official flame JPGs are mostly dim orange on black (mean ~15).
+    // A raw luma alpha falls under the walker's tex.w < 0.5 discard
+    // and the whole card vanishes. Keep any glow, punch only ink.
+    for px in img.rgba.chunks_exact_mut(4) {
+        let l = px[0].max(px[1]).max(px[2]);
+        if l < 10 {
+            px[3] = 0;
+            continue;
+        }
+        if l < 80 {
+            let g = 80.0 / l as f32;
+            px[0] = ((px[0] as f32) * g).min(255.0) as u8;
+            px[1] = ((px[1] as f32) * g).min(255.0) as u8;
+            px[2] = ((px[2] as f32) * g).min(255.0) as u8;
+        }
+        px[3] = 255;
+    }
+    img
+}
+
+/// Catalog cards for unique world/model albedo images (not aux maps).
+pub fn emit_texture_assets(
+    bank: &Q3TexBank,
+    staged: &Path,
+    source_id: &str,
+) -> Vec<ClassicAsset> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (key, img) in &bank.images {
+        if is_aux_tex_name(key) || key == "_default" {
+            continue;
+        }
+        // One card per unique bitmap. Alias keys (stem / no-prefix) share pixels.
+        let sig = (
+            img.w,
+            img.h,
+            img.rgba.len(),
+            img.rgba.get(0..16).unwrap_or(&[]).to_vec(),
+        );
+        if !seen.insert(format!("{sig:?}")) {
+            continue;
+        }
+        let slug = sanitize_slug(key);
+        let Ok(png) = encode_png_rgba(&img.rgba, img.w, img.h) else {
+            continue;
+        };
+        let tkey = format!("textures/{slug}");
+        let trel = format!("{tkey}.png");
+        let dest = staged.join(&trel);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if dest.exists() {
+            out.push(ClassicAsset {
+                key: tkey,
+                kind: AssetKind::Texture,
+                rel_path: trel,
+                tags: vec!["texture".into(), source_id.into(), slug],
+                icon_rel: None,
+            });
+            continue;
+        }
+        if std::fs::write(&dest, png).is_ok() {
+            out.push(ClassicAsset {
+                key: tkey,
+                kind: AssetKind::Texture,
+                rel_path: trel,
+                tags: vec!["texture".into(), source_id.into(), slug],
+                icon_rel: None,
+            });
+        }
+    }
+    out
 }
 
 fn tex_file_rank(path: &Path) -> u8 {
@@ -532,6 +988,14 @@ pub fn decode_tga(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
         let r = raw[p + 2];
         let a = if src_bpp == 4 { raw[p + 3] } else { 255 };
         rgba.extend_from_slice(&[r, g, b, a]);
+    }
+    // Many Q3 32-bit TGAs store unused alpha as 0. Default shaders are
+    // opaque; the walk viewer discards tex.w < 0.5, which deleted whole
+    // arch frames (skullarch_a/c) and left only the soffit C.
+    if src_bpp == 4 && rgba.chunks_exact(4).all(|p| p[3] == 0) {
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
     }
     let origin_top = desc & 0x20 != 0;
     if !origin_top {
@@ -840,7 +1304,8 @@ pub fn convert_bsp46(
 ) -> Result<Vec<ClassicAsset>, String> {
     let (glb, spawn, used) = bsp46_to_glb(bytes, textures)?;
     let slug = stem_slug(rel);
-    let key = format!("worlds/{slug}");
+    // Classic Quake maps — splash game worlds stay `worlds/`.
+    let key = format!("maps/{slug}");
     let rel_path = format!("{key}.glb");
     let dest = staged.join(&rel_path);
     if let Some(parent) = dest.parent() {
@@ -850,6 +1315,10 @@ pub fn convert_bsp46(
     if let Some(spawn) = spawn {
         write_spawn_sidecar(&dest, spawn);
     }
+    if let Ok((off, len)) = lump(bytes, LUMP_ENTITIES) {
+        let place = bsp46_place(&bytes[off..off + len], source_id, &key);
+        let _ = crate::world_place::write_place_sidecar(&dest, &place);
+    }
     let icon_rel = crate::world_preview::write_spawn_preview(&dest)
         .ok()
         .map(|_| format!("{key}.png"));
@@ -858,9 +1327,8 @@ pub fn convert_bsp46(
         kind: AssetKind::World,
         rel_path,
         tags: vec![
-            "world".into(),
-            source_id.into(),
             "map".into(),
+            source_id.into(),
             "bsp46".into(),
             slug.clone(),
             "no-portals".into(),
@@ -947,10 +1415,16 @@ fn bsp46_to_glb(
                 f32_le(bytes, o + 8),
             ],
             st: [f32_le(bytes, o + 12), f32_le(bytes, o + 16)],
+            lmst: [f32_le(bytes, o + 20), f32_le(bytes, o + 24)],
             normal: [
                 f32_le(bytes, o + 28),
                 f32_le(bytes, o + 32),
                 f32_le(bytes, o + 36),
+            ],
+            color: [
+                bytes.get(o + 40).copied().unwrap_or(255) as f32 / 255.0,
+                bytes.get(o + 41).copied().unwrap_or(255) as f32 / 255.0,
+                bytes.get(o + 42).copied().unwrap_or(255) as f32 / 255.0,
             ],
         });
     }
@@ -960,36 +1434,12 @@ fn bsp46_to_glb(
         meshverts.push(i32_le(bytes, idx_lump.0 + i * 4));
     }
 
-    let mut images: BTreeMap<String, Q3Image> = BTreeMap::new();
-    images.insert("_default".into(), gray_image(64, 64));
+    let lm_bytes = lump(bytes, LUMP_LIGHTMAPS).ok();
+    let lm_atlas = pack_lightmap_atlas(bytes, lm_bytes);
+
+    let mut parts: BTreeMap<String, PartGeom> = BTreeMap::new();
     let mut used = Vec::new();
-
-    let mut positions = Vec::new();
-    let mut uvs = Vec::new();
-    let mut normals = Vec::new();
-    let mut indices = Vec::new();
-
-    // First pass: collect referenced shader images so the atlas is complete
-    // before we emit UVs.
-    for fi in 0..n_face {
-        let o = face_lump.0 + fi * FACE_SIZE;
-        let tex = i32_le(bytes, o);
-        let typ = i32_le(bytes, o + 8);
-        if typ != FACE_POLYGON && typ != FACE_MESH && typ != FACE_PATCH {
-            continue;
-        }
-        let Some((name, flags)) = shaders.get(tex as usize) else {
-            continue;
-        };
-        if skip_shader(name, *flags) {
-            continue;
-        }
-        if let Some(img) = textures.resolve(name) {
-            used.push(name.clone());
-            images.entry(name.clone()).or_insert(img);
-        }
-    }
-    let (atlas_png, uv_map) = pack_atlas(&images);
+    let mut seen = BTreeSet::new();
 
     for fi in 0..n_face {
         let o = face_lump.0 + fi * FACE_SIZE;
@@ -999,6 +1449,7 @@ fn bsp46_to_glb(
         let n_vertexes = i32_le(bytes, o + 16);
         let first_idx = i32_le(bytes, o + 20);
         let n_meshverts = i32_le(bytes, o + 24);
+        let lm_num = i32_le(bytes, o + 28);
         let patch_w = i32_le(bytes, o + 96);
         let patch_h = i32_le(bytes, o + 100);
         let (name, flags) = match shaders.get(tex as usize) {
@@ -1008,59 +1459,144 @@ fn bsp46_to_glb(
         if skip_shader(name, *flags) {
             continue;
         }
-        let slot = lookup_slot(&uv_map, name);
+        if typ != FACE_POLYGON && typ != FACE_MESH && typ != FACE_PATCH {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            used.push(name.clone());
+        }
+        let geom = parts.entry(name.clone()).or_default();
         match typ {
             FACE_POLYGON | FACE_MESH => emit_indexed_face(
-                &mut positions,
-                &mut uvs,
-                &mut normals,
-                &mut indices,
+                geom,
                 &verts,
                 &meshverts,
                 first_vert,
                 n_vertexes,
                 first_idx,
                 n_meshverts,
-                slot,
+                lm_num,
+                lm_atlas.as_ref(),
             ),
-            FACE_PATCH => emit_patch(
-                &mut positions,
-                &mut uvs,
-                &mut normals,
-                &mut indices,
-                &verts,
-                first_vert,
-                n_vertexes,
-                patch_w,
-                patch_h,
-                slot,
-            ),
+            FACE_PATCH => {
+                // q3map already triangulated some degenerate Bevel nets
+                // for the lightmap. Prefer that fill when it exists.
+                if n_meshverts >= 3 {
+                    emit_indexed_face(
+                        geom,
+                        &verts,
+                        &meshverts,
+                        first_vert,
+                        n_vertexes,
+                        first_idx,
+                        n_meshverts,
+                        lm_num,
+                        lm_atlas.as_ref(),
+                    );
+                } else {
+                    emit_patch(
+                        geom,
+                        &verts,
+                        first_vert,
+                        n_vertexes,
+                        patch_w,
+                        patch_h,
+                        lm_num,
+                        lm_atlas.as_ref(),
+                    );
+                }
+            }
             _ => {}
         }
     }
 
-    if positions.is_empty() || indices.is_empty() {
-        positions = vec![
+    for (name, geom) in &mut parts {
+        let two = textures
+            .surface_for(name)
+            .map(|s| s.two_sided)
+            .unwrap_or(false);
+        if two && geom.indices.len() >= 3 {
+            let extra: Vec<u32> = geom
+                .indices
+                .chunks_exact(3)
+                .flat_map(|t| [t[0], t[2], t[1]])
+                .collect();
+            geom.indices.extend(extra);
+        }
+    }
+
+    let gray = gray_image(64, 64);
+    let gray_png = encode_png_rgba(&gray.rgba, gray.w, gray.h).unwrap_or_default();
+    let mut pngs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut detail_pngs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut detail_scales: BTreeMap<String, [f32; 2]> = BTreeMap::new();
+    let mut glb_parts: Vec<GlbTexturedPart<'_>> = Vec::new();
+    let lm_png = lm_atlas.as_ref().map(|a| a.png.as_slice());
+    // Keep PNG bytes alive for the writer borrow.
+    for name in parts.keys() {
+        if let Some(img) = textures.bake(name) {
+            if let Ok(png) = encode_png_rgba(&img.rgba, img.w, img.h) {
+                pngs.insert(name.clone(), png);
+            } else {
+                pngs.insert(name.clone(), gray_png.clone());
+            }
+        } else {
+            pngs.insert(name.clone(), gray_png.clone());
+        }
+        if let Some(det) = textures.detail_for(name) {
+            if let Some(img) = textures.resolve(&det.map) {
+                if let Ok(png) = encode_png_rgba(&img.rgba, img.w, img.h) {
+                    detail_pngs.insert(name.clone(), png);
+                    detail_scales.insert(name.clone(), det.scale);
+                }
+            }
+        }
+    }
+    for (name, geom) in &parts {
+        if geom.indices.len() < 3 {
+            continue;
+        }
+        let png = pngs.get(name).unwrap_or(&gray_png);
+        let has_lm = lm_png.is_some() && geom.lm_uvs.iter().any(|uv| uv[0] >= 0.0);
+        let detail = detail_pngs.get(name).map(|p| p.as_slice());
+        let dscale = detail_scales.get(name).copied().unwrap_or([0.0, 0.0]);
+        glb_parts.push(GlbTexturedPart {
+            positions: &geom.positions,
+            uvs: &geom.uvs,
+            indices: &geom.indices,
+            base_color_png: png,
+            normals: Some(&geom.normals),
+            base_color_factor: None,
+            colors: Some(&geom.colors),
+            lightmap_png: if has_lm { lm_png } else { None },
+            lightmap_uvs: if has_lm { Some(&geom.lm_uvs) } else { None },
+            detail_png: detail,
+            detail_scale: dscale,
+        });
+    }
+
+    let glb = if glb_parts.is_empty() {
+        let positions = vec![
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
             [1.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
         ];
-        uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        normals = vec![[0.0, 1.0, 0.0]; 4];
-        indices = vec![0, 1, 2, 0, 2, 3];
-    }
-
-    let glb = write_glb_mesh_textured(&GlbTexturedMesh {
-        positions: &positions,
-        normals: Some(&normals),
-        uvs: &uvs,
-        indices: &indices,
-        base_color_png: &atlas_png,
-        metallic_roughness_png: None,
-        double_sided: true,
-        colors: None,
-    });
+        let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        write_glb_mesh_textured(&GlbTexturedMesh {
+            positions: &positions,
+            normals: None,
+            uvs: &uvs,
+            indices: &indices,
+            base_color_png: &gray_png,
+            metallic_roughness_png: None,
+            double_sided: true,
+            colors: None,
+        })
+    } else {
+        write_glb_mesh_textured_parts(&glb_parts, true)
+    };
     if !glb.starts_with(b"glTF") {
         return Err("GLB writer failed".into());
     }
@@ -1068,8 +1604,128 @@ fn bsp46_to_glb(
     Ok((glb, spawn, used))
 }
 
+#[derive(Default)]
+struct PartGeom {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 3]>,
+    lm_uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+struct LightmapAtlas {
+    png: Vec<u8>,
+    cols: u32,
+    rows: u32,
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+}
+
+fn pack_lightmap_atlas(bytes: &[u8], lm: Option<(usize, usize)>) -> Option<LightmapAtlas> {
+    let (off, len) = lm?;
+    if len < LIGHTMAP_BYTES {
+        return None;
+    }
+    let pages = (len / LIGHTMAP_BYTES).max(1);
+    let cols = (pages as f32).sqrt().ceil() as u32;
+    let rows = pages.div_ceil(cols as usize) as u32;
+    let w = cols * LIGHTMAP_W as u32;
+    let h = rows * LIGHTMAP_W as u32;
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for p in 0..pages {
+        let src = off + p * LIGHTMAP_BYTES;
+        if src + LIGHTMAP_BYTES > bytes.len() {
+            break;
+        }
+        let col = (p as u32) % cols;
+        let row = (p as u32) / cols;
+        for y in 0..LIGHTMAP_W {
+            for x in 0..LIGHTMAP_W {
+                let si = src + (y * LIGHTMAP_W + x) * 3;
+                let dx = col as usize * LIGHTMAP_W + x;
+                let dy = row as usize * LIGHTMAP_W + y;
+                let di = (dy * w as usize + dx) * 4;
+                rgba[di] = bytes[si];
+                rgba[di + 1] = bytes[si + 1];
+                rgba[di + 2] = bytes[si + 2];
+                rgba[di + 3] = 255;
+            }
+        }
+    }
+    let png = encode_png_rgba(&rgba, w, h).ok()?;
+    Some(LightmapAtlas {
+        png,
+        cols,
+        rows,
+        rgba,
+        w,
+        h,
+    })
+}
+
+fn atlas_lm_uv(atlas: &LightmapAtlas, lm_num: i32, st: [f32; 2]) -> [f32; 2] {
+    if lm_num < 0 {
+        return [-1.0, -1.0];
+    }
+    let page = lm_num as u32;
+    let col = page % atlas.cols;
+    let row = page / atlas.cols;
+    let u = (col as f32 + st[0].clamp(0.0, 1.0)) / atlas.cols as f32;
+    let v = (row as f32 + st[1].clamp(0.0, 1.0)) / atlas.rows as f32;
+    [u, v]
+}
+
+fn sample_atlas(atlas: &LightmapAtlas, uv: [f32; 2]) -> [f32; 3] {
+    if uv[0] < 0.0 {
+        return [1.0, 1.0, 1.0];
+    }
+    let x = ((uv[0] * (atlas.w - 1) as f32).round() as u32).min(atlas.w - 1);
+    let y = ((uv[1] * (atlas.h - 1) as f32).round() as u32).min(atlas.h - 1);
+    let i = ((y * atlas.w + x) * 4) as usize;
+    [
+        atlas.rgba[i] as f32 / 255.0,
+        atlas.rgba[i + 1] as f32 / 255.0,
+        atlas.rgba[i + 2] as f32 / 255.0,
+    ]
+}
+
+/// Q3 lightmaps are stored dark (overbright). Do **not** multiply by the
+/// drawvert color — that is a separate vertex-lit path and made rooms black.
+fn apply_lightmap(c: [f32; 3]) -> [f32; 3] {
+    [
+        (c[0] * 4.0).clamp(0.22, 1.0),
+        (c[1] * 4.0).clamp(0.22, 1.0),
+        (c[2] * 4.0).clamp(0.22, 1.0),
+    ]
+}
+
+fn vert_lit(
+    v: &DrawVert,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
+) -> ([f32; 3], [f32; 2]) {
+    if let Some(atlas) = atlas {
+        if lm_num >= 0 {
+            let uv = atlas_lm_uv(atlas, lm_num, v.lmst);
+            return (apply_lightmap(sample_atlas(atlas, uv)), uv);
+        }
+    }
+    (
+        [
+            (v.color[0] * 2.0).clamp(0.22, 1.0),
+            (v.color[1] * 2.0).clamp(0.22, 1.0),
+            (v.color[2] * 2.0).clamp(0.22, 1.0),
+        ],
+        [-1.0, -1.0],
+    )
+}
+
 fn skip_shader(name: &str, flags: i32) -> bool {
-    if flags & (SURF_NODRAW | SURF_SKY | SURF_SKIP) != 0 {
+    // Keep SURF_SKY: those faces are the outdoor hull. Skipping them
+    // left a huge gray void in the courtyard corner.
+    if flags & (SURF_NODRAW | SURF_SKIP) != 0 {
         return true;
     }
     let n = name.to_ascii_lowercase();
@@ -1078,17 +1734,15 @@ fn skip_shader(name: &str, flags: i32) -> bool {
 }
 
 fn emit_indexed_face(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
+    geom: &mut PartGeom,
     verts: &[DrawVert],
     meshverts: &[i32],
     first_vert: i32,
     n_vertexes: i32,
     first_idx: i32,
     n_meshverts: i32,
-    slot: AtlasSlot,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
 ) {
     if n_meshverts < 3 || n_vertexes <= 0 {
         return;
@@ -1100,8 +1754,9 @@ fn emit_indexed_face(
     }
     let base_vert = first_vert as usize;
     let nverts = n_vertexes as usize;
+    let mut cache: HashMap<usize, u32> = HashMap::new();
     for tri in meshverts[start..start + count].chunks_exact(3) {
-        let mut corners = [0usize; 3];
+        let mut corners = [0u32; 3];
         let mut ok = true;
         for k in 0..3 {
             let idx = tri[k];
@@ -1110,21 +1765,14 @@ fn emit_indexed_face(
                 ok = false;
                 break;
             }
-            corners[k] = vi;
+            corners[k] = *cache
+                .entry(vi)
+                .or_insert_with(|| emit_vert(geom, &verts[vi], lm_num, atlas));
         }
         if !ok {
             continue;
         }
-        emit_tri(
-            positions,
-            uvs,
-            normals,
-            indices,
-            &verts[corners[0]],
-            &verts[corners[1]],
-            &verts[corners[2]],
-            slot,
-        );
+        emit_indexed_tri(geom, corners[0], corners[1], corners[2]);
     }
 }
 
@@ -1140,17 +1788,23 @@ fn resolve_meshvert(idx: i32, first_vert: usize, n_vertexes: usize) -> usize {
     }
 }
 
+/// ioquake3 `r_subdivisions` default. Remaining sagitta (Quake units)
+/// after uniform UV splits; a 90° gothic arch then gets 4 on-curve
+/// segments (~22° facets). The dark C was the control hull, not a
+/// need for 8–16 samples per cell.
+const PATCH_SUBDIVISIONS: f32 = 4.0;
+const PATCH_LEVEL_MIN: usize = 2;
+const PATCH_LEVEL_MAX: usize = 6;
+
 fn emit_patch(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
+    geom: &mut PartGeom,
     verts: &[DrawVert],
     first_vert: i32,
     n_vertexes: i32,
     patch_w: i32,
     patch_h: i32,
-    slot: AtlasSlot,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
 ) {
     if patch_w < 3 || patch_h < 3 {
         return;
@@ -1167,55 +1821,190 @@ fn emit_patch(
     if base.saturating_add(w * h) > verts.len() {
         return;
     }
-    // Cheap 2-sample tessellation (3×3 output per 3×3 Bezier).
-    const LEVEL: usize = 2;
+    // Evaluate on the quadratic, not the control hull. One level for the
+    // whole patch so shared cell edges weld. Index the grid — do not
+    // emit three unique verts per triangle.
     let ctrl = |r: usize, c: usize| &verts[base + r * w + c];
-    let mut r = 0usize;
-    while r + 2 < h {
-        let mut c = 0usize;
-        while c + 2 < w {
-            let mut grid = vec![DrawVert::default(); (LEVEL + 1) * (LEVEL + 1)];
-            for iy in 0..=LEVEL {
-                let ty = iy as f32 / LEVEL as f32;
-                for ix in 0..=LEVEL {
-                    let tx = ix as f32 / LEVEL as f32;
-                    grid[iy * (LEVEL + 1) + ix] = bezier_patch(
-                        [
-                            [ctrl(r, c), ctrl(r, c + 1), ctrl(r, c + 2)],
-                            [ctrl(r + 1, c), ctrl(r + 1, c + 1), ctrl(r + 1, c + 2)],
-                            [ctrl(r + 2, c), ctrl(r + 2, c + 1), ctrl(r + 2, c + 2)],
-                        ],
-                        tx,
-                        ty,
-                    );
-                }
-            }
-            for iy in 0..LEVEL {
-                for ix in 0..LEVEL {
-                    let i00 = iy * (LEVEL + 1) + ix;
-                    let i10 = i00 + 1;
-                    let i01 = i00 + (LEVEL + 1);
-                    let i11 = i01 + 1;
-                    emit_tri(
-                        positions, uvs, normals, indices, &grid[i00], &grid[i10], &grid[i11], slot,
-                    );
-                    emit_tri(
-                        positions, uvs, normals, indices, &grid[i00], &grid[i11], &grid[i01], slot,
-                    );
-                }
-            }
-            c += 2;
+    let cells_x = (w - 1) / 2;
+    let cells_y = (h - 1) / 2;
+    let mut level = PATCH_LEVEL_MIN;
+    for cy in 0..cells_y {
+        for cx in 0..cells_x {
+            let r = cy * 2;
+            let c = cx * 2;
+            let cell = [
+                [ctrl(r, c), ctrl(r, c + 1), ctrl(r, c + 2)],
+                [ctrl(r + 1, c), ctrl(r + 1, c + 1), ctrl(r + 1, c + 2)],
+                [ctrl(r + 2, c), ctrl(r + 2, c + 1), ctrl(r + 2, c + 2)],
+            ];
+            level = level.max(patch_cell_level(cell));
         }
-        r += 2;
+    }
+    let nx = cells_x * level;
+    let ny = cells_y * level;
+    let stride = nx + 1;
+    let mut grid = vec![DrawVert::default(); stride * (ny + 1)];
+    for iy in 0..=ny {
+        let cell_y = (iy / level).min(cells_y.saturating_sub(1));
+        let ty = (iy - cell_y * level) as f32 / level as f32;
+        for ix in 0..=nx {
+            let cell_x = (ix / level).min(cells_x.saturating_sub(1));
+            let tx = (ix - cell_x * level) as f32 / level as f32;
+            let r = cell_y * 2;
+            let c = cell_x * 2;
+            let cell = [
+                [ctrl(r, c), ctrl(r, c + 1), ctrl(r, c + 2)],
+                [ctrl(r + 1, c), ctrl(r + 1, c + 1), ctrl(r + 1, c + 2)],
+                [ctrl(r + 2, c), ctrl(r + 2, c + 1), ctrl(r + 2, c + 2)],
+            ];
+            grid[iy * stride + ix] = bezier_patch_eval(cell, tx, ty);
+        }
+    }
+    // ioquake3 drops columns/rows whose midpoints sit on the chord
+    // (Radiant Bevel / IBevel repeat a corner 7×). Keeping them and
+    // always splitting 00–11 deletes the spandrel and leaves a C.
+    let (grid, cols, rows) = collapse_patch_grid(grid, stride, ny + 1);
+    let mut ids = vec![0u32; cols * rows];
+    for iy in 0..rows {
+        for ix in 0..cols {
+            ids[iy * cols + ix] = emit_vert(geom, &grid[iy * cols + ix], lm_num, atlas);
+        }
+    }
+    for iy in 0..rows.saturating_sub(1) {
+        for ix in 0..cols.saturating_sub(1) {
+            let i00 = ids[iy * cols + ix];
+            let i10 = ids[iy * cols + ix + 1];
+            let i01 = ids[(iy + 1) * cols + ix];
+            let i11 = ids[(iy + 1) * cols + ix + 1];
+            emit_patch_quad(geom, i00, i10, i01, i11);
+        }
     }
 }
 
-fn bezier_patch(ctrl: [[&DrawVert; 3]; 3], u: f32, v: f32) -> DrawVert {
-    let mut col = [DrawVert::default(); 3];
-    for i in 0..3 {
-        col[i] = bezier_vert(ctrl[i][0], ctrl[i][1], ctrl[i][2], u);
+/// Drop a column/row when every sample is within 0.1 Quake units of the
+/// previous kept line — the `maxLen < 0.1` test in `R_SubdividePatchToGrid`.
+fn collapse_patch_grid(
+    grid: Vec<DrawVert>,
+    cols: usize,
+    rows: usize,
+) -> (Vec<DrawVert>, usize, usize) {
+    if cols == 0 || rows == 0 || grid.len() < cols * rows {
+        return (grid, cols, rows);
     }
-    bezier_vert(&col[0], &col[1], &col[2], v)
+    let keep_col = {
+        let mut keep = vec![true; cols];
+        let mut prev = 0usize;
+        for c in 1..cols {
+            let mut max_d = 0.0f32;
+            for r in 0..rows {
+                max_d = max_d.max(vert_dist(&grid[r * cols + c], &grid[r * cols + prev]));
+            }
+            if max_d < 0.1 {
+                keep[c] = false;
+            } else {
+                prev = c;
+            }
+        }
+        keep
+    };
+    let keep_row = {
+        let mut keep = vec![true; rows];
+        let mut prev = 0usize;
+        for r in 1..rows {
+            let mut max_d = 0.0f32;
+            for c in 0..cols {
+                if !keep_col[c] {
+                    continue;
+                }
+                max_d = max_d.max(vert_dist(&grid[r * cols + c], &grid[prev * cols + c]));
+            }
+            if max_d < 0.1 {
+                keep[r] = false;
+            } else {
+                prev = r;
+            }
+        }
+        keep
+    };
+    let nc = keep_col.iter().filter(|k| **k).count().max(1);
+    let nr = keep_row.iter().filter(|k| **k).count().max(1);
+    if nc == cols && nr == rows {
+        return (grid, cols, rows);
+    }
+    let mut out = Vec::with_capacity(nc * nr);
+    for r in 0..rows {
+        if !keep_row[r] {
+            continue;
+        }
+        for c in 0..cols {
+            if keep_col[c] {
+                out.push(grid[r * cols + c]);
+            }
+        }
+    }
+    (out, nc, nr)
+}
+
+fn vert_dist(a: &DrawVert, b: &DrawVert) -> f32 {
+    let dx = a.pos[0] - b.pos[0];
+    let dy = a.pos[1] - b.pos[1];
+    let dz = a.pos[2] - b.pos[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn emit_patch_quad(geom: &mut PartGeom, i00: u32, i10: u32, i01: u32, i11: u32) {
+    let a = tri_area_l1(geom, i00, i10, i11) + tri_area_l1(geom, i00, i11, i01);
+    let b = tri_area_l1(geom, i00, i10, i01) + tri_area_l1(geom, i10, i11, i01);
+    if a >= b {
+        emit_indexed_tri(geom, i00, i10, i11);
+        emit_indexed_tri(geom, i00, i11, i01);
+    } else {
+        emit_indexed_tri(geom, i00, i10, i01);
+        emit_indexed_tri(geom, i10, i11, i01);
+    }
+}
+
+fn tri_area_l1(geom: &PartGeom, ia: u32, ib: u32, ic: u32) -> f32 {
+    let pa = geom.positions[ia as usize];
+    let pb = geom.positions[ib as usize];
+    let pc = geom.positions[ic as usize];
+    let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+    (e1[1] * e2[2] - e1[2] * e2[1]).abs()
+        + (e1[2] * e2[0] - e1[0] * e2[2]).abs()
+        + (e1[0] * e2[1] - e1[1] * e2[0]).abs()
+}
+
+/// Uniform splits so remaining sagitta stays under `r_subdivisions`.
+/// Quadratic error scales as 1/n², so n = ceil(sqrt(err / 4)).
+fn patch_cell_level(cell: [[&DrawVert; 3]; 3]) -> usize {
+    let mut err2 = 0.0f32;
+    for i in 0..3 {
+        err2 = err2.max(bezier_chord_err2(cell[i][0], cell[i][1], cell[i][2]));
+        err2 = err2.max(bezier_chord_err2(cell[0][i], cell[1][i], cell[2][i]));
+    }
+    let n = (err2.sqrt() / PATCH_SUBDIVISIONS).sqrt().ceil() as usize;
+    n.clamp(PATCH_LEVEL_MIN, PATCH_LEVEL_MAX)
+}
+
+fn bezier_chord_err2(a: &DrawVert, b: &DrawVert, c: &DrawVert) -> f32 {
+    let lin = [
+        (a.pos[0] + c.pos[0]) * 0.5,
+        (a.pos[1] + c.pos[1]) * 0.5,
+        (a.pos[2] + c.pos[2]) * 0.5,
+    ];
+    let bez = bezier_pos(a, b, c, 0.5);
+    let dx = lin[0] - bez[0];
+    let dy = lin[1] - bez[1];
+    let dz = lin[2] - bez[2];
+    dx * dx + dy * dy + dz * dz
+}
+
+fn bezier_patch_eval(ctrl: [[&DrawVert; 3]; 3], u: f32, v: f32) -> DrawVert {
+    let c0 = bezier_vert(ctrl[0][0], ctrl[0][1], ctrl[0][2], u);
+    let c1 = bezier_vert(ctrl[1][0], ctrl[1][1], ctrl[1][2], u);
+    let c2 = bezier_vert(ctrl[2][0], ctrl[2][1], ctrl[2][2], u);
+    bezier_vert(&c0, &c1, &c2, v)
 }
 
 fn bezier_vert(a: &DrawVert, b: &DrawVert, c: &DrawVert, t: f32) -> DrawVert {
@@ -1239,23 +2028,45 @@ fn bezier_vert(a: &DrawVert, b: &DrawVert, c: &DrawVert, t: f32) -> DrawVert {
     DrawVert {
         pos: mix3(a.pos, b.pos, c.pos),
         st: mix2(a.st, b.st, c.st),
+        lmst: mix2(a.lmst, b.lmst, c.lmst),
         normal: mix3(a.normal, b.normal, c.normal),
+        color: mix3(a.color, b.color, c.color),
     }
 }
 
-fn emit_tri(
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
-    a: &DrawVert,
-    b: &DrawVert,
-    c: &DrawVert,
-    slot: AtlasSlot,
-) {
-    let pa = xform(a.pos);
-    let pb = xform(b.pos);
-    let pc = xform(c.pos);
+fn bezier_pos(a: &DrawVert, b: &DrawVert, c: &DrawVert, t: f32) -> [f32; 3] {
+    let s = 1.0 - t;
+    let w0 = s * s;
+    let w1 = 2.0 * s * t;
+    let w2 = t * t;
+    [
+        a.pos[0] * w0 + b.pos[0] * w1 + c.pos[0] * w2,
+        a.pos[1] * w0 + b.pos[1] * w1 + c.pos[1] * w2,
+        a.pos[2] * w0 + b.pos[2] * w1 + c.pos[2] * w2,
+    ]
+}
+
+fn emit_vert(
+    geom: &mut PartGeom,
+    v: &DrawVert,
+    lm_num: i32,
+    atlas: Option<&LightmapAtlas>,
+) -> u32 {
+    let i = geom.positions.len() as u32;
+    geom.positions.push(xform(v.pos));
+    // Raw tiling ST. Q3 v=0 is OpenGL bottom; glTF v=0 is top.
+    geom.uvs.push([v.st[0], 1.0 - v.st[1]]);
+    geom.normals.push(xform_dir(v.normal));
+    let (color, lm_uv) = vert_lit(v, lm_num, atlas);
+    geom.colors.push(color);
+    geom.lm_uvs.push(lm_uv);
+    i
+}
+
+fn emit_indexed_tri(geom: &mut PartGeom, ia: u32, ib: u32, ic: u32) {
+    let pa = geom.positions[ia as usize];
+    let pb = geom.positions[ib as usize];
+    let pc = geom.positions[ic as usize];
     let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
     let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
     let area = (e1[1] * e2[2] - e1[2] * e2[1]).abs()
@@ -1264,16 +2075,7 @@ fn emit_tri(
     if area < 1e-10 {
         return;
     }
-    let i = positions.len() as u32;
-    positions.extend_from_slice(&[pa, pb, pc]);
-    // Q3 ST: v=0 is OpenGL bottom. Atlas PNG is top-down (glTF).
-    uvs.push(slot_uv(slot, a.st[0], 1.0 - a.st[1]));
-    uvs.push(slot_uv(slot, b.st[0], 1.0 - b.st[1]));
-    uvs.push(slot_uv(slot, c.st[0], 1.0 - c.st[1]));
-    normals.push(xform_dir(a.normal));
-    normals.push(xform_dir(b.normal));
-    normals.push(xform_dir(c.normal));
-    indices.extend_from_slice(&[i, i + 1, i + 2]);
+    geom.indices.extend_from_slice(&[ia, ib, ic]);
 }
 
 fn xform(p: [f32; 3]) -> [f32; 3] {
@@ -1294,7 +2096,9 @@ fn xform_dir(n: [f32; 3]) -> [f32; 3] {
 struct DrawVert {
     pos: [f32; 3],
     st: [f32; 2],
+    lmst: [f32; 2],
     normal: [f32; 3],
+    color: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1380,6 +2184,89 @@ fn bsp46_spawn(text: &[u8]) -> Option<WorldSpawn> {
         }
     }
     best.map(|(_, s)| s)
+}
+
+fn bsp46_place(text: &[u8], source: &str, world_key: &str) -> crate::world_place::WorldPlace {
+    let spawn = bsp46_spawn(text).map(|s| (s.pos, s.yaw, s.pitch));
+    let mut places = Vec::new();
+    let Ok(text) = std::str::from_utf8(text) else {
+        return crate::world_place::WorldPlace {
+            source: source.into(),
+            world: world_key.into(),
+            spawn,
+            places,
+        };
+    };
+    let mut i = 0usize;
+    for raw in text.split(|c| c == '{' || c == '}') {
+        let block = raw.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let mut class = String::new();
+        let mut origin = None;
+        let mut angle = 0.0f32;
+        let mut model = String::new();
+        for line in block.lines() {
+            let kv: Vec<&str> = line.split('"').filter(|s| !s.trim().is_empty()).collect();
+            if kv.len() < 2 {
+                continue;
+            }
+            match kv[0] {
+                "classname" => class = kv[1].to_string(),
+                "origin" => {
+                    let mut it = kv[1].split_whitespace();
+                    if let (Some(x), Some(y), Some(z)) = (it.next(), it.next(), it.next()) {
+                        if let (Ok(x), Ok(y), Ok(z)) =
+                            (x.parse::<f32>(), y.parse::<f32>(), z.parse::<f32>())
+                        {
+                            origin = Some([x, y, z]);
+                        }
+                    }
+                }
+                "angle" => {
+                    angle = kv[1].parse().unwrap_or(0.0);
+                }
+                "angles" => {
+                    let mut it = kv[1].split_whitespace();
+                    if let (Some(_p), Some(y), Some(_r)) = (it.next(), it.next(), it.next()) {
+                        angle = y.parse().unwrap_or(angle);
+                    }
+                }
+                "model" => model = kv[1].to_string(),
+                _ => {}
+            }
+        }
+        let Some(o) = origin else { continue };
+        let mapped = crate::world_place::q3_class_actor(&class);
+        let (kind, asset) = if let Some((k, key)) = mapped {
+            (k, key.to_string())
+        } else if class == "misc_model" && model.to_ascii_lowercase().ends_with(".md3") {
+            ("prop", crate::world_place::q3_md3_catalog_key(&model))
+        } else {
+            continue;
+        };
+        let pos = [o[0] * SCALE, o[2] * SCALE, -o[1] * SCALE];
+        let yaw = std::f32::consts::FRAC_PI_2 - angle.to_radians();
+        places.push(crate::world_place::Place {
+            id: format!("ent-{i}"),
+            kind: kind.into(),
+            asset,
+            pos,
+            yaw,
+            class,
+            width: 0.0,
+            height: 0.0,
+            align: String::new(),
+        });
+        i += 1;
+    }
+    crate::world_place::WorldPlace {
+        source: source.into(),
+        world: world_key.into(),
+        spawn,
+        places,
+    }
 }
 
 fn lump(bytes: &[u8], i: usize) -> Result<(usize, usize), String> {
@@ -1705,12 +2592,6 @@ fn q3_face_camera_dir(n: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn q3_face_viewer(p: [f32; 3]) -> [f32; 3] {
-    // After Q3→studio, +X forward is +Z (away from the camera). Flip 180°.
-    let p = q3_face_camera(p);
-    [-p[0], p[1], -p[2]]
-}
-
 /// Fold split player parts / weapon flash+barrel into whole cards.
 /// `files` is `(extracted path, pk3-relative path)` for every MD3.
 pub fn assemble_players_and_weapons(
@@ -1849,7 +2730,6 @@ fn assemble_player(
 
     let mut unique_frames = Vec::new();
     let mut named = Vec::new();
-    let frame_at = 0usize;
     unique_frames.push(rest.unique.clone());
     for (clip_name, pairs) in &clip_defs {
         if pairs.is_empty() {
@@ -1869,7 +2749,6 @@ fn assemble_player(
                 frames: (start..unique_frames.len()).collect(),
             });
         }
-        let _ = frame_at;
     }
     if named.is_empty() {
         unique_frames.truncate(1);
@@ -1956,15 +2835,14 @@ fn assemble_weapon(
     let barrel_rel = format!("models/weapons2/{name}/{name}_barrel.md3");
     let barrel_path = by_rel.get(&barrel_rel).cloned();
     let barrel_bytes = barrel_path.as_ref().and_then(|p| std::fs::read(p).ok());
-    let barrel = match (barrel_path.as_ref(), barrel_bytes.as_deref()) {
-        (Some(p), Some(b)) => Md3File::parse(b).ok().map(|m| (p.clone(), m)),
-        _ => None,
-    };
+    let barrel = barrel_bytes
+        .as_deref()
+        .and_then(|b| Md3File::parse(b).ok());
     let mut skins = load_md3_skins(gun_path);
-    if let Some((bp, _)) = &barrel {
+    if let Some(bp) = &barrel_path {
         skins.extend(load_md3_skins(bp));
     }
-    let posed = pose_weapon(&gun, barrel.as_ref().map(|(_, m)| m), textures, &skins)?;
+    let posed = pose_weapon(&gun, barrel.as_ref(), textures, &skins)?;
     if posed.unique.is_empty() || posed.indices.len() < 3 {
         return Err("assembled weapon empty".into());
     }
@@ -2120,7 +2998,7 @@ fn xform_point(t: TagXform, p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn xform_tag_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
+fn apply_tag_dir(t: TagXform, p: [f32; 3]) -> [f32; 3] {
     [
         t.axis[0][0] * p[0] + t.axis[1][0] * p[1] + t.axis[2][0] * p[2],
         t.axis[0][1] * p[0] + t.axis[1][1] * p[1] + t.axis[2][1] * p[2],
@@ -2132,9 +3010,9 @@ fn mul_tag(a: TagXform, b: TagXform) -> TagXform {
     TagXform {
         origin: xform_point(a, b.origin),
         axis: [
-            xform_tag_dir(a, b.axis[0]),
-            xform_tag_dir(a, b.axis[1]),
-            xform_tag_dir(a, b.axis[2]),
+            apply_tag_dir(a, b.axis[0]),
+            apply_tag_dir(a, b.axis[1]),
+            apply_tag_dir(a, b.axis[2]),
         ],
     }
 }
@@ -2151,7 +3029,7 @@ fn invert_tag(t: TagXform) -> TagXform {
     };
     let neg = [-t.origin[0], -t.origin[1], -t.origin[2]];
     TagXform {
-        origin: xform_tag_dir(inv, neg),
+        origin: apply_tag_dir(inv, neg),
         axis,
     }
 }
@@ -2277,7 +3155,10 @@ fn emit_md3_posed(
                 i16_le(bytes, vo + 4) as f32 * MD3_XYZ_SCALE,
             ];
             let world = xform_point(xf, p);
-            out.unique.push(q3_face_viewer(xform(world)));
+            // +X (Q3 forward) → +Z after xform + q3_face_camera, which is
+            // the play controller's authored forward. A further 180° flip
+            // made them moonwalk: travel was correct, facing was reversed.
+            out.unique.push(q3_face_camera(xform(world)));
             let so = s + ofs_st + vi * 8;
             out.uvs.push([f32_le(bytes, so), 1.0 - f32_le(bytes, so + 4)]);
         }
@@ -2681,12 +3562,397 @@ mod tests {
         let world = assets
             .iter()
             .find(|a| a.kind == AssetKind::World)
-            .expect("world");
-        assert_eq!(world.rel_path, "worlds/q3tri.glb");
+            .expect("map");
+        assert_eq!(world.rel_path, "maps/q3tri.glb");
         let glb = std::fs::read(staged.join(&world.rel_path)).expect("glb");
         assert!(glb.starts_with(b"glTF"), "not a glTF/GLB");
         assert!(glb.len() > 200);
+        let place_text =
+            std::fs::read_to_string(staged.join("maps/q3tri.place")).expect("place sidecar");
+        let place = crate::world_place::WorldPlace::parse(&place_text).expect("parse place");
+        assert_eq!(place.source, QUAKE3_SOURCE_ID);
+        assert_eq!(place.world, "maps/q3tri");
+        assert_eq!(place.places.len(), 1);
+        assert_eq!(place.places[0].kind, "player");
         let _ = std::fs::remove_dir_all(&staged);
+    }
+
+    #[test]
+    fn arched_patch_subdivides_instead_of_two_chords() {
+        // Tight 3×3 arch: end posts on the floor, peak 128 units up.
+        // Control peak is z=128; the curve peak is z=64. Dense eval
+        // must sit on the curve, not the hull.
+        let mut ctrl = vec![DrawVert::default(); 9];
+        for r in 0..3 {
+            for c in 0..3 {
+                let x = (c as f32 - 1.0) * 128.0;
+                let z = if c == 1 { 128.0 } else { 0.0 };
+                ctrl[r * 3 + c].pos = [x, (r as f32 - 1.0) * 16.0, z];
+                ctrl[r * 3 + c].normal = [0.0, 0.0, 1.0];
+            }
+        }
+        let mut geom = PartGeom::default();
+        emit_patch(&mut geom, &ctrl, 0, 9, 3, 3, -1, None);
+        let tris = geom.indices.len() / 3;
+        assert!(
+            (16..=48).contains(&tris),
+            "r_subdivisions=4 90° arch should be ~32 tris, got {tris}"
+        );
+        assert!(
+            geom.positions.len() < tris,
+            "patch grid must be indexed, got {} verts for {tris} tris",
+            geom.positions.len()
+        );
+        let max_z = geom
+            .positions
+            .iter()
+            .map(|p| p[1] / SCALE)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            max_z < 80.0,
+            "off-curve control peak leaked into the mesh: max_z={max_z}"
+        );
+        let near_peak = geom
+            .positions
+            .iter()
+            .filter(|p| {
+                let x = p[0] / SCALE;
+                let z = p[1] / SCALE;
+                x.abs() < 4.0 && (z - 64.0).abs() < 4.0
+            })
+            .count();
+        assert!(near_peak > 0, "curve peak (0, 64) missing from tessellation");
+    }
+
+    #[test]
+    fn inner_arch_mesh_follows_curve_not_control_hull() {
+        // q3dm1 `textures/gothic_door/xian_tourneyarch_inside2` 5×3: the
+        // interior control row sits at z=380, the true Bezier mid at z=357.
+        // Emitting the hull is the dark faceted cavity in the doorway.
+        let xs = [572.0f32, 572.0, 672.0, 772.0, 772.0];
+        let zs = [288.0f32, 380.0, 380.0, 380.0, 288.0];
+        let mut pts = vec![DrawVert::default(); 15];
+        for r in 0..3 {
+            for c in 0..5 {
+                pts[r * 5 + c].pos = [xs[c], 1664.0 - r as f32 * 236.0, zs[c]];
+            }
+        }
+        let mut geom = PartGeom::default();
+        emit_patch(&mut geom, &pts, 0, 15, 5, 3, -1, None);
+        // Engine Y is Q3 Z. Control posts (572,380)/(772,380) are off-curve;
+        // the crown (672,380) and mids (~597,357)/(~747,357) are on it.
+        let xz: Vec<(f32, f32)> = geom
+            .positions
+            .iter()
+            .map(|p| (p[0] / SCALE, p[1] / SCALE))
+            .collect();
+        // Tangent at t=0 is vertical, so on-curve samples stay near x=572
+        // while z climbs. Only the control posts themselves are off-curve.
+        let leaked_posts = xz
+            .iter()
+            .filter(|(x, z)| {
+                ((*x - 572.0).abs() < 1.5 && (*z - 380.0).abs() < 1.5)
+                    || ((*x - 772.0).abs() < 1.5 && (*z - 380.0).abs() < 1.5)
+            })
+            .count();
+        assert_eq!(
+            leaked_posts, 0,
+            "off-curve control posts leaked into the mesh"
+        );
+        // The C-cavity is the control shelf across the corners. On the
+        // curve, z stays below ~371 for x<620 (and x>724).
+        let left_shelf = xz.iter().filter(|(x, z)| *x < 620.0 && *z > 375.0).count();
+        let right_shelf = xz.iter().filter(|(x, z)| *x > 724.0 && *z > 375.0).count();
+        assert_eq!(
+            left_shelf + right_shelf,
+            0,
+            "z=380 control shelf leaked into the corners (left={left_shelf} right={right_shelf})"
+        );
+        // t=0.5 of each cell is (597,357)/(747,357). Level 3 samples
+        // 0, 1/3, 2/3, 1 — still on the curve, just not at that exact mid.
+        let left_rise = xz
+            .iter()
+            .any(|(x, z)| *x > 575.0 && *x < 620.0 && *z > 320.0 && *z < 373.0);
+        let right_rise = xz
+            .iter()
+            .any(|(x, z)| *x > 724.0 && *x < 769.0 && *z > 320.0 && *z < 373.0);
+        assert!(
+            left_rise && right_rise,
+            "on-curve rise missing (left={left_rise} right={right_rise})"
+        );
+        let tris = geom.indices.len() / 3;
+        assert!(
+            (16..=80).contains(&tris),
+            "on-curve r_subdivisions=4 should be a few dozen tris, got {tris}"
+        );
+        assert!(
+            geom.positions.len() < tris,
+            "patch grid must be indexed, got {} verts for {tris} tris",
+            geom.positions.len()
+        );
+    }
+
+    #[test]
+    fn radiant_ibevel_fills_the_spandrel() {
+        // Radiant IBevel 3×3: p1 repeated 7×. The fill is the triangle
+        // from the elbow (0,64) to the curve (0,0)→(64,64), not a C
+        // along that curve.
+        let p0 = [0.0f32, 0.0, 0.0];
+        let p1 = [0.0, 0.0, 64.0];
+        let p2 = [64.0, 0.0, 64.0];
+        let net = [p0, p1, p1, p1, p1, p1, p2, p1, p1];
+        let mut ctrl = vec![DrawVert::default(); 9];
+        for (i, p) in net.iter().enumerate() {
+            ctrl[i].pos = *p;
+        }
+        let mut geom = PartGeom::default();
+        emit_patch(&mut geom, &ctrl, 0, 9, 3, 3, -1, None);
+        assert!(
+            geom.indices.len() >= 3,
+            "IBevel emitted no triangles"
+        );
+        let mut covered = false;
+        for tri in geom.indices.chunks_exact(3) {
+            let pts: Vec<(f32, f32)> = tri
+                .iter()
+                .map(|&i| {
+                    let p = geom.positions[i as usize];
+                    (p[0] / SCALE, p[1] / SCALE)
+                })
+                .collect();
+            let cx = (pts[0].0 + pts[1].0 + pts[2].0) / 3.0;
+            let cz = (pts[0].1 + pts[1].1 + pts[2].1) / 3.0;
+            if cx < 32.0 && cz > 32.0 {
+                covered = true;
+                break;
+            }
+        }
+        assert!(
+            covered,
+            "IBevel lost the spandrel (only the inner curve remains)"
+        );
+    }
+
+    #[test]
+    fn shader_detail_stage_is_not_the_albedo() {
+        let mut bank = Q3TexBank::default();
+        parse_shader_aliases(
+            r#"
+textures/gothic_block/blocks17_sandy
+{
+qer_editorimage textures/gothic_block/blocks17.tga
+{
+map $lightmap
+rgbGen identity
+}
+{
+map textures/gothic_block/sand2.tga
+blendfunc GL_DST_COLOR GL_SRC_COLOR
+detail
+tcMod scale 2.90 2.234
+}
+{
+map textures/gothic_block/blocks17.tga
+tcMod scale 0.25 0.25
+blendfunc GL_DST_COLOR GL_ZERO
+}
+}
+"#,
+            &mut bank,
+        );
+        assert_eq!(
+            bank.aliases.get("textures/gothic_block/blocks17_sandy").map(|s| s.as_str()),
+            Some("textures/gothic_block/blocks17")
+        );
+        let d = bank
+            .detail_for("textures/gothic_block/blocks17_sandy")
+            .expect("detail stage");
+        assert_eq!(d.map, "textures/gothic_block/sand2");
+        assert!((d.scale[0] - 2.90).abs() < 1e-4);
+        assert!((d.scale[1] - 2.234).abs() < 1e-4);
+    }
+
+    #[test]
+    fn animmap_becomes_the_albedo() {
+        let mut bank = Q3TexBank::default();
+        parse_shader_aliases(
+            r#"
+textures/sfx/flame1side
+{
+surfaceparm trans
+cull none
+{
+animMap 10 textures/sfx/flame1.tga textures/sfx/flame2.tga
+blendFunc GL_ONE GL_ONE
+}
+{
+animMap 10 textures/sfx/flame2.tga textures/sfx/flame1.tga
+blendFunc GL_ONE GL_ONE
+}
+{
+map textures/sfx/flameball.tga
+blendFunc GL_ONE GL_ONE
+}
+}
+"#,
+            &mut bank,
+        );
+        assert_eq!(
+            bank.aliases.get("textures/sfx/flame1side").map(|s| s.as_str()),
+            Some("textures/sfx/flame1")
+        );
+        let s = bank
+            .surface_for("textures/sfx/flame1side")
+            .expect("additive flame surface");
+        assert!(s.additive);
+        assert_eq!(s.albedo, "textures/sfx/flame1");
+    }
+
+    #[test]
+    fn alpha_stage_keeps_the_scrolled_underlayer() {
+        let mut bank = Q3TexBank::default();
+        parse_shader_aliases(
+            r#"
+textures/gothic_floor/largerblock3b_ow
+{
+{
+map textures/sfx/firegorre.tga
+tcmod scroll 0 1
+tcmod scale 4 4
+blendFunc GL_ONE GL_ZERO
+}
+{
+map textures/gothic_floor/largerblock3b_ow.tga
+blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+}
+{
+map $lightmap
+blendFunc GL_DST_COLOR GL_ONE_MINUS_DST_ALPHA
+}
+}
+"#,
+            &mut bank,
+        );
+        assert_eq!(
+            bank.aliases
+                .get("textures/gothic_floor/largerblock3b_ow")
+                .map(|s| s.as_str()),
+            Some("textures/gothic_floor/largerblock3b_ow")
+        );
+        let s = bank
+            .surface_for("textures/gothic_floor/largerblock3b_ow")
+            .expect("blood puddle surface");
+        assert_eq!(s.under.as_deref(), Some("textures/sfx/firegorre"));
+        assert!((s.under_scale[0] - 4.0).abs() < 1e-4);
+        assert!(!s.additive);
+    }
+
+    #[test]
+    fn bake_composites_under_alpha_and_stays_opaque() {
+        let mut bank = Q3TexBank::default();
+        let mut over = vec![0u8; 4 * 4];
+        // checker: opaque stone / punched hole
+        over[0..4].copy_from_slice(&[80, 70, 60, 255]);
+        over[4..8].copy_from_slice(&[80, 70, 60, 0]);
+        over[8..12].copy_from_slice(&[80, 70, 60, 0]);
+        over[12..16].copy_from_slice(&[80, 70, 60, 255]);
+        bank.images.insert(
+            "textures/gothic_floor/largerblock3b_ow".into(),
+            Q3Image {
+                w: 2,
+                h: 2,
+                rgba: over,
+            },
+        );
+        bank.images.insert(
+            "textures/sfx/firegorre".into(),
+            Q3Image {
+                w: 1,
+                h: 1,
+                rgba: vec![180, 20, 20, 255],
+            },
+        );
+        parse_shader_aliases(
+            r#"
+textures/gothic_floor/largerblock3b_ow
+{
+{
+map textures/sfx/firegorre.tga
+blendFunc GL_ONE GL_ZERO
+}
+{
+map textures/gothic_floor/largerblock3b_ow.tga
+blendFunc blend
+}
+}
+"#,
+            &mut bank,
+        );
+        let img = bank
+            .bake("textures/gothic_floor/largerblock3b_ow")
+            .expect("bake");
+        assert_eq!(img.rgba[3], 255, "stone stays opaque");
+        assert_eq!(&img.rgba[4..8], &[180, 20, 20, 255], "hole shows blood");
+        assert!(img.rgba.chunks_exact(4).all(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn bake_additive_fire_punches_black() {
+        let mut bank = Q3TexBank::default();
+        bank.images.insert(
+            "textures/sfx/flame1".into(),
+            Q3Image {
+                w: 1,
+                h: 2,
+                rgba: vec![0, 0, 0, 255, 255, 180, 20, 255],
+            },
+        );
+        parse_shader_aliases(
+            r#"
+textures/sfx/flame1side
+{
+{
+animMap 10 textures/sfx/flame1.tga textures/sfx/flame2.tga
+blendFunc GL_ONE GL_ONE
+}
+}
+"#,
+            &mut bank,
+        );
+        let img = bank.bake("textures/sfx/flame1side").expect("bake");
+        assert_eq!(img.rgba[3], 0, "black fire background is transparent");
+        assert_eq!(img.rgba[7], 255, "bright fire stays solid");
+    }
+
+    #[test]
+    fn bake_dim_flame_survives_alpha_discard() {
+        let mut bank = Q3TexBank::default();
+        bank.images.insert(
+            "textures/sfx/flame1".into(),
+            Q3Image {
+                w: 1,
+                h: 1,
+                rgba: vec![40, 18, 6, 255],
+            },
+        );
+        parse_shader_aliases(
+            r#"
+textures/sfx/flame1_hell
+{
+cull none
+{
+animMap 10 textures/sfx/flame1.tga textures/sfx/flame2.tga
+blendFunc GL_ONE GL_ONE
+}
+}
+"#,
+            &mut bank,
+        );
+        let s = bank.surface_for("textures/sfx/flame1_hell").expect("surf");
+        assert!(s.two_sided);
+        let img = bank.bake("textures/sfx/flame1_hell").expect("bake");
+        assert!(img.rgba[3] >= 128, "dim fire must beat tex.w < 0.5 discard");
+        assert!(img.rgba[0] >= 80, "dim fire must be lifted so it reads");
     }
 
     #[test]
@@ -2742,11 +4008,22 @@ mod tests {
             "expected maps+models, got bsp={bsp_ok} md3={md3_n} extract_fail={md3_ok} warn={}",
             warnings.len()
         );
-        let bank = load_tex_bank(&out);
+        let mut bank = load_tex_bank(&out);
+        apply_shader_aliases(&mut bank, &out);
         assert!(
             bank.images.len() > 50,
             "demo jpg/tga bank too small: {}",
             bank.images.len()
+        );
+        assert!(
+            bank.aliases.contains_key("textures/sfx/flame1side"),
+            "animMap flame1side must alias to a flame frame"
+        );
+        assert!(
+            bank.surface_for("textures/gothic_floor/largerblock3b_ow")
+                .and_then(|s| s.under.as_ref())
+                .is_some(),
+            "blood puddle must keep the firegorre underlayer"
         );
         let bsp = files
             .iter()
@@ -2757,6 +4034,26 @@ mod tests {
         let worlds = convert_bsp46(&bytes, &bsp.rel, &staged, &bank, QUAKE3_SOURCE_ID)
             .expect("q3dm1 convert");
         assert!(worlds.iter().any(|a| a.kind == AssetKind::World));
+        let glb_bytes = std::fs::read(staged.join("maps/q3dm1.glb")).expect("q3dm1 glb");
+        assert!(
+            glb_bytes.len() < 22_000_000,
+            "q3dm1 GLB still bloated after r_subdivisions=4: {} bytes",
+            glb_bytes.len()
+        );
+        let place_text =
+            std::fs::read_to_string(staged.join("maps/q3dm1.place")).expect("q3dm1 place");
+        let place = crate::world_place::WorldPlace::parse(&place_text).expect("parse q3dm1 place");
+        assert!(
+            place.places.iter().any(|p| p.kind == "weapon"),
+            "q3dm1 should place weapons"
+        );
+        assert!(
+            place
+                .places
+                .iter()
+                .any(|p| p.class == "misc_model" && p.asset.starts_with("props/")),
+            "q3dm1 should place misc_model props"
+        );
         let lower = files
             .iter()
             .find(|f| f.rel == "models/players/sarge/lower.md3")
@@ -2772,6 +4069,23 @@ mod tests {
         )
         .expect("sarge lower");
         assert_eq!(asset.kind, AssetKind::Character);
+        let md3s: Vec<(PathBuf, String)> = files
+            .iter()
+            .filter(|f| f.rel.ends_with(".md3"))
+            .map(|f| (f.path.clone(), f.rel.clone()))
+            .collect();
+        let (assembled, drop) =
+            assemble_players_and_weapons(&md3s, &staged, QUAKE3_SOURCE_ID, &bank);
+        assert!(
+            assembled.iter().any(|a| a.key == "characters/sarge"),
+            "sarge assembled, got {:?}",
+            assembled.iter().map(|a| a.key.as_str()).collect::<Vec<_>>()
+        );
+        assert!(drop.contains("characters/sarge-lower"));
+        assert!(
+            assembled.iter().any(|a| a.key == "weapons/shotgun"),
+            "shotgun assembled"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2797,6 +4111,55 @@ mod tests {
         assert_eq!(&rgba[4..8], &[0, 255, 0, 255]);
         assert_eq!(&rgba[8..12], &[0, 0, 255, 255]);
         assert_eq!(&rgba[12..16], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn tga_32bit_unused_alpha_is_opaque() {
+        let mut tga = vec![0u8; 18 + 2 * 2 * 4];
+        tga[2] = 2;
+        tga[12..14].copy_from_slice(&2u16.to_le_bytes());
+        tga[14..16].copy_from_slice(&2u16.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 0x20;
+        // BGRA: red with alpha 0 (Q3 "unused channel" convention).
+        tga[18..].copy_from_slice(&[0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0]);
+        let (rgba, w, h) = decode_tga(&tga).expect("tga");
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(rgba[3], 255, "all-zero alpha must not punch the mesh");
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn reconvert_local_q3dm1_work_source() {
+        let pk3 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/quake3/demoq3/pak0.pk3");
+        let staged = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/ai_content_app/import/quake3/work/source");
+        if !pk3.is_file() || (!staged.join("worlds").is_dir() && !staged.join("maps").is_dir()) {
+            return;
+        }
+        let root = tmp_dir("q3dm1bake");
+        let out = root.join("pk3");
+        let mut warnings = Vec::new();
+        let files = expand_pk3(&pk3, &out, &mut warnings).expect("expand");
+        let mut bank = load_tex_bank(&out);
+        apply_shader_aliases(&mut bank, &out);
+        for rel in [
+            "maps/q3dm1.bsp",
+            "maps/q3dm7.bsp",
+            "maps/q3dm17.bsp",
+            "maps/q3tourney2.bsp",
+        ] {
+            let Some(bsp) = files.iter().find(|f| f.rel == rel) else {
+                continue;
+            };
+            let bytes = std::fs::read(&bsp.path).unwrap();
+            convert_bsp46(&bytes, &bsp.rel, &staged, &bank, QUAKE3_SOURCE_ID)
+                .expect(rel);
+        }
+        let glb = staged.join("maps/q3dm1.glb");
+        assert!(glb.is_file(), "q3dm1.glb missing after bake reconvert");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

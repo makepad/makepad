@@ -527,6 +527,15 @@ impl AssetAiFleet {
         }
     }
 
+    pub fn from_urls(boxes: Vec<String>, log: bool) -> AssetAiFleet {
+        AssetAiFleet {
+            boxes,
+            discovered: None,
+            log,
+            routes: Default::default(),
+        }
+    }
+
     fn boxes(&self) -> Vec<String> {
         let mut boxes = self.boxes.clone();
         if let Some(discovered) = &self.discovered {
@@ -872,6 +881,7 @@ mod tests {
                 capabilities: Some(vec!["video".to_string()]),
                 vram_reserve_mb: Some(2 * 1024),
                 queue_limit: Some(8),
+                fleet: None,
             }),
             models,
         }

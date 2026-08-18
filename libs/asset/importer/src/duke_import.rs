@@ -831,6 +831,11 @@ fn map_to_glb(
             base_color_png: png,
             normals: None,
             base_color_factor: factor,
+            colors: None,
+            lightmap_png: None,
+            lightmap_uvs: None,
+            detail_png: None,
+            detail_scale: [0.0, 0.0],
         });
     }
     if let Some(ref sky) = sky {
@@ -841,6 +846,11 @@ fn map_to_glb(
             base_color_png: &sky.png,
             normals: Some(&sky.normals),
             base_color_factor: None,
+            colors: None,
+            lightmap_png: None,
+            lightmap_uvs: None,
+            detail_png: None,
+            detail_scale: [0.0, 0.0],
         });
     }
     let glb = write_glb_mesh_textured_parts(&parts, true);
