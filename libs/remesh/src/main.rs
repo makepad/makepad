@@ -165,7 +165,7 @@ fn postprocess(bytes: &[u8], target: usize, tex: usize, out_path: &str) {
     let mut indices = prim.indices;
     eprintln!("in: V {} F {}", positions.len(), indices.len() / 3);
     let mut t = std::time::Instant::now();
-    let mut stage = |name: &str, t: &mut std::time::Instant| {
+    let stage = |name: &str, t: &mut std::time::Instant| {
         eprintln!("  {name}: {:.3}s", t.elapsed().as_secs_f64());
         *t = std::time::Instant::now();
     };

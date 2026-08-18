@@ -45,7 +45,14 @@ pub trait DepthFleet {
 
 #[derive(Debug)]
 pub enum DepthJobOutcome {
-    Finalized { operation: String, asset: String, revision: String },
+    Finalized {
+        #[allow(dead_code)]
+        operation: String,
+        #[allow(dead_code)]
+        asset: String,
+        #[allow(dead_code)]
+        revision: String,
+    },
     Failed { error: String },
     CancelledUpstream,
 }

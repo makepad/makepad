@@ -8,9 +8,9 @@ workspace.members = [
     "libs/asset/client",
     "libs/asset/store",
     "libs/asset/chat",
-    "libs/game/math",
     "libs/render",
-    "libs/game/sim",
+    "libs/sim",
+    "libs/sim/math",
     "libs/show_control",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/pbr_paint",
@@ -57,7 +57,6 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
-    "tools/ao_bake",
     # === tests ===
     "platform/script/test",
 ]

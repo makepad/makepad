@@ -4205,7 +4205,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     fn registry() -> makepad_asset_ai::registry::Registry {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../libs/game/asset-ai/registry.json"
+            "/../../libs/asset/ai/registry.json"
         ))
             .expect("registry.json readable");
         makepad_asset_ai::registry::Registry::parse(&text).expect("registry parses")
@@ -4267,6 +4267,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("motion", "hy-motion"),
             ("motion", "hy-motion-oracle"),
             ("music", "minimax-music3"),
+            ("music", "minimax-music3-python"),
             ("music", "ace-step-1.5-xl"),
             ("paint", "hunyuan3d-paint-2.1"),
             ("paint", "pbr-testpattern"),

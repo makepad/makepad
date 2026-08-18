@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! makepad-app-asset-ui — catalog, licensed pack import, viewers, and
 //! fleet generation over the Asset Server. The GPU fleet still lives in
 //! `makepad-asset-ai`; this binary is the Asset UI:
@@ -68,7 +69,7 @@ use crate::billboard_view::BillboardView;
 use crate::mesh_view::MeshView;
 use crate::thumbnail_renderer::ThumbnailRenderer;
 use crate::asset_store_state::{
-    local_kind, server_kind_label, session_config_from_env, AssetStoreState, LocalLibraryFilters,
+    server_kind_label, session_config_from_env, AssetStoreState, LocalLibraryFilters,
     Remote, SERVER_KINDS,
 };
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};

@@ -66,7 +66,14 @@ pub trait MeshFleet {
 
 #[derive(Debug)]
 pub enum MeshJobOutcome {
-    Finalized { operation: String, asset: String, revision: String },
+    Finalized {
+        #[allow(dead_code)]
+        operation: String,
+        #[allow(dead_code)]
+        asset: String,
+        #[allow(dead_code)]
+        revision: String,
+    },
     Failed { error: String },
     CancelledUpstream,
 }
@@ -867,7 +874,7 @@ mod tests {
     #[test]
     fn unreadable_glb_fails_the_round_honestly() {
         let (mut server, token) = start_server("meshop_badglb");
-        let (mut admin, _seed_rev, op, png) = seed_and_create(&server, &token);
+        let (admin, _seed_rev, op, png) = seed_and_create(&server, &token);
         let stop = AtomicBool::new(false);
         let mut fleet = ScriptedMesh {
             expect_image: png,
@@ -898,7 +905,7 @@ mod tests {
     #[test]
     fn failing_fleet_reports_scrubbed_error_and_round_fails() {
         let (mut server, token) = start_server("meshop_fail");
-        let (mut admin, _seed_rev, op, _png) = seed_and_create(&server, &token);
+        let (admin, _seed_rev, op, _png) = seed_and_create(&server, &token);
         let stop = AtomicBool::new(false);
         let mut fleet = FailingMesh;
         let mut coordinator = MeshOpCoordinator {
