@@ -5,7 +5,7 @@
 //! additively from the `cx.audio_output` callback, so playback needs no
 //! plumbing through the widget tree. The service emits PCM16 WAV (kokoro:
 //! mono 24kHz, sa3-sfx: stereo 44.1kHz), decoded here with a minimal RIFF
-//! parser (libs/game/asset-ai wav.rs is encode-only).
+//! parser (libs/asset/ai wav.rs is encode-only).
 
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

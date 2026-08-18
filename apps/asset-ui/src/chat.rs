@@ -6,7 +6,7 @@
 //! never blocks on HTTP.
 
 use crate::pipeline::{
-    IMAGE_SIZES, IMAGE_STEPS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS,
+    IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use makepad_asset_ai::fleet::BoxSnapshot;
@@ -373,6 +373,15 @@ impl FleetView {
                         .collect(),
                 ),
             ));
+            options.push((
+                "mesh_face_counts",
+                Value::Arr(
+                    MESH_FACE_COUNTS
+                        .iter()
+                        .map(|s| Value::Int(*s as i64))
+                        .collect(),
+                ),
+            ));
         }
         if include_video {
             options.push((
@@ -437,7 +446,7 @@ pub enum ChatJobKind {
 }
 
 impl ChatJobKind {
-    pub fn preset_name(self, then: GenerateThen, model: Option<&str>) -> &'static str {
+    pub fn preset_name(self, then: GenerateThen, _model: Option<&str>) -> &'static str {
         match self {
             ChatJobKind::Image => match then {
                 GenerateThen::None => "image",
@@ -449,19 +458,9 @@ impl ChatJobKind {
                 GenerateThen::Depth => "image → depthmap",
             },
             ChatJobKind::Video => "video (small)",
-            ChatJobKind::Audio => match model {
-                Some(m) if m.contains("moss") => "audio sfx (moss)",
-                Some(m) if m.contains("woosh") => "audio sfx (woosh)",
-                _ => "audio sfx (sa3)",
-            },
-            ChatJobKind::Speech => match model {
-                Some(m) if m.contains("indextts") => "speech clone (indextts-2.5)",
-                _ => "speech (kokoro)",
-            },
-            ChatJobKind::Music => match model {
-                Some(m) if m.contains("ace") => "music (ace-step-1.5-xl)",
-                _ => "music (minimax-music3)",
-            },
+            ChatJobKind::Audio => "audio sfx",
+            ChatJobKind::Speech => "speech",
+            ChatJobKind::Music => "music",
             ChatJobKind::Mesh => "image → mesh",
             ChatJobKind::World => "image → world (splat)",
             ChatJobKind::Character => "character (playable)",
@@ -1332,6 +1331,7 @@ mod tests {
                 capabilities: Some(vec![domain.into()]),
                 vram_reserve_mb: Some(1024),
                 queue_limit: Some(4),
+                fleet: None,
             }),
             models: vec![ModelInfoJson {
                 id: id.into(),
