@@ -966,7 +966,7 @@ fn discovery_listeners_share_the_port_on_one_host() {
 // import + immutable derived-variant routes
 //
 // Real-process coverage of these routes belongs in the Asset Server crate
-// (`libs/game/asset-store` e2e). This suite stays hermetic: a local TCP fixture
+// (`libs/asset/store` e2e). This suite stays hermetic: a local TCP fixture
 // that speaks the wire contract. A clean-checkout `cargo test` must not
 // require a prebuilt `makepad-asset-store` binary.
 // ---------------------------------------------------------------------------
