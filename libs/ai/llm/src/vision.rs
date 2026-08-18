@@ -13,13 +13,12 @@
 
 use std::collections::BTreeMap;
 
-use makepad_ggml::{
-    backend::metal::{
-        prepare_graph, BufferStorageMode, MetalGraphSession, MetalGraphTensorWrite, MetalRuntime,
-    },
+use crate::metal_compiled::{prepare_graph, MetalGraphSession, MetalGraphTensorWrite};
+use crate::{
     BufferUsage, Context, Graph, Op, Prec, ScaleMode, TensorId, TensorType, UnaryOp,
     GGML_ROPE_TYPE_VISION,
 };
+use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
 
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufArray, GgufFile, GgufValue};

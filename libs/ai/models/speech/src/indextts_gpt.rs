@@ -1284,7 +1284,7 @@ use crate::backend::{
     gpu_layer_norm_pytorch, gpu_linear_nt_cached_bf16_bias_epilogue, gpu_slice_cols,
     gpu_slice_rows, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart, GpuTensor,
 };
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 
 const GPT_GPU_NS: &str = "indextts_gpt";
 

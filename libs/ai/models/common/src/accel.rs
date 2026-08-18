@@ -1,8 +1,10 @@
 //! Cross-backend host-path dispatch (Metal first, then CUDA).
 //! Spec types live in `makepad-ai-cuda::accel`.
 
-use super::{cuda, metal, prof};
+use crate::gpu as cuda;
+use makepad_ai_cuda::prof;
 use makepad_ai_cuda::quant::bf16_to_f32;
+use makepad_ai_metal as metal;
 
 pub use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 

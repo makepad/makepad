@@ -14,7 +14,7 @@ use std::process::Command;
 // links-metadata line `cargo:kernels=1`, which flows to immediate
 // dependents (libs/ggml, and libs/cuda's facade) as
 // `DEP_MAKEPAD_AI_CUDA_KERNELS`. libs/ggml/build.rs reads that env var and
-// re-emits `cargo:rustc-cfg=makepad_ggml_cuda_kernels` (same cfg name as
+// re-emits `cargo:rustc-cfg=makepad_cuda_kernels` (same cfg name as
 // before the move), so `libs/ggml/src/backend/cuda/mod.rs` needs zero
 // edits.
 fn main() {

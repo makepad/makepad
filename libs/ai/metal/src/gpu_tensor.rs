@@ -3,8 +3,8 @@
 //! Metal try_* kernels. Small addressing ops stay on the host. No oracle;
 //! goal is a working Metal path we can then keep cutting copies.
 
-use crate::backend::cuda::{GpuLinearPart, GpuTensor};
-use crate::backend::metal::{
+use crate::gpu_types::{GpuLinearPart, GpuTensor};
+use crate::shim::{
     try_add_f32, try_conv2d_planar_f32, try_flash_attn_f32_packed, try_gelu_f32,
     try_group_norm_planar_f32, try_layer_norm_mul_add_f32, try_matmul_nt_f32, try_mul_f32,
     try_silu_f32,
@@ -112,7 +112,7 @@ fn cache_weight(namespace: &str, parts: &[GpuLinearPart<'_>]) -> Vec<f32> {
 }
 
 pub fn available() -> bool {
-    crate::backend::metal::is_available()
+    crate::shim::is_available()
 }
 
 pub fn upload(values: &[f32], rows: usize, cols: usize) -> Result<GpuTensor, String> {

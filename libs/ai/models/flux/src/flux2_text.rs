@@ -50,7 +50,7 @@ use crate::flux2::{
 };
 use crate::flux2_tokenizer::{Flux2TokenizedPrompt, FLUX2_MAX_SEQUENCE_LENGTH};
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
 
 /// Device weight-cache namespace shared by every FLUX.2 TE prompt; evicted as

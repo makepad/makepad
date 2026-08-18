@@ -1613,10 +1613,10 @@ fn main() -> Result<(), String> {
         println!("[parity] PASS all staged BF16 gates");
     }
 
-    if makepad_ggml::backend::prof::enabled() {
+    if makepad_ai_common::backend::prof::enabled() {
         // Discard parity-pass counters so every following report describes
         // one tap-free production decode, including its synchronization cost.
-        let _ = makepad_ggml::backend::prof::report_and_reset("");
+        let _ = makepad_ai_common::backend::prof::report_and_reset("");
     }
     let mut timings = Vec::with_capacity(warm_runs);
     for run in 0..warm_runs {
@@ -1634,10 +1634,10 @@ fn main() -> Result<(), String> {
         }
         let elapsed = started.elapsed().as_secs_f64();
         println!("[benchmark] run={} {:.6}s", run + 1, elapsed);
-        if makepad_ggml::backend::prof::enabled() {
+        if makepad_ai_common::backend::prof::enabled() {
             print!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset(&format!(
+                makepad_ai_common::backend::prof::report_and_reset(&format!(
                     "[benchmark-prof run={}] ",
                     run + 1
                 ))

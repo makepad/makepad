@@ -21,9 +21,9 @@ use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
 use makepad_zune_png::PngEncoder;
 #[cfg(feature = "segment-native")]
-use makepad_diffusion::sam3::{unload_sam3, Sam3, Sam3Image, Sam3Weights};
+use makepad_ai_vision::sam3::{unload_sam3, Sam3, Sam3Image, Sam3Weights};
 #[cfg(feature = "segment-native")]
-use makepad_diffusion::DiffusionError;
+use makepad_ai_common::DiffusionError;
 #[cfg(feature = "segment-native")]
 use std::path::PathBuf;
 

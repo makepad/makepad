@@ -7,7 +7,7 @@
 static constexpr int kPaintMaxHeadDim = 128;
 
 // Matrix transpose: [rows, cols] -> [cols, rows]. Planar [C, HW] ↔ tokens [HW, C].
-static __global__ void makepad_ggml_cuda_paint_transpose_f32_kernel(
+static __global__ void makepad_cuda_paint_transpose_f32_kernel(
     const float * __restrict__ input,
     float * __restrict__ output,
     uint32_t rows,
@@ -23,7 +23,7 @@ static __global__ void makepad_ggml_cuda_paint_transpose_f32_kernel(
     output[static_cast<size_t>(c) * rows + r] = input[i];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_transpose_f32(
+extern "C" cudaError_t makepad_cuda_paint_transpose_f32(
     const float * input,
     float * output,
     uint32_t rows,
@@ -36,7 +36,7 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_transpose_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_paint_transpose_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_paint_transpose_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, rows, cols);
     return cudaGetLastError();
 }
@@ -55,7 +55,7 @@ static __device__ __forceinline__ float paint_dot(
 
 // Official RA: V is cat(v_alb, v_mr) on the last dim, then viewed as
 // [heads, 2*head_dim]. Matches libs/pbr_paint/src/unet_extras.rs.
-static __global__ void makepad_ggml_cuda_paint_ref_attn_wide_v_f32_kernel(
+static __global__ void makepad_cuda_paint_ref_attn_wide_v_f32_kernel(
     const float * __restrict__ q,
     const float * __restrict__ k,
     const float * __restrict__ v_alb,
@@ -114,7 +114,7 @@ static __global__ void makepad_ggml_cuda_paint_ref_attn_wide_v_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_ref_attn_wide_v_f32(
+extern "C" cudaError_t makepad_cuda_paint_ref_attn_wide_v_f32(
     const float * q,
     const float * k,
     const float * v_alb,
@@ -136,13 +136,13 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_ref_attn_wide_v_f32(
     }
     const dim3 block(128, 1, 1);
     const dim3 grid((q_len + block.x - 1) / block.x, heads, 1);
-    makepad_ggml_cuda_paint_ref_attn_wide_v_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_paint_ref_attn_wide_v_f32_kernel<<<grid, block, 0, stream>>>(
         q, k, v_alb, v_mr, o_alb, o_mr, q_len, kv_len, hidden, heads, scale);
     return cudaGetLastError();
 }
 
 // Independent self-attn over `batch` sequences packed as [batch * seq, hidden].
-static __global__ void makepad_ggml_cuda_paint_attn_batched_self_f32_kernel(
+static __global__ void makepad_cuda_paint_attn_batched_self_f32_kernel(
     const float * __restrict__ q,
     const float * __restrict__ k,
     const float * __restrict__ v,
@@ -193,7 +193,7 @@ static __global__ void makepad_ggml_cuda_paint_attn_batched_self_f32_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_paint_scale_f32_kernel(
+static __global__ void makepad_cuda_paint_scale_f32_kernel(
     const float * __restrict__ input,
     float * __restrict__ output,
     float scale,
@@ -205,7 +205,7 @@ static __global__ void makepad_ggml_cuda_paint_scale_f32_kernel(
     }
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_scale_f32(
+extern "C" cudaError_t makepad_cuda_paint_scale_f32(
     const float * input,
     float * output,
     float scale,
@@ -217,13 +217,13 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_scale_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
-    makepad_ggml_cuda_paint_scale_f32_kernel<<<grid, block, 0, stream>>>(input, output, scale, n);
+    makepad_cuda_paint_scale_f32_kernel<<<grid, block, 0, stream>>>(input, output, scale, n);
     return cudaGetLastError();
 }
 
 // 3D PoseRoPE matching libs/pbr_paint apply_pose_rope: per-head rotary with
 // xy dim = head_dim/8*3 and z dim = head_dim/8*2, theta=10000.
-static __global__ void makepad_ggml_cuda_paint_pose_rope_f32_kernel(
+static __global__ void makepad_cuda_paint_pose_rope_f32_kernel(
     const float * __restrict__ x,
     const uint32_t * __restrict__ xyz,
     float * __restrict__ out,
@@ -281,7 +281,7 @@ static __global__ void makepad_ggml_cuda_paint_pose_rope_f32_kernel(
     out[base + 1] = im * c + re * si;
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_pose_rope_f32(
+extern "C" cudaError_t makepad_cuda_paint_pose_rope_f32(
     const float * x,
     const uint32_t * xyz,
     float * out,
@@ -300,14 +300,14 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_pose_rope_f32(
     const uint32_t pairs = (hidden / heads) / 2;
     const dim3 block(pairs < 128 ? pairs : 128, 1, 1);
     const dim3 grid(seq, heads, 1);
-    makepad_ggml_cuda_paint_pose_rope_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_paint_pose_rope_f32_kernel<<<grid, block, 0, stream>>>(
         x, xyz, out, seq, hidden, heads, voxel_res);
     return cudaGetLastError();
 }
 
 // [batch * seq, heads * hd] token-major -> [batch * heads * seq, hd]
 // so one strided-batched GEMM can run over batch*heads.
-static __global__ void makepad_ggml_cuda_paint_pack_heads_f32_kernel(
+static __global__ void makepad_cuda_paint_pack_heads_f32_kernel(
     const float * __restrict__ input,
     float * __restrict__ output,
     uint32_t batch,
@@ -332,7 +332,7 @@ static __global__ void makepad_ggml_cuda_paint_pack_heads_f32_kernel(
     output[dst] = input[src];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_pack_heads_f32(
+extern "C" cudaError_t makepad_cuda_paint_pack_heads_f32(
     const float * input,
     float * output,
     uint32_t batch,
@@ -347,12 +347,12 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_pack_heads_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_paint_pack_heads_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_paint_pack_heads_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, batch, seq, heads, head_dim);
     return cudaGetLastError();
 }
 
-static __global__ void makepad_ggml_cuda_paint_unpack_heads_f32_kernel(
+static __global__ void makepad_cuda_paint_unpack_heads_f32_kernel(
     const float * __restrict__ input,
     float * __restrict__ output,
     uint32_t batch,
@@ -377,7 +377,7 @@ static __global__ void makepad_ggml_cuda_paint_unpack_heads_f32_kernel(
     output[dst] = input[src];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_unpack_heads_f32(
+extern "C" cudaError_t makepad_cuda_paint_unpack_heads_f32(
     const float * input,
     float * output,
     uint32_t batch,
@@ -392,13 +392,13 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_unpack_heads_f32(
     }
     const dim3 block(256, 1, 1);
     const dim3 grid(static_cast<unsigned int>((n + block.x - 1) / block.x), 1, 1);
-    makepad_ggml_cuda_paint_unpack_heads_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_paint_unpack_heads_f32_kernel<<<grid, block, 0, stream>>>(
         input, output, batch, seq, heads, head_dim);
     return cudaGetLastError();
 }
 
 // Independent GroupNorm over N planar images packed as [C, N * H * W].
-static __global__ void makepad_ggml_cuda_paint_gn_batched_stats_f32_kernel(
+static __global__ void makepad_cuda_paint_gn_batched_stats_f32_kernel(
     const float * __restrict__ input,
     float * __restrict__ stats,
     uint32_t width,
@@ -457,7 +457,7 @@ static __global__ void makepad_ggml_cuda_paint_gn_batched_stats_f32_kernel(
     }
 }
 
-static __global__ void makepad_ggml_cuda_paint_gn_batched_apply_f32_kernel(
+static __global__ void makepad_cuda_paint_gn_batched_apply_f32_kernel(
     const float * __restrict__ input,
     const float * __restrict__ gamma,
     const float * __restrict__ beta,
@@ -488,7 +488,7 @@ static __global__ void makepad_ggml_cuda_paint_gn_batched_apply_f32_kernel(
     output[i] = (x - mean) * inv * gamma[c] + beta[c];
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_gn_batched_f32(
+extern "C" cudaError_t makepad_cuda_paint_gn_batched_f32(
     const float * input,
     const float * gamma,
     const float * beta,
@@ -510,7 +510,7 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_gn_batched_f32(
     }
     const dim3 sblock(256, 1, 1);
     const dim3 sgrid(groups, batch, 1);
-    makepad_ggml_cuda_paint_gn_batched_stats_f32_kernel<<<sgrid, sblock, 0, stream>>>(
+    makepad_cuda_paint_gn_batched_stats_f32_kernel<<<sgrid, sblock, 0, stream>>>(
         input, stats, width, height, channels, groups, batch, eps);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -519,12 +519,12 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_gn_batched_f32(
     const size_t n = static_cast<size_t>(channels) * batch * width * height;
     const dim3 ablock(256, 1, 1);
     const dim3 agrid(static_cast<unsigned int>((n + ablock.x - 1) / ablock.x), 1, 1);
-    makepad_ggml_cuda_paint_gn_batched_apply_f32_kernel<<<agrid, ablock, 0, stream>>>(
+    makepad_cuda_paint_gn_batched_apply_f32_kernel<<<agrid, ablock, 0, stream>>>(
         input, gamma, beta, stats, output, width, height, channels, groups, batch);
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t makepad_ggml_cuda_paint_attn_batched_self_f32(
+extern "C" cudaError_t makepad_cuda_paint_attn_batched_self_f32(
     const float * q,
     const float * k,
     const float * v,
@@ -544,7 +544,7 @@ extern "C" cudaError_t makepad_ggml_cuda_paint_attn_batched_self_f32(
     }
     const dim3 block(128, 1, 1);
     const dim3 grid((seq + block.x - 1) / block.x, batch * heads, 1);
-    makepad_ggml_cuda_paint_attn_batched_self_f32_kernel<<<grid, block, 0, stream>>>(
+    makepad_cuda_paint_attn_batched_self_f32_kernel<<<grid, block, 0, stream>>>(
         q, k, v, out, batch, seq, hidden, heads, scale);
     return cudaGetLastError();
 }

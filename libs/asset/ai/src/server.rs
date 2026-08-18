@@ -1176,13 +1176,13 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
         feature = "indextts"
     ))]
     {
-        match makepad_diffusion::backend::gpu_weight_cache_evict_prefix("") {
+        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {
             Ok(count) => progress(&format!(
                 "vram-release: evicted {count} cached weight buffers + idle pool"
             )),
             Err(error) => progress(&format!("vram-release: weight cache evict failed: {error}")),
         }
-        makepad_diffusion::backend::gpu_pool_clear();
+        makepad_ai_common::backend::gpu_pool_clear();
     }
 }
 

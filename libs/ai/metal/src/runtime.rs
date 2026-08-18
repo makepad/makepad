@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use crate::backend::{BackendCapabilities, BackendInfo, BackendKind};
+    use crate::backend_kind::{BackendCapabilities, BackendInfo, BackendKind};
 
     pub type MetalResult<T> = Result<T, String>;
 
@@ -306,7 +306,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use crate::backend::{BackendCapabilities, BackendInfo, BackendKind};
+    use crate::backend_kind::{BackendCapabilities, BackendInfo, BackendKind};
     use makepad_objc_sys::runtime::{nil, ObjcId, Object, NO};
     use makepad_objc_sys::{class, msg_send, sel, sel_impl};
     use smallvec::SmallVec;
@@ -645,7 +645,7 @@ mod imp {
             self.storage
         }
 
-        pub(crate) fn as_id(&self) -> ObjcId {
+        pub fn as_id(&self) -> ObjcId {
             self.obj.as_id()
         }
     }

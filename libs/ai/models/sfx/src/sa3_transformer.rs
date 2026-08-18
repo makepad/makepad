@@ -356,7 +356,7 @@ impl Sa3Dit {
 // ---------------------------------------------------------------------------
 
 use crate::sa3::{dev_err, F16Weight, SA3_ROPE_DIM};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_cross, gpu_download,
     gpu_gated_residual_mod, gpu_linear_nt_cached, gpu_rms_norm_mod_indexed, gpu_rms_norm_mul,
     gpu_rope_half, gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload,
@@ -569,7 +569,7 @@ impl Sa3Dit {
         let x_pre = gpu_add(&x_dev, &pre).map_err(|e| dev_err("dit preprocess add", e))?;
         let projected = gpu_linear_nt_cached(&x_pre, "sa3dit", &[device.project_in.part()], &[])
             .map_err(|e| dev_err("dit project in", e))?;
-        let mut h = makepad_ggml::backend::cuda::gpu_concat_rows(&run.memory, &projected)
+        let mut h = makepad_ai_common::backend::cuda::gpu_concat_rows(&run.memory, &projected)
             .map_err(|e| dev_err("dit memory concat", e))?;
 
         let scale = 1.0 / (SA3_HEAD_DIM as f32).sqrt();
@@ -617,7 +617,7 @@ impl Sa3Dit {
                 let valid = gpu_slice_rows(&v, 0, pad_start).map_err(|e| dev_err("dit v valid", e))?;
                 let zeros = gpu_upload(&vec![0f32; (seq - pad_start) * d], seq - pad_start, d)
                     .map_err(|e| dev_err("dit v zeros", e))?;
-                makepad_ggml::backend::cuda::gpu_concat_rows(&valid, &zeros)
+                makepad_ai_common::backend::cuda::gpu_concat_rows(&valid, &zeros)
                     .map_err(|e| dev_err("dit v concat", e))?
             } else {
                 v

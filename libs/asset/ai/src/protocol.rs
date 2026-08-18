@@ -107,8 +107,28 @@ pub struct ChatMessageJson {
     pub text: String,
 }
 
-/// Empty-think prefill so Qwen3 thinking models skip the think block.
+/// Empty-think prefill so Qwen3 / Qwen3.6 skip the think block.
 pub const CHAT_THINK_PREFILL: &str = "<think>\n\n</think>\n\n";
+/// Qwen3.8 official generation prompt: thinking is on by default. Closing
+/// `</think>` in the prefill makes 3.8 emit `<|im_end|>` immediately
+/// (empty expansion). Open the block and let `clean_expansion` strip it.
+pub const CHAT_THINK_PREFILL_OPEN: &str = "<think>\n";
+/// Official 3.8 `reasoning_effort=low` system line so an open think
+/// block does not eat the expander's token budget on `xhigh`.
+pub const QWEN38_LOW_EFFORT: &str = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
+
+pub fn model_uses_open_think(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    id.contains("qwen3.8") || id.contains("qwen38")
+}
+
+pub fn think_prefill_for_model(model_id: &str) -> &'static str {
+    if model_uses_open_think(model_id) {
+        CHAT_THINK_PREFILL_OPEN
+    } else {
+        CHAT_THINK_PREFILL
+    }
+}
 /// Appended after the generated assistant text so the next chat prompt is
 /// a strict string-prefix extension (KV reuse).
 pub const CHAT_COMMIT_SUFFIX: &str = "<|im_end|>\n";
@@ -117,6 +137,14 @@ pub const CHAT_COMMIT_SUFFIX: &str = "<|im_end|>\n";
 /// reconstructed with the same think-prefill the generation prompt used, so
 /// `prompt_n + reply + CHAT_COMMIT_SUFFIX` is a prefix of `prompt_{n+1}`.
 pub fn assemble_chat_prompt(system: &str, messages: &[ChatMessageJson]) -> String {
+    assemble_chat_prompt_with_think(system, messages, CHAT_THINK_PREFILL)
+}
+
+pub fn assemble_chat_prompt_with_think(
+    system: &str,
+    messages: &[ChatMessageJson],
+    think_prefill: &str,
+) -> String {
     let mut out = String::new();
     out.push_str("<|im_start|>system\n");
     let sys = system.trim_end();
@@ -136,13 +164,13 @@ pub fn assemble_chat_prompt(system: &str, messages: &[ChatMessageJson]) -> Strin
         out.push_str(role);
         out.push('\n');
         if role == "assistant" {
-            out.push_str(CHAT_THINK_PREFILL);
+            out.push_str(think_prefill);
         }
         out.push_str(&m.text);
         out.push_str("<|im_end|>\n");
     }
     out.push_str("<|im_start|>assistant\n");
-    out.push_str(CHAT_THINK_PREFILL);
+    out.push_str(think_prefill);
     out
 }
 

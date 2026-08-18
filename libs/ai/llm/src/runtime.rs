@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use makepad_ggml::{
-    backend::metal::{
-        create_context_main_buffer, create_context_main_buffer_no_copy, create_context_ro_buffer,
-        warmup_affine_qmm_weights,
-        execute_compiled_graph, execute_compiled_graph_in_active_batch,
-        execute_compiled_graph_with_buffer_inputs, prepare_graph, try_matmul_nt_ggml_bytes,
-        try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer, MetalCompiledGraph,
-        MetalContextBuffers, MetalDeviceFeatures, MetalGraphSession, MetalGraphTensorBufferCopy,
-        MetalGraphTensorWrite, MetalPreparedGraph, MetalRuntime,
-    },
-    f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu, ggml_row_size_for_type, BufferUsage, Context,
-    GluOp, Graph, InitParams, Op, Prec, SortOrder, Tensor, TensorId, TensorType,
-    TriType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
+use crate::metal_compiled::{
+    create_context_main_buffer, create_context_main_buffer_no_copy, create_context_ro_buffer,
+    execute_compiled_graph, execute_compiled_graph_in_active_batch,
+    execute_compiled_graph_with_buffer_inputs, prepare_graph, warmup_affine_qmm_weights,
+    MetalCompiledGraph, MetalContextBuffers, MetalGraphSession, MetalGraphTensorBufferCopy,
+    MetalGraphTensorWrite, MetalPreparedGraph,
+};
+use crate::{
+    ggml_row_size_for_type, BufferUsage, Context, GluOp, Graph, InitParams, Op, Prec, SortOrder,
+    Tensor, TensorId, TensorType, TriType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
+};
+use makepad_ai_cuda::quant::{f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu};
+use makepad_ai_metal::{
+    try_matmul_nt_ggml_bytes, try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer,
+    MetalDeviceFeatures, MetalRuntime,
 };
 
 use crate::error::{LlamaError, Result};
@@ -7820,7 +7822,7 @@ pub(crate) fn debug_trace_outputs(
             TensorType::F16 => bytes
                 .chunks_exact(2)
                 .map(|chunk| {
-                    makepad_ggml::quant::f16_to_f32(u16::from_le_bytes(
+                    makepad_ai_cuda::quant::f16_to_f32(u16::from_le_bytes(
                         chunk.try_into().unwrap(),
                     ))
                 })
@@ -8504,7 +8506,7 @@ fn tensor_bytes_to_f32_vec(bytes: &[u8], ty: TensorType) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_ggml::core::InitParams;
+    use crate::core::InitParams;
 
     #[test]
     fn hybrid_cache_template_materializes_types_and_shape() {

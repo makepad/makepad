@@ -377,7 +377,7 @@ fn conv_transpose1d(input: &Plane, conv: &TConv) -> Plane {
 // ---------------------------------------------------------------------------
 
 use crate::sa3::{dev_err, F16Weight};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_rows, gpu_download, gpu_gather_rows_colblock, gpu_linear_nt_cached,
     gpu_slice_rows, gpu_snake_cols, gpu_upload, gpu_upload_u32, GpuTensor,
 };

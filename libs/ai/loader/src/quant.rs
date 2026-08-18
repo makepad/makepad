@@ -6,7 +6,7 @@
 //! Context, no Op, no compute kernels): pure lookup tables. ggml keeps a
 //! `pub use makepad_ai_loader::quant::*;` shim at both original locations so
 //! `TensorType` stays the same nominal type throughout ggml/llama and every
-//! existing `makepad_ggml::{TensorType, block_size, block_elements, ...}`
+//! existing `makepad_ai_common::{TensorType, block_size, block_elements, ...}`
 //! call site keeps compiling unchanged.
 //!
 //! `QK`/`QK_K`/`QK_NVFP4` are local copies of the same-named constants in

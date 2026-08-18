@@ -203,10 +203,13 @@ impl GenerateParams {
                 .is_some_and(|messages| !messages.is_empty());
         let prompt = if is_chat {
             match request.chat_messages.as_deref() {
-                Some(messages) if !messages.is_empty() => crate::protocol::assemble_chat_prompt(
-                    request.chat_system.as_deref().unwrap_or(""),
-                    messages,
-                ),
+                Some(messages) if !messages.is_empty() => {
+                    crate::protocol::assemble_chat_prompt_with_think(
+                        request.chat_system.as_deref().unwrap_or(""),
+                        messages,
+                        crate::protocol::think_prefill_for_model(&request.model),
+                    )
+                }
                 _ => request.prompt.clone().unwrap_or_default(),
             }
         } else {

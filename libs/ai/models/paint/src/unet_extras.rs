@@ -6,7 +6,7 @@ use crate::unet_attn::{
     paint_scale_like, ref_attn_wide_like,
 };
 use crate::unet_first::{paint_fast, BatchAct, UnetFirst, ATTN_GN_EPS, GN_GROUPS, NS};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_cols, gpu_concat_rows_many, gpu_download,
     gpu_group_norm_nchw, gpu_group_norm_planar, gpu_nchw_to_tokens, gpu_paint_group_norm_batched,
     gpu_paint_pose_rope, gpu_paint_pose_rope_dev,

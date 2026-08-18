@@ -232,7 +232,7 @@ pub fn ace_device_enabled() -> bool {
     {
         return false;
     }
-    makepad_ggml::backend::cuda::gpu_device_available()
+    makepad_ai_common::backend::cuda::gpu_device_available()
 }
 
 pub fn ace_open_shards(dir: impl AsRef<Path>) -> Result<H3ShardedWeights> {

@@ -19,7 +19,7 @@ use crate::backend::{
     gpu_linear_nt_cached_bf16_f32acc, gpu_pixel_shuffle_planar_cached, gpu_slice_cols,
     gpu_slice_rows, gpu_upload, gpu_upload_into, GpuLinearPart, GpuStepGraph, GpuTensor,
 };
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 use std::io::{Read, Seek, SeekFrom};
 use std::cell::RefCell;

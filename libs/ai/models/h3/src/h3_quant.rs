@@ -9,7 +9,7 @@
 
 use crate::error::{DiffusionError, Result};
 use makepad_ai_common::raw_st::Flux2SafetensorsHeader;
-use makepad_ggml::quant::{
+use makepad_ai_common::quant::{
     block_elements, block_size, dequantize_nvfp4_pairs_row, get_rows_ggml_bytes_cpu,
     h3_nvfp4_pairs_pack,
 };
@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-pub use makepad_ggml::quant::{
+pub use makepad_ai_common::quant::{
     GGML_TYPE_BF16, GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_H3_NVFP4_PAIRS,
     GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K,
 };
@@ -2356,7 +2356,7 @@ mod tests {
         let source = GgufTensorInfo {
             name: "blocks.0.attn.qkv_proj.weight".to_string(),
             dimensions: vec![k as u64, (3 * n) as u64],
-            tensor_type: makepad_ggml::TensorType::Q4K,
+            tensor_type: makepad_ai_common::TensorType::Q4K,
             offset: 0,
             size_bytes: (3 * n * row_bytes) as u64,
         };
@@ -2393,7 +2393,7 @@ mod tests {
 
     #[test]
     fn unsupported_linear_types_fail_closed() {
-        let err = runtime_linear_type(makepad_ggml::quant::GGML_TYPE_Q5_K, "bad")
+        let err = runtime_linear_type(makepad_ai_common::quant::GGML_TYPE_Q5_K, "bad")
             .unwrap_err();
         assert!(err.to_string().contains("unsupported"));
     }

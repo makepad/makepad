@@ -27,7 +27,7 @@ use crate::skin_tokens_tokenizer::{
     SKIN_TOKENS_TOKEN_SKELETON_EOS,
 };
 use crate::{DiffusionError, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use makepad_ai_loader::MlxDType;
 
 /// Shared with the continuous-prefix encoders so one service unload evicts

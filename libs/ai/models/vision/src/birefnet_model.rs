@@ -25,7 +25,7 @@ use crate::birefnet::{
     BIREFNET_WINDOW_SIZE,
 };
 use crate::{DiffusionError, ProgressHook, Result};
-use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
+use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F16};
 use makepad_ai_loader::MlxDType;
 use std::collections::HashMap;
 

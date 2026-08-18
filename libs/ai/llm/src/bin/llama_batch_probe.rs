@@ -5,7 +5,7 @@
 //!
 //! Usage: llama-batch-probe <model.gguf> [--tokens N] [--batches 1,2,3,4]
 
-use makepad_ggml::TensorType;
+use makepad_ai_llm::TensorType;
 use makepad_ai_llm::{
     compile_delta_net_recurrent_decode_metal,
     qwen35_delta_net_recurrent_decode_spec, qwen35_recurrent_block_layout, LlamaModel,

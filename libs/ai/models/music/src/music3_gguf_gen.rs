@@ -60,7 +60,7 @@ fn dit_ffn(
     let out_bk = format!("transformer_blocks.{layer}.ff_out.bias");
     if let (Some(ff_in), Some(ff_out)) = (file.keyed_mat(&ns, &in_n), file.keyed_mat(&ns, &out_n)) {
         let swap = std::env::var_os("MAKEPAD_MUSIC3_SWIGLU_SWAP").is_some();
-        if let Some(y) = makepad_ggml::backend::metal::try_dit_ffn_resident(
+        if let Some(y) = makepad_ai_common::backend::metal::try_dit_ffn_resident(
             normed,
             rows,
             MUSIC3_DIT_DIM,
@@ -551,7 +551,7 @@ impl Music3GgufLm {
         embed_c: &[f32],
         embed_u: &[f32],
     ) -> Option<()> {
-        use makepad_ggml::backend::metal;
+        use makepad_ai_common::backend::metal;
         use std::sync::OnceLock;
         static LOG: OnceLock<()> = OnceLock::new();
         let ns = format!("music3-{}", file.role.as_str());
@@ -1035,7 +1035,7 @@ pub fn gguf_ar_sample_forced(
     // Prefill's m=100..208 GEMMs leave ~1 GB of large recycled transients in
     // the pool; decode uses none of those sizes. Drop them at the phase edge
     // (pair-prefill runs showed decode slowing while they stayed retained).
-    makepad_ggml::backend::metal::transient_pool_clear();
+    makepad_ai_common::backend::metal::transient_pool_clear();
     // One up-front KV allocation per layer instead of Vec-doubling copies
     // of multi-MB caches mid-generation.
     let kv_row = MUSIC3_LM_KV_HEADS * MUSIC3_LM_HEAD_DIM;
@@ -1838,7 +1838,7 @@ pub fn gguf_generate(
     )?;
     drop(lm);
     drop(rvq);
-    makepad_ggml::backend::metal::ar_resident_clear();
+    makepad_ai_common::backend::metal::ar_resident_clear();
     pack.language_model.clear_byte_cache();
     pack.rvq.clear_byte_cache();
     let frames = music3_ar_frames(&hiddens);

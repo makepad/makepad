@@ -1,5 +1,5 @@
 //! Incremental UNet2p5D CUDA graph sections, built exclusively on the
-//! verified public `makepad_ggml::backend::cuda` ops. CUDA-only by decree:
+//! verified public `makepad_ai_common::backend::cuda` ops. CUDA-only by decree:
 //! no CPU/Metal path exists here. Each section lands together with a frozen
 //! host reference tap (see [`crate::numerical_fixtures`]) exercised by the
 //! `pbr-cuda-taps` canary on a supported CUDA host before the next section
@@ -10,11 +10,11 @@
 //! `rows = tokens, cols = hidden`.
 
 use crate::numerical_fixtures::ResnetSectionInputs;
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_conv2d_planar_cached, gpu_download, gpu_group_norm_planar,
     gpu_linear_nt_cached, gpu_silu, gpu_upload, GpuLinearPart, GpuTensor,
 };
-use makepad_ggml::quant::GGML_TYPE_F16;
+use makepad_ai_common::quant::GGML_TYPE_F16;
 
 pub const GROUP_NORM_EPS: f32 = 1e-5;
 

@@ -5,9 +5,9 @@ edition = "2021"
 description = "AI content generation service: wraps local GPU model runtimes (image/mesh/video/audio) behind an HTTP port, with on-demand HuggingFace model download"
 license = "MIT OR Apache-2.0"
 
-# Standalone workspace, same pattern as libs/diffusion: this crate pulls in
-# platform/network and (optionally) libs/diffusion which is its own workspace,
-# so it stays out of the root workspace member list.
+# Standalone workspace: this crate pulls in platform/network and the
+# per-family model crates under libs/ai, so it stays out of the root
+# workspace member list.
 [workspace]
 
 [features]
@@ -33,9 +33,8 @@ default = [
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native
 # service must not advertise or instantiate a Python runtime.
 python-backends = []
-# Real Flux image generation via libs/diffusion. Off by default so the service
-# scaffold builds/tests everywhere without the ggml/mlx toolchain.
-flux = ["dep:makepad-diffusion"]
+# Real Flux image generation via makepad-ai-flux.
+flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
 # The generative-PBR paint domain: mesh GLB + reference image -> PBR-textured
 # GLB + semantic maps + provenance manifest. Ships the deterministic
 # "paint-test" tier everywhere. Default also enables `paint-cuda`, so a
@@ -44,53 +43,33 @@ flux = ["dep:makepad-diffusion"]
 paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
 # Windows/Linux CUDA Hunyuan executor (in default).
 paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
-# Real LLM prompt expansion via libs/llama (Qwen3.5/3.6 family GGUF on
-# makepad-ggml). Off by default: the prompt assembly + artifact shaping in
-# llm_backend.rs compiles and tests everywhere with a stubbed generation fn.
+# Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]
-# Real Kokoro speech synthesis via libs/tts. Off by default: the WAV encoding
-# and request handling in kokoro_backend.rs test everywhere with a stub synth.
+# Real Kokoro speech synthesis via makepad-ai-speech.
 tts = ["dep:makepad-ai-speech"]
-# Real IndexTTS-2.5 character-voice TTS (voice cloning + 8-dim emotion
-# vector) via libs/diffusion (indextts_pipeline, CPU f32 today). Off by
-# default: reference-voice resolution, emotion validation and WAV shaping in
-# indextts_backend.rs compile and test everywhere with a stub synth.
-indextts = ["dep:makepad-diffusion"]
-# Real MiniMax H3 video generation via libs/diffusion (h3_pipeline on the
-# makepad-ggml CUDA stack) plus the hardware video file encoder
-# (makepad-video: Media Foundation / NVENC on Windows, VideoToolbox on
-# macOS) for the mp4 mux. Does NOT pull the UI platform crate.
-video = ["dep:makepad-diffusion", "dep:makepad-video"]
-# Real Stable Audio 3 Small SFX sound-effect generation via libs/diffusion
-# (sa3_pipeline: T5Gemma TE + 20-block DiT + SAME-S AE, CPU f32 today, CUDA
-# device path pending). Off by default: request handling and WAV encoding in
-# sa3_backend.rs compile and test everywhere with a stubbed generator.
-audio = ["dep:makepad-diffusion"]
-# Real TRELLIS.2 image->GLB mesh generation via libs/diffusion (trellis_*
-# on the makepad-ggml CUDA stack) plus the in-repo FaithC remesher
-# (libs/remesh) for optional retopo of the raw decode mesh. Off by default:
-# request handling, PNG input decode and artifact shaping in
-# trellis_backend.rs compile and test everywhere with a stubbed generator.
-mesh = ["matte-native", "depth-native", "dep:makepad-diffusion", "dep:makepad-remesh", "dep:makepad-gltf", "dep:makepad-xatlas"]
-# Native BiRefNet image matting through libs/diffusion on the Makepad CUDA
-# stack. This is separate from `mesh` so a matte-only service does not pull
-# the TRELLIS/remesh surface area.
-matte-native = ["dep:makepad-diffusion"]
-# Native DA3METRIC-LARGE metric depth through libs/diffusion on the Makepad
-# CUDA stack. Independent of `mesh` so a depth-only service does not pull
-# TRELLIS/remesh. `mesh` enables it so the existing fleet boxes serve both.
-depth-native = ["dep:makepad-diffusion"]
-# Native SAM 3.1 multiplex image segmentation through libs/diffusion.
-# Independent of `mesh` so a segment-only service does not pull TRELLIS.
-segment-native = ["dep:makepad-diffusion"]
-# Native HY-Motion decode -> rig retarget -> animated GLB. The heavyweight
-# prompt/DiT runtime remains optional; request/service code still builds on
-# machines that only route motion jobs to another box.
-motion-native = ["dep:makepad-diffusion", "dep:makepad-gltf", "dep:makepad-render"]
+# Real IndexTTS-2.5 character-voice TTS via makepad-ai-speech.
+indextts = ["dep:makepad-ai-speech", "dep:makepad-ai-common"]
+# Real MiniMax H3 video generation via makepad-ai-h3 plus the hardware
+# video file encoder (makepad-video). Does NOT pull the UI platform crate.
+video = ["dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-video"]
+# Real SA3 / MOSS / Woosh / ACE / Music3 audio via the sfx + music crates.
+audio = ["dep:makepad-ai-sfx", "dep:makepad-ai-music", "dep:makepad-ai-common"]
+# Real TRELLIS.2 image->GLB via makepad-ai-trellis plus the in-repo remesher.
+# Also needs H3's noise helper and BiRefNet (via matte-native).
+mesh = ["matte-native", "depth-native", "dep:makepad-ai-trellis", "dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-remesh", "dep:makepad-gltf", "dep:makepad-xatlas"]
+# Native BiRefNet image matting. Separate from `mesh` so a matte-only
+# service does not pull TRELLIS/remesh.
+matte-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+# Native DA3METRIC-LARGE metric depth. Independent of `mesh`.
+depth-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+# Native SAM 3.1 multiplex segmentation. Independent of `mesh`.
+segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+# Native HY-Motion decode -> rig retarget -> animated GLB.
+motion-native = ["dep:makepad-ai-motion", "dep:makepad-ai-common", "dep:makepad-gltf", "dep:makepad-render"]
 # Native SkinTokens checkpoint conversion, inference, surface transfer and
 # lossless skinned-GLB augmentation. The reference Torch/bpy backend remains
 # separately available as `rig-oracle` through `python-backends`.
-rig-native = ["dep:makepad-diffusion", "dep:makepad-gltf"]
+rig-native = ["dep:makepad-ai-rig", "dep:makepad-ai-common", "dep:makepad-gltf"]
 
 [dependencies]
 makepad-micro-serde = { path = "../../micro_serde" }
@@ -99,7 +78,15 @@ makepad-network = { path = "../../../platform/network" }
 makepad-zune-core = { path = "../../zune/zune-core" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zip-file = { path = "../../zip_file" }
-makepad-diffusion = { path = "../../diffusion", optional = true }
+makepad-ai-common = { path = "../../ai/models/common", optional = true }
+makepad-ai-flux = { path = "../../ai/models/flux", optional = true }
+makepad-ai-h3 = { path = "../../ai/models/h3", optional = true }
+makepad-ai-vision = { path = "../../ai/models/vision", optional = true }
+makepad-ai-rig = { path = "../../ai/models/rig", optional = true }
+makepad-ai-motion = { path = "../../ai/models/motion", optional = true }
+makepad-ai-sfx = { path = "../../ai/models/sfx", optional = true }
+makepad-ai-music = { path = "../../ai/models/music", optional = true }
+makepad-ai-trellis = { path = "../../ai/models/trellis", optional = true }
 makepad-ai-paint = { path = "../../ai/models/paint", optional = true }
 makepad-remesh = { path = "../../remesh", optional = true }
 makepad-gltf = { path = "../../gltf", optional = true }

@@ -5,15 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use makepad_ggml::{
-    backend::metal::{
-        prepare_graph, BufferStorageMode, MetalBuffer,
-        MetalContextBuffers, MetalGraphSession, MetalGraphTensorWrite, MetalRuntime,
-    },
-    bf16_to_f32, f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu, ggml_row_size_for_type,
-    BufferUsage, Context, Graph, InitParams, Prec, Tensor, TensorId, TensorLayout, TensorType,
-    GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
+use makepad_ai_cuda::quant::{bf16_to_f32, f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu};
+use makepad_ai_llm::metal_compiled::{
+    prepare_graph, MetalContextBuffers, MetalGraphSession, MetalGraphTensorWrite,
 };
+use makepad_ai_llm::{
+    ggml_row_size_for_type, BufferUsage, Context, Graph, InitParams, Prec, Tensor, TensorId,
+    TensorLayout, TensorType, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
+};
+use makepad_ai_metal::{BufferStorageMode, MetalBuffer, MetalRuntime};
 use makepad_ai_llm::{
     allocate_hybrid_shared_cache_tensors, build_delta_net_recurrent_decode_graph,
     build_hybrid_decode_graph_with_outputs, build_moe_ffn_graph, compile_attention_block_metal,
@@ -4256,7 +4256,7 @@ fn parse_preview_row(line: &str) -> Option<Vec<f32>> {
 
 fn tensor_preview_from_execution(
     ctx: &Context,
-    execution: &makepad_ggml::backend::metal::MetalGraphExecution,
+    execution: &makepad_ai_llm::metal_compiled::MetalGraphExecution,
     tensor_id: TensorId,
 ) -> Result<TensorPreview, Box<dyn std::error::Error>> {
     let tensor = ctx
@@ -4271,7 +4271,7 @@ fn tensor_preview_from_execution(
 
 fn tensor_values_from_execution_f32(
     ctx: &Context,
-    execution: &makepad_ggml::backend::metal::MetalGraphExecution,
+    execution: &makepad_ai_llm::metal_compiled::MetalGraphExecution,
     tensor_id: TensorId,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let tensor = ctx
@@ -4286,7 +4286,7 @@ fn tensor_values_from_execution_f32(
 
 fn tensor_values_from_execution_i32(
     ctx: &Context,
-    execution: &makepad_ggml::backend::metal::MetalGraphExecution,
+    execution: &makepad_ai_llm::metal_compiled::MetalGraphExecution,
     tensor_id: TensorId,
 ) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
     let tensor = ctx
@@ -9272,7 +9272,7 @@ fn token_slice<'a>(
 
 fn output_last_token_slice(
     ctx: &Context,
-    execution: &makepad_ggml::backend::metal::MetalGraphExecution,
+    execution: &makepad_ai_llm::metal_compiled::MetalGraphExecution,
     tensor_id: TensorId,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let values = bytes_to_f32s(

@@ -8,13 +8,13 @@ use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
 };
 use crate::error::AssetAiError;
-use makepad_diffusion::backend::gpu_device_available;
-use makepad_diffusion::flux2_pipeline::{
+use makepad_ai_common::backend::gpu_device_available;
+use makepad_ai_flux::flux2_pipeline::{
     flux2_dev_paths_from_root, flux2_klein_paths_from_root, Flux2DevPipeline, Flux2EditRequest,
     Flux2GenerateRequest, Flux2KleinPipeline, FLUX2_DEV_DEFAULT_GUIDANCE,
     FLUX2_DEV_DEFAULT_SIZE, FLUX2_DEV_DEFAULT_STEPS,
 };
-use makepad_diffusion::flux2_vae::flux2_image_from_rgb_u8;
+use makepad_ai_flux::flux2_vae::flux2_image_from_rgb_u8;
 use makepad_zune_core::options::DecoderOptions;
 use makepad_zune_png::PngDecoder;
 use std::io::BufReader;

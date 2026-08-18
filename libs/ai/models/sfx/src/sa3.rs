@@ -433,7 +433,7 @@ impl F16Weight {
         debug_assert_eq!(w.len(), n * k);
         let mut bytes = Vec::with_capacity(w.len() * 2);
         for &v in w {
-            bytes.extend_from_slice(&makepad_ggml::quant::f32_to_f16(v).to_le_bytes());
+            bytes.extend_from_slice(&makepad_ai_common::quant::f32_to_f16(v).to_le_bytes());
         }
         Self {
             n,
@@ -442,9 +442,9 @@ impl F16Weight {
         }
     }
 
-    pub fn part(&self) -> makepad_ggml::backend::cuda::GpuLinearPart<'_> {
-        makepad_ggml::backend::cuda::GpuLinearPart {
-            bt_ggml_type: makepad_ggml::quant::GGML_TYPE_F16,
+    pub fn part(&self) -> makepad_ai_common::backend::cuda::GpuLinearPart<'_> {
+        makepad_ai_common::backend::cuda::GpuLinearPart {
+            bt_ggml_type: makepad_ai_common::quant::GGML_TYPE_F16,
             n: self.n,
             cache_key: &self.key,
             bytes: &self.bytes,
@@ -458,7 +458,7 @@ pub fn sa3_device_enabled() -> bool {
     if std::env::var("SA3_DEVICE").map(|v| v == "0").unwrap_or(false) {
         return false;
     }
-    makepad_ggml::backend::cuda::gpu_device_available()
+    makepad_ai_common::backend::cuda::gpu_device_available()
 }
 
 #[cfg(test)]

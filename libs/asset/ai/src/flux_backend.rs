@@ -37,10 +37,10 @@
 use crate::backend::{CancelToken, ArtifactData, BackendCtx, ContentBackend, GenerateParams, ProgressSink};
 use crate::error::AssetAiError;
 use crate::registry::ModelSpec;
-use makepad_diffusion::comfy::{FluxGenerationConfig, FluxPrompts};
-use makepad_diffusion::flux::{ComfyModelRoots, FluxPromptToImagePlan, FluxResolvedBundle};
-use makepad_diffusion::flux_pipeline::encode_png_rgb;
-use makepad_diffusion::DiffusionError;
+use makepad_ai_flux::comfy::{FluxGenerationConfig, FluxPrompts};
+use makepad_ai_flux::flux::{ComfyModelRoots, FluxPromptToImagePlan, FluxResolvedBundle};
+use makepad_ai_flux::flux_pipeline::encode_png_rgb;
+use makepad_ai_common::DiffusionError;
 use std::path::PathBuf;
 
 pub struct FluxBackend {
@@ -78,7 +78,7 @@ struct ReadyFiles {
 /// explicitly (fail closed at the job, never a silent degrade).
 pub fn flux_fp8_provisioned() -> bool {
     static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PROBE.get_or_init(makepad_diffusion::backend::gpu_device_available)
+    *PROBE.get_or_init(makepad_ai_common::backend::gpu_device_available)
 }
 
 impl FluxBackend {
@@ -268,11 +268,11 @@ impl ContentBackend for FluxBackend {
 mod flux_worker {
     use crate::backend::{CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::flux::FluxPromptToImagePlan;
-    use makepad_diffusion::flux_pipeline::{
+    use makepad_ai_flux::flux::FluxPromptToImagePlan;
+    use makepad_ai_flux::flux_pipeline::{
         FluxPipeline, FluxPipelineGenerateRun, FluxRunHooks,
     };
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_common::DiffusionError;
     use std::sync::mpsc;
 
     /// One generation, fully resolved by the backend (paths in the plan,

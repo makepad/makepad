@@ -509,7 +509,7 @@ fn attention_full(
 // ---------------------------------------------------------------------------
 
 use crate::sa3::{dev_err, F16Weight};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_packed, gpu_attention_packed_cross, gpu_download,
     gpu_gated_residual_mod, gpu_gelu, gpu_layer_norm_mod, gpu_layer_norm_mul_add,
     gpu_linear_nt_cached, gpu_rms_norm_mul, gpu_rope_interleaved, gpu_slice_cols, gpu_upload,

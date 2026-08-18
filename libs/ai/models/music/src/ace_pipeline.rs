@@ -273,10 +273,10 @@ impl AcePipeline {
         };
         let cond_s = t_gen.elapsed().as_secs_f64();
         let t_after_cond = Instant::now();
-        if makepad_ggml::backend::prof::enabled() {
+        if makepad_ai_common::backend::prof::enabled() {
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("ace prof cond ")
+                makepad_ai_common::backend::prof::report_and_reset("ace prof cond ")
             );
         }
         emit_progress(progress, "condition", 0.15)?;
@@ -401,10 +401,10 @@ impl AcePipeline {
         }
 
         let denoise_s = t_after_cond.elapsed().as_secs_f64();
-        if makepad_ggml::backend::prof::enabled() {
+        if makepad_ai_common::backend::prof::enabled() {
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("ace prof denoise ")
+                makepad_ai_common::backend::prof::report_and_reset("ace prof denoise ")
             );
         }
         let forwards_per_step = if uncond.is_some() && std::env::var("ACE_BATCH_CFG").ok().as_deref() != Some("1")
@@ -432,10 +432,10 @@ impl AcePipeline {
             "ace timings cond={cond_s:.3}s denoise={denoise_s:.3}s vae={:.3}s",
             t_vae.elapsed().as_secs_f64()
         );
-        if makepad_ggml::backend::prof::enabled() {
+        if makepad_ai_common::backend::prof::enabled() {
             eprint!(
                 "{}",
-                makepad_ggml::backend::prof::report_and_reset("ace prof vae ")
+                makepad_ai_common::backend::prof::report_and_reset("ace prof vae ")
             );
         }
         let target = (seconds * ACE_SAMPLE_RATE as f64) as usize;

@@ -22,8 +22,9 @@ use makepad_ai_llm::{
     CudaExecRuntime, ExecBackendKind, ExecRuntime, LlamaModel, LlamaSession, LlamaSessionConfig,
 };
 use makepad_ai_llm::cuda_exec::{host_split_reset, host_split_snapshot};
-use makepad_ggml::{
-    quant, BufferUsage, Context, GluOp, Graph, InitParams, TensorId, TensorType, UnaryOp,
+use makepad_ai_cuda::quant;
+use makepad_ai_llm::{
+    BufferUsage, Context, GluOp, Graph, InitParams, TensorId, TensorType, UnaryOp,
     GGML_ROPE_TYPE_IMROPE,
 };
 
@@ -1964,7 +1965,7 @@ fn opcheck() -> i32 {
                 .expect("rms");
             let scaled = bench
                 .ctx
-                .binary_like_a(makepad_ggml::Op::Mul, norm, w, BufferUsage::Activations)
+                .binary_like_a(makepad_ai_llm::Op::Mul, norm, w, BufferUsage::Activations)
                 .expect("mul");
             let out = if with_add {
                 let a = bench.tensor(
@@ -1975,7 +1976,7 @@ fn opcheck() -> i32 {
                 );
                 bench
                     .ctx
-                    .binary_like_a(makepad_ggml::Op::Add, scaled, a, BufferUsage::Activations)
+                    .binary_like_a(makepad_ai_llm::Op::Add, scaled, a, BufferUsage::Activations)
                     .expect("add")
             } else {
                 scaled
@@ -2012,7 +2013,7 @@ fn opcheck() -> i32 {
                     .expect("rms");
                 let out = bench
                     .ctx
-                    .binary_like_a(makepad_ggml::Op::Mul, norm, w, BufferUsage::Activations)
+                    .binary_like_a(makepad_ai_llm::Op::Mul, norm, w, BufferUsage::Activations)
                     .expect("mul");
                 let _disable = ScopedEnv::set("MKLLM_DISABLE_RMS_FUSION", if fuse { "0" } else { "1" });
                 let outputs = bench.run(&exec, out, &[out]);
@@ -2126,7 +2127,7 @@ fn opcheck() -> i32 {
         let b = bench.tensor("b", TensorType::F32, &[ne0 as i64], &as_bytes_f32(&b_data));
         let out = bench
             .ctx
-            .binary_like_a(makepad_ggml::Op::Mul, a, b, BufferUsage::Activations)
+            .binary_like_a(makepad_ai_llm::Op::Mul, a, b, BufferUsage::Activations)
             .expect("mul");
         let outputs = bench.run(&exec, out, &[out]);
         let got = bytes_to_f32(&outputs[&out]);
@@ -2389,7 +2390,7 @@ fn opcheck() -> i32 {
             let u = bench.ctx.unary(x, op, BufferUsage::Activations).expect("unary");
             let out = bench
                 .ctx
-                .binary_like_a(makepad_ggml::Op::Mul, u, g, BufferUsage::Activations)
+                .binary_like_a(makepad_ai_llm::Op::Mul, u, g, BufferUsage::Activations)
                 .expect("mul");
             let outputs = bench.run(&exec, out, &[out]);
             let got = bytes_to_f32(&outputs[&out]);

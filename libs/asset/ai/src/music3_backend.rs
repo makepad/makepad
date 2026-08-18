@@ -115,7 +115,7 @@ fn music3_python() -> PathBuf {
 pub fn music3_provisioned() -> bool {
     #[cfg(feature = "audio")]
     {
-        if makepad_diffusion::backend::gpu_device_available() {
+        if makepad_ai_common::backend::gpu_device_available() {
             return true;
         }
     }
@@ -294,7 +294,7 @@ impl Music3Backend {
         #[cfg(feature = "audio")]
         {
             std::env::var("MAKEPAD_MUSIC3_FORCE_PYTHON").ok().as_deref() != Some("1")
-                && makepad_diffusion::backend::gpu_device_available()
+                && makepad_ai_common::backend::gpu_device_available()
         }
         #[cfg(not(feature = "audio"))]
         {
@@ -313,7 +313,7 @@ fn generate_native(
     progress: ProgressSink,
     cancel: &CancelToken,
 ) -> Result<Vec<ArtifactData>, AssetAiError> {
-    use makepad_diffusion::music3_pipeline::{
+    use makepad_ai_music::music3_pipeline::{
         music3_generate_with_progress, music3_planar_stereo, Music3Generate,
     };
     cancel.check()?;
@@ -334,7 +334,7 @@ fn generate_native(
         &|| cancel.is_cancelled(),
     )
     .map_err(|e| match e {
-        makepad_diffusion::DiffusionError::Cancelled => AssetAiError::Cancelled,
+        makepad_ai_common::DiffusionError::Cancelled => AssetAiError::Cancelled,
         other => AssetAiError::Backend(format!("music3 native: {other}")),
     })?;
     cancel.check()?;
@@ -344,7 +344,7 @@ fn generate_native(
     let bytes = crate::wav::encode_wav_pcm16_stereo(
         &left,
         &right,
-        makepad_diffusion::music3::MUSIC3_SAMPLE_RATE as u32,
+        makepad_ai_music::music3::MUSIC3_SAMPLE_RATE as u32,
     );
     progress("done", 1.0);
     Ok(vec![ArtifactData {

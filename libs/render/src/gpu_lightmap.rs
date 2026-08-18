@@ -82,6 +82,10 @@ pub enum GpuLightmapMode {
     /// for every receiver; every caster (characters included) renders into
     /// the cascades; the SDF quad tier draws nothing.
     Realtime,
+    /// No dynamic sun shadows. Cascades and SDF quads are both off;
+    /// `csm_vis` returns 1 and materials see full sun. Preview / debug
+    /// toggle — does not kick an OnChange atlas bake.
+    Off,
 }
 
 /// Device-local budget for the Realtime cascaded-shadow tier.
@@ -187,6 +191,10 @@ pub fn dynamic_shadow_tiers(mode: GpuLightmapMode) -> DynamicShadowTiers {
         GpuLightmapMode::Realtime => DynamicShadowTiers {
             sdf_quads: false,
             csm: true,
+        },
+        GpuLightmapMode::Off => DynamicShadowTiers {
+            sdf_quads: false,
+            csm: false,
         },
     }
 }
@@ -2061,6 +2069,8 @@ mod tests {
         assert!(on_change.sdf_quads && !on_change.csm);
         let realtime = dynamic_shadow_tiers(GpuLightmapMode::Realtime);
         assert!(!realtime.sdf_quads && realtime.csm);
+        let off = dynamic_shadow_tiers(GpuLightmapMode::Off);
+        assert!(!off.sdf_quads && !off.csm);
         for mode in [GpuLightmapMode::OnChange, GpuLightmapMode::Realtime] {
             let t = dynamic_shadow_tiers(mode);
             assert!(

@@ -6,11 +6,11 @@ use crate::backend::{
 use crate::flux::T5TextEncoderConfig;
 use crate::t5::T5TokenizedPrompt;
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
-use makepad_ggml::backend::{
+use makepad_ai_common::backend::{
     try_get_rows_ggml_bytes, try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes,
     try_matmul_nt_ggml_bytes_cached,
 };
-use makepad_ggml::{
+use makepad_ai_common::{
     bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, get_rows_ggml_bytes_cpu, ggml_pad, BufferUsage,
     Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
     UnaryOp, GGML_MEM_ALIGN, GGML_TYPE_F8_E4M3,
@@ -2346,7 +2346,7 @@ mod tests {
         T5_RELATIVE_ATTENTION_BIAS_NAME,
     };
     use crate::flux::T5TextEncoderConfig;
-    use makepad_ggml::TensorType;
+    use makepad_ai_common::TensorType;
     use makepad_ai_loader::{MlxDType, MlxTensorEntry};
     use std::collections::{BTreeMap, HashMap};
     use std::path::PathBuf;
@@ -2427,7 +2427,7 @@ mod tests {
     #[test]
     fn attention_bias_uses_relative_bias_without_padding_mask() {
         let weights = LoadedT5xxlWeights {
-            ctx: makepad_ggml::Context::new(makepad_ggml::InitParams {
+            ctx: makepad_ai_common::Context::new(makepad_ai_common::InitParams {
                 mem_size: 1024,
                 mem_buffer: None,
                 no_alloc: false,

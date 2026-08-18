@@ -217,18 +217,18 @@ pub fn seek_fraction(frac: f64) {
 /// line is "short" and auditions like an SFX.
 pub const ONE_SHOT_MAX_SPEECH_SECS: f64 = 30.0;
 
-/// One-shot audition policy for a freshly displayed audio artifact. SFX are
-/// one-shots by contract — they play once the moment they appear (generation
-/// accept and History click alike; the transport stays play-once, never a
-/// loop). Short speech lines audition the same way. Long-form audio — music
-/// tracks and long narration — loads paused instead, with the waveform
-/// scrub/playhead transport ready, so a multi-minute clip never blasts on a
-/// browse click.
+/// One-shot audition policy for a **freshly accepted** generated clip.
+/// History / Library reopen must not use this — `play()` at end-of-clip
+/// restarts, so a second display of a 200ms Quake/Doom shot is a loop.
+///
+/// Generated `audio` always auditions (the accept is the point). Short
+/// `speech` lines do too. Music, imported pack `sfx` (Quake water/wind,
+/// Doom DS_*), and everything else load paused; Play is explicit.
 pub fn autoplay_one_shot(domain: &str, seconds: f64) -> bool {
     match domain {
-        "music" => false,
+        "audio" => true,
         "speech" => seconds <= ONE_SHOT_MAX_SPEECH_SECS,
-        _ => true,
+        _ => false,
     }
 }
 
@@ -470,15 +470,18 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_policy_auditions_sfx_and_short_speech_but_never_music() {
-        // SFX-class audio (sa3/woosh/moss run under domain "audio") is a
-        // one-shot regardless of length.
+    fn one_shot_policy_auditions_generated_audio_and_short_speech_only() {
+        // Generated SFX (sa3/woosh/moss) run under domain "audio".
         assert!(autoplay_one_shot("audio", 1.5));
         assert!(autoplay_one_shot("audio", 45.0));
         // Speech lines audition when short; long narration loads paused.
         assert!(autoplay_one_shot("speech", 8.0));
         assert!(autoplay_one_shot("speech", ONE_SHOT_MAX_SPEECH_SECS));
         assert!(!autoplay_one_shot("speech", ONE_SHOT_MAX_SPEECH_SECS + 0.1));
+        // Imported pack shots (Quake/Doom DS_*) must never auto-blast —
+        // several are designed as ambients, and a History reopen would loop.
+        assert!(!autoplay_one_shot("sfx", 0.3));
+        assert!(!autoplay_one_shot("sfx", 8.0));
         // Music tracks never auto-blast — the scrub transport is the point.
         assert!(!autoplay_one_shot("music", 3.0));
         assert!(!autoplay_one_shot("music", 240.0));

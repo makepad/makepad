@@ -1,7 +1,7 @@
 use makepad_diffusion::comfy::FluxWorkflow;
 use makepad_diffusion::flux::{tokenize_flux_t5xxl_prompt, ComfyModelRoots, FluxPromptToImagePlan};
 use makepad_diffusion::t5_encoder::LoadedT5xxlWeights;
-use makepad_ggml::{bf16_to_f32, f16_to_f32, TensorType};
+use makepad_ai_common::{bf16_to_f32, f16_to_f32, TensorType};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -711,7 +711,7 @@ fn compare_stage_token0_vector(
 fn named_tensor<'a>(
     weights: &'a LoadedT5xxlWeights,
     name: &str,
-) -> Result<&'a makepad_ggml::Tensor, String> {
+) -> Result<&'a makepad_ai_common::Tensor, String> {
     let tensor_id = weights
         .tensor_ids
         .get(name)

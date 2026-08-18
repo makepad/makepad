@@ -25,7 +25,7 @@
 //! Blender reference takes 2.16 s including startup (252 ms export-only).
 //! Channel parity is below 9e-7 radians rotation and 1e-7 translation.
 
-use makepad_diffusion::hy_motion_decode::{
+use makepad_ai_motion::hy_motion_decode::{
     HyMotionDecoded, HY_MOTION_WOODEN_JOINTS,
 };
 use makepad_gltf::{

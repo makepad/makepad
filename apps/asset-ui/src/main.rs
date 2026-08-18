@@ -1550,9 +1550,29 @@ script_mod! {
                                         // (MeshView draws its own orbit/zoom hint.)
                                         View{
                                             width: Fill height: Fit flow: Right
+                                            align: Align{y: 0.5}
                                             padding: Inset{left: 10 right: 10 top: 4 bottom: 6}
+                                            spacing: 8
+                                            HintLabel{ text: "Scene" }
                                             View{ width: Fill height: Fit }
-                                            sample_mesh_btn := GhostButton{ text: "load sample mesh" }
+                                            shadows_toggle := CheckBox{
+                                                text: "Shadows"
+                                                active: true
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            dark_toggle := CheckBox{
+                                                text: "Dark"
+                                                active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
                                         }
                                     }
 
@@ -4523,7 +4543,7 @@ impl App {
         // strip/grid); returning to Create reopens it through the async
         // loading path (ViewerContent::needs_reopen).
         if show_in_viewer && self.surface == Surface::Create {
-            if self.display_artifact(cx, domain, content_type, &bytes, n, None) {
+            if self.display_artifact(cx, domain, content_type, &bytes, n, None, true) {
                 // An unpersisted display (library write failed) is
                 // TRANSIENT: not library-bound, so it must never trip the
                 // deleted-item viewer reset; the next open replaces it.
@@ -4579,6 +4599,10 @@ impl App {
         bytes: &[u8],
         n: u64,
         prewritten: Option<&std::path::Path>,
+        // True only for a freshly accepted generated clip. History / Library
+        // reopen must stay paused: `audio::play()` restarts at end-of-clip,
+        // so a second display of a short Quake/Doom shot is a speaker loop.
+        audition: bool,
     ) -> bool {
         let ct = content_type.to_ascii_lowercase();
         let is_glb = bytes.starts_with(b"glTF") || ct.contains("gltf");
@@ -4647,10 +4671,10 @@ impl App {
                         .image(cx, ids!(wave_img))
                         .set_texture(cx, Some(texture));
                     if audio::load(pcm.clone()) {
-                        // SFX/short-line one-shot audition: play once right
-                        // away; long-form audio stays paused with the scrub
-                        // transport armed (policy + rationale in audio.rs).
-                        if audio::autoplay_one_shot(domain, pcm.seconds()) {
+                        // Accept-path only. A gallery reopen of the same
+                        // WAV must not call play() or a 200ms DS_* / Quake
+                        // shot becomes a loop (play-at-end restarts).
+                        if audition && audio::autoplay_one_shot(domain, pcm.seconds()) {
                             crate::video_player::stop_audio();
                             audio::play();
                             self.arm_audio_pump(cx);
@@ -5263,6 +5287,7 @@ impl App {
                         &bytes,
                         0,
                         copy_to.as_deref(),
+                        false,
                     ) {
                         self.viewer = ViewerContent::Showing(file.clone());
                         self.set_caption(
@@ -7324,6 +7349,32 @@ impl App {
         }
     }
 
+    fn set_mesh_shadows(&mut self, cx: &mut Cx, on: bool) {
+        if let Some(mut mesh) = self
+            .ui
+            .widget(cx, ids!(mesh_view))
+            .borrow_mut::<MeshView>()
+        {
+            mesh.set_shadows_enabled(cx, on);
+        }
+        self.ui
+            .check_box(cx, ids!(shadows_toggle))
+            .set_active(cx, on, Animate::No);
+    }
+
+    fn set_mesh_dark(&mut self, cx: &mut Cx, on: bool) {
+        if let Some(mut mesh) = self
+            .ui
+            .widget(cx, ids!(mesh_view))
+            .borrow_mut::<MeshView>()
+        {
+            mesh.set_dark_enabled(cx, on);
+        }
+        self.ui
+            .check_box(cx, ids!(dark_toggle))
+            .set_active(cx, on, Animate::No);
+    }
+
     // -- samples (viewer smoke tests without live mesh/world backends) ---------
 
     fn load_sample_mesh(&mut self, cx: &mut Cx) {
@@ -7417,7 +7468,7 @@ impl App {
         });
         self.selected_file = managed.as_ref().map(|(file, _)| file.clone());
         self.set_caption(cx, "mesh", name);
-        if self.display_artifact(cx, "motion", "model/gltf-binary", &bytes, 0, None) {
+        if self.display_artifact(cx, "motion", "model/gltf-binary", &bytes, 0, None, false) {
             self.viewer = match &self.selected_file {
                 Some(file) => ViewerContent::Showing(file.clone()),
                 None => ViewerContent::Empty,
@@ -8194,8 +8245,11 @@ impl MatchEvent for App {
                 self.sync_audio_ui(cx);
             }
         }
-        if self.ui.button(cx, ids!(sample_mesh_btn)).clicked(actions) {
-            self.load_sample_mesh(cx);
+        if let Some(on) = self.ui.check_box(cx, ids!(shadows_toggle)).changed(actions) {
+            self.set_mesh_shadows(cx, on);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(dark_toggle)).changed(actions) {
+            self.set_mesh_dark(cx, on);
         }
         if self.ui.button(cx, ids!(sample_splat_btn)).clicked(actions) {
             self.load_sample_splat(cx);
@@ -8313,6 +8367,17 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if matches!(event, Event::DragEnd) {
             self.file_drag_active = false;
+        }
+        if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::F8 && !ke.is_repeat {
+                let on = self
+                    .ui
+                    .widget(cx, ids!(mesh_view))
+                    .borrow::<MeshView>()
+                    .map(|mesh| mesh.shadows_enabled())
+                    .unwrap_or(true);
+                self.set_mesh_shadows(cx, !on);
+            }
         }
         self.match_event(cx, event);
         if self.asset_store_timer.is_event(event).is_some() {

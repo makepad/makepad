@@ -32,25 +32,25 @@ use std::rc::Rc;
 struct AceFwdConsts {
     device_id: u64,
     rows: usize,
-    zeros: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
-    ones_tok: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
-    ones_row: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
-    idx: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
+    zeros: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
+    ones_tok: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
+    ones_row: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
+    idx: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
     rope_key: (usize, usize, bool),
     rope: Option<(
-        Rc<makepad_ggml::backend::cuda::GpuTensor>,
-        Rc<makepad_ggml::backend::cuda::GpuTensor>,
+        Rc<makepad_ai_common::backend::cuda::GpuTensor>,
+        Rc<makepad_ai_common::backend::cuda::GpuTensor>,
     )>,
-    sst: Vec<Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>>,
-    head_sst: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
-    w_out: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
+    sst: Vec<Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>>,
+    head_sst: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
+    w_out: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
     t_bits: (u32, u32),
-    mods: Vec<Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>>,
+    mods: Vec<Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>>,
     temb: Option<(
-        Rc<makepad_ggml::backend::cuda::GpuTensor>,
-        Rc<makepad_ggml::backend::cuda::GpuTensor>,
+        Rc<makepad_ai_common::backend::cuda::GpuTensor>,
+        Rc<makepad_ai_common::backend::cuda::GpuTensor>,
     )>,
-    head_g: Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
+    head_g: Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
 }
 
 thread_local! {
@@ -82,12 +82,12 @@ fn ace_fwd_prepare(device_id: u64, rows: usize, layers: usize, t_key: (u32, u32)
     });
 }
 
-fn ace_fwd_slot<F, M>(pick: F, make: M) -> Result<Rc<makepad_ggml::backend::cuda::GpuTensor>>
+fn ace_fwd_slot<F, M>(pick: F, make: M) -> Result<Rc<makepad_ai_common::backend::cuda::GpuTensor>>
 where
     F: for<'a> FnOnce(
         &'a mut AceFwdConsts,
-    ) -> &'a mut Option<Rc<makepad_ggml::backend::cuda::GpuTensor>>,
-    M: FnOnce() -> Result<makepad_ggml::backend::cuda::GpuTensor>,
+    ) -> &'a mut Option<Rc<makepad_ai_common::backend::cuda::GpuTensor>>,
+    M: FnOnce() -> Result<makepad_ai_common::backend::cuda::GpuTensor>,
 {
     ACE_FWD_CONSTS.with(|cell| {
         let mut c = cell.borrow_mut();
@@ -104,13 +104,13 @@ where
 fn ace_fwd_temb<M>(
     make: M,
 ) -> Result<(
-    Rc<makepad_ggml::backend::cuda::GpuTensor>,
-    Rc<makepad_ggml::backend::cuda::GpuTensor>,
+    Rc<makepad_ai_common::backend::cuda::GpuTensor>,
+    Rc<makepad_ai_common::backend::cuda::GpuTensor>,
 )>
 where
     M: FnOnce() -> Result<(
-        makepad_ggml::backend::cuda::GpuTensor,
-        makepad_ggml::backend::cuda::GpuTensor,
+        makepad_ai_common::backend::cuda::GpuTensor,
+        makepad_ai_common::backend::cuda::GpuTensor,
     )>,
 {
     ACE_FWD_CONSTS.with(|cell| {
@@ -132,11 +132,11 @@ fn ace_fwd_rope(
     rows: usize,
     half: usize,
 ) -> Result<(
-    Rc<makepad_ggml::backend::cuda::GpuTensor>,
-    Rc<makepad_ggml::backend::cuda::GpuTensor>,
+    Rc<makepad_ai_common::backend::cuda::GpuTensor>,
+    Rc<makepad_ai_common::backend::cuda::GpuTensor>,
 )> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::gpu_upload;
+    use makepad_ai_common::backend::cuda::gpu_upload;
     ACE_FWD_CONSTS.with(|cell| {
         let mut c = cell.borrow_mut();
         let key = (tokens, batch, rope_f32);
@@ -392,7 +392,7 @@ fn cond_gqa_attn_dev(
     window: Option<usize>,
 ) -> Result<Vec<f32>> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_attention_packed, gpu_download, gpu_gather_cols, gpu_rms_norm_mul, gpu_rope_half,
         gpu_upload,
     };
@@ -701,7 +701,7 @@ impl AceConditionEncoder {
         refer_frames: usize,
     ) -> Result<AceConditioning> {
         use makepad_ai_sfx::sa3::dev_err;
-        use makepad_ggml::backend::cuda::{
+        use makepad_ai_common::backend::cuda::{
             gpu_add, gpu_attention_packed_composite_bf16, gpu_attention_packed_sliding_bf16,
             gpu_bf16_round, gpu_download, gpu_linear_nt_cached_bf16_bias_epilogue,
             gpu_linear_nt_cached_bf16_mm, gpu_mul, gpu_rope_half, gpu_silu, gpu_upload,
@@ -714,10 +714,10 @@ impl AceConditionEncoder {
         let group = q_heads / kv_heads.max(1);
         let scale = 1.0 / (hd as f32).sqrt();
         let half = hd / 2;
-        let lin = |x: &makepad_ggml::backend::cuda::GpuTensor, w: &Bf16Weight| {
+        let lin = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight| {
             gpu_linear_nt_cached_bf16_mm(x, "acecond", &[w.part()])
         };
-        let lin_b = |x: &makepad_ggml::backend::cuda::GpuTensor, w: &Bf16Weight, bias: &[f32]| {
+        let lin_b = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight, bias: &[f32]| {
             gpu_linear_nt_cached_bf16_bias_epilogue(x, "acecond", &[w.part()], bias)
         };
 
@@ -775,7 +775,7 @@ impl AceConditionEncoder {
 }
 
 fn cond_enc_layer_dev(
-    x: &makepad_ggml::backend::cuda::GpuTensor,
+    x: &makepad_ai_common::backend::cuda::GpuTensor,
     layer: &EncLayer,
     devb: &EncDevLayer,
     seq: usize,
@@ -787,16 +787,16 @@ fn cond_enc_layer_dev(
     group: usize,
     scale: f32,
     half: usize,
-    rope_cos: &makepad_ggml::backend::cuda::GpuTensor,
-    rope_sin: &makepad_ggml::backend::cuda::GpuTensor,
+    rope_cos: &makepad_ai_common::backend::cuda::GpuTensor,
+    rope_sin: &makepad_ai_common::backend::cuda::GpuTensor,
     idx: usize,
     lin: impl Fn(
-        &makepad_ggml::backend::cuda::GpuTensor,
+        &makepad_ai_common::backend::cuda::GpuTensor,
         &Bf16Weight,
-    ) -> std::result::Result<makepad_ggml::backend::cuda::GpuTensor, String>,
-) -> Result<makepad_ggml::backend::cuda::GpuTensor> {
+    ) -> std::result::Result<makepad_ai_common::backend::cuda::GpuTensor, String>,
+) -> Result<makepad_ai_common::backend::cuda::GpuTensor> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_add, gpu_attention_packed_composite_bf16, gpu_attention_packed_sliding_bf16,
         gpu_bf16_round, gpu_mul, gpu_rope_half, gpu_silu,
     };
@@ -889,11 +889,11 @@ fn apply_time_embed_dev(
     dev: &TimeEmbedDev,
     t: f32,
 ) -> Result<(
-    makepad_ggml::backend::cuda::GpuTensor,
-    makepad_ggml::backend::cuda::GpuTensor,
+    makepad_ai_common::backend::cuda::GpuTensor,
+    makepad_ai_common::backend::cuda::GpuTensor,
 )> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_bf16_round, gpu_linear_nt_cached_bf16_bias_epilogue, gpu_silu, gpu_upload,
     };
     let freq = ace_time_sinusoid(t);
@@ -1067,14 +1067,14 @@ fn load_npy_f32(path: &Path) -> Result<Vec<f32>> {
 }
 
 fn ace_rms_two_store(
-    x: &makepad_ggml::backend::cuda::GpuTensor,
+    x: &makepad_ai_common::backend::cuda::GpuTensor,
     weight: &[f32],
     group_cols: usize,
     cache_key: &str,
     eps: f32,
-) -> Result<makepad_ggml::backend::cuda::GpuTensor> {
+) -> Result<makepad_ai_common::backend::cuda::GpuTensor> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_bf16_round, gpu_gated_residual, gpu_rms_norm_mul, gpu_rms_norm_mul_round_bf16,
         gpu_upload,
     };
@@ -1112,17 +1112,17 @@ fn ace_rms_two_store(
 /// `round(product) + 0.0`), the shift add as `fmaf(shift, 1.0, scaled)`
 /// (`shift * 1.0` is exact, single rounding of the sum either way).
 fn ace_adaln_stores(
-    normed: &makepad_ggml::backend::cuda::GpuTensor,
-    mods: &makepad_ggml::backend::cuda::GpuTensor,
+    normed: &makepad_ai_common::backend::cuda::GpuTensor,
+    mods: &makepad_ai_common::backend::cuda::GpuTensor,
     scale_off: usize,
     shift_off: usize,
     dim: usize,
-    zeros: &makepad_ggml::backend::cuda::GpuTensor,
-    ones_tok: &makepad_ggml::backend::cuda::GpuTensor,
-    ones_row: &makepad_ggml::backend::cuda::GpuTensor,
-) -> Result<makepad_ggml::backend::cuda::GpuTensor> {
+    zeros: &makepad_ai_common::backend::cuda::GpuTensor,
+    ones_tok: &makepad_ai_common::backend::cuda::GpuTensor,
+    ones_row: &makepad_ai_common::backend::cuda::GpuTensor,
+) -> Result<makepad_ai_common::backend::cuda::GpuTensor> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_adaln_mod, gpu_add, gpu_bf16_round, gpu_gated_residual_mod, gpu_slice_cols,
     };
     if !ace_env_flag("ACE_ADALN_TWO") && ace_fuse_on("ACE_FUSE_NO_ADALN") {
@@ -1665,7 +1665,7 @@ impl AceDit {
         encoder: &AceConditioning,
     ) -> Result<AceCrossKvCache> {
         use makepad_ai_sfx::sa3::dev_err;
-        use makepad_ggml::backend::cuda::{
+        use makepad_ai_common::backend::cuda::{
             gpu_bf16_round, gpu_linear_nt_cached_bf16_bias_epilogue, gpu_upload,
         };
         let q_heads = ACE_DIT_HEADS;
@@ -1772,7 +1772,7 @@ impl AceDit {
         cross_kv: Option<&AceCrossKvCache>,
     ) -> Result<Vec<f32>> {
         use makepad_ai_sfx::sa3::dev_err;
-        use makepad_ggml::backend::cuda::{
+        use makepad_ai_common::backend::cuda::{
             gpu_add, gpu_add_bf16, gpu_attention_packed_composite_bf16,
             gpu_attention_packed_cross_composite_bf16, gpu_attention_packed_f32,
             gpu_attention_packed_fa2_bf16, gpu_attention_packed_sliding,
@@ -1784,10 +1784,10 @@ impl AceDit {
             gpu_rope_half_round_bf16, gpu_silu, gpu_silu_round_mul_round_bf16,
             gpu_slice_cols, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32,
         };
-        let lin = |x: &makepad_ggml::backend::cuda::GpuTensor, w: &Bf16Weight| {
+        let lin = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight| {
             gpu_linear_nt_cached_bf16_mm(x, "acedit", &[w.part()])
         };
-        let lin_b = |x: &makepad_ggml::backend::cuda::GpuTensor, w: &Bf16Weight, bias: &[f32]| {
+        let lin_b = |x: &makepad_ai_common::backend::cuda::GpuTensor, w: &Bf16Weight, bias: &[f32]| {
             gpu_linear_nt_cached_bf16_bias_epilogue(x, "acedit", &[w.part()], bias)
         };
         let dump_dir = hook_dump_take();
@@ -1822,21 +1822,21 @@ impl AceDit {
         let zeros_tok = ace_fwd_slot(
             |c| &mut c.zeros,
             || {
-                makepad_ggml::backend::cuda::gpu_upload(&vec![0f32; rows * d], rows, d)
+                makepad_ai_common::backend::cuda::gpu_upload(&vec![0f32; rows * d], rows, d)
                     .map_err(|e| dev_err("ace dit zeros", e))
             },
         )?;
         let ones_tok = ace_fwd_slot(
             |c| &mut c.ones_tok,
             || {
-                makepad_ggml::backend::cuda::gpu_upload(&vec![1.0f32; rows * d], rows, d)
+                makepad_ai_common::backend::cuda::gpu_upload(&vec![1.0f32; rows * d], rows, d)
                     .map_err(|e| dev_err("ace dit ones", e))
             },
         )?;
         let ones_row = ace_fwd_slot(
             |c| &mut c.ones_row,
             || {
-                makepad_ggml::backend::cuda::gpu_upload(&vec![1.0f32; d], 1, d)
+                makepad_ai_common::backend::cuda::gpu_upload(&vec![1.0f32; d], 1, d)
                     .map_err(|e| dev_err("ace dit ones row", e))
             },
         )?;
@@ -2445,9 +2445,9 @@ impl Bf16Weight {
         }
     }
 
-    fn part(&self) -> makepad_ggml::backend::cuda::GpuLinearPart<'_> {
-        makepad_ggml::backend::cuda::GpuLinearPart {
-            bt_ggml_type: makepad_ggml::quant::GGML_TYPE_BF16,
+    fn part(&self) -> makepad_ai_common::backend::cuda::GpuLinearPart<'_> {
+        makepad_ai_common::backend::cuda::GpuLinearPart {
+            bt_ggml_type: makepad_ai_common::quant::GGML_TYPE_BF16,
             n: self.n,
             cache_key: &self.key,
             bytes: &self.bytes,
@@ -2527,14 +2527,14 @@ pub struct AceDitDevice {
 /// Per-layer expanded cross-attn K/V. Encoder-only; reuse across denoise steps.
 pub struct AceCrossKvCache {
     layers: Vec<(
-        makepad_ggml::backend::cuda::GpuTensor,
-        makepad_ggml::backend::cuda::GpuTensor,
+        makepad_ai_common::backend::cuda::GpuTensor,
+        makepad_ai_common::backend::cuda::GpuTensor,
     )>,
     enc_tokens: usize,
 }
 
 fn ace_layer_cross_kv(
-    enc: &makepad_ggml::backend::cuda::GpuTensor,
+    enc: &makepad_ai_common::backend::cuda::GpuTensor,
     block: &DitBlock,
     devb: &DitDevBlock,
     bi: usize,
@@ -2543,11 +2543,11 @@ fn ace_layer_cross_kv(
     hd: usize,
     group: usize,
 ) -> Result<(
-    makepad_ggml::backend::cuda::GpuTensor,
-    makepad_ggml::backend::cuda::GpuTensor,
+    makepad_ai_common::backend::cuda::GpuTensor,
+    makepad_ai_common::backend::cuda::GpuTensor,
 )> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::gpu_linear_nt_cached_bf16_mm;
+    use makepad_ai_common::backend::cuda::gpu_linear_nt_cached_bf16_mm;
     let ck = gpu_linear_nt_cached_bf16_mm(enc, "acedit", &[devb.cross_k.part()])
         .map_err(|e| dev_err("ace kv ck", e))?;
     let cv = gpu_linear_nt_cached_bf16_mm(enc, "acedit", &[devb.cross_v.part()])
@@ -2557,15 +2557,15 @@ fn ace_layer_cross_kv(
 }
 
 fn expand_gqa_dev(
-    k: makepad_ggml::backend::cuda::GpuTensor,
-    v: makepad_ggml::backend::cuda::GpuTensor,
+    k: makepad_ai_common::backend::cuda::GpuTensor,
+    v: makepad_ai_common::backend::cuda::GpuTensor,
     q_heads: usize,
     kv_heads: usize,
     hd: usize,
     group: usize,
-) -> Result<(makepad_ggml::backend::cuda::GpuTensor, makepad_ggml::backend::cuda::GpuTensor)> {
+) -> Result<(makepad_ai_common::backend::cuda::GpuTensor, makepad_ai_common::backend::cuda::GpuTensor)> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::gpu_gather_cols;
+    use makepad_ai_common::backend::cuda::gpu_gather_cols;
     if group <= 1 {
         return Ok((k, v));
     }
@@ -2584,16 +2584,16 @@ fn expand_gqa_dev(
 }
 
 fn ace_self_attn_dev(
-    q: &makepad_ggml::backend::cuda::GpuTensor,
-    k: &makepad_ggml::backend::cuda::GpuTensor,
-    v: &makepad_ggml::backend::cuda::GpuTensor,
+    q: &makepad_ai_common::backend::cuda::GpuTensor,
+    k: &makepad_ai_common::backend::cuda::GpuTensor,
+    v: &makepad_ai_common::backend::cuda::GpuTensor,
     heads: usize,
     scale: f32,
     tokens: usize,
     sliding: bool,
-) -> Result<makepad_ggml::backend::cuda::GpuTensor> {
+) -> Result<makepad_ai_common::backend::cuda::GpuTensor> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_attention_packed_composite_bf16, gpu_attention_packed_f32,
         gpu_attention_packed_sliding, gpu_attention_packed_sliding_bf16, gpu_concat_rows,
         gpu_slice_rows,
@@ -2634,16 +2634,16 @@ fn ace_self_attn_dev(
 }
 
 fn ace_cross_attn_dev(
-    q: &makepad_ggml::backend::cuda::GpuTensor,
-    k: &makepad_ggml::backend::cuda::GpuTensor,
-    v: &makepad_ggml::backend::cuda::GpuTensor,
+    q: &makepad_ai_common::backend::cuda::GpuTensor,
+    k: &makepad_ai_common::backend::cuda::GpuTensor,
+    v: &makepad_ai_common::backend::cuda::GpuTensor,
     heads: usize,
     scale: f32,
     q_tokens: usize,
     kv_tokens: usize,
-) -> Result<makepad_ggml::backend::cuda::GpuTensor> {
+) -> Result<makepad_ai_common::backend::cuda::GpuTensor> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_attention_packed_cross_composite_bf16, gpu_attention_packed_f32, gpu_concat_rows,
         gpu_slice_rows,
     };
@@ -2675,15 +2675,15 @@ fn ace_cross_attn_dev(
 }
 
 fn sliding_attn_dev(
-    q: &makepad_ggml::backend::cuda::GpuTensor,
-    k: &makepad_ggml::backend::cuda::GpuTensor,
-    v: &makepad_ggml::backend::cuda::GpuTensor,
+    q: &makepad_ai_common::backend::cuda::GpuTensor,
+    k: &makepad_ai_common::backend::cuda::GpuTensor,
+    v: &makepad_ai_common::backend::cuda::GpuTensor,
     heads: usize,
     scale: f32,
     window: usize,
-) -> Result<makepad_ggml::backend::cuda::GpuTensor> {
+) -> Result<makepad_ai_common::backend::cuda::GpuTensor> {
     use makepad_ai_sfx::sa3::dev_err;
-    use makepad_ggml::backend::cuda::{
+    use makepad_ai_common::backend::cuda::{
         gpu_attention_packed, gpu_attention_packed_cross, gpu_concat_rows, gpu_slice_rows,
         GpuTensor,
     };

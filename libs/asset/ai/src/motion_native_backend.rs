@@ -16,12 +16,12 @@ use crate::motion_retarget::{
     classify_humanoid_branches, retarget_hy_motion_glb_with_report, HyMotionClipRef,
     RetargetOptions,
 };
-use makepad_diffusion::hy_motion_pipeline::{
+use makepad_ai_motion::hy_motion_pipeline::{
     HyMotionGenerateParams, HyMotionModelPaths, HyMotionPipeline, HyMotionRunControl,
 };
-use makepad_diffusion::hy_motion::{HY_MOTION_BODY_JOINTS, HY_MOTION_CFG};
-use makepad_diffusion::hy_motion_decode::HyMotionDecoded;
-use makepad_diffusion::DiffusionError;
+use makepad_ai_motion::hy_motion::{HY_MOTION_BODY_JOINTS, HY_MOTION_CFG};
+use makepad_ai_motion::hy_motion_decode::HyMotionDecoded;
+use makepad_ai_common::DiffusionError;
 use makepad_gltf::parse_glb_bytes;
 use makepad_render::skin::SkinnedModel;
 use makepad_micro_serde::JsonValue;
@@ -1186,7 +1186,7 @@ impl MotionWorker {
                     .evict_conditioner_device_weights()
                     .map_err(diffusion_error);
                 drop(pipeline);
-                makepad_diffusion::backend::gpu_pool_clear();
+                makepad_ai_common::backend::gpu_pool_clear();
                 if let Some(events) = shutdown_reply {
                     let result = conditioner_evict.map(|_| Vec::new());
                     let _ = events.send(WorkerEvent::Done(result));
@@ -1471,7 +1471,7 @@ mod tests {
 
     #[test]
     fn dance_recipe_is_appended_finite_and_short() {
-        use makepad_diffusion::hy_motion::{
+        use makepad_ai_motion::hy_motion::{
             HY_MOTION_FPS, HY_MOTION_MAX_FRAMES, HY_MOTION_MIN_FRAMES,
         };
         // Append-only: the locomotion clips keep their indices, so their

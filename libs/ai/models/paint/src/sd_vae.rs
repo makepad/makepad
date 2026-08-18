@@ -6,7 +6,7 @@
 
 use crate::cuda_unet::Planar;
 use crate::torch_bin::{self, TensorRecord, TorchDtype};
-use makepad_ggml::backend::cuda::{
+use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached, gpu_conv2d_planar_strided,
     gpu_device_available, gpu_download, gpu_group_norm_planar, gpu_silu, gpu_upload,
     gpu_upsample_nearest2x, GpuTensor,

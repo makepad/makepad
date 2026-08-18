@@ -9,10 +9,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::context::Context;
-use crate::quant::{self, f32_to_f16, get_rows_ggml_bytes_cpu};
+use makepad_ai_cuda::quant::{self, f32_to_f16, get_rows_ggml_bytes_cpu};
 use crate::tensor::{Tensor, TensorType};
 
-use super::{
+use makepad_ai_metal::{
     BufferStorageMode, MetalBuffer, MetalBufferBindingRef, MetalPipeline, MetalPipelineDescriptor,
     MetalRuntime, MetalSize,
 };

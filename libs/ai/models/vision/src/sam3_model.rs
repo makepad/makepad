@@ -32,7 +32,7 @@ use crate::sam3::{
     SAM3_VISION_DIM, SAM3_VISION_HEADS, SAM3_VISION_MLP, SAM3_VISION_WINDOW,
 };
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::collections::HashMap;
 
 const VISION_HEAD_DIM: usize = SAM3_VISION_DIM / SAM3_VISION_HEADS;
@@ -55,10 +55,10 @@ fn tap_dir() -> Option<std::path::PathBuf> {
 /// MAKEPAD_GPU_PROF=1 per-phase op-category attribution (profiling inserts
 /// stream syncs, so only trust the categories, not the totals).
 fn prof_phase(tag: &str) {
-    if makepad_ggml::backend::prof::enabled() {
+    if makepad_ai_common::backend::prof::enabled() {
         eprint!(
             "{}",
-            makepad_ggml::backend::prof::report_and_reset(&format!("sam3 prof {tag} "))
+            makepad_ai_common::backend::prof::report_and_reset(&format!("sam3 prof {tag} "))
         );
     }
 }

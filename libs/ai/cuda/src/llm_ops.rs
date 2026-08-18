@@ -7,7 +7,7 @@
 //! logic only in `makepad-llama`.
 //!
 //! C symbols stay `mkllm_*` this step. A later rename can be
-//! `mkllm_*` → `makepad_ggml_cuda_*` without changing this Rust surface.
+//! `mkllm_*` → `makepad_cuda_*` without changing this Rust surface.
 
 use std::ffi::c_void;
 
@@ -61,7 +61,7 @@ pub type CudaError = i32;
 
 /// True when makepad-ai-cuda's build compiled `kernels/llm/kernels.cu`.
 pub const CUDA_KERNELS: bool =
-    cfg!(all(any(target_os = "linux", target_os = "windows"), makepad_ggml_cuda_kernels));
+    cfg!(all(any(target_os = "linux", target_os = "windows"), makepad_cuda_kernels));
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod ffi {

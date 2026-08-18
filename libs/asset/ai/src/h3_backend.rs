@@ -638,12 +638,12 @@ mod h3_gen {
     use super::{stage_from_phase, VideoClip, VideoJob};
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::h3_pipeline::{
+    use makepad_ai_h3::h3_pipeline::{
         h3_generate_with_control, H3CondCache, H3ComponentFile, H3GenerateParams, H3KeyframeInput,
         H3ModelSet, H3RunControl, H3WeightFormat,
     };
-    use makepad_diffusion::h3_tokenizer::H3Tokenizer;
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_h3::h3_tokenizer::H3Tokenizer;
+    use makepad_ai_common::DiffusionError;
     use std::path::PathBuf;
 
     pub struct H3Gen {
@@ -800,7 +800,7 @@ mod h3_gen {
 
         fn release_runtime(&mut self) -> Result<usize, AssetAiError> {
             self.runtime.release_with(|prefixes| {
-                makepad_diffusion::backend::release_gpu_runtime_namespaces(prefixes)
+                makepad_ai_common::backend::release_gpu_runtime_namespaces(prefixes)
                     .map_err(|error| AssetAiError::Backend(format!("h3 unload: {error}")))
             })
         }

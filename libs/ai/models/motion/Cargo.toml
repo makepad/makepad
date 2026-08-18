@@ -8,7 +8,6 @@ license = "MIT"
 [dependencies]
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
-makepad-ggml = { path = "../../../ggml", features = ["metal-precompile"] }
 makepad-micro-serde = { path = "../../../micro_serde" }
 makepad-ai-h3 = { path = "../h3" }
 makepad-ai-flux = { path = "../flux" }

@@ -40,6 +40,8 @@ pub struct PreviewStage {
     pub sky: bool,
     pub ground_half: f32,
     pub ground_color: Vec4f,
+    /// Near-black ground + night sky + dim sun. Independent of CSM.
+    pub dark: bool,
 }
 
 impl PreviewStage {
@@ -47,8 +49,10 @@ impl PreviewStage {
         Self {
             ground: true,
             sky: true,
-            ground_half: 8.0,
+            // Wide enough that a walk-map still sees a horizon plane.
+            ground_half: 256.0,
             ground_color: vec4(0.32, 0.38, 0.34, 1.0),
+            dark: false,
         }
     }
 
@@ -58,6 +62,7 @@ impl PreviewStage {
             sky: false,
             ground_half: 8.0,
             ground_color: vec4(0.0, 0.0, 0.0, 1.0),
+            dark: false,
         }
     }
 }
@@ -91,12 +96,17 @@ pub fn preview_scene_state(look: PreviewLook, rect: Rect, time: f64) -> Option<S
 fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
     let mut world = GameWorld::new();
     if stage.ground {
+        let ground_color = if stage.dark {
+            vec4(0.025, 0.028, 0.032, 1.0)
+        } else {
+            stage.ground_color
+        };
         world.entities = vec![Entity {
             id: 1,
             kind: BodyKind::Static,
             pos: vec3f(0.0, -0.25, 0.0),
             half: vec3f(stage.ground_half, 0.25, stage.ground_half),
-            color: stage.ground_color,
+            color: ground_color,
             collide: true,
             scale: vec3f(1.0, 1.0, 1.0),
             scale_target: vec3f(1.0, 1.0, 1.0),
@@ -106,7 +116,24 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
     } else {
         world.entities.clear();
     }
-    world.sky = stage.sky.then(SkyConfig::default);
+    world.sky = if !stage.sky {
+        None
+    } else if stage.dark {
+        Some(SkyConfig {
+            top: vec4(0.008, 0.01, 0.02, 1.0),
+            horizon: vec4(0.03, 0.035, 0.05, 1.0),
+            ground: vec4(0.02, 0.022, 0.025, 1.0),
+            ground_bottom: vec4(0.01, 0.011, 0.013, 1.0),
+            fog: 0.01,
+        })
+    } else {
+        Some(SkyConfig::default())
+    };
+    if stage.dark {
+        world.sun.color = Some(vec3f(0.05, 0.055, 0.07));
+        world.sun.ambient = Some(vec3f(0.035, 0.035, 0.04));
+        world.sun.shadow_alpha = Some(0.85);
+    }
     world.terrain = None;
     world.cam_target = look.target;
     world.cam_distance = look.distance;

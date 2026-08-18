@@ -20,7 +20,7 @@
 //! ggml's static lib. Elsewhere this module type-checks and fails
 //! closed at runtime.
 
-use makepad_ggml::Context;
+use crate::Context;
 
 use crate::error::Result;
 use crate::runtime::{
@@ -164,11 +164,11 @@ impl CudaExecRuntime {
     pub fn execute_raw_graph(
         &self,
         ctx: &Context,
-        graph: &makepad_ggml::Graph,
-        pinned: &[makepad_ggml::TensorId],
-        writes: &[(makepad_ggml::TensorId, Vec<u8>)],
-        wanted: &[makepad_ggml::TensorId],
-    ) -> Result<std::collections::BTreeMap<makepad_ggml::TensorId, Vec<u8>>> {
+        graph: &crate::Graph,
+        pinned: &[crate::TensorId],
+        writes: &[(crate::TensorId, Vec<u8>)],
+        wanted: &[crate::TensorId],
+    ) -> Result<std::collections::BTreeMap<crate::TensorId, Vec<u8>>> {
         self.imp.execute_raw_graph(ctx, graph, pinned, writes, wanted)
     }
 }

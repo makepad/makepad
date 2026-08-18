@@ -1,8 +1,20 @@
 use crate::{DiffusionError, Result};
-use makepad_ggml::backend::metal::{self as backend_impl, MetalGraphSession, MetalPreparedGraph};
-use makepad_ggml::{Context, Graph};
+use makepad_ai_llm::metal_compiled::{self as backend_impl, MetalGraphSession, MetalPreparedGraph};
+use makepad_ai_llm::{Context, Graph};
 
-pub use makepad_ggml::backend::metal::{
+pub use crate::accel::*;
+pub use crate::gpu as cuda;
+pub use makepad_ai_cuda::llm_ops;
+pub use makepad_ai_cuda::prof;
+pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
+
+pub mod metal {
+    pub use makepad_ai_llm::metal_compiled::*;
+    pub use makepad_ai_llm::metal_qmm::{affine_qmm_enabled, bench_steel_isolated, SteelBenchResult};
+    pub use makepad_ai_metal::*;
+}
+
+pub use metal::{
     try_add_f32, try_attention_softmax_weighted_sum_f32, try_conv2d_planar_f32,
     try_flash_attn_f32_packed, try_gelu_f32, try_group_norm_planar_f32,
     try_layer_norm_mul_add_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_mul_f32,
@@ -10,10 +22,10 @@ pub use makepad_ggml::backend::metal::{
     MetalGraphTensorWrite as GraphTensorWrite, MetalRuntime as Runtime,
 };
 
-/// Device-resident tensor API (CUDA today; stubbed elsewhere). Activations
-/// stay on the GPU across a whole transformer step — see the flux device
-/// path in flux_transformer.rs.
-pub use makepad_ggml::backend::cuda::{
+/// Device-resident tensor API (CUDA today; Metal-backed stub elsewhere).
+/// Activations stay on the GPU across a whole transformer step — see the
+/// flux device path in flux_transformer.rs.
+pub use crate::gpu::{
     gpu_act_f16_enabled, gpu_add, gpu_add_bf16, gpu_alias_snake_updown2x,
     gpu_attention_cross_fused_enabled,
     gpu_attention_gqa_decode_bf16, gpu_attention_gqa_decode_pair_bf16, gpu_attention_packed,

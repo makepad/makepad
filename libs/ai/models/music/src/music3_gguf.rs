@@ -826,7 +826,7 @@ impl Music3GgufRvq {
         uncond: &mut Music3GgufRvqSession,
         hidden: &[f32],
     ) -> Option<()> {
-        use makepad_ggml::backend::metal;
+        use makepad_ai_common::backend::metal;
         let ns = format!("music3-{}", file.role.as_str());
         let ns_f16 = format!("music3-{}-f16", file.role.as_str());
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;
@@ -925,7 +925,7 @@ impl Music3GgufRvq {
         hidden_in: &[f32],
         seq: usize,
     ) -> Option<(Music3GgufRvqSession, Music3GgufRvqSession)> {
-        use makepad_ggml::backend::metal;
+        use makepad_ai_common::backend::metal;
         let ns = format!("music3-{}", file.role.as_str());
         let ns_f16 = format!("music3-{}-f16", file.role.as_str());
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;

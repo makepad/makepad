@@ -38,6 +38,16 @@ pub struct SurfaceBvh<'a> {
 
 impl<'a> SurfaceBvh<'a> {
     pub fn build(positions: &'a [[f32; 3]], indices: &'a [u32]) -> Result<Self, String> {
+        Self::build_ctl(positions, indices, &mut |_, _| true)
+    }
+
+    /// Same as [`Self::build`]. `ctl(done_faces, total_faces)` returning
+    /// false aborts. Callers should throttle — this may fire often.
+    pub fn build_ctl(
+        positions: &'a [[f32; 3]],
+        indices: &'a [u32],
+        ctl: &mut impl FnMut(usize, usize) -> bool,
+    ) -> Result<Self, String> {
         if indices.len() % 3 != 0 {
             return Err("surface BVH indices are not triangles".to_string());
         }
@@ -52,7 +62,8 @@ impl<'a> SurfaceBvh<'a> {
             nodes: Vec::with_capacity(faces.saturating_mul(2).div_ceil(7)),
         };
         if faces != 0 {
-            tree.build_span(0, faces);
+            let mut leaf_done = 0usize;
+            tree.build_span(0, faces, faces, &mut leaf_done, ctl)?;
         }
         Ok(tree)
     }
@@ -70,7 +81,14 @@ impl<'a> SurfaceBvh<'a> {
         ]
     }
 
-    fn build_span(&mut self, begin: usize, end: usize) -> u32 {
+    fn build_span(
+        &mut self,
+        begin: usize,
+        end: usize,
+        total_faces: usize,
+        leaf_done: &mut usize,
+        ctl: &mut impl FnMut(usize, usize) -> bool,
+    ) -> Result<u32, String> {
         let node_id = self.nodes.len() as u32;
         self.nodes.push(BvhNode::default());
         let mut bmin = [f32::INFINITY; 3];
@@ -101,7 +119,11 @@ impl<'a> SurfaceBvh<'a> {
                 count: count as u32,
                 ..Default::default()
             };
-            return node_id;
+            *leaf_done += count;
+            if !ctl(*leaf_done, total_faces) {
+                return Err("surface BVH cancelled".to_string());
+            }
+            return Ok(node_id);
         }
         let mut axis = 0usize;
         if cmax[1] - cmin[1] > cmax[axis] - cmin[axis] {
@@ -125,8 +147,8 @@ impl<'a> SurfaceBvh<'a> {
                 .total_cmp(&centroid(fb))
                 .then_with(|| fa.cmp(&fb))
         });
-        let left = self.build_span(begin, mid);
-        let right = self.build_span(mid, end);
+        let left = self.build_span(begin, mid, total_faces, leaf_done, ctl)?;
+        let right = self.build_span(mid, end, total_faces, leaf_done, ctl)?;
         self.nodes[node_id as usize] = BvhNode {
             bmin,
             bmax,
@@ -134,7 +156,7 @@ impl<'a> SurfaceBvh<'a> {
             right,
             ..Default::default()
         };
-        node_id
+        Ok(node_id)
     }
 
     /// Exact closest point within `max_dist`. Returns `None` when the surface

@@ -41,7 +41,7 @@ pub fn matmul_nn(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Option<V
     if !worth_it(m, k, n) {
         return None;
     }
-    makepad_ggml::backend::metal::try_matmul_nn_f32(a, b, m, k, n)
+    makepad_ai_common::backend::metal::try_matmul_nn_f32(a, b, m, k, n)
 }
 
 /// `C[m, n] = A[m, k] * B^T`, with `bt` stored `[n, k]` row-major — PyTorch's
@@ -51,7 +51,7 @@ pub fn matmul_nt(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Option<
     if !worth_it(m, k, n) {
         return None;
     }
-    makepad_ggml::backend::metal::try_matmul_nt_f32(a, bt, m, k, n)
+    makepad_ai_common::backend::metal::try_matmul_nt_f32(a, bt, m, k, n)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]

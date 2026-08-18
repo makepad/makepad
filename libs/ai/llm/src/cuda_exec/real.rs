@@ -25,7 +25,7 @@ use makepad_ai_cuda::{
     CUBLAS_STATUS_SUCCESS, CUDA_MEMCPY_DEVICE_TO_HOST, CUDA_MEMCPY_HOST_TO_DEVICE, CUDA_R_16BF,
     CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
 };
-use makepad_ggml::llm_ops::{
+use crate::llm_ops::{
     binary, cast_f32_bf16, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
     fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
     get_rows_f32, get_rows_quant, glu, mmq_q4k, mmq_q5k, mmq_q6k, mmq_quant, mmq_quant_q81,
@@ -34,7 +34,7 @@ use makepad_ggml::llm_ops::{
     rope_multi, set_rows, softmax_mask, ssm_conv, unary, unary_mul, QUANT_Q4K as MKLLM_QUANT_Q4K,
     QUANT_Q5K as MKLLM_QUANT_Q5K, QUANT_Q6K as MKLLM_QUANT_Q6K, QUANT_Q80 as MKLLM_QUANT_Q80,
 };
-use makepad_ggml::{
+use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
     GGML_ROPE_TYPE_MROPE,
 };
@@ -790,7 +790,7 @@ impl Runtime {
     pub(super) fn execute_raw_graph(
         &self,
         ctx: &Context,
-        graph: &makepad_ggml::Graph,
+        graph: &crate::Graph,
         pinned: &[TensorId],
         writes: &[(TensorId, Vec<u8>)],
         wanted: &[TensorId],
@@ -1715,7 +1715,7 @@ fn plan_graph(ctx: &Context, decode: &HybridDecodeGraph) -> Result<GraphPlan> {
 
 fn plan_raw_graph(
     ctx: &Context,
-    graph: &makepad_ggml::Graph,
+    graph: &crate::Graph,
     pinned: &[TensorId],
 ) -> Result<GraphPlan> {
     let tensors = ctx.tensors();

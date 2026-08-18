@@ -740,32 +740,63 @@ mod trellis_gen {
     use super::MeshJob;
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
-    use makepad_diffusion::backend::gpu_pool_cap_override;
-    use makepad_diffusion::birefnet::{
+    use makepad_ai_common::backend::gpu_pool_cap_override;
+    use makepad_ai_vision::birefnet::{
         unload_birefnet, BiRefNet, BiRefNetImage, BiRefNetWeights,
     };
-    use makepad_diffusion::h3_pipeline::H3NoiseRng;
-    use makepad_diffusion::trellis::{
+    use makepad_ai_h3::h3_pipeline::H3NoiseRng;
+    use makepad_ai_trellis::trellis::{
         t2_quantize_unique_coords, t2_rope_tables, TrellisWeights, T2_SHAPE_SAMPLER,
         T2_SHAPE_SLAT_MEAN, T2_SHAPE_SLAT_STD, T2_SLAT_CHANNELS, T2_SS_CHANNELS, T2_SS_SAMPLER,
         T2_SS_TOKENS, T2_TEX_IN_CHANNELS, T2_TEX_SAMPLER, T2_TEX_SLAT_MEAN, T2_TEX_SLAT_STD,
     };
-    use makepad_diffusion::trellis_dino::T2Dino;
-    use makepad_diffusion::trellis_dit::{t2_upload_cond, t2_upload_rope, T2Dit};
-    use makepad_diffusion::trellis_image::{
+    use makepad_ai_trellis::trellis_dino::T2Dino;
+    use makepad_ai_trellis::trellis_dit::{t2_upload_cond, t2_upload_rope, T2Dit};
+    use makepad_ai_trellis::trellis_image::{
         t2_cond_input, t2_pad_black, t2_preprocess_rgba, t2_subject_border, T2Image,
     };
-    use makepad_diffusion::trellis_mesh::{
+    use makepad_ai_trellis::trellis_mesh::{
         t2_dual_grid_to_mesh, t2_fdg_fields, t2_mesh_to_glb_colored, t2_yup, T2VoxelSampler,
     };
-    use makepad_diffusion::trellis_pipeline::{
+    use makepad_ai_trellis::trellis_pipeline::{
         t2_chw_to_tokens, t2_run_ss_cancel, t2_sample_flow_cancel, t2_sample_flow_concat_ctl,
     };
-    use makepad_diffusion::trellis_slat::T2SparseDec;
-    use makepad_diffusion::trellis_vae::T2SsDec;
-    use makepad_diffusion::DiffusionError;
+    use makepad_ai_trellis::trellis_slat::T2SparseDec;
+    use makepad_ai_trellis::trellis_vae::T2SsDec;
+    use makepad_ai_common::DiffusionError;
     use makepad_remesh::{remesh_narrow_band_dc_ctl, SurfaceBvh};
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// Job-status writes are expensive. Forward a tick on phase change or
+    /// every ~700ms — enough to show life, not enough to stall remesh.
+    struct CoarseProgress<'a> {
+        sink: ProgressSink<'a>,
+        last: Instant,
+        last_label: String,
+    }
+
+    impl<'a> CoarseProgress<'a> {
+        fn new(sink: ProgressSink<'a>) -> Self {
+            Self {
+                sink,
+                last: Instant::now() - Duration::from_secs(1),
+                last_label: String::new(),
+            }
+        }
+
+        fn emit(&mut self, label: &str, frac: f64) {
+            let now = Instant::now();
+            if label == self.last_label && now.duration_since(self.last) < Duration::from_millis(700)
+            {
+                return;
+            }
+            self.last = now;
+            self.last_label.clear();
+            self.last_label.push_str(label);
+            (self.sink)(label, frac);
+        }
+    }
 
     /// The registry files this backend loads (tex flow + tex decoder only
     /// when the job asks for texture — the service default).
@@ -822,7 +853,7 @@ mod trellis_gen {
         /// This must run on the service worker thread which performed the
         /// generation because both caches are thread-local by design.
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
-            use makepad_diffusion::backend::{
+            use makepad_ai_common::backend::{
                 gpu_pool_clear, gpu_weight_cache_evict_prefix,
             };
 
@@ -1246,7 +1277,8 @@ mod trellis_gen {
             };
 
             cancel.check()?;
-            progress("weld surface", 0.88);
+            let mut coarse = CoarseProgress::new(progress);
+            coarse.emit("weld surface", 0.88);
             // Keep this cleaned decoded surface alive through remesh AND
             // baking. Its BVH drives the UDF and snaps every atlas texel
             // after simplification back to the original attribute surface.
@@ -1261,15 +1293,23 @@ mod trellis_gen {
                 1.0 / 8192.0,
             );
             cancel.check()?;
-            progress("fill holes", 0.885);
+            coarse.emit("fill holes", 0.885);
             makepad_remesh::fill_small_holes(&mut surface_indices, 64);
             cancel.check()?;
-            progress("build BVH", 0.89);
-            let surface_bvh = SurfaceBvh::build(&surface_positions, &surface_indices)
-                .map_err(trellis_err)?;
+            coarse.emit("build BVH", 0.89);
+            let surface_bvh = SurfaceBvh::build_ctl(
+                &surface_positions,
+                &surface_indices,
+                &mut |done, total| {
+                    let frac = done as f64 / total.max(1) as f64;
+                    coarse.emit("build BVH", 0.89 + 0.008 * frac.clamp(0.0, 1.0));
+                    !cancel.is_cancelled()
+                },
+            )
+            .map_err(trellis_err)?;
 
             cancel.check()?;
-            progress("narrow-band remesh", 0.90);
+            coarse.emit("remesh voxelize", 0.90);
             let remeshed = remesh_narrow_band_dc_ctl(
                 &surface_positions,
                 &surface_indices,
@@ -1282,7 +1322,7 @@ mod trellis_gen {
                 // creates near-coincident geometry and dark interference.
                 0.0,
                 &mut |stage, frac| {
-                    progress(
+                    coarse.emit(
                         &format!("remesh {stage}"),
                         0.90 + 0.03 * frac.clamp(0.0, 1.0),
                     );

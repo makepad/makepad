@@ -109,7 +109,7 @@ impl ModelExecutionPlan {
 mod tests {
     use super::{ModelLayerInventory, ModelLayerRole, ModelTensorInventory};
     use crate::gguf::GgufTensorInfo;
-    use makepad_ggml::TensorType;
+    use crate::TensorType;
     use std::collections::BTreeMap;
 
     #[test]

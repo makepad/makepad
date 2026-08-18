@@ -1,13 +1,13 @@
 use crate::core::{TensorFlag, GGML_MAX_DIMS, GGML_MAX_NAME, GGML_MAX_OP_PARAMS, GGML_MAX_SRC};
 use crate::op::{Ftype, GluOp, Op, UnaryOp};
-use crate::quant::*;
+use makepad_ai_cuda::quant::*;
 
 pub type TensorId = usize;
 
 // TensorType moved to makepad-ai-loader (lane T2, /aiarch.md §1): it's pure
 // GGML_TYPE_* dtype metadata (enum + tiny lookup tables), needed by the
 // loader's own formats/gguf.rs, which cannot depend back on this crate.
-// Re-exported here so every existing `makepad_ggml::TensorType` /
+// Re-exported here so every existing `crate::TensorType` /
 // `crate::tensor::TensorType` call site keeps compiling unchanged.
 pub use makepad_ai_loader::quant::TensorType;
 
