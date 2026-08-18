@@ -1,20 +1,23 @@
 use crate::backend::{
-    compile_graph_session, new_runtime, runtime_available, try_attention_softmax_weighted_sum_f32,
-    try_matmul_nn_f32, try_matmul_nt_f32, BufferStorageMode, GraphSession, GraphTensorWrite,
-    Runtime,
+    create_graph_session, gpu_add, gpu_attention_planar_single, gpu_conv2d_planar_cached,
+    gpu_device_available, gpu_download, gpu_group_norm_planar, gpu_pool_cap_override,
+    gpu_pool_clear, gpu_silu, gpu_upload, gpu_upsample_nearest2x, new_runtime, prepare_graph,
+    runtime_available, try_attention_softmax_weighted_sum_f32, try_matmul_nn_f32,
+    try_matmul_nt_f32, BufferStorageMode, GpuTensor, GraphSession, GraphTensorWrite, Runtime,
 };
 use crate::flux::FluxLatentShape;
-use crate::{DiffusionError, Result};
+use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ggml::{
-    ggml_pad, BufferUsage, Context, GluOp, Graph, InitParams, Op, ScaleMode, Tensor, TensorDesc,
-    TensorId, TensorLayout, TensorType, GGML_MEM_ALIGN,
+    f16_to_f32, f32_to_f16, ggml_pad, BufferUsage, Context, Graph, InitParams, Op, ScaleMode,
+    Tensor, TensorDesc, TensorId, TensorLayout, TensorType, UnaryOp, GGML_MEM_ALIGN,
 };
 use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const VAE_GROUP_NORM_EPSILON: f32 = 1.0e-6;
-const DEFAULT_GRAPH_EXTRA_BYTES: usize = 1usize * 1024 * 1024 * 1024;
+// Graph intermediates are no_alloc; this only covers input + metadata.
+const DEFAULT_GRAPH_EXTRA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GRAPH_GROWTH_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug)]
@@ -121,7 +124,24 @@ impl LoadedFluxVaeWeights {
     }
 
     pub fn load_with_extra(path: impl AsRef<Path>, extra_bytes: usize) -> Result<Self> {
-        let header = MlxSafetensorsHeader::load(path.as_ref())?;
+        Self::load_scoped_with_extra(path, None, extra_bytes)
+    }
+
+    /// Load the vae component of a combined checkpoint: the `prefix` scope
+    /// (`vae.`) exposes exactly the standalone ae.safetensors naming
+    /// (`decoder.*`/`encoder.*`); the weights keep the combined file's path
+    /// as their device-cache identity. Only the decode path's tensors are
+    /// ever uploaded — the device cache fills lazily per used tensor.
+    pub fn load_component(path: impl AsRef<Path>, prefix: Option<&str>) -> Result<Self> {
+        Self::load_scoped_with_extra(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES)
+    }
+
+    fn load_scoped_with_extra(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
+    ) -> Result<Self> {
+        let header = crate::flux::flux_component_header(path.as_ref(), prefix)?;
         let total_bytes = vae_weight_total_bytes(&header, extra_bytes)?;
         let mut ctx = Context::new(InitParams {
             mem_size: total_bytes,
@@ -226,10 +246,17 @@ impl CompiledFluxVae {
                 }
                 Err(err) => return Err(err),
             };
-            let session = compile_graph_session(
+            let prepared = prepare_graph(&runtime, &weights.ctx, &graph.graph)?;
+            eprintln!(
+                "flux vae compiled main_buffer={} used={} arena={}",
+                prepared.main_buffer_size,
+                weights.ctx.used_mem(),
+                weights.ctx.mem_buffer().len()
+            );
+            let session = create_graph_session(
                 &runtime,
                 &weights.ctx,
-                &graph.graph,
+                &prepared,
                 BufferStorageMode::Shared,
                 BufferStorageMode::Shared,
             )?;
@@ -255,9 +282,23 @@ impl CompiledFluxVae {
         weights: &LoadedFluxVaeWeights,
         latents_whcb: &[f32],
     ) -> Result<FluxVaeDecodeRun> {
+        self.execute_hooked(weights, latents_whcb, None)
+    }
+
+    /// [`Self::execute`] with per-block progress ("block 5/17") from the
+    /// lazy/device decode; the compiled (single-graph) executor has no
+    /// interior boundary and emits nothing.
+    pub fn execute_hooked(
+        &self,
+        weights: &LoadedFluxVaeWeights,
+        latents_whcb: &[f32],
+        mut progress: Option<ProgressHook>,
+    ) -> Result<FluxVaeDecodeRun> {
         match &self.inner {
             FluxVaeExecutor::Compiled(compiled) => compiled.execute(weights, latents_whcb),
-            FluxVaeExecutor::Lazy(lazy) => lazy.execute(weights, latents_whcb),
+            FluxVaeExecutor::Lazy(lazy) => {
+                lazy.execute_with_progress(weights, latents_whcb, &mut progress)
+            }
         }
     }
 
@@ -294,6 +335,11 @@ impl CompiledFluxVaeGraph {
             )));
         }
 
+        eprintln!(
+            "flux vae input n={} {}",
+            latents_whcb.len(),
+            f32_stats(latents_whcb)
+        );
         let latent_bytes = f32s_to_le_bytes(latents_whcb);
         let execution = self
             .session
@@ -311,8 +357,14 @@ impl CompiledFluxVaeGraph {
             .get(&self.graph.result_image)
             .ok_or_else(|| DiffusionError::model("flux vae decode did not return image tensor"))?;
 
+        let image = f32_bytes_to_vec(image_bytes)?;
+        eprintln!(
+            "flux vae image n={} {}",
+            image.len(),
+            f32_stats(&image)
+        );
         Ok(FluxVaeDecodeRun {
-            image: f32_bytes_to_vec(image_bytes)?,
+            image,
             width: self.graph.image_width,
             height: self.graph.image_height,
         })
@@ -414,7 +466,181 @@ impl LazyFluxVae {
         weights: &LoadedFluxVaeWeights,
         latents_whcb: &[f32],
     ) -> Result<FluxVaeDecodeRun> {
+        self.execute_with_progress(weights, latents_whcb, &mut None)
+    }
+
+    fn execute_with_progress(
+        &self,
+        weights: &LoadedFluxVaeWeights,
+        latents_whcb: &[f32],
+        progress: &mut Option<ProgressHook>,
+    ) -> Result<FluxVaeDecodeRun> {
+        if flux_vae_device_path_enabled() && gpu_device_available() {
+            match self.execute_device(weights, latents_whcb, progress) {
+                Ok(run) => return Ok(run),
+                Err(DiffusionError::Cancelled) => {
+                    // Mirror the success-path cleanup: the decode clamped the
+                    // idle-pool cap, don't leak that into the next job.
+                    gpu_pool_clear();
+                    gpu_pool_cap_override(None);
+                    return Err(DiffusionError::Cancelled);
+                }
+                Err(err) => {
+                    eprintln!("flux vae device path failed ({err}); falling back to host math");
+                }
+            }
+        }
         Ok(self.execute_with_debug(weights, latents_whcb)?.final_image)
+    }
+
+    /// Device-resident mirror of `execute_with_debug`: the whole decode runs
+    /// on the GPU (planar [c][y][x] activations resident; conv weights
+    /// device-cached across runs), only the final RGB planes come back.
+    fn execute_device(
+        &self,
+        weights: &LoadedFluxVaeWeights,
+        latents_whcb: &[f32],
+        progress: &mut Option<ProgressHook>,
+    ) -> Result<FluxVaeDecodeRun> {
+        let expected = self
+            .latent_shape
+            .latent_width
+            .checked_mul(self.latent_shape.latent_height)
+            .and_then(|value| value.checked_mul(self.latent_shape.latent_channels))
+            .ok_or_else(|| DiffusionError::model("flux vae latent size overflow"))?
+            as usize;
+        if latents_whcb.len() != expected {
+            return Err(DiffusionError::workflow(format!(
+                "flux vae input expected {} values, got {}",
+                expected,
+                latents_whcb.len()
+            )));
+        }
+        let namespace = flux_vae_cache_namespace(weights);
+        // Phase boundary: drop the denoise loop's pooled activation buckets
+        // so the transformer and VAE working sets never coexist in VRAM, and
+        // clamp the idle-pool cap for the decode — its multi-GB planes on top
+        // of the resident weights sit at the 32GB WDDM residency cliff where
+        // every idle GB costs ~3x in paging stalls (1438ms -> 406ms @1024).
+        gpu_pool_clear();
+        let vae_cap_mb = std::env::var("FLUX_GPU_POOL_CAP_VAE_MB")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(2048);
+        gpu_pool_cap_override(Some(vae_cap_mb * 1024 * 1024));
+
+        let mut hidden = GpuSpatial {
+            tensor: gpu_upload(
+                latents_whcb,
+                self.latent_shape.latent_channels as usize,
+                (self.latent_shape.latent_width * self.latent_shape.latent_height) as usize,
+            )
+            .map_err(DiffusionError::model)?,
+            width: self.latent_shape.latent_width as usize,
+            height: self.latent_shape.latent_height as usize,
+            channels: self.latent_shape.latent_channels as usize,
+        };
+        // Per-unit progress: mid section (3) + per-stage resnet blocks + the
+        // output head. On warm runs the loop enqueues async kernels and the
+        // labels tick ahead of execution; on cold runs each unit's conv
+        // weights upload synchronously, so the labels track the stream-in.
+        let total_units = 3 + (0..=3)
+            .map(|stage| {
+                3 + weights.has_tensor(&format!("decoder.up.{stage}.upsample.conv.weight"))
+                    as usize
+            })
+            .sum::<usize>()
+            + 1;
+        let mut done_units = 0usize;
+        let unit_progress = |done: &mut usize,
+                             progress: &mut Option<ProgressHook>|
+         -> Result<()> {
+            if progress.is_some() {
+                emit_progress(
+                    progress,
+                    &format!("block {}/{total_units}", *done + 1),
+                    *done as f64 / total_units as f64,
+                )?;
+            }
+            *done += 1;
+            Ok(())
+        };
+
+        unit_progress(&mut done_units, progress)?;
+        hidden = conv2d_device(
+            weights,
+            &namespace,
+            &hidden,
+            "decoder.conv_in.weight",
+            "decoder.conv_in.bias",
+            1,
+            1,
+        )?;
+        hidden = resnet_block_device(weights, &namespace, &hidden, "decoder.mid.block_1")?;
+        unit_progress(&mut done_units, progress)?;
+        hidden = mid_attention_device(weights, &namespace, &hidden, "decoder.mid.attn_1")?;
+        unit_progress(&mut done_units, progress)?;
+        hidden = resnet_block_device(weights, &namespace, &hidden, "decoder.mid.block_2")?;
+
+        for stage in (0..=3).rev() {
+            let stage_prefix = format!("decoder.up.{stage}");
+            for block in 0..=2 {
+                unit_progress(&mut done_units, progress)?;
+                hidden = resnet_block_device(
+                    weights,
+                    &namespace,
+                    &hidden,
+                    &format!("{stage_prefix}.block.{block}"),
+                )?;
+            }
+            if weights.has_tensor(&format!("{stage_prefix}.upsample.conv.weight")) {
+                unit_progress(&mut done_units, progress)?;
+                hidden = upsample_nearest2x_device(&hidden)?;
+                hidden = conv2d_device(
+                    weights,
+                    &namespace,
+                    &hidden,
+                    &format!("{stage_prefix}.upsample.conv.weight"),
+                    &format!("{stage_prefix}.upsample.conv.bias"),
+                    1,
+                    1,
+                )?;
+            }
+        }
+        unit_progress(&mut done_units, progress)?;
+
+        hidden = group_norm_device(
+            weights,
+            &namespace,
+            &hidden,
+            "decoder.norm_out.weight",
+            "decoder.norm_out.bias",
+            32,
+        )?;
+        hidden = silu_device(&hidden)?;
+        let image = conv2d_device(
+            weights,
+            &namespace,
+            &hidden,
+            "decoder.conv_out.weight",
+            "decoder.conv_out.bias",
+            1,
+            1,
+        )?;
+
+        let data = gpu_download(&image.tensor).map_err(DiffusionError::model)?;
+        let run = FluxVaeDecodeRun {
+            image: data,
+            width: image.width,
+            height: image.height,
+        };
+        drop(image);
+        drop(hidden);
+        // Free the VAE's pooled buckets before the next generation's denoise
+        // and restore the roomier denoise-phase pool cap.
+        gpu_pool_clear();
+        gpu_pool_cap_override(None);
+        Ok(run)
     }
 
     pub fn execute_with_debug(
@@ -547,6 +773,10 @@ pub fn build_flux_vae_decoder_graph(
             BufferUsage::Activations,
         )
         .map_err(DiffusionError::model)?;
+    // Intermediates stay metadata-only. The Metal binding planner assigns
+    // (and reuses) GPU ranges; CPU-allocating them is what grew a 1GiB
+    // extra arena for every VAE compile.
+    weights.ctx.set_no_alloc(true);
 
     let mut hidden = apply_conv2d(
         &mut weights.ctx,
@@ -815,6 +1045,13 @@ fn apply_group_norm(
         .map_err(DiffusionError::model)
 }
 
+fn vae_use_im2col_mm() -> bool {
+    match std::env::var("FLUX_VAE_NAIVE") {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("on") => false,
+        _ => true,
+    }
+}
+
 fn apply_conv2d(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
@@ -824,8 +1061,20 @@ fn apply_conv2d(
     pad_x: i32,
     pad_y: i32,
 ) -> Result<TensorId> {
-    let out = ctx
-        .conv_2d(
+    let out = if vae_use_im2col_mm() {
+        conv_2d_im2col_mm(
+            ctx,
+            require_tensor_id(tensor_ids, weight_name)?,
+            input,
+            1,
+            1,
+            pad_x,
+            pad_y,
+            1,
+            1,
+        )?
+    } else {
+        ctx.conv_2d(
             require_tensor_id(tensor_ids, weight_name)?,
             input,
             1,
@@ -836,25 +1085,86 @@ fn apply_conv2d(
             1,
             BufferUsage::Activations,
         )
-        .map_err(DiffusionError::model)?;
+        .map_err(DiffusionError::model)?
+    };
     let bias = broadcast_channel_vector(ctx, require_tensor_id(tensor_ids, bias_name)?, out)?;
     ctx.binary_like_a(Op::Add, out, bias, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
 
-fn apply_silu(ctx: &mut Context, input: TensorId) -> Result<TensorId> {
-    let ones = repeat_scalar_one(ctx, input)?;
-    ctx.glu_split(input, ones, GluOp::Swiglu, BufferUsage::Activations)
-        .map_err(DiffusionError::model)
+/// ggml_conv_2d as im2col + mul_mat (the official CPU/CUDA expansion).
+/// Metal's kernel_conv_2d is a naive per-pixel IC*KH*KW loop; mul_mm is
+/// the fast path already used by the Flux transformer.
+///
+/// Weights stay F16; im2col dest stays F32 so GEMM is `mul_mm_f16_f32`.
+fn conv_2d_im2col_mm(
+    ctx: &mut Context,
+    kernel: TensorId,
+    input: TensorId,
+    s0: i32,
+    s1: i32,
+    p0: i32,
+    p1: i32,
+    d0: i32,
+    d1: i32,
+) -> Result<TensorId> {
+    let (k_flat, oc) = {
+        let kernel_t = require_tensor(ctx, kernel)?;
+        let k_flat = kernel_t.ne[0]
+            .checked_mul(kernel_t.ne[1])
+            .and_then(|value| value.checked_mul(kernel_t.ne[2]))
+            .ok_or_else(|| DiffusionError::model("flux vae conv k_flat overflow"))?;
+        (k_flat, kernel_t.ne[3])
+    };
+    // Keep im2col activations F32. F16-act × F16-weight GEMM (K up to
+    // 3*3*512) overflows half and the VAE decode goes solid black.
+    // F16 weights × F32 cols select kernel_mul_mm_f16_f32.
+    let cols = ctx
+        .im2col(
+            kernel,
+            input,
+            s0,
+            s1,
+            p0,
+            p1,
+            d0,
+            d1,
+            true,
+            TensorType::F32,
+            BufferUsage::Activations,
+        )
+        .map_err(DiffusionError::model)?;
+    let (ow, oh, n) = {
+        let cols_t = require_tensor(ctx, cols)?;
+        (cols_t.ne[1], cols_t.ne[2], cols_t.ne[3])
+    };
+    let plane = ow
+        .checked_mul(oh)
+        .and_then(|value| value.checked_mul(n))
+        .ok_or_else(|| DiffusionError::model("flux vae conv plane overflow"))?;
+    let cols_2d = ctx
+        .reshape(cols, &[k_flat, plane])
+        .map_err(DiffusionError::model)?;
+    let kernel_2d = ctx
+        .reshape(kernel, &[k_flat, oc])
+        .map_err(DiffusionError::model)?;
+    let gemm = ctx
+        .mul_mat(kernel_2d, cols_2d, BufferUsage::Activations)
+        .map_err(DiffusionError::model)?;
+    // mul_mat dest is [OC, OW*OH*N] == [OC, OW, OH, N] in memory.
+    // ggml permute is dest.ne[axis[i]] = src.ne[i], so (2,0,1,3) yields
+    // [OW, OH, OC, N] — the same layout as Op::Conv2d.
+    let gemm_4d = ctx
+        .reshape(gemm, &[oc, ow, oh, n])
+        .map_err(DiffusionError::model)?;
+    let whcn = ctx
+        .permute(gemm_4d, [2, 0, 1, 3])
+        .map_err(DiffusionError::model)?;
+    ctx.cont(whcn).map_err(DiffusionError::model)
 }
 
-fn repeat_scalar_one(ctx: &mut Context, shape_of: TensorId) -> Result<TensorId> {
-    let one = ctx
-        .new_tensor_1d(TensorType::F32, 1, BufferUsage::Weights)
-        .map_err(DiffusionError::model)?;
-    ctx.write_tensor_data(one, &1.0f32.to_le_bytes())
-        .map_err(DiffusionError::model)?;
-    ctx.repeat(one, shape_of, BufferUsage::Activations)
+fn apply_silu(ctx: &mut Context, input: TensorId) -> Result<TensorId> {
+    ctx.unary(input, UnaryOp::Silu, BufferUsage::Activations)
         .map_err(DiffusionError::model)
 }
 
@@ -1021,6 +1331,22 @@ fn apply_conv2d_spatial(
         )));
     }
 
+    if let Some(output) = crate::backend::try_conv2d_planar_f32(
+        &input.data,
+        input.width,
+        input.height,
+        input.channels,
+        &kernel.data,
+        &bias,
+        kernel.out_channels,
+        kernel.kw,
+        kernel.kh,
+        pad_x,
+        pad_y,
+    ) {
+        return SpatialTensor::new(input.width, input.height, kernel.out_channels, output);
+    }
+
     let mut output = vec![0.0f32; input.width * input.height * kernel.out_channels];
     for out_c in 0..kernel.out_channels {
         for y in 0..input.height {
@@ -1078,6 +1404,19 @@ fn apply_group_norm_spatial(
             input.channels, groups
         )));
     }
+    if let Some(output) = crate::backend::try_group_norm_planar_f32(
+        &input.data,
+        input.width,
+        input.height,
+        input.channels,
+        groups,
+        &weight,
+        &bias,
+        VAE_GROUP_NORM_EPSILON,
+    ) {
+        return SpatialTensor::new(input.width, input.height, input.channels, output);
+    }
+
     let channels_per_group = input.channels / groups;
     let mut output = vec![0.0f32; input.data.len()];
     for group in 0..groups {
@@ -1113,6 +1452,9 @@ fn apply_group_norm_spatial(
 }
 
 fn silu_spatial(input: &SpatialTensor) -> Result<SpatialTensor> {
+    if let Some(data) = crate::backend::try_silu_f32(&input.data) {
+        return SpatialTensor::new(input.width, input.height, input.channels, data);
+    }
     let data = input
         .data
         .iter()
@@ -1352,11 +1694,278 @@ fn add_spatial(lhs: &SpatialTensor, rhs: &SpatialTensor) -> Result<SpatialTensor
     SpatialTensor::new(lhs.width, lhs.height, lhs.channels, data)
 }
 
+// ---------------------------------------------------------------------------
+// Device-resident decode path (mirrors the *_spatial helpers above; planar
+// [c][y][x] data lives in a GpuTensor with rows=channels, cols=width*height).
+// ---------------------------------------------------------------------------
+
+struct GpuSpatial {
+    tensor: GpuTensor,
+    width: usize,
+    height: usize,
+    channels: usize,
+}
+
+fn flux_vae_device_path_enabled() -> bool {
+    match std::env::var("FLUX_DEVICE") {
+        Ok(value) => value != "0",
+        Err(_) => true,
+    }
+}
+
+pub(crate) fn flux_vae_cache_namespace(weights: &LoadedFluxVaeWeights) -> String {
+    format!("flux_vae:{}", weights.path.display())
+}
+
+/// Drops every device weight-cache entry belonging to these vae weights.
+/// Called on a model switch — combined checkpoints key all components on
+/// the outgoing checkpoint path.
+pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxVaeWeights) -> usize {
+    crate::backend::gpu_weight_cache_evict_prefix(&flux_vae_cache_namespace(weights)).unwrap_or(0)
+}
+
+fn conv2d_device(
+    weights: &LoadedFluxVaeWeights,
+    namespace: &str,
+    input: &GpuSpatial,
+    weight_name: &str,
+    bias_name: &str,
+    pad_x: usize,
+    pad_y: usize,
+) -> Result<GpuSpatial> {
+    let kernel = weights.tensor_kernel(weight_name)?;
+    let bias = weights.tensor_f32_values(bias_name)?;
+    if kernel.in_channels != input.channels {
+        return Err(DiffusionError::model(format!(
+            "flux vae conv input channels mismatch: input={} kernel={}",
+            input.channels, kernel.in_channels
+        )));
+    }
+    if bias.len() != kernel.out_channels {
+        return Err(DiffusionError::model(format!(
+            "flux vae conv bias len mismatch: bias={} out_channels={}",
+            bias.len(),
+            kernel.out_channels
+        )));
+    }
+    let tensor = gpu_conv2d_planar_cached(
+        &input.tensor,
+        input.width,
+        input.height,
+        namespace,
+        weight_name,
+        &kernel.data,
+        &bias,
+        kernel.out_channels,
+        kernel.kw,
+        kernel.kh,
+        pad_x,
+        pad_y,
+    )
+    .map_err(DiffusionError::model)?;
+    Ok(GpuSpatial {
+        tensor,
+        width: input.width,
+        height: input.height,
+        channels: kernel.out_channels,
+    })
+}
+
+fn group_norm_device(
+    weights: &LoadedFluxVaeWeights,
+    namespace: &str,
+    input: &GpuSpatial,
+    weight_name: &str,
+    bias_name: &str,
+    groups: usize,
+) -> Result<GpuSpatial> {
+    let gamma = weights.tensor_f32_values(weight_name)?;
+    let beta = weights.tensor_f32_values(bias_name)?;
+    if gamma.len() != input.channels || beta.len() != input.channels {
+        return Err(DiffusionError::model(format!(
+            "flux vae group norm weight/bias mismatch: channels={} weight={} bias={}",
+            input.channels,
+            gamma.len(),
+            beta.len()
+        )));
+    }
+    let tensor = gpu_group_norm_planar(
+        &input.tensor,
+        input.width,
+        input.height,
+        groups,
+        namespace,
+        weight_name,
+        &gamma,
+        &beta,
+        VAE_GROUP_NORM_EPSILON,
+    )
+    .map_err(DiffusionError::model)?;
+    Ok(GpuSpatial {
+        tensor,
+        width: input.width,
+        height: input.height,
+        channels: input.channels,
+    })
+}
+
+fn silu_device(input: &GpuSpatial) -> Result<GpuSpatial> {
+    Ok(GpuSpatial {
+        tensor: gpu_silu(&input.tensor).map_err(DiffusionError::model)?,
+        width: input.width,
+        height: input.height,
+        channels: input.channels,
+    })
+}
+
+fn add_device(lhs: &GpuSpatial, rhs: &GpuSpatial) -> Result<GpuSpatial> {
+    if lhs.width != rhs.width || lhs.height != rhs.height || lhs.channels != rhs.channels {
+        return Err(DiffusionError::model("flux vae device add shape mismatch"));
+    }
+    Ok(GpuSpatial {
+        tensor: gpu_add(&lhs.tensor, &rhs.tensor).map_err(DiffusionError::model)?,
+        width: lhs.width,
+        height: lhs.height,
+        channels: lhs.channels,
+    })
+}
+
+fn upsample_nearest2x_device(input: &GpuSpatial) -> Result<GpuSpatial> {
+    Ok(GpuSpatial {
+        tensor: gpu_upsample_nearest2x(&input.tensor, input.width, input.height)
+            .map_err(DiffusionError::model)?,
+        width: input.width * 2,
+        height: input.height * 2,
+        channels: input.channels,
+    })
+}
+
+fn resnet_block_device(
+    weights: &LoadedFluxVaeWeights,
+    namespace: &str,
+    input: &GpuSpatial,
+    prefix: &str,
+) -> Result<GpuSpatial> {
+    let hidden = group_norm_device(
+        weights,
+        namespace,
+        input,
+        &format!("{prefix}.norm1.weight"),
+        &format!("{prefix}.norm1.bias"),
+        32,
+    )?;
+    let hidden = silu_device(&hidden)?;
+    let hidden = conv2d_device(
+        weights,
+        namespace,
+        &hidden,
+        &format!("{prefix}.conv1.weight"),
+        &format!("{prefix}.conv1.bias"),
+        1,
+        1,
+    )?;
+    let hidden = group_norm_device(
+        weights,
+        namespace,
+        &hidden,
+        &format!("{prefix}.norm2.weight"),
+        &format!("{prefix}.norm2.bias"),
+        32,
+    )?;
+    let hidden = silu_device(&hidden)?;
+    let hidden = conv2d_device(
+        weights,
+        namespace,
+        &hidden,
+        &format!("{prefix}.conv2.weight"),
+        &format!("{prefix}.conv2.bias"),
+        1,
+        1,
+    )?;
+    if weights.has_tensor(&format!("{prefix}.nin_shortcut.weight")) {
+        let residual = conv2d_device(
+            weights,
+            namespace,
+            input,
+            &format!("{prefix}.nin_shortcut.weight"),
+            &format!("{prefix}.nin_shortcut.bias"),
+            0,
+            0,
+        )?;
+        add_device(&residual, &hidden)
+    } else {
+        add_device(input, &hidden)
+    }
+}
+
+fn mid_attention_device(
+    weights: &LoadedFluxVaeWeights,
+    namespace: &str,
+    input: &GpuSpatial,
+    prefix: &str,
+) -> Result<GpuSpatial> {
+    let hidden = group_norm_device(
+        weights,
+        namespace,
+        input,
+        &format!("{prefix}.norm.weight"),
+        &format!("{prefix}.norm.bias"),
+        32,
+    )?;
+    let q = conv2d_device(
+        weights,
+        namespace,
+        &hidden,
+        &format!("{prefix}.q.weight"),
+        &format!("{prefix}.q.bias"),
+        0,
+        0,
+    )?;
+    let k = conv2d_device(
+        weights,
+        namespace,
+        &hidden,
+        &format!("{prefix}.k.weight"),
+        &format!("{prefix}.k.bias"),
+        0,
+        0,
+    )?;
+    let v = conv2d_device(
+        weights,
+        namespace,
+        &hidden,
+        &format!("{prefix}.v.weight"),
+        &format!("{prefix}.v.bias"),
+        0,
+        0,
+    )?;
+    let scale = 1.0 / (q.channels as f32).sqrt();
+    let attn = gpu_attention_planar_single(&q.tensor, &k.tensor, &v.tensor, scale)
+        .map_err(DiffusionError::model)?;
+    let attn = GpuSpatial {
+        tensor: attn,
+        width: input.width,
+        height: input.height,
+        channels: input.channels,
+    };
+    let attn = conv2d_device(
+        weights,
+        namespace,
+        &attn,
+        &format!("{prefix}.proj_out.weight"),
+        &format!("{prefix}.proj_out.bias"),
+        0,
+        0,
+    )?;
+    add_device(input, &attn)
+}
+
 fn tensor_to_f32_vec(ctx: &Context, tensor_id: TensorId) -> Result<Vec<f32>> {
     let tensor = require_tensor(ctx, tensor_id)?;
     let bytes = ctx.tensor_data(tensor_id).map_err(DiffusionError::model)?;
     match tensor.desc.ty {
         TensorType::F32 => f32_bytes_to_vec(bytes),
+        TensorType::F16 => f16_bytes_to_f32_vec(bytes),
         other => Err(DiffusionError::model(format!(
             "flux vae tensor {} cannot be decoded as f32 from {:?}",
             tensor_id, other
@@ -1366,14 +1975,22 @@ fn tensor_to_f32_vec(ctx: &Context, tensor_id: TensorId) -> Result<Vec<f32>> {
 
 fn conv_kernel(ctx: &Context, tensor_id: TensorId) -> Result<ConvKernel> {
     let tensor = require_tensor(ctx, tensor_id)?;
-    if tensor.desc.ty != TensorType::F32 {
-        return Err(DiffusionError::model(format!(
-            "flux vae conv kernel {} must be F32, got {:?}",
-            tensor_id, tensor.desc.ty
-        )));
-    }
+    let data = match tensor.desc.ty {
+        TensorType::F32 => {
+            f32_bytes_to_vec(ctx.tensor_data(tensor_id).map_err(DiffusionError::model)?)?
+        }
+        TensorType::F16 => {
+            f16_bytes_to_f32_vec(ctx.tensor_data(tensor_id).map_err(DiffusionError::model)?)?
+        }
+        other => {
+            return Err(DiffusionError::model(format!(
+                "flux vae conv kernel {} must be F16/F32, got {:?}",
+                tensor_id, other
+            )))
+        }
+    };
     Ok(ConvKernel {
-        data: f32_bytes_to_vec(ctx.tensor_data(tensor_id).map_err(DiffusionError::model)?)?,
+        data,
         kw: usize::try_from(tensor.ne[0])
             .map_err(|_| DiffusionError::model("flux vae kernel kw exceeds usize"))?,
         kh: usize::try_from(tensor.ne[1])
@@ -1502,7 +2119,7 @@ fn allocate_vae_weight_tensors(
                 name
             ))
         })?;
-        let ty = vae_target_tensor_type(entry.dtype)?;
+        let ty = vae_stored_tensor_type(entry)?;
         let extents = vae_target_extents(entry)?;
         let id = ctx
             .new_named_tensor(
@@ -1554,7 +2171,7 @@ fn vae_weight_total_bytes(header: &MlxSafetensorsHeader, extra_bytes: usize) -> 
 }
 
 fn vae_target_nbytes(entry: &MlxTensorEntry) -> Result<usize> {
-    let ty = vae_target_tensor_type(entry.dtype)?;
+    let ty = vae_stored_tensor_type(entry)?;
     let extents = vae_target_extents(entry)?;
     let layout = TensorLayout::for_ggml(ty, &extents).map_err(DiffusionError::model)?;
     Ok(Tensor::from_desc(0, TensorDesc::new(ty, layout, BufferUsage::Weights)).nbytes())
@@ -1596,18 +2213,77 @@ fn vae_target_tensor_type(dtype: MlxDType) -> Result<TensorType> {
     }
 }
 
+/// Rank-4 conv kernels are stored F16 once so compiled GEMMs use
+/// `kernel_mul_mm_f16_f16`. Rank-1 bias/norm stay F32.
+fn vae_stored_tensor_type(entry: &MlxTensorEntry) -> Result<TensorType> {
+    vae_target_tensor_type(entry.dtype)?;
+    if entry.shape.len() == 4 && vae_use_im2col_mm() {
+        Ok(TensorType::F16)
+    } else {
+        Ok(TensorType::F32)
+    }
+}
+
 fn vae_target_bytes(
     header: &MlxSafetensorsHeader,
     name: &str,
     entry: &MlxTensorEntry,
 ) -> Result<Vec<u8>> {
-    match entry.dtype {
-        MlxDType::F32 => Ok(header.read_tensor_bytes(name)?),
-        other => Err(DiffusionError::model(format!(
+    match (entry.dtype, vae_stored_tensor_type(entry)?) {
+        (MlxDType::F32, TensorType::F32) => Ok(header.read_tensor_bytes(name)?),
+        (MlxDType::F32, TensorType::F16) => {
+            let f32_bytes = header.read_tensor_bytes(name)?;
+            f32_bytes_to_f16_bytes(&f32_bytes)
+        }
+        (other, _) => Err(DiffusionError::model(format!(
             "flux vae unsupported tensor dtype {:?}",
             other
         ))),
     }
+}
+
+fn f32_bytes_to_f16_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    let values = f32_bytes_to_vec(bytes)?;
+    let mut out = Vec::with_capacity(values.len() * 2);
+    for value in values {
+        out.extend_from_slice(&f32_to_f16(value).to_le_bytes());
+    }
+    Ok(out)
+}
+
+fn f16_bytes_to_f32_vec(bytes: &[u8]) -> Result<Vec<f32>> {
+    if bytes.len() % 2 != 0 {
+        return Err(DiffusionError::model(format!(
+            "flux vae f16 byte length {} is not even",
+            bytes.len()
+        )));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|chunk| f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+        .collect())
+}
+
+fn f32_stats(values: &[f32]) -> String {
+    let mut finite = 0usize;
+    let mut nan = 0usize;
+    let mut inf = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &value in values {
+        if value.is_nan() {
+            nan += 1;
+            continue;
+        }
+        if value.is_infinite() {
+            inf += 1;
+            continue;
+        }
+        finite += 1;
+        min = min.min(value);
+        max = max.max(value);
+    }
+    format!("finite={finite} nan={nan} inf={inf} min={min} max={max}")
 }
 
 fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
@@ -1659,6 +2335,87 @@ mod tests {
     use crate::backend::{
         create_graph_session, new_runtime, prepare_graph, BufferStorageMode, GraphTensorWrite,
     };
+
+    #[test]
+    fn conv_2d_im2col_mm_matches_conv_2d_output_shape() {
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: true,
+        });
+        let kernel = ctx
+            .new_tensor_4d(TensorType::F32, 3, 3, 4, 8, BufferUsage::Weights)
+            .unwrap();
+        let input = ctx
+            .new_tensor_4d(TensorType::F32, 16, 16, 4, 1, BufferUsage::Activations)
+            .unwrap();
+        let naive = ctx
+            .conv_2d(kernel, input, 1, 1, 1, 1, 1, 1, BufferUsage::Activations)
+            .unwrap();
+        let gemm = conv_2d_im2col_mm(&mut ctx, kernel, input, 1, 1, 1, 1, 1, 1).unwrap();
+        let naive_t = ctx.tensor(naive).unwrap();
+        let gemm_t = ctx.tensor(gemm).unwrap();
+        assert_eq!(naive_t.ne, gemm_t.ne);
+        assert_eq!(naive_t.ne, [16, 16, 8, 1]);
+        assert_eq!(gemm_t.desc.ty, TensorType::F32);
+        assert!(gemm_t.is_contiguous());
+    }
+
+    #[test]
+    fn conv_2d_im2col_mm_matches_conv_2d_values_on_metal_when_available() {
+        let runtime = match new_runtime() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 4 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let kernel = ctx
+            .new_tensor_4d(TensorType::F32, 3, 3, 2, 3, BufferUsage::Weights)
+            .unwrap();
+        let input = ctx
+            .new_tensor_4d(TensorType::F32, 4, 4, 2, 1, BufferUsage::Activations)
+            .unwrap();
+        let kvals = patterned_f32s(3 * 3 * 2 * 3, -0.15, 0.04);
+        let ivals = patterned_f32s(4 * 4 * 2, 0.2, -0.03);
+        ctx.write_tensor_data(kernel, &f32s_to_le_bytes(&kvals))
+            .unwrap();
+        ctx.write_tensor_data(input, &f32s_to_le_bytes(&ivals))
+            .unwrap();
+
+        let naive = ctx
+            .conv_2d(kernel, input, 1, 1, 1, 1, 1, 1, BufferUsage::Activations)
+            .unwrap();
+        let gemm = conv_2d_im2col_mm(&mut ctx, kernel, input, 1, 1, 1, 1, 1, 1).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, naive).unwrap();
+        graph.build_forward_expand(&ctx, gemm).unwrap();
+        let prepared = prepare_graph(&runtime, &ctx, &graph).unwrap();
+        let session = create_graph_session(
+            &runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session.execute(&ctx, &[], &[naive, gemm]).unwrap();
+        let naive_v = f32_bytes_to_vec(execution.outputs.get(&naive).unwrap()).unwrap();
+        let gemm_v = f32_bytes_to_vec(execution.outputs.get(&gemm).unwrap()).unwrap();
+        assert_eq!(naive_v.len(), gemm_v.len());
+        let mut max_abs = 0.0f32;
+        for (a, b) in naive_v.iter().zip(gemm_v.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert!(
+            max_abs < 1e-4,
+            "im2col+mul_mm diverges from conv_2d: max_abs={max_abs}"
+        );
+    }
 
     #[test]
     fn spatial_token_roundtrip_matches_original_on_metal_when_available() {

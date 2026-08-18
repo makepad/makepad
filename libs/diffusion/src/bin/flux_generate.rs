@@ -1,8 +1,8 @@
 use makepad_diffusion::backend::{new_runtime, runtime_available};
-use makepad_diffusion::comfy::FluxWorkflow;
+use makepad_diffusion::comfy::{FluxGenerationConfig, FluxPrompts};
 use makepad_diffusion::flux::{
-    pack_flux_latents_nchw, unpack_flux_latents_nchw, ComfyModelRoots, FluxLatentShape,
-    FluxPromptToImagePlan,
+    pack_flux_latents_nchw, unpack_flux_latents_nchw, FluxLatentShape, FluxPromptToImagePlan,
+    FluxResolvedBundle,
 };
 use makepad_diffusion::flux_schedule::{
     euler_step, FluxSchedule, FLUX_VAE_SCALING_FACTOR, FLUX_VAE_SHIFT_FACTOR,
@@ -25,33 +25,113 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: flux-generate <workflow.json> <comfy-root-or-model-root> <output.png> [width height steps]"
+        "usage: flux-generate --unet <dit.gguf|safetensors> --vae <ae.safetensors> --output <out.png>\n\
+         \n\
+         optional:\n\
+           --clip <clip_l>   --t5 <t5xxl>\n\
+           --width 256       --height 256\n\
+           --steps 4         --seed 1\n\
+           --prompt TEXT     --guidance 1\n\
+         \n\
+         FLUX_COND_DIR still overrides T5/CLIP with precomputed bins."
     );
     std::process::exit(1);
 }
 
+struct GenerateArgs {
+    unet: String,
+    vae: String,
+    output: String,
+    clip: Option<String>,
+    t5: Option<String>,
+    width: u32,
+    height: u32,
+    steps: u32,
+    seed: u64,
+    prompt: String,
+    guidance: f32,
+}
+
+fn parse_args() -> Result<GenerateArgs, Box<dyn std::error::Error>> {
+    let mut unet = None;
+    let mut vae = None;
+    let mut output = None;
+    let mut clip = None;
+    let mut t5 = None;
+    let mut width = 256u32;
+    let mut height = 256u32;
+    let mut steps = 4u32;
+    let mut seed = 1u64;
+    let mut prompt = "a red cube".to_string();
+    let mut guidance = 1.0f32;
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let require = |flag: &str, got: Option<String>| {
+            got.ok_or_else(|| format!("missing value for {flag}"))
+        };
+        match arg.as_str() {
+            "-h" | "--help" => usage(),
+            "--unet" => unet = Some(require(&arg, args.next())?),
+            "--vae" => vae = Some(require(&arg, args.next())?),
+            "--output" | "-o" => output = Some(require(&arg, args.next())?),
+            "--clip" => clip = Some(require(&arg, args.next())?),
+            "--t5" => t5 = Some(require(&arg, args.next())?),
+            "--width" => width = require(&arg, args.next())?.parse()?,
+            "--height" => height = require(&arg, args.next())?.parse()?,
+            "--steps" => steps = require(&arg, args.next())?.parse()?,
+            "--seed" => seed = require(&arg, args.next())?.parse()?,
+            "--prompt" => prompt = require(&arg, args.next())?,
+            "--guidance" => guidance = require(&arg, args.next())?.parse()?,
+            other => return Err(format!("unknown argument: {other}").into()),
+        }
+    }
+    Ok(GenerateArgs {
+        unet: unet.ok_or("--unet is required")?,
+        vae: vae.ok_or("--vae is required")?,
+        output: output.ok_or("--output is required")?,
+        clip,
+        t5,
+        width,
+        height,
+        steps,
+        seed,
+        prompt,
+        guidance,
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_start = Instant::now();
-    let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
-    let root = env::args().nth(2).unwrap_or_else(|| usage());
-    let output_path = env::args().nth(3).unwrap_or_else(|| usage());
-    let width = env::args()
-        .nth(4)
-        .map(|value| value.parse::<u32>())
-        .transpose()?;
-    let height = env::args()
-        .nth(5)
-        .map(|value| value.parse::<u32>())
-        .transpose()?;
-    let steps = env::args()
-        .nth(6)
-        .map(|value| value.parse::<u32>())
-        .transpose()?;
+    let args = parse_args()?;
+    let output_path = args.output.clone();
 
     let plan_start = Instant::now();
-    let workflow = FluxWorkflow::from_file(&workflow_path)?;
-    let roots = ComfyModelRoots::new(root);
-    let plan = FluxPromptToImagePlan::from_workflow(&workflow, &roots)?;
+    let bundle = FluxResolvedBundle::from_split(
+        &args.unet,
+        &args.vae,
+        args.clip.as_deref(),
+        args.t5.as_deref(),
+    )?;
+    let plan = FluxPromptToImagePlan::from_files(
+        bundle,
+        FluxPrompts {
+            clip_l: args.prompt.clone(),
+            t5xxl: args.prompt.clone(),
+            negative: String::new(),
+        },
+        FluxGenerationConfig {
+            width: args.width,
+            height: args.height,
+            batch_size: 1,
+            seed: args.seed,
+            steps: args.steps,
+            cfg: 1.0,
+            denoise: 1.0,
+            guidance: args.guidance,
+            sampler_name: "euler".to_string(),
+            scheduler: "simple".to_string(),
+        },
+    )?;
     let plan_ms = elapsed_ms(plan_start);
     let runtime_start = Instant::now();
     let shared_runtime = if runtime_available() {
@@ -129,9 +209,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let width = width.unwrap_or(256);
-    let height = height.unwrap_or(width);
-    let steps = steps.unwrap_or(plan.generation.steps).max(1) as usize;
+    let width = plan.generation.width;
+    let height = plan.generation.height;
+    let steps = plan.generation.steps.max(1) as usize;
     let latent_shape = FluxLatentShape::from_image_size(width, height)?;
     let schedule = FluxSchedule::for_flux1(steps, plan.transformer.guidance_embed)?;
     let recompile_transformer_each_step =
@@ -223,14 +303,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut transformer_session_create_ms,
             );
             let denoise_start = Instant::now();
+            let fixed_t = env::var("FLUX_DIT_FIXED_T").ok().and_then(|value| {
+                if value == "1" || value.eq_ignore_ascii_case("on") {
+                    Some(schedule.sigmas[0])
+                } else {
+                    value.parse::<f32>().ok()
+                }
+            });
             for step_index in 0..steps {
                 let sigma = schedule.sigmas[step_index];
                 let sigma_next = schedule.sigmas[step_index + 1];
+                let model_t = fixed_t.unwrap_or(sigma);
                 let run = transformer_compiled.execute(
                     &transformer,
                     conditioning,
                     &packed,
-                    sigma,
+                    model_t,
                     plan.generation.guidance,
                 )?;
                 euler_step(&mut packed, &run.prediction, sigma, sigma_next)?;
@@ -266,7 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bundle
         .vae_path
         .as_ref()
-        .ok_or("workflow bundle does not include vae")?;
+        .ok_or("vae path is required")?;
     let vae_load_start = Instant::now();
     let mut vae = LoadedFluxVaeWeights::load(vae_path)?;
     let vae_load_ms = elapsed_ms(vae_load_start);
@@ -309,7 +397,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("debug layouts: {}, {}", interleaved_path, swapped_path);
     }
 
-    println!("workflow: {}", workflow.path.display());
+    println!(
+        "unet: {}",
+        plan.bundle.diffusion_model_path.display()
+    );
+    println!(
+        "vae: {}",
+        plan.bundle
+            .vae_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "missing".to_string())
+    );
     println!("output: {}", output_path);
     println!("conditioning.source: {}", conditioning_source);
     println!("t5xxl backend: {}", t5_backend);
