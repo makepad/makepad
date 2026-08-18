@@ -45,6 +45,7 @@ mod audio;
 mod billboard_view;
 mod chat;
 mod enhance_meta;
+mod fast_presets;
 mod fleet_poll;
 mod http;
 mod import;
@@ -73,10 +74,11 @@ use crate::asset_store_state::{
     Remote, SERVER_KINDS,
 };
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
+use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
     format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
-    IMAGE_SIZES, IMAGE_STEPS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
+    IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
@@ -780,6 +782,19 @@ script_mod! {
     // Scrolling DropDown2 popup: selected row stays under the field, list
     // clamps to the window, ▲/▼ arrows scroll. Used for every select in
     // this app (preset lists are long enough that DropDownFlat clips).
+    let FieldCaption = HintLabel{
+        width: 92
+        height: Fit
+        align: Align{y: 0.5}
+    }
+    let DropField = View{
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: 6
+        align: Align{y: 0.5}
+    }
+
     let FieldDrop = DropDown2Flat{
         width: Fill
         margin: 0
@@ -1018,65 +1033,53 @@ script_mod! {
                             spinner := LoadingSpinner{ width: 22 height: 22 visible: false }
                         }
 
-                        PanelHeading{ text: "What to make" margin: Inset{top: 4} }
-                        ChainRow{
-                            GroupTag{ text: "IMAGE" }
-                            ChainChips{
-                                qp_img := ChipButton{ text: "Image" }
-                                qp_expimg := ChipButton{ text: "Expand → Image" }
-                                qp_cutout := ChipButton{ text: "Image → Cutout" }
-                                qp_depth := ChipButton{ text: "Image → Depth" }
+                        PanelHeading{ text: "Saved" margin: Inset{top: 4} }
+                        saved_presets := View{
+                            width: Fill height: Fit
+                            flow: Flow.Right{wrap: true}
+                            spacing: 4
+                            fp0 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp0_go := ChipButton{ text: "" }
+                                fp0_del := GhostButton{ text: "×" }
+                            }
+                            fp1 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp1_go := ChipButton{ text: "" }
+                                fp1_del := GhostButton{ text: "×" }
+                            }
+                            fp2 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp2_go := ChipButton{ text: "" }
+                                fp2_del := GhostButton{ text: "×" }
+                            }
+                            fp3 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp3_go := ChipButton{ text: "" }
+                                fp3_del := GhostButton{ text: "×" }
+                            }
+                            fp4 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp4_go := ChipButton{ text: "" }
+                                fp4_del := GhostButton{ text: "×" }
+                            }
+                            fp5 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp5_go := ChipButton{ text: "" }
+                                fp5_del := GhostButton{ text: "×" }
+                            }
+                            fp6 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp6_go := ChipButton{ text: "" }
+                                fp6_del := GhostButton{ text: "×" }
+                            }
+                            fp7 := View{ width: Fit height: Fit flow: Right spacing: 2 visible: false
+                                fp7_go := ChipButton{ text: "" }
+                                fp7_del := GhostButton{ text: "×" }
                             }
                         }
-                        ChainRow{
-                            GroupTag{ text: "3D" }
-                            ChainChips{
-                                qp_mesh := ChipButton{ text: "Image → Mesh" }
-                                qp_mesh_pbr := ChipButton{ text: "Image → Mesh → PBR" }
-                                qp_mesh_pbr_test := ChipButton{ text: "Image → Mesh → PBR (test)" }
-                                qp_character := ChipButton{ text: "Character" }
-                                qp_character_pbr := ChipButton{ text: "Character → PBR" }
-                                qp_character_pbr_test := ChipButton{ text: "Character → PBR (test)" }
-                                qp_world := ChipButton{ text: "Image → World" }
-                                qp_expworld := ChipButton{ text: "Expand → Image → World" }
+                        save_preset_row := View{
+                            width: Fill height: Fit flow: Right spacing: 6
+                            align: Align{y: 0.5}
+                            preset_name_input := TextInputFlat{
+                                width: Fill
+                                height: 28
+                                empty_text: "preset name"
                             }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "VIDEO" }
-                            ChainChips{
-                                qp_vid := ChipButton{ text: "Video" }
-                                qp_expvid := ChipButton{ text: "Expand → Video" }
-                                qp_i2v := ChipButton{ text: "Image → Video" }
-                                qp_expi2v := ChipButton{ text: "Expand → Img → Video" }
-                                qp_fleet_i2v := ChipButton{ text: "Fleet Images → Choose → Video" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "SOUND" }
-                            ChainChips{
-                                qp_sfx := ChipButton{ text: "SFX (sa3)" }
-                                qp_sfx_moss := ChipButton{ text: "SFX (moss)" }
-                                qp_sfx_woosh := ChipButton{ text: "SFX (woosh)" }
-                                qp_expsfx_sa3 := ChipButton{ text: "Expand → SFX (sa3)" }
-                                qp_expsfx_moss := ChipButton{ text: "Expand → SFX (moss)" }
-                                qp_expsfx_woosh := ChipButton{ text: "Expand → SFX (woosh)" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "MUSIC" }
-                            ChainChips{
-                                qp_music := ChipButton{ text: "Music (Music3 native)" }
-                                qp_music_ace := ChipButton{ text: "Music (ACE-Step)" }
-                                qp_expmusic := ChipButton{ text: "Expand → Music3" }
-                                qp_expmusic_ace := ChipButton{ text: "Expand → ACE" }
-                            }
-                        }
-                        ChainRow{
-                            GroupTag{ text: "VOICE" }
-                            ChainChips{
-                                qp_speech := ChipButton{ text: "Speech (kokoro)" }
-                                qp_indextts := ChipButton{ text: "Voice clone (IndexTTS)" }
-                            }
+                            save_preset_btn := GhostButton{ text: "Save preset" }
                         }
 
                         // Persistent selected-input chip: the managed asset
@@ -1144,27 +1147,67 @@ script_mod! {
                         }
 
                         PanelHeading{ text: "Pipeline & routing" }
-                        preset_drop := FieldDrop{}
-                        model_drop := FieldDrop{}
-                        box_drop := FieldDrop{}
-                        voice_drop := FieldDrop{}
-                        params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            size_drop := FieldDrop{ width: Fill }
-                            steps_drop := FieldDrop{ width: Fill }
+                        DropField{
+                            FieldCaption{ text: "Type" }
+                            preset_drop := FieldDrop{}
                         }
-                        mesh_params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            texture_size_drop := FieldDrop{ width: Fill }
+                        md_text_row := DropField{ visible: false FieldCaption{ text: "Text model" } md_text := FieldDrop{} }
+                        md_image_row := DropField{ visible: false FieldCaption{ text: "Image model" } md_image := FieldDrop{} }
+                        md_audio_row := DropField{ visible: false FieldCaption{ text: "Audio model" } md_audio := FieldDrop{} }
+                        md_speech_row := DropField{ visible: false FieldCaption{ text: "Speech model" } md_speech := FieldDrop{} }
+                        md_music_row := DropField{ visible: false FieldCaption{ text: "Music model" } md_music := FieldDrop{} }
+                        md_video_row := DropField{ visible: false FieldCaption{ text: "Video model" } md_video := FieldDrop{} }
+                        md_mesh_row := DropField{ visible: false FieldCaption{ text: "Mesh model" } md_mesh := FieldDrop{} }
+                        md_matte_row := DropField{ visible: false FieldCaption{ text: "Matte model" } md_matte := FieldDrop{} }
+                        md_depth_row := DropField{ visible: false FieldCaption{ text: "Depth model" } md_depth := FieldDrop{} }
+                        md_segment_row := DropField{ visible: false FieldCaption{ text: "Segment model" } md_segment := FieldDrop{} }
+                        md_paint_row := DropField{ visible: false FieldCaption{ text: "Paint model" } md_paint := FieldDrop{} }
+                        md_world_row := DropField{ visible: false FieldCaption{ text: "World model" } md_world := FieldDrop{} }
+                        md_rig_row := DropField{ visible: false FieldCaption{ text: "Rig model" } md_rig := FieldDrop{} }
+                        md_motion_row := DropField{ visible: false FieldCaption{ text: "Motion model" } md_motion := FieldDrop{} }
+                        DropField{
+                            FieldCaption{ text: "Box" }
+                            box_drop := FieldDrop{}
                         }
-                        vid_params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            vid_size_drop := FieldDrop{ width: Fill }
-                            vid_len_drop := FieldDrop{ width: Fill }
+                        speech_params_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Speech voice" }
+                            voice_drop := FieldDrop{}
                         }
-                        music_params_row := View{
-                            width: Fill height: Fit flow: Right spacing: 6
-                            music_len_drop := FieldDrop{ width: Fill }
+                        image_size_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Image size" }
+                            size_drop := FieldDrop{}
+                        }
+                        image_steps_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Image steps" }
+                            steps_drop := FieldDrop{}
+                        }
+                        mesh_params_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Mesh texture" }
+                            texture_size_drop := FieldDrop{}
+                        }
+                        mesh_faces_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Mesh faces" }
+                            mesh_faces_drop := FieldDrop{}
+                        }
+                        vid_size_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Video size" }
+                            vid_size_drop := FieldDrop{}
+                        }
+                        vid_len_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Video length" }
+                            vid_len_drop := FieldDrop{}
+                        }
+                        music_params_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Music length" }
+                            music_len_drop := FieldDrop{}
                         }
 
                         action_row := View{
@@ -1644,7 +1687,8 @@ script_mod! {
                                         width: Fill height: Fit flow: Right spacing: 6
                                         align: Align{y: 0.5}
                                         lib_search := FilterInput{ width: 250 empty_text: "Search label, prompt, id…" }
-                                        lib_tag_drop := FieldDrop{ width: 280 }
+                                        FieldCaption{ text: "Tags" }
+                                        lib_tag_drop := FieldDrop{ width: 220 }
                                         lib_clear_btn := GhostButton{ text: "Clear" }
                                         lib_enhance_btn := GhostButton{ text: "Enhance metadata" }
                                     }
@@ -2166,7 +2210,7 @@ struct RunSeed {
 struct PendingRun {
     prompt: String,
     preset: usize,
-    model_override: Option<(String, String)>,
+    model_overrides: Vec<(String, String)>,
     box_override: Option<String>,
     /// Voice pack for speech stages (None = backend default).
     voice: Option<String>,
@@ -2300,9 +2344,12 @@ pub struct App {
     sample_timer: Timer,
     #[rust]
     exit_timer: Timer,
-    /// (domain, model) pairs behind the model selector (minus "auto").
+    /// Per-domain model ids behind each stage-model dropdown (minus "auto").
     #[rust]
-    model_choices: Vec<(String, String)>,
+    model_choices: Vec<(String, Vec<String>)>,
+    /// User-saved one-click pipeline snapshots.
+    #[rust]
+    saved_presets: Vec<SavedFastPreset>,
     /// Box urls behind the box selector (minus "auto").
     #[rust]
     box_choices: Vec<String>,
@@ -2445,6 +2492,7 @@ impl App {
         let _ = std::fs::create_dir_all(artifacts_dir());
         self.artifact_io = Some(ArtifactIo::start());
         self.library = Some(Library::open(repo_path("local/ai_content_library")));
+        self.saved_presets = fast_presets::load(&fast_presets::store_path());
         if let Some(library) = &mut self.library {
             crate::enhance_meta::apply_catalog_names(library);
         }
@@ -2471,7 +2519,11 @@ impl App {
         // empty library changes nothing.
         self.refresh_gallery(cx, true);
 
-        // GPU boxes join via the LAN beacon. No seed file.
+        // GPU boxes join via the LAN beacon. Asset-ui stays on the `gen`
+        // fleet so the sandbox `game` box (.123) never lands in this UI.
+        if std::env::var_os("MAKEPAD_AI_FLEET").is_none() {
+            std::env::set_var("MAKEPAD_AI_FLEET", "gen");
+        }
         self.discovered = Some(makepad_asset_ai::discovery::start_listener());
         self.fleet = Some(FleetPoll::new());
         self.maybe_connect_chat();
@@ -2480,21 +2532,19 @@ impl App {
         self.audio_timer = cx.start_interval(0.1);
         self.thumbnail_timer = cx.start_interval(0.5);
 
-        // Preset dropdown.
+        // Type dropdown (pipeline). Field captions sit beside the control;
+        // items are the choices only.
         let labels: Vec<String> = PRESETS.iter().map(|p| p.name.to_string()).collect();
         self.ui
             .drop_down2(cx, ids!(preset_drop))
             .set_labels(cx, labels);
         self.ui
-            .drop_down2(cx, ids!(model_drop))
-            .set_labels(cx, vec!["model: auto (affinity)".to_string()]);
-        self.ui
             .drop_down2(cx, ids!(box_drop))
-            .set_labels(cx, vec!["box: auto (affinity)".to_string()]);
+            .set_labels(cx, vec!["auto (affinity)".to_string()]);
         self.ui.drop_down2(cx, ids!(voice_drop)).set_labels(
             cx,
-            std::iter::once(format!("voice: default ({})", VOICES[0]))
-                .chain(VOICES[1..].iter().map(|v| format!("voice: {v}")))
+            std::iter::once(format!("default ({})", VOICES[0]))
+                .chain(VOICES[1..].iter().map(|v| (*v).to_string()))
                 .collect(),
         );
         self.ui.drop_down2(cx, ids!(size_drop)).set_labels(
@@ -2504,17 +2554,17 @@ impl App {
                 .enumerate()
                 .map(|(i, (w, h))| {
                     if i == 0 {
-                        format!("image: {w}×{h} (default)")
+                        format!("{w}×{h} (default)")
                     } else {
-                        format!("image: {w}×{h}")
+                        format!("{w}×{h}")
                     }
                 })
                 .collect(),
         );
         self.ui.drop_down2(cx, ids!(steps_drop)).set_labels(
             cx,
-            std::iter::once("steps: model default".to_string())
-                .chain(IMAGE_STEPS.iter().map(|s| format!("steps: {s}")))
+            std::iter::once("model default".to_string())
+                .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
                 .collect(),
         );
         self.ui
@@ -2525,12 +2575,22 @@ impl App {
                     .iter()
                     .enumerate()
                     .map(|(index, size)| match index {
-                        0 => format!("mesh texture: {size} (fast default)"),
-                        1 => format!("mesh texture: {size} (high)"),
-                        _ => format!("mesh texture: {size} (ultra)"),
+                        0 => format!("{size} (fast default)"),
+                        1 => format!("{size} (high)"),
+                        _ => format!("{size} (ultra)"),
                     })
                     .collect(),
             );
+        self.ui.drop_down2(cx, ids!(mesh_faces_drop)).set_labels(
+            cx,
+            MESH_FACE_COUNTS
+                .iter()
+                .map(|count| match *count {
+                    0 => "auto (12–20k)".to_string(),
+                    n => format!("{}k", n / 1000),
+                })
+                .collect(),
+        );
         self.ui.drop_down2(cx, ids!(vid_size_drop)).set_labels(
             cx,
             VIDEO_SIZES
@@ -2538,9 +2598,9 @@ impl App {
                 .enumerate()
                 .map(|(i, (w, h))| {
                     if i == 0 {
-                        format!("video: {w}×{h} (default)")
+                        format!("{w}×{h} (default)")
                     } else {
-                        format!("video: {w}×{h}")
+                        format!("{w}×{h}")
                     }
                 })
                 .collect(),
@@ -2553,9 +2613,9 @@ impl App {
                 .map(|(i, (frames, steps))| {
                     let seconds = *frames as f64 / 16.0;
                     if i == 0 {
-                        format!("length: {seconds:.1}s · {steps} steps (default)")
+                        format!("{seconds:.1}s · {steps} steps (default)")
                     } else {
-                        format!("length: {seconds:.1}s · {steps} steps")
+                        format!("{seconds:.1}s · {steps} steps")
                     }
                 })
                 .collect(),
@@ -2572,14 +2632,18 @@ impl App {
                 .map(|seconds| {
                     let clock = format_music_duration(*seconds);
                     if *seconds == MUSIC_DEFAULT_SECONDS {
-                        format!("song target: {clock} (default; may end early)")
+                        format!("{clock} (default; may end early)")
                     } else {
-                        format!("song target: {clock} (may end early)")
+                        format!("{clock} (may end early)")
                     }
                 })
                 .collect(),
         );
         music_len_drop.set_selected_item(cx, music_default);
+        self.refresh_saved_presets_ui(cx);
+        self.refresh_model_ui(cx, true);
+        self.refresh_voice_ui(cx);
+        self.sync_preset_name_box(cx);
 
         // Speakers: wav artifacts + video soundtrack.
         cx.audio_output(0, move |info, output| {
@@ -2635,56 +2699,415 @@ impl App {
             .label(cx, ids!(fleet_label))
             .set_text(cx, &fleet.panel_text());
 
-        // Model selector = every available model across the fleet.
-        let mut labels = vec!["model: auto (affinity)".to_string()];
-        let mut choices = Vec::new();
-        let mut box_labels = vec!["box: auto (affinity)".to_string()];
+        let mut box_labels = vec!["auto (affinity)".to_string()];
         let mut boxes = Vec::new();
         for snap in &fleet.snapshots {
             if !snap.is_up() {
                 continue;
             }
-            box_labels.push(format!("box: {}", snap.base_url.trim_start_matches("http://")));
+            box_labels.push(snap.base_url.trim_start_matches("http://").to_string());
             boxes.push(snap.base_url.clone());
-            for model in &snap.models {
-                if !model.available {
-                    continue;
-                }
-                let key = (model.domain.clone(), model.id.clone());
-                if !choices.contains(&key) {
-                    labels.push(format!("model: {} ({})", model.id, model.domain));
-                    choices.push(key);
-                }
-            }
-        }
-        // Compare the SETS, not the lengths: a box swapping one model for
-        // another keeps the count while changing the choices — the selector
-        // must always list every available /models entry across the fleet.
-        if choices != self.model_choices {
-            self.ui
-                .drop_down2(cx, ids!(model_drop))
-                .set_labels(cx, labels);
         }
         if boxes != self.box_choices {
             self.ui.drop_down2(cx, ids!(box_drop)).set_labels(cx, box_labels);
         }
-        self.model_choices = choices;
         self.box_choices = boxes;
+        self.refresh_model_ui(cx, false);
         self.refresh_voice_ui(cx);
+    }
+
+    fn current_preset_index(&self, cx: &mut Cx) -> usize {
+        self.ui
+            .drop_down2(cx, ids!(preset_drop))
+            .selected_item()
+            .min(PRESETS.len() - 1)
+    }
+
+    fn fleet_models_for_domain(&self, domain: &str) -> Vec<String> {
+        let Some(fleet) = &self.fleet else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for snap in &fleet.snapshots {
+            if !snap.is_up() {
+                continue;
+            }
+            for model in &snap.models {
+                if model.available && model.domain == domain && !ids.contains(&model.id) {
+                    ids.push(model.id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    fn selected_stage_model(&self, cx: &mut Cx, domain: &str) -> Option<String> {
+        let drop = match domain {
+            "text" => self.ui.drop_down2(cx, ids!(md_text)),
+            "image" => self.ui.drop_down2(cx, ids!(md_image)),
+            "audio" => self.ui.drop_down2(cx, ids!(md_audio)),
+            "speech" => self.ui.drop_down2(cx, ids!(md_speech)),
+            "music" => self.ui.drop_down2(cx, ids!(md_music)),
+            "video" => self.ui.drop_down2(cx, ids!(md_video)),
+            "mesh" => self.ui.drop_down2(cx, ids!(md_mesh)),
+            "matte" => self.ui.drop_down2(cx, ids!(md_matte)),
+            "depth" => self.ui.drop_down2(cx, ids!(md_depth)),
+            "segment" => self.ui.drop_down2(cx, ids!(md_segment)),
+            "paint" => self.ui.drop_down2(cx, ids!(md_paint)),
+            "world" => self.ui.drop_down2(cx, ids!(md_world)),
+            "rig" => self.ui.drop_down2(cx, ids!(md_rig)),
+            "motion" => self.ui.drop_down2(cx, ids!(md_motion)),
+            _ => return None,
+        };
+        let index = drop.selected_item().checked_sub(1)?;
+        self.model_choices
+            .iter()
+            .find(|(name, _)| name == domain)
+            .and_then(|(_, ids)| ids.get(index))
+            .cloned()
+    }
+
+    fn collected_stage_models(&self, cx: &mut Cx, domains: &[&str]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for domain in domains {
+            if let Some(model) = self.selected_stage_model(cx, domain) {
+                out.push(((*domain).to_string(), model));
+            }
+        }
+        out
+    }
+
+    fn refresh_one_stage_model(
+        &mut self,
+        cx: &mut Cx,
+        domain: &str,
+        row: &[LiveId],
+        drop: &[LiveId],
+        active: bool,
+        apply_preset_pin: bool,
+        pin: Option<&str>,
+    ) {
+        self.ui.widget(cx, row).set_visible(cx, active);
+        if !active {
+            return;
+        }
+        let previous = self.selected_stage_model(cx, domain);
+        let ids = self.fleet_models_for_domain(domain);
+        let labels: Vec<String> = std::iter::once("auto (affinity)".to_string())
+            .chain(ids.iter().cloned())
+            .collect();
+        let mut select = 0usize;
+        if apply_preset_pin {
+            if let Some(pin) = pin {
+                if let Some(index) = ids.iter().position(|id| id == pin) {
+                    select = index + 1;
+                }
+            }
+        } else if let Some(previous) = previous {
+            if let Some(index) = ids.iter().position(|id| id == &previous) {
+                select = index + 1;
+            }
+        }
+        let slot = self
+            .model_choices
+            .iter()
+            .position(|(name, _)| name == domain);
+        let changed = match slot {
+            Some(index) => self.model_choices[index].1 != ids,
+            None => true,
+        };
+        if changed {
+            self.ui.drop_down2(cx, drop).set_labels(cx, labels);
+            match slot {
+                Some(index) => self.model_choices[index].1 = ids,
+                None => self.model_choices.push((domain.to_string(), ids)),
+            }
+        }
+        self.ui.drop_down2(cx, drop).set_selected_item(cx, select);
+    }
+
+    /// Show a model dropdown for each step in the selected pipeline, the
+    /// same way image size / music length already splat out.
+    fn refresh_model_ui(&mut self, cx: &mut Cx, apply_preset_pin: bool) {
+        let preset = self.current_preset_index(cx);
+        let domains = PRESETS[preset].domains;
+        let pin_for = |domain: &str| {
+            PRESETS[preset]
+                .pins
+                .iter()
+                .find(|(pin_domain, _)| *pin_domain == domain)
+                .map(|(_, model)| *model)
+        };
+        let active = |domain: &str| domains.iter().any(|want| *want == domain);
+        self.refresh_one_stage_model(
+            cx, "text", ids!(md_text_row), ids!(md_text), active("text"), apply_preset_pin, pin_for("text"),
+        );
+        self.refresh_one_stage_model(
+            cx, "image", ids!(md_image_row), ids!(md_image), active("image"), apply_preset_pin, pin_for("image"),
+        );
+        self.refresh_one_stage_model(
+            cx, "audio", ids!(md_audio_row), ids!(md_audio), active("audio"), apply_preset_pin, pin_for("audio"),
+        );
+        self.refresh_one_stage_model(
+            cx, "speech", ids!(md_speech_row), ids!(md_speech), active("speech"), apply_preset_pin, pin_for("speech"),
+        );
+        self.refresh_one_stage_model(
+            cx, "music", ids!(md_music_row), ids!(md_music), active("music"), apply_preset_pin, pin_for("music"),
+        );
+        self.refresh_one_stage_model(
+            cx, "video", ids!(md_video_row), ids!(md_video), active("video"), apply_preset_pin, pin_for("video"),
+        );
+        self.refresh_one_stage_model(
+            cx, "mesh", ids!(md_mesh_row), ids!(md_mesh), active("mesh"), apply_preset_pin, pin_for("mesh"),
+        );
+        self.refresh_one_stage_model(
+            cx, "matte", ids!(md_matte_row), ids!(md_matte), active("matte"), apply_preset_pin, pin_for("matte"),
+        );
+        self.refresh_one_stage_model(
+            cx, "depth", ids!(md_depth_row), ids!(md_depth), active("depth"), apply_preset_pin, pin_for("depth"),
+        );
+        self.refresh_one_stage_model(
+            cx, "segment", ids!(md_segment_row), ids!(md_segment), active("segment"), apply_preset_pin, pin_for("segment"),
+        );
+        self.refresh_one_stage_model(
+            cx, "paint", ids!(md_paint_row), ids!(md_paint), active("paint"), apply_preset_pin, pin_for("paint"),
+        );
+        self.refresh_one_stage_model(
+            cx, "world", ids!(md_world_row), ids!(md_world), active("world"), apply_preset_pin, pin_for("world"),
+        );
+        self.refresh_one_stage_model(
+            cx, "rig", ids!(md_rig_row), ids!(md_rig), active("rig"), apply_preset_pin, pin_for("rig"),
+        );
+        self.refresh_one_stage_model(
+            cx, "motion", ids!(md_motion_row), ids!(md_motion), active("motion"), apply_preset_pin, pin_for("motion"),
+        );
+        self.ui
+            .widget(cx, ids!(speech_params_row))
+            .set_visible(cx, active("speech"));
+        self.ui
+            .widget(cx, ids!(image_size_row))
+            .set_visible(cx, active("image"));
+        self.ui
+            .widget(cx, ids!(image_steps_row))
+            .set_visible(cx, active("image"));
+        self.ui
+            .widget(cx, ids!(mesh_params_row))
+            .set_visible(cx, active("mesh") || active("paint"));
+        self.ui
+            .widget(cx, ids!(mesh_faces_row))
+            .set_visible(cx, active("mesh"));
+        self.ui
+            .widget(cx, ids!(vid_size_row))
+            .set_visible(cx, active("video"));
+        self.ui
+            .widget(cx, ids!(vid_len_row))
+            .set_visible(cx, active("video"));
+        self.ui
+            .widget(cx, ids!(music_params_row))
+            .set_visible(cx, active("music"));
+        self.sync_preset_name_box(cx);
+    }
+
+    fn current_panel_gen(&self, cx: &mut Cx) -> GenParams {
+        let size = IMAGE_SIZES[self
+            .ui
+            .drop_down2(cx, ids!(size_drop))
+            .selected_item()
+            .min(IMAGE_SIZES.len() - 1)];
+        let steps_index = self.ui.drop_down2(cx, ids!(steps_drop)).selected_item();
+        let image_steps = steps_index
+            .checked_sub(1)
+            .and_then(|i| IMAGE_STEPS.get(i).copied());
+        let mesh_texture_size = MESH_TEXTURE_SIZES[self
+            .ui
+            .drop_down2(cx, ids!(texture_size_drop))
+            .selected_item()
+            .min(MESH_TEXTURE_SIZES.len() - 1)];
+        let mesh_faces_n = MESH_FACE_COUNTS[self
+            .ui
+            .drop_down2(cx, ids!(mesh_faces_drop))
+            .selected_item()
+            .min(MESH_FACE_COUNTS.len() - 1)];
+        let mesh_faces = (mesh_faces_n != 0).then_some(mesh_faces_n);
+        let vid_size = VIDEO_SIZES[self
+            .ui
+            .drop_down2(cx, ids!(vid_size_drop))
+            .selected_item()
+            .min(VIDEO_SIZES.len() - 1)];
+        let (video_frames, video_steps) = VIDEO_LENGTHS[self
+            .ui
+            .drop_down2(cx, ids!(vid_len_drop))
+            .selected_item()
+            .min(VIDEO_LENGTHS.len() - 1)];
+        let music_seconds = MUSIC_LENGTHS[self
+            .ui
+            .drop_down2(cx, ids!(music_len_drop))
+            .selected_item()
+            .min(MUSIC_LENGTHS.len() - 1)];
+        GenParams {
+            image_size: size,
+            image_steps,
+            mesh_texture_size,
+            mesh_faces,
+            video_size: vid_size,
+            video_frames,
+            video_steps,
+            music_seconds,
+        }
+    }
+
+    fn sync_preset_name_box(&mut self, cx: &mut Cx) {
+        let preset = self.current_preset_index(cx);
+        let models = self.collected_stage_models(cx, PRESETS[preset].domains);
+        let gen = self.current_panel_gen(cx);
+        let name = fast_presets::auto_name(PRESETS[preset].name, &models, &gen);
+        self.ui
+            .text_input(cx, ids!(preset_name_input))
+            .set_text(cx, &name);
+    }
+
+    fn persist_saved_presets(&self) {
+        if let Err(error) = fast_presets::save(&fast_presets::store_path(), &self.saved_presets) {
+            log!("fast preset save failed: {error}");
+        }
+    }
+
+    fn refresh_saved_presets_ui(&mut self, cx: &mut Cx) {
+        let slots = [
+            (ids!(fp0), ids!(fp0_go), ids!(fp0_del)),
+            (ids!(fp1), ids!(fp1_go), ids!(fp1_del)),
+            (ids!(fp2), ids!(fp2_go), ids!(fp2_del)),
+            (ids!(fp3), ids!(fp3_go), ids!(fp3_del)),
+            (ids!(fp4), ids!(fp4_go), ids!(fp4_del)),
+            (ids!(fp5), ids!(fp5_go), ids!(fp5_del)),
+            (ids!(fp6), ids!(fp6_go), ids!(fp6_del)),
+            (ids!(fp7), ids!(fp7_go), ids!(fp7_del)),
+        ];
+        for (i, (row, go, _)) in slots.iter().enumerate() {
+            if let Some(saved) = self.saved_presets.get(i) {
+                self.ui.widget(cx, *row).set_visible(cx, true);
+                self.ui.button(cx, *go).set_text(cx, &saved.name);
+            } else {
+                self.ui.widget(cx, *row).set_visible(cx, false);
+            }
+        }
+    }
+
+    fn save_current_preset(&mut self, cx: &mut Cx) {
+        if self.saved_presets.len() >= MAX_FAST_PRESETS {
+            self.set_caption(cx, "PRESET", "delete one first (8 max)");
+            return;
+        }
+        let preset = self.current_preset_index(cx);
+        let models = self.collected_stage_models(cx, PRESETS[preset].domains);
+        let gen = self.current_panel_gen(cx);
+        let typed = self.ui.text_input(cx, ids!(preset_name_input)).text();
+        let name = {
+            let trimmed = typed.trim();
+            if trimmed.is_empty() {
+                fast_presets::auto_name(PRESETS[preset].name, &models, &gen)
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let voice_index = self.ui.drop_down2(cx, ids!(voice_drop)).selected_item();
+        let voice = if voice_index == 0 || !self.voice_drop_is_kokoro {
+            None
+        } else {
+            VOICES.get(voice_index).map(|v| v.to_string())
+        };
+        self.saved_presets.push(fast_presets::snapshot(
+            PRESETS[preset].name,
+            models,
+            voice,
+            &gen,
+            name,
+        ));
+        self.persist_saved_presets();
+        self.refresh_saved_presets_ui(cx);
+        self.sync_preset_name_box(cx);
+    }
+
+    fn apply_saved_preset(&mut self, cx: &mut Cx, index: usize) {
+        let Some(saved) = self.saved_presets.get(index).cloned() else {
+            return;
+        };
+        let Some(preset) = fast_presets::pipeline_index(&saved.pipeline) else {
+            self.set_caption(cx, "PRESET", &format!("missing pipeline {}", saved.pipeline));
+            return;
+        };
+        self.ui
+            .drop_down2(cx, ids!(preset_drop))
+            .set_selected_item(cx, preset);
+        self.refresh_model_ui(cx, false);
+        for pin in &saved.models {
+            let ids = self.fleet_models_for_domain(&pin.domain);
+            if let Some(pos) = ids.iter().position(|id| id == &pin.model) {
+                if let Some(drop) = Self::stage_model_drop_id(&pin.domain) {
+                    self.ui
+                        .drop_down2(cx, drop)
+                        .set_selected_item(cx, pos + 1);
+                }
+            }
+        }
+        self.ui
+            .drop_down2(cx, ids!(size_drop))
+            .set_selected_item(cx, fast_presets::nearest_image_size(saved.image_w, saved.image_h));
+        self.ui.drop_down2(cx, ids!(steps_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_image_steps(saved.image_steps),
+        );
+        self.ui.drop_down2(cx, ids!(texture_size_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_mesh_texture(saved.mesh_texture),
+        );
+        self.ui.drop_down2(cx, ids!(mesh_faces_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_mesh_faces(saved.mesh_faces),
+        );
+        self.ui.drop_down2(cx, ids!(vid_size_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_video_size(saved.video_w, saved.video_h),
+        );
+        self.ui.drop_down2(cx, ids!(vid_len_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_video_len(saved.video_frames, saved.video_steps),
+        );
+        self.ui.drop_down2(cx, ids!(music_len_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_music_len(saved.music_seconds),
+        );
+        self.refresh_voice_ui(cx);
+        self.sync_preset_name_box(cx);
+        self.start_generate(cx);
+    }
+
+    fn stage_model_drop_id(domain: &str) -> Option<&'static [LiveId]> {
+        Some(match domain {
+            "text" => ids!(md_text),
+            "image" => ids!(md_image),
+            "audio" => ids!(md_audio),
+            "speech" => ids!(md_speech),
+            "music" => ids!(md_music),
+            "video" => ids!(md_video),
+            "mesh" => ids!(md_mesh),
+            "matte" => ids!(md_matte),
+            "depth" => ids!(md_depth),
+            "segment" => ids!(md_segment),
+            "paint" => ids!(md_paint),
+            "world" => ids!(md_world),
+            "rig" => ids!(md_rig),
+            "motion" => ids!(md_motion),
+            _ => return None,
+        })
     }
 
     /// The speech model the NEXT run would use: an explicit speech model
     /// override wins, else the selected preset's speech pin, else Kokoro by
     /// affinity convention (the only pack-based backend).
     fn effective_speech_model(&mut self, cx: &mut Cx) -> Option<String> {
-        let model_index = self.ui.drop_down2(cx, ids!(model_drop)).selected_item();
-        if let Some((domain, model)) = model_index
-            .checked_sub(1)
-            .and_then(|index| self.model_choices.get(index))
-        {
-            if domain == "speech" {
-                return Some(model.clone());
-            }
+        if let Some(model) = self.selected_stage_model(cx, "speech") {
+            return Some(model);
         }
         let preset = self
             .ui
@@ -2713,8 +3136,8 @@ impl App {
         if kokoro {
             drop.set_labels(
                 cx,
-                std::iter::once(format!("voice: default ({})", VOICES[0]))
-                    .chain(VOICES[1..].iter().map(|voice| format!("voice: {voice}")))
+                std::iter::once(format!("default ({})", VOICES[0]))
+                    .chain(VOICES[1..].iter().map(|voice| (*voice).to_string()))
                     .collect(),
             );
         } else {
@@ -2722,7 +3145,7 @@ impl App {
             drop.set_labels(
                 cx,
                 vec![format!(
-                    "voice: n/a — {model} uses reference audio + emotion (not wired here yet)"
+                    "n/a — {model} uses reference audio + emotion (not wired here yet)"
                 )],
             );
         }
@@ -2758,6 +3181,7 @@ impl App {
         self.ui
             .drop_down2(cx, ids!(preset_drop))
             .set_selected_item(cx, preset_index);
+        self.refresh_model_ui(cx, true);
         // Extra queued runs, to exercise the run queue. Each is its own
         // History group, exactly like distinct Generate clicks.
         for sub in self.auto.queue.clone() {
@@ -2777,7 +3201,7 @@ impl App {
                     group_label,
                     prompt,
                     preset,
-                    model_override: None,
+                    model_overrides: Vec::new(),
                     box_override: None,
                     voice: None,
                     gen: GenParams::default(),
@@ -2805,12 +3229,8 @@ impl App {
             .drop_down2(cx, ids!(preset_drop))
             .selected_item()
             .min(PRESETS.len() - 1);
-        let model_index = self.ui.drop_down2(cx, ids!(model_drop)).selected_item();
-        let model_override = if model_index == 0 {
-            None
-        } else {
-            self.model_choices.get(model_index - 1).cloned()
-        };
+        let model_overrides =
+            self.collected_stage_models(cx, PRESETS[preset].domains);
         let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();
         let box_override = if box_index == 0 {
             None
@@ -2835,6 +3255,12 @@ impl App {
             .drop_down2(cx, ids!(texture_size_drop))
             .selected_item()
             .min(MESH_TEXTURE_SIZES.len() - 1)];
+        let mesh_faces_n = MESH_FACE_COUNTS[self
+            .ui
+            .drop_down2(cx, ids!(mesh_faces_drop))
+            .selected_item()
+            .min(MESH_FACE_COUNTS.len() - 1)];
+        let mesh_faces = (mesh_faces_n != 0).then_some(mesh_faces_n);
         let vid_size = VIDEO_SIZES[self
             .ui
             .drop_down2(cx, ids!(vid_size_drop))
@@ -2912,13 +3338,14 @@ impl App {
             group_label,
             prompt,
             preset,
-            model_override,
+            model_overrides,
             box_override,
             voice,
             gen: GenParams {
                 image_size: size,
                 image_steps,
                 mesh_texture_size,
+                mesh_faces,
                 video_size: vid_size,
                 video_frames,
                 video_steps,
@@ -2933,12 +3360,13 @@ impl App {
     /// about seeding a SPECIFIC box, exactly the case affinity won't route.
     /// Progress shows on the box's fleet entry (model state + queue).
     fn pull_model(&mut self, cx: &mut Cx) {
-        let model_index = self.ui.drop_down2(cx, ids!(model_drop)).selected_item();
-        let Some((_, model)) = model_index
-            .checked_sub(1)
-            .and_then(|i| self.model_choices.get(i))
+        let preset = self.current_preset_index(cx);
+        let Some((_, model)) = self
+            .collected_stage_models(cx, PRESETS[preset].domains)
+            .into_iter()
+            .next()
         else {
-            self.set_caption(cx, "PULL", "pick a model in the model pin first");
+            self.set_caption(cx, "PULL", "pick a model in a stage dropdown first");
             return;
         };
         let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();
@@ -3020,14 +3448,18 @@ impl App {
             .copied()
             .unwrap_or("image")
             .to_string();
-        let pinned_model = match &run.model_override {
-            Some((override_domain, model)) if *override_domain == domain => Some(model.clone()),
-            _ => PRESETS[run.preset]
-                .pins
-                .iter()
-                .find(|(pin_domain, _)| *pin_domain == domain)
-                .map(|(_, model)| (*model).to_string()),
-        };
+        let pinned_model = run
+            .model_overrides
+            .iter()
+            .find(|(override_domain, _)| override_domain == &domain)
+            .map(|(_, model)| model.clone())
+            .or_else(|| {
+                PRESETS[run.preset]
+                    .pins
+                    .iter()
+                    .find(|(pin_domain, _)| *pin_domain == domain)
+                    .map(|(_, model)| (*model).to_string())
+            });
         let ours = self.our_endpoint_use();
         let loads = self
             .fleet
@@ -3151,7 +3583,7 @@ impl App {
             &run.prompt,
             run.domains(),
             PRESETS[run.preset].pins,
-            run.model_override.clone(),
+            run.model_overrides.clone(),
             run.box_override.clone(),
             run.voice.clone(),
             run.gen.clone(),
@@ -4050,6 +4482,9 @@ impl App {
         self.artifact_count += 1;
         let n = self.artifact_count;
         log!("artifact #{n}: {domain} {content_type} {} bytes", bytes.len());
+        // Paint sidecars (albedo/normal/ORM/manifest) stay in History but
+        // must not replace the textured GLB in the viewer or steal selection.
+        let show_in_viewer = show_in_viewer && auto_show_artifact(domain, content_type);
         // Persist FIRST — History readiness never depends on what surface
         // is up. (Audio-thumbnail provenance is enforced INSIDE the library:
         // any caller thumbnail for audio is discarded there.)
@@ -4072,7 +4507,9 @@ impl App {
                 group,
             ) {
                 Ok(file) => {
-                    self.selected_file = Some(file.clone());
+                    if show_in_viewer {
+                        self.selected_file = Some(file.clone());
+                    }
                     managed_file = Some(file);
                 }
                 Err(error) => log!("library: could not persist artifact: {error}"),
@@ -4302,21 +4739,31 @@ impl App {
                 {
                     if let Some(place) = library.world_place(file) {
                         let mut sprites = Vec::new();
+                        let mut models = Vec::new();
                         for p in &place.places {
-                            if p.align != "face" || p.asset.is_empty() {
+                            if p.asset.is_empty() {
                                 continue;
                             }
                             let Some(path) = library.find_place_asset(&p.asset) else {
                                 continue;
                             };
-                            sprites.push((
-                                vec3f(p.pos[0], p.pos[1], p.pos[2]),
-                                p.width,
-                                p.height,
-                                path,
-                            ));
+                            if p.align == "face" {
+                                sprites.push((
+                                    vec3f(p.pos[0], p.pos[1], p.pos[2]),
+                                    p.width,
+                                    p.height,
+                                    path,
+                                ));
+                            } else {
+                                models.push((
+                                    vec3f(p.pos[0], p.pos[1], p.pos[2]),
+                                    p.yaw,
+                                    path,
+                                ));
+                            }
                         }
                         mesh.set_placed_sprites(cx, sprites);
+                        mesh.set_placed_models(cx, models);
                     }
                 }
             }
@@ -4538,12 +4985,6 @@ impl App {
                 "Image → Mesh → PBR",
                 "PBR",
             ),
-            (
-                ids!(qp_mesh_pbr_test),
-                "image → mesh → PBR (testpattern)",
-                "Image → Mesh → PBR (test)",
-                "PBR",
-            ),
             (ids!(qp_cutout), "image → cutout (alpha)", "Image → Cutout", "Cutout"),
             (ids!(qp_depth), "image → depthmap", "Image → Depth", "Depth"),
             (ids!(qp_world), "image → world", "Image → World", "World"),
@@ -4576,12 +5017,6 @@ impl App {
                 ids!(qp_character_pbr),
                 "character (playable + hunyuan PBR)",
                 "Character → PBR",
-                "Character",
-            ),
-            (
-                ids!(qp_character_pbr_test),
-                "character (playable + PBR test)",
-                "Character → PBR (test)",
                 "Character",
             ),
         ] {
@@ -5396,10 +5831,11 @@ impl App {
             );
             return;
         };
-        let model_override = job
+        let model_overrides = job
             .model
             .as_ref()
-            .map(|model| (job.kind.model_domain().to_string(), model.clone()));
+            .map(|model| vec![(job.kind.model_domain().to_string(), model.clone())])
+            .unwrap_or_default();
         let group_label = format!(
             "{} — \"{}\"",
             PRESETS[preset].name,
@@ -5451,7 +5887,7 @@ impl App {
             group_label,
             prompt: job.prompt,
             preset,
-            model_override,
+            model_overrides,
             box_override: None,
             voice: job.voice,
             gen,
@@ -5607,25 +6043,25 @@ impl App {
             Some(library) => collect_tag_stats(library.newest_items()),
             None => Vec::new(),
         };
-        let tag_labels: Vec<String> = std::iter::once(if tag_stats.is_empty() {
-            "tags".to_string()
+        let tag_labels: Vec<String> = if tag_stats.is_empty() {
+            vec!["None yet".to_string()]
         } else {
-            format!("tags · {}", tag_stats.len())
-        })
-        .chain(tag_stats.iter().map(|stat| {
-            let on = self
-                .lib_filters
-                .tags
+            tag_stats
                 .iter()
-                .any(|selected| selected.eq_ignore_ascii_case(&stat.name));
-            let mark = if on { "● " } else { "" };
-            let star = if stat.enhanced { "✦ " } else { "" };
-            format!("{mark}{star}{}   {}", stat.name, stat.count)
-        }))
-        .collect();
+                .map(|stat| {
+                    let on = self
+                        .lib_filters
+                        .tags
+                        .iter()
+                        .any(|selected| selected.eq_ignore_ascii_case(&stat.name));
+                    let mark = if on { "● " } else { "" };
+                    let star = if stat.enhanced { "✦ " } else { "" };
+                    format!("{mark}{star}{}   {}", stat.name, stat.count)
+                })
+                .collect()
+        };
         let drop = self.ui.drop_down2(cx, ids!(lib_tag_drop));
         drop.set_labels(cx, tag_labels);
-        drop.set_selected_item(cx, 0);
         self.lib_tag_options = tag_stats;
 
         let chips = self.lib_filters.tags.clone();
@@ -6896,9 +7332,9 @@ impl App {
         let (glb, png) = match std::env::var("AI_CONTENT_SAMPLE_MESH") {
             Ok(path) => (std::fs::read(&path), None),
             Err(_) => (
-                std::fs::read(repo_path("examples/rig/resources/character_retex.glb")),
+                std::fs::read(repo_path("apps/asset-ui/resources/test/character_retex.glb")),
                 std::fs::read(repo_path(
-                    "examples/rig/resources/character_retex_basecolor.png",
+                    "apps/asset-ui/resources/test/character_retex_basecolor.png",
                 ))
                 .ok(),
             ),
@@ -7052,6 +7488,20 @@ const MAX_FINISHED_RUNS_SHOWN: usize = 3;
 
 fn kind_label(domain: &str, content_type: &str) -> &'static str {
     crate::asset_store_state::library_type(domain, content_type)
+}
+
+/// Which completions take over the Create viewer. Paint's channel maps and
+/// provenance JSON are kept in History; auto-showing them is why a finished
+/// Hunyuan job landed on a text dump after two atlas images flashed past.
+fn auto_show_artifact(domain: &str, content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.starts_with("application/json") || ct.starts_with("text/") {
+        return false;
+    }
+    if domain == "paint" && ct.starts_with("image/") {
+        return false;
+    }
+    true
 }
 
 /// Named chip slots under the Library tag dropdown. Keep in sync with
@@ -7376,10 +7826,7 @@ impl MatchEvent for App {
             .changed(actions)
             .is_some();
         if let Some(index) = self.ui.drop_down2(cx, ids!(lib_tag_drop)).changed(actions) {
-            if let Some(stat) = index
-                .checked_sub(1)
-                .and_then(|i| self.lib_tag_options.get(i).cloned())
-            {
+            if let Some(stat) = self.lib_tag_options.get(index).cloned() {
                 if let Some(pos) = self
                     .lib_filters
                     .tags
@@ -7390,11 +7837,8 @@ impl MatchEvent for App {
                 } else if self.lib_filters.tags.len() < 8 {
                     self.lib_filters.tags.push(stat.name);
                 }
+                filters_changed = true;
             }
-            self.ui
-                .drop_down2(cx, ids!(lib_tag_drop))
-                .set_selected_item(cx, 0);
-            filters_changed = true;
         }
         if let Some(index) = lib_tag_chip_removed(&self.ui, cx, actions) {
             if index < self.lib_filters.tags.len() {
@@ -7606,67 +8050,68 @@ impl MatchEvent for App {
                 self.try_dispatch_pending(cx);
             }
         }
-        // One-click chains: select the preset and go.
-        for (button, preset_name) in [
-            (ids!(qp_img), "image"),
-            (ids!(qp_expimg), "expand → image"),
-            (ids!(qp_sfx), "audio sfx (sa3)"),
-            (ids!(qp_speech), "speech (kokoro)"),
-            (ids!(qp_indextts), "speech clone"),
-            (ids!(qp_sfx_woosh), "audio sfx (woosh)"),
-            (ids!(qp_expsfx_woosh), "expand → sfx (woosh)"),
-            (ids!(qp_vid), "video (small)"),
-            (ids!(qp_expvid), "expand → video"),
-            (ids!(qp_mesh), "image → mesh"),
-            (ids!(qp_mesh_pbr), "image → mesh → hunyuan PBR"),
-            (ids!(qp_mesh_pbr_test), "image → mesh → PBR (testpattern)"),
-            (ids!(qp_i2v), "image → video"),
-            (ids!(qp_expi2v), "expand → image → video"),
-            (ids!(qp_fleet_i2v), "fleet images → choose → video"),
-            (ids!(qp_world), "image → world"),
-            (ids!(qp_expworld), "expand → image → world"),
-            (ids!(qp_sfx_moss), "audio sfx (moss)"),
-            (ids!(qp_expsfx_sa3), "expand → sfx (sa3)"),
-            (ids!(qp_expsfx_moss), "expand → sfx (moss)"),
-            (ids!(qp_music), "music (minimax-music3)"),
-            (ids!(qp_music_ace), "music (ace-step-1.5-xl)"),
-            (ids!(qp_expmusic), "expand → music (minimax-music3)"),
-            (ids!(qp_expmusic_ace), "expand → music (ace-step-1.5-xl)"),
-            (ids!(qp_cutout), "image → cutout (alpha)"),
-            (ids!(qp_depth), "image → depthmap"),
-            // The full character chain: prompt → image → mesh → rig →
-            // motion → playable animated GLB in the mesh viewer.
-            (ids!(qp_character), "character (playable)"),
-            (ids!(qp_character_pbr), "character (playable + hunyuan PBR)"),
-            (ids!(qp_character_pbr_test), "character (playable + PBR test)"),
-        ] {
-            if self.ui.button(cx, button).clicked(actions) {
-                if let Some(index) = PRESETS.iter().position(|p| p.name.starts_with(preset_name))
-                {
-                    self.ui
-                        .drop_down2(cx, ids!(preset_drop))
-                        .set_selected_item(cx, index);
-                    // The voice control must reflect the preset's speech
-                    // backend BEFORE the run spec reads it.
-                    self.refresh_voice_ui(cx);
-                    self.start_generate(cx);
-                }
-            }
-        }
-        // Preset/model picks change which speech backend a run would hit —
-        // keep the voice control honest about pack support.
         if self
             .ui
             .drop_down2(cx, ids!(preset_drop))
             .changed(actions)
             .is_some()
-            || self
-                .ui
-                .drop_down2(cx, ids!(model_drop))
-                .changed(actions)
-                .is_some()
+        {
+            self.refresh_model_ui(cx, true);
+            self.refresh_voice_ui(cx);
+            self.sync_preset_name_box(cx);
+        }
+        if self.ui.button(cx, ids!(save_preset_btn)).clicked(actions) {
+            self.save_current_preset(cx);
+        }
+        let fast_slots = [
+            (ids!(fp0_go), ids!(fp0_del), 0usize),
+            (ids!(fp1_go), ids!(fp1_del), 1),
+            (ids!(fp2_go), ids!(fp2_del), 2),
+            (ids!(fp3_go), ids!(fp3_del), 3),
+            (ids!(fp4_go), ids!(fp4_del), 4),
+            (ids!(fp5_go), ids!(fp5_del), 5),
+            (ids!(fp6_go), ids!(fp6_del), 6),
+            (ids!(fp7_go), ids!(fp7_del), 7),
+        ];
+        for (go, del, index) in fast_slots {
+            if self.ui.button(cx, go).clicked(actions) {
+                self.apply_saved_preset(cx, index);
+            }
+            if self.ui.button(cx, del).clicked(actions) && index < self.saved_presets.len() {
+                self.saved_presets.remove(index);
+                self.persist_saved_presets();
+                self.refresh_saved_presets_ui(cx);
+            }
+        }
+        let stage_drops = [
+            ids!(md_text),
+            ids!(md_image),
+            ids!(md_audio),
+            ids!(md_speech),
+            ids!(md_music),
+            ids!(md_video),
+            ids!(md_mesh),
+            ids!(md_matte),
+            ids!(md_depth),
+            ids!(md_segment),
+            ids!(md_paint),
+            ids!(md_world),
+            ids!(md_rig),
+            ids!(md_motion),
+            ids!(size_drop),
+            ids!(steps_drop),
+            ids!(texture_size_drop),
+            ids!(mesh_faces_drop),
+            ids!(vid_size_drop),
+            ids!(vid_len_drop),
+            ids!(music_len_drop),
+        ];
+        if stage_drops
+            .iter()
+            .any(|id| self.ui.drop_down2(cx, *id).changed(actions).is_some())
         {
             self.refresh_voice_ui(cx);
+            self.sync_preset_name_box(cx);
         }
         if self
             .ui
@@ -8024,6 +8469,15 @@ impl AppMain for App {
                         self.enqueue_import(
                             cx,
                             ImportJob::Duke3d {
+                                path: String::new(),
+                            },
+                        );
+                    }
+                    "quake3" | "quakeiii" | "q3" => {
+                        log!("auto: queue Quake III demo");
+                        self.enqueue_import(
+                            cx,
+                            ImportJob::Quake3 {
                                 path: String::new(),
                             },
                         );

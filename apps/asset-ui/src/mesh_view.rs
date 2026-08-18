@@ -1610,40 +1610,43 @@ impl Widget for MeshView {
             _ => {}
         }
 
-        match event {
-            Event::MouseDown(me)
-                if self.view_rect.contains(me.abs) && me.button.is_primary() =>
-            {
-                self.orbit_last_abs = Some(me.abs);
+        // Raw mouse only while orbit-dragging: the pointer can leave the
+        // pane and must keep moving the camera. Never listen to raw
+        // MouseDown — that steals clicks from dropdowns and other widgets.
+        if self.orbit_last_abs.is_some() {
+            match event {
+                Event::MouseMove(me) => {
+                    if let Some(last) = self.orbit_last_abs {
+                        let delta = me.abs - last;
+                        self.orbit_yaw -= delta.x as f32 * 0.01;
+                        self.orbit_pitch =
+                            (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
+                        if let Some(w) = self.walk_cam.as_mut() {
+                            w.yaw = self.orbit_yaw;
+                            w.pitch = self.orbit_pitch;
+                        }
+                        self.apply_walk_camera();
+                        self.orbit_last_abs = Some(me.abs);
+                        self.area.redraw(cx);
+                    }
+                }
+                Event::MouseUp(me) if me.button.is_primary() => {
+                    self.orbit_last_abs = None;
+                }
+                _ => {}
+            }
+        }
+
+        match event.hits(cx, self.area) {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.orbit_last_abs = Some(fe.abs);
                 // Click claims key focus for play mode (and takes it away
                 // from the prompt TextInput so WASD doesn't type).
                 self.focused = true;
                 cx.set_key_focus(self.area);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
-            Event::MouseDown(me) if !self.view_rect.contains(me.abs) => {
-                self.focused = false;
-                self.keys.clear();
-            }
-            Event::MouseMove(me) => {
-                if let Some(last) = self.orbit_last_abs {
-                    let delta = me.abs - last;
-                    self.orbit_yaw -= delta.x as f32 * 0.01;
-                    self.orbit_pitch =
-                        (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
-                    if let Some(w) = self.walk_cam.as_mut() {
-                        w.yaw = self.orbit_yaw;
-                        w.pitch = self.orbit_pitch;
-                    }
-                    self.apply_walk_camera();
-                    self.orbit_last_abs = Some(me.abs);
-                    self.area.redraw(cx);
-                }
-            }
-            Event::MouseUp(me) if me.button.is_primary() => {
-                self.orbit_last_abs = None;
-            }
-            Event::Scroll(se) if self.view_rect.contains(se.abs) && self.walk_cam.is_none() => {
+            Hit::FingerScroll(se) if self.walk_cam.is_none() => {
                 let axis = if se.scroll.y.abs() > f64::EPSILON {
                     se.scroll.y
                 } else {
@@ -1655,6 +1658,13 @@ impl Widget for MeshView {
                         (self.look.distance * factor).clamp(1.0, 30.0);
                     self.area.redraw(cx);
                 }
+            }
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Grab);
+            }
+            Hit::KeyFocusLost(_) => {
+                self.focused = false;
+                self.keys.clear();
             }
             _ => {}
         }
@@ -1692,6 +1702,14 @@ impl Widget for MeshView {
         cx.begin_pass(&self.pass, None);
         self.look.yaw = self.orbit_yaw;
         self.look.pitch = self.orbit_pitch;
+        // Orbit zoom must retighten cascade 0 around the look-at so
+        // shadow texels stay ~1 screen pixel. Walk keeps the 80 m ladder.
+        if self.walk_cam.is_some() {
+            self.renderer.set_csm_focus_distance(None);
+        } else {
+            self.renderer
+                .set_csm_focus_distance(Some(self.look.distance));
+        }
         let scene_state = preview_scene_state(self.look, rect, cx.time());
         if let Some(scene_state) = scene_state {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
