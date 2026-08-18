@@ -541,7 +541,7 @@ fn decode_tga(bytes: &[u8]) -> Option<TileRgba> {
     if !matches!(itype, 2 | 10) || !matches!(ch, 3 | 4) {
         return None;
     }
-    let mut raw = if itype == 2 {
+    let raw = if itype == 2 {
         src.get(..w * h * ch)?.to_vec()
     } else {
         unpack_tga_rle(src, w * h, ch)?
@@ -629,7 +629,7 @@ fn walk_ext(root: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
-struct BuildMap {
+pub(crate) struct BuildMap {
     start: [i32; 3],
     start_ang: i16,
     start_sec: i16,
@@ -685,7 +685,7 @@ struct Sprite {
     ang: i16,
 }
 
-pub fn parse_map_v7(bytes: &[u8]) -> Result<BuildMap, String> {
+pub(crate) fn parse_map_v7(bytes: &[u8]) -> Result<BuildMap, String> {
     if bytes.len() < 26 {
         return Err("MAP too small".into());
     }

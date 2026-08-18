@@ -116,6 +116,6 @@ target/release/makepad-map-tiles versatiles \
     --max-zoom 14
 ```
 
-`download_map.sh` pins and verifies the large upstream snapshots, builds the
+`tools/download_map.sh` pins and verifies the large upstream snapshots, builds the
 release utility, validates SQLite, probes a real MVT tile, and only then
 atomically renames a `.partial.mbtiles` output.

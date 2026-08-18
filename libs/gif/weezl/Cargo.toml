@@ -16,3 +16,6 @@ std = ["alloc"]
 [lib]
 name = "weezl"
 path = "src/lib.rs"
+# Vendored: skip upstream lib-tests that include_bytes missing benches/Cargo.lock.
+test = false
+doctest = false

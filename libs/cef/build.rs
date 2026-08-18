@@ -29,7 +29,7 @@ fn parse_api_version(include_dir: &Path) -> Option<String> {
 }
 
 fn run_download_script(workspace_root: &Path, platform: &str) {
-    let script = workspace_root.join("download_cef.sh");
+    let script = workspace_root.join("tools/download_cef.sh");
     let status = Command::new(&script)
         .arg("--platform")
         .arg(platform)
@@ -71,7 +71,7 @@ fn build_macos_helper(manifest_dir: &Path, dist_dir: &Path, include_dir: &Path) 
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_CEF_DIST_DIR");
-    println!("cargo:rerun-if-changed=../../download_cef.sh");
+    println!("cargo:rerun-if-changed=../../tools/download_cef.sh");
     println!("cargo:rerun-if-changed=helper_main_macos.c");
     println!("cargo:rustc-check-cfg=cfg(makepad_cef_api_ge_13800)");
     println!("cargo:rustc-check-cfg=cfg(makepad_cef_api_ge_14600)");

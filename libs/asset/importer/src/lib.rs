@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Library surface for the Asset Worker: the licensed pack compiler and the
 //! media-inspection helpers the binary modes share.
 //!
