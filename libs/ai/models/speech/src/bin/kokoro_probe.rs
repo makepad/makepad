@@ -2,7 +2,7 @@
 //!
 //!     cargo run --release --bin kokoro_probe -- kokoro-v1_0.mktts af_heart.mkvoice
 
-use makepad_tts::kokoro::weights::Weights;
+use makepad_ai_speech::kokoro::weights::Weights;
 
 fn main() {
     let mut args = std::env::args().skip(1);

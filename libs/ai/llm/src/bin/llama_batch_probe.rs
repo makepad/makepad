@@ -6,7 +6,7 @@
 //! Usage: llama-batch-probe <model.gguf> [--tokens N] [--batches 1,2,3,4]
 
 use makepad_ggml::TensorType;
-use makepad_llama::{
+use makepad_ai_llm::{
     compile_delta_net_recurrent_decode_metal,
     qwen35_delta_net_recurrent_decode_spec, qwen35_recurrent_block_layout, LlamaModel,
     LlamaSession, LlamaSessionConfig, LlamaVocab, LogitsProbeInput,
@@ -39,7 +39,7 @@ fn dn_block_probe(model: &LlamaModel, vocab: &LlamaVocab, n_tokens: usize) {
     let spec = qwen35_delta_net_recurrent_decode_spec(model, 0, 1, TensorType::F32, TensorType::F32)
         .expect("spec");
 
-    let tap_ids = |loaded: &makepad_llama::LoadedGgufWeights| -> Vec<(usize, &'static str)> {
+    let tap_ids = |loaded: &makepad_ai_llm::LoadedGgufWeights| -> Vec<(usize, &'static str)> {
         DN_TAPS
             .iter()
             .filter_map(|(name, label)| loaded.ctx.get_tensor(name).map(|id| (id, *label)))

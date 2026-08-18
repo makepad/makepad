@@ -40,7 +40,7 @@ pub mod text_encoder;
 pub mod weights;
 
 use crate::g2p;
-use crate::{SpeechAudio, TtsError};
+use crate::tts::{SpeechAudio, TtsError};
 
 use bert::Bert;
 use decoder::Decoder;

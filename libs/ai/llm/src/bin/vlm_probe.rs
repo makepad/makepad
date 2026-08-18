@@ -6,7 +6,7 @@
 //
 // usage: vlm-probe <model.gguf> <mmproj.gguf> <image.ppm> <question> [--max-new-tokens N] [--max-context N]
 
-use makepad_llama::{
+use makepad_ai_llm::{
     preprocess_rgb8, LlamaSession, LlamaSessionConfig, VisionConfig, VisionTower,
 };
 use std::io::Write;
@@ -73,7 +73,7 @@ fn main() {
 
     // 1. vision leg
     let (rgb, w, h) = read_ppm(image_path);
-    let gguf = makepad_llama::GgufFile::open(mmproj_path).expect("open mmproj");
+    let gguf = makepad_ai_llm::GgufFile::open(mmproj_path).expect("open mmproj");
     let vision_config = VisionConfig::from_gguf(&gguf).expect("vision config");
     let t0 = Instant::now();
     let prepared = preprocess_rgb8(&rgb, w, h, &vision_config).expect("preprocess");

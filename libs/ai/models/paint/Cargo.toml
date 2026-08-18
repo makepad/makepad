@@ -1,8 +1,8 @@
 [package]
-name = "makepad-pbr-paint"
+name = "makepad-ai-paint"
 version = "0.1.0"
 edition = "2021"
-description = "Generative PBR material contract, deterministic test backend, and experimental Hunyuan3D-Paint-2.1 pipeline planning"
+description = "Hunyuan3D-Paint family. Was libs/pbr_paint (aiarch.md §1)."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -14,7 +14,7 @@ default = []
 cuda-taps = ["dep:makepad-ggml"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-makepad-ggml = { path = "../ggml", optional = true }
+makepad-ggml = { path = "../../../ggml", optional = true }
 
 [[bin]]
 name = "pbr-cuda-taps"

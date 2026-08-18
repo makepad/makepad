@@ -6,14 +6,14 @@
 
 use std::io::Write;
 
-use makepad_tts::g2p;
-use makepad_tts::kokoro::bert::Bert;
-use makepad_tts::kokoro::decoder::Decoder;
-use makepad_tts::kokoro::npy::Npy;
-use makepad_tts::kokoro::ops::{expand_to_frames, round_half_even, Mat};
-use makepad_tts::kokoro::predictor::Predictor;
-use makepad_tts::kokoro::text_encoder::TextEncoder;
-use makepad_tts::kokoro::weights::Weights;
+use makepad_ai_speech::g2p;
+use makepad_ai_speech::kokoro::bert::Bert;
+use makepad_ai_speech::kokoro::decoder::Decoder;
+use makepad_ai_speech::kokoro::npy::Npy;
+use makepad_ai_speech::kokoro::ops::{expand_to_frames, round_half_even, Mat};
+use makepad_ai_speech::kokoro::predictor::Predictor;
+use makepad_ai_speech::kokoro::text_encoder::TextEncoder;
+use makepad_ai_speech::kokoro::weights::Weights;
 
 const SENTENCE: &str = "Escape the Gummer, a squishy purple blob.";
 const MODEL: &str = "kokoro-v1_0.mktts";
@@ -41,8 +41,8 @@ fn write_wav(path: &str, samples: &[f32]) -> std::io::Result<()> {
 }
 
 fn main() {
-    makepad_tts::kokoro::accel::force_cpu(true);
-    makepad_tts::kokoro::generator::force_deterministic(true);
+    makepad_ai_speech::kokoro::accel::force_cpu(true);
+    makepad_ai_speech::kokoro::generator::force_deterministic(true);
 
     let weights = Weights::load(MODEL).expect("weights");
     let encoder = TextEncoder::load(&weights).expect("text encoder");

@@ -101,10 +101,18 @@ pub struct ExpandJob {
     pub commit_suffix: String,
 }
 
-/// The full Qwen ChatML prompt for one expansion, ending in the non-thinking
-/// assistant prefill so the answer starts immediately (same template as the
-/// production QwenFilter in libs/converse).
+/// The full Qwen ChatML prompt for one expansion. `think_prefill` is the
+/// assistant-turn opener: Qwen3/3.6 close an empty think block so the
+/// answer starts immediately; Qwen3.8 must leave `<think>` open.
 pub fn build_prompt(system: &str, params: &GenerateParams) -> String {
+    build_prompt_with_think(system, params, crate::protocol::CHAT_THINK_PREFILL)
+}
+
+pub fn build_prompt_with_think(
+    system: &str,
+    params: &GenerateParams,
+    think_prefill: &str,
+) -> String {
     let mut out = String::with_capacity(system.len() + params.prompt.len() + 256);
     out.push_str("<|im_start|>system\n");
     out.push_str(system.trim_end());
@@ -124,7 +132,8 @@ pub fn build_prompt(system: &str, params: &GenerateParams) -> String {
     }
     out.push_str("Intent: ");
     out.push_str(params.prompt.trim());
-    out.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    out.push_str("<|im_end|>\n<|im_start|>assistant\n");
+    out.push_str(think_prefill);
     out
 }
 
@@ -322,8 +331,18 @@ impl ContentBackend for LlmBackend {
         let prompt_text = if is_chat {
             params.prompt.clone()
         } else {
-            let system = system_prompt_for(&params.target_domain, self.prompts_dir.as_deref());
-            build_prompt(&system, params)
+            let mut system = system_prompt_for(&params.target_domain, self.prompts_dir.as_deref());
+            if crate::protocol::model_uses_open_think(&self.model_id) {
+                system = format!(
+                    "{}\n\n{system}",
+                    crate::protocol::QWEN38_LOW_EFFORT
+                );
+            }
+            build_prompt_with_think(
+                &system,
+                params,
+                crate::protocol::think_prefill_for_model(&self.model_id),
+            )
         };
 
         let variants = params.variants.max(1);
@@ -433,7 +452,7 @@ impl ContentBackend for LlmBackend {
 mod llama_worker {
     use super::ExpandJob;
     use crate::backend::CancelToken;
-    use makepad_llama::{LlamaSession, LlamaSessionConfig};
+    use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -559,21 +578,28 @@ mod llama_worker {
         // Reuse the live KV (weights already resident) and prefill only the
         // suffix. Independent expand jobs with a different prompt reset.
         const DECODE_RESERVE: usize = 128;
+        let tokenize_prompt = |session: &LlamaSession, text: &str, add_special: bool| {
+            let mut tokens = session
+                .vocab()
+                .tokenize(text, add_special, true)
+                .map_err(|e| format!("tokenize: {e:?}"))?;
+            // ChatML already ends the turn. A GGUF with add_eos_token=true
+            // would append EOS here and the first decode token is then EOS
+            // (empty expansion).
+            if tokens.last().copied() == session.vocab().eos_token_id() {
+                tokens.pop();
+            }
+            Ok::<Vec<i32>, String>(tokens)
+        };
         let reuse = !committed.is_empty() && job.prompt_text.starts_with(committed.as_str());
         if reuse {
             let delta = &job.prompt_text[committed.len()..];
             if !delta.is_empty() {
-                let extra = session
-                    .vocab()
-                    .tokenize(delta, false, true)
-                    .map_err(|e| format!("tokenize: {e:?}"))?;
+                let extra = tokenize_prompt(session, delta, false)?;
                 if session.remaining_context() < extra.len() + DECODE_RESERVE {
                     session.reset().map_err(|e| format!("reset: {e:?}"))?;
                     committed.clear();
-                    let tokens = session
-                        .vocab()
-                        .tokenize(&job.prompt_text, true, true)
-                        .map_err(|e| format!("tokenize: {e:?}"))?;
+                    let tokens = tokenize_prompt(session, &job.prompt_text, true)?;
                     let _ = events.send(WorkerEvent::Stage(format!(
                         "prefill {} tok (context full)",
                         tokens.len()
@@ -600,10 +626,7 @@ mod llama_worker {
         } else {
             session.reset().map_err(|e| format!("reset: {e:?}"))?;
             committed.clear();
-            let tokens = session
-                .vocab()
-                .tokenize(&job.prompt_text, true, true)
-                .map_err(|e| format!("tokenize: {e:?}"))?;
+            let tokens = tokenize_prompt(session, &job.prompt_text, true)?;
             session
                 .append_tokens_with_progress(&tokens, &mut |done, total| {
                     let _ = events.send(WorkerEvent::Stage(format!("prefill {done}/{total} tok")));
@@ -803,6 +826,23 @@ mod tests {
     }
 
     #[test]
+    fn qwen38_leaves_think_open() {
+        assert!(crate::protocol::model_uses_open_think("qwen3.8-27b"));
+        assert!(!crate::protocol::model_uses_open_think("qwen3.6-27b"));
+        assert_eq!(
+            crate::protocol::think_prefill_for_model("qwen3.8-27b"),
+            crate::protocol::CHAT_THINK_PREFILL_OPEN
+        );
+        let prompt = build_prompt_with_think(
+            "SYS",
+            &params("a pretty elf", "video"),
+            crate::protocol::think_prefill_for_model("qwen3.8-27b"),
+        );
+        assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n"));
+        assert!(!prompt.contains("</think>"));
+    }
+
+    #[test]
     fn chatml_prompt_shape() {
         let mut p = params("rusty pirate cannon", "mesh");
         p.style = "low-poly stylized".to_string();
@@ -811,8 +851,23 @@ mod tests {
         assert!(prompt.contains("<|im_end|>\n<|im_start|>user\nTarget domain: mesh\n"));
         assert!(prompt.contains("Style direction: low-poly stylized\n"));
         assert!(prompt.contains("Intent: rusty pirate cannon"));
-        // Non-thinking assistant prefill closes the prompt.
+        // Non-thinking assistant prefill closes the prompt on Qwen3/3.6.
         assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        let qwen38 = {
+            let mut backend = LlmBackend::with_stub("qwen3.8-27b", Box::new(|_| Ok("x".into())));
+            let mut sink = |_: &str, _: f64| {};
+            let _ = backend.generate(&params("x", "video"), &mut sink, &CancelToken::new());
+            build_prompt_with_think(
+                default_system_prompt("video"),
+                &params("x", "video"),
+                crate::protocol::think_prefill_for_model("qwen3.8-27b"),
+            )
+        };
+        assert!(
+            qwen38.ends_with("<|im_start|>assistant\n<think>\n"),
+            "Qwen3.8 must leave <think> open, got {qwen38:?}"
+        );
+        assert!(!qwen38.contains("</think>"));
         // No style line when style is empty.
         let plain = build_prompt(default_system_prompt("mesh"), &params("x", "mesh"));
         assert!(!plain.contains("Style direction"));

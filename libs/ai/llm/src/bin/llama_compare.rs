@@ -14,7 +14,7 @@ use makepad_ggml::{
     BufferUsage, Context, Graph, InitParams, Prec, Tensor, TensorId, TensorLayout, TensorType,
     GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
 };
-use makepad_llama::{
+use makepad_ai_llm::{
     allocate_hybrid_shared_cache_tensors, build_delta_net_recurrent_decode_graph,
     build_hybrid_decode_graph_with_outputs, build_moe_ffn_graph, compile_attention_block_metal,
     compile_attention_decode_metal_with_key_count, compile_delta_net_recurrent_decode_metal,

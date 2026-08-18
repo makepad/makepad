@@ -37,14 +37,14 @@ use makepad_gltf::{
     load_gltf_from_bytes, read_accessor_f32x2, read_accessor_f32x3, read_accessor_indices_u32,
     write_glb_mesh, write_glb_mesh_textured, GlbTexturedMesh,
 };
-use makepad_pbr_paint::contract::PbrMaterialSet;
-use makepad_pbr_paint::digest;
-use makepad_pbr_paint::mesh::TriMesh;
-use makepad_pbr_paint::pipeline::{
+use makepad_ai_paint::contract::PbrMaterialSet;
+use makepad_ai_paint::digest;
+use makepad_ai_paint::mesh::TriMesh;
+use makepad_ai_paint::pipeline::{
     HunyuanPaintPipeline, MemoryProfile, MockPaintExec, PaintConfig, PaintInputs,
 };
-use makepad_pbr_paint::png::{encode_png, PngColor};
-use makepad_pbr_paint::test_backend::{PbrError, PbrProgress, PbrStage};
+use makepad_ai_paint::png::{encode_png, PngColor};
+use makepad_ai_paint::test_backend::{PbrError, PbrProgress, PbrStage};
 
 pub const INPUT_MESH: &str = "mesh";
 pub const INPUT_REFERENCE: &str = "reference_image";
@@ -73,7 +73,7 @@ pub const ROLE_VAE: &str = "vae";
 pub const ROLE_DINO: &str = "dino-conditioner";
 
 #[cfg(all(feature = "paint-cuda", any(target_os = "linux", target_os = "windows")))]
-fn hunyuan_license() -> Result<makepad_pbr_paint::hunyuan::LicenseAcknowledgement, AssetAiError> {
+fn hunyuan_license() -> Result<makepad_ai_paint::hunyuan::LicenseAcknowledgement, AssetAiError> {
     // Fleet default: accept the pinned Hunyuan 3D 2.1 community license.
     // Opt out with MAKEPAD_HUNYUAN_LICENSE_ACCEPT=0.
     let accept = std::env::var("MAKEPAD_HUNYUAN_LICENSE_ACCEPT")
@@ -86,8 +86,8 @@ fn hunyuan_license() -> Result<makepad_pbr_paint::hunyuan::LicenseAcknowledgemen
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| makepad_pbr_paint::hunyuan::LICENSE_TEXT_SHA256.to_string());
-    makepad_pbr_paint::hunyuan::acknowledge_license(accept, &digest).map_err(|e| {
+        .unwrap_or_else(|| makepad_ai_paint::hunyuan::LICENSE_TEXT_SHA256.to_string());
+    makepad_ai_paint::hunyuan::acknowledge_license(accept, &digest).map_err(|e| {
         AssetAiError::Backend(format!(
             "Hunyuan license acknowledgement required ({e}). Set \
              MAKEPAD_HUNYUAN_LICENSE_ACCEPT=1 and MAKEPAD_HUNYUAN_LICENSE_SHA256 to the \
@@ -265,7 +265,7 @@ impl PaintBackend {
         progress: ProgressSink,
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
-        use makepad_pbr_paint::native_exec::{HunyuanBins, NativeHunyuanExec};
+        use makepad_ai_paint::native_exec::{HunyuanBins, NativeHunyuanExec};
         let mesh_input = named_input(params, INPUT_MESH, MESH_CONTENT_TYPE)?;
         let reference_input = named_input(params, INPUT_REFERENCE, REFERENCE_CONTENT_TYPE)?;
         let mesh_sha = digest::sha256_hex(&mesh_input.bytes);
@@ -536,7 +536,7 @@ mod tests {
     use super::*;
     use crate::protocol::{GenerateRequestJson, NamedInputJson};
     use makepad_base64::base64_encode;
-    use makepad_pbr_paint::hunyuan;
+    use makepad_ai_paint::hunyuan;
 
     fn cube_glb_no_uv() -> Vec<u8> {
         let cube = TriMesh::unit_cube();

@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use makepad_tts::{SpeechAudio, Speaker};
+use makepad_ai_speech::{SpeechAudio, Speaker};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -13,10 +13,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use makepad_ggml::{TensorId, TensorType};
-use makepad_llama::runtime::{
+use makepad_ai_llm::runtime::{
     allocate_hybrid_shared_cache_tensors, build_hybrid_decode_graph_with_attention_key_count,
 };
-use makepad_llama::{LlamaModel, LlamaSessionConfig};
+use makepad_ai_llm::{LlamaModel, LlamaSessionConfig};
 
 struct Args {
     model_path: PathBuf,

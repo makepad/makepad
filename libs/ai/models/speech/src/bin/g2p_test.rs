@@ -2,7 +2,7 @@
 //!
 //!     cargo run --bin g2p_test -- "Escape the Gummer!"
 
-use makepad_tts::g2p;
+use makepad_ai_speech::g2p;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

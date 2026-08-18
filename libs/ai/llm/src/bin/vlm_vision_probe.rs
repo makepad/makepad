@@ -5,7 +5,7 @@
 // usage: vlm-vision-probe <mmproj.gguf> <image.ppm> [reference_prefix]
 //   reference_prefix.preproc.bin / reference_prefix.embd.bin as written by clip_dump
 
-use makepad_llama::{preprocess_rgb8, VisionConfig, VisionTower};
+use makepad_ai_llm::{preprocess_rgb8, VisionConfig, VisionTower};
 
 use std::fs;
 use std::time::Instant;
@@ -97,7 +97,7 @@ fn main() {
     let (rgb, w, h) = read_ppm(image_path);
     println!("image: {w} x {h}");
 
-    let gguf = makepad_llama::GgufFile::open(mmproj_path).expect("open mmproj");
+    let gguf = makepad_ai_llm::GgufFile::open(mmproj_path).expect("open mmproj");
     let config = VisionConfig::from_gguf(&gguf).expect("vision config");
     println!(
         "config: {} layers, embd {}, heads {}, proj {}, image {} patch {} merge {}",

@@ -13,7 +13,7 @@ use makepad_ggml::quant::{
     block_elements, block_size, dequantize_nvfp4_pairs_row, get_rows_ggml_bytes_cpu,
     h3_nvfp4_pairs_pack,
 };
-use makepad_llama::{GgufFile, GgufTensorInfo};
+use makepad_ai_llm::{GgufFile, GgufTensorInfo};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

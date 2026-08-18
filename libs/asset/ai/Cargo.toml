@@ -41,16 +41,16 @@ flux = ["dep:makepad-diffusion"]
 # "paint-test" tier everywhere. Default also enables `paint-cuda`, so a
 # Windows/Linux fleet box advertises Hunyuan Paint and downloads weights
 # like any other registry model.
-paint = ["dep:makepad-pbr-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
+paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
 # Windows/Linux CUDA Hunyuan executor (in default).
-paint-cuda = ["paint", "makepad-pbr-paint/cuda-taps"]
+paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
 # Real LLM prompt expansion via libs/llama (Qwen3.5/3.6 family GGUF on
 # makepad-ggml). Off by default: the prompt assembly + artifact shaping in
 # llm_backend.rs compiles and tests everywhere with a stubbed generation fn.
-llm = ["dep:makepad-llama"]
+llm = ["dep:makepad-ai-llm"]
 # Real Kokoro speech synthesis via libs/tts. Off by default: the WAV encoding
 # and request handling in kokoro_backend.rs test everywhere with a stub synth.
-tts = ["dep:makepad-tts"]
+tts = ["dep:makepad-ai-speech"]
 # Real IndexTTS-2.5 character-voice TTS (voice cloning + 8-dim emotion
 # vector) via libs/diffusion (indextts_pipeline, CPU f32 today). Off by
 # default: reference-voice resolution, emotion validation and WAV shaping in
@@ -100,13 +100,13 @@ makepad-zune-core = { path = "../../zune/zune-core" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zip-file = { path = "../../zip_file" }
 makepad-diffusion = { path = "../../diffusion", optional = true }
-makepad-pbr-paint = { path = "../../pbr_paint", optional = true }
+makepad-ai-paint = { path = "../../ai/models/paint", optional = true }
 makepad-remesh = { path = "../../remesh", optional = true }
 makepad-gltf = { path = "../../gltf", optional = true }
 makepad-xatlas = { path = "../../xatlas", optional = true }
 makepad-render = { path = "../../render", optional = true }
-makepad-llama = { path = "../../llama", optional = true }
-makepad-tts = { path = "../../tts", optional = true }
+makepad-ai-llm = { path = "../../ai/llm", optional = true }
+makepad-ai-speech = { path = "../../ai/models/speech", optional = true }
 makepad-video = { path = "../../../platform/video", optional = true }
 
 [[bin]]

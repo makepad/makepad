@@ -18,10 +18,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use makepad_llama::{
+use makepad_ai_llm::{
     CudaExecRuntime, ExecBackendKind, ExecRuntime, LlamaModel, LlamaSession, LlamaSessionConfig,
 };
-use makepad_llama::cuda_exec::{host_split_reset, host_split_snapshot};
+use makepad_ai_llm::cuda_exec::{host_split_reset, host_split_snapshot};
 use makepad_ggml::{
     quant, BufferUsage, Context, GluOp, Graph, InitParams, TensorId, TensorType, UnaryOp,
     GGML_ROPE_TYPE_IMROPE,

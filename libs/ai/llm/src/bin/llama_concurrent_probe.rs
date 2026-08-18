@@ -4,7 +4,7 @@
 //! interference. Run with/without MAKEPAD_LLAMA_NO_MMAP=1 to A/B the mmap
 //! weight path.
 
-use makepad_llama::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab};
+use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 

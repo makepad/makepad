@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use makepad_llama::{LlamaModel, LlamaVocab};
+use makepad_ai_llm::{LlamaModel, LlamaVocab};
 
 struct Args {
     model_path: PathBuf,

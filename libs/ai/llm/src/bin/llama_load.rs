@@ -7,7 +7,7 @@ use makepad_ggml::{
     },
     TensorType,
 };
-use makepad_llama::{
+use makepad_ai_llm::{
     compile_attention_block_metal, compile_attention_decode_metal,
     compile_delta_net_recurrent_decode_metal, compile_hybrid_decode_metal,
     compile_logits_probe_metal, compile_moe_ffn_metal, execute_attention_block_graph_metal_cached,
@@ -818,8 +818,8 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn qwen35moe_probe_layout(
-    qwen35moe: &makepad_llama::Qwen35MoeTensors,
-) -> Result<makepad_llama::GgufWeightLayout, Box<dyn std::error::Error>> {
+    qwen35moe: &makepad_ai_llm::Qwen35MoeTensors,
+) -> Result<makepad_ai_llm::GgufWeightLayout, Box<dyn std::error::Error>> {
     let recurrent = qwen35moe
         .layers
         .iter()
@@ -833,7 +833,7 @@ fn qwen35moe_probe_layout(
             std::io::Error::other("qwen35moe probe could not find an attention layer")
         })?;
 
-    Ok(makepad_llama::GgufWeightLayout::from_tensors(vec![
+    Ok(makepad_ai_llm::GgufWeightLayout::from_tensors(vec![
         qwen35moe.globals.output_norm.clone(),
         recurrent.0.attn_norm.clone(),
         recurrent.0.post_attention_norm.clone(),
@@ -848,9 +848,9 @@ fn qwen35moe_probe_layout(
 }
 
 fn dump_recurrent_debug(
-    gguf: &makepad_llama::GgufFile,
-    layout: &makepad_llama::GgufWeightLayout,
-    spec: &makepad_llama::DeltaNetRecurrentDecodeSpec,
+    gguf: &makepad_ai_llm::GgufFile,
+    layout: &makepad_ai_llm::GgufWeightLayout,
+    spec: &makepad_ai_llm::DeltaNetRecurrentDecodeSpec,
     token_ids: &[i32],
     tensor_names: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {

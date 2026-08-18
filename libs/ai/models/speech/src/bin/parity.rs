@@ -4,14 +4,14 @@
 //!
 //!     cargo run --release --bin parity
 
-use makepad_tts::g2p;
-use makepad_tts::kokoro::bert::Bert;
-use makepad_tts::kokoro::decoder::Decoder;
-use makepad_tts::kokoro::npy::{max_abs_diff, Npy};
-use makepad_tts::kokoro::ops::{expand_to_frames, round_half_even, Mat};
-use makepad_tts::kokoro::predictor::Predictor;
-use makepad_tts::kokoro::text_encoder::TextEncoder;
-use makepad_tts::kokoro::weights::Weights;
+use makepad_ai_speech::g2p;
+use makepad_ai_speech::kokoro::bert::Bert;
+use makepad_ai_speech::kokoro::decoder::Decoder;
+use makepad_ai_speech::kokoro::npy::{max_abs_diff, Npy};
+use makepad_ai_speech::kokoro::ops::{expand_to_frames, round_half_even, Mat};
+use makepad_ai_speech::kokoro::predictor::Predictor;
+use makepad_ai_speech::kokoro::text_encoder::TextEncoder;
+use makepad_ai_speech::kokoro::weights::Weights;
 
 const SENTENCE: &str = "Escape the Gummer, a squishy purple blob.";
 const MODEL: &str = "kokoro-v1_0.mktts";
@@ -55,10 +55,10 @@ fn main() {
     // The strict pass runs the pure-Rust reference paths; the Metal tier is
     // timed and sanity-checked separately at the end, because its simdgroup
     // matmul rounds tiles to f16 and cannot meet the reassociation-only bar.
-    makepad_tts::kokoro::accel::force_cpu(true);
+    makepad_ai_speech::kokoro::accel::force_cpu(true);
     // The dump comes from the determinism-patched export; run without the
     // restored excitation noise so `har_source` diffs entrywise.
-    makepad_tts::kokoro::generator::force_deterministic(true);
+    makepad_ai_speech::kokoro::generator::force_deterministic(true);
 
     let weights = match Weights::load(MODEL) {
         Ok(weights) => weights,
@@ -331,7 +331,7 @@ fn main() {
         "{DUMP}/decoder_decoder_generator_m_source_l_tanh_Tanh_output_0.npy"
     ))
     .expect("reference har_source");
-    let stft_of_ref = makepad_tts::kokoro::stft::stft_mag_phase(&ref_source.data);
+    let stft_of_ref = makepad_ai_speech::kokoro::stft::stft_mag_phase(&ref_source.data);
     let (worst, _) = max_abs_diff(&complex(&stft_of_ref.data), &complex(&ref_har.data));
     let stft_ok = worst <= TOLERANCE;
     println!(
@@ -428,7 +428,7 @@ fn main() {
     // ---- accelerated tier (informational) ----
     // Same graph on the Metal matmuls. Frame counts must agree; the waveform
     // drift beyond the strict run's is the f16-tile cost.
-    makepad_tts::kokoro::accel::force_cpu(false);
+    makepad_ai_speech::kokoro::accel::force_cpu(false);
     let started = std::time::Instant::now();
     let fast = decoder.run(&asr, &prosody.f0, &prosody.noise, decoder_style);
     let elapsed = started.elapsed().as_secs_f32();

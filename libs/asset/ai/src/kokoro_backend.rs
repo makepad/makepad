@@ -158,7 +158,7 @@ mod kokoro_synth {
     use crate::backend::{BackendCtx, CancelToken, ProgressSink};
     use crate::error::AssetAiError;
     use crate::registry::FileSpec;
-    use makepad_tts::kokoro::KokoroSpeaker;
+    use makepad_ai_speech::kokoro::KokoroSpeaker;
     use std::path::{Path, PathBuf};
 
     // KokoroSpeaker is plain weight buffers (Metal state is process-global in
@@ -197,9 +197,9 @@ mod kokoro_synth {
             return false;
         };
         if name.ends_with(".mktts") {
-            makepad_tts::kokoro::model_path_if_present().is_some()
+            makepad_ai_speech::kokoro::model_path_if_present().is_some()
         } else {
-            makepad_tts::kokoro::named_voice_path_if_present(name).is_some()
+            makepad_ai_speech::kokoro::named_voice_path_if_present(name).is_some()
         }
     }
 
@@ -258,7 +258,7 @@ mod kokoro_synth {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| file.cache_as.clone());
                 let progress = &mut *ctx.progress;
-                makepad_tts::convert::convert_torch_weights(
+                makepad_ai_speech::convert::convert_torch_weights(
                     &src,
                     &converted,
                     &mut |done, tensors| {
@@ -296,7 +296,7 @@ mod kokoro_synth {
             let resolved = if cached.is_file() {
                 Some(cached.clone())
             } else {
-                makepad_tts::kokoro::model_path_if_present().map(PathBuf::from)
+                makepad_ai_speech::kokoro::model_path_if_present().map(PathBuf::from)
             };
             match resolved {
                 Some(path) => {
@@ -322,7 +322,7 @@ mod kokoro_synth {
                     return Ok(cached.to_string_lossy().into_owned());
                 }
             }
-            makepad_tts::kokoro::named_voice_path_if_present(&file_name).ok_or_else(|| {
+            makepad_ai_speech::kokoro::named_voice_path_if_present(&file_name).ok_or_else(|| {
                 AssetAiError::Backend(format!(
                     "voice pack {file_name} not found in the cache tts/ dir or next to the service"
                 ))

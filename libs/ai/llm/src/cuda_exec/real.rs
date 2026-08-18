@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::Instant;
 
-use makepad_cuda::{
+use makepad_ai_cuda::{
     begin_stream_capture, end_stream_capture, cublasCreate_v2, cublasDestroy_v2, cublasGemmEx,
     cublasHandle_t, cublasSetStream_v2, cublasSgemm_v2, cudaFree, cudaGetDeviceCount,
     cudaFreeHost, cudaGetErrorString, cudaHostAlloc, cudaMalloc, cudaMemGetInfo, cudaMemcpyAsync,
@@ -2118,7 +2118,7 @@ impl Compiled {
                     let _ = end_stream_capture(stream);
                     return Err(err);
                 }
-                match end_stream_capture(stream).and_then(makepad_cuda::CudaGraph::instantiate) {
+                match end_stream_capture(stream).and_then(makepad_ai_cuda::CudaGraph::instantiate) {
                     Ok(exec) => {
                         exec.launch(stream).map_err(|err| {
                             LlamaError::format(format!("cuda graph first launch: {err}"))

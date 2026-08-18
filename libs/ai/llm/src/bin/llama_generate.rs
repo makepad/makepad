@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::Instant;
 
-use makepad_llama::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaStopReason, LlamaVocab};
+use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaStopReason, LlamaVocab};
 
 const DEFAULT_MAX_NEW_TOKENS: usize = 64;
 const DEFAULT_UPSTREAM_COMPLETION_BIN: &str =
