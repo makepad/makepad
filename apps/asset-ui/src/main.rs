@@ -9344,7 +9344,13 @@ impl MatchEvent for App {
             }
         }
         if let Some(url) = card_hit {
-            self.open_fleet_modal(cx, url);
+            // Same card again = toggle the config column closed; another
+            // card just switches the column to that box.
+            if self.fleet_modal_box.as_deref() == Some(url.as_str()) {
+                self.close_fleet_modal(cx);
+            } else {
+                self.open_fleet_modal(cx, url);
+            }
         }
         if self.ui.button(cx, ids!(fleet_box_close)).clicked(actions) {
             self.close_fleet_modal(cx);
