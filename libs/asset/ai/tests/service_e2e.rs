@@ -725,6 +725,11 @@ fn realtime_feedback_mode_produces_frames_without_any_input_then_cancels() {
             width: Some(16),
             height: Some(16),
             loop_mode: Some("feedback".to_string()),
+            // Explicit "raw": this test asserts on raw RGB8 payload size;
+            // the service-wide default is "h264" when the video codec
+            // feature is compiled in (see the dedicated h264 round-trip
+            // test below for that path).
+            output_encoding: Some("raw".to_string()),
             idle_timeout_s: Some(5),
             ..Default::default()
         },
@@ -793,4 +798,123 @@ fn realtime_post_admission_errors_match_generate_semantics() {
     if !expect_flux {
         assert_eq!(status, 503, "unavailable model: {response:?}");
     }
+}
+
+/// Phase 2: hardware H.264 codec round trip. The test acts as its own
+/// client, using the SAME `makepad-video` stream encoder/decoder the
+/// service uses internally (VideoToolbox on macOS — this is the only
+/// platform this was actually run on; see platform/video's module docs for
+/// the Windows MFT path, which is cross-compile-checked only).
+#[cfg(feature = "video")]
+#[test]
+fn realtime_h264_round_trip_input_and_output() {
+    use makepad_video::{StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions};
+
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 64;
+
+    let provider = start_test_service("realtime-h264");
+    let base_url = provider.base_url().to_string();
+
+    let (status, response) = post_realtime(
+        &base_url,
+        &RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            width: Some(WIDTH),
+            height: Some(HEIGHT),
+            loop_mode: Some("feed".to_string()),
+            input_encoding: Some("h264".to_string()),
+            output_encoding: Some("h264".to_string()),
+            idle_timeout_s: Some(5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(status, 200, "realtime response: {response:?}");
+    let job_id = response.job_id.clone().expect("job_id");
+    let ws_path = response.ws_path.clone().expect("ws_path");
+
+    let (mut socket, rx) = open_realtime_socket(&base_url, &ws_path);
+
+    // The client's own encoder/decoder — independent instances of the same
+    // hardware codec seam (platform/video), proving the wire round trip
+    // rather than any shared in-process state.
+    let mut client_encoder = VideoStreamEncoder::new(VideoStreamEncoderOptions {
+        codec: StreamVideoCodec::H264,
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 30,
+        bitrate_kbps: 2_000,
+        keyint: 30,
+        low_latency: true,
+    })
+    .expect("client encoder creation");
+    let mut client_decoder = VideoStreamDecoder::new(StreamVideoCodec::H264).expect("client decoder creation");
+
+    let mut decoded_output_frames = 0usize;
+    let mut stats_reported_h264 = false;
+    let mut next_input_index = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while decoded_output_frames < 5 && Instant::now() < deadline {
+        if next_input_index < 300 {
+            // A moving synthetic gradient — the same "must actually move"
+            // shape as platform/video's own codec test.
+            let shift = (next_input_index * 4) as usize;
+            let mut rgb = vec![0u8; (WIDTH * HEIGHT * 3) as usize];
+            for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+                px[0] = ((i + shift) % 256) as u8;
+                px[1] = (i % 256) as u8;
+                px[2] = ((i * 2 + shift) % 256) as u8;
+            }
+            let pts_100ns = next_input_index as i64 * (10_000_000 / 30);
+            let packets = client_encoder.push_frame_rgb8(&rgb, pts_100ns).expect("client encode");
+            for packet in packets {
+                let header = FrameHeader {
+                    kind: FrameKind::H264,
+                    width: WIDTH as u16,
+                    height: HEIGHT as u16,
+                    frame_index: next_input_index,
+                };
+                let bytes = realtime_wire::encode_frame(header, &packet.data);
+                socket.send_message(WebSocketMessage::Binary(bytes)).unwrap();
+            }
+            next_input_index += 1;
+        }
+        match rx.recv_timeout(Duration::from_millis(30)) {
+            Ok(WebSocketMessage::Binary(data)) => {
+                if realtime_wire::is_frame_message(&data) {
+                    let (header, payload) = realtime_wire::decode_frame(&data).unwrap();
+                    assert_eq!(header.kind, FrameKind::H264, "server output frame must be h264");
+                    let frames = client_decoder
+                        .push_packet(payload, header.frame_index as i64)
+                        .expect("client decode of server output");
+                    for frame in frames {
+                        assert_eq!((frame.width, frame.height), (WIDTH, HEIGHT));
+                        let rgb = frame.to_rgb8();
+                        assert_eq!(rgb.len(), (WIDTH * HEIGHT * 3) as usize);
+                        decoded_output_frames += 1;
+                    }
+                } else {
+                    let text = std::str::from_utf8(&data).expect("non-frame push must be utf-8 json");
+                    if text.contains("\"type\":\"stats\"") && text.contains("\"output\":\"h264\"") {
+                        stats_reported_h264 = true;
+                    }
+                }
+            }
+            Ok(WebSocketMessage::Closed) => panic!("socket closed before {decoded_output_frames} h264 frames decoded"),
+            Ok(WebSocketMessage::Error(e)) => panic!("websocket error: {e}"),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("socket channel disconnected early"),
+        }
+    }
+    assert!(decoded_output_frames >= 5, "only decoded {decoded_output_frames} h264 output frames");
+    assert!(stats_reported_h264, "stats never reported codec.output = h264");
+
+    socket
+        .send_message(WebSocketMessage::String(r#"{"type":"stop"}"#.to_string()))
+        .unwrap();
+    let state = poll_realtime_terminal(&provider, &job_id);
+    assert_eq!(state, "done");
+    assert!(wait_for_socket_close(&rx, Duration::from_secs(10)), "socket never closed after stop");
+    socket.close();
 }

@@ -17,6 +17,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// H.264 input/output codec seam (`makepad-video`'s hardware
+/// `VideoStreamEncoder`/`VideoStreamDecoder`) — only compiled with the
+/// `video` cargo feature; see [`OutputEncoding::H264`]'s doc for what a
+/// build without it does instead (refuses the request at admission time).
+#[cfg(feature = "video")]
+mod h264 {
+    pub use makepad_video::{StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions};
+}
+
 /// One connected realtime websocket: the sender the connection's write
 /// thread drains (`platform/network/src/http_server.rs`). The channel is an
 /// unbounded `std::sync::mpsc`, so pushing to it never blocks; a closed
@@ -32,6 +41,7 @@ struct SessionSocket {
 struct SessionState {
     config: LiveConfig,
     loop_mode: LoopMode,
+    input_encoding: OutputEncoding,
     output_encoding: OutputEncoding,
     max_fps: f64,
     idle_timeout_s: u64,
@@ -47,7 +57,23 @@ pub struct RealtimeSession {
     frames_in: AtomicU64,
     frames_out: AtomicU64,
     dropped: AtomicU64,
+    /// H.264 input packets that failed to decode (see `handle_binary`) —
+    /// surfaced as `stats.codec.dropped_decode`.
+    dropped_decode: AtomicU64,
     stop_requested: AtomicBool,
+    /// Persists across input packets (a streaming H.264 decoder needs SPS/
+    /// PPS + reference-frame continuity). `handle_binary` runs on the HTTP
+    /// route thread, so this — unlike the encoder below — must be shared,
+    /// not local to `run_live`.
+    #[cfg(feature = "video")]
+    input_decoder: Mutex<Option<h264::VideoStreamDecoder>>,
+    /// Persists across output frames (GOP/keyframe cadence). Only ever
+    /// touched by the worker thread inside `run_live`, but lives here
+    /// (rather than as a local in `run_live`) so `add_socket` can request a
+    /// fresh keyframe for a newly joined socket without threading extra
+    /// state through the worker loop.
+    #[cfg(feature = "video")]
+    output_encoder: Mutex<Option<h264::VideoStreamEncoder>>,
 }
 
 impl RealtimeSession {
@@ -58,6 +84,7 @@ impl RealtimeSession {
             state: Mutex::new(SessionState {
                 config: params.config.clone(),
                 loop_mode: params.loop_mode,
+                input_encoding: params.input_encoding,
                 output_encoding: params.output_encoding,
                 max_fps: params.max_fps,
                 idle_timeout_s: params.idle_timeout_s,
@@ -68,12 +95,25 @@ impl RealtimeSession {
             frames_in: AtomicU64::new(0),
             frames_out: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            dropped_decode: AtomicU64::new(0),
             stop_requested: AtomicBool::new(false),
+            #[cfg(feature = "video")]
+            input_decoder: Mutex::new(None),
+            #[cfg(feature = "video")]
+            output_encoder: Mutex::new(None),
         }
     }
 
     pub fn add_socket(&self, id: u64, sender: mpsc::Sender<Vec<u8>>) {
         self.sockets.lock().unwrap().push(SessionSocket { id, sender });
+        // A fresh socket has no decoder state at all — get it a keyframe
+        // now instead of making it wait for the encoder's own GOP cadence.
+        #[cfg(feature = "video")]
+        if let Ok(mut encoder) = self.output_encoder.lock() {
+            if let Some(encoder) = encoder.as_mut() {
+                encoder.request_keyframe();
+            }
+        }
     }
 
     pub fn remove_socket(&self, id: u64) {
@@ -151,6 +191,15 @@ impl RealtimeSession {
         )
     }
 
+    fn codec_stats(&self) -> realtime_wire::CodecStatsJson {
+        let state = self.state.lock().unwrap();
+        realtime_wire::CodecStatsJson {
+            input: state.input_encoding.as_str().to_string(),
+            output: state.output_encoding.as_str().to_string(),
+            dropped_decode: self.dropped_decode.load(Ordering::Relaxed),
+        }
+    }
+
     /// Merges a partial `{"type":"control", ...}` update: only the fields
     /// present in `update` change anything (see [`apply_control_to_config`]
     /// for the `LiveConfig` subset; the session-only knobs are merged here).
@@ -165,9 +214,18 @@ impl RealtimeSession {
             state.loop_mode = mode;
         }
         if let Some(encoding) = update
+            .input_encoding
+            .as_deref()
+            .and_then(|text| OutputEncoding::parse(text).ok())
+            .filter(OutputEncoding::is_supported_in_this_build)
+        {
+            state.input_encoding = encoding;
+        }
+        if let Some(encoding) = update
             .output_encoding
             .as_deref()
             .and_then(|text| OutputEncoding::parse(text).ok())
+            .filter(OutputEncoding::is_supported_in_this_build)
         {
             state.output_encoding = encoding;
         }
@@ -195,12 +253,61 @@ impl RealtimeSession {
     }
 
     /// Handles one client -> server binary message: decodes it as an input
-    /// frame and pushes it to the mailbox.
+    /// frame and pushes it to the mailbox. A malformed WIRE HEADER (bad
+    /// magic, bad raw-frame length) is a protocol error and propagates. An
+    /// H.264 packet that fails to DECODE is different — real network jitter
+    /// can corrupt/drop packets — so that is swallowed here: counted in
+    /// `dropped_decode` and reported back only via `stats`, never as a hard
+    /// per-message error to the client.
     pub fn handle_binary(&self, bytes: &[u8]) -> Result<(), AssetAiError> {
         let (header, payload) = realtime_wire::decode_frame(bytes)?;
-        let image = decode_frame_payload(header, payload)?;
-        self.push_input_frame(image);
+        match header.kind {
+            FrameKind::Raw | FrameKind::Png => {
+                let image = decode_frame_payload(header, payload)?;
+                self.push_input_frame(image);
+            }
+            FrameKind::H264 => self.handle_binary_h264(header, payload),
+        }
         Ok(())
+    }
+
+    #[cfg(feature = "video")]
+    fn handle_binary_h264(&self, header: FrameHeader, payload: &[u8]) {
+        let mut decoder_slot = self.input_decoder.lock().unwrap();
+        if decoder_slot.is_none() {
+            match h264::VideoStreamDecoder::new(h264::StreamVideoCodec::H264) {
+                Ok(decoder) => *decoder_slot = Some(decoder),
+                Err(e) => {
+                    eprintln!("realtime: h264 input decoder init failed: {e}");
+                    self.dropped_decode.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        let decoder = decoder_slot.as_mut().unwrap();
+        match decoder.push_packet(payload, header.frame_index as i64) {
+            Ok(frames) => {
+                if let Some(frame) = frames.into_iter().last() {
+                    self.push_input_frame(RgbImage {
+                        width: frame.width,
+                        height: frame.height,
+                        data: frame.to_rgb8(),
+                    });
+                }
+                // Zero frames is a legitimate outcome (SPS/PPS-only packet,
+                // or the decoder still buffering) — not a drop.
+            }
+            Err(e) => {
+                eprintln!("realtime: h264 input decode failed, dropping packet: {e}");
+                self.dropped_decode.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn handle_binary_h264(&self, _header: FrameHeader, _payload: &[u8]) {
+        self.dropped_decode.fetch_add(1, Ordering::Relaxed);
+        eprintln!("realtime: received an h264 input frame but this build has no 'video' feature — dropped");
     }
 
     /// Handles one client -> server text message: control / reference / stop.
@@ -218,6 +325,77 @@ impl RealtimeSession {
             ClientMessage::Stop => self.request_stop(),
         }
         Ok(())
+    }
+
+    /// Encodes one produced output frame per the session's current
+    /// `output_encoding` and returns ready-to-push wire messages (0 when
+    /// the H.264 encoder produced nothing for this input — the normal
+    /// startup/buffering case; 1 in the synchronous-per-frame steady
+    /// state). Called only from `run_live` (the worker thread).
+    fn encode_output(&self, image: &RgbImage, frame_index: u32) -> Vec<Vec<u8>> {
+        let output_encoding = self.state.lock().unwrap().output_encoding;
+        match output_encoding {
+            OutputEncoding::Raw | OutputEncoding::Png => {
+                vec![encode_output_frame(image, output_encoding, frame_index)]
+            }
+            OutputEncoding::H264 => self.encode_output_h264(image, frame_index),
+        }
+    }
+
+    #[cfg(feature = "video")]
+    fn encode_output_h264(&self, image: &RgbImage, frame_index: u32) -> Vec<Vec<u8>> {
+        let mut encoder_slot = self.output_encoder.lock().unwrap();
+        let needs_new = match encoder_slot.as_ref() {
+            None => true,
+            Some(encoder) => encoder.options().width != image.width || encoder.options().height != image.height,
+        };
+        if needs_new {
+            let options = h264::VideoStreamEncoderOptions {
+                codec: h264::StreamVideoCodec::H264,
+                width: image.width,
+                height: image.height,
+                fps: 30,
+                bitrate_kbps: 4_000,
+                keyint: 60,
+                low_latency: true,
+            };
+            match h264::VideoStreamEncoder::new(options) {
+                Ok(encoder) => *encoder_slot = Some(encoder),
+                Err(e) => {
+                    eprintln!("realtime: h264 output encoder init failed, falling back to raw: {e}");
+                    return vec![encode_output_frame(image, OutputEncoding::Raw, frame_index)];
+                }
+            }
+        }
+        let encoder = encoder_slot.as_mut().unwrap();
+        match encoder.push_frame_rgb8(&image.data, frame_index as i64) {
+            Ok(packets) => packets
+                .into_iter()
+                .map(|packet| {
+                    let header = FrameHeader {
+                        kind: FrameKind::H264,
+                        width: image.width.min(u16::MAX as u32) as u16,
+                        height: image.height.min(u16::MAX as u32) as u16,
+                        frame_index,
+                    };
+                    realtime_wire::encode_frame(header, &packet.data)
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!("realtime: h264 output encode failed, dropping frame: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    #[cfg(not(feature = "video"))]
+    fn encode_output_h264(&self, image: &RgbImage, frame_index: u32) -> Vec<Vec<u8>> {
+        // LiveParams::from_request refuses output_encoding="h264" without
+        // the 'video' feature, and apply_control's OutputEncoding::
+        // is_supported_in_this_build filter refuses it there too — this
+        // should be unreachable, but degrade to raw rather than silently
+        // dropping every frame if it somehow is reached.
+        vec![encode_output_frame(image, OutputEncoding::Raw, frame_index)]
     }
 }
 
@@ -276,6 +454,9 @@ pub fn apply_control_to_config(config: &mut LiveConfig, update: &realtime_wire::
     }
 }
 
+/// Decodes a raw or PNG input frame. `handle_binary` routes `H264` frames
+/// to `handle_binary_h264` instead (a streaming decoder needs to persist
+/// across calls; this function is stateless).
 fn decode_frame_payload(header: FrameHeader, payload: &[u8]) -> Result<RgbImage, AssetAiError> {
     match header.kind {
         FrameKind::Raw => Ok(RgbImage {
@@ -287,9 +468,17 @@ fn decode_frame_payload(header: FrameHeader, payload: &[u8]) -> Result<RgbImage,
             let (data, width, height) = crate::testpattern::decode_png_rgb8(payload)?;
             Ok(RgbImage { width, height, data })
         }
+        FrameKind::H264 => Err(AssetAiError::Backend(
+            "decode_frame_payload: H264 must go through handle_binary_h264 (stateful decoder)".to_string(),
+        )),
     }
 }
 
+/// Encodes one output frame as raw RGB8 or PNG. NOT used for `H264` — see
+/// `RealtimeSession::encode_output`, which dispatches to this for `Raw`/
+/// `Png` and to the per-session `VideoStreamEncoder` otherwise; a
+/// (should-be-unreachable) `H264` call here falls back to raw defensively
+/// rather than panicking the worker thread.
 fn encode_output_frame(image: &RgbImage, encoding: OutputEncoding, frame_index: u32) -> Vec<u8> {
     let (kind, payload) = match encoding {
         OutputEncoding::Raw => (FrameKind::Raw, image.data.clone()),
@@ -301,6 +490,10 @@ fn encode_output_frame(image: &RgbImage, encoding: OutputEncoding, frame_index: 
                     (FrameKind::Raw, image.data.clone())
                 }
             }
+        }
+        OutputEncoding::H264 => {
+            eprintln!("realtime: encode_output_frame called with H264 (should route through encode_output) — using raw");
+            (FrameKind::Raw, image.data.clone())
         }
     };
     let header = FrameHeader {
@@ -440,7 +633,7 @@ pub fn run_live(
         }
 
         let frame_start = Instant::now();
-        let (mut config, loop_mode, output_encoding, max_fps) = session.snapshot();
+        let (mut config, loop_mode, _output_encoding, max_fps) = session.snapshot();
 
         let prep_start = Instant::now();
         let init_image = match loop_mode {
@@ -482,8 +675,9 @@ pub fn run_live(
         };
 
         let post_start = Instant::now();
-        let frame_bytes = encode_output_frame(&out.image, output_encoding, frame_index as u32);
-        session.push_bytes(frame_bytes);
+        for frame_bytes in session.encode_output(&out.image, frame_index as u32) {
+            session.push_bytes(frame_bytes);
+        }
         let post_ms = post_start.elapsed().as_secs_f64() * 1000.0;
         last_output = Some(out.image);
 
@@ -507,6 +701,7 @@ pub fn run_live(
                 frames_in,
                 frames_out,
                 dropped,
+                codec: session.codec_stats(),
             })
             .into_bytes(),
         );
@@ -683,6 +878,7 @@ mod tests {
             model: "testpattern".to_string(),
             config: LiveConfig::default(),
             loop_mode: LoopMode::Feed,
+            input_encoding: OutputEncoding::Raw,
             output_encoding: OutputEncoding::Raw,
             max_fps: 0.0,
             idle_timeout_s: 30,
@@ -703,6 +899,7 @@ mod tests {
             model: "testpattern".to_string(),
             config: LiveConfig::default(),
             loop_mode: LoopMode::Feed,
+            input_encoding: OutputEncoding::Raw,
             output_encoding: OutputEncoding::Raw,
             max_fps: 0.0,
             idle_timeout_s: 30,

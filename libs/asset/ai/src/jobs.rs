@@ -566,6 +566,7 @@ mod tests {
             model: model.to_string(),
             config: crate::backend::LiveConfig::default(),
             loop_mode: crate::backend::LoopMode::Feed,
+            input_encoding: crate::backend::OutputEncoding::Raw,
             output_encoding: crate::backend::OutputEncoding::Raw,
             max_fps: 0.0,
             idle_timeout_s: 30,

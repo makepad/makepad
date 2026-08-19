@@ -23,6 +23,10 @@ pub enum FrameKind {
     /// Raw RGB8, no compression — the fast path.
     Raw = 0,
     Png = 1,
+    /// One H.264 Annex-B access unit (start-code delimited NAL units;
+    /// see `platform/video`'s `stream_encoder`/`stream_decoder`). A
+    /// keyframe access unit always carries SPS+PPS before the IDR slice.
+    H264 = 2,
 }
 
 impl FrameKind {
@@ -30,8 +34,9 @@ impl FrameKind {
         match value {
             0 => Ok(FrameKind::Raw),
             1 => Ok(FrameKind::Png),
+            2 => Ok(FrameKind::H264),
             other => Err(AssetAiError::Params(format!(
-                "realtime frame: unknown kind byte {other} (expected 0=raw or 1=png)"
+                "realtime frame: unknown kind byte {other} (expected 0=raw, 1=png or 2=h264)"
             ))),
         }
     }
@@ -150,6 +155,7 @@ pub struct ControlUpdateJson {
     pub height: Option<u32>,
     pub camera: Option<CameraUpdateJson>,
     pub loop_mode: Option<String>,
+    pub input_encoding: Option<String>,
     pub output_encoding: Option<String>,
     pub max_fps: Option<f64>,
     pub idle_timeout_s: Option<u64>,
@@ -216,6 +222,17 @@ pub struct StatsMessageJson {
     pub frames_in: u64,
     pub frames_out: u64,
     pub dropped: u64,
+    pub codec: CodecStatsJson,
+}
+
+/// Wire encoding actually in effect for each direction, plus the count of
+/// input packets that failed to decode (H.264 only — see
+/// `realtime::RealtimeSession::handle_binary`).
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct CodecStatsJson {
+    pub input: String,
+    pub output: String,
+    pub dropped_decode: u64,
 }
 
 pub fn encode_stats_message(mut stats: StatsMessageJson) -> String {
@@ -409,6 +426,7 @@ mod tests {
             frames_in: 3,
             frames_out: 3,
             dropped: 0,
+            codec: CodecStatsJson::default(),
             kind: String::new(),
         });
         assert!(stats.contains("\"type\":\"stats\""));

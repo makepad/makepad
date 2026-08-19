@@ -419,15 +419,26 @@ impl LoopMode {
     }
 }
 
-/// Wire format for output frames pushed to connected sockets (see
+/// Wire format for input AND output frames on a realtime session (see
 /// `realtime_wire::FrameKind`, which mirrors this 1:1 on the binary frame
-/// header).
+/// header — `Raw` = kind 0, `Png` = kind 1, `H264` = kind 2, Annex-B). One
+/// enum serves both directions: `LiveParams::input_encoding` is the
+/// session's advisory "what a client should send" default (the wire is
+/// self-describing per frame via the header's `kind` byte, so nothing
+/// actually enforces it — see `realtime::RealtimeSession::handle_binary`,
+/// which decodes whatever kind actually arrives); `output_encoding` is
+/// enforced (it picks what the session itself encodes and pushes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OutputEncoding {
-    /// Raw RGB8, no compression — the default, cheapest on a LAN.
+    /// Raw RGB8, no compression — cheapest on a LAN, always available.
     #[default]
     Raw,
     Png,
+    /// H.264 Annex-B via the platform hardware codec (`makepad-video`'s
+    /// `VideoStreamEncoder`/`VideoStreamDecoder`) — the default for both
+    /// directions when this build has the `video` feature (see
+    /// `LiveParams::from_request`); refused at admission time otherwise.
+    H264,
 }
 
 impl OutputEncoding {
@@ -435,8 +446,9 @@ impl OutputEncoding {
         match text {
             "" | "raw" => Ok(OutputEncoding::Raw),
             "png" => Ok(OutputEncoding::Png),
+            "h264" => Ok(OutputEncoding::H264),
             other => Err(AssetAiError::Params(format!(
-                "unknown output_encoding {other:?} (expected \"raw\" or \"png\")"
+                "unknown output_encoding {other:?} (expected \"raw\", \"png\" or \"h264\")"
             ))),
         }
     }
@@ -445,6 +457,28 @@ impl OutputEncoding {
         match self {
             OutputEncoding::Raw => "raw",
             OutputEncoding::Png => "png",
+            OutputEncoding::H264 => "h264",
+        }
+    }
+
+    /// True when this build can actually encode/decode this wire format —
+    /// `H264` requires the `video` cargo feature (`makepad-video`'s
+    /// hardware codec seam); `Raw`/`Png` are always available.
+    pub fn is_supported_in_this_build(&self) -> bool {
+        match self {
+            OutputEncoding::Raw | OutputEncoding::Png => true,
+            OutputEncoding::H264 => cfg!(feature = "video"),
+        }
+    }
+
+    /// The default output/input encoding when a request doesn't specify
+    /// one: H.264 when this build has the codec (bandwidth-cheap over a
+    /// real network), raw otherwise (no codec to fall back to).
+    pub fn default_for_this_build() -> Self {
+        if cfg!(feature = "video") {
+            OutputEncoding::H264
+        } else {
+            OutputEncoding::Raw
         }
     }
 }
@@ -540,12 +574,27 @@ pub struct LiveParams {
     pub model: String,
     pub config: LiveConfig,
     pub loop_mode: LoopMode,
+    /// Advisory: what a well-behaved client should send. See
+    /// [`OutputEncoding`]'s doc — the wire is self-describing per frame, so
+    /// nothing rejects a different kind actually being sent.
+    pub input_encoding: OutputEncoding,
+    /// Enforced: what the session itself encodes and pushes.
     pub output_encoding: OutputEncoding,
     /// 0 = as fast as possible.
     pub max_fps: f64,
     /// Session ends (job -> done) after this many seconds with zero
     /// connected websockets. 0 = never.
     pub idle_timeout_s: u64,
+}
+
+/// Clamps a live-session frame dimension to `16..=4096` AND rounds it down
+/// to even — H.264/NV12 4:2:0 requires even width/height, and applying that
+/// universally (not only when H.264 is actually selected) means a control
+/// message can freely flip `output_encoding` to `"h264"` mid-session
+/// without ever hitting an odd-dimension encoder rejection.
+fn clamp_even_dimension(value: u32) -> u32 {
+    let clamped = value.clamp(16, 4096);
+    clamped - (clamped % 2)
 }
 
 impl LiveParams {
@@ -562,8 +611,8 @@ impl LiveParams {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0)
         });
-        let width = request.width.unwrap_or(512).clamp(16, 4096);
-        let height = request.height.unwrap_or(512).clamp(16, 4096);
+        let width = clamp_even_dimension(request.width.unwrap_or(512));
+        let height = clamp_even_dimension(request.height.unwrap_or(512));
         let strength = request
             .strength
             .filter(|v| v.is_finite())
@@ -576,7 +625,26 @@ impl LiveParams {
             .map(|v| v as f32);
         let seed_mode = SeedMode::parse(request.seed_mode.as_deref().unwrap_or(""))?;
         let loop_mode = LoopMode::parse(request.loop_mode.as_deref().unwrap_or(""))?;
-        let output_encoding = OutputEncoding::parse(request.output_encoding.as_deref().unwrap_or(""))?;
+        let input_encoding = match request.input_encoding.as_deref() {
+            None | Some("") => OutputEncoding::default_for_this_build(),
+            Some(text) => OutputEncoding::parse(text)?,
+        };
+        let output_encoding = match request.output_encoding.as_deref() {
+            None | Some("") => OutputEncoding::default_for_this_build(),
+            Some(text) => OutputEncoding::parse(text)?,
+        };
+        if !output_encoding.is_supported_in_this_build() {
+            return Err(AssetAiError::Params(format!(
+                "output_encoding {:?} needs a build with the 'video' cargo feature",
+                output_encoding.as_str()
+            )));
+        }
+        if !input_encoding.is_supported_in_this_build() {
+            return Err(AssetAiError::Params(format!(
+                "input_encoding {:?} needs a build with the 'video' cargo feature",
+                input_encoding.as_str()
+            )));
+        }
         let max_fps = request
             .max_fps
             .filter(|v| v.is_finite() && *v >= 0.0)
@@ -599,6 +667,7 @@ impl LiveParams {
                 camera: CameraMotion::default(),
             },
             loop_mode,
+            input_encoding,
             output_encoding,
             max_fps,
             idle_timeout_s,

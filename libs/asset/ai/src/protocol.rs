@@ -448,7 +448,7 @@ pub struct LiveStatusJson {
 // Binary frames (both directions) share one 16-byte little-endian header
 // (see `realtime_wire::FrameHeader` / `FRAME_MAGIC`):
 //   [ magic:u32 = 0x4C465246 ("FRFL")
-//   , kind:u8   (0 = raw RGB8, 1 = PNG)
+//   , kind:u8   (0 = raw RGB8, 1 = PNG, 2 = H.264 Annex-B access unit)
 //   , reserved:u8
 //   , reserved:u16
 //   , width:u16
@@ -456,18 +456,29 @@ pub struct LiveStatusJson {
 //   , frame_index:u32
 //   ] ++ payload
 // Client -> server: an input frame (`frame_index` is the client's own input
-// counter; not otherwise interpreted). Raw RGB8 is the fast path. The
-// session keeps only the LATEST unconsumed input frame — a newer frame
-// replaces an older one that has not yet been consumed and `dropped`
+// counter; not otherwise interpreted). Raw RGB8 is the fast/uncompressed
+// path; kind 2 (H.264) is decoded by a per-session `makepad-video`
+// `VideoStreamDecoder` (see `realtime::RealtimeSession::handle_binary`) —
+// width/height in the header are ignored for kind 2 (the decoder reports
+// its own, parsed from the bitstream's SPS); a packet that fails to decode
+// is dropped and counted (`stats.codec.dropped_decode`), never treated as a
+// protocol error. The session keeps only the LATEST unconsumed DECODED
+// input frame — a newer one replaces an older unconsumed one and `dropped`
 // increments (see the `stats` message).
 // Server -> client: an output frame; `kind` follows the session's
-// `output_encoding` (raw by default; `{"type":"control","output_encoding":
-// "png"}` switches it). `frame_index` is the session's output counter.
+// `output_encoding` (`{"type":"control","output_encoding":"png"}` switches
+// it; default is "h264" when the service was built with the `video` cargo
+// feature, "raw" otherwise — see `RealtimeRequestJson::output_encoding`).
+// `frame_index` is the session's output counter. When a NEW socket
+// connects to an H.264-output session, the encoder is asked for a fresh
+// keyframe (SPS/PPS + IDR) so the new client can start decoding
+// immediately rather than waiting for the next scheduled one.
 //
 // Text (JSON) frames, client -> server:
 //   {"type":"control", ...any subset of: prompt, negative_prompt, strength,
 //    steps, guidance, seed, seed_mode, width, height, camera:{dolly,pan_x,
-//    pan_y,roll}, loop_mode, output_encoding, max_fps, idle_timeout_s}
+//    pan_y,roll}, loop_mode, input_encoding, output_encoding, max_fps,
+//    idle_timeout_s}
 //   {"type":"reference", "slot":0, "png_b64":"..."}
 //   {"type":"stop"}
 // A `control` message only touches the fields it sets (see
@@ -477,7 +488,9 @@ pub struct LiveStatusJson {
 // JSON messages, server -> client:
 //   {"type":"stats", "frame_index":N, "fps":.., "frame_ms":..,
 //    "stage_ms":{"prep":..,"model":..,"post":..}, "frames_in":..,
-//    "frames_out":.., "dropped":..}      (sent every produced frame)
+//    "frames_out":.., "dropped":..,
+//    "codec":{"input":"h264","output":"h264","dropped_decode":N}}
+//    (sent every produced frame)
 //   {"type":"error", "message":".."}
 //   {"type":"stopped", "reason":"stopped"|"cancelled"|"error"}  (once, as
 //    the session ends; sockets are then closed from the server side)
@@ -516,8 +529,15 @@ pub struct RealtimeRequestJson {
     /// "feed" (default): wait for client-pushed input frames. "feedback":
     /// the session's own previous output (camera-warped) is the next init.
     pub loop_mode: Option<String>,
-    /// "raw" (default) | "png" — output frame payload format.
+    /// "raw" | "png" | "h264" — output frame payload format. Default:
+    /// "h264" when this service was built with the `video` cargo feature
+    /// (`makepad-video`'s hardware H.264 codec), "raw" otherwise. Requesting
+    /// "h264" on a build without that feature is refused (400).
     pub output_encoding: Option<String>,
+    /// "raw" | "png" | "h264" — advisory only (the wire is self-describing
+    /// per input frame; nothing rejects a client sending a different kind).
+    /// Same default rule as `output_encoding`.
+    pub input_encoding: Option<String>,
     /// Session ends after this many seconds with zero connected sockets.
     /// Default 30; 0 = never.
     pub idle_timeout_s: Option<u64>,
