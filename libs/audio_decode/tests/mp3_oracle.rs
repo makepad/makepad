@@ -362,6 +362,57 @@ fn intensity_stereo_pans_the_left_channel_across() {
 }
 
 #[test]
+fn lsf_intensity_scale_comes_from_the_right_channel() {
+    // MPEG-2 intensity stereo pans in quarter-log2 steps, and the low bit of
+    // `scalefac_compress` doubles the step. That bit belongs to the channel
+    // that carries the positions -- the *right* one -- and reading it from the
+    // left channel instead is wrong by exactly 2^(1/4) per band. CoreAudio was
+    // the arbiter here, in both directions; this pins the answer down.
+    //
+    // The right channel codes only its positions (`big_values` 0), so every
+    // band is intensity coded. `scalefac_compress` 144/145 both select an
+    // intensity partition whose first field is two bits wide, and every
+    // position is written as 1: odd, so k_left is the attenuated one.
+    for (compress, expected) in [(144u32, 0.25f32), (145, 0.5)] {
+        let mut spec = FrameSpec::silence(MPEG2, 1);
+        spec.rate_index = 0;
+        spec.bitrate_index = 8;
+        spec.mode_ext = 1;
+        spec.granules[0][0] = Gr {
+            part2_3: PAIRS * 5,
+            big_values: PAIRS,
+            global_gain: 196,
+            table0: 1,
+            ..Gr::default()
+        };
+        spec.granules[0][1] = Gr {
+            part2_3: 14,
+            global_gain: 196,
+            scalefac_compress: compress,
+            ..Gr::default()
+        };
+        // Left: the coded pairs. Right: seven two-bit positions, all 1.
+        spec.main = eight_pairs();
+        spec.main.extend(std::iter::repeat_n((1u32, 2u32), 7));
+
+        let audio = decode(&stream(&spec, 8), false);
+        let rms = |s: &[f32]| {
+            (s.iter().map(|v| (v * v) as f64).sum::<f64>() / s.len().max(1) as f64).sqrt()
+        };
+        let left = rms(&audio.channel(0));
+        let right = rms(&audio.channel(1));
+        assert!(right > 1e-5, "compress {compress}: nothing decoded");
+        // k_left / k_right = 2^-expected.
+        let ratio = (left / right) as f32;
+        let want = (-expected).exp2();
+        assert!(
+            (ratio - want).abs() < 1e-3,
+            "compress {compress}: channel ratio {ratio} should be {want}"
+        );
+    }
+}
+
+#[test]
 fn mixed_blocks_decode_with_per_window_gain() {
     // A mixed block is long in the lowest two subbands and short above them,
     // and each of the three short windows carries its own gain. Verified
