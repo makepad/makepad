@@ -1846,7 +1846,11 @@ fn resnet_block_device(
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {
-    let hidden = group_norm_device(
+    // Re-assign (not shadow): each intermediate plane returns to the pool as
+    // soon as its consumer ran. Shadowing kept six planes live per block —
+    // at 1024px that alone exceeded the idle-pool cap and turned every op
+    // into a fresh WDDM cudaMalloc (see flux2_vae.rs::resnet).
+    let mut hidden = group_norm_device(
         weights,
         namespace,
         input,
@@ -1854,8 +1858,8 @@ fn resnet_block_device(
         &format!("{prefix}.norm1.bias"),
         32,
     )?;
-    let hidden = silu_device(&hidden)?;
-    let hidden = conv2d_device(
+    hidden = silu_device(&hidden)?;
+    hidden = conv2d_device(
         weights,
         namespace,
         &hidden,
@@ -1864,7 +1868,7 @@ fn resnet_block_device(
         1,
         1,
     )?;
-    let hidden = group_norm_device(
+    hidden = group_norm_device(
         weights,
         namespace,
         &hidden,
@@ -1872,8 +1876,8 @@ fn resnet_block_device(
         &format!("{prefix}.norm2.bias"),
         32,
     )?;
-    let hidden = silu_device(&hidden)?;
-    let hidden = conv2d_device(
+    hidden = silu_device(&hidden)?;
+    hidden = conv2d_device(
         weights,
         namespace,
         &hidden,
@@ -1940,8 +1944,10 @@ fn mid_attention_device(
         0,
     )?;
     let scale = 1.0 / (q.channels as f32).sqrt();
+    drop(hidden);
     let attn = gpu_attention_planar_single(&q.tensor, &k.tensor, &v.tensor, scale)
         .map_err(DiffusionError::model)?;
+    drop((q, k, v));
     let attn = GpuSpatial {
         tensor: attn,
         width: input.width,

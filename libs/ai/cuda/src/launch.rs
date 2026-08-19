@@ -3571,6 +3571,76 @@ mod imp {
         static GPU_TENSOR_POOL: RefCell<std::collections::BTreeMap<usize, Vec<DeviceBuffer>>> =
             RefCell::new(std::collections::BTreeMap::new());
         static GPU_TENSOR_POOL_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        // Release order of the idle buffers (device ptr -> monotonically
+        // increasing release stamp) so over-cap eviction can drop the
+        // least-recently-released buffers first. Largest-first eviction kept
+        // a decoder's stale small-stage planes alive and evicted the hot
+        // full-resolution planes every op (measured flux2-dev 1024 decode:
+        // 69 fresh cudaMallocs / 20GB churn at the 2GB cap).
+        static GPU_POOL_RELEASE_STAMP: RefCell<std::collections::HashMap<usize, u64>> =
+            RefCell::new(std::collections::HashMap::new());
+        static GPU_POOL_RELEASE_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn pool_stamp_of(buffer: &DeviceBuffer) -> u64 {
+        GPU_POOL_RELEASE_STAMP
+            .try_with(|map| {
+                map.borrow()
+                    .get(&(buffer.ptr.as_ptr() as usize))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+
+    fn pool_stamp_forget(buffer: &DeviceBuffer) {
+        let _ = GPU_POOL_RELEASE_STAMP
+            .try_with(|map| map.borrow_mut().remove(&(buffer.ptr.as_ptr() as usize)));
+    }
+
+    /// Evict idle buffers (least-recently-released first, pinned skipped)
+    /// from `pool` until at least `need` bytes are freed. Returns the bytes
+    /// actually freed; the cudaFrees happen here.
+    fn pool_evict_lru(
+        pool: &mut std::collections::BTreeMap<usize, Vec<DeviceBuffer>>,
+        need: usize,
+    ) -> usize {
+        // (stamp, bucket, index) of every evictable idle buffer, oldest first.
+        let mut candidates: Vec<(u64, usize, usize)> = Vec::new();
+        for (bucket, buffers) in pool.iter() {
+            for (index, buffer) in buffers.iter().enumerate() {
+                if !gpu_graph_pinned(buffer) {
+                    candidates.push((pool_stamp_of(buffer), *bucket, index));
+                }
+            }
+        }
+        candidates.sort_unstable();
+        let mut freed = 0usize;
+        let mut to_drop: Vec<DeviceBuffer> = Vec::new();
+        // Collect per bucket the indices to remove (descending so removal
+        // indices stay valid).
+        let mut chosen: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (_, bucket, index) in candidates {
+            if freed >= need {
+                break;
+            }
+            chosen.entry(bucket).or_default().push(index);
+            freed += bucket;
+        }
+        for (bucket, mut indices) in chosen {
+            if let Some(buffers) = pool.get_mut(&bucket) {
+                indices.sort_unstable_by(|a, b| b.cmp(a));
+                for index in indices {
+                    let buffer = buffers.remove(index);
+                    pool_stamp_forget(&buffer);
+                    to_drop.push(buffer);
+                }
+            }
+        }
+        pool.retain(|_, buffers| !buffers.is_empty());
+        drop(to_drop); // the real cudaFrees
+        freed
     }
 
     // ------------------------------------------------------------------
@@ -3674,26 +3744,7 @@ mod imp {
         let _ = GPU_TENSOR_POOL.try_with(|pool| {
             let mut pool = pool.borrow_mut();
             let need = pooled - cap;
-            let mut to_drop: Vec<DeviceBuffer> = Vec::new();
-            let sizes: Vec<usize> = pool.keys().rev().copied().collect();
-            'outer: for bucket in sizes {
-                if let Some(buffers) = pool.get_mut(&bucket) {
-                    let mut index = 0;
-                    while index < buffers.len() {
-                        if gpu_graph_pinned(&buffers[index]) {
-                            index += 1;
-                            continue;
-                        }
-                        to_drop.push(buffers.remove(index));
-                        freed += bucket;
-                        if freed >= need {
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-            pool.retain(|_, buffers| !buffers.is_empty());
-            drop(to_drop);
+            freed = pool_evict_lru(&mut pool, need);
         });
         perf_count(&PERF_POOL_OVERCAP_FREE_BYTES, freed as u64);
         GPU_TENSOR_POOL_BYTES.with(|total| total.set(pooled.saturating_sub(freed)));
@@ -3752,6 +3803,14 @@ mod imp {
             .unwrap_or(false)
     }
 
+    /// `MAKEPAD_POOL_TRACE=1`: one stderr line per fresh (non-pooled) device
+    /// allocation with the idle-pool state — the tool for "why does this
+    /// phase cudaMalloc at all" questions near the WDDM residency cliff.
+    fn pool_trace_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("MAKEPAD_POOL_TRACE").as_deref() == Ok("1"))
+    }
+
     fn gpu_pool_acquire(min_bytes: usize) -> Result<DeviceBuffer, String> {
         let rounded = gpu_pool_round(min_bytes);
         // BEST-FIT: take the smallest pooled buffer in [rounded, 2*rounded)
@@ -3773,6 +3832,7 @@ mod imp {
                 if buffers.is_empty() {
                     pool.remove(&size);
                 }
+                pool_stamp_forget(&buffer);
                 Some(buffer)
             })
         });
@@ -3783,6 +3843,23 @@ mod imp {
         } else {
             perf_count(&PERF_POOL_FRESH_ALLOC_COUNT, 1);
             perf_count(&PERF_POOL_FRESH_ALLOC_BYTES, rounded as u64);
+            if pool_trace_enabled() {
+                let pooled = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
+                let idle: Vec<String> = GPU_TENSOR_POOL.with(|pool| {
+                    pool.borrow()
+                        .iter()
+                        .map(|(size, buffers)| format!("{}x{}MB", buffers.len(), size >> 20))
+                        .collect()
+                });
+                eprintln!(
+                    "pool trace: fresh alloc {}MB (asked {}MB) pooled={}MB cap={}MB idle=[{}]",
+                    rounded >> 20,
+                    min_bytes >> 20,
+                    pooled >> 20,
+                    gpu_pool_cap_bytes() >> 20,
+                    idle.join(" ")
+                );
+            }
             match DeviceBuffer::new(rounded) {
                 Ok(buffer) => buffer,
                 Err(_) => {
@@ -3822,26 +3899,7 @@ mod imp {
             let evicted = GPU_TENSOR_POOL.try_with(|pool| {
                 let mut pool = pool.borrow_mut();
                 let need = (pooled + size).saturating_sub(cap);
-                let mut to_drop: Vec<DeviceBuffer> = Vec::new();
-                let sizes: Vec<usize> = pool.keys().rev().copied().collect();
-                'outer: for bucket in sizes {
-                    if let Some(buffers) = pool.get_mut(&bucket) {
-                        let mut index = 0;
-                        while index < buffers.len() {
-                            if gpu_graph_pinned(&buffers[index]) {
-                                index += 1;
-                                continue;
-                            }
-                            to_drop.push(buffers.remove(index));
-                            freed += bucket;
-                            if freed >= need {
-                                break 'outer;
-                            }
-                        }
-                    }
-                }
-                pool.retain(|_, buffers| !buffers.is_empty());
-                drop(to_drop); // the real cudaFrees
+                freed = pool_evict_lru(&mut pool, need);
             });
             if evicted.is_err() {
                 // TLS teardown: no pool to evict from, free for real.
@@ -3864,6 +3922,14 @@ mod imp {
         let mut slot = Some(buffer);
         let _ = GPU_TENSOR_POOL.try_with(|pool| {
             if let Some(buffer) = slot.take() {
+                let stamp = GPU_POOL_RELEASE_COUNTER.with(|counter| {
+                    let next = counter.get().wrapping_add(1);
+                    counter.set(next);
+                    next
+                });
+                let _ = GPU_POOL_RELEASE_STAMP.try_with(|map| {
+                    map.borrow_mut().insert(buffer.ptr.as_ptr() as usize, stamp)
+                });
                 pool.borrow_mut().entry(size).or_default().push(buffer);
             }
         });
@@ -3897,6 +3963,7 @@ mod imp {
             GPU_TENSOR_POOL.with(|pool| pool.borrow_mut().clear());
             GPU_TENSOR_POOL_BYTES.with(|total| total.set(0));
         }
+        let _ = GPU_POOL_RELEASE_STAMP.try_with(|map| map.borrow_mut().clear());
         CONV_SCRATCH.with(|cell| *cell.borrow_mut() = [None, None]);
     }
 

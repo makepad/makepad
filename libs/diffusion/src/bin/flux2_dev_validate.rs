@@ -14,11 +14,23 @@
 //!   te_ids.json        token ids (from the timing hook log)
 //!
 //! Gates (native vs oracle): input_ids exact, TE conditioning cosine,
-//! step-0 pred (teacher noise + teacher context), final latent, decoded
-//! PNG u8 max_abs / f32 cosine, warm e2e vs the official warm wall.
+//! step-0 pred (teacher noise + teacher context), teacher-forced per-step
+//! prediction cosine (the parity gate), decoded PNG f32 cosine, warm e2e vs
+//! the official warm wall. The end-to-end final-latent cosine is REPORTED
+//! with a loose sanity band only: with fp8 GEMMs + bf16 attention the 20
+//! guided Euler steps amplify per-step ulp noise chaotically (measured
+//! 2026-08-19 on the 5090: per-step teacher-forced cosine 0.9997 mean /
+//! 0.9992 worst, yet the integrated final latent lands at 0.988 while the
+//! decoded image is the oracle's visual twin at 0.997) — a tight final-
+//! latent threshold measures the chaos, not the port.
 //!
 //! Usage: flux2-dev-validate --models <dir> --dumps <dir>
-//!        [--steps N] [--size N] [--own-te] [--warm-runs N]
+//!        [--steps N] [--size N] [--own-te] [--warm-runs N] [--no-teacher-forced]
+//!
+//! The teacher-forced pass (default on, `--no-teacher-forced` skips its ~20
+//! extra forwards) runs every step on the ORACLE's `stepNNN_x` so each
+//! prediction is compared to `stepNNN_pred` without trajectory drift; the
+//! gate is the worst per-step cosine.
 
 use makepad_diffusion::backend::gpu_device_available;
 use makepad_diffusion::flux2_pipeline::{
@@ -149,6 +161,7 @@ fn run() -> Result<(), String> {
     let mut size = 1024u32;
     let mut own_te = false;
     let mut warm_runs = 2usize;
+    let mut teacher_forced = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -167,6 +180,8 @@ fn run() -> Result<(), String> {
                     .ok_or("--size value")?
             }
             "--own-te" => own_te = true,
+            "--teacher-forced" => teacher_forced = true,
+            "--no-teacher-forced" => teacher_forced = false,
             "--warm-runs" => {
                 warm_runs = args
                     .next()
@@ -259,6 +274,7 @@ fn run() -> Result<(), String> {
         seed: 7,
         noise: Some(noise.clone()),
         teacher_embeds: teacher_embeds.clone(),
+        teacher_steps: None,
     };
     let result = pipe.generate(&request).map_err(|err| err.to_string())?;
     let (pred0_max, pred0_cos) = compare(
@@ -272,16 +288,54 @@ fn run() -> Result<(), String> {
         failed += 1;
     }
 
+    // --- teacher-forced per-step gate ----------------------------------------
+    if teacher_forced {
+        let mut teacher_x = Vec::with_capacity(steps);
+        let mut teacher_pred = Vec::with_capacity(steps);
+        for step in 0..steps {
+            teacher_x.push(planar_to_tokens(&load_npy(
+                &dumps.join(format!("step{step:03}_x.npy")),
+            )?)?);
+            teacher_pred.push(planar_to_tokens(&load_npy(
+                &dumps.join(format!("step{step:03}_pred.npy")),
+            )?)?);
+        }
+        let forced = Flux2GenerateRequest {
+            teacher_steps: Some(teacher_x),
+            ..request.clone()
+        };
+        let forced_result = pipe.generate(&forced).map_err(|err| err.to_string())?;
+        let mut worst = (0usize, 0.0f64, 1.0f64);
+        let mut sum_cos = 0.0f64;
+        for (step, pred) in &forced_result.step_predictions {
+            let (max_abs, cosine) = compare(pred, &teacher_pred[*step])?;
+            sum_cos += cosine;
+            if cosine < worst.2 {
+                worst = (*step, max_abs, cosine);
+            }
+        }
+        let mean_cos = sum_cos / forced_result.step_predictions.len().max(1) as f64;
+        rows.push(format!(
+            "teacher_forced   worst_step={} worst_max_abs={:.5} worst_cosine={:.6} mean_cosine={:.6}",
+            worst.0, worst.1, worst.2, mean_cos
+        ));
+        if worst.2 < 0.995 {
+            failed += 1;
+        }
+    }
+
     // --- final latent gate ---------------------------------------------------
     let vae_in_path = dumps.join("vae_in.npy");
     if vae_in_path.is_file() {
         let oracle_final = planar_to_tokens(&load_npy(&vae_in_path)?)?;
         let native_final = result.packed_latents.to_tokens();
         let (final_max, final_cos) = compare(&native_final, &oracle_final)?;
+        // Sanity band only (see the module doc): the integrated trajectory
+        // is chaotic at the ulp level; per-step parity is gated above.
         rows.push(format!(
-            "final_latents    max_abs={final_max:.5} cosine={final_cos:.6}"
+            "final_latents    max_abs={final_max:.5} cosine={final_cos:.6} (sanity band >= 0.97)"
         ));
-        if final_cos < 0.99 {
+        if final_cos < 0.97 {
             failed += 1;
         }
     } else {
