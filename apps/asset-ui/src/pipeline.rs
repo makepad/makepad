@@ -1617,6 +1617,17 @@ impl Pipeline {
 
     // -- stage lifecycle ----------------------------------------------------
 
+    /// Every model this run names explicitly (UI override or preset pin) —
+    /// the fleet's per-domain preference filter must never hide these from
+    /// the run's routing view.
+    pub fn pinned_models(&self) -> Vec<String> {
+        self.model_overrides
+            .iter()
+            .chain(self.preset_pins.iter())
+            .map(|(_, model)| model.clone())
+            .collect()
+    }
+
     fn pinned_model_for_domain(&self, domain: &str) -> Option<String> {
         self.model_overrides
             .iter()

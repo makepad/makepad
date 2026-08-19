@@ -3335,10 +3335,29 @@ impl App {
 
     /// The fleet as routing sees it: every snapshot minus the models the
     /// user switched off for that box. Display keeps the raw snapshots.
+    /// The fleet as the scheduler sees it: disabled models removed, and per
+    /// domain only the box's preferred model kept (explicit ★ or the rule's
+    /// pick) — EXCEPT models a run names explicitly (UI model override or
+    /// preset pin): an explicit pick must stay routable even where it is
+    /// not the box's preference, and a not-yet-pulled model must stay
+    /// pickable so "pull + run" works. Runs in flight/queued contribute
+    /// their pins; `extra_keep` is for a run being dispatched right now.
     fn routing_snapshots(&self) -> Vec<BoxSnapshot> {
+        self.routing_snapshots_keeping(&[])
+    }
+
+    fn routing_snapshots_keeping(&self, extra_keep: &[String]) -> Vec<BoxSnapshot> {
         let Some(fleet) = &self.fleet else {
             return Vec::new();
         };
+        let mut keep: HashSet<String> = extra_keep.iter().cloned().collect();
+        for run in &self.runs {
+            keep.extend(run.pipeline.pinned_models());
+        }
+        for run in &self.run_queue {
+            keep.extend(run.model_overrides.iter().map(|(_, model)| model.clone()));
+            keep.extend(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()));
+        }
         fleet
             .snapshots
             .iter()
@@ -3372,13 +3391,40 @@ impl App {
                     }
                 }
                 snap.models.retain(|model| {
-                    preferred
-                        .iter()
-                        .all(|(domain, keep)| model.domain != *domain || model.id == *keep)
+                    keep.contains(&model.id)
+                        || preferred
+                            .iter()
+                            .all(|(domain, keep)| model.domain != *domain || model.id == *keep)
                 });
                 snap
             })
             .collect()
+    }
+
+    /// Dropdown contents: every enabled, available model any up box serves
+    /// for `domain` (plus edit-capable image tiers for `edit`). Explicit
+    /// choices are never narrowed by the per-box preference — that only
+    /// decides "auto (affinity)".
+    fn fleet_models_for_domain(&self, domain: &str) -> Vec<String> {
+        let Some(fleet) = &self.fleet else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for snap in &fleet.snapshots {
+            if !snap.is_up() {
+                continue;
+            }
+            for model in &snap.models {
+                if model.available
+                    && !self.fleet_disabled.contains(&(snap.base_url.clone(), model.id.clone()))
+                    && model_serves_domain(&model.id, &model.domain, domain)
+                    && !ids.contains(&model.id)
+                {
+                    ids.push(model.id.clone());
+                }
+            }
+        }
+        ids
     }
 
     fn fleet_prefs_path() -> PathBuf {
@@ -3780,26 +3826,7 @@ impl App {
         order[row]
     }
 
-    fn fleet_models_for_domain(&self, domain: &str) -> Vec<String> {
-        if self.fleet.is_none() {
-            return Vec::new();
-        }
-        let mut ids = Vec::new();
-        for snap in &self.routing_snapshots() {
-            if !snap.is_up() {
-                continue;
-            }
-            for model in &snap.models {
-                if model.available
-                    && model_serves_domain(&model.id, &model.domain, domain)
-                    && !ids.contains(&model.id)
-                {
-                    ids.push(model.id.clone());
-                }
-            }
-        }
-        ids
-    }
+
 
     fn selected_stage_model(&self, cx: &mut Cx, domain: &str) -> Option<String> {
         let drop = match domain {
@@ -4734,7 +4761,13 @@ impl App {
                     .map(|(_, model)| (*model).to_string())
             });
         let ours = self.our_endpoint_use();
-        let routing = self.routing_snapshots();
+        let keep: Vec<String> = run
+            .model_overrides
+            .iter()
+            .map(|(_, model)| model.clone())
+            .chain(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()))
+            .collect();
+        let routing = self.routing_snapshots_keeping(&keep);
         let loads = routing
             .iter()
             .filter(|snapshot| {
@@ -4850,7 +4883,13 @@ impl App {
         if self.fleet.is_none() {
             return;
         }
-        let snapshots = self.routing_snapshots();
+        let keep: Vec<String> = run
+            .model_overrides
+            .iter()
+            .map(|(_, model)| model.clone())
+            .chain(PRESETS[run.preset].pins.iter().map(|(_, model)| model.to_string()))
+            .collect();
+        let snapshots = self.routing_snapshots_keeping(&keep);
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
