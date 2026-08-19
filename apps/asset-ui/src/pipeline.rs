@@ -4370,6 +4370,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("image", "flux1-schnell"),
             ("edit", "flux2-klein-4b"),
             ("image", "flux2-dev"),
+            ("image", "flux2-dev-q4-24g"),
             ("matte", "birefnet-hr"),
             ("mesh", "trellis-2"),
             ("motion", "hy-motion"),
