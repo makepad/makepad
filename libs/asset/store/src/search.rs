@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 /// created before schema v2 (tests/migration.rs proves the parity).
 const KIND_DDL: &str = "kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard'))";
+'audio','video','skybox','world','prefab','billboard','game'))";
 
 /// The canonical-alias column's definition. Must stay identical in the CREATE
 /// below and in `canon_alias_migration_sql()`, which retrofits the column onto
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS search_annotations(
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard')),
+'audio','video','skybox','world','prefab','billboard','game')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -180,6 +180,7 @@ pub fn kind_name(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
     }
 }
 
@@ -198,6 +199,7 @@ pub fn kind_parse(s: &str) -> Option<AssetKind> {
         "world" => AssetKind::World,
         "prefab" => AssetKind::Prefab,
         "billboard" => AssetKind::Billboard,
+        "game" => AssetKind::Game,
         _ => return None,
     })
 }
@@ -215,15 +217,30 @@ pub(crate) fn canon_alias_migration_sql() -> String {
     format!("ALTER TABLE search_annotations ADD COLUMN {CANON_ALIAS_DDL}")
 }
 
-/// v5 -> v6: rebuild `search_annotations` so the kind CHECK accepts
-/// `billboard`. SQLite cannot ALTER a CHECK; copy + rename is the retrofit.
+/// The browse-mode total order, verbatim: `canon_alias ASC, asset_id ASC`.
+/// Without it every browse page is a full table scan plus a temp b-tree sort
+/// of the whole annotation table, and the keyset predicate cannot seek.
+///
+/// It lives outside `SEARCH_SCHEMA` because that string is also executed by
+/// the v1 -> v2 step, where `canon_alias` does not exist yet; the v2 -> v3
+/// step runs this immediately after adding the column, and the v7 -> v8 step
+/// runs it for roots that predate the index.
+pub(crate) const SEARCH_CANON_INDEX_SQL: &str = "
+CREATE INDEX IF NOT EXISTS search_annotations_by_canon
+    ON search_annotations(canon_alias, asset_id);
+";
+
+/// Rebuild `search_annotations` so the kind CHECK matches this build's
+/// `KIND_DDL` (v5 -> v6 added `billboard`, v6 -> v7 added `game`). SQLite
+/// cannot ALTER a CHECK; copy + rename is the retrofit, and re-running it
+/// is harmless, so every kind-widening step reuses this one statement.
 pub(crate) const KIND_CHECK_REBUILD_SQL: &str = "
-CREATE TABLE search_annotations_v6(
+CREATE TABLE search_annotations_rebuild(
     asset_id BLOB PRIMARY KEY,
     namespace TEXT NOT NULL,
     kind TEXT CHECK(kind IS NULL OR kind IN \
     ('mesh','character','weapon','vehicle','prop','texture','material',\
-'audio','video','skybox','world','prefab','billboard')),
+'audio','video','skybox','world','prefab','billboard','game')),
     visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),
     owner BLOB,
     title TEXT NOT NULL,
@@ -238,7 +255,7 @@ CREATE TABLE search_annotations_v6(
     updated_ms INTEGER NOT NULL,
     canon_alias TEXT NOT NULL DEFAULT ''
 );
-INSERT INTO search_annotations_v6(
+INSERT INTO search_annotations_rebuild(
     asset_id, namespace, kind, visibility, owner, title, description,
     creator, generator, backend, model, prompt, provenance, live,
     updated_ms, canon_alias
@@ -249,9 +266,11 @@ SELECT
     updated_ms, canon_alias
 FROM search_annotations;
 DROP TABLE search_annotations;
-ALTER TABLE search_annotations_v6 RENAME TO search_annotations;
+ALTER TABLE search_annotations_rebuild RENAME TO search_annotations;
 CREATE INDEX IF NOT EXISTS search_annotations_by_ns ON search_annotations(namespace);
 CREATE INDEX IF NOT EXISTS search_annotations_by_kind ON search_annotations(kind);
+CREATE INDEX IF NOT EXISTS search_annotations_by_canon
+    ON search_annotations(canon_alias, asset_id);
 ";
 
 /// Mutable, searchable metadata for one asset. Entirely separate from the
@@ -288,6 +307,9 @@ pub struct SearchFilters<'a> {
     pub kind: Option<AssetKind>,
     pub category: Option<&'a str>,
     pub tag: Option<&'a str>,
+    /// Negative tag filter: assets carrying this tag are excluded, even when
+    /// `tag` also matches. Server-side so frontends never post-filter pages.
+    pub exclude_tag: Option<&'a str>,
     pub creator: Option<&'a str>,
     pub generator: Option<&'a str>,
     pub backend: Option<&'a str>,
@@ -515,6 +537,10 @@ const CURSOR_VERSION: u8 = 2;
 /// Everything except the variable alias bytes.
 const CURSOR_FIXED_LEN: usize = 1 + 8 + 32 + 8 + 2 + 16 + 8;
 const CURSOR_CHECK_LEN: usize = 8;
+/// Longest encoded search cursor: the fixed frame plus a maximal alias.
+/// The HTTP routes decode cursors against THIS bound — a smaller one turned
+/// every page boundary that fell on a long alias into "malformed cursor".
+pub const MAX_SEARCH_CURSOR_BYTES: usize = CURSOR_FIXED_LEN + MAX_ALIAS_BYTES;
 
 /// The keyset a cursor carries: resume strictly after this position in the
 /// total order `score DESC, canon_alias ASC, asset_id ASC`.
@@ -768,6 +794,36 @@ pub(crate) fn backfill_alias_index(db: &Db, budgets: &Budgets) -> ServerResult<(
     Ok(())
 }
 
+/// Delete one asset's entire searchable footprint — annotation row, labels,
+/// postings, alias postings — inside the caller's transaction, and advance
+/// the index generation if anything was there. Retirement uses this: a
+/// retired asset is ABSENT from the index rather than filtered out of it, so
+/// no query pays a predicate for content that no longer exists. Returns
+/// whether an annotation row was removed.
+pub(crate) fn clear_annotation_in_tx(db: &Db, asset_id: &[u8]) -> ServerResult<bool> {
+    let mut s = db.prepare(
+        "clear annotation",
+        "DELETE FROM search_annotations WHERE asset_id = ?1",
+    )?;
+    s.bind_blob(1, asset_id)?;
+    s.run()?;
+    drop(s);
+    let existed = db.changes() > 0;
+    for (sql, op) in [
+        ("DELETE FROM search_labels WHERE asset_id = ?1", "clear labels"),
+        ("DELETE FROM search_postings WHERE asset_id = ?1", "clear postings"),
+        ("DELETE FROM search_alias_postings WHERE asset_id = ?1", "clear alias postings"),
+    ] {
+        let mut s = db.prepare(op, sql)?;
+        s.bind_blob(1, asset_id)?;
+        s.run()?;
+    }
+    if existed {
+        bump_generation(db)?;
+    }
+    Ok(existed)
+}
+
 pub struct Search<'a> {
     pub(crate) db: &'a Db,
     pub(crate) budgets: &'a Budgets,
@@ -965,26 +1021,7 @@ impl<'a> Search<'a> {
     /// index generation advances only when a row was actually removed.
     pub fn clear_annotation(&self, asset_id: &AssetId) -> ServerResult<()> {
         self.db.tx(|db| {
-            let mut s = db.prepare(
-                "clear annotation",
-                "DELETE FROM search_annotations WHERE asset_id = ?1",
-            )?;
-            s.bind_blob(1, asset_id.as_bytes())?;
-            s.run()?;
-            drop(s);
-            let existed = db.changes() > 0;
-            for (sql, op) in [
-                ("DELETE FROM search_labels WHERE asset_id = ?1", "clear labels"),
-                ("DELETE FROM search_postings WHERE asset_id = ?1", "clear postings"),
-                ("DELETE FROM search_alias_postings WHERE asset_id = ?1", "clear alias postings"),
-            ] {
-                let mut s = db.prepare(op, sql)?;
-                s.bind_blob(1, asset_id.as_bytes())?;
-                s.run()?;
-            }
-            if existed {
-                bump_generation(db)?;
-            }
+            clear_annotation_in_tx(db, asset_id.as_bytes())?;
             Ok(())
         })
     }
@@ -1088,7 +1125,7 @@ impl<'a> Search<'a> {
         if let Some(ns) = f.namespace {
             validate_namespace(ns)?;
         }
-        for l in [f.category, f.tag] {
+        for l in [f.category, f.tag, f.exclude_tag] {
             if let Some(l) = l {
                 check_label(l)?;
             }
@@ -1236,6 +1273,7 @@ fn fingerprint(
         f.kind.map(kind_name),
         f.category,
         f.tag,
+        f.exclude_tag,
         f.creator,
         f.generator,
         f.backend,
@@ -1299,6 +1337,25 @@ mod tests {
     }
 
     #[test]
+    fn longest_cursor_fits_the_route_bound() {
+        let alias = "a".repeat(MAX_ALIAS_BYTES);
+        let bytes = encode_cursor(7, &[3u8; 32], 9, &alias, &AssetId::from_bytes([1u8; 16]));
+        assert_eq!(bytes.len(), MAX_SEARCH_CURSOR_BYTES);
+        assert!(
+            decode_cursor(&bytes, &[3u8; 32]).is_ok(),
+            "a maximal alias must round-trip"
+        );
+        // A realistic pack alias is well past the old 128-byte bound's
+        // 53-byte alias room and must round-trip too.
+        let long = "kenney/modular-dungeon-kit/wall-doorway-round-cracked-narrow";
+        assert!(long.len() > 53);
+        let bytes = encode_cursor(1, &[0u8; 32], 1, long, &AssetId::from_bytes([2u8; 16]));
+        assert!(bytes.len() > 128, "this cursor exceeds the old bound");
+        assert!(bytes.len() <= MAX_SEARCH_CURSOR_BYTES);
+        assert!(decode_cursor(&bytes, &[0u8; 32]).is_ok());
+    }
+
+    #[test]
     fn kind_names_round_trip_and_are_all_in_the_check() {
         let all = [
             AssetKind::Mesh,
@@ -1314,6 +1371,7 @@ mod tests {
             AssetKind::World,
             AssetKind::Prefab,
             AssetKind::Billboard,
+            AssetKind::Game,
         ];
         for kind in all {
             assert_eq!(kind_parse(kind_name(kind)), Some(kind));
@@ -1413,6 +1471,16 @@ fn build_sql(
             binds.push(Bind::Text(kind.to_string()));
             binds.push(Bind::Text(v.to_string()));
         }
+    }
+    // Exclusion reads the same label index; it is applied after the positive
+    // label clauses so an asset carrying both `tag` and `exclude_tag` drops.
+    // Being part of the shared builder, it binds identically in the COUNT and
+    // the page form, so `total` and the keyset walk never disagree.
+    if let Some(v) = f.exclude_tag {
+        sql.push_str(
+            " AND NOT EXISTS(SELECT 1 FROM search_labels l WHERE l.asset_id = a.asset_id AND l.kind = 'tag' AND l.label = ?)",
+        );
+        binds.push(Bind::Text(v.to_string()));
     }
     if let Some(owner) = &f.owner {
         sql.push_str(" AND a.owner IS NOT NULL AND a.owner = ?");

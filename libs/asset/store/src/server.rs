@@ -39,10 +39,22 @@ use std::path::Path;
 /// - v5: typed asset operations — owner-scoped durable operation rows with
 ///   idempotency, per-operation event logs, and the worker-liveness table
 ///   behind truthful operation availability.
+/// - v6: the search kind CHECK accepts `billboard`.
+/// - v7: the search kind CHECK accepts `game` (playable splash sources).
+/// - v8: scale retrofit — the reverse alias indices, the browse-order index,
+///   and the CAS two-level hash path (`objects/ab/cd/<64-hex>`). Existing
+///   objects move out of the one-level layout in this step.
+/// - v9: deletion — asset/revision retirement (`assets.retired_ms`,
+///   `candidates.retired_ms`), the per-asset revision index those walk,
+///   the dedup-recency column blob GC's grace horizon reads
+///   (`blobs.last_ref_ms`), and the incremental blob-GC tables. Every part
+///   is an `ALTER TABLE ADD COLUMN` or a `CREATE ... IF NOT EXISTS`, so the
+///   step costs one index build and no table rewrite however large the
+///   store is.
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 6;
+pub const SERVER_SCHEMA_VERSION: i64 = 9;
 
 pub struct AssetServerCore {
     db: Db,
@@ -82,7 +94,7 @@ fn table_has_column(db: &Db, table: &str, column: &str) -> ServerResult<bool> {
 /// openers serialize on the writer lock and every step applies exactly once;
 /// a crash between steps leaves a valid older version that the next open
 /// finishes migrating. Unknown versions (newer builds, corruption) refuse.
-fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
+fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
     loop {
         let version = user_version(db)?;
         if version == SERVER_SCHEMA_VERSION {
@@ -131,6 +143,7 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
                         )?;
                     }
                     db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
+                    db.exec("create canon index", crate::search::SEARCH_CANON_INDEX_SQL)?;
                     crate::search::backfill_alias_index(db, budgets)?;
                 }
                 // v4: import + derived-variant tables. Purely additive; no
@@ -148,7 +161,10 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
                     )?;
                 }
                 // v6: kind CHECK accepts billboard (sprite/billboard content).
-                5 => {
+                // v7: kind CHECK accepts game. Both rebuild the table with
+                // this build's CHECK, so a v5 root passes through v6 already
+                // carrying the v7 list and the v7 step is a no-op rebuild.
+                5 | 6 => {
                     if table_exists(db, "search_annotations")? {
                         db.exec(
                             "rebuild search_annotations kind check",
@@ -156,6 +172,41 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
                         )?;
                     }
                     db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
+                }
+                // v8: the scale retrofit. Both schema strings are made
+                // entirely of IF NOT EXISTS statements, so re-running them
+                // only adds the indices this version introduced; the CAS
+                // move is idempotent for the same reason. Doing the move
+                // inside the migration transaction is deliberate: the
+                // writer lock is what stops two openers migrating at once,
+                // and an interrupted move leaves objects readable at both
+                // paths for the next attempt.
+                7 => {
+                    db.exec("create catalog schema", CATALOG_SCHEMA)?;
+                    db.exec("create canon index", crate::search::SEARCH_CANON_INDEX_SQL)?;
+                    cas.migrate_shards()?;
+                }
+                // v9: retirement + blob GC. The three columns are added with
+                // ALTER TABLE (SQLite records them in the schema without
+                // touching a single row), the rest is IF NOT EXISTS DDL, and
+                // the one real cost is building the per-asset revision index
+                // once.
+                8 => {
+                    for (table, column, ddl) in [
+                        ("assets", "retired_ms", "ALTER TABLE assets ADD COLUMN retired_ms INTEGER"),
+                        (
+                            "candidates",
+                            "retired_ms",
+                            "ALTER TABLE candidates ADD COLUMN retired_ms INTEGER",
+                        ),
+                        ("blobs", "last_ref_ms", "ALTER TABLE blobs ADD COLUMN last_ref_ms INTEGER"),
+                    ] {
+                        if table_exists(db, table)? && !table_has_column(db, table, column)? {
+                            db.exec("add retirement column", ddl)?;
+                        }
+                    }
+                    db.exec("create catalog schema", CATALOG_SCHEMA)?;
+                    db.exec("create gc schema", crate::gc::GC_SCHEMA)?;
                 }
                 other => return Err(ServerError::UnsupportedSchema { found: other }),
             }
@@ -167,6 +218,9 @@ fn migrate(db: &Db, budgets: &Budgets) -> ServerResult<()> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoverReport {
     pub cas_temps_removed: u64,
+    /// Blob delete intents left by a crash mid-sweep that this start
+    /// resolved (unlinked, or kept because the bytes were re-uploaded).
+    pub gc_deletes_resolved: u64,
     pub leases_expired: u64,
 }
 
@@ -201,17 +255,20 @@ impl AssetServerCore {
         db.exec("set synchronous", "PRAGMA synchronous=FULL")?;
         db.exec("set foreign keys", "PRAGMA foreign_keys=ON")?;
 
-        migrate(&db, &budgets)?;
+        migrate(&db, &cas, &budgets)?;
         Ok(Self { db, cas, budgets })
     }
 
-    /// Restart recovery: purge orphan CAS temp files and tear down expired
-    /// worker leases (re-queueing or failing their jobs).
+    /// Restart recovery: purge orphan CAS temp files, finish or abandon blob
+    /// delete intents a crash left mid-sweep, and tear down expired worker
+    /// leases (re-queueing or failing their jobs).
     pub fn recover(&self, now_ms: u64) -> ServerResult<RecoverReport> {
         let cas_temps_removed = self.cas.recover()?;
+        let gc_deletes_resolved = self.gc().recover_pending(&self.cas)?;
         let leases_expired = self.jobs().expire_leases(now_ms)?;
         Ok(RecoverReport {
             cas_temps_removed,
+            gc_deletes_resolved,
             leases_expired,
         })
     }
@@ -250,6 +307,45 @@ impl AssetServerCore {
 
     pub fn cas(&self) -> &Cas {
         &self.cas
+    }
+
+    pub fn gc(&self) -> crate::gc::Gc<'_> {
+        crate::gc::Gc { db: &self.db, budgets: &self.budgets }
+    }
+
+    // ---- blob garbage collection -------------------------------------------
+
+    /// Start a GC run (see [`crate::gc`]). Refuses while one is active.
+    pub fn gc_begin(&self, cfg: crate::gc::GcConfig, now_ms: u64) -> ServerResult<crate::gc::GcStatus> {
+        self.gc().begin(cfg, now_ms)
+    }
+
+    /// Advance the active run by at most `max_steps` bounded steps. Every
+    /// step is one transaction over one batch, so this call's cost is
+    /// chosen by the caller, not by the size of the store.
+    pub fn gc_advance(&self, max_steps: u32, now_ms: u64) -> ServerResult<Option<crate::gc::GcStatus>> {
+        self.gc().advance(&self.cas, max_steps, now_ms)
+    }
+
+    pub fn gc_status(&self) -> ServerResult<Option<crate::gc::GcStatus>> {
+        self.gc().status()
+    }
+
+    pub fn gc_cancel(&self, now_ms: u64) -> ServerResult<bool> {
+        self.gc().cancel(now_ms)
+    }
+
+    /// Convenience for tests and one-shot operators: begin a run and drive
+    /// it to completion, up to `max_steps` steps.
+    pub fn gc_run(
+        &self,
+        cfg: crate::gc::GcConfig,
+        max_steps: u32,
+        now_ms: u64,
+    ) -> ServerResult<crate::gc::GcStatus> {
+        self.gc_begin(cfg, now_ms)?;
+        let status = self.gc_advance(max_steps, now_ms)?;
+        status.ok_or(ServerError::NotFound { what: "gc run" })
     }
 
     // ---- blob admission (CAS + catalog in the required order) --------------

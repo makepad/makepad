@@ -531,6 +531,14 @@ impl<'a> Variants<'a> {
             s.bind_u64(6, now_ms)?;
             s.run()?;
             drop(s);
+            // A variant makes its output bytes reachable; an in-flight blob
+            // GC run learns about them in THIS transaction (see crate::gc).
+            let mut pinned: Vec<makepad_asset_data::BlobId> =
+                manifest.outputs.iter().map(|f| f.blob).collect();
+            if let Some(t) = &manifest.thumbnail {
+                pinned.push(t.blob);
+            }
+            crate::gc::pin_blobs_in_tx(db, &pinned)?;
             let mut s = db.prepare(
                 "ready derivation",
                 "UPDATE derivations SET state='ready', variant=?2, updated_ms=?3 WHERE dkey=?1",

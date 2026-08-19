@@ -21,6 +21,10 @@ use makepad_asset_data::{
 
 // ---- discovery beacon ------------------------------------------------------
 
+/// Catalog-event vocabulary this build speaks (see [`path_events`]). v1 is
+/// the original kind set; v2 adds `asset_retired` / `revision_retired`.
+pub const EVENT_VOCABULARY: u32 = 2;
+
 pub const DISCOVERY_MAGIC: [u8; 8] = *b"MPASDIS1";
 pub const BEACON_LEN: usize = 36;
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -153,6 +157,29 @@ pub fn path_annotation(asset: &AssetId) -> String {
     format!("/v1/assets/{asset}/annotation")
 }
 
+// ---- deletion --------------------------------------------------------------
+
+/// Retire (delete) a whole asset: every revision leaves the catalog's
+/// listings, aliases and search index, and its bytes become collectable.
+pub fn path_asset_retire(asset: &AssetId) -> String {
+    format!("/v1/assets/{asset}/retire")
+}
+
+/// Retire one revision (a superseded one, typically); the asset stays live.
+pub fn path_revision_retire(asset: &AssetId, rev: &AssetRevisionId) -> String {
+    format!("/v1/assets/{asset}/revisions/{rev}/retire")
+}
+
+/// Blob garbage collection: POST advances a run (starting one if needed),
+/// GET reports the newest run, and the cancel path abandons an active one.
+pub fn path_gc() -> String {
+    "/v1/gc".to_string()
+}
+
+pub fn path_gc_cancel() -> String {
+    "/v1/gc/cancel".to_string()
+}
+
 // ---- jobs (generation scheduling) ------------------------------------------
 
 /// Advertised generation capabilities; `domain` filters (`video`, `audio`…).
@@ -197,7 +224,11 @@ pub fn path_events(
     limit: u32,
     kind: Option<&str>,
 ) -> String {
-    let mut p = format!("/v1/events?wait={wait_ms}&limit={limit}");
+    // `ev` is the event VOCABULARY this build understands. A server that
+    // only speaks v1 ignores it; a newer server uses it to decide whether it
+    // may send kinds this client knows (retirement), and downgrades them to
+    // their v1 spelling for clients that do not ask.
+    let mut p = format!("/v1/events?wait={wait_ms}&limit={limit}&ev={EVENT_VOCABULARY}");
     if let Some(k) = kind {
         p.push_str("&kind=");
         p.push_str(k);

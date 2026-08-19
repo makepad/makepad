@@ -136,6 +136,8 @@ pub fn file_role_name(role: FileRole) -> &'static str {
         FileRole::Video => "video",
         FileRole::Source => "source",
         FileRole::Depth => "depth",
+        FileRole::Splat => "splat",
+        FileRole::AoTexture => "ao_texture",
     }
 }
 
@@ -161,6 +163,8 @@ const ALL_ROLES: &[FileRole] = &[
     FileRole::Video,
     FileRole::Source,
     FileRole::Depth,
+    FileRole::Splat,
+    FileRole::AoTexture,
 ];
 
 pub fn media_type_name(media: MediaType) -> &'static str {
@@ -173,6 +177,7 @@ pub fn media_type_name(media: MediaType) -> &'static str {
         MediaType::Mp4 => "mp4",
         MediaType::Bin => "bin",
         MediaType::Text => "text",
+        MediaType::Ply => "ply",
     }
 }
 
@@ -186,6 +191,7 @@ pub fn media_type_parse(s: &str) -> Option<MediaType> {
         MediaType::Mp4,
         MediaType::Bin,
         MediaType::Text,
+        MediaType::Ply,
     ]
     .into_iter()
     .find(|m| media_type_name(*m) == s)
@@ -699,6 +705,14 @@ struct DecodedSpec {
     inputs: Vec<PinnedInput>,
     params: Vec<(String, ParamValue)>,
     publication: OperationPublication,
+}
+
+/// The blob digests one stored operation spec pins as inputs. Blob GC marks
+/// these for QUEUED operations: the operation was armed against exactly
+/// those bytes, and collecting them mid-flight would turn a scheduled job
+/// into an unexplainable failure even though the store promised them.
+pub(crate) fn spec_input_blobs(bytes: &[u8]) -> ServerResult<Vec<makepad_asset_data::BlobId>> {
+    Ok(decode_spec(bytes)?.inputs.into_iter().map(|i| i.blob).collect())
 }
 
 fn decode_spec(bytes: &[u8]) -> ServerResult<DecodedSpec> {

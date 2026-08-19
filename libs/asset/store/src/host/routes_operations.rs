@@ -871,8 +871,6 @@ pub fn operation_finalize(
         // order equals commit order (the same convention as every other
         // publishing route).
         ctx.asset_index_insert(asset.as_bytes(), &meta.ns, now)?;
-        ctx.asset_rev_insert(asset.as_bytes(), revision.as_bytes(), now)?;
-        ctx.asset_rev_mark(asset.as_bytes(), revision.as_bytes(), true, now)?;
         let attempt = ctx
             .core
             .jobs()
