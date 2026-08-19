@@ -659,6 +659,9 @@ pub fn qwen35moe_hybrid_decode_spec(
         final_logit_softcap: None,
         per_layer_input: None,
         layers,
+        hidden_carry: None,
+        mtp_prologue: None,
+        recurrent_checkpoints: false,
     })
 }
 
