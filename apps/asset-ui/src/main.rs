@@ -1340,6 +1340,7 @@ script_mod! {
                         md_upscale_row := DropField{ visible: false FieldCaption{ text: "Upscale model" } md_upscale := FieldDrop{} }
                         md_control_row := DropField{ visible: false FieldCaption{ text: "Control model" } md_control := FieldDrop{} }
                         md_inpaint_row := DropField{ visible: false FieldCaption{ text: "Inpaint model" } md_inpaint := FieldDrop{} }
+                        md_splat_row := DropField{ visible: false FieldCaption{ text: "Splat model" } md_splat := FieldDrop{} }
                         DropField{
                             FieldCaption{ text: "Box" }
                             box_drop := FieldDrop{}
@@ -4133,6 +4134,7 @@ impl App {
             "upscale" => self.ui.drop_down2(cx, ids!(md_upscale)),
             "control" => self.ui.drop_down2(cx, ids!(md_control)),
             "inpaint" => self.ui.drop_down2(cx, ids!(md_inpaint)),
+            "splat" => self.ui.drop_down2(cx, ids!(md_splat)),
             _ => return None,
         };
         let index = drop.selected_item().checked_sub(1)?;
@@ -4268,6 +4270,9 @@ impl App {
         );
         self.refresh_one_stage_model(
             cx, "inpaint", ids!(md_inpaint_row), ids!(md_inpaint), active("inpaint"), apply_preset_pin, pin_for("inpaint"),
+        );
+        self.refresh_one_stage_model(
+            cx, "splat", ids!(md_splat_row), ids!(md_splat), active("splat"), apply_preset_pin, pin_for("splat"),
         );
         self.ui
             .widget(cx, ids!(speech_params_row))
@@ -9825,7 +9830,7 @@ fn stage_primary_output(domain: &str, content_type: &str) -> bool {
         "mesh" | "paint" | "rig" | "motion" | "character" => {
             ct.contains("gltf") || ct.contains("glb")
         }
-        "world" => ct.contains("ply") || ct.contains("gltf") || ct.contains("glb"),
+        "world" | "splat" => ct.contains("ply") || ct.contains("gltf") || ct.contains("glb"),
         "video" => ct.starts_with("video/"),
         "speech" | "audio" | "sfx" | "music" => ct.starts_with("audio/"),
         // image / matte / depth / edit / upscale / control / segment
