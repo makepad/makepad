@@ -96,8 +96,6 @@ pub struct Music3Backend {
     model_id: String,
     python: PathBuf,
     keep_warm: bool,
-    /// Official ModularPipeline only — never the native CUDA path.
-    force_python: bool,
     model_dir: Option<PathBuf>,
     tmp_dir: Option<PathBuf>,
     worker: Option<Worker>,
@@ -129,32 +127,12 @@ pub fn music3_provisioned() -> bool {
     }
 }
 
-/// Official Python worker is provisioned when the box venv exists.
-pub fn music3_python_provisioned() -> bool {
-    music3_python().exists()
-}
-
 impl Music3Backend {
     pub fn new_music3(model_id: &str) -> Self {
         Self {
             model_id: model_id.to_string(),
             python: music3_python(),
             keep_warm: std::env::var("MAKEPAD_MUSIC3_KEEP_WARM").is_ok_and(|v| v == "1"),
-            force_python: false,
-            model_dir: None,
-            tmp_dir: None,
-            worker: None,
-            job_counter: 0,
-        }
-    }
-
-    /// Always the official ModularPipeline worker (`minimax-music3-python`).
-    pub fn new_music3_python(model_id: &str) -> Self {
-        Self {
-            model_id: model_id.to_string(),
-            python: music3_python(),
-            keep_warm: std::env::var("MAKEPAD_MUSIC3_KEEP_WARM").is_ok_and(|v| v == "1"),
-            force_python: true,
             model_dir: None,
             tmp_dir: None,
             worker: None,
@@ -288,9 +266,6 @@ impl Music3Backend {
 
 impl Music3Backend {
     fn uses_native(&self) -> bool {
-        if self.force_python {
-            return false;
-        }
         #[cfg(feature = "audio")]
         {
             std::env::var("MAKEPAD_MUSIC3_FORCE_PYTHON").ok().as_deref() != Some("1")

@@ -942,9 +942,6 @@ pub fn backend_compiled(name: &str) -> bool {
         "motion-native" => cfg!(feature = "motion-native"),
         // Native Music3 lives on the same CUDA stack as SA3 (`audio`).
         "music3" => cfg!(feature = "audio") || cfg!(feature = "python-backends"),
-        // Official ModularPipeline reference — compiled even when the
-        // other python-backends (FlashWorld / oracles) are off.
-        "music3-python" => true,
         // Box-provisioned Python/Torch reference-tier backends are an
         // explicit opt-in. Native-only fleet builds must never advertise
         // them merely because their std-only wrappers compile everywhere.
@@ -978,7 +975,6 @@ pub fn backend_provisioned(name: &str) -> bool {
         #[cfg(feature = "python-backends")]
         "flashworld" => crate::world_backend::flashworld_provisioned(),
         "music3" => crate::music3_backend::music3_provisioned(),
-        "music3-python" => crate::music3_backend::music3_python_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         #[cfg(feature = "python-backends")]
@@ -1189,9 +1185,6 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(any(feature = "audio", feature = "python-backends"))]
         "music3" => Ok(Box::new(
             crate::music3_backend::Music3Backend::new_music3(&spec.id),
-        )),
-        "music3-python" => Ok(Box::new(
-            crate::music3_backend::Music3Backend::new_music3_python(&spec.id),
         )),
         #[cfg(feature = "matte-native")]
         "matte-native" => Ok(Box::new(crate::matte_backend::MatteBackend::new_native(

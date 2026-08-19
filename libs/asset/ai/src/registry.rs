@@ -723,16 +723,6 @@ mod tests {
         let total: u64 = music3.files.iter().map(|f| f.size.unwrap()).sum();
         assert_eq!(total, 28_517_609_106);
 
-        let music3_py = registry.find("minimax-music3-python").unwrap();
-        assert_eq!(music3_py.domain, Domain::Music);
-        assert_eq!(music3_py.backend, "music3-python");
-        assert!(music3_py.available && !music3_py.gated);
-        assert_eq!(music3_py.files.len(), music3.files.len());
-        assert_eq!(
-            music3_py.files.iter().map(|f| f.cache_as.as_str()).collect::<Vec<_>>(),
-            music3.files.iter().map(|f| f.cache_as.as_str()).collect::<Vec<_>>()
-        );
-
         // Music Q4 tier: the official audio.cpp GGUF pack (default mix
         // Q4_0 LM + Q4_0 DiT + BF16 RVQ + F32 cond/vocoder + sidecar
         // tokenizer + LICENSE), every file pinned to one immutable revision.
@@ -796,11 +786,6 @@ mod tests {
         }
         let ace_total: u64 = ace.files.iter().map(|f| f.size.unwrap()).sum();
         assert_eq!(ace_total, 11_101_497_774);
-
-        let testpattern = registry.find("testpattern").unwrap();
-        assert_eq!(testpattern.domain, Domain::Image);
-        assert!(testpattern.available);
-        assert!(testpattern.files.is_empty());
 
         // The canonical flux IDs are combined single-file FP8 checkpoints:
         // exactly ONE file each, with the immutable Comfy-Org revision, the
@@ -939,16 +924,6 @@ mod tests {
             Some("7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169")
         );
         assert!(!qwen38_gguf.local);
-
-        let qwen36 = registry.find("qwen3.6-27b").unwrap();
-        assert_eq!(qwen36.domain, Domain::Text);
-        assert_eq!(qwen36.backend, "llm");
-        assert!(qwen36.available);
-        assert_eq!(qwen36.files.len(), 1);
-        assert_eq!(qwen36.files[0].repo, "unsloth/Qwen3.6-27B-GGUF");
-        assert_eq!(qwen36.files[0].cache_as, "llm/Qwen3.6-27B-Q4_K_M.gguf");
-        assert_eq!(qwen36.files[0].size, Some(16_817_244_384));
-        assert!(!qwen36.files[0].local);
 
         // Speech domain: Kokoro downloads the upstream .pth/.pt and converts
         // in-process to the .mktts/.mkvoice format the loader reads.

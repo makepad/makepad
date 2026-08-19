@@ -3554,7 +3554,6 @@ mod tests {
         let absent = vec![
             text_snapshot("http://qwen38", &[(PREFERRED_EXPAND_MODEL, MODEL_STATE_ABSENT)]),
             text_snapshot("http://qwen35", &[(CHARACTER_LLM_MODEL, MODEL_STATE_READY)]),
-            text_snapshot("http://qwen36", &[("qwen3.6-27b", MODEL_STATE_LOADED)]),
         ];
         let picked = pick_stage_model_target(&absent, "text", None, true, true).unwrap();
         assert_eq!(picked.1, CHARACTER_LLM_MODEL);
@@ -4345,13 +4344,11 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("image", "flux1-schnell"),
             ("edit", "flux2-klein-4b"),
             ("image", "flux2-dev"),
-            ("image", "testpattern"),
             ("matte", "birefnet-hr"),
             ("mesh", "trellis-2"),
             ("motion", "hy-motion"),
             ("motion", "hy-motion-oracle"),
             ("music", "minimax-music3"),
-            ("music", "minimax-music3-python"),
             ("music", "minimax-music3-q4"),
             ("music", "ace-step-1.5-xl"),
             ("paint", "hunyuan3d-paint-2.1"),
@@ -4360,7 +4357,6 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("segment", "sam3-1-multiplex"),
             ("speech", "indextts-2.5"),
             ("speech", "kokoro"),
-            ("text", "qwen3.6-27b"),
             ("text", "qwen3.8-27b"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
