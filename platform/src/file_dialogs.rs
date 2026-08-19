@@ -86,3 +86,20 @@ impl Default for FileDialog {
         Self::new()
     }
 }
+
+/// The outcome of a native file/folder dialog, delivered back to the app as a
+/// plain [`crate::action::Action`] (via `Cx::post_action`) on the next actions
+/// pass — a dialog is answered by the user long after the call that opened it,
+/// so there is no return value to wait on.
+///
+/// Cancelling is a first-class outcome, not an error: a UI that armed an
+/// import needs to disarm it again.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum FileDialogAction {
+    /// The user chose this folder in a folder-select dialog.
+    FolderSelected(PathBuf),
+    /// The user dismissed a folder-select dialog without choosing.
+    FolderCancelled,
+    #[default]
+    None,
+}

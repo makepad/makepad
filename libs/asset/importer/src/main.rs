@@ -27,7 +27,7 @@ mod mesh_from_image;
 
 // The library importer/watcher now lives in the crate's lib so the Asset UI
 // can run the same publication loop in-process against its embedded server.
-use makepad_asset_importer::{games_import, import, pack_import, watch};
+use makepad_asset_importer::{games_import, import, music_import, pack_import, watch};
 
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig, PublishRights};
 use makepad_asset_data::{DerivativePolicy, Redistribution};
@@ -39,6 +39,8 @@ const USAGE: &str = "\
 makepad-asset-importer --server <ip:controlport:dataport> --token-file <path> [options]
 makepad-asset-importer --import-pack <dir> --out <dir> --source-config <file>
 makepad-asset-importer --import-pack <dir> --out <dir> [source/rights flags]
+makepad-asset-importer --server <ip:c:d> --token-file <p> --import-music <dir> \
+                       [--namespace <ns>]
 
 Modes:
   (default)                     Claim + dispatch every wired generation kind
@@ -59,6 +61,21 @@ Modes:
                                 named CC0 grant (own-authored sandbox
                                 games) unless --license/--redistribution/
                                 --derivatives are given.
+  --import-music <dir>          Publish every audio file under <dir> as an
+                                `audio` asset, one row per track. EVERY
+                                relative directory name becomes a catalog
+                                tag (plus the constant `music` tag), and
+                                ID3/Vorbis title/artist/album name the row
+                                when the file carries them. Alias
+                                <namespace>/music/<artist>/<title>;
+                                unchanged tracks skip, changed bytes become
+                                a new revision of the same asset. mp3/ogg/
+                                wav are published, flac/m4a/… are listed as
+                                unsupported. Rights default to the personal
+                                library terms (all rights reserved, LAN
+                                local, local-preview derivatives) unless
+                                --license/--redistribution/--derivatives
+                                are given.
   --import-pack <dir>           Compile a licensed local pack (Kenney, …)
                                 into canonical SourceCollection and
                                 ImportManifest bytes plus a local upload
@@ -161,6 +178,9 @@ struct Args {
     watch: Option<PathBuf>,
     /// Splash game folders -> `game` assets. Exclusive with every other mode.
     import_games: Option<PathBuf>,
+    /// A music directory tree -> `audio` assets. Exclusive with every other
+    /// mode.
+    import_music: Option<PathBuf>,
     namespace: String,
     suffix: String,
     cache: PathBuf,
@@ -223,6 +243,7 @@ fn parse_args() -> Args {
     let mut import = None;
     let mut watch = None;
     let mut import_games = None;
+    let mut import_music = None;
     let mut namespace: Option<String> = None;
     let mut suffix = "w1".to_string();
     let mut cache: Option<PathBuf> = None;
@@ -271,6 +292,9 @@ fn parse_args() -> Args {
             }
             "--import-games" => {
                 import_games = Some(PathBuf::from(value_of("--import-games", &mut args)))
+            }
+            "--import-music" => {
+                import_music = Some(PathBuf::from(value_of("--import-music", &mut args)))
             }
             "--import-pack" => {
                 import_pack = Some(PathBuf::from(value_of("--import-pack", &mut args)))
@@ -367,8 +391,26 @@ fn parse_args() -> Args {
     {
         fail("--import-games is exclusive with every other mode and --once");
     }
+    if import_music.is_some()
+        && (import.is_some()
+            || watch.is_some()
+            || import_pack.is_some()
+            || import_games.is_some()
+            || mesh_ops
+            || depth_ops
+            || once)
+    {
+        fail("--import-music is exclusive with every other mode and --once");
+    }
     let namespace = namespace.unwrap_or_else(|| {
-        if import_games.is_some() { "sandbox" } else { "gen" }.to_string()
+        if import_games.is_some() {
+            "sandbox"
+        } else if import_music.is_some() {
+            "music"
+        } else {
+            "gen"
+        }
+        .to_string()
     });
     if mesh_ops && (import.is_some() || watch.is_some() || import_pack.is_some()) {
         fail("--mesh-from-image is exclusive with library import/watch/pack modes");
@@ -479,6 +521,7 @@ fn parse_args() -> Args {
         import,
         watch,
         import_games,
+        import_music,
         namespace,
         suffix,
         cache,
@@ -621,6 +664,56 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("makepad-asset-importer: games import failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // ---- music directory import mode ----
+    if let Some(dir) = args.import_music {
+        // A personal library states the honest terms unless the operator
+        // declared better ones: held locally, servable on this LAN, never
+        // redistributed off it.
+        let rights = args
+            .rights
+            .clone()
+            .unwrap_or_else(|| music_import::personal_library_rights(&dir));
+        let mut progress = |done: usize, total: usize, current: &str| {
+            if args.log && !current.is_empty() {
+                eprintln!("[music-import] {done}/{total} {current}");
+            }
+        };
+        let cancel = || STOP.load(Ordering::SeqCst);
+        match music_import::import_music(
+            &mut client,
+            &dir,
+            &args.namespace,
+            &rights,
+            args.log,
+            &mut progress,
+            &cancel,
+        ) {
+            Ok(report) => {
+                println!(
+                    "music import complete: {} published, {} updated, {} unchanged, \
+                     {} skipped, {} failed{}",
+                    report.published.len(),
+                    report.updated.len(),
+                    report.unchanged.len(),
+                    report.skipped.len(),
+                    report.failed.len(),
+                    if report.cancelled { " (cancelled)" } else { "" }
+                );
+                for (rel, reason) in &report.skipped {
+                    println!("  skipped {rel}: {reason}");
+                }
+                for (rel, error) in &report.failed {
+                    println!("  FAILED {rel}: {error}");
+                }
+                std::process::exit(if report.failed.is_empty() { 0 } else { 1 });
+            }
+            Err(error) => {
+                eprintln!("makepad-asset-importer: music import failed: {error}");
                 std::process::exit(1);
             }
         }
