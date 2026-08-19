@@ -980,6 +980,22 @@ impl Mixer {
         }
     }
 
+    /// `(position_secs, duration_secs, playing, scratching)` in ONE lock.
+    /// The per-frame UI path uses this: the audio callback only `try_lock`s,
+    /// so every extra grab from the UI is a chance of a silent buffer.
+    pub fn deck_snapshot(&self, deck: DeckId) -> (f64, f64, bool, bool) {
+        let s = self.state.lock().unwrap();
+        let d = &s.decks[deck.index()];
+        let scratching = d.scratch.active();
+        match &d.pcm {
+            None => (0.0, 0.0, false, scratching),
+            Some(pcm) => {
+                let position = d.playhead_frames() / pcm.sample_rate.max(1) as f64;
+                (position, pcm.seconds(), d.playing, scratching)
+            }
+        }
+    }
+
     /// Pre-fader peak levels for the two deck VU meters. `meters()` reports
     /// what reaches the master; these report what the channel is doing,
     /// which is what an operator sets gain against.
