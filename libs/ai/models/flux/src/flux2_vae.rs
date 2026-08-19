@@ -365,8 +365,6 @@ fn encode_moments(
         )));
     }
     let (width, height) = (hidden.width, hidden.height);
-    let _ = plane;
-    let _ = z_channels;
     drop(hidden);
     gpu_pool_clear();
     gpu_pool_cap_override(None);

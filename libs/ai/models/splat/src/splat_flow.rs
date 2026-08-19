@@ -28,7 +28,7 @@ use crate::splat::{
     FLOW_FINAL_NORM_EPS, FLOW_HEADS, FLOW_HEAD_DIM, FLOW_IN_CHANNELS, FLOW_MODEL_CHANNELS,
     FLOW_MOD_COLS, FLOW_NORM_EPS, FLOW_OUT_CHANNELS, FLOW_Q_TOKENS, FLOW_REFINER_BLOCKS,
     FLOW_SOBOL_SEED, POS_EMBED_MAX_RES, REPO_FREQ_0, REPO_FREQ_1, REPO_FREQ_2, REPO_HIDDEN,
-    REPO_PAIRS, T_FREQ_DIM,
+    REPO_PAIRS, SPLAT_FLOW_NAMESPACE, T_FREQ_DIM,
 };
 use crate::splat_ops::{
     add, attention, concat_rows, gated_residual_mod, gelu_tanh, host_linear, host_silu, layer_norm,
@@ -195,6 +195,9 @@ fn splat_repo_tables(
 /// One `UnifiedTransformerBlock`.
 struct FlowBlock {
     dims: Dims,
+    /// Checkpoint prefix, reused as the device weight-cache key for the
+    /// per-head RMS gammas (the shared kernel caches them by name).
+    name: String,
     /// `None` for the unmodulated `context_refiner` blocks, which instead
     /// carry affine LayerNorm parameters.
     shift_table: Option<Vec<f32>>,
@@ -233,6 +236,7 @@ impl FlowBlock {
         };
         Ok(Self {
             dims,
+            name: prefix.to_string(),
             shift_table,
             norm1,
             norm2,
@@ -296,8 +300,22 @@ impl FlowBlock {
         let q = rope_pairs_per_head(&q, heads, &cos, &sin)?;
         let k = rope_pairs_per_head(&k, heads, &cos, &sin)?;
         drop((cos, sin));
-        let q = rms_norm_per_head(&q, heads, head_dim, &self.q_norm)?;
-        let k = rms_norm_per_head(&k, heads, head_dim, &self.k_norm)?;
+        let q = rms_norm_per_head(
+            &q,
+            heads,
+            head_dim,
+            &self.q_norm,
+            SPLAT_FLOW_NAMESPACE,
+            &format!("{}.attn.q_norm", self.name),
+        )?;
+        let k = rms_norm_per_head(
+            &k,
+            heads,
+            head_dim,
+            &self.k_norm,
+            SPLAT_FLOW_NAMESPACE,
+            &format!("{}.attn.k_norm", self.name),
+        )?;
         let attn = attention(&q, &k, &v, heads, scale)?;
         drop((q, k, v));
         let attn = linear(&attn, &self.out)?;
@@ -788,11 +806,13 @@ impl FlowBlock {
     ) -> Result<Self> {
         let c = dims.channels;
         let device = Device::Cpu;
+        let name = format!("test.{}", rng.uniform().to_bits());
         let mut small = |len: usize| -> Vec<f32> {
             (0..len).map(|_| 0.1 * rng.normal()).collect()
         };
         Ok(Self {
             dims,
+            name,
             shift_table: modulated.then(|| vec![0.0f32; dims.mod_cols()]),
             norm1: (!modulated).then(|| (vec![1.0; c], vec![0.0; c])),
             norm2: (!modulated).then(|| (vec![1.0; c], vec![0.0; c])),

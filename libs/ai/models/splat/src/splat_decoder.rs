@@ -22,7 +22,7 @@ use crate::splat::{
     GS_COND_CHANNELS, GS_FFN, GS_HEADS, GS_HEAD_DIM, GS_IN_CHANNELS, GS_LAYOUT, GS_MODEL_CHANNELS,
     GS_OUT_CHANNELS, GS_PERTURB_SIZE, GS_PER_POINT, OCT_BLOCKS, OCT_COND_CHANNELS, OCT_FFN,
     OCT_HEADS, OCT_HEAD_DIM, OCT_LEVEL, OCT_MODEL_CHANNELS, OCT_OUT, POS_EMBED_V2_MAX_RES,
-    T_FREQ_DIM,
+    SPLAT_DEC_NAMESPACE, T_FREQ_DIM,
 };
 use crate::splat_ops::{
     add, attention, gated_residual_mod, gelu_tanh, host_linear, host_silu, layer_norm,
@@ -33,6 +33,9 @@ use crate::{DiffusionError, ProgressHook, Result};
 
 /// `MultiHeadAttention(type="cross", qk_rms_norm=True)`.
 struct CrossAttn {
+    /// Checkpoint prefix, reused as the device weight-cache key for the
+    /// per-head RMS gammas.
+    name: String,
     to_q: Lin,
     to_kv: Lin,
     q_norm: Vec<f32>,
@@ -51,6 +54,7 @@ impl CrossAttn {
     ) -> Result<Self> {
         let head_dim = channels / heads;
         Ok(Self {
+            name: prefix.to_string(),
             to_q: Lin::new(
                 device,
                 &weights.f32_shaped(&format!("{prefix}.to_q.weight"), &[channels, channels])?,
@@ -85,7 +89,14 @@ impl CrossAttn {
         let head_dim = channels / heads;
         let scale = 1.0 / (head_dim as f32).sqrt();
         let q = linear(x, &self.to_q)?;
-        let q = rms_norm_per_head(&q, heads, head_dim, &self.q_norm)?;
+        let q = rms_norm_per_head(
+            &q,
+            heads,
+            head_dim,
+            &self.q_norm,
+            SPLAT_DEC_NAMESPACE,
+            &format!("{}.q_rms_norm", self.name),
+        )?;
         let attn = attention(&q, &kv.0, &kv.1, heads, scale)?;
         drop(q);
         linear(&attn, &self.to_out)
@@ -98,13 +109,21 @@ impl CrossAttn {
         let k = slice_cols(&kv, 0, channels)?;
         let v = slice_cols(&kv, channels, channels)?;
         drop(kv);
-        let k = rms_norm_per_head(&k, heads, head_dim, &self.k_norm)?;
+        let k = rms_norm_per_head(
+            &k,
+            heads,
+            head_dim,
+            &self.k_norm,
+            SPLAT_DEC_NAMESPACE,
+            &format!("{}.k_rms_norm", self.name),
+        )?;
         Ok((k, v))
     }
 }
 
 /// `MultiHeadAttention(type="self", qk_rms_norm=True)`.
 struct SelfAttn {
+    name: String,
     to_qkv: Lin,
     q_norm: Vec<f32>,
     k_norm: Vec<f32>,
@@ -115,6 +134,7 @@ impl SelfAttn {
     fn load(device: Device, weights: &SplatWeights, prefix: &str, channels: usize, heads: usize) -> Result<Self> {
         let head_dim = channels / heads;
         Ok(Self {
+            name: prefix.to_string(),
             to_qkv: Lin::new(
                 device,
                 &weights.f32_shaped(&format!("{prefix}.to_qkv.weight"), &[3 * channels, channels])?,
@@ -144,8 +164,22 @@ impl SelfAttn {
         let k = slice_cols(&qkv, channels, channels)?;
         let v = slice_cols(&qkv, 2 * channels, channels)?;
         drop(qkv);
-        let q = rms_norm_per_head(&q, heads, head_dim, &self.q_norm)?;
-        let k = rms_norm_per_head(&k, heads, head_dim, &self.k_norm)?;
+        let q = rms_norm_per_head(
+            &q,
+            heads,
+            head_dim,
+            &self.q_norm,
+            SPLAT_DEC_NAMESPACE,
+            &format!("{}.q_rms_norm", self.name),
+        )?;
+        let k = rms_norm_per_head(
+            &k,
+            heads,
+            head_dim,
+            &self.k_norm,
+            SPLAT_DEC_NAMESPACE,
+            &format!("{}.k_rms_norm", self.name),
+        )?;
         let attn = attention(&q, &k, &v, heads, scale)?;
         drop((q, k, v));
         linear(&attn, &self.to_out)

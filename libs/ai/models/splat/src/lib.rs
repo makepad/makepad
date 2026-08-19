@@ -55,11 +55,13 @@ pub fn splat_device_available() -> bool {
 /// Must run on the worker thread that performed the generation — both caches
 /// are thread-local by design.
 pub fn unload_splat() -> Result<usize> {
-    let mut evicted = 0usize;
-    for namespace in SPLAT_NAMESPACES {
-        evicted += backend::gpu_weight_cache_evict_prefix(&format!("{namespace}::"))
-            .map_err(DiffusionError::model)?;
-    }
-    backend::gpu_pool_clear();
-    Ok(evicted)
+    // The `_if_loaded` variant behind release_gpu_runtime_namespaces: a cold
+    // or CPU-only thread must not initialize CUDA merely to discover there is
+    // nothing to release. It also trims the activation pool.
+    let prefixes: Vec<String> = SPLAT_NAMESPACES
+        .iter()
+        .map(|namespace| format!("{namespace}::"))
+        .collect();
+    let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+    backend::release_gpu_runtime_namespaces(&refs)
 }
