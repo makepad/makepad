@@ -671,6 +671,7 @@ mod tests {
             inputs: Vec::new(),
             strength: None,
             loras: Vec::new(),
+            interpolate: None,
             canny_low: None,
             canny_high: None,
             frames: None,

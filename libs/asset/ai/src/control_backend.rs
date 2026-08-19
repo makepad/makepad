@@ -589,6 +589,7 @@ mod tests {
             inputs: Vec::new(),
             strength: None,
             loras: Vec::new(),
+            interpolate: None,
             frames: None,
             codec: String::new(),
             audio: None,
