@@ -145,6 +145,10 @@ impl WindowsStreamDecoder {
     }
 
     pub fn push_packet(&mut self, annex_b_data: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
+        // See `WindowsStreamEncoder::push_frame_nv12`'s identical comment —
+        // this type is `Send` and may be called from a different thread
+        // than the one that constructed it; re-assert MTA membership here.
+        ensure_media_foundation()?;
         let sample = make_input_sample(annex_b_data, pts_100ns)?;
         let hr = unsafe { windows_mft::process_input(&self.transform, &sample) };
         if hr.is_err() {
@@ -190,3 +194,8 @@ impl WindowsStreamDecoder {
         self.drain_available()
     }
 }
+
+// SAFETY (UNVERIFIED): see `WindowsStreamEncoder`'s identical `Send` impl
+// in windows_stream_encoder.rs — same reasoning (Mutex-enforced exclusive
+// access + per-thread MTA re-assertion on every entry point).
+unsafe impl Send for WindowsStreamDecoder {}

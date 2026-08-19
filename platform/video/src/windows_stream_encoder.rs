@@ -197,6 +197,15 @@ impl WindowsStreamEncoder {
     }
 
     pub fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        // COM apartment state is thread-local: `new()` initialized the MTA
+        // only on the thread that constructed this encoder. Since this type
+        // is `Send` (see the impl below) and callers may legitimately push
+        // frames from a different thread than the one that created it (e.g.
+        // `makepad-asset-ai`'s realtime session, whose worker thread is not
+        // necessarily the HTTP thread), re-assert MTA membership on whatever
+        // thread is calling now — idempotent and cheap (a thread already in
+        // the MTA is a no-op; `MFStartup` itself only runs once, process-wide).
+        ensure_media_foundation()?;
         let keyint = self.options.keyint.max(1);
         if self.force_keyframe || self.frames_since_keyframe >= keyint {
             self.recreate()?;
@@ -260,3 +269,17 @@ impl WindowsStreamEncoder {
         self.force_keyframe = true;
     }
 }
+
+// SAFETY (UNVERIFIED — no Windows machine to confirm on): `IMFTransform`
+// wraps a raw COM pointer (`NonNull<c_void>`, `!Send` by default). This
+// encoder is only ever accessed through a `Mutex` (exclusive access
+// enforced), which rules out the memory-safety hazard `Send` is about.
+// The remaining question is COM-apartment correctness: `push_frame_nv12`
+// re-asserts MTA membership (`ensure_media_foundation()`) on whatever
+// thread calls it, and MTA-created in-proc objects are documented to
+// tolerate being called from any MTA thread — so moving ownership between
+// threads (not concurrent access) should be sound as long as every calling
+// thread is in the MTA, which the re-assert guarantees. Flagged as
+// unverified because this is exactly the kind of thing that only a real
+// Windows COM run can actually confirm.
+unsafe impl Send for WindowsStreamEncoder {}
