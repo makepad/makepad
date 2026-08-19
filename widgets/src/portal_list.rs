@@ -2356,7 +2356,7 @@ impl Widget for PortalList {
         // One rect test here guards the entire item subtree from high-rate
         // mouse-move fan-out.
         if let Event::MouseMove(e) = event {
-            let inside = self.area.clipped_rect(cx).contains(e.abs);
+            let inside = self.area.is_valid(cx) && self.area.clipped_rect(cx).contains(e.abs);
             if !inside && !self.pointer_was_inside {
                 pass_through_to_children = false;
             }
