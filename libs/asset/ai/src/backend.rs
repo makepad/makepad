@@ -48,6 +48,11 @@ pub struct GenerateParams {
     pub frames: Option<u32>,
     /// "" = backend default (h265); "h264" for the compatibility codec.
     pub codec: String,
+    /// `None`/`Some(true)` = decode + mux the jointly-denoised audio track
+    /// (H3 default). `Some(false)` = skip the audio VAE decode and the AAC
+    /// mux, producing a silent mp4 — the joint DiT still denoises the audio
+    /// rows (no upstream mode drops them from the packed sequence).
+    pub audio: Option<bool>,
 
     // Text domain (llm backend).
     /// Domain the expanded prompt targets: "image" | "video" | "mesh".
@@ -250,6 +255,7 @@ impl GenerateParams {
 
             frames: request.frames.map(|v| v.clamp(1, 1024)),
             codec: request.codec.clone().unwrap_or_default(),
+            audio: request.audio,
 
             target_domain,
             identity_anchor: request.identity_anchor.clone().unwrap_or_default(),
@@ -938,6 +944,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "matte-native" => cfg!(feature = "matte-native"),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "upscale-native" => cfg!(feature = "upscale-native"),
         "rig-native" => cfg!(feature = "rig-native"),
         "motion-native" => cfg!(feature = "motion-native"),
         // Native Music3 lives on the same CUDA stack as SA3 (`audio`).
@@ -977,6 +984,7 @@ pub fn backend_provisioned(name: &str) -> bool {
         "music3" => crate::music3_backend::music3_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "upscale-native" => cfg!(feature = "upscale-native"),
         #[cfg(feature = "python-backends")]
         "depth" => crate::depth_backend::depth_provisioned(),
         #[cfg(feature = "python-backends")]
@@ -1211,6 +1219,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(not(feature = "segment-native"))]
         "segment-native" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'segment-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "upscale-native")]
+        "upscale-native" => Ok(Box::new(
+            crate::upscale_backend::UpscaleBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(feature = "upscale-native"))]
+        "upscale-native" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'upscale-native' cargo feature",
             spec.id
         ))),
         #[cfg(feature = "python-backends")]
