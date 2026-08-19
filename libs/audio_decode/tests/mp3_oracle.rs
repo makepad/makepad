@@ -518,6 +518,29 @@ fn probe_duration_matches_a_full_decode() {
 }
 
 #[test]
+fn probe_duration_ignores_bytes_that_are_not_frames() {
+    // Anything appended after the last frame -- an APEv2 tag, a Lyrics3 block,
+    // padding -- would inflate a duration estimated from the file length. The
+    // probe walks the frame chain instead, so it does not move.
+    let spec = FrameSpec::silence(MPEG1, 0);
+    let bytes = stream(&spec, 20);
+    let clean = mp3::probe_duration(&bytes).expect("probe");
+    let mut padded = bytes.clone();
+    padded.extend_from_slice(b"APETAGEX");
+    padded.extend(std::iter::repeat_n(0x5au8, 40_000));
+    let padded_probe = mp3::probe_duration(&padded).expect("probe");
+    assert!(
+        (clean - padded_probe).abs() < 1e-9,
+        "{clean} became {padded_probe} because of trailing junk"
+    );
+    assert!((clean - 20.0 * 1152.0 / 44_100.0).abs() < 1e-9, "{clean}");
+    // Leading junk before the first frame does not move it either.
+    let mut prefixed = vec![0x11u8; 5_000];
+    prefixed.extend_from_slice(&bytes);
+    assert!((mp3::probe_duration(&prefixed).expect("probe") - clean).abs() < 1e-9);
+}
+
+#[test]
 fn an_id3v2_tag_does_not_hide_the_stream() {
     let audio_bytes = stream(&FrameSpec::silence(MPEG1, 0), 4);
     let mut file = vec![0u8; 10];
@@ -574,6 +597,36 @@ fn free_format_and_other_layers_are_refused_by_name() {
         frame[1] = (frame[1] & !0x06) | 0x04; // layer II
     }
     assert!(matches!(mp3::decode_all(&layer2), Err(AudioError::Empty)));
+}
+
+#[test]
+fn damaged_frames_keep_the_timeline_exact() {
+    // A decoder that drops an undecodable frame shortens the track and, worse,
+    // leaves the bit reservoir describing bytes that no longer belong to the
+    // frames after it -- so everything downstream decodes from misaligned main
+    // data. Damage must cost silence, not time.
+    let spec = one_line_frame(196, false);
+    let frame_bytes = spec.frame_bytes();
+    let clean = stream(&spec, 8);
+    let expected = decode(&clean, false).frames();
+    assert_eq!(expected, 8 * 1152);
+
+    // `big_values` past its legal maximum: one flipped bit in the side info.
+    let mut broken = clean.clone();
+    broken[3 * frame_bytes + 8] = 0xff;
+    assert_eq!(decode(&broken, false).frames(), expected, "side info");
+
+    // An undefined Huffman table (4) selected for region 0.
+    let mut undefined = spec;
+    undefined.granules[0][0].table0 = 4;
+    let stream_with_bad_table = stream(&undefined, 8);
+    assert_eq!(decode(&stream_with_bad_table, false).frames(), expected, "table 4");
+
+    // Truncating a frame's main data mid-granule.
+    let mut short = clean.clone();
+    short.drain(5 * frame_bytes + 40..5 * frame_bytes + 60);
+    let got = decode(&short, false).frames();
+    assert!(got <= expected, "truncation grew the stream: {got} vs {expected}");
 }
 
 #[test]

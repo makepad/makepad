@@ -176,12 +176,17 @@ impl FrameHeader {
         }
     }
 
+    /// MPEG-2.5's lowest rate, whose scalefactor bands are twice as wide as
+    /// every other rate's and which therefore needs its own boundaries.
+    pub fn is_8khz(&self) -> bool {
+        matches!(self.version, Version::Mpeg25) && self.rate_index == 2
+    }
+
     /// Start of region 1 when the granule uses window switching, where the
     /// region boundaries are fixed rather than coded (2.4.2.7). 8 kHz has its
     /// own value because its bands are twice as wide.
     pub fn switched_region1_start(&self, short_blocks: bool) -> usize {
-        let eight_k = matches!(self.version, Version::Mpeg25) && self.rate_index == 2;
-        match (short_blocks, eight_k) {
+        match (short_blocks, self.is_8khz()) {
             (true, false) => 36,
             (true, true) => 72,
             (false, true) => 108,
@@ -338,22 +343,49 @@ fn parse_xing(frame: &[u8], at: usize) -> Option<VbrInfo> {
     Some(VbrInfo { frames, bytes, delay })
 }
 
-/// Duration in seconds, from a VBR header when there is one and from the
-/// stream length at the first frame's bitrate otherwise.
+/// Frames a duration probe will walk before giving up. Two hours of MPEG-1 is
+/// about 300 000, so this only ever stops a crafted file.
+const MAX_PROBE_FRAMES: u64 = 4_000_000;
+
+/// Duration in seconds without decoding any audio.
+///
+/// A Xing/VBRI header answers immediately. Failing that this walks the frame
+/// chain, which is header arithmetic only — four bytes read per frame, no
+/// Huffman and no filterbank — and is exact for both constant and variable
+/// bitrate. Estimating from the file length instead is off by whatever
+/// non-audio bytes are appended, which on a real library is a tag the decoder
+/// skips but a byte count does not.
 pub fn probe_duration(bytes: &[u8]) -> Result<f64, AudioError> {
     let audio = strip_containers(bytes);
     let (at, header) = find_frame(audio, 0).ok_or(AudioError::Empty)?;
     let frame = audio.get(at..).unwrap_or(&[]);
-    let per_frame = header.samples_per_frame() as f64 / header.sample_rate as f64;
+    let rate = header.sample_rate as f64;
     if let Some(vbr) = parse_vbr_header(frame, &header) {
         if let Some(frames) = vbr.frames.filter(|&f| f > 0) {
-            return Ok(frames as f64 * per_frame);
+            return Ok(frames as f64 * header.samples_per_frame() as f64 / rate);
         }
     }
-    // Constant-bitrate estimate. `frame_bytes` already accounts for padding,
-    // which averages out over a stream.
-    let payload = frame.len() as f64;
-    Ok(payload / header.frame_bytes as f64 * per_frame)
+    let mut samples = 0u64;
+    let mut frames = 0u64;
+    let mut cursor = at;
+    while cursor + 4 <= audio.len() && frames < MAX_PROBE_FRAMES {
+        let word =
+            u32::from_be_bytes([audio[cursor], audio[cursor + 1], audio[cursor + 2], audio[cursor + 3]]);
+        match FrameHeader::parse(word) {
+            Some(next) if header.compatible_with(&next) && next.frame_bytes > 4 => {
+                samples += next.samples_per_frame() as u64;
+                frames += 1;
+                cursor += next.frame_bytes;
+            }
+            // Damage, or the tail of the file: resync forward. `find_frame`
+            // only ever moves the cursor on, so the whole walk stays linear.
+            _ => match find_frame(audio, cursor + 1) {
+                Some((next, _)) => cursor = next,
+                None => break,
+            },
+        }
+    }
+    Ok(samples as f64 / rate)
 }
 
 #[cfg(test)]
