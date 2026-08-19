@@ -139,6 +139,12 @@ pub enum Domain {
     /// `Edit`, so image-domain affinity never routes a text-to-image job to
     /// a model that fails closed without an input image.
     Upscale,
+    /// Structure-conditioned image generation: a control image (depth map or
+    /// Canny edge map) + text prompt -> a new image matching that structure
+    /// (FLUX.1-Depth-dev / FLUX.1-Canny-dev). Its own domain, like `Edit`/
+    /// `Upscale`, so image-domain affinity never routes a text-to-image job
+    /// to a model that fails closed without a control image.
+    Control,
 }
 
 impl Domain {
@@ -160,6 +166,7 @@ impl Domain {
             "paint" => Some(Domain::Paint),
             "edit" => Some(Domain::Edit),
             "upscale" => Some(Domain::Upscale),
+            "control" => Some(Domain::Control),
             _ => None,
         }
     }
@@ -182,6 +189,7 @@ impl Domain {
             Domain::Paint => "paint",
             Domain::Edit => "edit",
             Domain::Upscale => "upscale",
+            Domain::Control => "control",
         }
     }
 }

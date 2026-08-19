@@ -77,6 +77,102 @@
    ]
   },
   {
+   "id": "flux1-depth-dev",
+   "domain": "control",
+   "backend": "control",
+   "available": true,
+   "gated": true,
+   "vram_gb": 35.0,
+   "min_vram_gb": 38.0,
+   "note": "FLUX.1-Depth-dev (FLUX.1 [dev] Non-Commercial License, gated - black-forest-labs/FLUX.1-Depth-dev is itself gated on HF, not just the license flag): the official BFL split-model bundle, no public FP8 single-file repackage exists yet (checked 2026-08-19: only unofficial/unverified third-party fp8 repacks like boricuapab/flux1-depth-dev-fp8 turn up, none from black-forest-labs or Comfy-Org) so this pins the canonical BF16 diffusion checkpoint - heavier than the FP8 flux1-dev tier (~34GB total resident vs ~17GB). img_in accepts 128 channels (packed noisy latents 64 + packed VAE-encoded depth-map latents 64, concatenated every step - diffusers FluxControlPipeline); guidance_embed present, recommended guidance ~10, 30-50 steps. clip_l/t5xxl are the standard public ComfyUI companion encoders (comfyanonymous/flux_text_encoders, ungated, shared verbatim across the whole FLUX.1 family so flux1-canny-dev below reuses the same cache_as/bytes) - the BFL repo's own text_encoder/text_encoder_2 are diffusers-sharded and NOT used here. ae.safetensors matches flux1-canny-dev's byte-for-byte (same sha256) but is cached per-model rather than shared, keeping each model's file list self-contained. Requires a CUDA box (no CPU/Metal fallback - control_backend::control_provisioned fails closed).",
+   "files": [
+    {
+     "role": "unet",
+     "repo": "black-forest-labs/FLUX.1-Depth-dev",
+     "path": "flux1-depth-dev.safetensors",
+     "cache_as": "unet/flux1-depth-dev.safetensors",
+     "revision": "fb5e9b1bae41b8c8adcea4ea2a87b74dd298f07a",
+     "size": 23803351200,
+     "sha256": "41360d1662f44ca45bc1b665fe6387e91802f53911001630d970a4f8be8dac21"
+    },
+    {
+     "role": "vae",
+     "repo": "black-forest-labs/FLUX.1-Depth-dev",
+     "path": "ae.safetensors",
+     "cache_as": "vae/flux1-depth-ae.safetensors",
+     "revision": "fb5e9b1bae41b8c8adcea4ea2a87b74dd298f07a",
+     "size": 335304388,
+     "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+    },
+    {
+     "role": "clip-l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp16.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp16.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 9787841024,
+     "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    }
+   ]
+  },
+  {
+   "id": "flux1-canny-dev",
+   "domain": "control",
+   "backend": "control",
+   "available": true,
+   "gated": true,
+   "vram_gb": 35.0,
+   "min_vram_gb": 38.0,
+   "note": "FLUX.1-Canny-dev (FLUX.1 [dev] Non-Commercial License, gated - black-forest-labs/FLUX.1-Canny-dev is itself gated on HF). Same shape as flux1-depth-dev above (see its note for the FP8-repackage search + text-encoder sourcing rationale): official BFL BF16 split-model bundle, img_in 128 channels (packed noisy + packed VAE-encoded Canny-edge-map latents), guidance_embed present, recommended guidance ~30 (higher than depth's ~10 - Canny conditioning is weaker/more literal per the BFL model card), 30-50 steps. control_backend runs its own CPU Canny detector (control_image::canny_edges_u8, defaults low=50/high=200) on the input image before VAE-encoding it, so a plain photo works as input_b64 (not just a pre-made edge map). clip_l/t5xxl/ae share the exact bytes flux1-depth-dev pins (ae has its own per-model cache_as; clip_l/t5xxl share cache_as+bytes - see the shared-cache-identity note there).",
+   "files": [
+    {
+     "role": "unet",
+     "repo": "black-forest-labs/FLUX.1-Canny-dev",
+     "path": "flux1-canny-dev.safetensors",
+     "cache_as": "unet/flux1-canny-dev.safetensors",
+     "revision": "27c3d8bdc17509b47cf4fd9ba25ab1c7508a69a2",
+     "size": 23803351736,
+     "sha256": "996876670169591cb412b937fbd46ea14cbed6933aef17c48a2dcd9685c98cdb"
+    },
+    {
+     "role": "vae",
+     "repo": "black-forest-labs/FLUX.1-Canny-dev",
+     "path": "ae.safetensors",
+     "cache_as": "vae/flux1-canny-ae.safetensors",
+     "revision": "27c3d8bdc17509b47cf4fd9ba25ab1c7508a69a2",
+     "size": 335304388,
+     "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+    },
+    {
+     "role": "clip-l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp16.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp16.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 9787841024,
+     "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    }
+   ]
+  },
+  {
    "id": "flux2-klein-4b",
    "domain": "edit",
    "backend": "flux2",

@@ -619,6 +619,8 @@ mod tests {
             decimation_target: None,
             texture_size: None,
             motion_mode: None,
+            canny_low: None,
+            canny_high: None,
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
         }

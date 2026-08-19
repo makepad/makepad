@@ -101,6 +101,14 @@ pub struct GenerateParams {
     /// playable set (see `GenerateRequestJson::motion_mode`).
     pub motion_mode: Option<String>,
 
+    // Control domain (control backend: FLUX.1-Depth-dev / FLUX.1-Canny-dev).
+    /// Canny low threshold (flux1-canny-dev only). `None` = backend default
+    /// (`control_image::CANNY_DEFAULT_LOW`, 50).
+    pub canny_low: Option<f32>,
+    /// Canny high threshold. `None` = backend default
+    /// (`control_image::CANNY_DEFAULT_HIGH`, 200).
+    pub canny_high: Option<f32>,
+
     // Peer-assisted model distribution (see crate::peer / crate::peer_fetch).
     /// Coordinator-selected source-box base URLs, tried before Hugging Face.
     pub peer_sources: Vec<String>,
@@ -327,6 +335,18 @@ impl GenerateParams {
             texture_size: request.texture_size.map(|v| v.clamp(256, 4096)),
 
             motion_mode: request.motion_mode.clone(),
+
+            // Wire-level sanity range only (matches the Sobel-magnitude
+            // scale documented on `control_image::canny_edges_u8`); the
+            // backend re-clamps low <= high itself.
+            canny_low: request
+                .canny_low
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 2000.0) as f32),
+            canny_high: request
+                .canny_high
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 2000.0) as f32),
 
             peer_sources: {
                 let sources = request.peer_sources.clone().unwrap_or_default();
@@ -937,7 +957,7 @@ pub fn backend_live_supported(spec: &ModelSpec) -> bool {
 pub fn backend_compiled(name: &str) -> bool {
     match name {
         "testpattern" => true,
-        "flux" | "flux2" => cfg!(feature = "flux"),
+        "flux" | "flux2" | "control" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
         "indextts" => cfg!(feature = "indextts"),
@@ -980,6 +1000,12 @@ pub fn backend_provisioned(name: &str) -> bool {
         "flux" => crate::flux_backend::flux_fp8_provisioned(),
         #[cfg(feature = "flux")]
         "flux2" => crate::flux2_backend::flux2_cuda_provisioned(),
+        // The control checkpoints (Depth/Canny) are plain BF16 dense
+        // FLUX.1-dev-architecture transformers, not FP8 — any CUDA device
+        // is enough (no combined-FP8-checkpoint contract to satisfy), but
+        // there is still no CPU/Metal fallback: fail closed the same way.
+        #[cfg(feature = "flux")]
+        "control" => crate::control_backend::control_provisioned(),
         // CUDA Hunyuan Paint is default-on for Windows/Linux `paint-cuda`
         // builds. Weights may still be absent until first pull.
         #[cfg(feature = "paint")]
@@ -1119,6 +1145,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "flux2" => Ok(Box::new(crate::flux2_backend::Flux2Backend::new(&spec.id))),
         #[cfg(not(feature = "flux"))]
         "flux2" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a CUDA build with the 'flux' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "flux")]
+        "control" => Ok(Box::new(crate::control_backend::ControlBackend::new(&spec.id))),
+        #[cfg(not(feature = "flux"))]
+        "control" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a CUDA build with the 'flux' cargo feature",
             spec.id
         ))),

@@ -33,6 +33,7 @@
 
 pub mod backend;
 pub mod client;
+pub mod control_image;
 pub mod depth_backend;
 pub mod download;
 pub mod error;
@@ -84,6 +85,8 @@ pub mod world_backend;
 pub mod flux_backend;
 #[cfg(feature = "flux")]
 pub mod flux2_backend;
+#[cfg(feature = "flux")]
+pub mod control_backend;
 
 pub use error::AssetAiError;
 pub use server::{start_service, ServiceConfig, ServiceHandle};

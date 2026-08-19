@@ -329,6 +329,14 @@ pub struct GenerateRequestJson {
     /// retargeted onto the rig as clip `prompt`; viewers play it as the idle.
     pub motion_mode: Option<String>,
 
+    // -- control domain (control backend: FLUX.1-Depth-dev / FLUX.1-Canny-dev) --
+    /// Canny low threshold (flux1-canny-dev only; ignored elsewhere).
+    /// `None` = the backend default (50, matching OpenCV's usual default).
+    /// Only meaningful together with `canny_high`.
+    pub canny_low: Option<f64>,
+    /// Canny high threshold. `None` = the backend default (200).
+    pub canny_high: Option<f64>,
+
     // -- peer-assisted model distribution (all domains; used by pull jobs
     //    and by any generate that must first download model files) --
     /// Coordinator-selected source boxes to try BEFORE Hugging Face: service
