@@ -38,8 +38,42 @@ use crate::splat_ops::{
 use crate::splat_rand::sobol_draw;
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 
+/// Sizes a flow block and its rope layer are built at. Fixed to
+/// [`Dims::FLOW`] in production; the tests instantiate tiny ones so the whole
+/// block stack can be forwarded on random weights.
+#[derive(Clone, Copy, Debug)]
+pub struct Dims {
+    pub channels: usize,
+    pub heads: usize,
+    pub head_dim: usize,
+    pub ffn: usize,
+    pub repo_hidden: usize,
+    /// Per-axis frequency counts; they must sum to `head_dim / 2`.
+    pub freqs: [usize; 3],
+}
+
+impl Dims {
+    pub const FLOW: Dims = Dims {
+        channels: FLOW_MODEL_CHANNELS,
+        heads: FLOW_HEADS,
+        head_dim: FLOW_HEAD_DIM,
+        ffn: FLOW_FFN,
+        repo_hidden: REPO_HIDDEN,
+        freqs: [REPO_FREQ_0, REPO_FREQ_1, REPO_FREQ_2],
+    };
+
+    pub fn pairs(&self) -> usize {
+        self.head_dim / 2
+    }
+
+    pub fn mod_cols(&self) -> usize {
+        6 * self.channels
+    }
+}
+
 /// One `RePo3DRotaryEmbedding`.
 struct RepoLayer {
+    dims: Dims,
     norm_w: Vec<f32>,
     norm_b: Vec<f32>,
     gate_map: Lin,
@@ -52,11 +86,13 @@ struct RepoLayer {
 
 impl RepoLayer {
     fn load(device: Device, weights: &SplatWeights, prefix: &str) -> Result<Self> {
-        let c = FLOW_MODEL_CHANNELS;
+        let dims = Dims::FLOW;
+        let c = dims.channels;
         let mut freqs = weights.f32_shaped(&format!("{prefix}.freqs_0"), &[REPO_FREQ_0])?;
         freqs.extend(weights.f32_shaped(&format!("{prefix}.freqs_1"), &[REPO_FREQ_1])?);
         freqs.extend(weights.f32_shaped(&format!("{prefix}.freqs_2"), &[REPO_FREQ_2])?);
         Ok(Self {
+            dims,
             norm_w: weights.f32_shaped(&format!("{prefix}.norm.weight"), &[c])?,
             norm_b: weights.f32_shaped(&format!("{prefix}.norm.bias"), &[c])?,
             gate_map: Lin::new(
@@ -97,23 +133,28 @@ impl RepoLayer {
         drop(normed);
         let delta = linear(&mul(&gate, &content)?, &self.final_map)?;
         drop((gate, content));
-        splat_repo_tables(&delta, &self.freqs_dev, &self.freqs)
+        splat_repo_tables(&delta, &self.freqs_dev, &self.freqs, self.dims)
     }
 }
 
 /// Phase tables from a `(tokens, heads*3)` delta projection. `clamp_mul` in
 /// the reference is `x*tanh(f) + x.detach()*(f - tanh(f))`, which without
 /// autograd is exactly `x * f`, so the angle is `delta[axis] * freq * pi`.
-fn splat_repo_tables(delta: &Ten, freqs_dev: &Ten, freqs_host: &[f32]) -> Result<(Ten, Ten)> {
+fn splat_repo_tables(
+    delta: &Ten,
+    freqs_dev: &Ten,
+    freqs_host: &[f32],
+    dims: Dims,
+) -> Result<(Ten, Ten)> {
     match delta.device() {
         Device::Cuda => {
             let (cos, sin) = crate::backend::gpu_splat_repo3d_tables(
                 delta.as_gpu()?,
                 freqs_dev.as_gpu()?,
-                FLOW_HEADS,
-                REPO_PAIRS,
-                REPO_FREQ_0,
-                REPO_FREQ_1,
+                dims.heads,
+                dims.pairs(),
+                dims.freqs[0],
+                dims.freqs[1],
             )
             .map_err(DiffusionError::model)?;
             Ok((Ten::adopt_gpu(cos), Ten::adopt_gpu(sin)))
@@ -121,17 +162,18 @@ fn splat_repo_tables(delta: &Ten, freqs_dev: &Ten, freqs_host: &[f32]) -> Result
         Device::Cpu => {
             let values = delta.to_host()?;
             let rows = delta.rows();
-            let cols = FLOW_HEADS * REPO_PAIRS;
+            let pairs = dims.pairs();
+            let cols = dims.heads * pairs;
             let mut cos = vec![0.0f32; rows * cols];
             let mut sin = vec![0.0f32; rows * cols];
             for row in 0..rows {
-                for head in 0..FLOW_HEADS {
-                    let base = (row * FLOW_HEADS + head) * 3;
-                    let out = (row * FLOW_HEADS + head) * REPO_PAIRS;
-                    for p in 0..REPO_PAIRS {
-                        let axis = if p < REPO_FREQ_0 {
+                for head in 0..dims.heads {
+                    let base = (row * dims.heads + head) * 3;
+                    let out = (row * dims.heads + head) * pairs;
+                    for p in 0..pairs {
+                        let axis = if p < dims.freqs[0] {
                             0
-                        } else if p < REPO_FREQ_0 + REPO_FREQ_1 {
+                        } else if p < dims.freqs[0] + dims.freqs[1] {
                             1
                         } else {
                             2
@@ -152,6 +194,7 @@ fn splat_repo_tables(delta: &Ten, freqs_dev: &Ten, freqs_host: &[f32]) -> Result
 
 /// One `UnifiedTransformerBlock`.
 struct FlowBlock {
+    dims: Dims,
     /// `None` for the unmodulated `context_refiner` blocks, which instead
     /// carry affine LayerNorm parameters.
     shift_table: Option<Vec<f32>>,
@@ -167,7 +210,8 @@ struct FlowBlock {
 
 impl FlowBlock {
     fn load(device: Device, weights: &SplatWeights, prefix: &str, modulated: bool) -> Result<Self> {
-        let c = FLOW_MODEL_CHANNELS;
+        let dims = Dims::FLOW;
+        let c = dims.channels;
         let (shift_table, norm1, norm2) = if modulated {
             (
                 Some(weights.f32_shaped(&format!("{prefix}.shift_table"), &[1, FLOW_MOD_COLS])?),
@@ -188,6 +232,7 @@ impl FlowBlock {
             )
         };
         Ok(Self {
+            dims,
             shift_table,
             norm1,
             norm2,
@@ -229,8 +274,10 @@ impl FlowBlock {
     /// `mods` is the per-block modulation row `t_mod + shift_table`, already
     /// uploaded; `None` for the unmodulated context refiner.
     fn forward(&self, x: Ten, mods: Option<&Ten>, repo: &RepoLayer) -> Result<Ten> {
-        let c = FLOW_MODEL_CHANNELS;
-        let scale = 1.0 / (FLOW_HEAD_DIM as f32).sqrt();
+        let c = self.dims.channels;
+        let heads = self.dims.heads;
+        let head_dim = self.dims.head_dim;
+        let scale = 1.0 / (head_dim as f32).sqrt();
         let (cos, sin) = repo.tables(&x)?;
 
         let normed = match (mods, &self.norm1) {
@@ -246,12 +293,12 @@ impl FlowBlock {
         drop(qkv);
         // Reference order: rope FIRST, then the per-head RMS norm. The two do
         // not commute (rope mixes the pairs that gamma scales element-wise).
-        let q = rope_pairs_per_head(&q, FLOW_HEADS, &cos, &sin)?;
-        let k = rope_pairs_per_head(&k, FLOW_HEADS, &cos, &sin)?;
+        let q = rope_pairs_per_head(&q, heads, &cos, &sin)?;
+        let k = rope_pairs_per_head(&k, heads, &cos, &sin)?;
         drop((cos, sin));
-        let q = rms_norm_per_head(&q, FLOW_HEADS, FLOW_HEAD_DIM, &self.q_norm)?;
-        let k = rms_norm_per_head(&k, FLOW_HEADS, FLOW_HEAD_DIM, &self.k_norm)?;
-        let attn = attention(&q, &k, &v, FLOW_HEADS, scale)?;
+        let q = rms_norm_per_head(&q, heads, head_dim, &self.q_norm)?;
+        let k = rms_norm_per_head(&k, heads, head_dim, &self.k_norm)?;
+        let attn = attention(&q, &k, &v, heads, scale)?;
         drop((q, k, v));
         let attn = linear(&attn, &self.out)?;
         let mut x = match mods {
@@ -700,9 +747,126 @@ pub fn flow_expected_tensors() -> Vec<(String, Vec<usize>)> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Synthetic construction for the tiny-config forward test
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl RepoLayer {
+    fn synthetic(dims: Dims, rng: &mut crate::splat_rand::SplatRng) -> Result<Self> {
+        let c = dims.channels;
+        let device = Device::Cpu;
+        let mut small = |len: usize| -> Vec<f32> {
+            (0..len).map(|_| 0.1 * rng.normal()).collect()
+        };
+        let freqs: Vec<f32> = (0..dims.pairs()).map(|i| 1.0 + i as f32).collect();
+        Ok(Self {
+            dims,
+            norm_w: vec![1.0; c],
+            norm_b: vec![0.0; c],
+            gate_map: Lin::new(device, &small(dims.repo_hidden * c), dims.repo_hidden, c, None)?,
+            content_map: Lin::new(device, &small(dims.repo_hidden * c), dims.repo_hidden, c, None)?,
+            final_map: Lin::new(
+                device,
+                &small(3 * dims.heads * dims.repo_hidden),
+                3 * dims.heads,
+                dims.repo_hidden,
+                None,
+            )?,
+            freqs_dev: Ten::upload(device, &freqs, 1, dims.pairs())?,
+            freqs,
+        })
+    }
+}
+
+#[cfg(test)]
+impl FlowBlock {
+    fn synthetic(
+        dims: Dims,
+        modulated: bool,
+        rng: &mut crate::splat_rand::SplatRng,
+    ) -> Result<Self> {
+        let c = dims.channels;
+        let device = Device::Cpu;
+        let mut small = |len: usize| -> Vec<f32> {
+            (0..len).map(|_| 0.1 * rng.normal()).collect()
+        };
+        Ok(Self {
+            dims,
+            shift_table: modulated.then(|| vec![0.0f32; dims.mod_cols()]),
+            norm1: (!modulated).then(|| (vec![1.0; c], vec![0.0; c])),
+            norm2: (!modulated).then(|| (vec![1.0; c], vec![0.0; c])),
+            qkv: Lin::new(device, &small(3 * c * c), 3 * c, c, Some(&vec![0.0; 3 * c]))?,
+            q_norm: vec![1.0; c],
+            k_norm: vec![1.0; c],
+            out: Lin::new(device, &small(c * c), c, c, Some(&vec![0.0; c]))?,
+            mlp0: Lin::new(device, &small(dims.ffn * c), dims.ffn, c, Some(&vec![0.0; dims.ffn]))?,
+            mlp2: Lin::new(device, &small(c * dims.ffn), c, dims.ffn, Some(&vec![0.0; c]))?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::splat_rand::SplatRng;
+
+    /// A tiny stand-in for the real trunk: same block code, 1/128th the width.
+    const TINY: Dims = Dims {
+        channels: 8,
+        heads: 2,
+        head_dim: 4,
+        ffn: 16,
+        repo_hidden: 4,
+        freqs: [1, 1, 0],
+    };
+
+    #[test]
+    fn tiny_config_block_stack_forwards_end_to_end_on_random_weights() {
+        assert_eq!(TINY.freqs.iter().sum::<usize>(), TINY.pairs());
+        let mut rng = SplatRng::new(11);
+        let tokens = 5usize;
+        let blocks: Vec<FlowBlock> = (0..3)
+            .map(|i| FlowBlock::synthetic(TINY, i != 1, &mut rng).unwrap())
+            .collect();
+        let repos: Vec<RepoLayer> = (0..3)
+            .map(|_| RepoLayer::synthetic(TINY, &mut rng).unwrap())
+            .collect();
+        let mods_host: Vec<f32> = (0..TINY.mod_cols()).map(|_| 0.05 * rng.normal()).collect();
+        let mods = Ten::upload(Device::Cpu, &mods_host, 1, TINY.mod_cols()).unwrap();
+
+        let input: Vec<f32> = (0..tokens * TINY.channels).map(|_| rng.normal()).collect();
+        let mut hidden = Ten::upload(Device::Cpu, &input, tokens, TINY.channels).unwrap();
+        for (i, (block, repo)) in blocks.iter().zip(&repos).enumerate() {
+            let mods = (i != 1).then_some(&mods);
+            hidden = block.forward(hidden, mods, repo).unwrap();
+        }
+        assert_eq!((hidden.rows(), hidden.cols()), (tokens, TINY.channels));
+        let out = hidden.to_host().unwrap();
+        assert_eq!(out.len(), tokens * TINY.channels);
+        assert!(out.iter().all(|v| v.is_finite()), "{out:?}");
+        // The residual stream is not a no-op: the blocks moved the input.
+        let moved: f32 = out.iter().zip(&input).map(|(a, b)| (a - b).abs()).sum();
+        assert!(moved > 1e-4, "block stack was an identity ({moved})");
+    }
+
+    #[test]
+    fn tiny_block_is_token_permutation_equivariant_up_to_attention() {
+        // The RePo3D rope is derived per token from that token's own hidden
+        // state, so a block has NO positional input beyond the content: two
+        // identical tokens must produce identical outputs.
+        let mut rng = SplatRng::new(3);
+        let block = FlowBlock::synthetic(TINY, false, &mut rng).unwrap();
+        let repo = RepoLayer::synthetic(TINY, &mut rng).unwrap();
+        let row: Vec<f32> = (0..TINY.channels).map(|_| rng.normal()).collect();
+        let mut input = row.clone();
+        input.extend_from_slice(&row);
+        let hidden = Ten::upload(Device::Cpu, &input, 2, TINY.channels).unwrap();
+        let out = block.forward(hidden, None, &repo).unwrap().to_host().unwrap();
+        for (a, b) in out[..TINY.channels].iter().zip(&out[TINY.channels..]) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
 
     #[test]
     fn state_dict_contract_matches_the_released_checkpoint_shape() {
