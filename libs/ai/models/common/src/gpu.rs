@@ -3602,6 +3602,65 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
+    // -- Practical-RIFE v4.26 (libs/ai/cuda/kernels/rife.cu) --
+
+    pub fn gpu_rife_warp(
+        _x: &GpuTensor,
+        _flow: &GpuTensor,
+        _width: usize,
+        _height: usize,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_rife_conv_transpose2d(
+        _x: &GpuTensor,
+        _in_width: usize,
+        _in_height: usize,
+        _cache_namespace: &str,
+        _weight_cache_key: &str,
+        _weights: &[f32],
+        _bias: &[f32],
+        _out_channels: usize,
+        _kw: usize,
+        _kh: usize,
+        _pad: usize,
+        _stride: usize,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_rife_res_conv(
+        _conv: &GpuTensor,
+        _residual: &GpuTensor,
+        _beta: &[f32],
+        _slope: f32,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_rife_scale(_x: &GpuTensor, _scale: f32) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_rife_fill(_rows: usize, _cols: usize, _value: f32) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_rife_merge_rgb8(
+        _warped0: &GpuTensor,
+        _warped1: &GpuTensor,
+        _mask: &GpuTensor,
+        _padded_width: usize,
+        _padded_height: usize,
+        _width: usize,
+        _height: usize,
+    ) -> Result<Vec<u8>, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn gpu_realesrgan_conv3x3_f16(
         _input: &GpuTensor,
