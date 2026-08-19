@@ -1331,6 +1331,7 @@ script_mod! {
                         md_motion_row := DropField{ visible: false FieldCaption{ text: "Motion model" } md_motion := FieldDrop{} }
                         md_edit_row := DropField{ visible: false FieldCaption{ text: "Edit model" } md_edit := FieldDrop{} }
                         md_upscale_row := DropField{ visible: false FieldCaption{ text: "Upscale model" } md_upscale := FieldDrop{} }
+                        md_control_row := DropField{ visible: false FieldCaption{ text: "Control model" } md_control := FieldDrop{} }
                         DropField{
                             FieldCaption{ text: "Box" }
                             box_drop := FieldDrop{}
@@ -3752,6 +3753,7 @@ impl App {
             "motion" => self.ui.drop_down2(cx, ids!(md_motion)),
             "edit" => self.ui.drop_down2(cx, ids!(md_edit)),
             "upscale" => self.ui.drop_down2(cx, ids!(md_upscale)),
+            "control" => self.ui.drop_down2(cx, ids!(md_control)),
             _ => return None,
         };
         let index = drop.selected_item().checked_sub(1)?;
@@ -3881,6 +3883,9 @@ impl App {
         );
         self.refresh_one_stage_model(
             cx, "upscale", ids!(md_upscale_row), ids!(md_upscale), active("upscale"), apply_preset_pin, pin_for("upscale"),
+        );
+        self.refresh_one_stage_model(
+            cx, "control", ids!(md_control_row), ids!(md_control), active("control"), apply_preset_pin, pin_for("control"),
         );
         self.ui
             .widget(cx, ids!(speech_params_row))
