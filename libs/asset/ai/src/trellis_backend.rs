@@ -160,11 +160,8 @@ pub fn alpha_is_segmented(rgba: &[u8]) -> bool {
 /// The second check catches a sheet split across several components.  A normal
 /// foot sole can touch the minimum Y plane, but it neither consumes 12% of all
 /// faces nor spans 80% of both other reconstruction axes.
-/// Stable marker propagated through the HTTP job error. The UI uses this to
-/// distinguish a retryable sampled-geometry rejection from transport/model
-/// failures without matching human diagnostic prose.
-pub const TRELLIS_GEOMETRY_QUALITY_MARKER: &str = "trellis-geometry-quality:";
-
+/// Advisory only: the reconstruction is logged against these heuristics but
+/// never rejected. Whatever TRELLIS produced is what the user gets.
 pub fn check_trellis_mesh_quality(
     positions: &[[f32; 3]],
     indices: &[u32],
@@ -668,15 +665,10 @@ impl ContentBackend for TrellisBackend {
     }
 
     fn resident_is_healthy_after_error(&self, error: &AssetAiError) -> bool {
-        // Geometry-quality rejection happens after a complete native forward
-        // and deterministic remesh audit. It does not corrupt weights or the
-        // CUDA cache, and the character pipeline is expected to retry another
-        // seed. Treat it like parameter validation so `/models` remains
-        // ready/loaded; ordinary backend/CUDA errors stay conservative.
+        // Parameter validation and cancellation happen without touching the
+        // weights or the CUDA cache, so `/models` stays ready/loaded;
+        // ordinary backend/CUDA errors stay conservative.
         matches!(error, AssetAiError::Cancelled | AssetAiError::Params(_))
-            || error
-                .to_string()
-                .contains(TRELLIS_GEOMETRY_QUALITY_MARKER)
     }
 
     fn generate(
@@ -801,6 +793,10 @@ mod trellis_gen {
     /// The registry files this backend loads (tex flow + tex decoder only
     /// when the job asks for texture — the service default).
     struct Paths {
+        /// `<cache_dir>/trellis`: where the last pre-unwrap mesh is kept so a
+        /// hung or ugly unwrap can be replayed offline (single overwritten
+        /// file, a few MB).
+        scratch: PathBuf,
         ss_flow: PathBuf,
         lr_flow: PathBuf,
         hr_flow: PathBuf,
@@ -870,6 +866,7 @@ mod trellis_gen {
         pub fn ensure_loaded(&mut self, ctx: &mut BackendCtx) -> Result<(), AssetAiError> {
             ctx.ensure_files()?;
             self.paths = Some(Paths {
+                scratch: ctx.cache_dir.join("trellis"),
                 ss_flow: ctx.path_by_role("ss-flow")?,
                 lr_flow: ctx.path_by_role("shape-flow-512")?,
                 hr_flow: ctx.path_by_role("shape-flow-1024")?,
@@ -1398,13 +1395,15 @@ mod trellis_gen {
                 !cancel.is_cancelled()
             });
             cancel.check()?;
-            coarse.emit("quality gate", 0.964);
-            super::check_trellis_mesh_quality(&dp, &di).map_err(|detail| {
-                AssetAiError::Params(format!(
-                    "trellis: {} {detail}",
-                    super::TRELLIS_GEOMETRY_QUALITY_MARKER
-                ))
-            })?;
+            // The geometry heuristics (planar sheets, boundary occupancy,
+            // floor components) stay as a logged AUDIT, not a gate: the user
+            // gets whatever TRELLIS reconstructed. Rejecting + reseeding
+            // never produced a better mesh in practice, and busts / figurines
+            // / anything with a flat cut were refused outright.
+            coarse.emit("quality audit", 0.964);
+            if let Err(detail) = super::check_trellis_mesh_quality(&dp, &di) {
+                eprintln!("trellis geometry audit (advisory): {detail}");
+            }
             coarse.emit("orient faces", 0.965);
             let before_orient = makepad_remesh::audit_mesh_topology(&dp, &di);
             let reoriented = makepad_remesh::unify_face_orientations(&dp, &mut di);
@@ -1417,6 +1416,22 @@ mod trellis_gen {
                 before_orient.inconsistent_edges,
                 after_orient.inconsistent_edges,
                 reoriented,
+            );
+
+            // Keep the exact xatlas input on disk: the unwrap is the one
+            // stage that has hung in production, and the mesh is otherwise
+            // unrecoverable (it only exists in this stack frame).
+            dump_pre_unwrap_mesh(&paths.scratch, &dp, &di);
+            // xatlas on a decimation-mangled mesh can take arbitrarily long
+            // (chart merge is quadratic in chart count). Past this budget the
+            // unwrap is abandoned and the projection fallbacks bake instead,
+            // so the user always gets a textured mesh.
+            let unwrap_started = Instant::now();
+            let unwrap_budget = Duration::from_secs(
+                std::env::var("MAKEPAD_TRELLIS_UNWRAP_BUDGET_S")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(150),
             );
 
             let glb = match &voxel_pbr {
@@ -1453,12 +1468,19 @@ mod trellis_gen {
                             };
                             coarse.emit(label, lo + span * frac);
                             !cancel.is_cancelled()
+                                && (stage != "unwrap" || unwrap_started.elapsed() < unwrap_budget)
                         },
                     );
                     if cancel.is_cancelled() {
                         return Err(AssetAiError::Cancelled);
                     }
                     if !baked.ok() {
+                        eprintln!(
+                            "trellis: xatlas unwrap abandoned after {:.1}s (budget {}s) - chart projection fallback",
+                            unwrap_started.elapsed().as_secs_f64(),
+                            unwrap_budget.as_secs()
+                        );
+                        coarse.emit("unwrap (chart projection)", 0.973);
                         baked = makepad_remesh::uv_chart_bake(
                             &dp,
                             &di,
@@ -1529,7 +1551,7 @@ mod trellis_gen {
                     coarse.emit("unwrap (xatlas)", 0.967);
                     match makepad_remesh::uv_xatlas_unwrap_ctl(&dp, &di, &mut |frac| {
                         coarse.emit("unwrap (xatlas)", 0.967 + 0.012 * frac.clamp(0.0, 1.0));
-                        !cancel.is_cancelled()
+                        !cancel.is_cancelled() && unwrap_started.elapsed() < unwrap_budget
                     }) {
                         Ok((pos, uvs, idx, src)) => {
                             let pre_normals = makepad_gltf::compute_vertex_normals(&dp, &di);
@@ -1547,6 +1569,12 @@ mod trellis_gen {
                             )
                         }
                         Err(_) => {
+                            cancel.check()?;
+                            eprintln!(
+                                "trellis: xatlas unwrap abandoned after {:.1}s (budget {}s) - exporting without UVs",
+                                unwrap_started.elapsed().as_secs_f64(),
+                                unwrap_budget.as_secs()
+                            );
                             let exported_positions: Vec<[f32; 3]> =
                                 dp.iter().copied().map(t2_yup).collect();
                             makepad_gltf::write_glb_mesh(&exported_positions, &di)
@@ -1555,6 +1583,23 @@ mod trellis_gen {
                 }
             };
             Ok(glb)
+        }
+    }
+
+    /// Best effort: `<scratch>/pre_unwrap.glb` (positions + indices in the
+    /// TRELLIS frame). Failure only logs — this must never fail a job.
+    fn dump_pre_unwrap_mesh(scratch: &std::path::Path, positions: &[[f32; 3]], indices: &[u32]) {
+        let path = scratch.join("pre_unwrap.glb");
+        let result = std::fs::create_dir_all(scratch)
+            .and_then(|_| std::fs::write(&path, makepad_gltf::write_glb_mesh(positions, indices)));
+        match result {
+            Ok(()) => eprintln!(
+                "trellis: pre-unwrap mesh saved to {} (V={} F={})",
+                path.display(),
+                positions.len(),
+                indices.len() / 3
+            ),
+            Err(err) => eprintln!("trellis: pre-unwrap mesh dump failed: {err}"),
         }
     }
 }
@@ -2018,15 +2063,13 @@ mod tests {
     }
 
     #[test]
-    fn geometry_quality_rejection_keeps_resident_backend_healthy() {
+    fn params_and_cancel_errors_keep_resident_backend_healthy() {
         let backend = TrellisBackend::with_stub(
             "trellis-2",
             Box::new(|_: &MeshJob, _p: ProgressSink| unreachable!()),
         );
-        let quality = AssetAiError::Params(format!(
-            "trellis: {TRELLIS_GEOMETRY_QUALITY_MARKER} planar sheet"
-        ));
-        assert!(backend.resident_is_healthy_after_error(&quality));
+        let params = AssetAiError::Params("trellis: needs an input image".to_string());
+        assert!(backend.resident_is_healthy_after_error(&params));
         assert!(backend.resident_is_healthy_after_error(&AssetAiError::Cancelled));
         assert!(!backend.resident_is_healthy_after_error(&AssetAiError::Backend(
             "trellis: CUDA kernel launch failed".to_string()

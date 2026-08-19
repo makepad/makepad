@@ -1178,6 +1178,8 @@ impl ChartGroup {
         self.face_to_source_face_map = faces;
     }
 
+    /// `progress(frac)`: segmentation 0.0..0.6, per-chart parameterization
+    /// 0.6..1.0. Returning `false` aborts and yields `false` here.
     pub fn compute_charts(
         &mut self,
         options: &ChartOptions,
@@ -1185,11 +1187,14 @@ impl ChartGroup {
         boundary_grid: &mut UniformGrid2,
         chart_buffers: &mut ChartCtorBuffers,
         piecewise: &mut PiecewiseParam,
-    ) {
+        progress: &mut dyn FnMut(f64) -> bool,
+    ) -> bool {
         self.charts.clear();
         let mesh = self.create_mesh();
         atlas.reset(&mesh, options);
-        atlas.compute();
+        if !atlas.compute(&mut |frac| progress(0.6 * frac)) {
+            return false;
+        }
         let face_count = mesh.face_count();
         let chart_count = atlas.chart_count();
         let mut chart_faces = Vec::new();
@@ -1208,6 +1213,9 @@ impl ChartGroup {
         let mut results: Vec<(Chart, Vec<Chart>)> = Vec::new();
         offset = 0;
         for i in 0..chart_count {
+            if i % 32 == 0 && !progress(0.6 + 0.4 * i as f64 / chart_count.max(1) as f64) {
+                return false;
+            }
             let basis = atlas.chart_basis(i);
             let gen = atlas.chart_generator_type(i);
             let nfaces = chart_faces[offset];
@@ -1242,6 +1250,7 @@ impl ChartGroup {
                 self.charts.push(chart);
             }
         }
+        progress(1.0)
     }
 
     fn create_mesh(&self) -> Mesh {
@@ -1328,17 +1337,18 @@ impl ParamAtlas {
     }
 
     pub fn compute_charts(&mut self, options: &ChartOptions) -> bool {
-        self.compute_charts_with_progress(options, &mut |_, _| true)
+        self.compute_charts_with_progress(options, &mut |_| true)
     }
 
-    /// Same as [`Self::compute_charts`]; `progress(done_groups, total_groups)`
-    /// is called before each chart group (the expensive per-group
-    /// parameterization). Returning false abandons the remaining groups and
-    /// returns false.
+    /// Same as [`Self::compute_charts`]; `progress(frac)` in [0, 1] advances
+    /// through the chart groups AND inside each group's segmentation and
+    /// parameterization (a closed mesh is a single group, so per-group ticks
+    /// alone would sit still for the whole run). Returning false abandons
+    /// the remaining work and returns false.
     pub fn compute_charts_with_progress(
         &mut self,
         options: &ChartOptions,
-        progress: &mut dyn FnMut(usize, usize) -> bool,
+        progress: &mut dyn FnMut(f64) -> bool,
     ) -> bool {
         self.charts_computed = false;
         let mesh_count = self.meshes.len();
@@ -1383,18 +1393,26 @@ impl ParamAtlas {
             rs.sort(&mut sort_data);
             let granks: Vec<u32> = rs.ranks().to_vec();
             let n = groups.len();
+            // Weight groups by face count: the largest group (first) is
+            // where the time goes on a closed mesh.
+            let total_faces: f64 = groups.iter().map(|g| g.face_count() as f64).sum::<f64>().max(1.0);
+            let mut done_faces = 0.0f64;
             for kk in 0..n {
-                if !progress(kk, n) {
-                    return false;
-                }
                 let gi = granks[n - 1 - kk] as usize;
-                groups[gi].compute_charts(
+                let group_faces = groups[gi].face_count() as f64;
+                let base = done_faces / total_faces;
+                let span = group_faces / total_faces;
+                if !groups[gi].compute_charts(
                     options,
                     &mut atlas,
                     &mut boundary_grid,
                     &mut chart_buffers,
                     &mut piecewise,
-                );
+                    &mut |frac| progress(base + span * frac),
+                ) {
+                    return false;
+                }
+                done_faces += group_faces;
             }
             self.mesh_chart_groups[i] = groups;
         }

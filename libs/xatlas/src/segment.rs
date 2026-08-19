@@ -503,7 +503,9 @@ impl ClusteredCharts {
         self.charts[i as usize].as_ref().unwrap().basis
     }
 
-    fn compute(&mut self) {
+    /// `progress(frac)` in [0, 1] over the segmentation of this group;
+    /// returning `false` aborts (the caller treats that as cancellation).
+    fn compute(&mut self, progress: &mut dyn FnMut(f64) -> bool) -> bool {
         let face_count = self.data().mesh().face_count();
         self.faces_left = 0;
         for i in 0..face_count {
@@ -515,21 +517,39 @@ impl ClusteredCharts {
         self.face_charts = vec![-1; face_count as usize];
         self.texcoords = vec![Vec2::splat(0.0); (face_count * 3) as usize];
         if self.faces_left == 0 {
-            return;
+            return true;
         }
+        let total = self.faces_left as f64;
         let max_cost = self.data().options.max_cost;
         let max_iterations = self.data().options.max_iterations;
-        self.place_seeds(max_cost * 0.5);
+        // Seeding claims every face once: 0.00..0.35.
+        if !self.place_seeds(max_cost * 0.5, &mut |left| {
+            progress(0.35 * (1.0 - left as f64 / total))
+        }) {
+            return false;
+        }
         if max_iterations == 0 {
-            return;
+            return progress(1.0);
         }
         self.relocate_seeds();
         self.reset_charts();
         let mut iteration = 0u32;
         loop {
-            self.grow_charts(max_cost);
-            self.fill_holes(max_cost * 0.5);
-            self.merge_charts();
+            // Growth re-claims every face: 0.35..0.75, holes 0.75..0.80,
+            // merge passes 0.80..1.00.
+            if !self.grow_charts(max_cost, &mut |left| {
+                progress(0.35 + 0.40 * (1.0 - left as f64 / total))
+            }) {
+                return false;
+            }
+            if !self.fill_holes(max_cost * 0.5, &mut |left| {
+                progress(0.75 + 0.05 * (1.0 - left as f64 / total))
+            }) {
+                return false;
+            }
+            if !self.merge_charts(&mut |frac| progress(0.80 + 0.20 * frac)) {
+                return false;
+            }
             iteration += 1;
             if iteration == max_iterations {
                 break;
@@ -539,20 +559,50 @@ impl ClusteredCharts {
             }
             self.reset_charts();
         }
+        progress(1.0)
     }
 
-    fn place_seeds(&mut self, threshold: f32) {
+    /// Every remaining face is claimed by exactly one new chart per call, so
+    /// `faces_left` strictly decreases; a call that claims nothing means the
+    /// seed scan found no unclaimed face with area (should be impossible) and
+    /// is treated as done rather than spun on.
+    fn place_seeds(&mut self, threshold: f32, progress: &mut dyn FnMut(u32) -> bool) -> bool {
         self.placing_seeds = true;
-        while self.faces_left > 0 {
-            self.create_chart(threshold);
-        }
+        let ok = self.claim_all_faces(threshold, progress);
         self.placing_seeds = false;
+        ok
     }
 
-    fn grow_charts(&mut self, threshold: f32) {
+    fn claim_all_faces(&mut self, threshold: f32, progress: &mut dyn FnMut(u32) -> bool) -> bool {
+        let mut since_report = 0u32;
+        while self.faces_left > 0 {
+            let before = self.faces_left;
+            if !self.create_chart(threshold) {
+                break;
+            }
+            since_report += before - self.faces_left;
+            if since_report >= 256 {
+                since_report = 0;
+                if !progress(self.faces_left) {
+                    return false;
+                }
+            }
+        }
+        progress(self.faces_left)
+    }
+
+    fn grow_charts(&mut self, threshold: f32, progress: &mut dyn FnMut(u32) -> bool) -> bool {
+        let mut since_report = 0u32;
         loop {
             if self.faces_left == 0 {
                 break;
+            }
+            since_report += 1;
+            if since_report >= 256 {
+                since_report = 0;
+                if !progress(self.faces_left) {
+                    return false;
+                }
             }
             let mut best_face = UINT32_MAX;
             let mut best_chart = UINT32_MAX;
@@ -602,6 +652,7 @@ impl ClusteredCharts {
                     .push(region);
             }
         }
+        progress(self.faces_left)
     }
 
     fn reset_charts(&mut self) {
@@ -648,15 +699,20 @@ impl ClusteredCharts {
         any
     }
 
-    fn fill_holes(&mut self, threshold: f32) {
-        while self.faces_left > 0 {
-            self.create_chart(threshold);
-        }
+    fn fill_holes(&mut self, threshold: f32, progress: &mut dyn FnMut(u32) -> bool) -> bool {
+        self.claim_all_faces(threshold, progress)
     }
 
-    fn merge_charts(&mut self) {
+    /// `progress(frac)`: fraction of the original charts merged away so far
+    /// (each pass removes exactly one chart, so passes are bounded by the
+    /// chart count).
+    fn merge_charts(&mut self, progress: &mut dyn FnMut(f64) -> bool) -> bool {
         let chart_count = self.charts.len();
+        let mut merges = 0usize;
         loop {
+            if merges % 16 == 0 && !progress(merges as f64 / chart_count.max(1) as f64) {
+                return false;
+            }
             let mut merged = false;
             for c in (0..chart_count as i32).rev() {
                 if self.charts[c as usize].is_none() {
@@ -751,6 +807,7 @@ impl ClusteredCharts {
                     if self.merge_chart(c as u32, cc as u32, self.shared_boundary_lengths_no_seams[cc as usize])
                     {
                         merged = true;
+                        merges += 1;
                         break;
                     }
                 }
@@ -776,14 +833,15 @@ impl ClusteredCharts {
                 c += 1;
             }
         }
+        progress(1.0)
     }
 
-    fn create_chart(&mut self, threshold: f32) {
+    fn create_chart(&mut self, threshold: f32) -> bool {
         let id = self.charts.len() as i32;
         let mut chart = ClusteredChart::new();
         chart.id = id;
-        let mut seed = 0u32;
-        let mut largest_area = 0.0f32;
+        let mut seed = UINT32_MAX;
+        let mut largest_area = -1.0f32;
         let face_count = self.data().mesh().face_count();
         for f in 0..face_count {
             if self.data().is_face_in_chart.get(f) {
@@ -794,6 +852,11 @@ impl ClusteredCharts {
                 largest_area = area;
                 seed = f;
             }
+        }
+        if seed == UINT32_MAX {
+            // Nothing left to claim (faces_left is stale): don't seed a chart
+            // on an already-claimed face, which would double-count it.
+            return false;
         }
         chart.seed = seed;
         self.charts.push(Some(Box::new(chart)));
@@ -818,6 +881,7 @@ impl ClusteredCharts {
                     .push(region);
             }
         }
+        true
     }
 
     fn is_chart_boundary_edge(&self, chart_id: i32, edge: u32) -> bool {
@@ -958,7 +1022,7 @@ impl ClusteredCharts {
         for i in old_face_count..face_count {
             let f = self.charts[chart_i as usize].as_ref().unwrap().faces[i];
             self.face_charts[f as usize] = id;
-            self.faces_left -= 1;
+            self.faces_left = self.faces_left.saturating_sub(1);
             self.data_mut().is_face_in_chart.set(f);
             let center = self.data().mesh().compute_face_center(f);
             self.charts[chart_i as usize].as_mut().unwrap().centroid_sum += center;
@@ -1409,13 +1473,15 @@ impl Atlas {
         self.rewire();
     }
 
-    pub fn compute(&mut self) {
+    /// `progress(frac)` covers the clustered segmentation; returning `false`
+    /// aborts and makes this return `false`.
+    pub fn compute(&mut self, progress: &mut dyn FnMut(f64) -> bool) -> bool {
         self.rewire();
         if self.data.options.use_input_mesh_uvs {
             self.original_uv.compute();
         }
         self.planar.compute();
         self.rewire();
-        self.clustered.compute();
+        self.clustered.compute(progress)
     }
 }
