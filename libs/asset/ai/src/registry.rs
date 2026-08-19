@@ -44,7 +44,23 @@ pub struct RegistryModelJson {
     /// Blackwell-only NVFP4 checkpoints).
     pub min_compute_cap: Option<f64>,
     pub note: Option<String>,
+    /// Weight-license record the UI must show before this model is cleared
+    /// for download or generation. Optional on the wire so a cache-dir
+    /// override registry from an older box still parses; the embedded
+    /// registry requires it (see tests).
+    pub license: Option<ModelLicenseJson>,
     pub files: Vec<RegistryEntryFileJson>,
+}
+
+/// Registry JSON shape of a model-weight license. `restriction` is one of
+/// `none` (permissive), `non-commercial`, `community`, `restricted`.
+#[derive(Clone, Debug, SerJson, DeJson, PartialEq, Eq)]
+pub struct ModelLicenseJson {
+    pub name: String,
+    pub url: String,
+    pub summary: String,
+    pub restriction: String,
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]
@@ -298,7 +314,64 @@ pub struct ModelSpec {
     pub min_vram_gb: Option<f64>,
     pub min_compute_cap: Option<f64>,
     pub note: Option<String>,
+    pub license: Option<ModelLicense>,
     pub files: Vec<FileSpec>,
+}
+
+/// Validated weight-license identity. The UI keys acknowledgements on
+/// `(model id, license.identity())` so a license-text change forces a
+/// fresh ack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelLicense {
+    pub name: String,
+    pub url: String,
+    pub summary: String,
+    pub restriction: LicenseRestriction,
+    pub sha256: Option<String>,
+}
+
+impl ModelLicense {
+    /// Stable identity of the *text* the user accepted: sha256 when pinned,
+    /// otherwise the canonical URL.
+    pub fn identity(&self) -> String {
+        self.sha256
+            .clone()
+            .unwrap_or_else(|| self.url.clone())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LicenseRestriction {
+    /// Apache / MIT / BSD and similar permissive weight licenses.
+    None,
+    NonCommercial,
+    Community,
+    Restricted,
+}
+
+impl LicenseRestriction {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "none" => Some(Self::None),
+            "non-commercial" => Some(Self::NonCommercial),
+            "community" => Some(Self::Community),
+            "restricted" => Some(Self::Restricted),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::NonCommercial => "non-commercial",
+            Self::Community => "community",
+            Self::Restricted => "restricted",
+        }
+    }
+
+    pub fn needs_emphasis(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 impl ModelSpec {
@@ -509,6 +582,10 @@ impl Registry {
                     }
                 }
             }
+            let license = match model.license {
+                None => None,
+                Some(license) => Some(validate_license(&model.id, license)?),
+            };
             models.push(ModelSpec {
                 id: model.id,
                 domain,
@@ -519,6 +596,7 @@ impl Registry {
                 min_vram_gb: model.min_vram_gb,
                 min_compute_cap: model.min_compute_cap,
                 note: model.note,
+                license,
                 files,
             });
         }
@@ -538,6 +616,48 @@ impl Registry {
     pub fn find(&self, id: &str) -> Option<&ModelSpec> {
         self.models.iter().find(|model| model.id == id)
     }
+}
+
+/// License record for `id` from the embedded registry. Used by the Asset UI
+/// when a live box is old enough that `GET /models` has no license fields.
+pub fn license_for_model(id: &str) -> Option<ModelLicense> {
+    Registry::embedded()
+        .ok()?
+        .find(id)
+        .and_then(|model| model.license.clone())
+}
+
+fn validate_license(model_id: &str, license: ModelLicenseJson) -> Result<ModelLicense, AssetAiError> {
+    if license.name.trim().is_empty() || license.url.trim().is_empty() || license.summary.trim().is_empty()
+    {
+        return Err(AssetAiError::Registry(format!(
+            "model {model_id}: license name, url and summary must be non-empty"
+        )));
+    }
+    if !license.url.starts_with("https://") && !license.url.starts_with("http://") {
+        return Err(AssetAiError::Registry(format!(
+            "model {model_id}: license url must be http(s), got {:?}",
+            license.url
+        )));
+    }
+    let restriction = LicenseRestriction::parse(&license.restriction).ok_or_else(|| {
+        AssetAiError::Registry(format!(
+            "model {model_id}: unknown license restriction {:?} (expected none|non-commercial|community|restricted)",
+            license.restriction
+        ))
+    })?;
+    if let Some(sha256) = &license.sha256 {
+        validate_sha256(sha256).map_err(|message| {
+            AssetAiError::Registry(format!("model {model_id}: license sha256: {message}"))
+        })?;
+    }
+    Ok(ModelLicense {
+        name: license.name,
+        url: license.url,
+        summary: license.summary,
+        restriction,
+        sha256: license.sha256.map(|s| s.to_ascii_lowercase()),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -702,6 +822,19 @@ mod tests {
         let hunyuan = registry.find("hunyuan3d-paint-2.1").unwrap();
         assert_eq!(hunyuan.domain, Domain::Paint);
         assert_eq!(hunyuan.backend, "paint");
+        let hunyuan_license = hunyuan.license.as_ref().expect("hunyuan license");
+        assert_eq!(
+            hunyuan_license.name,
+            "Tencent Hunyuan 3D 2.1 Community License Agreement"
+        );
+        assert_eq!(
+            hunyuan_license.restriction,
+            LicenseRestriction::Community
+        );
+        assert_eq!(
+            hunyuan_license.sha256.as_deref(),
+            Some("5bd08f93b2d280bb26ff3eed5d3996fe47a9698b5f7785163928668d7fd578c6")
+        );
         assert_eq!(hunyuan.files.len(), 3);
         for role in ["unet", "vae", "dino-conditioner"] {
             let file = hunyuan.file_by_role(role).unwrap();
@@ -1424,5 +1557,45 @@ mod tests {
         let entry = |role: &str, output: &str, output_sha: &str| format!(r#"{{"role":"{role}","repo":"o/r","path":"w","revision":"{revision}","cache_as":"shared/source","size":7,"sha256":"{source_sha}","conversion":{{"cache_as":"{output}","size":9,"sha256":"{output_sha}","converter_id":"c","converter_version":"1"}}}}"#);
         let json = format!(r#"{{"models":[{{"id":"x","domain":"rig","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"files":[{},{}]}}]}}"#, entry("a", "out/a", &output_a), entry("b", "out/b", &output_b));
         assert!(Registry::parse(&json).is_ok());
+    }
+
+    #[test]
+    fn embedded_registry_requires_a_license_on_every_model() {
+        let registry = Registry::embedded().unwrap();
+        assert!(registry.models.len() >= 4);
+        for model in &registry.models {
+            let license = model
+                .license
+                .as_ref()
+                .unwrap_or_else(|| panic!("model {} is missing a license record", model.id));
+            assert!(
+                !license.name.trim().is_empty(),
+                "{} empty license name",
+                model.id
+            );
+            assert!(
+                license.url.starts_with("https://") || license.url.starts_with("http://"),
+                "{} license url {}",
+                model.id,
+                license.url
+            );
+            assert!(
+                !license.summary.trim().is_empty(),
+                "{} empty license summary",
+                model.id
+            );
+        }
+        let flux_dev = license_for_model("flux1-dev").expect("flux1-dev license");
+        assert_eq!(flux_dev.restriction, LicenseRestriction::NonCommercial);
+        let schnell = license_for_model("flux1-schnell").expect("flux1-schnell license");
+        assert_eq!(schnell.restriction, LicenseRestriction::None);
+        assert!(license_for_model("no-such-model").is_none());
+    }
+
+    #[test]
+    fn unknown_license_restriction_fails_closed() {
+        let json = r#"{"models":[{"id":"x","domain":"image","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"license":{"name":"X","url":"https://example.com/l","summary":"s","restriction":"copyleft"},"files":[]}]}"#;
+        let message = Registry::parse(json).unwrap_err().to_string();
+        assert!(message.contains("unknown license restriction"), "{message}");
     }
 }

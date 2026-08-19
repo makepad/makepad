@@ -1708,6 +1708,7 @@ mod tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files,
         }
     }

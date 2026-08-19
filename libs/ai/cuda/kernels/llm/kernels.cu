@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Substantial portions derived from ggml / llama.cpp
+// (https://github.com/ggml-org/llama.cpp), MIT licensed.
+// The original copyright notice and permission notice are retained.
+// See libs/ai/NOTICE and, where present, LICENSE in this directory.
+//
 // Native CUDA kernels for llama + gen-AI graphs. Compiled once by
 // libs/ggml/build.rs from this file (not by makepad-llama).
 //

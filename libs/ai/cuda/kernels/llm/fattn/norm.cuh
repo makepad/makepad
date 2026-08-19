@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Substantial portions derived from ggml / llama.cpp
+// (https://github.com/ggml-org/llama.cpp), MIT licensed.
+// The original copyright notice and permission notice are retained.
+// See libs/ai/NOTICE and, where present, LICENSE in this directory.
+//
 #pragma once
 // Official llama.cpp ggml-cuda/norm.cu rms_norm_f32 fused with MUL (+ ADD).
 // Source: /Users/admin/llama.cpp/ggml/src/ggml-cuda/norm.cu:74-384

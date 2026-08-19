@@ -89,6 +89,14 @@ pub struct ModelInfoJson {
     /// this machine, or disabled in the registry — so schedulers and UIs
     /// report *why* instead of guessing.
     pub unavailable_reason: Option<String>,
+    /// Weight-license identity. Optional so older `/models` payloads still
+    /// parse; the Asset UI falls back to the embedded registry by model id.
+    pub license_name: Option<String>,
+    pub license_url: Option<String>,
+    pub license_summary: Option<String>,
+    /// `none` / `non-commercial` / `community` / `restricted`.
+    pub license_restriction: Option<String>,
+    pub license_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]

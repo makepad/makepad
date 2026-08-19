@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Substantial portions derived from ggml / llama.cpp
+// (https://github.com/ggml-org/llama.cpp), MIT licensed.
+// The original copyright notice and permission notice are retained.
+// See libs/ai/NOTICE and, where present, LICENSE in this directory.
+//
 #pragma once
 // Minimal llama.cpp ggml-cuda/common.cuh stand-in so fattn-mma-f16.cuh and
 // mma.cuh compile inside the llama executor. Not the shared ggml CUDA tree.

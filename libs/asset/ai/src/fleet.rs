@@ -574,6 +574,11 @@ mod tests {
             error: None,
             revision: None,
             unavailable_reason: None,
+            license_name: None,
+            license_url: None,
+            license_summary: None,
+            license_restriction: None,
+            license_sha256: None,
         }
     }
 

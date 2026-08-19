@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+// Vendored ggml-metal snapshot. See LICENSE in this directory and libs/ai/NOTICE.
+//
 #define GGML_COMMON_DECL_METAL
 #define GGML_COMMON_IMPL_METAL
 #if defined(GGML_METAL_EMBED_LIBRARY)

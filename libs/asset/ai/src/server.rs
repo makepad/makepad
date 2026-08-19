@@ -778,6 +778,11 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
                 error,
                 revision: model_revision(spec),
                 unavailable_reason,
+                license_name: spec.license.as_ref().map(|l| l.name.clone()),
+                license_url: spec.license.as_ref().map(|l| l.url.clone()),
+                license_summary: spec.license.as_ref().map(|l| l.summary.clone()),
+                license_restriction: spec.license.as_ref().map(|l| l.restriction.as_str().to_string()),
+                license_sha256: spec.license.as_ref().and_then(|l| l.sha256.clone()),
             }
         })
         .collect();
@@ -1753,6 +1758,7 @@ mod lifecycle_tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         };
         let cache = std::env::temp_dir();
@@ -1840,6 +1846,7 @@ mod lifecycle_tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         };
         let cancel = crate::backend::CancelToken::new();
@@ -1872,6 +1879,7 @@ mod lifecycle_tests {
             min_vram_gb: None,
             min_compute_cap: None,
             note: None,
+            license: None,
             files: Vec::new(),
         };
         let cancel = crate::backend::CancelToken::new();
