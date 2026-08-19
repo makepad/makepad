@@ -96,6 +96,11 @@ makepad-ai-llm = { path = "../../ai/llm", optional = true }
 makepad-ai-speech = { path = "../../ai/models/speech", optional = true }
 makepad-video = { path = "../../../platform/video", optional = true }
 
+[dev-dependencies]
+# Test-only: tests/service_e2e.rs drives the realtime websocket endpoint
+# through the in-repo plain-TCP websocket client.
+makepad-live-id = { path = "../../live_id" }
+
 [[bin]]
 name = "makepad-asset-ai"
 path = "src/main.rs"

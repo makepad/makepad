@@ -351,6 +351,12 @@ pub struct GenerateResponseJson {
 
 pub const JOB_STATE_QUEUED: &str = "queued";
 pub const JOB_STATE_RUNNING: &str = "running";
+/// A live/realtime session (`POST /realtime`) that has started: the worker
+/// owns it (one GPU = one job) and loops `live_step` until stopped. See
+/// `LiveStatusJson` for the counters surfaced alongside `stage` while in
+/// this state, and the "Realtime session wire protocol" doc block below for
+/// the websocket contract.
+pub const JOB_STATE_LIVE: &str = "live";
 pub const JOB_STATE_DONE: &str = "done";
 pub const JOB_STATE_ERROR: &str = "error";
 /// Cancelled via POST /job/<id>/cancel — either while still queued or
@@ -401,6 +407,130 @@ pub struct JobStatusJson {
     /// instead of fetching the text artifact. Absent on image/audio/mesh
     /// jobs and on services that have not implemented the chat contract.
     pub partial_text: Option<String>,
+    /// Present exactly while `state == "live"`: live-session frame counters,
+    /// updated at up to 10 Hz by the worker (the same rate the `stats`
+    /// websocket message uses for the per-frame timing detail this doesn't
+    /// carry).
+    pub live: Option<LiveStatusJson>,
+}
+
+/// Live-session counters mirrored on `GET /job/<id>` (see
+/// `JobStatusJson::live`) — a poller that never opens the websocket still
+/// sees the session is alive and roughly how fast it is running.
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct LiveStatusJson {
+    pub frames_in: u64,
+    pub frames_out: u64,
+    pub fps: f64,
+}
+
+// ---------------------------------------------------------------------------
+// POST /realtime, GET /realtime/<id> (websocket) — the live session
+// ---------------------------------------------------------------------------
+//
+// `POST /realtime` admits a live session exactly like `POST /generate`
+// admits an ordinary job (same FIFO / `queue_policy=reject` gate in
+// `jobs::JobStore`): a live session occupies the box's single GPU worker
+// slot until it stops, and every other submitted job stays queued behind it
+// — that is intended, the box is dedicated to the live feed while one runs.
+// A model whose backend does not implement `ContentBackend::live_step`
+// (`backend::backend_live_supported` returns false) is refused with 400
+// before a job is even created.
+//
+// On success the response carries `ws_path`; the client then opens a
+// websocket to that path (the in-repo `HttpServer` upgrades any GET whose
+// headers carry `Sec-WebSocket-Key`, matched on `path` in server.rs). Any
+// number of sockets may be connected to the same session at once — all of
+// them receive every output frame and stats message, and any of them may
+// send control updates or input frames. A dead/full socket is dropped
+// (never blocks the frame loop); see `realtime::RealtimeSession`.
+//
+// Binary frames (both directions) share one 16-byte little-endian header
+// (see `realtime_wire::FrameHeader` / `FRAME_MAGIC`):
+//   [ magic:u32 = 0x4C465246 ("FRFL")
+//   , kind:u8   (0 = raw RGB8, 1 = PNG)
+//   , reserved:u8
+//   , reserved:u16
+//   , width:u16
+//   , height:u16
+//   , frame_index:u32
+//   ] ++ payload
+// Client -> server: an input frame (`frame_index` is the client's own input
+// counter; not otherwise interpreted). Raw RGB8 is the fast path. The
+// session keeps only the LATEST unconsumed input frame — a newer frame
+// replaces an older one that has not yet been consumed and `dropped`
+// increments (see the `stats` message).
+// Server -> client: an output frame; `kind` follows the session's
+// `output_encoding` (raw by default; `{"type":"control","output_encoding":
+// "png"}` switches it). `frame_index` is the session's output counter.
+//
+// Text (JSON) frames, client -> server:
+//   {"type":"control", ...any subset of: prompt, negative_prompt, strength,
+//    steps, guidance, seed, seed_mode, width, height, camera:{dolly,pan_x,
+//    pan_y,roll}, loop_mode, output_encoding, max_fps, idle_timeout_s}
+//   {"type":"reference", "slot":0, "png_b64":"..."}
+//   {"type":"stop"}
+// A `control` message only touches the fields it sets (see
+// `realtime::apply_control_to_config`) — every other tunable keeps its
+// current value.
+//
+// JSON messages, server -> client:
+//   {"type":"stats", "frame_index":N, "fps":.., "frame_ms":..,
+//    "stage_ms":{"prep":..,"model":..,"post":..}, "frames_in":..,
+//    "frames_out":.., "dropped":..}      (sent every produced frame)
+//   {"type":"error", "message":".."}
+//   {"type":"stopped", "reason":"stopped"|"cancelled"|"error"}  (once, as
+//    the session ends; sockets are then closed from the server side)
+//
+// IMPORTANT TRANSPORT NOTE: the in-repo `HttpServer`'s websocket write
+// thread (platform/network/src/http_server.rs, `handle_web_socket`) always
+// frames server -> client pushes with the WebSocket **Binary** opcode —
+// there is no server -> client Text-frame path in this transport. So,
+// although the messages above are JSON text, they physically arrive as
+// Binary websocket frames, indistinguishable BY OPCODE from a pushed output
+// frame. Every server -> client push is therefore self-describing instead:
+// if the first 4 bytes equal `FRAME_MAGIC` it is a binary frame per the
+// layout above; otherwise the whole payload is UTF-8 JSON. Clients MUST
+// dispatch on this signature, not the WS opcode (`realtime_wire::
+// is_frame_message`). Client -> server text messages are NOT affected —
+// the server's read path parses the client's real WS opcode, so JS/browser
+// `ws.send(jsonString)` (Text) vs `ws.send(arrayBuffer)` (Binary) both
+// arrive correctly split as `HttpServerRequest::TextMessage` /
+// `BinaryMessage`.
+
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct RealtimeRequestJson {
+    pub model: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub prompt: Option<String>,
+    pub negative_prompt: Option<String>,
+    pub strength: Option<f64>,
+    pub steps: Option<u32>,
+    pub guidance: Option<f64>,
+    pub seed: Option<u64>,
+    /// "fixed" (default) | "increment" | "random".
+    pub seed_mode: Option<String>,
+    /// 0 (default) = as fast as possible.
+    pub max_fps: Option<f64>,
+    /// "feed" (default): wait for client-pushed input frames. "feedback":
+    /// the session's own previous output (camera-warped) is the next init.
+    pub loop_mode: Option<String>,
+    /// "raw" (default) | "png" — output frame payload format.
+    pub output_encoding: Option<String>,
+    /// Session ends after this many seconds with zero connected sockets.
+    /// Default 30; 0 = never.
+    pub idle_timeout_s: Option<u64>,
+    /// Same admission policy as `/generate`: "queue" (default) or "reject".
+    pub queue_policy: Option<String>,
+}
+
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct RealtimeResponseJson {
+    pub job_id: Option<String>,
+    /// Present on success: `GET`-upgrade this path to a websocket.
+    pub ws_path: Option<String>,
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

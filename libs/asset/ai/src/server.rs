@@ -3,13 +3,15 @@
 //! plus the single worker thread that executes jobs (one GPU = one job).
 
 use crate::backend::{
-    create_backend, model_availability, BackendCtx, ContentBackend, GenerateParams,
+    backend_live_supported, create_backend, model_availability, BackendCtx, ContentBackend,
+    GenerateParams, LiveParams,
 };
 use crate::download::{DownloadProgress, Downloader};
 use crate::error::AssetAiError;
 use crate::gpu::GpuCache;
-use crate::jobs::{QueuePolicy, SharedJobs};
+use crate::jobs::{JobParams, QueuePolicy, SharedJobs};
 use crate::protocol::*;
+use crate::realtime::RealtimeSession;
 use crate::registry::{ModelSpec, Registry};
 use crate::residency::{self, ResidencyConfig};
 use makepad_micro_serde::{DeJson, SerJson};
@@ -192,6 +194,17 @@ pub struct ServiceShared {
     /// Peer-assisted model distribution state: transfer secret, serve
     /// bounds, in-flight serve leases, operator-injected sources.
     pub peer: crate::peer_serve::PeerRuntime,
+    /// Live/realtime sessions currently running, keyed by job id. Reachable
+    /// from both the worker thread (`server::execute_live_job`, which
+    /// inserts/removes) and `route_loop` (which feeds it websocket traffic).
+    /// At most one entry in practice — one GPU = one job — but keyed by job
+    /// id rather than a single `Option` so a session mid-teardown never
+    /// collides with a new one for a different job id.
+    pub realtime_sessions: Mutex<HashMap<String, Arc<RealtimeSession>>>,
+    /// `web_socket_id -> job_id`, populated on `ConnectWebSocket` so a later
+    /// `BinaryMessage`/`TextMessage`/`DisconnectWebSocket` (which only carry
+    /// the socket id) can find the right session.
+    pub ws_sessions: Mutex<HashMap<u64, String>>,
 }
 
 pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
@@ -274,6 +287,8 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         last_used: Mutex::new(HashMap::new()),
         fleet: crate::discovery::normalize_fleet(&config.fleet),
         peer,
+        realtime_sessions: Mutex::new(HashMap::new()),
+        ws_sessions: Mutex::new(HashMap::new()),
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
     // fleet-file edit. Frontends keep only beacons whose fleet matches.
@@ -368,26 +383,73 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 let out = route_post(&shared, &headers.path, &body);
                 let _ = response.send(out);
             }
-            // No websocket endpoints on this service: sending the empty
-            // sentinel makes the connection close down cleanly.
+            // The only websocket endpoint is a live session's own path,
+            // `/realtime/<job_id>` (see `route_post`'s `POST /realtime` and
+            // `protocol.rs`'s wire doc block). Anything else — including a
+            // request for a session that already finished — closes cleanly
+            // via the empty-payload sentinel.
             HttpServerRequest::ConnectWebSocket {
-                response_sender, ..
+                web_socket_id,
+                headers,
+                response_sender,
             } => {
-                let _ = response_sender.send(Vec::new());
+                let session = headers
+                    .path
+                    .strip_prefix("/realtime/")
+                    .and_then(|job_id| shared.realtime_sessions.lock().unwrap().get(job_id).cloned());
+                match session {
+                    Some(session) => {
+                        session.add_socket(web_socket_id, response_sender);
+                        shared
+                            .ws_sessions
+                            .lock()
+                            .unwrap()
+                            .insert(web_socket_id, session.job_id.clone());
+                    }
+                    None => {
+                        let _ = response_sender.send(Vec::new());
+                    }
+                }
             }
             HttpServerRequest::BinaryMessage {
-                response_sender, ..
+                web_socket_id,
+                response_sender,
+                data,
             } => {
-                let _ = response_sender.send(Vec::new());
+                if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
+                    if let Err(e) = session.handle_binary(&data) {
+                        let _ = response_sender
+                            .send(crate::realtime_wire::encode_error_message(&e.to_string()).into_bytes());
+                    }
+                }
             }
             HttpServerRequest::TextMessage {
-                response_sender, ..
+                web_socket_id,
+                response_sender,
+                string,
             } => {
-                let _ = response_sender.send(Vec::new());
+                if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
+                    if let Err(e) = session.handle_text(&string) {
+                        let _ = response_sender
+                            .send(crate::realtime_wire::encode_error_message(&e.to_string()).into_bytes());
+                    }
+                }
             }
-            HttpServerRequest::DisconnectWebSocket { .. } => {}
+            HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                if let Some(job_id) = shared.ws_sessions.lock().unwrap().remove(&web_socket_id) {
+                    if let Some(session) = shared.realtime_sessions.lock().unwrap().get(&job_id).cloned() {
+                        session.remove_socket(web_socket_id);
+                    }
+                }
+            }
         }
     }
+}
+
+/// Looks up the live session a connected websocket belongs to.
+fn realtime_session_for_socket(shared: &Arc<ServiceShared>, web_socket_id: u64) -> Option<Arc<RealtimeSession>> {
+    let job_id = shared.ws_sessions.lock().unwrap().get(&web_socket_id).cloned()?;
+    shared.realtime_sessions.lock().unwrap().get(&job_id).cloned()
 }
 
 fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
@@ -447,7 +509,20 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         .and_then(|rest| rest.strip_suffix("/cancel"))
     {
         use crate::jobs::CancelOutcome;
-        return match shared.jobs.with(|store| store.cancel(job_id)) {
+        let outcome = shared.jobs.with(|store| store.cancel(job_id));
+        if outcome == CancelOutcome::Cancelled {
+            // A queued (not yet running) job was dropped outright — if it
+            // was a live session, its `RealtimeSession` was created back at
+            // `POST /realtime` time and no worker thread ever ran
+            // `execute_live_job` to tear it down. Do that here instead: any
+            // socket a client opened while the session sat queued still
+            // gets its `stopped` notice and a clean close.
+            if let Some(session) = shared.realtime_sessions.lock().unwrap().remove(job_id) {
+                session.push_bytes(crate::realtime_wire::encode_stopped_message("cancelled").into_bytes());
+                session.close_all_sockets();
+            }
+        }
+        return match outcome {
             CancelOutcome::Cancelled | CancelOutcome::Cancelling => {
                 match shared.jobs.with(|store| store.status_json(job_id)) {
                     Some(status) => ok_json(status.serialize_json()),
@@ -459,6 +534,9 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
             }
             CancelOutcome::Unknown => error_json(404, format!("no such job: {job_id}")),
         };
+    }
+    if path == "/realtime" {
+        return route_realtime_post(shared, body);
     }
     if path != "/generate" {
         return error_json(404, format!("no such endpoint: POST {path}"));
@@ -489,7 +567,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Ok(params) => params,
         Err(e) => return error_json(400, e.to_string()),
     };
-    match shared.jobs.submit(params, policy) {
+    match shared.jobs.submit(JobParams::Generate(params), policy) {
         Ok(job_id) => ok_json(
             GenerateResponseJson {
                 job_id: Some(job_id),
@@ -500,6 +578,72 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Err(refused @ (AssetAiError::Busy | AssetAiError::QueueFull(_))) => {
             let body = GenerateResponseJson {
                 job_id: None,
+                error: Some(refused.to_string()),
+            };
+            json_response(409, body.serialize_json())
+        }
+        Err(e) => error_json(500, e.to_string()),
+    }
+}
+
+/// `POST /realtime` — admits a live session exactly like `POST /generate`
+/// admits an ordinary job (same FIFO / `queue_policy=reject` gate); see the
+/// "Realtime session wire protocol" doc block in `protocol.rs`.
+fn route_realtime_post(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResponse {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return error_json(400, "request body is not utf-8".to_string()),
+    };
+    let request = match RealtimeRequestJson::deserialize_json_lenient(text) {
+        Ok(request) => request,
+        Err(e) => return error_json(400, format!("bad realtime request: {e:?}")),
+    };
+    let spec = match shared.registry.find(&request.model) {
+        Some(spec) => spec,
+        None => return error_json(404, format!("unknown model: {}", request.model)),
+    };
+    let gpu = shared.gpu.get();
+    if let Err(reason) = model_availability(spec, &gpu, shared.residency.reserve_mb) {
+        return error_json(503, format!("model {} is unavailable: {reason}", spec.id));
+    }
+    if !backend_live_supported(spec) {
+        return error_json(400, format!("model {} has no live/realtime mode", spec.id));
+    }
+    let policy = match QueuePolicy::parse(request.queue_policy.as_deref()) {
+        Ok(policy) => policy,
+        Err(e) => return error_json(400, e.to_string()),
+    };
+    let live_params = match LiveParams::from_request(&request) {
+        Ok(params) => params,
+        Err(e) => return error_json(400, e.to_string()),
+    };
+    // The session object is created here, synchronously with the response,
+    // NOT when the worker thread eventually starts running the job — a
+    // client is entitled to open the websocket and start sending control
+    // updates the instant it has `ws_path`, which can race well ahead of
+    // `execute_live_job` (the job may still be queued behind another job).
+    // `execute_live_job` looks this same session up by job id instead of
+    // constructing a new one. If the job is cancelled while still queued
+    // (never reaches the worker), `route_post`'s cancel handler tears this
+    // down directly since `execute_live_job` never runs to do it.
+    let session_seed = live_params.clone();
+    match shared.jobs.submit(JobParams::Live(live_params), policy) {
+        Ok(job_id) => {
+            let session = Arc::new(RealtimeSession::new(job_id.clone(), &session_seed));
+            shared.realtime_sessions.lock().unwrap().insert(job_id.clone(), session);
+            ok_json(
+                RealtimeResponseJson {
+                    ws_path: Some(format!("/realtime/{job_id}")),
+                    job_id: Some(job_id),
+                    error: None,
+                }
+                .serialize_json(),
+            )
+        }
+        Err(refused @ (AssetAiError::Busy | AssetAiError::QueueFull(_))) => {
+            let body = RealtimeResponseJson {
+                job_id: None,
+                ws_path: None,
                 error: Some(refused.to_string()),
             };
             json_response(409, body.serialize_json())
@@ -674,7 +818,12 @@ fn worker_loop(shared: Arc<ServiceShared>) {
             idle_evict_sweep(&shared, &mut backends);
             continue;
         };
-        let result = execute_job(&shared, &mut backends, &job_id);
+        let is_live = shared.jobs.with(|store| store.is_live(&job_id));
+        let result = if is_live {
+            execute_live_job(&shared, &mut backends, &job_id)
+        } else {
+            execute_job(&shared, &mut backends, &job_id)
+        };
         match result {
             Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
             Err(AssetAiError::Cancelled) => shared.jobs.with(|store| store.cancelled(&job_id)),
@@ -743,10 +892,15 @@ fn execute_job(
     backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     job_id: &str,
 ) -> Result<Vec<ArtifactRefJson>, AssetAiError> {
-    let params = shared
-        .jobs
-        .with(|store| store.take_params(job_id))
-        .ok_or_else(|| AssetAiError::Backend(format!("job {job_id} has no params")))?;
+    let params = match shared.jobs.with(|store| store.take_params(job_id)) {
+        Some(JobParams::Generate(params)) => params,
+        Some(JobParams::Live(_)) => {
+            return Err(AssetAiError::Backend(format!(
+                "job {job_id} is a live session, not an ordinary generate job"
+            )))
+        }
+        None => return Err(AssetAiError::Backend(format!("job {job_id} has no params"))),
+    };
     let spec = shared
         .registry
         .find(&params.model)
@@ -1068,6 +1222,234 @@ fn execute_job(
         });
     }
     Ok(refs)
+}
+
+/// Runs a live session job: same download/admit/load prefix as
+/// [`execute_job`] (model files may need a first pull, VRAM admission and
+/// LRU eviction apply identically — a live session competes for the box's
+/// single GPU slot exactly like an ordinary job), then hands the loaded
+/// backend to `crate::realtime::run_live` instead of `generate` and loops
+/// there until the session stops. Never persists artifacts (a live session
+/// has none).
+///
+/// The `RealtimeSession` itself is looked up here, NOT constructed —
+/// `route_realtime_post` already created and registered it synchronously
+/// with the `POST /realtime` response, so a client racing ahead of this
+/// worker (opening the websocket, sending control updates, while the job
+/// still sits queued) is never refused. Every exit path below (admission
+/// failure, load failure, a cancel raised before/while running, or a clean
+/// stop) funnels through one teardown: broadcast `stopped`/`error`, close
+/// every connected socket, remove the session from `shared.realtime_
+/// sessions` (freeing the box's live slot for the next `POST /realtime`),
+/// then fix up model residency state exactly like `execute_job` does.
+fn execute_live_job(
+    shared: &Arc<ServiceShared>,
+    backends: &mut HashMap<String, Box<dyn ContentBackend>>,
+    job_id: &str,
+) -> Result<Vec<ArtifactRefJson>, AssetAiError> {
+    let params = match shared.jobs.with(|store| store.take_params(job_id)) {
+        Some(JobParams::Live(params)) => params,
+        Some(JobParams::Generate(_)) => {
+            return Err(AssetAiError::Backend(format!(
+                "job {job_id} is an ordinary generate job, not a live session"
+            )))
+        }
+        None => return Err(AssetAiError::Backend(format!("job {job_id} has no params"))),
+    };
+    let spec = shared
+        .registry
+        .find(&params.model)
+        .ok_or_else(|| AssetAiError::UnknownModel(params.model.clone()))?
+        .clone();
+
+    // Missing here means the queued job was already cancelled — route_post's
+    // cancel handler already ran this exact teardown directly since this
+    // function never got a chance to. Nothing left to run or clean up.
+    let Some(session) = shared.realtime_sessions.lock().unwrap().get(job_id).cloned() else {
+        return Err(AssetAiError::Cancelled);
+    };
+
+    let cancel = shared
+        .jobs
+        .with(|store| store.cancel_token(job_id))
+        .unwrap_or_default();
+
+    let result: Result<(), AssetAiError> = (|| {
+        model_availability(&spec, &shared.gpu.get(), shared.residency.reserve_mb)
+            .map_err(|reason| AssetAiError::Unavailable(format!("model {}: {reason}", spec.id)))?;
+        cancel.check()?;
+
+        if !backends.contains_key(&spec.id) {
+            backends.insert(spec.id.clone(), create_backend(&spec)?);
+        }
+        if !backends.get(&spec.id).unwrap().live_supported() {
+            return Err(AssetAiError::Unavailable(format!(
+                "model {} has no live/realtime mode",
+                spec.id
+            )));
+        }
+
+        // Download/verify/convert + load progress — identical plumbing to
+        // execute_job's (see there for the per-field byte aggregation
+        // comment).
+        let mut per_file: HashMap<String, (u64, Option<u64>)> = HashMap::new();
+        let progress_spec = spec.clone();
+        let progress_shared = shared.clone();
+        let progress_job = job_id.to_string();
+        let mut download_progress = move |p: DownloadProgress| {
+            per_file.insert(p.file.clone(), (p.done, p.total));
+            let done: u64 = per_file.values().map(|(done, _)| *done).sum();
+            let mut total = Some(0u64);
+            for file in &progress_spec.files {
+                let known = per_file
+                    .get(&file.path)
+                    .and_then(|(_, total)| *total)
+                    .or(file.size);
+                match (known, &mut total) {
+                    (Some(bytes), Some(sum)) => *sum += bytes,
+                    _ => {
+                        total = None;
+                        break;
+                    }
+                }
+            }
+            set_model_state(
+                &progress_shared,
+                &progress_spec.id,
+                ModelTrack::Downloading {
+                    done,
+                    total,
+                    file: p.file.clone(),
+                },
+            );
+            if let Some(total) = total {
+                if total > 0 {
+                    progress_shared.jobs.with(|store| {
+                        store.set_progress(&progress_job, "download", done as f64 / total as f64)
+                    });
+                }
+            }
+        };
+        let load_shared = shared.clone();
+        let load_job = job_id.to_string();
+        let mut load_progress = move |stage: &str, fraction: f64| {
+            load_shared
+                .jobs
+                .with(|store| store.set_progress(&load_job, stage, fraction));
+        };
+        // A live session does not ride the request-level peer_sources/
+        // tickets a one-shot GenerateParams carries — only operator-injected
+        // env sources apply here.
+        let job_downloader = shared.downloader.clone().with_peer_plan(crate::peer::PeerPlan::for_job(
+            &[],
+            &[],
+            &shared.peer.env_sources,
+            &shared.node_key,
+            shared.peer.secret.clone(),
+        ));
+        let mut ctx = BackendCtx {
+            spec: &spec,
+            cache_dir: &shared.cache_dir,
+            downloader: &job_downloader,
+            download_progress: &mut download_progress,
+            cancel: &cancel,
+            progress: &mut load_progress,
+        };
+        {
+            let backend = backends.get_mut(&spec.id).unwrap();
+            backend.prepare_artifacts(&mut ctx)?;
+        }
+        cancel.check()?;
+
+        admit_for_load(shared, backends, &spec, job_id, &cancel)?;
+        cancel.check()?;
+        shared.last_used.lock().unwrap().insert(spec.id.clone(), Instant::now());
+
+        let mut oom_retried = false;
+        loop {
+            let load_error = {
+                let backend = backends.get_mut(&spec.id).unwrap();
+                match backend.ensure_loaded(&mut ctx) {
+                    Ok(()) => {
+                        let resident = backend.is_resident();
+                        set_model_state(
+                            shared,
+                            &spec.id,
+                            if resident { ModelTrack::Loaded } else { ModelTrack::Ready },
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        let _ = backend.unload();
+                        Some(e)
+                    }
+                }
+            };
+            let Some(error) = load_error else { break };
+            if !oom_retried && residency::error_is_oom(&error) && residency::fresh_free_mb().is_some() {
+                oom_retried = true;
+                oom_evict_all_others(shared, backends, &spec.id, job_id, &error)?;
+                continue;
+            }
+            set_model_state(
+                shared,
+                &spec.id,
+                if matches!(error, AssetAiError::Cancelled) {
+                    ModelTrack::Ready
+                } else {
+                    ModelTrack::Error(error.to_string())
+                },
+            );
+            return Err(error);
+        }
+        cancel.check()?;
+        shared.last_used.lock().unwrap().insert(spec.id.clone(), Instant::now());
+
+        shared
+            .jobs
+            .with(|store| store.set_live_progress(job_id, "live", 0, 0, 0.0));
+        let progress_shared = shared.clone();
+        let progress_job = job_id.to_string();
+        let mut progress_sink = move |stage: &str, frames_in: u64, frames_out: u64, fps: f64| {
+            progress_shared
+                .jobs
+                .with(|store| store.set_live_progress(&progress_job, stage, frames_in, frames_out, fps));
+        };
+        let backend = backends.get_mut(&spec.id).unwrap();
+        crate::realtime::run_live(&session, backend.as_mut(), &cancel, &mut progress_sink)
+    })();
+
+    // Tell every connected client why the session ended, then close their
+    // sockets from the server side and forget the session (before touching
+    // residency, so a slow eviction below can never delay that
+    // notification).
+    match &result {
+        Ok(()) => session.push_bytes(crate::realtime_wire::encode_stopped_message("stopped").into_bytes()),
+        Err(AssetAiError::Cancelled) => {
+            session.push_bytes(crate::realtime_wire::encode_stopped_message("cancelled").into_bytes())
+        }
+        Err(e) => {
+            session.push_bytes(crate::realtime_wire::encode_error_message(&e.to_string()).into_bytes());
+            session.push_bytes(crate::realtime_wire::encode_stopped_message("error").into_bytes());
+        }
+    }
+    session.close_all_sockets();
+    shared.realtime_sessions.lock().unwrap().remove(job_id);
+
+    if let Some(backend) = backends.get_mut(&spec.id) {
+        if let Err(error) = &result {
+            if !backend.resident_is_healthy_after_error(error) {
+                let _ = backend.unload();
+            }
+        }
+        set_model_state(
+            shared,
+            &spec.id,
+            if backend.is_resident() { ModelTrack::Loaded } else { ModelTrack::Ready },
+        );
+    }
+
+    result.map(|()| Vec::new())
 }
 
 fn set_model_state(shared: &Arc<ServiceShared>, model_id: &str, state: ModelTrack) {
@@ -1397,6 +1779,8 @@ mod lifecycle_tests {
                 &peer_options,
                 &std::env::temp_dir(),
             ),
+            realtime_sessions: Mutex::new(HashMap::new()),
+            ws_sessions: Mutex::new(HashMap::new()),
         })
     }
 

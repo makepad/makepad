@@ -23,8 +23,13 @@
 //! - `GET  /models`          -> registry list + per-model state
 //!                              (absent / downloading{progress} / ready / loaded / error)
 //! - `POST /generate`        -> `{model, prompt, width, height, seed, steps, ...}` -> `{job_id}`
-//! - `GET  /job/<id>`        -> queued / running{stage, progress} / done{artifacts} / error
+//! - `GET  /job/<id>`        -> queued / running{stage, progress} / live{stage, frames_in,
+//!                              frames_out, fps} / done{artifacts} / error
 //! - `GET  /artifact/<id>`   -> artifact bytes with the right content-type
+//! - `POST /realtime`        -> `{model, width, height, prompt, strength, steps, loop_mode,
+//!                              ...}` -> `{job_id, ws_path}`; then `GET <ws_path>` (websocket
+//!                              upgrade) streams input/output video frames + live control —
+//!                              see `protocol.rs`'s wire doc block and `crate::realtime`.
 
 pub mod backend;
 pub mod client;
@@ -52,6 +57,8 @@ pub mod peer;
 pub mod peer_fetch;
 pub mod peer_serve;
 pub mod protocol;
+pub mod realtime;
+pub mod realtime_wire;
 pub mod registry;
 pub mod resample;
 pub mod residency;

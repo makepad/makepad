@@ -5,7 +5,8 @@
 //!   (euler, 20 steps, guidance 4.0, 1024px default).
 
 use crate::backend::{
-    ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
+    ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, LiveFrameIn,
+    LiveFrameOut, ProgressSink, RgbImage,
 };
 use crate::error::AssetAiError;
 use makepad_ai_common::backend::gpu_device_available;
@@ -198,6 +199,92 @@ impl ContentBackend for Flux2Backend {
                 }])
             }
         }
+    }
+
+    fn live_supported(&self) -> bool {
+        // Declares the CAPABILITY (this backend implements live_step) for
+        // whichever model this instance is: only flux2-klein-4b's edit
+        // pipeline maps onto a live step; flux2-dev (32B t2i) has none. Real
+        // runnability on THIS machine is `model_availability`'s job (CUDA
+        // device required) — `POST /realtime` already 503s on a non-CUDA
+        // build/box before this is ever consulted.
+        !self.is_dev()
+    }
+
+    /// Maps one live-session step onto the Klein edit pipeline: `init`
+    /// (the feed-mode latest input frame, or the feedback-warped previous
+    /// output — `crate::realtime::run_live` resolves which) is the edit
+    /// conditioning image, `config.references` ride along as additional
+    /// Klein references, `config.prompt`/`steps`/`seed` map directly.
+    /// flux2-dev has no live mode (see `live_supported`) — `POST /realtime`
+    /// already refuses it at admission time, so reaching `Flux2Pipeline::
+    /// Dev` here would mean that check was bypassed; fail closed rather
+    /// than silently running the wrong pipeline.
+    fn live_step(&mut self, frame: LiveFrameIn<'_>, cancel: &CancelToken) -> Result<LiveFrameOut, AssetAiError> {
+        if !gpu_device_available() {
+            return Err(AssetAiError::Unavailable(
+                "flux2 requires CUDA; refusing CPU/Metal fallback".into(),
+            ));
+        }
+        cancel.check()?;
+        let start = std::time::Instant::now();
+        let pipe = self
+            .pipeline
+            .as_mut()
+            .ok_or_else(|| AssetAiError::Backend(format!("{} not loaded", self.model_id)))?;
+        let pipe = match pipe {
+            Flux2Pipeline::Dev(_) => {
+                return Err(AssetAiError::Unavailable(
+                    "flux2-dev has no live mode (only flux2-klein-4b's edit pipeline does)".into(),
+                ))
+            }
+            Flux2Pipeline::Klein(pipe) => pipe,
+        };
+        let config = frame.config;
+        let init = frame.init.ok_or_else(|| {
+            AssetAiError::Params(
+                "flux2-klein-4b live mode requires an init image (feed: latest input frame; \
+                 feedback: previous output) — none available yet"
+                    .into(),
+            )
+        })?;
+        let mut references = vec![flux2_image_from_rgb_u8(&init.data, init.width as usize, init.height as usize)
+            .map_err(|err| AssetAiError::Backend(format!("flux2 live init ref: {err}")))?];
+        for extra in &config.references {
+            references.push(
+                flux2_image_from_rgb_u8(&extra.data, extra.width as usize, extra.height as usize)
+                    .map_err(|err| AssetAiError::Backend(format!("flux2 live extra ref: {err}")))?,
+            );
+        }
+        let out_w = config.width.max(16) / 16 * 16;
+        let out_h = config.height.max(16) / 16 * 16;
+        cancel.check()?;
+        // TODO(realtime): Flux2EditRequest has no denoise-strength / noise-
+        // scale knob exposed today (see flux2_pipeline.rs) — `config.strength`
+        // is accepted on the live wire protocol but NOT applied here; every
+        // live_step call is a full Klein edit at `config.steps`. Wire it
+        // through `Flux2EditRequest.noise` (or a new pipeline field) if/when
+        // flux2_pipeline grows one — do not invent pipeline internals here.
+        let request = Flux2EditRequest {
+            prompt: config.prompt.clone(),
+            width: out_w,
+            height: out_h,
+            steps: config.steps.max(1) as usize,
+            seed: config.seed,
+            references,
+            noise: None,
+            teacher_ref_tokens: None,
+            teacher_embeds: None,
+        };
+        let result = pipe
+            .edit(&request)
+            .map_err(|err| AssetAiError::Backend(format!("flux2 live edit: {err}")))?;
+        cancel.check()?;
+        let (rgb, width, height) = crate::testpattern::decode_png_rgb8(&result.png)?;
+        Ok(LiveFrameOut {
+            image: RgbImage { width, height, data: rgb },
+            model_ms: start.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 }
 

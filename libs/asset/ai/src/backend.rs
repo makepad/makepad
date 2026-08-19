@@ -12,7 +12,7 @@
 
 use crate::download::{DownloadProgress, Downloader};
 use crate::error::AssetAiError;
-use crate::protocol::GenerateRequestJson;
+use crate::protocol::{GenerateRequestJson, RealtimeRequestJson};
 use crate::registry::{FileSpec, ModelSpec};
 use std::path::{Path, PathBuf};
 
@@ -351,6 +351,279 @@ impl GenerateParams {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Live/realtime session (see crate::realtime, crate::realtime_wire, and the
+// `POST /realtime` + `GET /realtime/<id>` (websocket) endpoints in server.rs)
+// ---------------------------------------------------------------------------
+
+/// Per-frame seed policy for a live session (see [`LiveConfig::seed_mode`]).
+/// `Increment`/`Random` are resolved once per frame by the session loop
+/// (`crate::realtime::run_live`) — a backend's `live_step` always sees the
+/// already-resolved `LiveConfig::seed` for that frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SeedMode {
+    #[default]
+    Fixed,
+    Increment,
+    Random,
+}
+
+impl SeedMode {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "fixed" => Ok(SeedMode::Fixed),
+            "increment" => Ok(SeedMode::Increment),
+            "random" => Ok(SeedMode::Random),
+            other => Err(AssetAiError::Params(format!(
+                "unknown seed_mode {other:?} (expected \"fixed\", \"increment\" or \"random\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SeedMode::Fixed => "fixed",
+            SeedMode::Increment => "increment",
+            SeedMode::Random => "random",
+        }
+    }
+}
+
+/// How a live session sources its per-frame init image (see
+/// `crate::realtime::run_live`). `Feed`: wait for the client's latest pushed
+/// input frame. `Feedback`: the session's own previous output, warped by
+/// `camera` (`crate::realtime::warp_feedback`), becomes the next init.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LoopMode {
+    #[default]
+    Feed,
+    Feedback,
+}
+
+impl LoopMode {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "feed" => Ok(LoopMode::Feed),
+            "feedback" => Ok(LoopMode::Feedback),
+            other => Err(AssetAiError::Params(format!(
+                "unknown loop_mode {other:?} (expected \"feed\" or \"feedback\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LoopMode::Feed => "feed",
+            LoopMode::Feedback => "feedback",
+        }
+    }
+}
+
+/// Wire format for output frames pushed to connected sockets (see
+/// `realtime_wire::FrameKind`, which mirrors this 1:1 on the binary frame
+/// header).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OutputEncoding {
+    /// Raw RGB8, no compression — the default, cheapest on a LAN.
+    #[default]
+    Raw,
+    Png,
+}
+
+impl OutputEncoding {
+    pub fn parse(text: &str) -> Result<Self, AssetAiError> {
+        match text {
+            "" | "raw" => Ok(OutputEncoding::Raw),
+            "png" => Ok(OutputEncoding::Png),
+            other => Err(AssetAiError::Params(format!(
+                "unknown output_encoding {other:?} (expected \"raw\" or \"png\")"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputEncoding::Raw => "raw",
+            OutputEncoding::Png => "png",
+        }
+    }
+}
+
+/// Feedback-loop camera vector: per-iteration dolly/pan/roll consumed by
+/// `crate::realtime::warp_feedback` (the ONE place camera motion is applied —
+/// backends never warp `LiveFrameIn::init` themselves, they only read
+/// `LiveConfig::camera` if their pipeline can use it directly, e.g. as a
+/// conditioning signal).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct CameraMotion {
+    /// Zoom-toward-center per iteration; effective scale is `1 + dolly*0.05`.
+    pub dolly: f32,
+    /// Horizontal pan per iteration, as a fraction of image width.
+    pub pan_x: f32,
+    /// Vertical pan per iteration, as a fraction of image height.
+    pub pan_y: f32,
+    /// Rotation per iteration, in radians.
+    pub roll: f32,
+}
+
+/// Tightly packed RGB8 image (no alpha, no stride padding): `data.len() ==
+/// width * height * 3`. The live-session pixel currency end to end — decoded
+/// wire input frames, backend init/output frames, reference images.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RgbImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+impl RgbImage {
+    /// A solid black placeholder — used to pad `LiveConfig::references` up to
+    /// a requested slot before the client has sent that slot's image.
+    pub fn blank(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0u8; width as usize * height as usize * 3],
+        }
+    }
+}
+
+/// Live-session tunables, live-updatable via the `{"type":"control", ...}`
+/// websocket message (see `realtime_wire::ControlUpdateJson` +
+/// `realtime::apply_control_to_config`, which merges only the fields a
+/// control message actually sets). Passed to `ContentBackend::live_step`
+/// inside [`LiveFrameIn`] once per frame; `seed` is already the resolved
+/// per-frame value (see [`SeedMode`]).
+#[derive(Clone, Debug)]
+pub struct LiveConfig {
+    pub width: u32,
+    pub height: u32,
+    pub prompt: String,
+    pub negative_prompt: String,
+    /// 0.0 = pass the init image straight through, 1.0 = ignore it (pure
+    /// model output). Backend-specific in between.
+    pub strength: f32,
+    pub steps: u32,
+    pub guidance: Option<f32>,
+    pub seed: u64,
+    pub seed_mode: SeedMode,
+    /// Decoded reference images (`{"type":"reference", "slot":N, ...}`).
+    pub references: Vec<RgbImage>,
+    pub camera: CameraMotion,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self {
+            width: 512,
+            height: 512,
+            prompt: String::new(),
+            negative_prompt: String::new(),
+            strength: 0.6,
+            steps: 4,
+            guidance: None,
+            seed: 0,
+            seed_mode: SeedMode::default(),
+            references: Vec::new(),
+            camera: CameraMotion::default(),
+        }
+    }
+}
+
+/// Everything `POST /realtime` needs to start a live session: the target
+/// model plus the initial [`LiveConfig`] and the session-level (not
+/// per-frame-tunable via control messages the same way, though control CAN
+/// still touch `loop_mode`/`output_encoding`/`max_fps`/`idle_timeout_s` —
+/// see `realtime::RealtimeSession::apply_control`) knobs.
+#[derive(Clone)]
+pub struct LiveParams {
+    pub model: String,
+    pub config: LiveConfig,
+    pub loop_mode: LoopMode,
+    pub output_encoding: OutputEncoding,
+    /// 0 = as fast as possible.
+    pub max_fps: f64,
+    /// Session ends (job -> done) after this many seconds with zero
+    /// connected websockets. 0 = never.
+    pub idle_timeout_s: u64,
+}
+
+impl LiveParams {
+    /// Builds initial live-session params from the `POST /realtime` body.
+    /// Ranges are clamped the same way [`GenerateParams::from_request`]
+    /// clamps `/generate` — see that function for the convention.
+    pub fn from_request(request: &RealtimeRequestJson) -> Result<Self, AssetAiError> {
+        if request.model.trim().is_empty() {
+            return Err(AssetAiError::Params("realtime: model is required".to_string()));
+        }
+        let seed = request.seed.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        });
+        let width = request.width.unwrap_or(512).clamp(16, 4096);
+        let height = request.height.unwrap_or(512).clamp(16, 4096);
+        let strength = request
+            .strength
+            .filter(|v| v.is_finite())
+            .map(|v| (v as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.6);
+        let steps = request.steps.unwrap_or(4).clamp(1, 200);
+        let guidance = request
+            .guidance
+            .filter(|v| v.is_finite())
+            .map(|v| v as f32);
+        let seed_mode = SeedMode::parse(request.seed_mode.as_deref().unwrap_or(""))?;
+        let loop_mode = LoopMode::parse(request.loop_mode.as_deref().unwrap_or(""))?;
+        let output_encoding = OutputEncoding::parse(request.output_encoding.as_deref().unwrap_or(""))?;
+        let max_fps = request
+            .max_fps
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+            .min(240.0);
+        let idle_timeout_s = request.idle_timeout_s.unwrap_or(30).min(3600);
+        Ok(Self {
+            model: request.model.clone(),
+            config: LiveConfig {
+                width,
+                height,
+                prompt: request.prompt.clone().unwrap_or_default(),
+                negative_prompt: request.negative_prompt.clone().unwrap_or_default(),
+                strength,
+                steps,
+                guidance,
+                seed,
+                seed_mode,
+                references: Vec::new(),
+                camera: CameraMotion::default(),
+            },
+            loop_mode,
+            output_encoding,
+            max_fps,
+            idle_timeout_s,
+        })
+    }
+}
+
+/// One `ContentBackend::live_step` call's inputs: the (optional) init image
+/// for this frame — `None` only in `loop_mode = "feed"` before any input
+/// frame has ever arrived — the monotonic frame counter, and the current
+/// (already control-merged, seed-resolved) config.
+pub struct LiveFrameIn<'a> {
+    pub init: Option<&'a RgbImage>,
+    pub frame_index: u64,
+    pub config: &'a LiveConfig,
+}
+
+/// One `ContentBackend::live_step` call's output: the produced frame plus
+/// the backend's own wall-clock cost (surfaced in the `stats` message's
+/// `stage_ms.model`).
+pub struct LiveFrameOut {
+    pub image: RgbImage,
+    pub model_ms: f64,
+}
+
 /// One generated output. `content_type` drives the `/artifact` response;
 /// `ext` names the file on disk.
 pub struct ArtifactData {
@@ -539,6 +812,41 @@ pub trait ContentBackend: Send {
         progress: ProgressSink,
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError>;
+
+    /// Live-session capability (see [`LiveConfig`] / `crate::realtime`).
+    /// Default: not supported — `POST /realtime` refuses such models with
+    /// 400 before ever constructing a session.
+    fn live_supported(&self) -> bool {
+        false
+    }
+
+    /// One live-session step: given the (optional) init image and the
+    /// current config, produce the next output frame. Called at frame rate
+    /// by `crate::realtime::run_live` on the single worker thread — it MUST
+    /// be fast (no multi-second internal denoise loop without checking
+    /// `cancel` between steps) and MUST reuse the resident weights loaded by
+    /// `ensure_loaded` (no per-frame reload).
+    fn live_step(
+        &mut self,
+        frame: LiveFrameIn<'_>,
+        cancel: &CancelToken,
+    ) -> Result<LiveFrameOut, AssetAiError> {
+        let _ = (frame, cancel);
+        Err(AssetAiError::Backend(format!(
+            "{} has no live mode",
+            self.model_id()
+        )))
+    }
+}
+
+/// True when constructing this model's backend reports live-session support.
+/// Construction is cheap (see [`create_backend`]'s doc contract), so this is
+/// safe to call on the `POST /realtime` request path before admission.
+pub fn backend_live_supported(spec: &ModelSpec) -> bool {
+    match create_backend(spec) {
+        Ok(backend) => backend.live_supported(),
+        Err(_) => false,
+    }
 }
 
 /// True when this build contains an implementation for the given registry

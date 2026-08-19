@@ -6,10 +6,17 @@
 use makepad_asset_ai::client::{ContentProvider, LocalService};
 use makepad_asset_ai::download::Downloader;
 use makepad_asset_ai::error::AssetAiError;
-use makepad_asset_ai::protocol::GenerateRequestJson;
+use makepad_asset_ai::http_client::{http_fetch, HttpClientRequest};
+use makepad_asset_ai::protocol::{GenerateRequestJson, RealtimeRequestJson, RealtimeResponseJson};
+use makepad_asset_ai::realtime_wire::{self, FrameHeader, FrameKind};
 use makepad_asset_ai::registry::{Domain, Registry};
 use makepad_asset_ai::server::{start_service, ServiceConfig};
+use makepad_live_id::LiveId;
+use makepad_micro_serde::{DeJson, SerJson};
+use makepad_network::plain_web_socket::PlainWebSocket;
+use makepad_network::{HttpMethod, HttpRequest, WebSocketMessage};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 fn test_dir(name: &str) -> PathBuf {
@@ -532,4 +539,258 @@ fn models_report_revision_and_explicit_unavailable_reason() {
     let trellis = models.iter().find(|m| m.id == "trellis-2").unwrap();
     let revision = trellis.revision.as_deref().expect("trellis revisions pinned");
     assert!(revision.len() >= 40);
+}
+
+// ---------------------------------------------------------------------------
+// Realtime / live session (POST /realtime + GET /realtime/<id> websocket)
+// ---------------------------------------------------------------------------
+
+fn post_realtime(base_url: &str, request: &RealtimeRequestJson) -> (u16, RealtimeResponseJson) {
+    let url = format!("{base_url}/realtime");
+    let response = http_fetch(&HttpClientRequest::post(
+        &url,
+        "application/json",
+        request.serialize_json().as_bytes(),
+    ))
+    .unwrap();
+    let status = response.status;
+    let bytes = response.read_body_to_vec(4 * 1024 * 1024).unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    let parsed = RealtimeResponseJson::deserialize_json_lenient(text)
+        .unwrap_or_else(|e| panic!("bad realtime response json {text:?}: {e:?}"));
+    (status, parsed)
+}
+
+/// Opens a plain-TCP websocket to `<base_url><ws_path>` (base_url is
+/// "http://host:port" — rewritten to "ws://host:port" here, matching the
+/// scheme `PlainWebSocket::open` accepts).
+fn open_realtime_socket(base_url: &str, ws_path: &str) -> (PlainWebSocket, Receiver<WebSocketMessage>) {
+    let ws_url = format!("{}{}", base_url.replacen("http://", "ws://", 1), ws_path);
+    let (tx, rx) = std::sync::mpsc::channel::<WebSocketMessage>();
+    let socket = PlainWebSocket::open(LiveId::empty(), HttpRequest::new(ws_url, HttpMethod::GET), tx);
+    (socket, rx)
+}
+
+/// Drains `rx` until the socket reports `Closed` (or its channel disconnects
+/// — the io thread dropping its sender after `Closed` is also a valid
+/// "closed" signal), or `timeout` elapses.
+fn wait_for_socket_close(rx: &Receiver<WebSocketMessage>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(WebSocketMessage::Closed) => return true,
+            Ok(_) => {} // drain frames/stats/stopped/etc while waiting
+            Err(RecvTimeoutError::Disconnected) => return true,
+            Err(RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+fn poll_realtime_terminal(provider: &LocalService, job_id: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let status = provider.poll(job_id).unwrap();
+        if matches!(status.state.as_str(), "done" | "cancelled" | "error") {
+            return status.state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "live session did not reach a terminal state in time (state={})",
+            status.state
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn realtime_feed_mode_streams_frames_and_stops_cleanly() {
+    let provider = start_test_service("realtime-feed");
+    let base_url = provider.base_url().to_string();
+
+    let (status, response) = post_realtime(
+        &base_url,
+        &RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            width: Some(16),
+            height: Some(16),
+            prompt: Some("a red fox".to_string()),
+            strength: Some(0.7),
+            steps: Some(2),
+            loop_mode: Some("feed".to_string()),
+            output_encoding: Some("raw".to_string()),
+            idle_timeout_s: Some(5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(status, 200, "realtime response: {response:?}");
+    let job_id = response.job_id.clone().expect("job_id");
+    let ws_path = response.ws_path.clone().expect("ws_path");
+    assert_eq!(ws_path, format!("/realtime/{job_id}"));
+    assert!(provider.poll(&job_id).unwrap().state == "queued" || provider.poll(&job_id).unwrap().state == "live");
+
+    let (mut socket, rx) = open_realtime_socket(&base_url, &ws_path);
+
+    // A control update (must not crash/derail the session) ...
+    socket
+        .send_message(WebSocketMessage::String(
+            r#"{"type":"control","prompt":"a blue whale","strength":0.9}"#.to_string(),
+        ))
+        .unwrap();
+
+    // Then raw RGB8 input frames — sent one at a time, interleaved with
+    // receiving, not as an upfront burst: the session mailbox keeps only the
+    // LATEST unconsumed frame (see protocol.rs's backpressure law), so a
+    // burst sent faster than the worker's loop cadence would mostly
+    // coalesce away and starve loop_mode="feed" (which blocks waiting for a
+    // genuinely NEW frame each iteration). A real camera-feed client would
+    // push continuously the same way. Keep sending fresh frames until at
+    // least 5 outputs and one stats message have arrived.
+    let mut frames_received = 0usize;
+    let mut stats_received = false;
+    let mut next_input_index = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while (frames_received < 5 || !stats_received) && Instant::now() < deadline {
+        if next_input_index < 200 {
+            let payload = vec![((next_input_index * 37) % 255) as u8; 16 * 16 * 3];
+            let header = FrameHeader {
+                kind: FrameKind::Raw,
+                width: 16,
+                height: 16,
+                frame_index: next_input_index,
+            };
+            let bytes = realtime_wire::encode_frame(header, &payload);
+            socket.send_message(WebSocketMessage::Binary(bytes)).unwrap();
+            next_input_index += 1;
+        }
+        match rx.recv_timeout(Duration::from_millis(30)) {
+            Ok(WebSocketMessage::Binary(data)) => {
+                if realtime_wire::is_frame_message(&data) {
+                    let (header, payload) = realtime_wire::decode_frame(&data).unwrap();
+                    assert_eq!(header.kind, FrameKind::Raw);
+                    assert_eq!((header.width, header.height), (16, 16));
+                    assert_eq!(payload.len(), 16 * 16 * 3);
+                    frames_received += 1;
+                } else {
+                    let text = std::str::from_utf8(&data).expect("non-frame push must be utf-8 json");
+                    if text.contains("\"type\":\"stats\"") {
+                        stats_received = true;
+                        assert!(text.contains("\"frames_out\""));
+                    }
+                }
+            }
+            Ok(WebSocketMessage::Closed) => panic!("socket closed before {frames_received} frames arrived"),
+            Ok(WebSocketMessage::Error(e)) => panic!("websocket error: {e}"),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("socket channel disconnected early"),
+        }
+    }
+    assert!(frames_received >= 5, "only received {frames_received} frames");
+    assert!(stats_received, "never received a stats message");
+
+    // GET /job/<id> carries live counters whenever it reports state=live
+    // (the counters themselves are only refreshed at ~10 Hz — see
+    // `run_live`'s doc — so they may still read frames_out=0 a few ms into
+    // the session; only the field's presence is a stable contract here).
+    let live_status = provider.poll(&job_id).unwrap();
+    if live_status.state == "live" {
+        live_status.live.expect("live counters present while state=live");
+    }
+
+    socket
+        .send_message(WebSocketMessage::String(r#"{"type":"stop"}"#.to_string()))
+        .unwrap();
+
+    let state = poll_realtime_terminal(&provider, &job_id);
+    assert_eq!(state, "done", "stop must end the session as done, not error/cancelled");
+
+    assert!(wait_for_socket_close(&rx, Duration::from_secs(10)), "socket never closed after stop");
+    socket.close();
+}
+
+#[test]
+fn realtime_feedback_mode_produces_frames_without_any_input_then_cancels() {
+    let provider = start_test_service("realtime-feedback");
+    let base_url = provider.base_url().to_string();
+
+    let (status, response) = post_realtime(
+        &base_url,
+        &RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            // 16 is LiveParams::from_request's clamp floor for width/height.
+            width: Some(16),
+            height: Some(16),
+            loop_mode: Some("feedback".to_string()),
+            idle_timeout_s: Some(5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(status, 200, "realtime response: {response:?}");
+    let job_id = response.job_id.clone().expect("job_id");
+    let ws_path = response.ws_path.clone().expect("ws_path");
+
+    let (mut socket, rx) = open_realtime_socket(&base_url, &ws_path);
+
+    // No input frames are ever sent — feedback mode must still produce
+    // output (its own previous output, camera-warped, seeds the next step;
+    // the very first frame has no previous output either, and testpattern's
+    // live_step handles `init: None` by rendering the pure pattern).
+    let mut frames_received = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while frames_received < 3 && Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(WebSocketMessage::Binary(data)) if realtime_wire::is_frame_message(&data) => {
+                let (header, payload) = realtime_wire::decode_frame(&data).unwrap();
+                assert_eq!((header.width, header.height), (16, 16));
+                assert_eq!(payload.len(), 16 * 16 * 3);
+                frames_received += 1;
+            }
+            Ok(WebSocketMessage::Error(e)) => panic!("websocket error: {e}"),
+            _ => {}
+        }
+    }
+    assert!(frames_received >= 3, "only received {frames_received} feedback-mode frames");
+
+    // Cancel via the ordinary job-cancel endpoint (not the ws "stop"
+    // message) — the live session must honor POST /job/<id>/cancel exactly
+    // like a running generate job.
+    provider.cancel(&job_id).unwrap();
+    let state = poll_realtime_terminal(&provider, &job_id);
+    assert_eq!(state, "cancelled");
+
+    assert!(wait_for_socket_close(&rx, Duration::from_secs(10)), "socket never closed after cancel");
+    socket.close();
+}
+
+#[test]
+fn realtime_post_admission_errors_match_generate_semantics() {
+    let provider = start_test_service("realtime-admission-errors");
+    let base_url = provider.base_url().to_string();
+
+    let (status, response) = post_realtime(
+        &base_url,
+        &RealtimeRequestJson {
+            model: "does-not-exist".to_string(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(status, 404, "unknown model: {response:?}");
+
+    // A registered-but-unavailable model 503s before the live-support check
+    // even runs — same admission order as POST /generate.
+    let expect_flux = cfg!(feature = "flux") && makepad_asset_ai::backend::backend_provisioned("flux");
+    let (status, response) = post_realtime(
+        &base_url,
+        &RealtimeRequestJson {
+            model: "flux1-schnell".to_string(),
+            ..Default::default()
+        },
+    );
+    if !expect_flux {
+        assert_eq!(status, 503, "unavailable model: {response:?}");
+    }
 }

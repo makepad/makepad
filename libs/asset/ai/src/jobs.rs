@@ -3,11 +3,11 @@
 //! threads); `SharedJobs` wraps it in Mutex+Condvar for the single worker
 //! thread the server spawns.
 
-use crate::backend::{CancelToken, GenerateParams};
+use crate::backend::{CancelToken, GenerateParams, LiveParams};
 use crate::error::AssetAiError;
 use crate::protocol::{
-    ArtifactRefJson, JobStatusJson, JOB_STATE_CANCELLED, JOB_STATE_DONE, JOB_STATE_ERROR,
-    JOB_STATE_QUEUED, JOB_STATE_RUNNING,
+    ArtifactRefJson, JobStatusJson, LiveStatusJson, JOB_STATE_CANCELLED, JOB_STATE_DONE,
+    JOB_STATE_ERROR, JOB_STATE_LIVE, JOB_STATE_QUEUED, JOB_STATE_RUNNING,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -59,11 +59,45 @@ impl QueuePolicy {
 pub enum JobState {
     Queued,
     Running { stage: String, progress: f64 },
+    /// A live/realtime session running (see `JOB_STATE_LIVE`). `stage` is
+    /// informational ("live"); `frames_in`/`frames_out`/`fps` are the same
+    /// counters `crate::realtime::RealtimeSession` tracks, mirrored here at
+    /// up to 10 Hz so a poller that never opens the websocket still sees
+    /// the session is alive.
+    Live {
+        stage: String,
+        frames_in: u64,
+        frames_out: u64,
+        fps: f64,
+    },
     Done { artifacts: Vec<ArtifactRefJson> },
     Error { message: String },
     /// Cancelled — either dropped from the queue, or the running worker
     /// noticed the raised cancel flag and unwound.
     Cancelled,
+}
+
+/// What a job carries into the worker: an ordinary one-shot generation, or a
+/// live session's initial config. `JobStore` only needs to tell the two
+/// apart (`take_next` picks the right initial `JobState`; `is_live` lets
+/// `server::worker_loop` dispatch to `execute_job` vs `execute_live_job`) —
+/// everything else is opaque to it.
+pub enum JobParams {
+    Generate(GenerateParams),
+    Live(LiveParams),
+}
+
+impl JobParams {
+    pub fn model(&self) -> &str {
+        match self {
+            JobParams::Generate(params) => &params.model,
+            JobParams::Live(params) => &params.model,
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        matches!(self, JobParams::Live(_))
+    }
 }
 
 /// Result of a cancel request (`POST /job/<id>/cancel`).
@@ -86,7 +120,7 @@ pub struct JobRecord {
     /// the worker takes it out exactly once instead of cloning and retaining
     /// it for the finished-job lifetime.
     pub model: String,
-    pub params: Option<GenerateParams>,
+    pub params: Option<JobParams>,
     pub state: JobState,
     /// Shared cancel flag: raised by POST /job/<id>/cancel, checked by the
     /// backend between steps/tiles/load components.
@@ -187,7 +221,7 @@ impl JobStore {
 
     pub fn submit(
         &mut self,
-        params: GenerateParams,
+        params: JobParams,
         policy: QueuePolicy,
     ) -> Result<String, AssetAiError> {
         if policy == QueuePolicy::Reject && self.is_busy() {
@@ -198,7 +232,7 @@ impl JobStore {
         }
         self.next_id += 1;
         let id = format!("job-{}", self.next_id);
-        let model = params.model.clone();
+        let model = params.model().to_string();
         self.jobs.insert(
             id.clone(),
             JobRecord {
@@ -222,15 +256,27 @@ impl JobStore {
 
     /// Pops the next queued job and marks it running. Returns None while a
     /// job is already running (one GPU = one job) or the queue is empty.
+    /// A live session starts in `JobState::Live`, an ordinary job in
+    /// `JobState::Running`.
     pub fn take_next(&mut self) -> Option<String> {
         if self.running.is_some() {
             return None;
         }
         let id = self.queue.pop_front()?;
         if let Some(job) = self.jobs.get_mut(&id) {
-            job.state = JobState::Running {
-                stage: "starting".to_string(),
-                progress: 0.0,
+            let is_live = job.params.as_ref().map(JobParams::is_live).unwrap_or(false);
+            job.state = if is_live {
+                JobState::Live {
+                    stage: "starting".to_string(),
+                    frames_in: 0,
+                    frames_out: 0,
+                    fps: 0.0,
+                }
+            } else {
+                JobState::Running {
+                    stage: "starting".to_string(),
+                    progress: 0.0,
+                }
             };
             job.started_ms = Some(now_ms());
         }
@@ -241,8 +287,20 @@ impl JobStore {
     /// Moves the potentially large/sensitive request into the worker. A job
     /// has one execution attempt; retaining or cloning these bytes after it
     /// starts only wastes memory and keeps expired transfer tickets alive.
-    pub fn take_params(&mut self, id: &str) -> Option<GenerateParams> {
+    pub fn take_params(&mut self, id: &str) -> Option<JobParams> {
         self.jobs.get_mut(id)?.params.take()
+    }
+
+    /// Peeks whether a (still-queued-or-just-taken) job is a live session —
+    /// `server::worker_loop` uses this right after `wait_take_next` to pick
+    /// `execute_job` vs `execute_live_job`, before `take_params` moves the
+    /// params out.
+    pub fn is_live(&self, id: &str) -> bool {
+        self.jobs
+            .get(id)
+            .and_then(|job| job.params.as_ref())
+            .map(JobParams::is_live)
+            .unwrap_or(false)
     }
 
     /// Cancels a job. Queued: dropped from the FIFO immediately. Running:
@@ -264,7 +322,7 @@ impl JobStore {
         match self.jobs.get(id) {
             None => CancelOutcome::Unknown,
             Some(job) => match job.state {
-                JobState::Running { .. } => {
+                JobState::Running { .. } | JobState::Live { .. } => {
                     job.cancel.cancel();
                     CancelOutcome::Cancelling
                 }
@@ -305,6 +363,25 @@ impl JobStore {
                     progress: progress.clamp(0.0, 1.0),
                 };
                 job.log_stage(stage, progress.clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// Live-session counters, updated by `crate::realtime::run_live` through
+    /// `server::execute_live_job`'s progress closure (throttled to ~10 Hz
+    /// there — this only writes when the job is still `Live`, so a stray
+    /// late update after cancel/finish is silently ignored, same convention
+    /// as `set_progress`).
+    pub fn set_live_progress(&mut self, id: &str, stage: &str, frames_in: u64, frames_out: u64, fps: f64) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            if matches!(job.state, JobState::Live { .. }) {
+                job.state = JobState::Live {
+                    stage: stage.to_string(),
+                    frames_in,
+                    frames_out,
+                    fps,
+                };
+                job.log_stage(stage, 0.0);
             }
         }
     }
@@ -368,6 +445,9 @@ impl JobStore {
                 JobState::Running { stage, progress } => {
                     Some(format!("{stage} {:.0}%", progress * 100.0))
                 }
+                JobState::Live { stage, frames_out, .. } => {
+                    Some(format!("{stage} (live session, {frames_out} frames out)"))
+                }
                 _ => None,
             })
         });
@@ -396,6 +476,7 @@ impl JobStore {
                 Some(job.log.clone())
             },
             partial_text: job.partial_text.clone(),
+            live: None,
         };
         match &job.state {
             JobState::Queued => {
@@ -406,6 +487,15 @@ impl JobStore {
                 status.state = JOB_STATE_RUNNING.to_string();
                 status.stage = Some(stage.clone());
                 status.progress = Some(*progress);
+            }
+            JobState::Live { stage, frames_in, frames_out, fps } => {
+                status.state = JOB_STATE_LIVE.to_string();
+                status.stage = Some(stage.clone());
+                status.live = Some(LiveStatusJson {
+                    frames_in: *frames_in,
+                    frames_out: *frames_out,
+                    fps: *fps,
+                });
             }
             JobState::Done { artifacts } => {
                 status.state = JOB_STATE_DONE.to_string();
@@ -445,7 +535,7 @@ impl SharedJobs {
 
     pub fn submit(
         &self,
-        params: GenerateParams,
+        params: JobParams,
         policy: QueuePolicy,
     ) -> Result<String, AssetAiError> {
         self.with(|store| store.submit(params, policy))
@@ -467,7 +557,22 @@ impl SharedJobs {
 mod tests {
     use super::*;
 
-    fn params(model: &str) -> GenerateParams {
+    fn params(model: &str) -> JobParams {
+        JobParams::Generate(generate_params(model))
+    }
+
+    fn live_params(model: &str) -> JobParams {
+        JobParams::Live(LiveParams {
+            model: model.to_string(),
+            config: crate::backend::LiveConfig::default(),
+            loop_mode: crate::backend::LoopMode::Feed,
+            output_encoding: crate::backend::OutputEncoding::Raw,
+            max_fps: 0.0,
+            idle_timeout_s: 30,
+        })
+    }
+
+    fn generate_params(model: &str) -> GenerateParams {
         GenerateParams {
             model: model.to_string(),
             prompt: "p".to_string(),
@@ -700,5 +805,81 @@ mod tests {
         let started = done.started_ms.expect("started_ms");
         let finished = done.finished_ms.expect("finished_ms");
         assert!(done.queued_ms.unwrap() <= started && started <= finished);
+    }
+
+    #[test]
+    fn live_session_queued_to_live_to_done() {
+        let mut store = JobStore::new();
+        let id = store.submit(live_params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.status_json(&id).unwrap().state, "queued");
+
+        assert_eq!(store.take_next().as_deref(), Some(id.as_str()));
+        let live = store.status_json(&id).unwrap();
+        assert_eq!(live.state, "live");
+        let counters = live.live.expect("live counters present");
+        assert_eq!((counters.frames_in, counters.frames_out), (0, 0));
+
+        // A second job stays queued behind the live session — the box is
+        // dedicated to the live feed until it stops.
+        let queued = store.submit(params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.status_json(&queued).unwrap().state, "queued");
+        assert!(store.take_next().is_none());
+
+        store.set_live_progress(&id, "live", 12, 11, 30.5);
+        let live = store.status_json(&id).unwrap();
+        let counters = live.live.expect("live counters present");
+        assert_eq!((counters.frames_in, counters.frames_out), (12, 11));
+        assert_eq!(counters.fps, 30.5);
+        // Ordinary set_progress must not touch a Live job's state.
+        store.set_progress(&id, "denoise", 0.5);
+        assert_eq!(store.status_json(&id).unwrap().state, "live");
+
+        // "stop"/idle-timeout ends a live session as an ordinary finish
+        // (done, no artifacts) — the worker calls this exactly like any
+        // other job, just with an empty artifact list.
+        store.finish(&id, vec![]);
+        assert_eq!(store.status_json(&id).unwrap().state, "done");
+        // The worker slot is free again: the queued job can now start.
+        assert_eq!(store.pending_count(), 1);
+        assert_eq!(store.take_next().as_deref(), Some(queued.as_str()));
+    }
+
+    #[test]
+    fn live_session_cancel_raises_flag_like_running() {
+        let mut store = JobStore::new();
+        let id = store.submit(live_params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next().as_deref(), Some(id.as_str()));
+        assert!(matches!(store.status_json(&id).unwrap().state.as_str(), "live"));
+
+        let token = store.cancel_token(&id).unwrap();
+        assert!(!token.is_cancelled());
+        assert_eq!(store.cancel(&id), CancelOutcome::Cancelling);
+        assert!(token.is_cancelled());
+
+        // The worker sees AssetAiError::Cancelled and reports it exactly
+        // like an ordinary job's cancellation.
+        store.cancelled(&id);
+        assert_eq!(store.status_json(&id).unwrap().state, "cancelled");
+        assert_eq!(store.cancel(&id), CancelOutcome::NotCancellable);
+    }
+
+    #[test]
+    fn is_live_reports_before_and_after_take_next() {
+        let mut store = JobStore::new();
+        let live_id = store.submit(live_params("testpattern"), QueuePolicy::Queue).unwrap();
+        let gen_id = store.submit(params("testpattern"), QueuePolicy::Queue).unwrap();
+        assert!(store.is_live(&live_id));
+        assert!(!store.is_live(&gen_id));
+        assert!(!store.is_live("job-999"));
+
+        assert_eq!(store.take_next().as_deref(), Some(live_id.as_str()));
+        // Still live after take_next moved it to Running/Live state (params
+        // still present — take_params has not been called yet).
+        assert!(store.is_live(&live_id));
+        let taken = store.take_params(&live_id).unwrap();
+        assert!(taken.is_live());
+        // Once taken, params is None: is_live reports false (nothing left
+        // to peek), matching take_params's one-shot contract.
+        assert!(!store.is_live(&live_id));
     }
 }
