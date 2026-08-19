@@ -300,8 +300,17 @@ fn process(request: IoRequest) -> IoDone {
             let decoded = std::fs::read(&request.path)
                 .ok()
                 .and_then(|bytes| decode_image_from_data(&bytes).ok());
+            // Walk/idle sheets only ever live in importer-written `.thumb`
+            // sidecars. An image PAYLOAD is always a still: a 1024×1024
+            // Flux render passes the sheet dimension test too and must not
+            // be chopped into 64 cycling tiles.
+            let sidecar = request
+                .path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("thumb"));
             let (pixels, sequence, fps) = match decoded {
-                Some(image) => split_encoded_preview(image),
+                Some(image) if sidecar => split_encoded_preview(image),
+                Some(image) => (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0),
                 None => (None, Vec::new(), 0.0),
             };
             IoDone::GalleryPreview {
@@ -729,6 +738,37 @@ mod tests {
                         assert_eq!((width, height), (128, 128));
                     }
                     _ => panic!("expected first tile as raw pixels"),
+                }
+            }
+            _ => panic!("wrong completion kind"),
+        }
+
+        // A generated 1024×1024 image payload has sheet-shaped dimensions
+        // but is its own still preview: never split into cycling tiles.
+        let render = dir.join("lib-flux.png");
+        let mut rgba = vec![0u8; 1024 * 1024 * 4];
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            let x = (i % 1024) as u8;
+            let y = (i / 1024) as u8;
+            px.copy_from_slice(&[x, y, 128, 255]);
+        }
+        let png = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, 1024, 1024).unwrap();
+        std::fs::write(&render, &png).unwrap();
+        io.request(IoRequest {
+            file: "lib-flux.png".into(),
+            path: render,
+            purpose: IoPurpose::GalleryPreviewEncoded,
+        });
+        match io.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            IoDone::GalleryPreview { file, pixels, sequence, fps, .. } => {
+                assert_eq!(file, "lib-flux.png");
+                assert!(sequence.is_empty(), "image payload must stay a still");
+                assert_eq!(fps, 0.0);
+                match pixels {
+                    Some(PreviewPixels::Encoded(image)) => {
+                        assert_eq!((image.width, image.height), (1024, 1024));
+                    }
+                    _ => panic!("expected the full still image"),
                 }
             }
             _ => panic!("wrong completion kind"),

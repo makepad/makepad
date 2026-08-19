@@ -730,8 +730,6 @@ fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
 #[derive(Default)]
 pub struct UniformGrid2 {
     edges: Vec<u32>,
-    positions: Vec<Vec2>,
-    indices: Vec<u32>,
     cell_size: f32,
     grid_origin: Vec2,
     grid_width: u32,
@@ -742,14 +740,37 @@ pub struct UniformGrid2 {
     traversed_cell_offsets: Vec<u32>,
 }
 
+/// Vertex of edge `index` under an optional index buffer (empty = identity),
+/// same as xatlas.cpp `UniformGrid2::vertexAt`.
+#[inline]
+fn grid_vertex_at(indices: &[u32], index: u32) -> u32 {
+    if indices.is_empty() {
+        index
+    } else {
+        indices[index as usize]
+    }
+}
+
+#[inline]
+fn grid_edge_position0(positions: &[Vec2], indices: &[u32], edge: u32) -> Vec2 {
+    positions[grid_vertex_at(indices, mesh_edge_index0(edge)) as usize]
+}
+
+#[inline]
+fn grid_edge_position1(positions: &[Vec2], indices: &[u32], edge: u32) -> Vec2 {
+    positions[grid_vertex_at(indices, mesh_edge_index1(edge)) as usize]
+}
+
+/// The positions/indices are BORROWED per query instead of copied into the
+/// grid: xatlas.cpp keeps pointers, and the clustered segmentation resets
+/// this grid once per added face over the whole mesh's texcoord array — a
+/// copy there made chart growth O(faces²) in memmove alone.
 impl UniformGrid2 {
-    pub fn reset(&mut self, positions: &[Vec2], indices: &[u32], reserve_edge_count: u32) {
+    pub fn reset(&mut self, reserve_edge_count: u32) {
         self.edges.clear();
         if reserve_edge_count > 0 {
             self.edges.reserve(reserve_edge_count as usize);
         }
-        self.positions = positions.to_vec();
-        self.indices = indices.to_vec();
         self.cell_data_offsets.clear();
     }
 
@@ -758,17 +779,29 @@ impl UniformGrid2 {
         self.edges.push(edge);
     }
 
-    pub fn intersect_segment(&mut self, v1: Vec2, v2: Vec2, epsilon: f32) -> bool {
+    pub fn intersect_segment(
+        &mut self,
+        positions: &[Vec2],
+        indices: &[u32],
+        v1: Vec2,
+        v2: Vec2,
+        epsilon: f32,
+    ) -> bool {
         let edge_count = self.edges.len() as u32;
         let mut brute_force = edge_count <= 20;
         if !brute_force && self.cell_data_offsets.is_empty() {
-            brute_force = !self.create_grid();
+            brute_force = !self.create_grid(positions, indices);
         }
         if brute_force {
             for j in 0..edge_count {
                 let edge = self.edges[j as usize];
-                if lines_intersect(v1, v2, self.edge_position0(edge), self.edge_position1(edge), epsilon)
-                {
+                if lines_intersect(
+                    v1,
+                    v2,
+                    grid_edge_position0(positions, indices, edge),
+                    grid_edge_position1(positions, indices, edge),
+                    epsilon,
+                ) {
                     return true;
                 }
             }
@@ -780,8 +813,13 @@ impl UniformGrid2 {
                 if edge == prev_edge {
                     continue;
                 }
-                if lines_intersect(v1, v2, self.edge_position0(edge), self.edge_position1(edge), epsilon)
-                {
+                if lines_intersect(
+                    v1,
+                    v2,
+                    grid_edge_position0(positions, indices, edge),
+                    grid_edge_position1(positions, indices, edge),
+                    epsilon,
+                ) {
                     return true;
                 }
                 prev_edge = edge;
@@ -792,41 +830,45 @@ impl UniformGrid2 {
 
     pub fn intersect(
         &mut self,
+        positions: &[Vec2],
+        indices: &[u32],
         epsilon: f32,
         edges: Option<&[u32]>,
         ignore_edges: &[u32],
     ) -> bool {
         let mut brute_force = self.edges.len() <= 20;
         if !brute_force && self.cell_data_offsets.is_empty() {
-            brute_force = !self.create_grid();
+            brute_force = !self.create_grid(positions, indices);
         }
-        let edges1: Vec<u32> = match edges {
-            Some(e) if !e.is_empty() => e.to_vec(),
-            _ => self.edges.clone(),
-        };
+        // Iterate the caller's edge list, or the grid's own edges (taken
+        // out for the duration so no clone is needed while the grid mutates
+        // its potential-edge scratch).
+        let own_edges = std::mem::take(&mut self.edges);
+        let checking_self = edges.map_or(true, |e| e.is_empty());
+        let edges1: &[u32] = if checking_self { &own_edges } else { edges.unwrap() };
         let edges1_count = edges1.len();
-        let checking_self = edges.is_none() || edges.map(|e| e.is_empty()).unwrap_or(true);
-        for i in 0..edges1_count {
+        let mut hit = false;
+        'outer: for i in 0..edges1_count {
             let edge1 = edges1[i];
             let edge1_vertex = [
-                self.vertex_at(mesh_edge_index0(edge1)),
-                self.vertex_at(mesh_edge_index1(edge1)),
+                grid_vertex_at(indices, mesh_edge_index0(edge1)),
+                grid_vertex_at(indices, mesh_edge_index1(edge1)),
             ];
-            let edge1_position1 = self.positions[edge1_vertex[0] as usize];
-            let edge1_position2 = self.positions[edge1_vertex[1] as usize];
+            let edge1_position1 = positions[edge1_vertex[0] as usize];
+            let edge1_position2 = positions[edge1_vertex[1] as usize];
             let edge1_extents = Extents2::from_points(edge1_position1, edge1_position2);
             let mut j = 0usize;
-            let edges2: Vec<u32> = if brute_force {
+            let edges2: &[u32] = if brute_force {
                 if checking_self {
                     j = i + 1;
                     if j == edges1_count {
                         break;
                     }
                 }
-                self.edges.clone()
+                &own_edges
             } else {
-                self.compute_potential_edges(self.edge_position0(edge1), self.edge_position1(edge1));
-                self.potential_edges.clone()
+                self.compute_potential_edges(edge1_position1, edge1_position2);
+                &self.potential_edges
             };
             let edges2_count = edges2.len();
             let mut prev_edge = UINT32_MAX;
@@ -844,8 +886,8 @@ impl UniformGrid2 {
                     continue;
                 }
                 let edge2_vertex = [
-                    self.vertex_at(mesh_edge_index0(edge2)),
-                    self.vertex_at(mesh_edge_index1(edge2)),
+                    grid_vertex_at(indices, mesh_edge_index0(edge2)),
+                    grid_vertex_at(indices, mesh_edge_index1(edge2)),
                 ];
                 if edge1_vertex[0] == edge2_vertex[0]
                     || edge1_vertex[0] == edge2_vertex[1]
@@ -854,8 +896,8 @@ impl UniformGrid2 {
                 {
                     continue;
                 }
-                let edge2_position1 = self.positions[edge2_vertex[0] as usize];
-                let edge2_position2 = self.positions[edge2_vertex[1] as usize];
+                let edge2_position1 = positions[edge2_vertex[0] as usize];
+                let edge2_position2 = positions[edge2_vertex[1] as usize];
                 if !Extents2::intersect(
                     edge1_extents,
                     Extents2::from_points(edge2_position1, edge2_position2),
@@ -869,21 +911,23 @@ impl UniformGrid2 {
                     edge2_position2,
                     epsilon,
                 ) {
-                    return true;
+                    hit = true;
+                    break 'outer;
                 }
             }
         }
-        false
+        self.edges = own_edges;
+        hit
     }
 
-    fn create_grid(&mut self) -> bool {
+    fn create_grid(&mut self, positions: &[Vec2], indices: &[u32]) -> bool {
         let edge_count = self.edges.len() as u32;
         let mut edge_extents = Extents2::default();
         edge_extents.reset();
         for i in 0..edge_count {
             let edge = self.edges[i as usize];
-            edge_extents.add(self.edge_position0(edge));
-            edge_extents.add(self.edge_position1(edge));
+            edge_extents.add(grid_edge_position0(positions, indices, edge));
+            edge_extents.add(grid_edge_position1(positions, indices, edge));
         }
         self.grid_origin = edge_extents.min;
         let extents_size = edge_extents.max - edge_extents.min;
@@ -903,9 +947,13 @@ impl UniformGrid2 {
         self.cell_data.reserve((edge_count * 2) as usize);
         for i in 0..edge_count {
             let edge = self.edges[i as usize];
-            self.traverse(self.edge_position0(edge), self.edge_position1(edge));
+            self.traverse(
+                grid_edge_position0(positions, indices, edge),
+                grid_edge_position1(positions, indices, edge),
+            );
             debug_assert!(!self.traversed_cell_offsets.is_empty());
-            for &cell in &self.traversed_cell_offsets.clone() {
+            for k in 0..self.traversed_cell_offsets.len() {
+                let cell = self.traversed_cell_offsets[k];
                 let mut offset = self.cell_data_offsets[cell as usize];
                 if offset == UINT32_MAX {
                     self.cell_data_offsets[cell as usize] = self.cell_data.len() as u32;
@@ -929,7 +977,8 @@ impl UniformGrid2 {
     fn compute_potential_edges(&mut self, p1: Vec2, p2: Vec2) {
         self.potential_edges.clear();
         self.traverse(p1, p2);
-        for &cell in &self.traversed_cell_offsets.clone() {
+        for k in 0..self.traversed_cell_offsets.len() {
+            let cell = self.traversed_cell_offsets[k];
             let mut offset = self.cell_data_offsets[cell as usize];
             while offset != UINT32_MAX {
                 let edge2 = self.cell_data[offset as usize];
@@ -1016,21 +1065,5 @@ impl UniformGrid2 {
     fn cell_y(&self, y: f32) -> u32 {
         let v = ((y - self.grid_origin.y) / self.cell_size).max(0.0) as u32;
         v.min(self.grid_height - 1)
-    }
-
-    fn edge_position0(&self, edge: u32) -> Vec2 {
-        self.positions[self.vertex_at(mesh_edge_index0(edge)) as usize]
-    }
-
-    fn edge_position1(&self, edge: u32) -> Vec2 {
-        self.positions[self.vertex_at(mesh_edge_index1(edge)) as usize]
-    }
-
-    fn vertex_at(&self, index: u32) -> u32 {
-        if !self.indices.is_empty() {
-            self.indices[index as usize]
-        } else {
-            index
-        }
     }
 }

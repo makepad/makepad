@@ -3163,6 +3163,12 @@ impl Pipeline {
         if self.finished {
             return false;
         }
+        // A VRAM-admission backoff has no job on the box yet but is still a
+        // live run holding a slot; Stop must be able to abandon it instead
+        // of reporting "no cancellable job" until the box frees up.
+        if self.waiting_for_admission {
+            return true;
+        }
         if let Some(set) = self.active_candidate_set() {
             return set.state == CandidateSetState::FanOut
                 && set.candidates.iter().any(|candidate| {
@@ -3187,6 +3193,12 @@ impl Pipeline {
     pub fn cancel_current(&mut self, cx: &mut Cx) -> bool {
         if !self.can_cancel_current() {
             return false;
+        }
+        if self.waiting_for_admission {
+            self.waiting_for_admission = false;
+            self.admission_retry_not_before = None;
+            let _ = self.fail_stage(self.current, "cancelled".to_string(), Vec::new());
+            return true;
         }
         if self.active_candidate_set().is_some() {
             let Some(jobs) = self.begin_candidate_cancellation() else {
@@ -4254,6 +4266,9 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert!(pipeline.stages[0].service_state.is_empty());
         assert!(pipeline.stages[0].detail.contains("retry in 5s"));
         assert_eq!(pipeline.stages[0].vram_retries, 1);
+        // Stop must be able to abandon the backoff: it is a live run with a
+        // slot even though no job exists on the box yet.
+        assert!(pipeline.can_cancel_current());
     }
 
     /// Exhaustive snapshot of the registry's (domain, id) set. When a model
