@@ -393,6 +393,26 @@ script_mod! {
             draw_text +: { text_style: theme.font_regular{font_size: 7.5} }
         }
     }
+    // One live job on a box (ours or another client's) with its Cancel.
+    let FleetJobRow = View{
+        width: Fill height: 22 flow: Right spacing: 6
+        align: Align{y: 0.5}
+        visible: false
+        jstate := SolidView{
+            width: 7 height: 7
+            draw_bg +: {
+                color: #xf0a33d
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
+                    sdf.fill(self.color)
+                    return sdf.result
+                }
+            }
+        }
+        jtext := BrightLabel{ width: Fill text: "" draw_text +: { text_style: theme.font_regular{font_size: 8.5} } }
+        jcancel := LibraryDeleteButton{ text: "×" }
+    }
     // One model on a box, inside the box popup.
     let FleetModelRow = View{
         width: Fill height: 20 flow: Right spacing: 6
@@ -1586,6 +1606,17 @@ script_mod! {
                         }
                         fleet_box_status := HintLabel{ text: "" }
                         fleet_box_hint := HintLabel{ text: "Unchecked = never routed to this box by this app. ★ prefer = for that domain this box only ever runs that model (small GPU → small image model, big GPU → large, same request). Defaults = largest present model that fits, per domain. The box itself is untouched." }
+                        // Live jobs on the box (ours AND other clients'), each
+                        // with its own Cancel → POST /job/<id>/cancel.
+                        fleet_box_jobs := View{
+                            visible: false
+                            width: Fill height: Fit flow: Down spacing: 2
+                            PanelHeading{ text: "Jobs on this box" margin: Inset{top: 2} }
+                            fj0 := FleetJobRow{} fj1 := FleetJobRow{} fj2 := FleetJobRow{}
+                            fj3 := FleetJobRow{} fj4 := FleetJobRow{} fj5 := FleetJobRow{}
+                            fj6 := FleetJobRow{} fj7 := FleetJobRow{}
+                        }
+                        PanelHeading{ text: "Models" margin: Inset{top: 2} }
                         fleet_box_rows := QuietScrollY{
                             width: Fill
                             height: Fill
@@ -2820,6 +2851,9 @@ pub struct App {
     fleet_modal_box: Option<String>,
     #[rust]
     fleet_modal_models: Vec<String>,
+    /// Job ids per jobs row in the node column (for Cancel).
+    #[rust]
+    fleet_modal_jobs: Vec<String>,
     /// Box base_url per fleet card slot (click → popup).
     #[rust]
     fleet_card_boxes: Vec<String>,
@@ -3225,6 +3259,12 @@ impl App {
         ]
     }
 
+    fn fleet_job_row_ids() -> [&'static [LiveId]; 8] {
+        [
+            ids!(fj0), ids!(fj1), ids!(fj2), ids!(fj3), ids!(fj4), ids!(fj5), ids!(fj6), ids!(fj7),
+        ]
+    }
+
     fn fleet_model_row_ids() -> Vec<&'static [LiveId]> {
         vec![
             ids!(fm0), ids!(fm1), ids!(fm2), ids!(fm3), ids!(fm4), ids!(fm5), ids!(fm6), ids!(fm7),
@@ -3259,6 +3299,23 @@ impl App {
         }
         let pending = snap.jobs_pending();
         if pending > 0 {
+            // The service's own job list names what is actually running.
+            let running = self.fleet.as_ref().and_then(|fleet| {
+                fleet
+                    .snapshots
+                    .iter()
+                    .position(|s| s.base_url == base_url)
+                    .and_then(|i| fleet.jobs.get(i))
+                    .and_then(|jobs| jobs.first().cloned())
+            });
+            if let Some(job) = running {
+                let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
+                let what = job.model.clone().unwrap_or_else(|| "job".to_string());
+                let stage = job.stage.clone().unwrap_or_else(|| job.state.clone());
+                let more = pending.saturating_sub(1);
+                let tail = if more > 0 { format!(" +{more} queued") } else { String::new() };
+                return (format!("{what} · {stage} {pct}%{tail}"), BUSY);
+            }
             return (format!("{pending} job{} (other client)", if pending == 1 { "" } else { "s" }), BUSY);
         }
         let loaded = snap
@@ -3336,6 +3393,58 @@ impl App {
             None => "down — last known models".to_string(),
         };
         self.ui.label(cx, ids!(fleet_box_status)).set_text(cx, &status);
+        // Live jobs (running first, then queued) — other clients' included.
+        let jobs: Vec<makepad_asset_ai::protocol::JobStatusJson> = self
+            .fleet
+            .as_ref()
+            .and_then(|fleet| {
+                fleet
+                    .snapshots
+                    .iter()
+                    .position(|s| s.base_url == url)
+                    .and_then(|i| fleet.jobs.get(i).cloned())
+            })
+            .unwrap_or_default();
+        self.fleet_modal_jobs = jobs.iter().map(|j| j.job_id.clone()).collect();
+        self.ui.widget(cx, ids!(fleet_box_jobs)).set_visible(cx, !jobs.is_empty());
+        let ours: Vec<String> = self
+            .runs
+            .iter()
+            .flat_map(|run| run.pipeline.job_ids_on(&url))
+            .collect();
+        for (slot, row) in Self::fleet_job_row_ids().iter().enumerate() {
+            let view = self.ui.view(cx, row);
+            let Some(job) = jobs.get(slot) else {
+                view.set_visible(cx, false);
+                continue;
+            };
+            view.set_visible(cx, true);
+            let pct = (job.progress.unwrap_or(0.0) * 100.0).round() as u32;
+            let who = if ours.iter().any(|id| id == &job.job_id) { "ours" } else { "other client" };
+            let text = format!(
+                "{} · {} · {}{} · {} · {}",
+                job.model.clone().unwrap_or_else(|| "?".to_string()),
+                job.state,
+                job.stage.clone().unwrap_or_default(),
+                if job.state == "running" { format!(" {pct}%") } else { String::new() },
+                who,
+                job.job_id
+            );
+            let mut id = row.to_vec();
+            id.push(live_id!(jtext));
+            self.ui.label(cx, &id).set_text(cx, &text);
+            let color = if job.state == "running" {
+                Vec4f { x: 0.94, y: 0.64, z: 0.24, w: 1.0 }
+            } else {
+                Vec4f { x: 0.35, y: 0.38, z: 0.42, w: 1.0 }
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(jstate));
+            let mut light = self.ui.view(cx, &id);
+            script_apply_eval!(cx, light, {
+                draw_bg +: { color: #(color) }
+            });
+        }
         let mut models: Vec<_> = snap.models.iter().filter(|m| m.available).cloned().collect();
         models.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.id.cmp(&b.id)));
         self.fleet_modal_models = models.iter().map(|m| m.id.clone()).collect();
@@ -9397,6 +9506,22 @@ impl MatchEvent for App {
             self.close_fleet_modal(cx);
         }
         if let Some(url) = self.fleet_modal_box.clone() {
+            // Cancel any listed job (ours or another client's): the service
+            // drops a queued job immediately and unwinds a running one.
+            for (slot, row) in Self::fleet_job_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(jcancel));
+                if self.ui.button(cx, &id).clicked(actions) {
+                    if let Some(job_id) = self.fleet_modal_jobs.get(slot).cloned() {
+                        let cancel_url = format!("{url}/job/{job_id}/cancel");
+                        let mut request = crate::http::request(cancel_url, HttpMethod::POST);
+                        request.set_header("Content-Type".to_string(), "application/json".to_string());
+                        request.set_body(b"{}".to_vec());
+                        cx.http_request(LiveId::unique(), request);
+                        log!("fleet: cancel requested for {job_id} on {url}");
+                    }
+                }
+            }
             let mut changed = false;
             if self.ui.button(cx, ids!(fleet_box_defaults)).clicked(actions) {
                 self.apply_default_preferences(&url);

@@ -387,6 +387,14 @@ pub struct ArtifactRefJson {
     pub byte_len: Option<u64>,
 }
 
+/// `GET /jobs`: every job the service currently holds that is not finished
+/// (the running one first, then the queue in order), so a fleet client can
+/// SEE other clients' work on a box and cancel it (`POST /job/<id>/cancel`).
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct JobsJson {
+    pub jobs: Vec<JobStatusJson>,
+}
+
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct JobStatusJson {
     pub job_id: String,

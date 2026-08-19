@@ -463,6 +463,10 @@ fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
     if path == "/v1/model_inventory" {
         return ok_json(model_inventory_json(shared).serialize_json());
     }
+    if path == "/jobs" {
+        let jobs = shared.jobs.with(|store| store.active_status_json());
+        return ok_json(crate::protocol::JobsJson { jobs }.serialize_json());
+    }
     if let Some(job_id) = path.strip_prefix("/job/") {
         return match shared.jobs.with(|store| store.status_json(job_id)) {
             Some(status) => ok_json(status.serialize_json()),

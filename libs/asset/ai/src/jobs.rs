@@ -457,6 +457,16 @@ impl JobStore {
         }
     }
 
+    /// Running job first, then the queue in FIFO order — the live picture
+    /// `GET /jobs` serves (finished jobs stay reachable by id only).
+    pub fn active_status_json(&self) -> Vec<JobStatusJson> {
+        self.running
+            .iter()
+            .chain(self.queue.iter())
+            .filter_map(|id| self.status_json(id))
+            .collect()
+    }
+
     pub fn status_json(&self, id: &str) -> Option<JobStatusJson> {
         let job = self.jobs.get(id)?;
         let mut status = JobStatusJson {

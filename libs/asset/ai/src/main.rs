@@ -130,7 +130,7 @@ fn run() -> Result<(), AssetAiError> {
         println!("  HF_TOKEN present (gated repos enabled)");
     }
     println!(
-        "  endpoints: /health /models POST:/generate /job/<id> /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id>"
+        "  endpoints: /health /models /jobs POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id>"
     );
 
     // The http listener thread runs until the process is killed.
