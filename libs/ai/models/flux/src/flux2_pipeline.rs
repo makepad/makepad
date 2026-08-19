@@ -407,6 +407,13 @@ pub struct Flux2GenerateRequest {
     pub noise: Option<Vec<f32>>,
     /// Optional oracle conditioning, ALREADY zero-left-padded `[512, 15360]`.
     pub teacher_embeds: Option<Vec<f32>>,
+    /// Optional teacher forcing: the oracle's latent `x` at EVERY step
+    /// (token-major `[gen_tokens, 128]`, `len() == steps`). When set, step
+    /// `i` runs the transformer on the oracle's `x_i` instead of the
+    /// natively integrated sample, and `step_predictions` carries all
+    /// steps — the per-step parity metric that is not polluted by the
+    /// trajectory's chaotic amplification of fp8/bf16 ulps.
+    pub teacher_steps: Option<Vec<Vec<f32>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -569,10 +576,29 @@ impl Flux2DevPipeline {
         }
         let denoise_started = std::time::Instant::now();
         let mut step_predictions = Vec::new();
+        if let Some(teacher) = &request.teacher_steps {
+            if teacher.len() != request.steps {
+                return Err(DiffusionError::workflow(format!(
+                    "flux2 dev teacher_steps has {} entries for {} steps",
+                    teacher.len(),
+                    request.steps
+                )));
+            }
+        }
         for step in 0..request.steps {
             let step_started = std::time::Instant::now();
             if let Some(hook) = on_stage.as_deref_mut() {
                 hook("denoise", step + 1, request.steps);
+            }
+            if let Some(teacher) = &request.teacher_steps {
+                if teacher[step].len() != sample.len() {
+                    return Err(DiffusionError::workflow(format!(
+                        "flux2 dev teacher_steps[{step}] has {} values, expected {}",
+                        teacher[step].len(),
+                        sample.len()
+                    )));
+                }
+                sample.copy_from_slice(&teacher[step]);
             }
             let run = flux2_transformer_forward(
                 &self.transformer,
@@ -584,7 +610,7 @@ impl Flux2DevPipeline {
                 Some(request.guidance),
                 gen_tokens,
             )?;
-            if step == 0 || step + 1 == request.steps {
+            if step == 0 || step + 1 == request.steps || request.teacher_steps.is_some() {
                 step_predictions.push((step, run.prediction.clone()));
             }
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
@@ -601,12 +627,16 @@ impl Flux2DevPipeline {
                 "{}",
                 makepad_ai_common::backend::prof::report_and_reset("flux2dev prof denoise ")
             );
+            flux2_dev_prof_mem("after denoise");
         }
         flux2_dit_clear_pool();
         // Decode transients (~2-3GB at 1024px) plus the resident DiT sit at
         // the 32GB WDDM cliff; the ring slots are the cheapest headroom —
         // freed here, re-primed on the next forward.
         let _ = crate::backend::gpu_stream_ring_release_slots();
+        if prof {
+            flux2_dev_prof_mem("before decode (pool cleared, ring slots released)");
+        }
 
         let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
         let decode_started = std::time::Instant::now();
@@ -617,6 +647,7 @@ impl Flux2DevPipeline {
         let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
         if prof {
             eprintln!("flux2dev prof vae_decode ms={decode_ms:.1}");
+            flux2_dev_prof_mem("after decode");
             eprint!(
                 "{}",
                 makepad_ai_common::backend::prof::report_and_reset("flux2dev prof vae ")
@@ -645,6 +676,27 @@ impl Flux2DevPipeline {
             total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
         })
     }
+}
+
+/// `MAKEPAD_GPU_PROF` line: live device memory + weight-cache/pool counters
+/// (reset on each call) — the 32GB-card decode phase lives at the WDDM
+/// residency cliff, so "where the bytes are" is the first question.
+fn flux2_dev_prof_mem(label: &str) {
+    let stats = crate::backend::gpu_perf_stats(true);
+    eprintln!(
+        "flux2dev prof mem {label}: free={:.0}MB total={:.0}MB weight_stream={} ({:.0}MB) \
+         weight_evict_events={} pool_fresh_alloc={} ({:.0}MB) pool_oom_clears={} \
+         pool_overcap_free={:.0}MB",
+        stats.mem_free_bytes as f64 / (1024.0 * 1024.0),
+        stats.mem_total_bytes as f64 / (1024.0 * 1024.0),
+        stats.weight_stream_count,
+        stats.weight_stream_bytes as f64 / (1024.0 * 1024.0),
+        stats.weight_evict_events,
+        stats.pool_fresh_alloc_count,
+        stats.pool_fresh_alloc_bytes as f64 / (1024.0 * 1024.0),
+        stats.pool_oom_clears,
+        stats.pool_overcap_free_bytes as f64 / (1024.0 * 1024.0),
+    );
 }
 
 /// Resolve the dev weight layout under one root: the three Comfy files plus

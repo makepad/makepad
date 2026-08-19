@@ -293,7 +293,7 @@ pub fn flux2_vae_encode(
         )));
     }
     gpu_pool_clear();
-    gpu_pool_cap_override(Some(2048 * 1024 * 1024));
+    gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
     let ns = namespace(weights);
     let mut hidden = GpuSpatial {
         tensor: gpu_upload(&image.data, 3, image.width * image.height)
@@ -347,6 +347,41 @@ pub fn flux2_vae_encode(
     Ok(packed)
 }
 
+/// Idle-pool cap for the VAE phases, sized from the VRAM that is actually
+/// free when the phase starts.
+///
+/// The 1024px decode cycles ~512MB planes through resnet/attn/upsample; the
+/// planes it frees must stay pooled or every next op is a fresh cudaMalloc
+/// — and on a 32GB card with a 25GB DiT resident, each of those costs
+/// ~10-20ms in VidMm eviction scans (measured flux2-dev: fixed 2GB cap ->
+/// 69 fresh allocs / 20.7GB churn per decode, 735-1147ms instead of the
+/// ~300ms the same convs take with room). The old fixed 2GB cap came from
+/// flux1's 24GB tier where free VRAM at decode start was itself ~2-3GB and
+/// a roomier idle pool pushed the process over the WDDM residency cliff.
+/// So: leave a working-set margin below what is free, clamp to [2GB, 6GB].
+fn vae_pool_cap_bytes() -> usize {
+    const MIN: u64 = 2048 * 1024 * 1024;
+    const MAX: u64 = 6144 * 1024 * 1024;
+    const MARGIN: u64 = 3072 * 1024 * 1024;
+    let free = crate::backend::gpu_perf_stats(false).mem_free_bytes;
+    // FLUX_GPU_POOL_CAP_VAE_MB pins the cap (the flux1 knob) for A/B runs.
+    let cap = match std::env::var("FLUX_GPU_POOL_CAP_VAE_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(mb) => mb * 1024 * 1024,
+        None => free.saturating_sub(MARGIN).clamp(MIN, MAX),
+    };
+    if std::env::var_os("MAKEPAD_GPU_PROF").is_some() {
+        eprintln!(
+            "flux2 vae pool cap {:.0}MB (free {:.0}MB)",
+            cap as f64 / (1024.0 * 1024.0),
+            free as f64 / (1024.0 * 1024.0)
+        );
+    }
+    cap as usize
+}
+
 /// FLUX2_VAE_DUMP=dir: dump decoder stage outputs as rows=channels x
 /// cols=plane .f32 files (the DiT dump format) for oracle bisection.
 fn vae_dump(name: &str, spatial: &GpuSpatial) {
@@ -386,7 +421,7 @@ pub fn flux2_vae_decode(
     let width = packed.width * 2;
     let height = packed.height * 2;
     gpu_pool_clear();
-    gpu_pool_cap_override(Some(2048 * 1024 * 1024));
+    gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
     let ns = namespace(weights);
     let mut hidden = GpuSpatial {
         tensor: gpu_upload(&unpacked, z_channels, width * height).map_err(DiffusionError::model)?,
@@ -654,15 +689,21 @@ fn resnet(
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {
-    let hidden = group_norm(
+    // Re-ASSIGN (not shadow) so every intermediate plane goes back to the
+    // pool as soon as its consumer has run. Shadowed `let hidden` bindings
+    // kept all six intermediates alive to the end of the block — at the
+    // 1024px stages that is 6-7 x 512MB..1GB live per resnet, more than the
+    // idle-pool cap, so every op paid a fresh WDDM cudaMalloc (flux2-dev:
+    // 70 fresh allocs / 18GB churn per decode, 2.5x the official time).
+    let mut hidden = group_norm(
         weights,
         ns,
         input,
         &format!("{prefix}.norm1.weight"),
         &format!("{prefix}.norm1.bias"),
     )?;
-    let hidden = silu(&hidden)?;
-    let hidden = conv2d(
+    hidden = silu(&hidden)?;
+    hidden = conv2d(
         weights,
         ns,
         &hidden,
@@ -671,15 +712,15 @@ fn resnet(
         1,
         1,
     )?;
-    let hidden = group_norm(
+    hidden = group_norm(
         weights,
         ns,
         &hidden,
         &format!("{prefix}.norm2.weight"),
         &format!("{prefix}.norm2.bias"),
     )?;
-    let hidden = silu(&hidden)?;
-    let hidden = conv2d(
+    hidden = silu(&hidden)?;
+    hidden = conv2d(
         weights,
         ns,
         &hidden,
@@ -744,9 +785,11 @@ fn mid_attn(
         0,
         0,
     )?;
+    drop(hidden);
     let scale = 1.0 / (q.channels as f32).sqrt();
     let attn = gpu_attention_planar_single(&q.tensor, &k.tensor, &v.tensor, scale)
         .map_err(DiffusionError::model)?;
+    drop((q, k, v));
     let attn = GpuSpatial {
         tensor: attn,
         width: input.width,

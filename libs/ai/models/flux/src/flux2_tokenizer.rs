@@ -844,4 +844,33 @@ mod tests {
             .iter()
             .all(|&id| id == FLUX2_TOKEN_PAD));
     }
+    #[test]
+    fn t2i_unpadded_lighthouse_matches_comfy_oracle_when_downloaded() {
+        let Some(dir) = local_tokenizer_dir() else {
+            eprintln!("flux2 tokenizer t2i: local tokenizer dir missing, skipping");
+            return;
+        };
+        let tokenizer = Flux2Tokenizer::load(&dir).expect("load flux2 tokenizer");
+        // ComfyUI 0.22.0 oracle (`flux2_oracle_hook` te event, seed-7 run of
+        // the FLUX.2-dev fp8 recipe): 118 unpadded ids for the lighthouse
+        // prompt of `flux2-dev-validate`.
+        let prompt = "A weathered lighthouse keeper's cottage on a basalt cliff at golden hour: \
+whitewashed stone walls streaked with salt, a red tin roof, warm lamplight glowing in one round \
+window, gulls circling the rusted lantern tower, waves bursting into spray on black rocks below, \
+long shadows across wind-bent grass, thin volumetric sea mist, shot on 35mm film with fine grain.";
+        let ids = tokenizer.encode_t2i_unpadded(crate::flux2::FLUX2_SYSTEM_MESSAGE, prompt);
+        let expected: &[u32] = &[
+            1, 17, 4568, 1584, 1420, 26554, 1455, 12738, 2314, 3937, 38340, 1046, 3213, 5628,
+            37253, 11688, 30557, 1408, 3481, 14608, 1044, 3481, 1010, 2452, 5604, 1321, 10636,
+            3816, 67813, 1046, 18, 3, 1065, 17253, 1286, 1295, 118910, 121823, 1681, 73953, 1408,
+            1261, 3575, 3464, 81468, 1513, 33841, 12271, 1058, 7496, 13779, 2440, 15551, 16363,
+            12614, 17091, 1454, 14091, 1044, 1261, 4804, 21157, 22726, 1044, 15701, 35588, 1497,
+            1620, 87219, 1294, 1925, 6509, 7404, 1044, 105301, 1115, 13715, 104852, 1278, 44130,
+            1286, 104363, 28686, 1044, 22140, 127495, 2203, 32308, 1408, 7244, 34176, 5956, 1044,
+            2730, 49910, 5669, 12330, 2756, 1297, 23170, 1044, 16402, 100989, 11196, 11692, 1044,
+            12800, 1408, 1032, 1051, 1053, 8383, 4076, 1454, 7771, 26127, 1046, 4,
+        ];
+        assert_eq!(ids.len(), expected.len(), "native {:?}", ids);
+        assert_eq!(&ids[..], expected);
+    }
 }
