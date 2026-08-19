@@ -42,6 +42,9 @@ pub struct GenerateParams {
     pub input_content_type: String,
     /// Decoded named inputs (multi-input models); empty when none were sent.
     pub inputs: Vec<NamedInput>,
+    /// Image-to-image denoise strength 0..=1 (see the wire doc); `None` =
+    /// model default. Clamped at parse time.
+    pub strength: Option<f32>,
 
     // Video domain (h3 backend).
     /// Frame count at the model's native fps.
@@ -252,6 +255,10 @@ impl GenerateParams {
                 .clone()
                 .unwrap_or_else(|| "image/png".to_string()),
             inputs,
+            strength: request
+                .strength
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 1.0)),
 
             frames: request.frames.map(|v| v.clamp(1, 1024)),
             codec: request.codec.clone().unwrap_or_default(),

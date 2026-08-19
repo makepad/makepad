@@ -595,6 +595,7 @@ mod tests {
             guidance: Some(1.0),
             delay_ms: 0,
             inputs: Vec::new(),
+            strength: None,
             pull_only: false,
             input_bytes: Vec::new(),
             input_content_type: String::new(),

@@ -215,6 +215,14 @@ pub struct GenerateRequestJson {
     /// a model that requires named inputs visibly refuses requests missing
     /// them — it never infers or falls back to `input_b64`.
     pub inputs: Option<Vec<NamedInputJson>>,
+    /// Image-to-image denoise strength 0..=1 for image/edit models that
+    /// start from `input_b64` instead of pure noise (1.0 = ignore the
+    /// input's pixels, only its size; 0.0 = return it unchanged). `None` =
+    /// the model's default (instruction editors condition on the reference
+    /// tokens and generate fully; plain image models ignore the input).
+    /// Extra edit references ride in `inputs` as `reference_1..N`
+    /// (`image/png`) next to the primary `input_b64` reference.
+    pub strength: Option<f32>,
 
     // -- video domain (h3 backend) --
     /// Frame count at the model's native fps (H3: 24 fps, frames snapped up
