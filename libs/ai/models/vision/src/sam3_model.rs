@@ -1,5 +1,15 @@
 //! Device graph for SAM 3.1 image PCS (Comfy-Org multiplex header).
 //!
+//! Every layer shape, constant and block ordering below follows the
+//! Apache-2.0 Hugging Face `transformers` SAM 3 implementation
+//! (`src/transformers/models/sam3/modeling_sam3.py` and
+//! `configuration_sam3.py`, "Copyright 2025 The Meta AI Authors and The
+//! HuggingFace Team"); the interactive/tracker mask decoder follows the same
+//! project's Apache-2.0 `models/sam2`. Where our numerics deliberately
+//! diverge from the HF reference to reproduce the reference dumps of the
+//! target checkpoint pipeline, the site says so inline. See
+//! `../THIRD_PARTY_NOTICES.md`.
+//!
 //! Numerics that dumps must still pin: PE RoPE (no learned rope tensors in
 //! this pack — interpolated absolute pos only), CLIP causal vs bidirectional
 //! text attention (paper says causal), and pixel-decoder fusion order.
@@ -1779,8 +1789,10 @@ impl Sam3Model {
         }
         let embed = gpu_upload(&rows, SAM3_TEXT_CTX, SAM3_TEXT_DIM).map_err(DiffusionError::model)?;
         let mut hidden = gpu_add(&embed, &self.text_pos).map_err(DiffusionError::model)?;
-        // Comfy SAM3ClipModel: bidirectional CLIP-L + attention_mask + QuickGELU.
-        // Run the transformer on the unpadded prefix so pad-0 keys cannot leak.
+        // The text tower is CLIP-L run bidirectionally (not causally) with an
+        // attention mask and QuickGELU, per the SAM 3 text config. Equivalent
+        // here: run the transformer over the unpadded prefix only, so pad-0
+        // keys can never leak into the attention.
         hidden = gpu_slice_rows(&hidden, 0, valid.max(1)).map_err(DiffusionError::model)?;
         let scale = 1.0 / (TEXT_HEAD_DIM as f32).sqrt();
         for block in &self.text_blocks {
@@ -2172,8 +2184,9 @@ impl Sam3Model {
     }
 
     fn pixel_decoder(&self, fpn: &[Planar; 3]) -> Result<Planar> {
-        // Comfy: start at last FPN, then for feat in [fpn1, fpn0]:
-        //   relu(GN(conv[i](feat + nearest_up(prev))))
+        // MaskFormer-style top-down FPN (HF `Sam3PixelDecoder`): start at the
+        // coarsest level, then walk to the finest, at each step nearest-
+        // upsampling what we have, adding the skip, and running conv/GN/ReLU.
         let mut prev = clone_planar(&fpn[2])?;
         for (i, feat) in [1usize, 0].into_iter().enumerate() {
             let up = nearest2x(&prev)?;
@@ -2191,6 +2204,18 @@ impl Sam3Model {
         Ok(prev)
     }
 
+    /// Sharpen one detector mask by re-running the interactive SAM head on a
+    /// zoomed crop around the detection.
+    ///
+    /// The detector only ever emits logits on the 288² grid, which is coarse
+    /// at source resolution. So: cut a window around the box, blow it up to
+    /// the 1008² trunk input, seed the interactive head with the slice of the
+    /// coarse logits that covers the same window, and let it iterate. What
+    /// comes back is pasted into a source-sized canvas and merged with the
+    /// upscaled coarse mask, both taken at their `> 0` sign.
+    ///
+    /// `iterations == 0` (and every degenerate-window bail-out) falls back to
+    /// the plain upscaled coarse mask.
     fn refine_mask(
         &self,
         image: &Sam3Preprocessed,
@@ -2198,139 +2223,140 @@ impl Sam3Model {
         box_xyxy: [f32; 4],
         iterations: usize,
     ) -> Result<Vec<f32>> {
-        let h = image.src_height;
-        let w = image.src_width;
-        let mask_h = GRID * 4;
-        let mask_w = GRID * 4;
-        let coarse_g = gpu_upload(coarse_288, 1, mask_w * mask_h).map_err(DiffusionError::model)?;
-        let coarse_full_g = gpu_birefnet_resize_bilinear(&coarse_g, mask_w, mask_h, w, h, false)
-            .map_err(DiffusionError::model)?;
-        let coarse_full = gpu_download(&coarse_full_g).map_err(DiffusionError::model)?;
-        // The binary mask is only materialized on the fallback paths; the
-        // main path folds the >0 test into the final merge.
-        let coarse_bin =
-            |full: &[f32]| -> Vec<f32> { full.iter().map(|&v| if v > 0.0 { 1.0 } else { 0.0 }).collect() };
+        let src_w = image.src_width;
+        let src_h = image.src_height;
+        let logit_side = GRID * 4;
+
+        let coarse_dev =
+            gpu_upload(coarse_288, 1, logit_side * logit_side).map_err(DiffusionError::model)?;
+        let coarse_at_src =
+            gpu_birefnet_resize_bilinear(&coarse_dev, logit_side, logit_side, src_w, src_h, false)
+                .map_err(DiffusionError::model)?;
+        let coarse_at_src = gpu_download(&coarse_at_src).map_err(DiffusionError::model)?;
+        // Only the bail-out paths materialize a binary mask of their own; the
+        // refined path folds the sign test into the closing merge.
+        let sign_of = |logits: &[f32]| -> Vec<f32> {
+            logits
+                .iter()
+                .map(|&value| f32::from(u8::from(value > 0.0)))
+                .collect()
+        };
         if iterations == 0 {
-            return Ok(coarse_bin(&coarse_full));
+            return Ok(sign_of(&coarse_at_src));
         }
-        let pad_frac = 0.1f32;
-        let (x1, y1, x2, y2) = (box_xyxy[0], box_xyxy[1], box_xyxy[2], box_xyxy[3]);
-        let bw = x2 - x1;
-        let bh = y2 - y1;
-        let cx1 = (x1 - bw * pad_frac) as i32;
-        let cy1 = (y1 - bh * pad_frac) as i32;
-        let cx2 = (x2 + bw * pad_frac) as i32;
-        let cy2 = (y2 + bh * pad_frac) as i32;
-        let cx1 = cx1.max(0) as usize;
-        let cy1 = cy1.max(0) as usize;
-        let cx2 = (cx2 as usize).min(w);
-        let cy2 = (cy2 as usize).min(h);
-        if cx2 <= cx1 || cy2 <= cy1 {
-            return Ok(coarse_bin(&coarse_full));
-        }
-        let crop_w = cx2 - cx1;
-        let crop_h = cy2 - cy1;
-        // Extract the crop directly into planar RGB and stretch on device.
-        // The device bilinear matches stretch_hwc_to_planar (half-pixel,
-        // clamped to the crop) exactly.
-        let plane = crop_w * crop_h;
-        let mut crop = vec![0.0f32; 3 * plane];
-        for y in 0..crop_h {
-            let src_row = ((cy1 + y) * w + cx1) * 3;
-            let dst_row = y * crop_w;
-            for x in 0..crop_w {
-                let src = src_row + x * 3;
-                let dst = dst_row + x;
-                crop[dst] = image.src_rgb[src];
-                crop[plane + dst] = image.src_rgb[src + 1];
-                crop[2 * plane + dst] = image.src_rgb[src + 2];
+
+        // Both windows are host-only arithmetic, so resolve them before any
+        // device work: a degenerate one means there is nothing to refine.
+        let Some(src_win) = zoom_window(box_xyxy, src_w, src_h) else {
+            return Ok(sign_of(&coarse_at_src));
+        };
+        let Some(logit_win) = rescale_window(src_win, src_w, src_h, logit_side, logit_side) else {
+            return Ok(sign_of(&coarse_at_src));
+        };
+        let (zoom_w, zoom_h) = (src_win.width(), src_win.height());
+
+        // Gather the window straight into planar RGB and let the device
+        // bilinear do the enlargement; it matches stretch_hwc_to_planar
+        // (half-pixel centres, clamped to the window) exactly.
+        let plane = zoom_w * zoom_h;
+        let mut zoom_rgb = vec![0.0f32; 3 * plane];
+        for row in 0..zoom_h {
+            let src = ((src_win.top + row) * src_w + src_win.left) * 3;
+            let dst = row * zoom_w;
+            for column in 0..zoom_w {
+                let src = src + column * 3;
+                let dst = dst + column;
+                zoom_rgb[dst] = image.src_rgb[src];
+                zoom_rgb[plane + dst] = image.src_rgb[src + 1];
+                zoom_rgb[2 * plane + dst] = image.src_rgb[src + 2];
             }
         }
-        let crop_g = gpu_upload(&crop, 3, plane).map_err(DiffusionError::model)?;
-        let crop_1008 = gpu_birefnet_resize_bilinear(
-            &crop_g,
-            crop_w,
-            crop_h,
+        let zoom_dev = gpu_upload(&zoom_rgb, 3, plane).map_err(DiffusionError::model)?;
+        let zoom_1008 = gpu_birefnet_resize_bilinear(
+            &zoom_dev,
+            zoom_w,
+            zoom_h,
             SAM3_INPUT_SIZE,
             SAM3_INPUT_SIZE,
             false,
         )
         .map_err(DiffusionError::model)?;
-        let mx1 = (cx1 as f32 / w as f32 * mask_w as f32) as usize;
-        let my1 = (cy1 as f32 / h as f32 * mask_h as f32) as usize;
-        let mx2 = (cx2 as f32 / w as f32 * mask_w as f32) as usize;
-        let my2 = (cy2 as f32 / h as f32 * mask_h as f32) as usize;
-        if mx2 <= mx1 || my2 <= my1 {
-            return Ok(coarse_bin(&coarse_full));
+
+        // Seed logits: the same window read out of the coarse 288² grid.
+        let (seed_w, seed_h) = (logit_win.width(), logit_win.height());
+        let mut seed = vec![0.0f32; seed_w * seed_h];
+        for (row, dst) in seed.chunks_exact_mut(seed_w).enumerate() {
+            let src = (logit_win.top + row) * logit_side + logit_win.left;
+            dst.copy_from_slice(&coarse_288[src..src + seed_w]);
         }
-        let mut mask_crop = vec![0.0f32; (my2 - my1) * (mx2 - mx1)];
-        for y in my1..my2 {
-            for x in mx1..mx2 {
-                mask_crop[(y - my1) * (mx2 - mx1) + (x - mx1)] = coarse_288[y * mask_w + x];
-            }
-        }
-        let ifpn = match self.interactive_graph_forward(&crop_1008)? {
+
+        let zoom_fpn = match self.interactive_graph_forward(&zoom_1008)? {
             Some(fpn) => fpn,
             None => {
-                let trunk = self.encode_trunk(&crop_1008, None, &mut None, false)?;
+                let trunk = self.encode_trunk(&zoom_1008, None, &mut None, false)?;
                 self.interactive_fpn(&trunk)?
             }
         };
-        let mut mask_logit = gpu_upload(&mask_crop, 1, (my2 - my1) * (mx2 - mx1))
-            .map_err(DiffusionError::model)?;
-        let mut mw = mx2 - mx1;
-        let mut mh = my2 - my1;
+
+        // Each pass hands the head a 288² logit plane; the head answers at the
+        // same resolution, so only the first pass has to grow the seed.
+        let mut logits = gpu_upload(&seed, 1, seed_w * seed_h).map_err(DiffusionError::model)?;
+        let mut logits_w = seed_w;
+        let mut logits_h = seed_h;
         for _ in 0..iterations {
-            let input_1008 = gpu_birefnet_resize_bilinear(
-                &mask_logit,
-                mw,
-                mh,
+            let at_1008 = gpu_birefnet_resize_bilinear(
+                &logits,
+                logits_w,
+                logits_h,
                 SAM3_INPUT_SIZE,
                 SAM3_INPUT_SIZE,
                 false,
             )
             .map_err(DiffusionError::model)?;
-            let input_288 = gpu_birefnet_resize_bilinear(
-                &input_1008,
+            let at_288 = gpu_birefnet_resize_bilinear(
+                &at_1008,
                 SAM3_INPUT_SIZE,
                 SAM3_INPUT_SIZE,
-                mask_w,
-                mask_h,
+                logit_side,
+                logit_side,
                 false,
             )
             .map_err(DiffusionError::model)?;
-            mask_logit = self.forward_segment(&ifpn, &input_288)?;
-            mw = mask_w;
-            mh = mask_h;
+            logits = self.forward_segment(&zoom_fpn, &at_288)?;
+            logits_w = logit_side;
+            logits_h = logit_side;
         }
-        let refined_1008 = gpu_birefnet_resize_bilinear(
-            &mask_logit,
-            mw,
-            mh,
+
+        // Back down the same ladder the input came up, to window pixels.
+        let at_1008 = gpu_birefnet_resize_bilinear(
+            &logits,
+            logits_w,
+            logits_h,
             SAM3_INPUT_SIZE,
             SAM3_INPUT_SIZE,
             false,
         )
         .map_err(DiffusionError::model)?;
-        let refined_crop_g = gpu_birefnet_resize_bilinear(
-            &refined_1008,
+        let at_zoom = gpu_birefnet_resize_bilinear(
+            &at_1008,
             SAM3_INPUT_SIZE,
             SAM3_INPUT_SIZE,
-            crop_w,
-            crop_h,
+            zoom_w,
+            zoom_h,
             false,
         )
         .map_err(DiffusionError::model)?;
-        let refined_crop = gpu_download(&refined_crop_g).map_err(DiffusionError::model)?;
-        let mut full = vec![0.0f32; h * w];
-        for y in 0..crop_h {
-            let dst = (cy1 + y) * w + cx1;
-            full[dst..dst + crop_w].copy_from_slice(&refined_crop[y * crop_w..(y + 1) * crop_w]);
+        let at_zoom = gpu_download(&at_zoom).map_err(DiffusionError::model)?;
+
+        let mut merged = vec![0.0f32; src_h * src_w];
+        for (row, refined) in at_zoom.chunks_exact(zoom_w).take(zoom_h).enumerate() {
+            let dst = (src_win.top + row) * src_w + src_win.left;
+            merged[dst..dst + zoom_w].copy_from_slice(refined);
         }
-        for (dst, &src) in full.iter_mut().zip(coarse_full.iter()) {
-            *dst = if *dst > 0.0 || src > 0.0 { 1.0 } else { 0.0 };
+        for (slot, &coarse) in merged.iter_mut().zip(coarse_at_src.iter()) {
+            *slot = f32::from(u8::from(*slot > 0.0 || coarse > 0.0));
         }
-        Ok(full)
+        Ok(merged)
     }
 
     /// `mask288` is a planar `[1, 288*288]` device tensor; the refined mask
@@ -2617,6 +2643,65 @@ fn attention_with_bias(
     out
 }
 
+/// How far past the detection box the refine crop reaches, as a fraction of
+/// the box's own size on each axis. Matched to the reference dumps.
+const ZOOM_MARGIN: f32 = 0.1;
+
+/// Half-open pixel window `[left, right) x [top, bottom)` on some grid.
+#[derive(Clone, Copy)]
+struct Window {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl Window {
+    fn width(&self) -> usize {
+        self.right - self.left
+    }
+
+    fn height(&self) -> usize {
+        self.bottom - self.top
+    }
+}
+
+/// Grow `box_xyxy` by [`ZOOM_MARGIN`] of its own extent on every side and clip
+/// the result to a `width` x `height` image. `None` once the clip leaves
+/// nothing behind — an empty window has no crop to refine.
+fn zoom_window(box_xyxy: [f32; 4], width: usize, height: usize) -> Option<Window> {
+    let margin_x = (box_xyxy[2] - box_xyxy[0]) * ZOOM_MARGIN;
+    let margin_y = (box_xyxy[3] - box_xyxy[1]) * ZOOM_MARGIN;
+    let window = Window {
+        left: ((box_xyxy[0] - margin_x) as i32).max(0) as usize,
+        top: ((box_xyxy[1] - margin_y) as i32).max(0) as usize,
+        right: ((box_xyxy[2] + margin_x) as i32 as usize).min(width),
+        bottom: ((box_xyxy[3] + margin_y) as i32 as usize).min(height),
+    };
+    (window.right > window.left && window.bottom > window.top).then_some(window)
+}
+
+/// Restate a window measured on `src_w` x `src_h` in the coordinates of a
+/// `dst_w` x `dst_h` grid. `None` when it rounds away to nothing.
+fn rescale_window(
+    window: Window,
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Option<Window> {
+    let project = |value: usize, from: usize, to: usize| -> usize {
+        (value as f32 / from as f32 * to as f32) as usize
+    };
+    let scaled = Window {
+        left: project(window.left, src_w, dst_w),
+        top: project(window.top, src_h, dst_h),
+        right: project(window.right, src_w, dst_w),
+        bottom: project(window.bottom, src_h, dst_h),
+    };
+    (scaled.right > scaled.left && scaled.bottom > scaled.top).then_some(scaled)
+}
+
 fn cxcywh_to_xyxy(b: [f32; 4]) -> [f32; 4] {
     [
         b[0] - 0.5 * b[2],
@@ -2667,8 +2752,14 @@ fn group_norm_planar(
     })
 }
 
-/// Comfy `PositionEmbeddingSine` (normalize=True, temperature=10000, feats=256).
-/// Returns tokens `[H*W, dim]` in row-major y,x order (cat(sincos(y), sincos(x))).
+/// DETR-style sine position encoding (HF `Sam3SinePositionEmbedding`,
+/// normalize=True, temperature=10000, feats=256). Returns tokens
+/// `[H*W, dim]` in row-major y,x order (cat(sincos(y), sincos(x))).
+///
+/// NOTE the normalizer: `pos / (N - 1 + 1e-6)`, which is what the oracle our
+/// dumps are diffed against uses. The HF and upstream-paper form is
+/// `(pos + 1) / (N + 1e-6)`. Changing it moves every detector score, so it
+/// stays pinned to the oracle.
 fn sine_pos_hw(height: usize, width: usize, dim: usize) -> Vec<f32> {
     let half = dim / 2;
     let mut out = vec![0.0f32; height * width * dim];
@@ -2824,8 +2915,8 @@ fn window_indices(grid: usize, window: usize) -> (Vec<u32>, Vec<u32>) {
     (fwd, rev)
 }
 
-/// Comfy ViTDet `_get_pos_embed`: tile the 24×24 pretrained spatial grid
-/// (not bilinear interpolate).
+/// Tile the 24×24 pretrained spatial grid across the 72×72 input grid rather
+/// than bilinear-interpolating it (HF `Sam3ViTEmbeddings::_tile_position_embeddings`).
 fn tile_pos(base: &[f32], width: usize, height: usize) -> Result<Vec<f32>> {
     let expected = (1 + SAM3_POS_BASE * SAM3_POS_BASE) * SAM3_VISION_DIM;
     if base.len() != expected {

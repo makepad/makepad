@@ -6,6 +6,13 @@
 //! Python, Torch, subprocess, or silent fallback. Facebook TOS weights are
 //! never fetched.
 //!
+//! The SAM 3 model this backend drives lives in `libs/ai/models/vision` and
+//! is implemented after the Apache-2.0 Hugging Face `transformers` SAM 3
+//! implementation (`src/transformers/models/sam3/`, "Copyright 2025 The Meta
+//! AI Authors and The HuggingFace Team"). Checkpoint weights stay
+//! SAM-Licensed: the operator pulls them at runtime and this service never
+//! redistributes them. See `libs/ai/models/vision/THIRD_PARTY_NOTICES.md`.
+//!
 //! Request: `{model: "sam3-1-multiplex", input_b64: <png>, prompt: "cat:1"}`
 //! -> TWO artifacts:
 //! 1. `image/png` grayscale soft mask at input resolution
