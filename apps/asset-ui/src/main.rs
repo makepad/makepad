@@ -1138,56 +1138,6 @@ script_mod! {
                             save_preset_btn := GhostButton{ text: "Save preset" }
                         }
 
-                        // Persistent selected-input chip: the managed asset
-                        // the next transform run consumes. Populated by an
-                        // explicit click on a History tile / Library card;
-                        // its × unpins without deleting anything.
-                        input_tray := Card{
-                            visible: false
-                            width: Fill height: Fit
-                            flow: Right spacing: 8
-                            padding: 6
-                            align: Align{y: 0.5}
-                            View{
-                                width: 44 height: 33
-                                align: Align{x: 0.5 y: 0.5}
-                                input_chip_thumb := ThumbFitImage{}
-                            }
-                            View{
-                                width: Fill height: Fit flow: Down spacing: 2
-                                input_chip_kind := HintLabel{ text: "" }
-                                input_chip_title := BrightLabel{ text: "" }
-                            }
-                            input_clear := LibraryDeleteButton{ text: "×" }
-                        }
-
-                        // The selected run, spread out: every artifact the
-                        // pipeline produced (source image, matte, mesh, paint,
-                        // rig, …) as clickable chips. History keeps ONE tile
-                        // per run; this is where its members are reachable —
-                        // click a chip to view it, and it becomes the pinned
-                        // input, so a "mesh only" preset re-meshes exactly
-                        // that image.
-                        run_tray := Card{
-                            visible: false
-                            width: Fill height: Fit
-                            flow: Down spacing: 4
-                            padding: 6
-                            run_tray_title := HintLabel{ text: "" }
-                            View{
-                                width: Fill height: Fit
-                                flow: Flow.Right{wrap: true} spacing: 4 wrap_spacing: 4
-                                run_chip0 := RunChip{ visible: false }
-                                run_chip1 := RunChip{ visible: false }
-                                run_chip2 := RunChip{ visible: false }
-                                run_chip3 := RunChip{ visible: false }
-                                run_chip4 := RunChip{ visible: false }
-                                run_chip5 := RunChip{ visible: false }
-                                run_chip6 := RunChip{ visible: false }
-                                run_chip7 := RunChip{ visible: false }
-                            }
-                        }
-
                         View{
                             width: Fill height: Fit flow: Right
                             align: Align{y: 1.0}
@@ -1332,6 +1282,57 @@ script_mod! {
                             FieldCaption{ text: "Music length" }
                             music_len_drop := FieldDrop{}
                         }
+
+                        // Persistent selected-input chip: the managed asset
+                        // the next transform run consumes. Populated by an
+                        // explicit click on a History tile / Library card;
+                        // its × unpins without deleting anything.
+                        input_tray := Card{
+                            visible: false
+                            width: Fill height: Fit
+                            flow: Right spacing: 8
+                            padding: 6
+                            align: Align{y: 0.5}
+                            View{
+                                width: 44 height: 33
+                                align: Align{x: 0.5 y: 0.5}
+                                input_chip_thumb := ThumbFitImage{}
+                            }
+                            View{
+                                width: Fill height: Fit flow: Down spacing: 2
+                                input_chip_kind := HintLabel{ text: "" }
+                                input_chip_title := BrightLabel{ text: "" }
+                            }
+                            input_clear := LibraryDeleteButton{ text: "×" }
+                        }
+
+                        // The selected run, spread out: every artifact the
+                        // pipeline produced (source image, matte, mesh, paint,
+                        // rig, …) as clickable chips. History keeps ONE tile
+                        // per run; this is where its members are reachable —
+                        // click a chip to view it, and it becomes the pinned
+                        // input, so a "mesh only" preset re-meshes exactly
+                        // that image.
+                        run_tray := Card{
+                            visible: false
+                            width: Fill height: Fit
+                            flow: Down spacing: 4
+                            padding: 6
+                            run_tray_title := HintLabel{ text: "" }
+                            View{
+                                width: Fill height: Fit
+                                flow: Flow.Right{wrap: true} spacing: 4 wrap_spacing: 4
+                                run_chip0 := RunChip{ visible: false }
+                                run_chip1 := RunChip{ visible: false }
+                                run_chip2 := RunChip{ visible: false }
+                                run_chip3 := RunChip{ visible: false }
+                                run_chip4 := RunChip{ visible: false }
+                                run_chip5 := RunChip{ visible: false }
+                                run_chip6 := RunChip{ visible: false }
+                                run_chip7 := RunChip{ visible: false }
+                            }
+                        }
+
 
                         action_row := View{
                             width: Fill height: Fit flow: Right spacing: 6
@@ -5290,7 +5291,24 @@ impl App {
             preview_path: asset.preview_path.clone(),
             selected: false,
         };
-        if crate::store_views::preview_work(&entry).is_some() {
+        // The History strip usually already decoded this file — reuse it.
+        // Otherwise queue the decode ourselves: the gallery only records a
+        // miss while IT draws the tile, so a chip for an off-screen (or
+        // already-cached) file would never get a texture.
+        let cached = self
+            .ui
+            .widget(cx, ids!(library_gallery))
+            .borrow::<LibraryGallery>()
+            .and_then(|gallery| gallery.cached_texture(&asset.file));
+        if let Some(texture) = cached {
+            self.ui
+                .image(cx, ids!(input_chip_thumb))
+                .set_texture(cx, Some(texture));
+            return;
+        }
+        if let Some(work) = crate::store_views::preview_work(&entry) {
+            self.extra_preview_work.retain(|(f, _)| f != &asset.file);
+            self.extra_preview_work.push((asset.file.clone(), work));
             self.pump_gallery_previews(cx);
         }
     }
