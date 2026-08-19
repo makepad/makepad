@@ -473,12 +473,25 @@ pub fn remesh_narrow_band_dc_ctl(
 
     let mut dual = vec![[0.0f32; 3]; acoord.len()];
     let mut owned = vec![[0i8; 3]; acoord.len()];
-    let chunk = acoord.len().div_ceil(threads).max(1);
+    // Waves of `threads` chunks so the contour phase can report and cancel
+    // between them (same shape as the field phase).
+    let contour_waves = 8usize;
+    let cells_per_wave = acoord.len().div_ceil(contour_waves).max(1);
+    for wave in 0..contour_waves {
+        let wstart = wave * cells_per_wave;
+        if wstart >= acoord.len() {
+            break;
+        }
+        let wend = (wstart + cells_per_wave).min(acoord.len());
+        if !ctl("contour", 0.72 + 0.16 * (wave as f64 / contour_waves as f64)) {
+            return Err("narrow-band remesh cancelled".to_string());
+        }
+    let chunk = (wend - wstart).div_ceil(threads).max(1);
     std::thread::scope(|scope| {
-        for ((coords, dual_out), owned_out) in acoord
+        for ((coords, dual_out), owned_out) in acoord[wstart..wend]
             .chunks(chunk)
-            .zip(dual.chunks_mut(chunk))
-            .zip(owned.chunks_mut(chunk))
+            .zip(dual[wstart..wend].chunks_mut(chunk))
+            .zip(owned[wstart..wend].chunks_mut(chunk))
         {
             let vmap = &vmap;
             let fvert = &fvert;
@@ -530,6 +543,7 @@ pub fn remesh_narrow_band_dc_ctl(
             });
         }
     });
+    }
 
     const OFFSETS: [[[i32; 3]; 4]; 3] = [
         [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]],
@@ -540,7 +554,11 @@ pub fn remesh_narrow_band_dc_ctl(
     const SPLIT_POS: [usize; 6] = [0, 2, 1, 0, 3, 2];
     let mut faces_out = Vec::<u32>::with_capacity(acoord.len() * 6);
     let mut used = vec![false; acoord.len()];
+    let n_cells = acoord.len().max(1);
     for (i, &c) in acoord.iter().enumerate() {
+        if i % 16384 == 0 && !ctl("faces", 0.88 + 0.04 * (i as f64 / n_cells as f64)) {
+            return Err("narrow-band remesh cancelled".to_string());
+        }
         for axis in 0..3 {
             let direction = owned[i][axis];
             if direction == 0 {

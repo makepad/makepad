@@ -707,6 +707,17 @@ pub fn uv_xatlas_unwrap(
     positions: &[[f32; 3]],
     indices: &[u32],
 ) -> Result<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, Vec<u32>), String> {
+    uv_xatlas_unwrap_ctl(positions, indices, &mut |_| true)
+}
+
+/// Same as [`uv_xatlas_unwrap`]; `ctl(frac)` reports xatlas's phase
+/// boundaries (add mesh / charts / pack / output). Returning false aborts
+/// with an error.
+pub fn uv_xatlas_unwrap_ctl(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    ctl: &mut impl FnMut(f64) -> bool,
+) -> Result<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, Vec<u32>), String> {
     if positions.is_empty() || indices.len() < 3 {
         return Err("xatlas unwrap: empty mesh".into());
     }
@@ -717,7 +728,7 @@ pub fn uv_xatlas_unwrap(
         .chunks_exact(3)
         .map(|t| [t[0], t[1], t[2]])
         .collect();
-    let atlas = makepad_xatlas::parametrize(positions, &faces).map_err(|err| {
+    let atlas = makepad_xatlas::parametrize_with_progress(positions, &faces, ctl).map_err(|err| {
         format!("xatlas parametrize failed: {err}")
     })?;
     if atlas.width == 0 || atlas.height == 0 || atlas.vertices.is_empty() {
@@ -751,6 +762,19 @@ pub fn uv_atlas_bake(
     texsize: usize,
     sample: BakeSampler,
 ) -> BakedMesh {
+    uv_atlas_bake_ctl(positions, uvs, indices, texsize, sample, &mut |_, _| true)
+}
+
+/// Same as [`uv_atlas_bake`]; `ctl(done_tris, total_tris)` is called every
+/// 512 triangles. Returning false stops rasterizing (partial atlas).
+pub fn uv_atlas_bake_ctl(
+    positions: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+    texsize: usize,
+    sample: BakeSampler,
+    ctl: &mut impl FnMut(usize, usize) -> bool,
+) -> BakedMesh {
     let t = texsize;
     let mut out = BakedMesh {
         positions: positions.to_vec(),
@@ -768,7 +792,11 @@ pub fn uv_atlas_bake(
     let mut mask = vec![0u8; t * t];
     let mut zbuf = vec![f32::INFINITY; t * t];
     let ts = t as f32;
-    for tri in indices.chunks_exact(3) {
+    let total_tris = indices.len() / 3;
+    for (tri_i, tri) in indices.chunks_exact(3).enumerate() {
+        if tri_i % 512 == 0 && !ctl(tri_i, total_tris) {
+            break;
+        }
         let idx = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
         if idx.iter().any(|&i| i >= positions.len() || i >= uvs.len()) {
             continue;
@@ -830,9 +858,24 @@ pub fn uv_xatlas_bake(
     texsize: usize,
     sample: BakeSampler,
 ) -> BakedMesh {
-    match uv_xatlas_unwrap(positions, indices) {
+    uv_xatlas_bake_ctl(positions, indices, texsize, sample, &mut |_, _| true)
+}
+
+/// Same as [`uv_xatlas_bake`]; `ctl(stage, frac)` reports `"unwrap"` (xatlas
+/// phases, coarse) then `"bake"` (per triangle). Returning false stops.
+pub fn uv_xatlas_bake_ctl(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    texsize: usize,
+    sample: BakeSampler,
+    ctl: &mut impl FnMut(&str, f64) -> bool,
+) -> BakedMesh {
+    let unwrapped = uv_xatlas_unwrap_ctl(positions, indices, &mut |frac| ctl("unwrap", frac));
+    match unwrapped {
         Ok((pos, uvs, idx, source)) => {
-            let mut baked = uv_atlas_bake(&pos, &uvs, &idx, texsize, sample);
+            let mut baked = uv_atlas_bake_ctl(&pos, &uvs, &idx, texsize, sample, &mut |done, total| {
+                ctl("bake", done as f64 / total.max(1) as f64)
+            });
             baked.source_vertex = source;
             baked
         }
