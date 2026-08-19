@@ -6442,7 +6442,10 @@ impl App {
                     path
                 }
             };
-            self.set_splat_file(cx, &path.to_string_lossy(), false);
+            // TripoSplat writes y-down like scans (flip); world splats are y-up.
+            let object = domain.eq_ignore_ascii_case("splat");
+            self.set_splat_file(cx, &path.to_string_lossy(), object);
+            self.frame_splat_camera(cx, object);
             self.show_page(cx, id!(splat_page));
             true
         } else {
@@ -9371,6 +9374,30 @@ impl App {
 
     /// `flip_y`: generated worlds (FlashWorld ply) are y-up/-z-forward and load
     /// as-is; scan-class plys (the biker sample) are y-down and need the flip.
+    /// Frame the splat scene: object splats (TripoSplat, a single subject
+    /// normalised to the unit sphere) are orbited from OUTSIDE; world splats
+    /// (FlashWorld, scans) keep the inside-the-scene framing.
+    fn frame_splat_camera(&mut self, cx: &mut Cx, object: bool) {
+        if let Some(mut scene) = self
+            .ui
+            .widget(cx, ids!(splat_scene))
+            .borrow_mut::<makepad_xr::scene::XrSceneView>()
+        {
+            let camera = scene.camera_mut();
+            if object {
+                camera.distance = 6.0;
+                camera.distance_min = 0.5;
+                camera.orbit_yaw = 0.4;
+                camera.orbit_pitch = -0.2;
+            } else {
+                camera.distance = 1.5;
+                camera.distance_min = 0.03;
+                camera.orbit_yaw = 0.0;
+                camera.orbit_pitch = 0.0;
+            }
+        }
+    }
+
     fn set_splat_file(&mut self, cx: &mut Cx, abs_path: &str, flip_y: bool) {
         let abs_path = abs_path.to_string();
         let mut splat = self.ui.widget(cx, ids!(splat));
@@ -9655,6 +9682,7 @@ impl App {
         let path = repo_path("local/biker.ply");
         if std::path::Path::new(&path).is_file() {
             self.set_splat_file(cx, &path, true);
+            self.frame_splat_camera(cx, false);
             self.selected_file = None;
             self.viewer = ViewerContent::Empty;
             self.set_caption(cx, "splat", "sample — biker scan");
@@ -11203,6 +11231,25 @@ impl AppMain for App {
                     if let Some(file) = newest {
                         self.reopen_gallery(cx, &file);
                     }
+                }
+                // A .ply/.sog path opens straight in the splat viewer (headless
+                // captures of generated splats); anything else imports as a
+                // playtest artifact (GLB etc.).
+                Some(path)
+                    if std::path::Path::new(path).is_file()
+                        && (path.ends_with(".ply") || path.ends_with(".sog")) =>
+                {
+                    let path = path.to_string();
+                    // Headless samples: a TripoSplat-style object file is small
+                    // (≲ 50 MB) — frame it as an object (y-down, flip); big
+                    // scans/worlds keep the inside framing.
+                    let object = std::fs::metadata(&path).map(|m| m.len() < 50_000_000).unwrap_or(false);
+                    self.set_splat_file(cx, &path, object);
+                    self.frame_splat_camera(cx, object);
+                    self.selected_file = None;
+                    self.viewer = ViewerContent::Empty;
+                    self.set_caption(cx, "splat", &format!("sample — {path}"));
+                    self.show_page(cx, id!(splat_page));
                 }
                 Some(path) if std::path::Path::new(path).is_file() => {
                     match std::fs::read(path) {

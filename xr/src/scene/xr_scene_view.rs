@@ -90,6 +90,12 @@ pub struct XrSceneView {
 }
 
 impl XrSceneView {
+    /// Desktop orbit camera (distance / target / limits), for hosts that
+    /// re-frame the scene per content (e.g. an object splat vs a world).
+    pub fn camera_mut(&mut self) -> &mut XrCamera {
+        &mut self.camera
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         if self.initialized {
             return;
