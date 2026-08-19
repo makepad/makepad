@@ -12,6 +12,17 @@ pub struct Splat {
     pub color: [f32; 4],    // rgba in [0, 1]
 }
 
+impl Splat {
+    /// All-zero placeholder (identity-free: rotation is the zero quaternion),
+    /// used to size output buffers before parallel decode fills them.
+    pub const ZERO: Splat = Splat {
+        position: [0.0; 3],
+        scale: [0.0; 3],
+        rotation: [0.0; 4],
+        color: [0.0; 4],
+    };
+}
+
 #[derive(Clone, Debug)]
 pub struct SplatHigherOrderSh {
     pub bands: usize,

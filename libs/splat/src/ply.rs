@@ -1,5 +1,5 @@
 use crate::{Splat, SplatError, SplatFileFormat, SplatScene};
-use std::io::{BufRead, BufReader, Cursor, Read, Seek};
+use std::io::{BufRead, BufReader, Cursor, Seek};
 
 const SH_C0: f32 = 0.2820948;
 
@@ -215,18 +215,179 @@ fn parse_binary_vertices(
     header: &PlyHeader,
     out: &mut Vec<Splat>,
 ) -> Result<(), SplatError> {
-    let mut cursor = Cursor::new(&bytes[header.data_offset..]);
-    let indices = PropertyIndices::new(&header.properties);
+    let fields = BinaryFields::new(&header.properties);
+    let stride = fields.stride;
+    let payload = &bytes[header.data_offset.min(bytes.len())..];
+    let needed = header
+        .vertex_count
+        .checked_mul(stride)
+        .ok_or_else(|| SplatError::InvalidData("PLY vertex payload size overflow".to_string()))?;
+    if payload.len() < needed {
+        return Err(SplatError::InvalidData(format!(
+            "binary PLY payload truncated: need {} bytes for {} vertices, have {}",
+            needed,
+            header.vertex_count,
+            payload.len()
+        )));
+    }
+    let payload = &payload[..needed];
 
-    for _ in 0..header.vertex_count {
-        let mut values = Vec::with_capacity(header.properties.len());
-        for property in &header.properties {
-            values.push(read_binary_scalar(&mut cursor, property.scalar_type)?);
-        }
-        out.push(build_splat_from_values(&values, &indices));
+    let start = out.len();
+    out.resize(start + header.vertex_count, Splat::ZERO);
+    let dst = &mut out[start..];
+    if stride == 0 {
+        return Ok(());
     }
 
+    // Decode rows in parallel chunks; each chunk writes its own slice of
+    // `dst`, so no synchronization beyond the scoped join.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let min_rows_per_thread = 65_536;
+    let chunk_rows = (header.vertex_count / threads)
+        .max(min_rows_per_thread)
+        .max(1);
+    std::thread::scope(|scope| {
+        for (dst_chunk, src_chunk) in dst
+            .chunks_mut(chunk_rows)
+            .zip(payload.chunks(chunk_rows * stride))
+        {
+            let fields = &fields;
+            scope.spawn(move || {
+                for (splat, row) in dst_chunk.iter_mut().zip(src_chunk.chunks_exact(stride)) {
+                    *splat = fields.read_splat(row);
+                }
+            });
+        }
+    });
     Ok(())
+}
+
+/// Byte offset + scalar type of the splat properties inside one binary
+/// vertex row, plus the row stride.
+#[derive(Clone, Debug)]
+struct BinaryFields {
+    stride: usize,
+    x: Option<(usize, PlyScalarType)>,
+    y: Option<(usize, PlyScalarType)>,
+    z: Option<(usize, PlyScalarType)>,
+    dc0: Option<(usize, PlyScalarType)>,
+    dc1: Option<(usize, PlyScalarType)>,
+    dc2: Option<(usize, PlyScalarType)>,
+    opacity: Option<(usize, PlyScalarType)>,
+    scale0: Option<(usize, PlyScalarType)>,
+    scale1: Option<(usize, PlyScalarType)>,
+    scale2: Option<(usize, PlyScalarType)>,
+    rot0: Option<(usize, PlyScalarType)>,
+    rot1: Option<(usize, PlyScalarType)>,
+    rot2: Option<(usize, PlyScalarType)>,
+    rot3: Option<(usize, PlyScalarType)>,
+}
+
+impl BinaryFields {
+    fn new(properties: &[PlyProperty]) -> Self {
+        let mut out = Self {
+            stride: 0,
+            x: None,
+            y: None,
+            z: None,
+            dc0: None,
+            dc1: None,
+            dc2: None,
+            opacity: None,
+            scale0: None,
+            scale1: None,
+            scale2: None,
+            rot0: None,
+            rot1: None,
+            rot2: None,
+            rot3: None,
+        };
+        let mut offset = 0usize;
+        for property in properties {
+            let at = Some((offset, property.scalar_type));
+            match property.name.as_str() {
+                "x" => out.x = at,
+                "y" => out.y = at,
+                "z" => out.z = at,
+                "f_dc_0" => out.dc0 = at,
+                "f_dc_1" => out.dc1 = at,
+                "f_dc_2" => out.dc2 = at,
+                "opacity" => out.opacity = at,
+                "scale_0" => out.scale0 = at,
+                "scale_1" => out.scale1 = at,
+                "scale_2" => out.scale2 = at,
+                "rot_0" => out.rot0 = at,
+                "rot_1" => out.rot1 = at,
+                "rot_2" => out.rot2 = at,
+                "rot_3" => out.rot3 = at,
+                _ => {}
+            }
+            offset += scalar_size(property.scalar_type);
+        }
+        out.stride = offset;
+        out
+    }
+
+    #[inline]
+    fn get(row: &[u8], field: Option<(usize, PlyScalarType)>) -> Option<f32> {
+        field.map(|(offset, ty)| read_scalar_at(row, offset, ty))
+    }
+
+    #[inline]
+    fn read_splat(&self, row: &[u8]) -> Splat {
+        build_splat(RawSplatFields {
+            x: Self::get(row, self.x),
+            y: Self::get(row, self.y),
+            z: Self::get(row, self.z),
+            dc0: Self::get(row, self.dc0),
+            dc1: Self::get(row, self.dc1),
+            dc2: Self::get(row, self.dc2),
+            opacity: Self::get(row, self.opacity),
+            scale0: Self::get(row, self.scale0),
+            scale1: Self::get(row, self.scale1),
+            scale2: Self::get(row, self.scale2),
+            rot0: Self::get(row, self.rot0),
+            rot1: Self::get(row, self.rot1),
+            rot2: Self::get(row, self.rot2),
+            rot3: Self::get(row, self.rot3),
+        })
+    }
+}
+
+fn scalar_size(ty: PlyScalarType) -> usize {
+    match ty {
+        PlyScalarType::Char | PlyScalarType::UChar => 1,
+        PlyScalarType::Short | PlyScalarType::UShort => 2,
+        PlyScalarType::Int | PlyScalarType::UInt | PlyScalarType::Float => 4,
+        PlyScalarType::Double => 8,
+    }
+}
+
+/// Little-endian scalar at `offset` inside a row whose layout was validated
+/// against the header stride (so the slice indexing cannot go out of range).
+#[inline]
+fn read_scalar_at(row: &[u8], offset: usize, ty: PlyScalarType) -> f32 {
+    macro_rules! le {
+        ($t:ty) => {{
+            let size = std::mem::size_of::<$t>();
+            let mut bytes = [0u8; std::mem::size_of::<$t>()];
+            bytes.copy_from_slice(&row[offset..offset + size]);
+            <$t>::from_le_bytes(bytes) as f32
+        }};
+    }
+    match ty {
+        PlyScalarType::Char => row[offset] as i8 as f32,
+        PlyScalarType::UChar => row[offset] as f32,
+        PlyScalarType::Short => le!(i16),
+        PlyScalarType::UShort => le!(u16),
+        PlyScalarType::Int => le!(i32),
+        PlyScalarType::UInt => le!(u32),
+        PlyScalarType::Float => le!(f32),
+        PlyScalarType::Double => le!(f64),
+    }
 }
 
 fn parse_ascii_scalar(token: &str, scalar_type: PlyScalarType) -> Result<f32, SplatError> {
@@ -263,39 +424,6 @@ fn parse_ascii_scalar(token: &str, scalar_type: PlyScalarType) -> Result<f32, Sp
             .map(|v| v as f32)
             .map_err(|_| SplatError::InvalidData("invalid double ascii value".to_string())),
     }
-}
-
-fn read_binary_scalar(
-    reader: &mut impl Read,
-    scalar_type: PlyScalarType,
-) -> Result<f32, SplatError> {
-    macro_rules! read_t {
-        ($t:ty) => {{
-            let mut bytes = [0u8; std::mem::size_of::<$t>()];
-            reader.read_exact(&mut bytes)?;
-            <$t>::from_le_bytes(bytes) as f32
-        }};
-    }
-
-    let value = match scalar_type {
-        PlyScalarType::Char => read_t!(i8),
-        PlyScalarType::UChar => read_t!(u8),
-        PlyScalarType::Short => read_t!(i16),
-        PlyScalarType::UShort => read_t!(u16),
-        PlyScalarType::Int => read_t!(i32),
-        PlyScalarType::UInt => read_t!(u32),
-        PlyScalarType::Float => {
-            let mut bytes = [0u8; 4];
-            reader.read_exact(&mut bytes)?;
-            f32::from_le_bytes(bytes)
-        }
-        PlyScalarType::Double => {
-            let mut bytes = [0u8; 8];
-            reader.read_exact(&mut bytes)?;
-            f64::from_le_bytes(bytes) as f32
-        }
-    };
-    Ok(value)
 }
 
 #[derive(Clone, Debug)]
@@ -359,50 +487,66 @@ impl PropertyIndices {
     }
 }
 
+/// The splat-relevant scalars of one vertex, `None` when the file lacks the
+/// property (defaults applied in `build_splat`).
+#[derive(Clone, Copy, Debug, Default)]
+struct RawSplatFields {
+    x: Option<f32>,
+    y: Option<f32>,
+    z: Option<f32>,
+    dc0: Option<f32>,
+    dc1: Option<f32>,
+    dc2: Option<f32>,
+    opacity: Option<f32>,
+    scale0: Option<f32>,
+    scale1: Option<f32>,
+    scale2: Option<f32>,
+    rot0: Option<f32>,
+    rot1: Option<f32>,
+    rot2: Option<f32>,
+    rot3: Option<f32>,
+}
+
 fn build_splat_from_values(values: &[f32], idx: &PropertyIndices) -> Splat {
-    let x = idx.x.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
-    let y = idx.y.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
-    let z = idx.z.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
+    let get = |i: Option<usize>| i.and_then(|i| values.get(i)).copied();
+    build_splat(RawSplatFields {
+        x: get(idx.x),
+        y: get(idx.y),
+        z: get(idx.z),
+        dc0: get(idx.dc0),
+        dc1: get(idx.dc1),
+        dc2: get(idx.dc2),
+        opacity: get(idx.opacity),
+        scale0: get(idx.scale0),
+        scale1: get(idx.scale1),
+        scale2: get(idx.scale2),
+        rot0: get(idx.rot0),
+        rot1: get(idx.rot1),
+        rot2: get(idx.rot2),
+        rot3: get(idx.rot3),
+    })
+}
 
-    let dc0 = idx.dc0.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
-    let dc1 = idx.dc1.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
-    let dc2 = idx.dc2.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
+#[inline]
+fn build_splat(f: RawSplatFields) -> Splat {
+    let x = f.x.unwrap_or(0.0);
+    let y = f.y.unwrap_or(0.0);
+    let z = f.z.unwrap_or(0.0);
 
-    let opacity = idx
-        .opacity
-        .and_then(|i| values.get(i))
-        .copied()
-        .unwrap_or(1.0);
+    let dc0 = f.dc0.unwrap_or(0.0);
+    let dc1 = f.dc1.unwrap_or(0.0);
+    let dc2 = f.dc2.unwrap_or(0.0);
 
-    let s0 = idx
-        .scale0
-        .and_then(|i| values.get(i))
-        .copied()
-        .unwrap_or(-7.0)
-        .exp();
-    let s1 = idx
-        .scale1
-        .and_then(|i| values.get(i))
-        .copied()
-        .unwrap_or(-7.0)
-        .exp();
-    let s2 = idx
-        .scale2
-        .and_then(|i| values.get(i))
-        .copied()
-        .unwrap_or(-7.0)
-        .exp();
+    let opacity = f.opacity.unwrap_or(1.0);
 
-    let (rotation, _had_rot) = {
-        let r0 = idx.rot0.and_then(|i| values.get(i)).copied();
-        let r1 = idx.rot1.and_then(|i| values.get(i)).copied();
-        let r2 = idx.rot2.and_then(|i| values.get(i)).copied();
-        let r3 = idx.rot3.and_then(|i| values.get(i)).copied();
-        if let (Some(w), Some(x), Some(y), Some(z)) = (r0, r1, r2, r3) {
-            (normalize_quaternion([x, y, z, w]), true)
-        } else {
-            ([0.0, 0.0, 0.0, 1.0], false)
-        }
+    let s0 = f.scale0.unwrap_or(-7.0).exp();
+    let s1 = f.scale1.unwrap_or(-7.0).exp();
+    let s2 = f.scale2.unwrap_or(-7.0).exp();
+
+    let rotation = if let (Some(w), Some(x), Some(y), Some(z)) = (f.rot0, f.rot1, f.rot2, f.rot3) {
+        normalize_quaternion([x, y, z, w])
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
     };
 
     let color = [
