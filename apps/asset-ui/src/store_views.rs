@@ -195,6 +195,12 @@ impl PreviewCache {
         }
     }
 
+    /// The decoded still for `file` if this cache holds one (animated
+    /// previews return their first frame; badges count as decoded).
+    pub fn cached(&self, file: &str) -> Option<Texture> {
+        self.map.get(file).map(|cached| cached.texture.clone())
+    }
+
     /// Store a completed (or failure-pinned) texture under its validation
     /// source.
     pub fn install(&mut self, file: String, source: Option<PathBuf>, texture: Texture) {
@@ -715,6 +721,12 @@ impl LibraryGallery {
         self.cache.install_anim(file, source, frames, fps);
         self.view.redraw(cx);
         cx.new_next_frame();
+    }
+
+    /// A member's decoded preview if the strip already has it (lets other
+    /// widgets — the run tray — reuse the decode instead of re-reading).
+    pub fn cached_texture(&self, file: &str) -> Option<Texture> {
+        self.cache.cached(file)
     }
 
     /// Stable file id of tile `index`'s representative artifact — what a

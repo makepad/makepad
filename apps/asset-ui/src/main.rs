@@ -340,6 +340,61 @@ script_mod! {
         height: Fill
         fit: ImageFit.Smallest
     }
+    // One artifact of the selected run in the run tray: thumb + kind. Click
+    // = open in the viewer AND pin as the next transform run's input.
+    let RunChip = RoundedView{
+        width: 54 height: 58
+        flow: Down spacing: 2
+        padding: 3
+        align: Align{x: 0.5}
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            color: #x161619
+            border_color: #xffffff10
+            border_color_selected: #x3d9bf0
+            selected: instance(0.0)
+            border_size: 1.0
+            border_radius: 3.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.0,
+                    self.rect_size.y - self.border_size * 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(self.color)
+                sdf.stroke(
+                    self.border_color.mix(self.border_color_selected, self.selected),
+                    self.border_size
+                )
+                return sdf.result
+            }
+        }
+        animator: Animator{
+            select: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Play.Snap}
+                    apply: {draw_bg: {selected: 0.0}}
+                }
+                on: AnimatorState{
+                    from: {all: Play.Snap}
+                    apply: {draw_bg: {selected: 1.0}}
+                }
+            }
+        }
+        View{
+            width: 46 height: 36
+            align: Align{x: 0.5 y: 0.5}
+            thumb := ThumbFitImage{}
+        }
+        kind := HintLabel{
+            text: ""
+            draw_text +: { text_style: theme.font_regular{font_size: 6.5} }
+        }
+    }
     // Doom/Quake sprites: point sample so authored texels stay crisp when
     // the card scales them up. Linear filtering turns them to mush.
     let SpriteFitImage = Image{
@@ -1104,6 +1159,33 @@ script_mod! {
                                 input_chip_title := BrightLabel{ text: "" }
                             }
                             input_clear := LibraryDeleteButton{ text: "×" }
+                        }
+
+                        // The selected run, spread out: every artifact the
+                        // pipeline produced (source image, matte, mesh, paint,
+                        // rig, …) as clickable chips. History keeps ONE tile
+                        // per run; this is where its members are reachable —
+                        // click a chip to view it, and it becomes the pinned
+                        // input, so a "mesh only" preset re-meshes exactly
+                        // that image.
+                        run_tray := Card{
+                            visible: false
+                            width: Fill height: Fit
+                            flow: Down spacing: 4
+                            padding: 6
+                            run_tray_title := HintLabel{ text: "" }
+                            View{
+                                width: Fill height: Fit
+                                flow: Flow.Right{wrap: true} spacing: 4 wrap_spacing: 4
+                                run_chip0 := RunChip{ visible: false }
+                                run_chip1 := RunChip{ visible: false }
+                                run_chip2 := RunChip{ visible: false }
+                                run_chip3 := RunChip{ visible: false }
+                                run_chip4 := RunChip{ visible: false }
+                                run_chip5 := RunChip{ visible: false }
+                                run_chip6 := RunChip{ visible: false }
+                                run_chip7 := RunChip{ visible: false }
+                            }
                         }
 
                         View{
@@ -2241,6 +2323,8 @@ fn repo_path(rel: &str) -> String {
 }
 
 const QUEUE_ROWS: usize = 6;
+/// Chip slots in the run tray (character runs have 7 artifacts).
+const RUN_TRAY_SLOTS: usize = 8;
 
 /// The immutable input attachment of a seeded (transform) run: the exact
 /// managed payload bytes snapshotted at ENQUEUE, so deleting or evicting
@@ -2463,6 +2547,14 @@ pub struct App {
     /// thumbnail refreshes and drops stale async chip previews.
     #[rust]
     input_chip_file: Option<String>,
+    /// Members of the selected run shown in the run tray, pipeline order
+    /// (oldest first), one per chip slot.
+    #[rust]
+    run_tray_files: Vec<String>,
+    /// Preview decodes wanted by non-gallery widgets (run tray chips) —
+    /// drained by `pump_gallery_previews` alongside the gallery caches.
+    #[rust]
+    extra_preview_work: Vec<(String, PreviewWork)>,
     /// Native outbound file drag is one OS session per pointer gesture. It is
     /// cleared only by DragEnd so repeated move actions cannot start twice.
     #[rust(false)]
@@ -4974,7 +5066,124 @@ impl App {
         // deletion sweep rides along so it can never advertise a payload
         // that no longer exists.
         self.sync_input_tray(cx);
+        self.sync_run_tray(cx);
         self.ui.redraw(cx);
+    }
+
+    /// The run tray's chip slots, in order.
+    fn run_chip_ids() -> [&'static [LiveId]; RUN_TRAY_SLOTS] {
+        [
+            ids!(run_chip0),
+            ids!(run_chip1),
+            ids!(run_chip2),
+            ids!(run_chip3),
+            ids!(run_chip4),
+            ids!(run_chip5),
+            ids!(run_chip6),
+            ids!(run_chip7),
+        ]
+    }
+
+    /// Spread the SELECTED run out into the run tray: one chip per member
+    /// artifact in pipeline order (oldest first), the viewer's current file
+    /// highlighted. Hidden for ungrouped records and single-artifact runs.
+    /// Textures come from the gallery's decoded cache when it has them, else
+    /// from the same async preview worker the tiles use.
+    fn sync_run_tray(&mut self, cx: &mut Cx) {
+        let members: Vec<crate::library::LibraryMeta> = match (&self.library, &self.selected_file) {
+            (Some(library), Some(selected)) => library
+                .get(selected)
+                .and_then(|item| item.group_id.clone())
+                .map(|group| {
+                    let mut members: Vec<_> = library
+                        .newest_items()
+                        .filter(|item| item.group_id.as_deref() == Some(group.as_str()))
+                        .cloned()
+                        .collect();
+                    members.reverse();
+                    members
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let files: Vec<String> = members.iter().map(|m| m.file.clone()).collect();
+        let changed = files != self.run_tray_files;
+        self.run_tray_files = files;
+        let show = members.len() > 1;
+        self.ui.widget(cx, ids!(run_tray)).set_visible(cx, show);
+        if !show {
+            return;
+        }
+        let label = members
+            .iter()
+            .find_map(|m| m.group_label.clone())
+            .unwrap_or_else(|| "run".to_string());
+        self.ui.label(cx, ids!(run_tray_title)).set_text(
+            cx,
+            &format!("RUN · {} · {} artifacts — click to view / use as input", truncate(&label, 34), members.len()),
+        );
+        let library = self.library.as_ref().expect("members imply a library");
+        let gallery_widget = self.ui.widget(cx, ids!(library_gallery));
+        for (slot, chip) in Self::run_chip_ids().iter().enumerate() {
+            let chip_view = self.ui.view(cx, chip);
+            let Some(member) = members.get(slot) else {
+                chip_view.set_visible(cx, false);
+                continue;
+            };
+            chip_view.set_visible(cx, true);
+            let selected = self.selected_file.as_deref() == Some(member.file.as_str());
+            chip_view.toggle_state(cx, selected, Animate::No, ids!(select.on), ids!(select.off));
+            // Stage-ish label: the domain (matte, mesh, paint, rig, …) says
+            // more than the payload kind; plain images keep the kind.
+            let kind = if member.domain.is_empty() || member.domain.eq_ignore_ascii_case("image") {
+                crate::asset_store_state::local_kind(&member.domain, &member.content_type).to_string()
+            } else {
+                member.domain.to_ascii_lowercase()
+            };
+            let mut chip_kind = chip.to_vec();
+            chip_kind.push(live_id!(kind));
+            self.ui.label(cx, &chip_kind).set_text(cx, &kind);
+            if !changed {
+                continue;
+            }
+            // Texture: cached decode if the History strip has it, else badge
+            // now + async preview.
+            let mut chip_thumb = chip.to_vec();
+            chip_thumb.push(live_id!(thumb));
+            let cached = gallery_widget
+                .borrow::<LibraryGallery>()
+                .and_then(|gallery| gallery.cached_texture(&member.file));
+            match cached {
+                Some(texture) => {
+                    self.ui.image(cx, &chip_thumb).set_texture(cx, Some(texture));
+                }
+                None => {
+                    let badge = crate::store_views::badge_texture(cx, &member.domain);
+                    self.ui.image(cx, &chip_thumb).set_texture(cx, Some(badge));
+                    if let Ok(path) = library.payload_path(&member.file) {
+                        let ct = member.content_type.to_ascii_lowercase();
+                        let preview_path = if ct.starts_with("image/") {
+                            Some(path.clone())
+                        } else {
+                            library.thumbnail_path(&member.file).ok().flatten()
+                        };
+                        let entry = GalleryEntry {
+                            meta: member.clone(),
+                            path,
+                            preview_path,
+                            selected: false,
+                        };
+                        if let Some(work) = crate::store_views::preview_work(&entry) {
+                            self.extra_preview_work.retain(|(f, _)| f != &member.file);
+                            self.extra_preview_work.push((member.file.clone(), work));
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.pump_gallery_previews(cx);
+        }
     }
 
     /// Input tray chip + honest transform-action labels. Cheap when nothing
@@ -5456,6 +5665,13 @@ impl App {
                             .image(cx, ids!(input_chip_thumb))
                             .set_texture(cx, Some(texture.clone()));
                     }
+                    if let Some(slot) = self.run_tray_files.iter().position(|f| f == &file) {
+                        if let Some(chip) = Self::run_chip_ids().get(slot) {
+                            let mut chip_thumb = chip.to_vec();
+                            chip_thumb.push(live_id!(thumb));
+                            self.ui.image(cx, &chip_thumb).set_texture(cx, Some(texture.clone()));
+                        }
+                    }
                     if let Some(mut grid) = self
                         .ui
                         .widget(cx, ids!(lib_grid))
@@ -5492,6 +5708,7 @@ impl App {
         {
             wanted.extend(grid.take_preview_work());
         }
+        wanted.append(&mut self.extra_preview_work);
         let Some(io) = &self.artifact_io else { return };
         for (file, work) in wanted {
             if self.preview_in_flight.iter().any(|f| f == &file) {
@@ -8409,6 +8626,17 @@ impl MatchEvent for App {
                 }
             }
             None => {}
+        }
+        // Run tray chips: an explicit pick — view it and pin it as input.
+        let mut chip_open = None;
+        for (slot, chip) in Self::run_chip_ids().iter().enumerate() {
+            if self.ui.view(cx, chip).finger_down(actions).is_some() {
+                chip_open = self.run_tray_files.get(slot).cloned();
+                break;
+            }
+        }
+        if let Some(file) = chip_open {
+            self.open_gallery(cx, &file);
         }
         // Run-queue rows: cancel / move up.
         for (k, (cancel, up)) in [
