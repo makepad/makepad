@@ -1763,6 +1763,21 @@ script_mod! {
                         thumbnail_renderer := ThumbnailRenderer{
                             abs_pos: vec2(0.0, 0.0)
                         }
+                        // Offscreen splat-thumbnail scene (gaussian .ply
+                        // History previews): a 256² XrSceneView parked far
+                        // off-screen; its color target is read back once the
+                        // splat has loaded + sorted. Same lifecycle home as
+                        // the mesh thumbnail renderer above.
+                        splat_thumb_scene := XrSceneView{
+                            abs_pos: vec2(-6000.0, -6000.0)
+                            width: 256
+                            height: 256
+                            camera.distance: 6.0
+                            camera.distance_min: 0.5
+                            splat_thumb := ViewSplat{
+                                scale: vec3(1.0, -1.0, 1.0)
+                            }
+                        }
 
                         surface_nav := SolidView{
                             width: Fill height: Fit flow: Right spacing: 2
@@ -2780,6 +2795,15 @@ struct RunSeed {
     mask: Option<std::sync::Arc<Vec<u8>>>,
 }
 
+/// One gaussian-splat thumbnail in flight on the offscreen scene.
+struct SplatThumbJob {
+    file: String,
+    /// Timer ticks since the file was set (load + sort are async).
+    ticks: u8,
+    /// Readbacks that came back empty/clear so far.
+    attempts: u8,
+}
+
 /// Brush radii (canvas px) for the inpaint mask painter.
 const MASK_BRUSH_SIZES: &[f32] = &[8.0, 24.0, 48.0, 96.0, 160.0];
 
@@ -3038,6 +3062,14 @@ pub struct App {
     /// LoRA names behind the LoRA dropdown (index 0 = none).
     #[rust]
     lora_names: Vec<String>,
+    /// Gaussian-splat thumbnail lane: pending (file, payload path, object?)
+    /// and the one job in flight.
+    #[rust]
+    splat_thumb_queue: VecDeque<(String, PathBuf, bool)>,
+    #[rust]
+    splat_thumb_job: Option<SplatThumbJob>,
+    #[rust]
+    splat_thumb_scanned: bool,
     /// Members of the selected run shown in the run tray, pipeline order
     /// (oldest first), one per chip slot.
     #[rust]
@@ -6174,6 +6206,7 @@ impl App {
         }
         if let Some(file) = &managed_file {
             self.queue_glb_thumbnail(cx, file, &bytes);
+            self.queue_splat_thumbnail(cx, file, content_type, domain);
         }
         // Display/play ONLY while the Create viewer is actually up. On other
         // surfaces the completion is persisted + selected (ready in the
@@ -7279,6 +7312,177 @@ impl App {
                 None => base.to_string(),
             };
             self.ui.button(cx, button).set_text(cx, &text);
+        }
+    }
+
+    // -- gaussian-splat thumbnails ------------------------------------------
+
+    /// A freshly landed `.ply` (splat/world) gets an offscreen splat render
+    /// as its History preview; other payloads are ignored here.
+    fn queue_splat_thumbnail(&mut self, cx: &mut Cx, file: &str, content_type: &str, domain: &str) {
+        if !content_type.to_ascii_lowercase().contains("ply") {
+            return;
+        }
+        let Some(path) = self
+            .library
+            .as_ref()
+            .and_then(|library| library.payload_path(file).ok())
+        else {
+            return;
+        };
+        if self.splat_thumb_queue.iter().any(|(f, _, _)| f == file) {
+            return;
+        }
+        let object = domain.eq_ignore_ascii_case("splat");
+        self.splat_thumb_queue.push_back((file.to_string(), path, object));
+        let _ = cx;
+    }
+
+    /// Once per session: every `.ply` in the library without a preview
+    /// sidecar joins the queue (newest first).
+    fn scan_splat_thumbnail_backfill(&mut self) {
+        let Some(library) = self.library.as_ref() else {
+            return;
+        };
+        let mut jobs = Vec::new();
+        for item in library.newest_items() {
+            let ct = item.content_type.to_ascii_lowercase();
+            if !(ct.contains("ply") || item.file.ends_with(".ply")) {
+                continue;
+            }
+            if !matches!(library.thumbnail_path(&item.file), Ok(None)) {
+                continue;
+            }
+            if let Ok(path) = library.payload_path(&item.file) {
+                let object = item.domain.eq_ignore_ascii_case("splat");
+                jobs.push((item.file.clone(), path, object));
+            }
+        }
+        for job in jobs {
+            if !self.splat_thumb_queue.iter().any(|(f, _, _)| f == &job.0) {
+                self.splat_thumb_queue.push_back(job);
+            }
+        }
+    }
+
+    /// One step per thumbnail-timer tick: start the next queued splat on
+    /// the offscreen scene, or harvest the one in flight once it has had a
+    /// few ticks to load + sort. Readbacks that are still clear retry a
+    /// bounded number of times; failures keep the typed badge.
+    fn pump_splat_thumbnails(&mut self, cx: &mut Cx) {
+        if !self.splat_thumb_scanned && self.library.is_some() {
+            self.splat_thumb_scanned = true;
+            self.scan_splat_thumbnail_backfill();
+        }
+        const TICKS_BEFORE_READ: u8 = 3;
+        const MAX_ATTEMPTS: u8 = 12;
+        if self.splat_thumb_job.is_none() {
+            let Some((file, path, object)) = self.splat_thumb_queue.pop_front() else {
+                return;
+            };
+            // Deleted meanwhile, or a preview landed another way.
+            let still_needed = self
+                .library
+                .as_ref()
+                .is_some_and(|library| library.get(&file).is_some()
+                    && matches!(library.thumbnail_path(&file), Ok(None)));
+            if !still_needed {
+                return;
+            }
+            let mut splat = self.ui.widget(cx, ids!(splat_thumb));
+            let abs_path = path.to_string_lossy().to_string();
+            script_apply_eval!(cx, splat, {
+                src: mod.res.file_resource(#(abs_path))
+            });
+            if let Some(mut view) = splat.borrow_mut::<ViewSplat>() {
+                view.set_scale(vec3f(1.0, if object { -1.0 } else { 1.0 }, 1.0));
+            }
+            if let Some(mut scene) = self
+                .ui
+                .widget(cx, ids!(splat_thumb_scene))
+                .borrow_mut::<makepad_xr::scene::XrSceneView>()
+            {
+                let camera = scene.camera_mut();
+                if object {
+                    camera.distance = 6.0;
+                    camera.distance_min = 0.5;
+                    camera.orbit_yaw = 0.55;
+                    camera.orbit_pitch = -0.25;
+                } else {
+                    camera.distance = 1.5;
+                    camera.distance_min = 0.03;
+                    camera.orbit_yaw = 0.0;
+                    camera.orbit_pitch = 0.0;
+                }
+            }
+            self.ui.widget(cx, ids!(splat_thumb_scene)).redraw(cx);
+            self.splat_thumb_job = Some(SplatThumbJob { file, ticks: 0, attempts: 0 });
+            return;
+        }
+        let Some(job) = self.splat_thumb_job.as_mut() else {
+            return;
+        };
+        job.ticks = job.ticks.saturating_add(1);
+        // Keep the offscreen scene drawing while we wait for load + sort.
+        self.ui.widget(cx, ids!(splat_thumb_scene)).redraw(cx);
+        if job.ticks < TICKS_BEFORE_READ {
+            return;
+        }
+        let readback = self
+            .ui
+            .widget(cx, ids!(splat_thumb_scene))
+            .borrow::<makepad_xr::scene::XrSceneView>()
+            .map(|scene| scene.color_texture().clone())
+            .and_then(|texture| cx.debug_read_render_texture(&texture));
+        let file = job.file.clone();
+        let mut done = false;
+        if let Some((width, height, mut bgra)) = readback {
+            if width > 0 && height > 0 && bgra.len() == width * height * 4 {
+                for px in bgra.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                    px[3] = 255;
+                }
+                // Still clear? (no splats drawn yet) — count pixels that
+                // differ from the top-left one.
+                let first = [bgra[0], bgra[1], bgra[2]];
+                let differing = bgra
+                    .chunks_exact(4)
+                    .filter(|px| {
+                        (px[0] as i16 - first[0] as i16).abs() > 6
+                            || (px[1] as i16 - first[1] as i16).abs() > 6
+                            || (px[2] as i16 - first[2] as i16).abs() > 6
+                    })
+                    .count();
+                if differing * 200 > width * height {
+                    if let Ok(png) =
+                        makepad_asset_ai::testpattern::encode_png_rgba(&bgra, width, height)
+                    {
+                        match self
+                            .library
+                            .as_ref()
+                            .map(|library| library.replace_thumbnail_png(&file, &png))
+                        {
+                            Some(Ok(())) => {
+                                log!("library: rendered splat thumbnail for {file} ({width}x{height})");
+                                self.refresh_gallery(cx, false);
+                            }
+                            other => log!("library: splat thumbnail for {file} not stored: {other:?}"),
+                        }
+                    }
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            let job = self.splat_thumb_job.as_mut().unwrap();
+            job.attempts = job.attempts.saturating_add(1);
+            if job.attempts >= MAX_ATTEMPTS {
+                log!("library: splat thumbnail for {file} gave up (still clear after {MAX_ATTEMPTS} reads)");
+                done = true;
+            }
+        }
+        if done {
+            self.splat_thumb_job = None;
         }
     }
 
@@ -11106,6 +11310,7 @@ impl AppMain for App {
         }
         if self.thumbnail_timer.is_event(event).is_some() {
             self.pump_thumbnail_backfill(cx);
+            self.pump_splat_thumbnails(cx);
         }
 
         if self.fleet_timer.is_event(event).is_some() {
