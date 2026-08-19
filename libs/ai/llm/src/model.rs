@@ -8,7 +8,9 @@ use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufFile, GgufTensorInfo};
 use crate::plan::ModelExecutionPlan;
 use crate::qwen35::Qwen35Tensors;
-use crate::qwen35_runtime::{qwen35_execution_plan, qwen35_hybrid_decode_spec};
+use crate::qwen35_runtime::{
+    qwen35_execution_plan, qwen35_hybrid_decode_spec, qwen35_mtp_decode_spec,
+};
 use crate::qwen35moe::Qwen35MoeTensors;
 use crate::qwen35moe_runtime::{qwen35moe_execution_plan, qwen35moe_hybrid_decode_spec};
 use crate::runtime::HybridDecodeSpec;
@@ -60,6 +62,11 @@ pub struct LlamaModel {
     pub general: ModelGeneral,
     pub qwen35: Option<Qwen35Config>,
     pub qwen35moe: Option<Qwen35MoeConfig>,
+    /// Mirrors llama.cpp `llama_model_params::load_mtp`: when false the
+    /// trailing `blk.N.nextn.*` multi-token-prediction block is not part of
+    /// the tensor inventory at all, so it costs no VRAM. Speculative decoding
+    /// turns it on before the execution plan is built.
+    load_mtp: bool,
 }
 
 impl LlamaModel {
@@ -91,7 +98,24 @@ impl LlamaModel {
             general,
             qwen35,
             qwen35moe,
+            load_mtp: false,
         })
+    }
+
+    /// Include the MTP/nextn draft block in the tensor inventory. Must be set
+    /// before `execution_plan()` / `hybrid_decode_spec()` are used, because
+    /// both are derived from the inventory.
+    pub fn set_load_mtp(&mut self, load_mtp: bool) {
+        self.load_mtp = load_mtp;
+    }
+
+    pub fn load_mtp(&self) -> bool {
+        self.load_mtp
+    }
+
+    /// True when the gguf actually carries an MTP block we know how to run.
+    pub fn has_mtp_block(&self) -> bool {
+        matches!(&self.qwen35, Some(cfg) if cfg.nextn_predict_layers == 1)
     }
 
     pub fn tensor(&self, name: &str) -> Option<&GgufTensorInfo> {
@@ -125,7 +149,7 @@ impl LlamaModel {
     }
 
     pub fn qwen35_tensors(&self) -> Result<Qwen35Tensors> {
-        Qwen35Tensors::from_model(self)
+        Qwen35Tensors::from_model_with_mtp(self, self.load_mtp)
     }
 
     pub fn qwen35_weight_layout(&self) -> Result<GgufWeightLayout> {
@@ -190,6 +214,27 @@ impl LlamaModel {
                 "hybrid decode spec is not implemented for architecture '{}'",
                 self.architecture.name()
             ))),
+        }
+    }
+
+    /// The MTP/nextn draft-head decode spec, or `None` when the model has no
+    /// nextn block or it was not loaded (`set_load_mtp`).
+    pub fn mtp_decode_spec(
+        &self,
+        max_context: u32,
+        max_sequences: u32,
+        attention_k_type: TensorType,
+        attention_v_type: TensorType,
+    ) -> Result<Option<HybridDecodeSpec>> {
+        match self.architecture {
+            LlamaArchitecture::Qwen35 => qwen35_mtp_decode_spec(
+                self,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+            ),
+            _ => Ok(None),
         }
     }
 

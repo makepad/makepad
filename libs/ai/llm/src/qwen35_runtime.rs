@@ -13,8 +13,9 @@ use crate::runtime::{
     AttentionBlockSpec, AttentionDecodeSpec, AttentionKvCacheSpec, AttentionQueryLayout,
     AttentionRopeSpec, DeltaNetRecurrentBlockSpec, DeltaNetRecurrentDecodeSpec,
     DeltaNetRecurrentStateSpec, DenseGatedFfnSpec, DenseLayerFfnSpec, HybridCacheShape,
-    HybridCacheSpec, HybridCacheTemplate, HybridCacheTypes, HybridDecodeSpec, HybridLayerFfnSpec,
-    HybridLayerSpec, LogitsProbeSpec, ProbeInputKind, RmsNormSpec,
+    HybridCacheSpec, HybridCacheTemplate, HybridCacheTypes, HybridDecodeSpec, HybridHiddenCarrySpec,
+    HybridLayerFfnSpec, HybridLayerSpec, HybridMtpPrologueSpec, LogitsProbeSpec, ProbeInputKind,
+    RmsNormSpec,
 };
 use crate::weights::GgufWeightLayout;
 
@@ -529,8 +530,11 @@ pub fn qwen35_hybrid_decode_spec(
     let tensors = model.qwen35_tensors()?;
     let cfg = model.require_qwen35()?;
 
-    let mut layers = Vec::with_capacity(tensors.layers.len());
-    for layer in &tensors.layers {
+    // The MTP block lives at the end of `tensors.layers` but is not part of
+    // the main forward pass; it runs in its own draft graph.
+    let main_layers = tensors.main_layers();
+    let mut layers = Vec::with_capacity(main_layers.len());
+    for layer in main_layers {
         let ffn = HybridLayerFfnSpec::Dense(qwen35_dense_ffn_spec(model, layer.index)?);
         match layer.kind {
             Qwen35LayerKind::Attention => layers.push(HybridLayerSpec::Attention {
@@ -574,7 +578,101 @@ pub fn qwen35_hybrid_decode_spec(
         final_logit_softcap: None,
         per_layer_input: None,
         layers,
+        // Publishing post-final-norm rows costs one `set_rows` and keeps the
+        // last block at full width; only worth it when a draft head reads it.
+        hidden_carry: tensors.mtp.as_ref().map(|_| HybridHiddenCarrySpec {
+            tensor_name: MTP_HIDDEN_CARRY_TENSOR.to_string(),
+            hidden_size: cfg.embedding_length,
+        }),
+        mtp_prologue: None,
+        recurrent_checkpoints: false,
     })
+}
+
+/// Name of the device tensor that carries post-final-norm hidden rows between
+/// the main graph and the MTP draft graph.
+pub const MTP_HIDDEN_CARRY_TENSOR: &str = "hybrid_cache.mtp_h_carry";
+
+/// The `blk.N` multi-token-prediction draft head as a one-layer decode spec.
+/// Returns `None` when the model has no nextn block or it was not loaded.
+pub fn qwen35_mtp_decode_spec(
+    model: &LlamaModel,
+    max_context: u32,
+    max_sequences: u32,
+    attention_k_type: TensorType,
+    attention_v_type: TensorType,
+) -> Result<Option<HybridDecodeSpec>> {
+    let tensors = model.qwen35_tensors()?;
+    let cfg = model.require_qwen35()?;
+    let Some(mtp) = tensors.mtp.as_ref() else {
+        return Ok(None);
+    };
+    let epsilon = cfg.attention_layer_norm_rms_epsilon;
+    let layer = HybridLayerSpec::Attention {
+        layer_index: mtp.layer_index,
+        decode: qwen35_attention_decode_spec(
+            model,
+            mtp.layer_index,
+            max_context,
+            max_sequences,
+            attention_k_type,
+            attention_v_type,
+        )?,
+        post_attention_norm: None,
+        ffn: HybridLayerFfnSpec::Dense(qwen35_dense_ffn_spec(model, mtp.layer_index)?),
+        post_ffn_norm: None,
+        per_layer_input: None,
+        output_scale_name: None,
+    };
+
+    Ok(Some(HybridDecodeSpec {
+        input: ProbeInputKind::TokenIds {
+            token_embedding_name: mtp
+                .embed_tokens
+                .as_ref()
+                .unwrap_or(&tensors.globals.token_embd)
+                .name
+                .clone(),
+            token_embedding_scale: None,
+        },
+        output_norm_name: mtp
+            .shared_head_norm
+            .as_ref()
+            .unwrap_or(&tensors.globals.output_norm)
+            .name
+            .clone(),
+        output_name: mtp
+            .shared_head
+            .as_ref()
+            .unwrap_or(&tensors.globals.output)
+            .name
+            .clone(),
+        rms_epsilon: epsilon,
+        final_logit_softcap: None,
+        per_layer_input: None,
+        layers: vec![layer],
+        // The draft head feeds its own hidden output back for the next draft
+        // step, so it both reads and writes the carry.
+        hidden_carry: Some(HybridHiddenCarrySpec {
+            tensor_name: MTP_HIDDEN_CARRY_TENSOR.to_string(),
+            hidden_size: cfg.embedding_length,
+        }),
+        mtp_prologue: Some(HybridMtpPrologueSpec {
+            enorm: RmsNormSpec {
+                weight_name: mtp.enorm.name.clone(),
+                epsilon,
+            },
+            hnorm: RmsNormSpec {
+                weight_name: mtp.hnorm.name.clone(),
+                epsilon,
+            },
+            eh_proj_name: mtp.eh_proj.name.clone(),
+            eh_proj_scale_name: mtp.eh_proj_scale.as_ref().map(|t| t.name.clone()),
+            hidden_carry_name: MTP_HIDDEN_CARRY_TENSOR.to_string(),
+            hidden_size: cfg.embedding_length,
+        }),
+        recurrent_checkpoints: false,
+    }))
 }
 
 pub fn qwen35_execution_plan(model: &LlamaModel) -> Result<ModelExecutionPlan> {
@@ -602,6 +700,16 @@ fn qwen35_inventory(tensors: &Qwen35Tensors) -> ModelTensorInventory {
     insert_tensor(&mut globals, "token_embd", &tensors.globals.token_embd);
     insert_tensor(&mut globals, "output_norm", &tensors.globals.output_norm);
     insert_tensor(&mut globals, "output", &tensors.globals.output);
+
+    if let Some(mtp) = tensors.mtp.as_ref() {
+        insert_tensor(&mut globals, "nextn_enorm", &mtp.enorm);
+        insert_tensor(&mut globals, "nextn_hnorm", &mtp.hnorm);
+        insert_tensor(&mut globals, "nextn_eh_proj", &mtp.eh_proj);
+        insert_optional_tensor(&mut globals, "nextn_eh_proj.scale", &mtp.eh_proj_scale);
+        insert_optional_tensor(&mut globals, "nextn_shared_head_norm", &mtp.shared_head_norm);
+        insert_optional_tensor(&mut globals, "nextn_shared_head", &mtp.shared_head);
+        insert_optional_tensor(&mut globals, "nextn_embed_tokens", &mtp.embed_tokens);
+    }
 
     let layers = tensors
         .layers

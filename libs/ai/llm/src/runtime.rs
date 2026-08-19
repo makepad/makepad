@@ -740,6 +740,35 @@ pub enum HybridLayerSpec {
     },
 }
 
+/// Post-final-norm hidden rows (llama.cpp's `t_h_nextn`) are written into a
+/// persistent device tensor instead of only being read back to the host, so
+/// the MTP draft graph can consume them without a round trip. Setting this
+/// also keeps the last block at full `n_tokens` width and moves the
+/// `n_outputs` narrowing to just before the LM head, so every batch position
+/// gets a hidden row while the (very wide) logits stay narrow.
+#[derive(Clone, Debug)]
+pub struct HybridHiddenCarrySpec {
+    /// Name of the `[hidden_size, rows]` F32 State tensor.
+    pub tensor_name: String,
+    pub hidden_size: u32,
+}
+
+/// The Qwen3.5/3.8 `blk.N.nextn.*` prologue that turns the trailing decoder
+/// block into an MTP draft head:
+/// `eh_proj(concat(rms_norm(embed(token), enorm), rms_norm(h_prev, hnorm)))`.
+/// Mirrors llama.cpp `llama_model_qwen35::graph_mtp`.
+#[derive(Clone, Debug)]
+pub struct HybridMtpPrologueSpec {
+    pub enorm: RmsNormSpec,
+    pub hnorm: RmsNormSpec,
+    pub eh_proj_name: String,
+    pub eh_proj_scale_name: Option<String>,
+    /// Name of the shared hidden-carry tensor the previous-position hidden
+    /// rows are read from (same tensor the main graph writes).
+    pub hidden_carry_name: String,
+    pub hidden_size: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct HybridDecodeSpec {
     pub input: ProbeInputKind,
@@ -749,6 +778,15 @@ pub struct HybridDecodeSpec {
     pub final_logit_softcap: Option<f32>,
     pub per_layer_input: Option<HybridPerLayerInputProjectSpec>,
     pub layers: Vec<HybridLayerSpec>,
+    /// Write post-final-norm hidden rows to a persistent device tensor.
+    pub hidden_carry: Option<HybridHiddenCarrySpec>,
+    /// Present only on the MTP draft spec.
+    pub mtp_prologue: Option<HybridMtpPrologueSpec>,
+    /// Run the recurrent scan one token at a time and store the state after
+    /// every token in its own cache row. Costs one extra state read+write per
+    /// extra token, and makes speculative rollback a row-index change instead
+    /// of a re-forward. Only set on the speculative verify spec.
+    pub recurrent_checkpoints: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -779,6 +817,13 @@ pub struct HybridDecodeBatchLayout {
     /// diverge from the linear sequence index, while `positions` stays the
     /// linear index used for cache writes and attention masking.
     pub rope_positions: Option<Vec<i32>>,
+    /// Hidden-carry rows this batch reads (MTP draft graph only), one per
+    /// token: row `i` supplies the `h_{pos-1}` input for batch token `i`.
+    pub hidden_read_rows: Vec<i32>,
+    /// Hidden-carry rows this batch writes, one per token (graphs with
+    /// `hidden_carry` set). Row `i` receives the post-final-norm hidden of
+    /// batch token `i`.
+    pub hidden_write_rows: Vec<i32>,
 }
 
 impl HybridDecodeBatchLayout {
@@ -831,6 +876,8 @@ impl HybridDecodeBatchLayout {
             recurrent_state_rows: vec![0],
             output_ids: output_ids.to_vec(),
             rope_positions: None,
+            hidden_read_rows: Vec::new(),
+            hidden_write_rows: Vec::new(),
         })
     }
 
@@ -909,6 +956,10 @@ pub struct HybridDecodeGraph {
     pub input_attention_write_indices: Option<TensorId>,
     pub input_rope_positions: Option<TensorId>,
     pub input_recurrent_state_rows: Option<TensorId>,
+    /// MTP draft graph: which hidden-carry rows feed this batch.
+    pub input_hidden_read_rows: Option<TensorId>,
+    /// Graphs with `hidden_carry`: which hidden-carry rows this batch writes.
+    pub input_hidden_write_rows: Option<TensorId>,
     pub attention_cache_views: Vec<HybridAttentionCacheView>,
     pub moe_selected_experts: Vec<HybridMoeSelection>,
     pub state_updates: Vec<TensorId>,
@@ -3475,9 +3526,62 @@ pub fn execute_attention_decode_graph_metal_cached(
 struct BuiltDeltaNetRecurrentDecode {
     r_cache: TensorId,
     s_cache: TensorId,
-    r_cache_update: TensorId,
-    s_cache_update: TensorId,
+    /// One entry per written state row: a single row normally, one per batch
+    /// token when speculative checkpointing is on.
+    r_cache_updates: Vec<TensorId>,
+    s_cache_updates: Vec<TensorId>,
     result_output: TensorId,
+}
+
+/// The state-cache rows every checkpoint of this batch writes: elements
+/// `1..=n_tokens` of the `[resume_row, w_0..w_n]` vector.
+fn state_write_rows_all(
+    ctx: &mut Context,
+    input_state_rows: TensorId,
+    recurrent_checkpoints: bool,
+) -> Result<TensorId> {
+    if !recurrent_checkpoints {
+        return Ok(input_state_rows);
+    }
+    let rows = require_tensor(ctx, input_state_rows)?.ne[0];
+    ctx.view_1d(input_state_rows, rows - 1, row_size(TensorType::I32, 1)?)
+        .map_err(LlamaError::format)
+}
+
+/// The state-cache row indices one checkpoint writes: the whole input vector
+/// when checkpointing is off (the classic single live row), otherwise element
+/// `checkpoint + 1` of the `[resume_row, w_0..w_n]` vector.
+fn state_write_rows(
+    ctx: &mut Context,
+    input_state_rows: TensorId,
+    recurrent_checkpoints: bool,
+    checkpoint: usize,
+) -> Result<TensorId> {
+    if !recurrent_checkpoints {
+        return Ok(input_state_rows);
+    }
+    let offset = row_size(
+        TensorType::I32,
+        i64::try_from(checkpoint)
+            .map_err(|_| LlamaError::format("state checkpoint index does not fit in i64"))?
+            + 1,
+    )?;
+    ctx.view_1d(input_state_rows, 1, offset)
+        .map_err(LlamaError::format)
+}
+
+/// Slice one token out of a delta-net `[.., .., n_tokens, n_seqs]` tensor,
+/// keeping the source strides so views over `conv_output` stay valid.
+fn view_delta_net_token(ctx: &mut Context, src: TensorId, token: usize) -> Result<TensorId> {
+    let t = require_tensor(ctx, src)?.clone();
+    let offset = t
+        .nb[2]
+        .checked_mul(token)
+        .ok_or_else(|| LlamaError::format("overflow computing delta-net token view offset"))?;
+    ctx.view_4d(
+        src, t.ne[0], t.ne[1], 1, t.ne[3], t.nb[1], t.nb[2], t.nb[3], offset,
+    )
+    .map_err(LlamaError::format)
 }
 
 fn build_delta_net_chunking(
@@ -4053,12 +4157,27 @@ fn build_delta_net_recurrent_decode_from_hidden(
     input_state_rows: TensorId,
     input_embed: TensorId,
     n_tokens: usize,
+    recurrent_checkpoints: bool,
     prefix: &str,
 ) -> Result<BuiltDeltaNetRecurrentDecode> {
     let block = &spec.block;
     let n_tokens_i64 =
         i64::try_from(n_tokens).map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
-    let n_seqs = require_tensor(ctx, input_state_rows)?.ne[0];
+    // Checkpointing repurposes the state-row input as `[resume_row, w_0..w_n]`
+    // for a single sequence, so the row count no longer encodes n_seqs.
+    let n_seqs = if recurrent_checkpoints {
+        let rows = require_tensor(ctx, input_state_rows)?.ne[0];
+        if rows != n_tokens_i64 + 1 {
+            return Err(LlamaError::format(format!(
+                "checkpointed delta-net decode expects {} state rows, got {}",
+                n_tokens_i64 + 1,
+                rows
+            )));
+        }
+        1
+    } else {
+        require_tensor(ctx, input_state_rows)?.ne[0]
+    };
     if n_seqs <= 0 {
         return Err(LlamaError::format(
             "delta-net recurrent decode requires at least one active sequence",
@@ -4347,8 +4466,19 @@ fn build_delta_net_recurrent_decode_from_hidden(
         (r_cache, s_cache)
     };
 
+    // With checkpointing the layout carries `n_tokens + 1` row indices:
+    // element 0 is the row the scan resumes from and elements `1..=n_tokens`
+    // receive the state after each token, so undoing a rejected speculative
+    // draft is a change of resume row rather than a re-forward.
+    let state_read_rows = if recurrent_checkpoints {
+        ctx.view_1d(input_state_rows, 1, 0)
+            .map_err(LlamaError::format)?
+    } else {
+        input_state_rows
+    };
+
     let active_r_cache = ctx
-        .get_rows(r_cache, input_state_rows, BufferUsage::State)
+        .get_rows(r_cache, state_read_rows, BufferUsage::State)
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(active_r_cache, format!("{prefix}.conv_states"))
         .map_err(LlamaError::format)?;
@@ -4380,36 +4510,51 @@ fn build_delta_net_recurrent_decode_from_hidden(
         .map_err(LlamaError::format)?;
 
     let conv_input_tensor = require_tensor(ctx, conv_input)?.clone();
-    let last_conv_states = ctx
-        .view_3d(
-            conv_input,
-            conv_prefix,
-            qkv_dim,
-            n_seqs,
-            conv_input_tensor.nb[1],
-            conv_input_tensor.nb[2],
-            row_size(conv_input_tensor.desc.ty, n_seq_tokens)?,
-        )
-        .map_err(LlamaError::format)?;
-    let last_conv_states_rows = ctx
-        .cont_2d(last_conv_states, r_width, n_seqs)
-        .map_err(LlamaError::format)?;
-    ctx.set_tensor_name(
-        last_conv_states_rows,
-        format!("{prefix}.last_conv_states_rows"),
-    )
-    .map_err(LlamaError::format)?;
-    let r_cache_update = ctx
-        .set_rows(
-            r_cache,
-            last_conv_states_rows,
-            input_state_rows,
-            BufferUsage::State,
-        )
-        .map_err(LlamaError::format)?;
+    // The conv state after token `t` is the `conv_prefix`-wide window of
+    // `conv_input` ending at that token, so every checkpoint is a view at a
+    // different offset — no extra compute, only the row write.
+    // Every conv-state checkpoint is the same `conv_prefix`-wide window of
+    // `conv_input` shifted by one token, so all of them are one strided view:
+    // dim2 walks the checkpoints with a stride of a single element. That keeps
+    // the checkpointed graph at ONE cont + ONE set_rows per layer instead of
+    // one pair per token.
+    let mut r_cache_updates = Vec::with_capacity(1);
+    {
+        let element = row_size(conv_input_tensor.desc.ty, 1)?;
+        let (rows, offset, checkpoint_stride) = if recurrent_checkpoints {
+            (n_tokens as i64, element, element)
+        } else {
+            (
+                n_seqs,
+                row_size(conv_input_tensor.desc.ty, n_seq_tokens)?,
+                conv_input_tensor.nb[2],
+            )
+        };
+        let conv_states_at = ctx
+            .view_3d(
+                conv_input,
+                conv_prefix,
+                qkv_dim,
+                rows,
+                conv_input_tensor.nb[1],
+                checkpoint_stride,
+                offset,
+            )
+            .map_err(LlamaError::format)?;
+        let conv_states_rows = ctx
+            .cont_2d(conv_states_at, r_width, rows)
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(conv_states_rows, format!("{prefix}.last_conv_states_rows"))
+            .map_err(LlamaError::format)?;
+        let write_rows = state_write_rows_all(ctx, input_state_rows, recurrent_checkpoints)?;
+        r_cache_updates.push(
+            ctx.set_rows(r_cache, conv_states_rows, write_rows, BufferUsage::State)
+                .map_err(LlamaError::format)?,
+        );
+    }
 
     let active_s_cache = ctx
-        .get_rows(s_cache, input_state_rows, BufferUsage::State)
+        .get_rows(s_cache, state_read_rows, BufferUsage::State)
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(active_s_cache, format!("{prefix}.active_s_cache"))
         .map_err(LlamaError::format)?;
@@ -4545,7 +4690,101 @@ fn build_delta_net_recurrent_decode_from_hidden(
             .map_err(LlamaError::format)?;
     }
 
-    let (output, new_state) = if use_fused_delta_net {
+    // Speculative verify batches run the scan one token at a time so the state
+    // after every token lands in its own cache row. The scan is inherently
+    // sequential, so this costs only one extra state read+write per extra
+    // token (the projections above still run once for the whole batch); in
+    // exchange, rejecting a draft never needs a second forward pass.
+    let (output, new_state, checkpoint_s_updates) = if use_fused_delta_net && recurrent_checkpoints
+    {
+        let value_head_dim = i64::from(block.value_head_dim);
+        let value_head_count = i64::from(block.value_head_count);
+        let mut state_in = state;
+        let mut flat_outputs = Vec::with_capacity(n_tokens);
+        let mut s_updates = Vec::with_capacity(n_tokens);
+        for token in 0..n_tokens {
+            let q_t = view_delta_net_token(ctx, q_conv, token)?;
+            let k_t = view_delta_net_token(ctx, k_conv, token)?;
+            let v_t = view_delta_net_token(ctx, v_conv, token)?;
+            let gate_t = view_delta_net_token(ctx, gate, token)?;
+            let beta_t = view_delta_net_token(ctx, beta, token)?;
+            let gated_delta = ctx
+                .gated_delta_net(
+                    q_t,
+                    k_t,
+                    v_t,
+                    gate_t,
+                    beta_t,
+                    state_in,
+                    BufferUsage::Activations,
+                )
+                .map_err(LlamaError::format)?;
+            ctx.set_tensor_name(gated_delta, format!("{prefix}.fgdn_ckpt{token}"))
+                .map_err(LlamaError::format)?;
+            // The token's output is the leading, contiguous slice of its own
+            // gated_delta result, so a flat view is enough — no copy needed
+            // before the concat below.
+            let flat = ctx
+                .view_2d(
+                    gated_delta,
+                    value_hidden_size,
+                    n_seqs,
+                    row_size(TensorType::F32, value_hidden_size)?,
+                    0,
+                )
+                .map_err(LlamaError::format)?;
+            ctx.set_tensor_name(flat, format!("{prefix}.output_flat{token}"))
+                .map_err(LlamaError::format)?;
+            flat_outputs.push(flat);
+
+            let new_state_t = ctx
+                .view_4d(
+                    gated_delta,
+                    value_head_dim,
+                    value_head_dim,
+                    value_head_count,
+                    n_seqs,
+                    row_size(TensorType::F32, value_head_dim)?,
+                    row_size(TensorType::F32, value_head_dim * value_head_dim)?,
+                    row_size(
+                        TensorType::F32,
+                        value_head_dim * value_head_dim * value_head_count,
+                    )?,
+                    row_size(TensorType::F32, value_hidden_size * n_seqs)?,
+                )
+                .map_err(LlamaError::format)?;
+            ctx.set_tensor_name(new_state_t, format!("{prefix}.output_state{token}"))
+                .map_err(LlamaError::format)?;
+            let new_state_nb3 = require_tensor(ctx, new_state_t)?.nb[3];
+            let new_state_rows = ctx
+                .view_2d(new_state_t, s_width, n_seqs, new_state_nb3, 0)
+                .map_err(LlamaError::format)?;
+            let write_rows = state_write_rows(ctx, input_state_rows, true, token)?;
+            s_updates.push(
+                ctx.set_rows(s_cache, new_state_rows, write_rows, BufferUsage::State)
+                    .map_err(LlamaError::format)?,
+            );
+            state_in = new_state_t;
+        }
+        // Token outputs are `[value_hidden_size, 1]` columns; a dim-0 concat
+        // then reshape rebuilds the `[vhd, vhc, n_tokens, n_seqs]` layout the
+        // rest of the layer expects, without a strided scatter.
+        let mut assembled = flat_outputs[0];
+        for &flat in &flat_outputs[1..] {
+            assembled = ctx
+                .concat(assembled, flat, 0, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+        }
+        let output = ctx
+            .reshape(
+                assembled,
+                &[value_head_dim, value_head_count, n_seq_tokens, n_seqs],
+            )
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(output, format!("{prefix}.output_view"))
+            .map_err(LlamaError::format)?;
+        (output, state_in, s_updates)
+    } else if use_fused_delta_net {
         let gated_delta = ctx
             .gated_delta_net(
                 q_conv,
@@ -4606,7 +4845,7 @@ fn build_delta_net_recurrent_decode_from_hidden(
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(new_state, format!("{prefix}.output_state"))
             .map_err(LlamaError::format)?;
-        (output, new_state)
+        (output, new_state, Vec::new())
     } else if n_seq_tokens == 1 {
         let q_scaled = ctx
             .scale(
@@ -4679,9 +4918,9 @@ fn build_delta_net_recurrent_decode_from_hidden(
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(output, format!("{prefix}.output_view"))
             .map_err(LlamaError::format)?;
-        (output, new_state)
+        (output, new_state, Vec::new())
     } else {
-        build_delta_net_chunking(
+        let (output, new_state) = build_delta_net_chunking(
             ctx,
             block,
             q_conv,
@@ -4693,7 +4932,8 @@ fn build_delta_net_recurrent_decode_from_hidden(
             n_seq_tokens,
             n_seqs,
             prefix,
-        )?
+        )?;
+        (output, new_state, Vec::new())
     };
 
     // Debug bisection hatch: pass raw v through instead of the delta-net
@@ -4703,25 +4943,17 @@ fn build_delta_net_recurrent_decode_from_hidden(
     } else {
         output
     };
-    let new_state_rows = ctx
-        .view_2d(
-            new_state,
-            s_width,
-            n_seqs,
-            ctx.tensor(new_state)
-                .ok_or_else(|| LlamaError::format("invalid new_state tensor"))?
-                .nb[3],
-            0,
-        )
-        .map_err(LlamaError::format)?;
-    let s_cache_update = ctx
-        .set_rows(
-            s_cache,
-            new_state_rows,
-            input_state_rows,
-            BufferUsage::State,
-        )
-        .map_err(LlamaError::format)?;
+    let s_cache_updates = if checkpoint_s_updates.is_empty() {
+        let new_state_nb3 = require_tensor(ctx, new_state)?.nb[3];
+        let new_state_rows = ctx
+            .view_2d(new_state, s_width, n_seqs, new_state_nb3, 0)
+            .map_err(LlamaError::format)?;
+        vec![ctx
+            .set_rows(s_cache, new_state_rows, input_state_rows, BufferUsage::State)
+            .map_err(LlamaError::format)?]
+    } else {
+        checkpoint_s_updates
+    };
 
     let z = ctx
         .reshape(
@@ -4800,8 +5032,8 @@ fn build_delta_net_recurrent_decode_from_hidden(
     Ok(BuiltDeltaNetRecurrentDecode {
         r_cache,
         s_cache,
-        r_cache_update,
-        s_cache_update,
+        r_cache_updates,
+        s_cache_updates,
         result_output,
     })
 }
@@ -4892,6 +5124,7 @@ pub fn build_delta_net_recurrent_decode_graph(
         input_state_rows,
         input_embed,
         n_tokens,
+        false,
         "recur_decode",
     )?;
     let result_output = built.result_output;
@@ -4899,10 +5132,10 @@ pub fn build_delta_net_recurrent_decode_graph(
 
     let mut graph = Graph::new();
     graph
-        .build_forward_expand(ctx, built.r_cache_update)
+        .build_forward_expand(ctx, built.r_cache_updates[0])
         .map_err(LlamaError::format)?;
     graph
-        .build_forward_expand(ctx, built.s_cache_update)
+        .build_forward_expand(ctx, built.s_cache_updates[0])
         .map_err(LlamaError::format)?;
     graph
         .build_forward_expand(ctx, result_output)
@@ -6378,13 +6611,59 @@ fn build_hybrid_decode_graph_impl(
     } else {
         None
     };
+    let recurrent_checkpoints = spec.recurrent_checkpoints;
+    // Row indices for the recurrent state cache. Without checkpointing this
+    // is the single row read and written by every recurrent layer. With
+    // checkpointing (speculative verify batches) it is `n_tokens + 1` long:
+    // element 0 is the row the scan starts from, elements 1..=n_tokens are
+    // the rows the per-token states are written to, so a rejected draft is
+    // rolled back by simply reading a different row next step.
+    let state_row_count = if recurrent_checkpoints {
+        n_tokens
+            .checked_add(1)
+            .ok_or_else(|| LlamaError::format("overflow computing recurrent state row count"))?
+    } else {
+        1
+    };
     let input_recurrent_state_rows = if has_recurrent {
         let rows = ctx
             .new_named_tensor(
                 "hybrid_decode.inp_state_rows",
                 TensorType::I32,
                 1,
-                &[1],
+                &[i64::try_from(state_row_count).map_err(|_| {
+                    LlamaError::format("recurrent state row count does not fit in i64")
+                })?],
+                BufferUsage::Activations,
+            )
+            .map_err(LlamaError::format)?;
+        mark_input(ctx, rows)?;
+        Some(rows)
+    } else {
+        None
+    };
+    let input_hidden_read_rows = if spec.mtp_prologue.is_some() {
+        let rows = ctx
+            .new_named_tensor(
+                "hybrid_decode.inp_h_read_rows",
+                TensorType::I32,
+                1,
+                &[n_tokens as i64],
+                BufferUsage::Activations,
+            )
+            .map_err(LlamaError::format)?;
+        mark_input(ctx, rows)?;
+        Some(rows)
+    } else {
+        None
+    };
+    let input_hidden_write_rows = if spec.hidden_carry.is_some() {
+        let rows = ctx
+            .new_named_tensor(
+                "hybrid_decode.inp_h_write_rows",
+                TensorType::I32,
+                1,
+                &[n_tokens as i64],
                 BufferUsage::Activations,
             )
             .map_err(LlamaError::format)?;
@@ -6453,6 +6732,55 @@ fn build_hybrid_decode_graph_impl(
     };
     ctx.set_tensor_name(hidden, "hybrid_decode.input_embed")
         .map_err(LlamaError::format)?;
+
+    // MTP draft prologue (llama.cpp `graph_mtp`): the draft block consumes the
+    // embedding of the token at position p together with the main model's
+    // post-final-norm hidden state at position p-1.
+    if let Some(prologue) = &spec.mtp_prologue {
+        let carry = require_tensor_id(tensor_ids, &prologue.hidden_carry_name)?;
+        let read_rows = input_hidden_read_rows
+            .ok_or_else(|| LlamaError::format("mtp prologue requires hidden read rows input"))?;
+        let h_prev = ctx
+            .get_rows(carry, read_rows, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(h_prev, "hybrid_decode.mtp_h_input")
+            .map_err(LlamaError::format)?;
+        let h_norm = build_rms_norm_mul(
+            ctx,
+            tensor_ids,
+            h_prev,
+            prologue.hnorm.epsilon,
+            &prologue.hnorm.weight_name,
+            "hybrid_decode.mtp_hnorm",
+        )?;
+        let e_norm = build_rms_norm_mul(
+            ctx,
+            tensor_ids,
+            hidden,
+            prologue.enorm.epsilon,
+            &prologue.enorm.weight_name,
+            "hybrid_decode.mtp_enorm",
+        )?;
+        let concat = ctx
+            .concat(e_norm, h_norm, 0, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(concat, "hybrid_decode.mtp_concat")
+            .map_err(LlamaError::format)?;
+        let eh_proj = require_tensor_id(tensor_ids, &prologue.eh_proj_name)?;
+        let projected = ctx
+            .mul_mat(eh_proj, concat, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        hidden = apply_optional_proj_scale(
+            ctx,
+            tensor_ids,
+            projected,
+            &prologue.eh_proj_scale_name,
+            "hybrid_decode.mtp_eh_proj_scaled",
+        )?;
+        ctx.set_tensor_name(hidden, "hybrid_decode.mtp_eh_proj")
+            .map_err(LlamaError::format)?;
+    }
+
     let shared_per_layer_inputs = spec
         .per_layer_input
         .as_ref()
@@ -6485,7 +6813,10 @@ fn build_hybrid_decode_graph_impl(
     })?;
 
     for (layer_offset, layer) in spec.layers.iter().enumerate() {
-        let is_last_layer = layer_offset == last_layer;
+        // With a hidden carry the narrowing moves past the final norm so
+        // every batch position produces a hidden row; only the LM head runs
+        // at `n_outputs` width.
+        let is_last_layer = layer_offset == last_layer && spec.hidden_carry.is_none();
         match layer {
             HybridLayerSpec::Attention {
                 layer_index,
@@ -6695,10 +7026,11 @@ fn build_hybrid_decode_graph_impl(
                     })?,
                     hidden,
                     n_tokens,
+                    recurrent_checkpoints,
                     &format!("{prefix}.recur"),
                 )?;
-                state_updates.push(recur.r_cache_update);
-                state_updates.push(recur.s_cache_update);
+                state_updates.extend(recur.r_cache_updates.iter().copied());
+                state_updates.extend(recur.s_cache_updates.iter().copied());
                 let mut layer_output = recur.result_output;
                 let mut residual_input = hidden;
                 if is_last_layer {
@@ -6765,9 +7097,38 @@ fn build_hybrid_decode_graph_impl(
         &spec.output_norm_name,
         "hybrid_decode.result_norm",
     )?;
+    // Publish the post-final-norm rows (llama.cpp's `t_h_nextn`) to the shared
+    // carry tensor so the MTP draft graph reads them straight out of device
+    // memory — llama.cpp round-trips these rows through the host instead.
+    let hidden_carry_update = match &spec.hidden_carry {
+        Some(carry) => {
+            let carry_id = require_tensor_id(tensor_ids, &carry.tensor_name)?;
+            let write_rows = input_hidden_write_rows.ok_or_else(|| {
+                LlamaError::format("hidden carry requires the hidden write rows input")
+            })?;
+            let update = ctx
+                .set_rows(carry_id, result_norm, write_rows, BufferUsage::State)
+                .map_err(LlamaError::format)?;
+            ctx.set_tensor_name(update, "hybrid_decode.hidden_carry_update")
+                .map_err(LlamaError::format)?;
+            Some(update)
+        }
+        None => None,
+    };
+    // Without a carry the narrowing already happened inside the last block.
+    let head_input = if spec.hidden_carry.is_some() {
+        let narrowed = ctx
+            .get_rows(result_norm, input_output_ids, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(narrowed, "hybrid_decode.result_norm.out_ids")
+            .map_err(LlamaError::format)?;
+        narrowed
+    } else {
+        result_norm
+    };
     let output_weight = require_tensor_id(tensor_ids, &spec.output_name)?;
     let mut result_logits = ctx
-        .mul_mat(output_weight, result_norm, BufferUsage::Activations)
+        .mul_mat(output_weight, head_input, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
     if let Some(softcap) = spec.final_logit_softcap {
         result_logits = ctx
@@ -6786,6 +7147,11 @@ fn build_hybrid_decode_graph_impl(
 
     let mut graph = Graph::new();
     for &update in &state_updates {
+        graph
+            .build_forward_expand(ctx, update)
+            .map_err(LlamaError::format)?;
+    }
+    if let Some(update) = hidden_carry_update {
         graph
             .build_forward_expand(ctx, update)
             .map_err(LlamaError::format)?;
@@ -6815,6 +7181,8 @@ fn build_hybrid_decode_graph_impl(
         input_attention_write_indices,
         input_rope_positions,
         input_recurrent_state_rows,
+        input_hidden_read_rows,
+        input_hidden_write_rows,
         attention_cache_views,
         moe_selected_experts,
         state_updates,
@@ -7707,6 +8075,32 @@ pub(crate) fn build_hybrid_decode_writes(
         writes.push((
             input_recurrent_state_rows,
             i32_slice_as_bytes(&layout.recurrent_state_rows).to_vec(),
+        ));
+    }
+    if let Some(input_hidden_read_rows) = decode.input_hidden_read_rows {
+        if layout.hidden_read_rows.len() != positions.len() {
+            return Err(LlamaError::format(format!(
+                "hybrid decode layout needs {} hidden read rows, got {}",
+                positions.len(),
+                layout.hidden_read_rows.len()
+            )));
+        }
+        writes.push((
+            input_hidden_read_rows,
+            i32_slice_as_bytes(&layout.hidden_read_rows).to_vec(),
+        ));
+    }
+    if let Some(input_hidden_write_rows) = decode.input_hidden_write_rows {
+        if layout.hidden_write_rows.len() != positions.len() {
+            return Err(LlamaError::format(format!(
+                "hybrid decode layout needs {} hidden write rows, got {}",
+                positions.len(),
+                layout.hidden_write_rows.len()
+            )));
+        }
+        writes.push((
+            input_hidden_write_rows,
+            i32_slice_as_bytes(&layout.hidden_write_rows).to_vec(),
         ));
     }
     let mut written_masks = BTreeSet::new();

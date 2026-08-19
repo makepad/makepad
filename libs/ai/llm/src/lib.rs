@@ -121,7 +121,10 @@ pub use runtime::{
     LogitsProbeSpec, MoeFfnGraph, MoeFfnRun, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind,
     RmsNormSpec,
 };
-pub use session::{LlamaGeneration, LlamaSession, LlamaSessionConfig, LlamaStopReason};
+pub use session::{
+    LlamaGeneration, LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
+    SpeculativeStats,
+};
 pub use vision::{
     calc_size_preserved_ratio, preprocess_rgb8, vision_rope_positions, PreparedImage,
     VisionConfig, VisionTower,

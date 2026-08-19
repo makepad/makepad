@@ -324,6 +324,7 @@ struct DeviceState {
     scratch_host: RefCell<HostScratch>,
     last_q81_src: Cell<*const f32>,
     last_q81_k: Cell<usize>,
+    last_q81_m: Cell<usize>,
     split_ev0: Cell<CudaEvent>,
     split_ev1: Cell<CudaEvent>,
     split_ev2: Cell<CudaEvent>,
@@ -584,6 +585,7 @@ impl Runtime {
                     }),
                     last_q81_src: Cell::new(std::ptr::null()),
                     last_q81_k: Cell::new(0),
+                    last_q81_m: Cell::new(0),
                     split_ev0: Cell::new(split_ev0),
                     split_ev1: Cell::new(split_ev1),
                     split_ev2: Cell::new(split_ev2),
@@ -1126,7 +1128,16 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                     && !(gqa > 4 && k.ne[1] >= 8192)
                 {
                     KernelSel::FlashVec
-                } else if q.ne[1] >= 20 && gqa > 4 {
+                } else if gqa > 4 {
+                    // llama.cpp fattn.cu get_best_fattn_kernel: for D=256 on
+                    // Turing+ everything that is not the n_q==1 VEC case goes
+                    // to MMA_F16. The old `q.ne[1] >= 20` threshold sent two
+                    // very common shapes to the generic FlashDecode instead:
+                    // any 2..19-token batch (speculative verify, small
+                    // prefill chunks) and — because VEC is skipped once
+                    // GQA>4 and KV>=8192 — ordinary single-token decode past
+                    // 8k context. FlashDecode is ~10x slower per layer here,
+                    // which is exactly the long-context decode cliff.
                     KernelSel::FlashMma
                 } else {
                     KernelSel::FlashDecode
@@ -1252,10 +1263,15 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
 
 const GLU_SWIGLU: i32 = 2;
 
-fn mmvq_q81_shape_ok(t: &Tensor, act: &Tensor, kind: i32) -> bool {
+// `dst` is the fused GLU output; the multi-column kernel indexes it as
+// `dst[col*n + row]`, so both it and the activations must be contiguous.
+fn mmvq_q81_shape_ok(t: &Tensor, act: &Tensor, dst: &Tensor, kind: i32) -> bool {
     let k = t.ne[0];
+    let n = t.ne[1];
     let m = act.ne[1] * act.ne[2] * act.ne[3];
-    m == 1
+    m >= 1
+        && m <= MMV_MAX_COLUMNS as i64
+        && (m == 1 || (act.nb[1] == 4 * k as usize && dst.nb[1] == 4 * n as usize))
         && k % 256 == 0
         && t.ne[2] == 1
         && t.ne[3] == 1
@@ -1360,7 +1376,7 @@ fn fuse_mmvq_swiglu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [P
         let act = &tensors[up_act];
         if gate_w_t.ne != up_w_t.ne
             || gate_w_t.nb != up_w_t.nb
-            || !mmvq_q81_shape_ok(up_w_t, act, kind0)
+            || !mmvq_q81_shape_ok(up_w_t, act, glu, kind0)
         {
             i += 1;
             continue;
@@ -2143,6 +2159,7 @@ impl Compiled {
                 // token would omit quantize from the captured graph.
                 self.state.last_q81_src.set(std::ptr::null());
                 self.state.last_q81_k.set(0);
+                self.state.last_q81_m.set(0);
                 begin_stream_capture(stream, CUDA_STREAM_CAPTURE_MODE_RELAXED)
                     .map_err(|err| LlamaError::format(format!("cuda graph begin capture: {err}")))?;
                 let dispatch = view.dispatch_all(None);
@@ -3122,8 +3139,14 @@ impl ExecView<'_> {
                 let q81_disabled = std::env::var_os("MKLLM_DISABLE_Q81_MMVQ")
                     .map(|v| v == "1")
                     .unwrap_or(false);
+                // mul_mat_vec_q reads the weights once for up to
+                // MMVQ_MAX_BATCH_SIZE destination columns; the multi-column
+                // form needs contiguous activation columns (one flat q8_1
+                // quantize) and a contiguous destination (stride_col_dst = n).
                 let q81_ok = !q81_disabled
-                    && m == 1
+                    && m >= 1
+                    && m <= MMV_MAX_COLUMNS
+                    && (m == 1 || (b.nb[1] == 4 * k && t.nb[1] == 4 * n))
                     && (k % 256) == 0
                     && a.ne[2] == 1
                     && a.ne[3] == 1
@@ -3135,7 +3158,7 @@ impl ExecView<'_> {
                         || kind == MKLLM_QUANT_Q6K)
                     && (cc.0 > 6 || (cc.0 == 6 && cc.1 >= 1));
                 if q81_ok {
-                    self.mmv_quant_q81(&t, kind, k, n, row_bytes, quant_profile.as_deref_mut())
+                    self.mmv_quant_q81(&t, kind, k, n, m, row_bytes, quant_profile.as_deref_mut())
                 } else {
                     check(
                         unsafe {
@@ -3468,8 +3491,10 @@ impl ExecView<'_> {
         })?;
         let gate_w_t = &tensors[gate_w];
         let up_w_t = &tensors[up_w];
+        let act = &tensors[act_id];
         let k = up_w_t.ne[0] as usize;
         let n = up_w_t.ne[1] as usize;
+        let m = (act.ne[1] * act.ne[2] * act.ne[3]) as usize;
         let up_row_bytes =
             ggml_row_size_for_type(up_w_t.desc.ty, up_w_t.ne[0]).map_err(LlamaError::format)?;
         let gate_row_bytes =
@@ -3478,6 +3503,7 @@ impl ExecView<'_> {
         let nblk = k / 32;
         let y_bytes = nblk
             .checked_mul(36)
+            .and_then(|bytes| bytes.checked_mul(m))
             .ok_or_else(|| LlamaError::format("q81 fused mmvq scratch overflow"))?;
         let scratch = self
             .state
@@ -3485,16 +3511,21 @@ impl ExecView<'_> {
             .borrow_mut()
             .ensure(y_bytes, "q81 fused activation scratch")?;
         let src1 = self.ptr_of(act_id)? as *const f32;
-        let reuse_q81 =
-            src1 == self.state.last_q81_src.get() && k == self.state.last_q81_k.get();
+        let reuse_q81 = src1 == self.state.last_q81_src.get()
+            && k == self.state.last_q81_k.get()
+            && m == self.state.last_q81_m.get();
         let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
         if !reuse_q81 {
+            // Columns are contiguous, so one flat quantize produces exactly the
+            // column-major q8_1 block layout mul_mat_vec_q indexes with
+            // stride_col_y = k / QK8_1.
             check(
-                unsafe { quantize_q81(src1, scratch, k as i32, stream) },
+                unsafe { quantize_q81(src1, scratch, (k * m) as i32, stream) },
                 "q81 fused quantize",
             )?;
             self.state.last_q81_src.set(src1);
             self.state.last_q81_k.set(k);
+            self.state.last_q81_m.set(m);
             if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
                 stage_start = Some(timeline.finish(start, kind, "q81_quant")?);
             }
@@ -3509,6 +3540,7 @@ impl ExecView<'_> {
                     self.ptr_of(t.id)? as *mut f32,
                     k as i32,
                     n as i32,
+                    m as i32,
                     up_row_bytes,
                     gate_row_bytes,
                     stream,
@@ -3522,12 +3554,14 @@ impl ExecView<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mmv_quant_q81(
         &self,
         t: &Tensor,
         kind: i32,
         k: usize,
         n: usize,
+        m: usize,
         row_bytes: usize,
         mut profile: Option<&mut QuantTimeline>,
     ) -> Result<()> {
@@ -3537,6 +3571,7 @@ impl ExecView<'_> {
         let nblk = k / 32;
         let y_bytes = nblk
             .checked_mul(36)
+            .and_then(|bytes| bytes.checked_mul(m))
             .ok_or_else(|| LlamaError::format("q81 mmvq scratch overflow"))?;
         let scratch = self
             .state
@@ -3544,16 +3579,18 @@ impl ExecView<'_> {
             .borrow_mut()
             .ensure(y_bytes, "q81 activation scratch")?;
         let src1 = self.ptr_of(b_id)? as *const f32;
-        let reuse_q81 =
-            src1 == self.state.last_q81_src.get() && k == self.state.last_q81_k.get();
+        let reuse_q81 = src1 == self.state.last_q81_src.get()
+            && k == self.state.last_q81_k.get()
+            && m == self.state.last_q81_m.get();
         let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
         if !reuse_q81 {
             check(
-                unsafe { quantize_q81(src1, scratch, k as i32, stream) },
+                unsafe { quantize_q81(src1, scratch, (k * m) as i32, stream) },
                 "q81 quantize",
             )?;
             self.state.last_q81_src.set(src1);
             self.state.last_q81_k.set(k);
+            self.state.last_q81_m.set(m);
             if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
                 stage_start = Some(timeline.finish(start, kind, "q81_quant")?);
             }
@@ -3567,6 +3604,7 @@ impl ExecView<'_> {
                     self.ptr_of(t.id)? as *mut f32,
                     k as i32,
                     n as i32,
+                    m as i32,
                     row_bytes,
                     t.nb[1] / 4,
                     stream,
