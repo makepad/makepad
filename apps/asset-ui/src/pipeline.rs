@@ -984,6 +984,27 @@ impl Pipeline {
         }
     }
 
+    /// Service job ids this run has in flight on `base_url` (linear stage
+    /// + fan-out candidates) — lets the fleet panel tell "ours" from other
+    /// clients' jobs.
+    pub fn job_ids_on(&self, base_url: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .candidate_sets
+            .iter()
+            .flat_map(|set| set.candidates.iter())
+            .filter(|c| c.endpoint == base_url && !c.job_id.is_empty())
+            .map(|c| c.job_id.clone())
+            .collect();
+        if !self.finished {
+            if let Some(stage) = self.stages.get(self.current) {
+                if stage.box_url == base_url && !stage.job_id.is_empty() {
+                    ids.push(stage.job_id.clone());
+                }
+            }
+        }
+        ids
+    }
+
     /// Every endpoint this run currently occupies. Fan-out stages can own
     /// several GPU slots at once, including siblings still cancelling after
     /// an early human choice; callers must not collapse them to one.
