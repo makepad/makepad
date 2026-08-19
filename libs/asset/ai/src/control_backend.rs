@@ -588,6 +588,7 @@ mod tests {
             input_content_type: "image/png".to_string(),
             inputs: Vec::new(),
             strength: None,
+            loras: Vec::new(),
             frames: None,
             codec: String::new(),
             audio: None,

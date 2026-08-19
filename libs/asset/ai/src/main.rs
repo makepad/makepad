@@ -129,8 +129,9 @@ fn run() -> Result<(), AssetAiError> {
     if std::env::var("HF_TOKEN").is_ok() {
         println!("  HF_TOKEN present (gated repos enabled)");
     }
+    println!("  lora dir  {}", cache_dir.join("loras").display());
     println!(
-        "  endpoints: /health /models /jobs POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id>"
+        "  endpoints: /health /models /jobs /loras POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id>"
     );
 
     // The http listener thread runs until the process is killed.

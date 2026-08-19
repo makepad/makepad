@@ -384,6 +384,11 @@ pub struct FluxPromptToImagePlan {
     pub generation: FluxGenerationConfig,
     pub latent_shape: FluxLatentShape,
     pub transformer: FluxTransformerConfig,
+    /// LoRA adapters merged into the transformer weights at load. Part of
+    /// the pipeline's warm-reuse identity (see `FluxPipeline::serves_plan`):
+    /// a different set or strength rebuilds instead of reusing weights that
+    /// carry the previous adaptation.
+    pub loras: crate::flux_lora::FluxLoraStack,
 }
 
 impl FluxPromptToImagePlan {
@@ -404,7 +409,20 @@ impl FluxPromptToImagePlan {
             generation,
             latent_shape,
             transformer,
+            loras: crate::flux_lora::FluxLoraStack::default(),
         })
+    }
+
+    /// [`Self::from_files`] with LoRA adapters attached.
+    pub fn from_files_with_loras(
+        bundle: FluxResolvedBundle,
+        prompts: FluxPrompts,
+        generation: FluxGenerationConfig,
+        loras: crate::flux_lora::FluxLoraStack,
+    ) -> Result<Self> {
+        let mut plan = Self::from_files(bundle, prompts, generation)?;
+        plan.loras = loras;
+        Ok(plan)
     }
 
     pub fn from_workflow(workflow: &FluxWorkflow, roots: &ComfyModelRoots) -> Result<Self> {

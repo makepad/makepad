@@ -109,6 +109,13 @@ pub struct GenerateParams {
     /// (`control_image::CANNY_DEFAULT_HIGH`, 200).
     pub canny_high: Option<f32>,
 
+    // Image domain (flux backend).
+    /// LoRA adapters as (name, strength). Resolved against
+    /// `<cache-dir>/loras/` by the backend; empty for every request that
+    /// asked for none. Backends other than `flux` refuse a non-empty list
+    /// (see [`validate_loras_for_backend`]).
+    pub loras: Vec<(String, f32)>,
+
     // Peer-assisted model distribution (see crate::peer / crate::peer_fetch).
     /// Coordinator-selected source-box base URLs, tried before Hugging Face.
     pub peer_sources: Vec<String>,
@@ -347,6 +354,7 @@ impl GenerateParams {
                 .canny_high
                 .filter(|v| v.is_finite())
                 .map(|v| v.clamp(0.0, 2000.0) as f32),
+            loras: parse_loras(request.loras.as_deref())?,
 
             peer_sources: {
                 let sources = request.peer_sources.clone().unwrap_or_default();
@@ -724,6 +732,145 @@ pub struct LiveFrameIn<'a> {
 pub struct LiveFrameOut {
     pub image: RgbImage,
     pub model_ms: f64,
+}
+
+/// Maximum adapters one job may stack. Each one is merged into the resident
+/// weights at load, so this bounds both the merge cost and how many
+/// distinct patched checkpoints a box can be asked to build.
+pub const MAX_LORAS: usize = 8;
+
+/// Wire `loras` -> `(name, strength)`. Names are file names, so they are
+/// screened for path traversal HERE rather than deep in the backend.
+fn parse_loras(
+    requested: Option<&[crate::protocol::LoraRefJson]>,
+) -> Result<Vec<(String, f32)>, AssetAiError> {
+    let Some(requested) = requested else {
+        return Ok(Vec::new());
+    };
+    if requested.len() > MAX_LORAS {
+        return Err(AssetAiError::Params(format!(
+            "loras: at most {MAX_LORAS} adapters, got {}",
+            requested.len()
+        )));
+    }
+    let mut out: Vec<(String, f32)> = Vec::with_capacity(requested.len());
+    for entry in requested {
+        let name = entry.name.trim();
+        if name.is_empty() || name.len() > 128 {
+            return Err(AssetAiError::Params(
+                "loras: name must be 1..=128 chars".to_string(),
+            ));
+        }
+        // The name indexes one flat directory; anything that could escape it
+        // is refused rather than normalized.
+        if name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || name.starts_with('.')
+        {
+            return Err(AssetAiError::Params(format!(
+                "loras: {name:?} must be a plain file name in the loras dir"
+            )));
+        }
+        if out.iter().any(|(prev, _)| prev == name) {
+            return Err(AssetAiError::Params(format!(
+                "loras: duplicate adapter {name:?}"
+            )));
+        }
+        let strength = entry.strength.unwrap_or(1.0);
+        if !strength.is_finite() {
+            return Err(AssetAiError::Params(format!(
+                "loras: {name:?} strength must be finite"
+            )));
+        }
+        out.push((name.to_string(), strength.clamp(-4.0, 4.0) as f32));
+    }
+    Ok(out)
+}
+
+/// The operator's LoRA drop-box under the service cache dir. Created at
+/// startup so there is always somewhere to copy adapters into.
+pub fn lora_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("loras")
+}
+
+/// `(file stem, byte length)` of every `*.safetensors` in `dir`, sorted by
+/// name. A missing directory lists as empty (no adapter dropped in yet),
+/// never an error.
+pub fn list_loras(dir: &Path) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("safetensors") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        out.push((stem.to_string(), bytes));
+    }
+    out.sort();
+    out
+}
+
+/// Resolves requested adapter names against `<dir>/<name>.safetensors`
+/// (a `.safetensors` suffix in the name is accepted too). A miss fails the
+/// job with the sorted list of what IS there, so a typo is fixable in one
+/// round trip instead of by guessing.
+pub fn resolve_loras(
+    dir: &Path,
+    requested: &[(String, f32)],
+) -> Result<Vec<(String, PathBuf, f32)>, AssetAiError> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(requested.len());
+    for (name, strength) in requested {
+        let file = if name.ends_with(".safetensors") {
+            name.clone()
+        } else {
+            format!("{name}.safetensors")
+        };
+        let path = dir.join(&file);
+        if !path.is_file() {
+            let available = list_loras(dir)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            return Err(AssetAiError::Params(format!(
+                "lora {name:?} is not in {} — available: [{}]",
+                dir.display(),
+                available.join(", ")
+            )));
+        }
+        out.push((name.clone(), path, *strength));
+    }
+    Ok(out)
+}
+
+/// Fails a request that asked for LoRAs on a backend that cannot apply
+/// them. Silently ignoring the field would render an un-adapted image and
+/// look like a broken adapter.
+pub fn validate_loras_for_backend(
+    backend: &str,
+    loras: &[(String, f32)],
+) -> Result<(), AssetAiError> {
+    if loras.is_empty() || backend == "flux" {
+        return Ok(());
+    }
+    Err(AssetAiError::Params(format!(
+        "loras: the {backend:?} backend does not support LoRA adapters (only \"flux\" does); \
+         requested: [{}]",
+        loras
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// One generated output. `content_type` drives the `/artifact` response;
@@ -1470,6 +1617,166 @@ mod tests {
         ] {
             assert!(backend_compiled(name), "{name}");
             assert!(create_backend(&spec(name, true, None)).is_ok(), "{name}");
+        }
+    }
+
+    // -- LoRA plumbing ----------------------------------------------------
+
+    use super::{list_loras, lora_dir, resolve_loras, validate_loras_for_backend, GenerateParams};
+    use crate::protocol::{GenerateRequestJson, LoraRefJson};
+    use makepad_micro_serde::{DeJson, SerJson};
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "makepad-asset-ai-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn request_with_loras(loras: Option<Vec<LoraRefJson>>) -> GenerateRequestJson {
+        let mut request =
+            GenerateRequestJson::deserialize_json(r#"{"model":"flux1-dev"}"#).unwrap();
+        request.loras = loras;
+        request
+    }
+
+    #[test]
+    fn lists_and_resolves_the_lora_drop_box() {
+        let cache = scratch_dir("loras");
+        let dir = lora_dir(&cache);
+        // Nothing dropped in yet: lists empty, never errors.
+        assert!(list_loras(&dir).is_empty());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("zebra.safetensors"), b"xx").unwrap();
+        std::fs::write(dir.join("apple.safetensors"), b"xxxx").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
+        assert_eq!(
+            list_loras(&dir),
+            vec![("apple".to_string(), 4u64), ("zebra".to_string(), 2)]
+        );
+
+        // Both spellings resolve; strengths ride through in request order.
+        let resolved = resolve_loras(
+            &dir,
+            &[
+                ("apple".to_string(), 0.5),
+                ("zebra.safetensors".to_string(), 1.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].1, dir.join("apple.safetensors"));
+        assert_eq!(resolved[0].2, 0.5);
+        assert_eq!(resolved[1].1, dir.join("zebra.safetensors"));
+
+        // A typo names what IS available so it is fixable in one round trip.
+        let error = resolve_loras(&dir, &[("aple".to_string(), 1.0)]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("apple"), "{message}");
+        assert!(message.contains("zebra"), "{message}");
+
+        // Empty request never touches the filesystem.
+        assert!(resolve_loras(&cache.join("nope"), &[]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn generate_request_round_trips_loras_and_validates_them() {
+        let json = r#"{"model":"flux1-dev","prompt":"a fox",
+            "loras":[{"name":"frosting","strength":0.8},{"name":"detail.safetensors"}]}"#;
+        let request = GenerateRequestJson::deserialize_json(json).unwrap();
+        let params = GenerateParams::from_request(&request).unwrap();
+        assert_eq!(
+            params.loras,
+            vec![
+                ("frosting".to_string(), 0.8f32),
+                ("detail.safetensors".to_string(), 1.0),
+            ]
+        );
+
+        // Round-trips through our own serializer unchanged.
+        let reparsed =
+            GenerateRequestJson::deserialize_json(&request.serialize_json()).unwrap();
+        assert_eq!(
+            GenerateParams::from_request(&reparsed).unwrap().loras,
+            params.loras
+        );
+
+        // Absent field = no adapters (and every older client stays valid).
+        let plain = GenerateRequestJson::deserialize_json(r#"{"model":"flux1-dev"}"#).unwrap();
+        assert!(GenerateParams::from_request(&plain).unwrap().loras.is_empty());
+    }
+
+    #[test]
+    fn lora_requests_are_screened_before_they_reach_a_backend() {
+        let bad_names = ["", "../secrets", "sub/dir", "a\\b", ".hidden"];
+        for name in bad_names {
+            let request = request_with_loras(Some(vec![LoraRefJson {
+                name: name.to_string(),
+                strength: None,
+            }]));
+            assert!(
+                GenerateParams::from_request(&request).is_err(),
+                "name {name:?} must be refused"
+            );
+        }
+
+        // Duplicates, over-long lists and non-finite strengths refuse.
+        let duplicate = request_with_loras(Some(vec![
+            LoraRefJson { name: "a".into(), strength: None },
+            LoraRefJson { name: "a".into(), strength: Some(0.5) },
+        ]));
+        assert!(GenerateParams::from_request(&duplicate).is_err());
+
+        let too_many = request_with_loras(Some(
+            (0..super::MAX_LORAS + 1)
+                .map(|i| LoraRefJson {
+                    name: format!("a{i}"),
+                    strength: None,
+                })
+                .collect(),
+        ));
+        assert!(GenerateParams::from_request(&too_many).is_err());
+
+        let nan = request_with_loras(Some(vec![LoraRefJson {
+            name: "a".into(),
+            strength: Some(f64::NAN),
+        }]));
+        assert!(GenerateParams::from_request(&nan).is_err());
+
+        // Strength is clamped, not rejected, inside a sane band.
+        let hot = request_with_loras(Some(vec![LoraRefJson {
+            name: "a".into(),
+            strength: Some(99.0),
+        }]));
+        assert_eq!(
+            GenerateParams::from_request(&hot).unwrap().loras,
+            vec![("a".to_string(), 4.0f32)]
+        );
+    }
+
+    #[test]
+    fn only_the_flux_backend_accepts_loras() {
+        let loras = vec![("frosting".to_string(), 1.0f32)];
+        assert!(validate_loras_for_backend("flux", &loras).is_ok());
+        // No adapters requested: every backend is fine.
+        for backend in ["flux", "flux2", "trellis", "h3", "testpattern"] {
+            assert!(validate_loras_for_backend(backend, &[]).is_ok(), "{backend}");
+        }
+        // Adapters requested on a backend that cannot apply them: refused,
+        // and the message names both the backend and the adapters.
+        for backend in ["flux2", "trellis", "h3", "testpattern", "llm"] {
+            let error = validate_loras_for_backend(backend, &loras)
+                .expect_err("{backend} must refuse loras");
+            let message = error.to_string();
+            assert!(message.contains(backend), "{message}");
+            assert!(message.contains("frosting"), "{message}");
         }
     }
 }

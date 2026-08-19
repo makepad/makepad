@@ -3,8 +3,8 @@
 //! plus the single worker thread that executes jobs (one GPU = one job).
 
 use crate::backend::{
-    backend_live_supported, create_backend, model_availability, BackendCtx, ContentBackend,
-    GenerateParams, LiveParams,
+    backend_live_supported, create_backend, list_loras, lora_dir, model_availability,
+    validate_loras_for_backend, BackendCtx, ContentBackend, GenerateParams, LiveParams,
 };
 use crate::download::{DownloadProgress, Downloader};
 use crate::error::AssetAiError;
@@ -210,6 +210,12 @@ pub struct ServiceShared {
 pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
     fs::create_dir_all(&config.cache_dir)
         .map_err(|e| AssetAiError::Io(format!("cache dir {}: {e}", config.cache_dir.display())))?;
+    // The LoRA drop-box: operators copy adapter safetensors in here and
+    // `GET /loras` lists them. Created up front so the directory exists to
+    // copy into on a fresh box.
+    let loras_dir = lora_dir(&config.cache_dir);
+    fs::create_dir_all(&loras_dir)
+        .map_err(|e| AssetAiError::Io(format!("loras dir {}: {e}", loras_dir.display())))?;
     // Hard deployment invariant: exactly one service process per Windows
     // machine, independent of cache dir, plus an advisory cache-dir lock on
     // every platform. Acquire both before binding or mutating cache state.
@@ -460,6 +466,9 @@ fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
     if path == "/models" {
         return ok_json(models_json(shared).serialize_json());
     }
+    if path == "/loras" {
+        return ok_json(loras_json(&shared.cache_dir).serialize_json());
+    }
     if path == "/v1/model_inventory" {
         return ok_json(model_inventory_json(shared).serialize_json());
     }
@@ -571,6 +580,11 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Ok(params) => params,
         Err(e) => return error_json(400, e.to_string()),
     };
+    // Only the flux backend can apply LoRAs — refuse rather than render an
+    // un-adapted image that looks like a broken adapter.
+    if let Err(e) = validate_loras_for_backend(&spec.backend, &params.loras) {
+        return error_json(400, e.to_string());
+    }
     match shared.jobs.submit(JobParams::Generate(params), policy) {
         Ok(job_id) => ok_json(
             GenerateResponseJson {
@@ -701,6 +715,17 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         vram_reserve_mb: Some(shared.residency.reserve_mb),
         queue_limit: Some(queue_limit),
         fleet: Some(shared.fleet.clone()),
+    }
+}
+
+/// GET /loras — the adapters this box has, for the `loras` field of
+/// POST /generate. Names are file stems; sorted.
+fn loras_json(cache_dir: &Path) -> LorasJson {
+    LorasJson {
+        loras: list_loras(&lora_dir(cache_dir))
+            .into_iter()
+            .map(|(name, bytes)| LoraInfoJson { name, bytes })
+            .collect(),
     }
 }
 

@@ -621,6 +621,7 @@ mod tests {
             motion_mode: None,
             canny_low: None,
             canny_high: None,
+            loras: Vec::new(),
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
         }

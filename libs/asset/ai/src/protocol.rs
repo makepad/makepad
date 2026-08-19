@@ -97,6 +97,24 @@ pub struct ModelsJson {
 }
 
 // ---------------------------------------------------------------------------
+// GET /loras
+// ---------------------------------------------------------------------------
+
+/// One adapter file the box operator dropped into `<cache-dir>/loras/`.
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct LoraInfoJson {
+    /// File stem — exactly what `GenerateRequestJson::loras[].name` takes.
+    pub name: String,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct LorasJson {
+    /// Sorted by name.
+    pub loras: Vec<LoraInfoJson>,
+}
+
+// ---------------------------------------------------------------------------
 // POST /generate
 // ---------------------------------------------------------------------------
 
@@ -337,6 +355,13 @@ pub struct GenerateRequestJson {
     /// Canny high threshold. `None` = the backend default (200).
     pub canny_high: Option<f64>,
 
+    // -- image domain (flux backend) --
+    /// LoRA adapters to apply, by file name under `<cache-dir>/loras/`
+    /// (`GET /loras` lists what this box has). Honored by the `flux`
+    /// backend only; any other backend REFUSES a non-empty list rather
+    /// than silently ignoring it. Order does not matter — the deltas sum.
+    pub loras: Option<Vec<LoraRefJson>>,
+
     // -- peer-assisted model distribution (all domains; used by pull jobs
     //    and by any generate that must first download model files) --
     /// Coordinator-selected source boxes to try BEFORE Hugging Face: service
@@ -350,6 +375,17 @@ pub struct GenerateRequestJson {
     /// operator-configured `MAKEPAD_AI_PEER_SOURCES` when the fleet shares a
     /// transfer secret.
     pub peer_tickets: Option<Vec<String>>,
+}
+
+/// One requested LoRA adapter (see `GenerateRequestJson::loras`).
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct LoraRefJson {
+    /// File stem or file name under `<cache-dir>/loras/`, e.g. "frosting"
+    /// or "frosting.safetensors".
+    pub name: String,
+    /// Multiplier on the adapter's own `alpha/rank` scale. Default 1.0;
+    /// 0.0 is exactly the pristine model.
+    pub strength: Option<f64>,
 }
 
 /// One named binary input (see `GenerateRequestJson::inputs`).

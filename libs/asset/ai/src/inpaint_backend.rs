@@ -670,6 +670,7 @@ mod tests {
             input_content_type: "image/png".to_string(),
             inputs: Vec::new(),
             strength: None,
+            loras: Vec::new(),
             canny_low: None,
             canny_high: None,
             frames: None,
