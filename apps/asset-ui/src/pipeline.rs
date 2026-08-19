@@ -39,6 +39,10 @@ pub const IMAGE_SIZES: &[(u32, u32)] = &[
 /// Image step presets; the dropdown's extra first entry means "model
 /// default" (schnell 4, dev-class ~20).
 pub const IMAGE_STEPS: &[u32] = &[4, 8, 12, 20, 28, 50];
+/// img2img strength choices for edit chains: 1.0 = a full instruction edit
+/// (reference tokens only); lower = the sampler starts from the VAE-encoded
+/// input at sigma index floor((1-strength)*steps), keeping more of it.
+pub const EDIT_STRENGTHS: &[f32] = &[1.0, 0.85, 0.7, 0.55, 0.4, 0.25];
 /// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
 /// larger atlases trade bake time and device memory for sharper materials.
 pub const MESH_TEXTURE_SIZES: &[u32] = &[1024, 2048, 4096];
@@ -108,6 +112,9 @@ pub struct GenParams {
     /// set from the backend's own prompts; otherwise ONE prompted take
     /// (`motion_mode: "prompt"`) — "make them dance".
     pub motion_prompt: String,
+    /// Edit-stage img2img strength; 1.0 = full edit (no init), see
+    /// [`EDIT_STRENGTHS`].
+    pub edit_strength: f32,
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
@@ -130,6 +137,7 @@ impl Default for GenParams {
             mesh_faces: None,
             mesh_trellis_texture: false,
             motion_prompt: String::new(),
+            edit_strength: 1.0,
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
@@ -1318,6 +1326,9 @@ impl Pipeline {
             // default (klein: 4 distilled).
             "edit" => {
                 request.prompt = Some(prompt);
+                if self.gen.edit_strength < 1.0 {
+                    request.strength = Some(self.gen.edit_strength);
+                }
             }
             "speech" => {
                 request.text = Some(prompt);
@@ -4687,6 +4698,20 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(decoded_input(&edit), b"picture");
         assert_eq!(edit.width, None, "output size follows the reference");
         assert!(edit.inputs.is_none(), "no extra references unless pinned");
+        assert!(edit.strength.is_none(), "1.0 = full edit, nothing on the wire");
+        {
+            let mut keep = Pipeline::new(
+                "x",
+                &["edit"],
+                &[("edit", EDIT_MODEL)],
+                vec![],
+                None,
+                None,
+                GenParams { edit_strength: 0.55, ..GenParams::default() },
+            );
+            keep.set_seed_input("image/png".to_string(), b"picture".to_vec()).unwrap();
+            assert_eq!(keep.request_for_stage(0).unwrap().strength, Some(0.55));
+        }
 
         // Extra references ride as reference_1..N named PNG inputs.
         pipeline

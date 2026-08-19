@@ -79,7 +79,7 @@ use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
     consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
-    IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
+    EDIT_STRENGTHS, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
@@ -1424,6 +1424,12 @@ script_mod! {
                                     text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
+                        }
+                        // Edit chains: how much of the input survives.
+                        edit_strength_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Keep input" }
+                            edit_strength_drop := FieldDrop{}
                         }
                         music_params_row := DropField{
                             visible: false
@@ -3049,6 +3055,19 @@ impl App {
                 .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
                 .collect(),
         );
+        self.ui.drop_down2(cx, ids!(edit_strength_drop)).set_labels(
+            cx,
+            EDIT_STRENGTHS
+                .iter()
+                .map(|s| {
+                    if *s >= 1.0 {
+                        "full edit (strength 1.0)".to_string()
+                    } else {
+                        format!("strength {s:.2} (keeps {:.0}%)", (1.0 - s) * 100.0)
+                    }
+                })
+                .collect(),
+        );
         self.ui
             .drop_down2(cx, ids!(texture_size_drop))
             .set_labels(
@@ -3808,6 +3827,9 @@ impl App {
             .widget(cx, ids!(image_steps_row))
             .set_visible(cx, active("image"));
         self.ui
+            .widget(cx, ids!(edit_strength_row))
+            .set_visible(cx, active("edit"));
+        self.ui
             .widget(cx, ids!(mesh_params_row))
             .set_visible(cx, active("mesh") || active("paint"));
         self.ui
@@ -3877,6 +3899,11 @@ impl App {
             mesh_faces,
             mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
             motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
+            edit_strength: EDIT_STRENGTHS[self
+                .ui
+                .drop_down2(cx, ids!(edit_strength_drop))
+                .selected_item()
+                .min(EDIT_STRENGTHS.len() - 1)],
             video_size: vid_size,
             video_frames,
             video_steps,
@@ -4011,6 +4038,10 @@ impl App {
         self.ui
             .check_box(cx, ids!(video_audio_toggle))
             .set_active(cx, saved.video_audio.unwrap_or(true), Animate::No);
+        self.ui.drop_down2(cx, ids!(edit_strength_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_edit_strength(saved.edit_strength.unwrap_or(1.0)),
+        );
         self.ui.drop_down2(cx, ids!(music_len_drop)).set_selected_item(
             cx,
             fast_presets::nearest_music_len(saved.music_seconds),
@@ -4311,6 +4342,11 @@ impl App {
                 mesh_faces,
                 mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
                 motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
+                edit_strength: EDIT_STRENGTHS[self
+                    .ui
+                    .drop_down2(cx, ids!(edit_strength_drop))
+                    .selected_item()
+                    .min(EDIT_STRENGTHS.len() - 1)],
                 video_size: vid_size,
                 video_frames,
                 video_steps,
