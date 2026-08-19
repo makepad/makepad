@@ -7,6 +7,11 @@
 //!   asset publish ........................... `asset_publish`
 //!   asset AND game quarantine ............... `asset_quarantine` (the
 //!       moderation capability; the core defines no game-specific one)
+//!   asset/revision RETIREMENT (deletion) .... `asset_quarantine` on the ns
+//!       (deletion is the strongest pull there is, so it rides the pull
+//!       capability — publishing rights alone must not delete history)
+//!   blob garbage collection ................. bootstrap root admin only
+//!       (whole-store operation; no namespace can scope it)
 //!   alias + game-alias writes ............... `alias_write`
 //!   game register/stage ..................... `game_register`
 //!   game publish ............................ `game_publish`
@@ -99,6 +104,14 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         ["v1", "assets", a, "revisions", r, "quarantine"] if m == Method::Post => {
             asset_lifecycle(head, rc, ast_of(a)?, arev_of(r)?, false)
         }
+        // Deletion. `retire` is quarantine plus the intent to reclaim the
+        // bytes; DELETE on the asset is the same operation under the verb a
+        // browser-shaped client expects.
+        ["v1", "assets", a, "retire"] if m == Method::Post => asset_retire(head, rc, ast_of(a)?),
+        ["v1", "assets", a] if m == Method::Delete => asset_retire(head, rc, ast_of(a)?),
+        ["v1", "assets", a, "revisions", r, "retire"] if m == Method::Post => {
+            revision_retire(head, rc, ast_of(a)?, arev_of(r)?)
+        }
         ["v1", "assets", a, "annotation"] => match m {
             Method::Put => annotation_put(conn, head, rc, ast_of(a)?),
             Method::Get | Method::Head => annotation_get(head, rc, ast_of(a)?),
@@ -153,6 +166,11 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         ["v1", "games", g, "revisions", r, "refs"] if is_read(m) => {
             game_refs(head, rc, gam_of(g)?, grev_of(r)?)
         }
+
+        // ---- blob garbage collection ---------------------------------------
+        ["v1", "gc"] if m == Method::Post => gc_run(conn, head, rc),
+        ["v1", "gc"] if is_read(m) => gc_get(head, rc),
+        ["v1", "gc", "cancel"] if m == Method::Post => gc_cancel(head, rc),
 
         // ---- catalog event feed --------------------------------------------
         ["v1", "events"] => {
@@ -603,15 +621,19 @@ fn assets_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
 fn asset_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let now = now_ms();
-    let (ns, revs) = call_state(&rc.state, move |ctx| {
+    let (ns, revs, retired_ms) = call_state(&rc.state, move |ctx| {
         ctx.core.auth().authenticate(secret.as_bytes(), now)?;
         let ns = ctx
             .core
             .catalog()
             .asset_namespace(&ast)?
             .ok_or(ServerError::NotFound { what: "asset" })?;
-        let revs = ctx.asset_rev_list(ast.as_bytes(), 512)?;
-        Ok((ns, revs))
+        // Lifecycle comes from the CORE, not the transport mirror: the GC
+        // retention rule retires revisions without passing through a route,
+        // so a mirrored state could be stale here.
+        let revs = ctx.core.catalog().asset_candidates(&ast, 512)?;
+        let retired_ms = ctx.core.catalog().asset_retired_ms(&ast)?;
+        Ok((ns, revs, retired_ms))
     })?;
     let candidates: Vec<Value> = revs
         .iter()
@@ -620,12 +642,21 @@ fn asset_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
                 Some(t) => Value::Int(t as i64),
                 None => Value::Null,
             };
+            // A retired revision reports `retired`, not the `quarantined`
+            // its lifecycle row carries: the state machine is shared, the
+            // meaning to a client is not (retired bytes are collectable).
+            let state = if r.retired_ms.is_some() || retired_ms.is_some() {
+                "retired"
+            } else {
+                r.state.as_str()
+            };
             obj(vec![
-                ("revision", s(AssetRevisionId::from_bytes(r.revision).to_string())),
-                ("state", s(r.state.clone())),
+                ("revision", s(r.revision.to_string())),
+                ("state", s(state)),
                 ("staged_ms", Value::Int(r.staged_ms as i64)),
                 ("published_ms", opt(r.published_ms)),
                 ("quarantined_ms", opt(r.quarantined_ms)),
+                ("retired_ms", opt(r.retired_ms.or(retired_ms))),
             ])
         })
         .collect();
@@ -634,6 +665,11 @@ fn asset_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
         &obj(vec![
             ("asset_id", s(ast.to_string())),
             ("namespace", s(ns)),
+            ("retired", Value::Bool(retired_ms.is_some())),
+            ("retired_ms", match retired_ms {
+                Some(t) => Value::Int(t as i64),
+                None => Value::Null,
+            }),
             ("candidates", Value::Arr(candidates)),
         ]),
     )))
@@ -664,7 +700,6 @@ fn asset_stage(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId) ->
             return Err(ServerError::Conflict { what: "manifest asset_id" });
         }
         let rev = ctx.core.catalog().stage_asset_revision(&bytes, now)?;
-        ctx.asset_rev_insert(ast.as_bytes(), rev.as_bytes(), now)?;
         Ok(rev)
     })?;
     Ok(Outcome::Resp(Resp::json(
@@ -721,7 +756,6 @@ fn asset_lifecycle(
             require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
             ctx.core.catalog().quarantine_asset(&ast, &rev, now)?;
         }
-        ctx.asset_rev_mark(ast.as_bytes(), rev.as_bytes(), publish, now)?;
         // Emitted only after the core call above committed, still on the
         // state thread, so journal order equals commit order.
         let kind = if publish {
@@ -743,6 +777,217 @@ fn asset_lifecycle(
             ("revision", s(rev.to_string())),
             ("state", s(if publish { "published" } else { "quarantined" })),
         ]),
+    )))
+}
+
+/// Delete an asset from the store: every revision retired, every alias head
+/// dropped, its whole search footprint removed, and its bytes handed to blob
+/// GC. Idempotent — retiring an already retired asset answers 200 with
+/// `already_retired: true`.
+///
+/// Capability: `asset_quarantine` on the asset's namespace, the existing
+/// moderation capability for pulling content (retirement is the strongest
+/// pull there is). Publishing rights alone must not delete history.
+fn asset_retire(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let report = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let ns = ctx
+            .core
+            .catalog()
+            .asset_namespace(&ast)?
+            .ok_or(ServerError::NotFound { what: "asset" })?;
+        require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
+        // The annotation carries the content kind subscribers filter on, and
+        // retirement deletes it: read it BEFORE the mutation.
+        let content_kind = annotation_kind(ctx, &ast);
+        let report = ctx.core.catalog().retire_asset(&ast, now)?;
+        ctx.asset_mark_retired(ast.as_bytes(), now)?;
+        if !report.already_retired {
+            hub.publish(
+                EventBody::asset(events::KIND_ASSET_RETIRED, &ns, ast.to_string(), now)
+                    .with_content_kind(content_kind),
+            );
+        }
+        Ok(report)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("asset_id", s(ast.to_string())),
+            ("state", s("retired")),
+            ("already_retired", Value::Bool(report.already_retired)),
+            ("revisions_retired", Value::Int(report.revisions_retired as i64)),
+            ("aliases_dropped", Value::Int(report.aliases_dropped as i64)),
+            ("annotation_cleared", Value::Bool(report.annotation_cleared)),
+        ]),
+    )))
+}
+
+/// Delete ONE revision (a superseded one, typically). The asset itself
+/// stays live; alias heads pointing at this revision drop exactly as
+/// quarantine drops them.
+fn revision_retire(
+    head: &Head,
+    rc: &RouteCtx,
+    ast: AssetId,
+    rev: AssetRevisionId,
+) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let hub = rc.events.clone();
+    let changed = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let ns = ctx
+            .core
+            .catalog()
+            .asset_namespace(&ast)?
+            .ok_or(ServerError::NotFound { what: "asset" })?;
+        require_cap(ctx, &p, Capability::AssetQuarantine, &ns)?;
+        let content_kind = annotation_kind(ctx, &ast);
+        let changed = ctx.core.catalog().retire_revision(&ast, &rev, now)?;
+        if changed {
+            hub.publish(
+                EventBody::asset(events::KIND_REVISION_RETIRED, &ns, ast.to_string(), now)
+                    .with_revision(rev.to_string())
+                    .with_content_kind(content_kind),
+            );
+        }
+        Ok(changed)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![
+            ("asset_id", s(ast.to_string())),
+            ("revision", s(rev.to_string())),
+            ("state", s("retired")),
+            ("already_retired", Value::Bool(!changed)),
+        ]),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// blob garbage collection
+// ---------------------------------------------------------------------------
+
+fn gc_status_value(status: &crate::GcStatus) -> Value {
+    obj(vec![
+        ("run_id", Value::Int(status.run_id as i64)),
+        ("phase", s(status.phase.as_str())),
+        ("done", Value::Bool(status.finished())),
+        ("dry_run", Value::Bool(status.dry_run)),
+        ("started_ms", Value::Int(status.started_ms as i64)),
+        ("updated_ms", Value::Int(status.updated_ms as i64)),
+        ("horizon_ms", Value::Int(status.horizon_ms as i64)),
+        ("retain_keep", match status.retain_keep {
+            Some(k) => Value::Int(k as i64),
+            None => Value::Null,
+        }),
+        ("retired_revisions", Value::Int(status.retired_revisions as i64)),
+        ("scanned_revisions", Value::Int(status.scanned_revisions as i64)),
+        ("marked_blobs", Value::Int(status.marked_blobs as i64)),
+        ("examined_blobs", Value::Int(status.examined_blobs as i64)),
+        ("unreferenced_blobs", Value::Int(status.unreferenced_blobs as i64)),
+        ("unreferenced_bytes", Value::Int(status.unreferenced_bytes as i64)),
+        ("deleted_blobs", Value::Int(status.deleted_blobs as i64)),
+        ("deleted_bytes", Value::Int(status.deleted_bytes as i64)),
+    ])
+}
+
+/// Start (or resume) a garbage collection run and do a BOUNDED amount of its
+/// work before answering. A whole-store sweep is never performed inside one
+/// request: the response carries the durable progress, `done` says whether
+/// the run finished, and the caller polls this route (or lets the janitor
+/// finish it). Whole-store admin operation: bootstrap admin only.
+fn gc_run(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let dry_run = match body.get("dry_run") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(Fail::Http(400, "malformed dry_run")),
+    };
+    let grace_ms = body_u64(&body, "grace_ms").unwrap_or(rc.cfg.gc_grace_ms);
+    let retain_keep = match body.get("retain_per_asset") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let n = v.as_u64().ok_or(Fail::Http(400, "malformed retain_per_asset"))?;
+            if n == 0 || n > 10_000 {
+                return Err(Fail::Http(400, "retain_per_asset out of range"));
+            }
+            Some(n as u32)
+        }
+    };
+    let max_steps = match body_u64(&body, "max_steps") {
+        None => rc.cfg.gc_max_steps_per_request,
+        Some(n) => {
+            if n == 0 || n > rc.cfg.gc_max_steps_per_request as u64 {
+                return Err(Fail::Http(400, "max_steps out of range"));
+            }
+            n as u32
+        }
+    };
+    let cfg = crate::GcConfig {
+        dry_run,
+        grace_ms,
+        mark_batch: rc.cfg.gc_mark_batch,
+        sweep_batch: rc.cfg.gc_sweep_batch,
+        retain_keep,
+        retain_batch: rc.cfg.gc_retain_batch,
+    };
+    let now = now_ms();
+    let status = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        // An active run is RESUMED rather than restarted: two runs would
+        // each hold half the truth about what is referenced. Resuming with
+        // different policy would silently answer a different question than
+        // the caller asked (a "collect" advancing someone's dry run), so
+        // that refuses instead — cancel first.
+        match ctx.core.gc_status()? {
+            Some(existing) if !existing.finished() => {
+                if existing.dry_run != cfg.dry_run || existing.retain_keep != cfg.retain_keep {
+                    return Err(ServerError::Conflict { what: "gc run already active" });
+                }
+            }
+            _ => {
+                ctx.core.gc_begin(cfg, now)?;
+            }
+        }
+        ctx.core
+            .gc_advance(max_steps, now)?
+            .ok_or(ServerError::NotFound { what: "gc run" })
+    })?;
+    Ok(Outcome::Resp(Resp::json(200, &gc_status_value(&status))))
+}
+
+fn gc_get(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let status = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        ctx.core.gc_status()
+    })?;
+    Ok(Outcome::Resp(match status {
+        Some(st) => Resp::json(200, &gc_status_value(&st)),
+        None => Resp::json(200, &obj(vec![("run_id", Value::Null), ("done", Value::Bool(true))])),
+    }))
+}
+
+fn gc_cancel(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let now = now_ms();
+    let stopped = call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        require_root(ctx, &p)?;
+        ctx.core.gc_cancel(now)
+    })?;
+    Ok(Outcome::Resp(Resp::json(
+        200,
+        &obj(vec![("cancelled", Value::Bool(stopped))]),
     )))
 }
 
@@ -1266,13 +1511,21 @@ fn annotation_kind(ctx: &StateCtx, ast: &AssetId) -> Option<&'static str> {
         .map(kind_name)
 }
 
-fn events_resp(events: &[CatalogEvent], cursor: &EventCursor, gap: bool) -> Resp {
+fn events_resp(
+    events: &[CatalogEvent],
+    cursor: &EventCursor,
+    gap: bool,
+    vocabulary: u32,
+) -> Resp {
     let arr = events
         .iter()
         .map(|e| {
             let mut pairs = vec![
                 ("seq", Value::Int(e.seq as i64)),
-                ("kind", s(e.kind)),
+                // Kinds added after v1 are rendered in the vocabulary the
+                // subscriber asked for, so an older client never sees a
+                // kind it would refuse.
+                ("kind", s(events::downgrade_kind(e.kind, vocabulary))),
                 ("ns", s(e.namespace.clone())),
             ];
             if let Some(v) = &e.asset_id {
@@ -1345,10 +1598,25 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
         .map(parse_kind)
         .transpose()?
         .map(kind_name);
+    // Event vocabulary the subscriber speaks. Absent = 1 (the kinds that
+    // shipped before retirement existed).
+    let vocabulary = match head.query_get("ev") {
+        None => 1,
+        Some(t) => {
+            if t.len() > 2 || !t.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Fail::Http(400, "malformed event vocabulary"));
+            }
+            let v: u32 = t.parse().map_err(|_| Fail::Http(400, "malformed event vocabulary"))?;
+            if v == 0 || v > events::EVENT_VOCABULARY {
+                return Err(Fail::Http(400, "unsupported event vocabulary"));
+            }
+            v
+        }
+    };
 
     let Some(cursor_text) = head.query_get("cursor") else {
         let tail = rc.events.tail_cursor();
-        return Ok(Outcome::Resp(events_resp(&[], &tail, false)));
+        return Ok(Outcome::Resp(events_resp(&[], &tail, false, vocabulary)));
     };
     let mut cursor =
         EventCursor::parse(cursor_text).ok_or(Fail::Http(400, "malformed cursor"))?;
@@ -1357,7 +1625,12 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     loop {
         let poll = rc.events.poll_after(cursor, kind, limit);
         if poll.gap || !poll.events.is_empty() {
-            return Ok(Outcome::Resp(events_resp(&poll.events, &poll.cursor, poll.gap)));
+            return Ok(Outcome::Resp(events_resp(
+                &poll.events,
+                &poll.cursor,
+                poll.gap,
+                vocabulary,
+            )));
         }
         // Empty scan still advances past filtered-out events; wait (and
         // later polls) resume from the advanced cursor.
@@ -1366,7 +1639,7 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
             || std::time::Instant::now() >= deadline
             || !rc.events.wait_beyond(cursor.seq, deadline)
         {
-            return Ok(Outcome::Resp(events_resp(&[], &cursor, false)));
+            return Ok(Outcome::Resp(events_resp(&[], &cursor, false, vocabulary)));
         }
     }
 }
@@ -1381,6 +1654,8 @@ struct SearchParams {
     kind: Option<AssetKind>,
     category: Option<String>,
     tag: Option<String>,
+    /// Negative tag filter, validated by the core exactly like `tag`.
+    exclude_tag: Option<String>,
     creator: Option<String>,
     generator: Option<String>,
     backend: Option<String>,
@@ -1404,7 +1679,8 @@ fn parse_flag(t: &str) -> RouteResult<bool> {
 }
 
 fn parse_cursor(t: &str) -> RouteResult<Vec<u8>> {
-    from_hex_bounded(t, 128).ok_or(Fail::Http(400, "malformed cursor"))
+    from_hex_bounded(t, crate::search::MAX_SEARCH_CURSOR_BYTES)
+        .ok_or(Fail::Http(400, "malformed cursor"))
 }
 
 fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchParams> {
@@ -1424,6 +1700,7 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
         kind: head.query_get("kind").map(parse_kind).transpose()?,
         category: q("category"),
         tag: q("tag"),
+        exclude_tag: q("exclude_tag"),
         creator: q("creator"),
         generator: q("generator"),
         backend: q("backend"),
@@ -1464,6 +1741,7 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
         kind: field("kind")?.as_deref().map(parse_kind).transpose()?,
         category: field("category")?,
         tag: field("tag")?,
+        exclude_tag: field("exclude_tag")?,
         creator: field("creator")?,
         generator: field("generator")?,
         backend: field("backend")?,
@@ -1492,6 +1770,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
             kind: params.kind,
             category: params.category.as_deref(),
             tag: params.tag.as_deref(),
+            exclude_tag: params.exclude_tag.as_deref(),
             creator: params.creator.as_deref(),
             generator: params.generator.as_deref(),
             backend: params.backend.as_deref(),

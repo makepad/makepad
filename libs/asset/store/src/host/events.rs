@@ -31,10 +31,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Closed event-kind vocabulary. Additions require a protocol version bump —
-/// clients refuse unknown kinds rather than misrender them.
+/// Closed event-kind vocabulary. Clients refuse unknown kinds rather than
+/// misrender them, so an addition is a compatibility event: a subscriber
+/// asks for the newer vocabulary explicitly (`GET /v1/events?ev=2`), and
+/// subscribers that do not are served the v1 spelling of the same fact —
+/// retirement renders as `asset_quarantined`, which every existing client
+/// already handles by dropping the asset. Nobody is broken and nobody is
+/// lied to (see [`downgrade_kind`]).
 pub const KIND_ASSET_PUBLISHED: &str = "asset_published";
 pub const KIND_ASSET_QUARANTINED: &str = "asset_quarantined";
+/// The whole asset was deleted (every revision retired, aliases gone,
+/// search rows removed). v2 vocabulary.
+pub const KIND_ASSET_RETIRED: &str = "asset_retired";
+/// One revision was retired (superseded or explicitly deleted); the asset
+/// itself may still be live. v2 vocabulary.
+pub const KIND_REVISION_RETIRED: &str = "revision_retired";
 pub const KIND_ALIAS_SET: &str = "alias_set";
 pub const KIND_ALIAS_CLEARED: &str = "alias_cleared";
 pub const KIND_ANNOTATION_SET: &str = "annotation_set";
@@ -46,6 +57,24 @@ pub const KIND_GAME_ALIAS_CLEARED: &str = "game_alias_cleared";
 
 /// Condvar wait slice; mirrors the connection loop's idle-slice stop checks.
 const WAIT_SLICE_MS: u64 = 250;
+
+/// The newest event vocabulary a subscriber can ask for. A request without
+/// `ev` gets vocabulary 1.
+pub const EVENT_VOCABULARY: u32 = 2;
+
+/// Render an event kind for a subscriber that asked for vocabulary
+/// `vocabulary`. Kinds introduced later are downgraded to the nearest v1
+/// kind with the SAME operational meaning; there is no kind whose v1
+/// spelling would mislead a client into keeping deleted content.
+pub fn downgrade_kind(kind: &'static str, vocabulary: u32) -> &'static str {
+    if vocabulary >= 2 {
+        return kind;
+    }
+    match kind {
+        KIND_ASSET_RETIRED | KIND_REVISION_RETIRED => KIND_ASSET_QUARANTINED,
+        other => other,
+    }
+}
 
 /// One committed catalog change. Identity fields are pre-rendered display
 /// spellings (`ast_…`, `arev_…`, `gam_…`, `grev_…`), which are exactly what

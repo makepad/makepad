@@ -895,7 +895,10 @@ impl AssetClient {
             Some(CandidateStateDto::Published) => {
                 // Already durable; continue to the idempotent alias write.
             }
-            Some(CandidateStateDto::Quarantined) => {
+            Some(CandidateStateDto::Quarantined) | Some(CandidateStateDto::Retired) => {
+                // Pulled or deleted content is never re-published under the
+                // same immutable revision; a caller that wants it back
+                // publishes new content.
                 return Err(ClientError::InvalidInput {
                     what: "publish revision quarantined",
                 });
@@ -1035,7 +1038,10 @@ impl AssetClient {
             Some(CandidateStateDto::Published) => {
                 // Already durable; continue to the idempotent alias write.
             }
-            Some(CandidateStateDto::Quarantined) => {
+            Some(CandidateStateDto::Quarantined) | Some(CandidateStateDto::Retired) => {
+                // Pulled or deleted content is never re-published under the
+                // same immutable revision; a caller that wants it back
+                // publishes new content.
                 return Err(ClientError::InvalidInput {
                     what: "publish revision quarantined",
                 });

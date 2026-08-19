@@ -28,6 +28,11 @@
 //!   atomic deterministic pack-import transaction — one manifest becomes
 //!   published revisions, aliases, and an immutable entry map, whole or not
 //!   at all, idempotent by import revision.
+//! - **Deletion** ([`catalog`] retirement + [`gc`]): retiring an asset or a
+//!   superseded revision is the terminal quarantine transition plus a
+//!   deletion intent, cost proportional to that asset alone; the bytes it
+//!   named are reclaimed later by an incremental, restartable, crash-safe
+//!   mark-and-sweep over the whole store that never blocks publishes.
 //! - **Variants** ([`variants`]): canonical processing recipes, the
 //!   single-flight derivation cache keyed by exact content, typed worker job
 //!   arming (the server never runs kernels), validated completion, immutable
@@ -43,6 +48,7 @@ pub mod budget;
 pub mod cas;
 pub mod catalog;
 pub mod error;
+pub mod gc;
 pub mod imports;
 pub mod jobs;
 pub mod operations;
@@ -55,8 +61,9 @@ mod sqlite;
 pub use auth::{token_hash, Auth, Capability, PrincipalId, Scope};
 pub use budget::Budgets;
 pub use cas::{BlobCommit, BlobWriter, Cas};
-pub use catalog::{validate_namespace, CandidateState, Catalog};
+pub use catalog::{validate_namespace, CandidateState, Catalog, RetireReport};
 pub use error::{ServerError, ServerResult};
+pub use gc::{Gc, GcConfig, GcPhase, GcStatus};
 pub use imports::{ImportEntryRow, ImportReport, Imports};
 pub use jobs::{AttemptRow, ClaimedJob, JobId, JobState, Jobs, NewJob};
 pub use operations::{
