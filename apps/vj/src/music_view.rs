@@ -69,10 +69,9 @@ script_mod! {
         stem_tiles: texture_2d(float)
 
         color_bg: uniform(#x0a0d12)
-        // Frequency bands, until the separator has covered a stretch.
-        color_low: uniform(#xff4d3d)
-        color_mid: uniform(#x4f9ee8)
-        color_high: uniform(#x46e8a8)
+        // Before separation a wave is grey peaks and nothing else: colour
+        // in this view always means a real separated stem.
+        color_grey: uniform(#x8b98a6)
         color_grid: uniform(#xffffff1e)
         color_grid_bar: uniform(#xffffff6e)
         color_head: uniform(#xf4f7fa)
@@ -175,26 +174,26 @@ script_mod! {
             let present = raw.x + raw.y + raw.z + raw.w
             let separated = step(0.004, present) * self.has_stems
 
-            // Bands: bass at the core, mids around it, highs at the tips.
-            let b_low = clamp(t.x, 0.0, 1.0) * 0.62
-            let b_mid = clamp(t.y, 0.0, 1.0) * 0.30
-            let b_high = clamp(t.z, 0.0, 1.0) * 0.22
-            // Stems: bass core, then drums, vocals, other outward.
+            // Unseparated: one grey peak envelope, the honest picture of
+            // audio nobody has taken apart yet.
+            let peak = max(max(t.x, t.y), t.z)
+            let grey_h = clamp(peak, 0.0, 1.0) * 0.78
+            // Separated: bass at the core, then drums, vocals, other.
             let s_bass = clamp(stem.z, 0.0, 1.0) * 0.55
             let s_drums = clamp(stem.y, 0.0, 1.0) * 0.40
             let s_vocals = clamp(stem.x, 0.0, 1.0) * 0.36
             let s_other = clamp(stem.w, 0.0, 1.0) * 0.30
 
-            let e0 = mix(b_low, s_bass, separated)
-            let e1 = e0 + mix(b_mid, s_drums, separated)
-            let e2raw = e1 + mix(b_high, s_vocals, separated)
+            let e0 = mix(grey_h, s_bass, separated)
+            let e1 = mix(grey_h, s_bass + s_drums, separated)
+            let e2raw = mix(grey_h, s_bass + s_drums + s_vocals, separated)
             let e2 = min(e2raw, 1.0)
-            let e3 = min(e2raw + s_other * separated, 1.0)
+            let e3 = min(mix(grey_h, e2raw + s_other, separated), 1.0)
 
-            let c0 = self.color_low.mix(self.color_bass, separated)
-            let c1 = self.color_mid.mix(self.color_drums, separated)
-            let c2 = self.color_high.mix(self.color_vocals, separated)
-            let c3 = self.color_other
+            let c0 = self.color_grey.mix(self.color_bass, separated)
+            let c1 = self.color_grey.mix(self.color_drums, separated)
+            let c2 = self.color_grey.mix(self.color_vocals, separated)
+            let c3 = self.color_grey.mix(self.color_other, separated)
 
             // Half-pixel feathering: the envelope edge stays smooth while
             // the whole thing scrolls, instead of crawling pixel to pixel.
@@ -208,12 +207,12 @@ script_mod! {
             let band = c0 * in0
                 + c1 * (in1 - in0)
                 + c2 * (in2 - in1)
-                + c3 * (in3 - in2) * separated
-            let cover = clamp(max(in2, in3 * separated), 0.0, 1.0)
+                + c3 * (in3 - in2)
+            let cover = clamp(max(in3, in2), 0.0, 1.0)
 
             // Loud passages glow: the core of a big hit lifts toward white.
             let energy = clamp(e3 * 1.35, 0.0, 1.0)
-            let glow = energy * energy * (1.0 - smoothstep(0.0, e3 + 0.001, y)) * 0.45
+            let glow = energy * energy * (1.0 - smoothstep(0.0, e3 + 0.001, y)) * mix(0.18, 0.45, separated)
             let lit = vec3(band.x + glow, band.y + glow, band.z + glow)
 
             // Behind the playhead the music has been played; ahead of it is
@@ -1465,6 +1464,76 @@ pub struct VjWaveScroll {
     events: Vec<WaveEvent>,
     #[rust]
     next_frame: NextFrame,
+    /// Frame-time instrumentation, on when `VJ_DEBUG_FRAMETIME` is set.
+    #[rust]
+    frame_probe: Option<Box<FrameProbe>>,
+}
+
+/// Inter-draw intervals for the wave view, bucketed and reported once a
+/// second. This is the number that matters for a scratch: how often the
+/// lanes actually reach the screen.
+struct FrameProbe {
+    last: f64,
+    window_start: f64,
+    frames: u32,
+    /// Frame requests that came back as events — if these run at display
+    /// cadence but `frames` does not, the cost is the draw, not the pacing.
+    ticks: u32,
+    worst: f64,
+    /// <8.3 ms (120 Hz), <16.7 (60), <33.3 (30), slower.
+    buckets: [u32; 4],
+}
+
+impl FrameProbe {
+    fn new(now: f64) -> FrameProbe {
+        FrameProbe {
+            last: now,
+            window_start: now,
+            frames: 0,
+            ticks: 0,
+            worst: 0.0,
+            buckets: [0; 4],
+        }
+    }
+
+    fn note(&mut self, now: f64) -> Option<String> {
+        let delta = (now - self.last).max(0.0);
+        self.last = now;
+        if delta > 0.0 {
+            self.frames += 1;
+            self.worst = self.worst.max(delta);
+            let bucket = if delta < 0.0083 {
+                0
+            } else if delta < 0.0167 {
+                1
+            } else if delta < 0.0333 {
+                2
+            } else {
+                3
+            };
+            self.buckets[bucket] += 1;
+        }
+        if now - self.window_start < 1.0 {
+            return None;
+        }
+        let report = format!(
+            "wave frames {} (ticks {}) in {:.2}s · <8.3ms {} · <16.7ms {} · <33ms {} · slower {} · worst {:.1}ms",
+            self.frames,
+            self.ticks,
+            now - self.window_start,
+            self.buckets[0],
+            self.buckets[1],
+            self.buckets[2],
+            self.buckets[3],
+            self.worst * 1000.0
+        );
+        self.window_start = now;
+        self.frames = 0;
+        self.ticks = 0;
+        self.worst = 0.0;
+        self.buckets = [0; 4];
+        Some(report)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1544,6 +1613,24 @@ impl VjWaveScroll {
         std::mem::take(&mut self.events)
     }
 
+    /// One draw happened: bucket the interval and report once a second.
+    fn note_frame(&mut self, now: f64) {
+        if self.frame_probe.is_none() {
+            if std::env::var("VJ_DEBUG_FRAMETIME").is_err() {
+                return;
+            }
+            self.frame_probe = Some(Box::new(FrameProbe::new(now)));
+            return;
+        }
+        let report = self
+            .frame_probe
+            .as_mut()
+            .and_then(|probe| probe.note(now));
+        if let Some(report) = report {
+            log!("{}", report);
+        }
+    }
+
     fn lane_at(&self, position: DVec2) -> Option<DeckId> {
         for (index, rect) in self.lane_rects.iter().enumerate() {
             if rect.contains(position) {
@@ -1585,6 +1672,9 @@ impl Widget for VjWaveScroll {
         // A held-still pointer must stop the record, and no FingerMove
         // arrives to say so — a frame tick does.
         if self.next_frame.is_event(event).is_some() {
+            if let Some(probe) = self.frame_probe.as_mut() {
+                probe.ticks += 1;
+            }
             if let Some(drag) = self.drag {
                 let now = cx.seconds_since_app_start();
                 if now - drag.idle_since > SCRATCH_IDLE_SECS {
@@ -1667,6 +1757,7 @@ impl Widget for VjWaveScroll {
         if self.lanes.iter().any(|lane| lane.playing) {
             self.next_frame = cx.new_next_frame();
         }
+        self.note_frame(now);
         // Two lanes with a ruler gutter between them.
         let gutter = 14.0f64;
         let lane_h = ((rect.size.y - gutter) * 0.5).max(8.0);
@@ -1725,7 +1816,17 @@ impl Widget for VjWaveScroll {
             // The shared playhead is one quad over both lanes.
             self.draw_lane.head_on = 0.0;
             self.draw_lane.cols = lane.cols as f32;
-            self.draw_lane.centre_col = lane.head_column_at(now) as f32;
+            // Snap the scroll to whole device pixels. A sub-pixel offset
+            // makes every column's sample point crawl between neighbours
+            // frame to frame, which reads as a shimmer over the whole wave.
+            let raw_centre = lane.head_column_at(now);
+            let columns_per_pixel = cols_per_px as f64;
+            let centre = if columns_per_pixel > 0.0 {
+                (raw_centre / columns_per_pixel).round() * columns_per_pixel
+            } else {
+                raw_centre
+            };
+            self.draw_lane.centre_col = centre as f32;
             self.draw_lane.cols_per_px = cols_per_px;
             let (beat_cols, phase) = lane.grid_columns().unwrap_or((0.0, 0.0));
             self.draw_lane.beat_cols = beat_cols as f32;
