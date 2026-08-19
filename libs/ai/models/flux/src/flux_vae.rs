@@ -8,8 +8,8 @@ use crate::backend::{
 use crate::flux::FluxLatentShape;
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ai_common::{
-    f16_to_f32, f32_to_f16, ggml_pad, BufferUsage, Context, Graph, InitParams, Op, ScaleMode,
-    Tensor, TensorDesc, TensorId, TensorLayout, TensorType, UnaryOp, GGML_MEM_ALIGN,
+    bf16_to_f32, f16_to_f32, f32_to_f16, ggml_pad, BufferUsage, Context, Graph, InitParams, Op,
+    ScaleMode, Tensor, TensorDesc, TensorId, TensorLayout, TensorType, UnaryOp, GGML_MEM_ALIGN,
 };
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
@@ -1695,6 +1695,195 @@ fn add_spatial(lhs: &SpatialTensor, rhs: &SpatialTensor) -> Result<SpatialTensor
 }
 
 // ---------------------------------------------------------------------------
+// Host encoder path (image -> latent mean): used by FLUX.1-Fill's masked-
+// image conditioning (`flux_fill_pipeline.rs`). Mirrors the *_spatial decode
+// helpers above in reverse — the `down` stages use strided convs (no
+// backend-accelerated stride>1 conv2d exists yet, see
+// `downsample_conv2d_spatial`), 2 resnet blocks per stage (vs. the decoder's
+// 3), and a `mid` block identical in shape to the decoder's. There is
+// deliberately no device-resident fast path yet (unlike decode's
+// `execute_device`) — this always runs the host f32 math below.
+// ---------------------------------------------------------------------------
+
+/// Encodes an RGB image (already in `[-1, 1]`, planar `[c][y][x]` layout,
+/// `width`/`height` both a multiple of 8) through the FLUX VAE encoder down
+/// to the raw (unscaled) latent distribution MEAN — 16 channels at
+/// `width/8 x height/8`. Deliberately returns the distribution's mean, not a
+/// sample from it: FLUX.1-Fill's `masked_image_latents` conditioning is
+/// fixed for the whole denoise run, and a mean encode keeps the whole
+/// request deterministic on the caller's `seed` alone (matches ComfyUI's
+/// VAEEncode convention; diffusers' `FluxFillPipeline` instead samples the
+/// posterior through a second RNG stream this port does not reproduce). The
+/// result is in the VAE's own latent space — callers apply
+/// `FLUX_VAE_SHIFT_FACTOR`/`FLUX_VAE_SCALING_FACTOR` (`flux_schedule.rs`)
+/// before packing, the exact inverse of what decode does after unpacking.
+pub fn encode_image_to_latent_mean(
+    weights: &LoadedFluxVaeWeights,
+    image_chw: &[f32],
+    width: usize,
+    height: usize,
+) -> Result<Vec<f32>> {
+    if width % 8 != 0 || height % 8 != 0 {
+        return Err(DiffusionError::workflow(format!(
+            "flux vae encode: width/height must be multiples of 8, got {}x{}",
+            width, height
+        )));
+    }
+    let expected = width
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(3))
+        .ok_or_else(|| DiffusionError::model("flux vae encode input size overflow"))?;
+    if image_chw.len() != expected {
+        return Err(DiffusionError::workflow(format!(
+            "flux vae encode expected {} values for a {}x{} RGB image, got {}",
+            expected,
+            width,
+            height,
+            image_chw.len()
+        )));
+    }
+
+    let mut hidden = SpatialTensor::new(width, height, 3, image_chw.to_vec())?;
+    hidden = apply_conv2d_spatial(
+        weights,
+        &hidden,
+        "encoder.conv_in.weight",
+        "encoder.conv_in.bias",
+        1,
+        1,
+    )?;
+
+    for stage in 0..=3usize {
+        let stage_prefix = format!("encoder.down.{stage}");
+        for block in 0..=1usize {
+            hidden =
+                resnet_block_spatial(weights, &hidden, &format!("{stage_prefix}.block.{block}"))?;
+        }
+        if weights.has_tensor(&format!("{stage_prefix}.downsample.conv.weight")) {
+            hidden = downsample_conv2d_spatial(
+                weights,
+                &hidden,
+                &format!("{stage_prefix}.downsample.conv.weight"),
+                &format!("{stage_prefix}.downsample.conv.bias"),
+            )?;
+        }
+    }
+
+    hidden = resnet_block_spatial(weights, &hidden, "encoder.mid.block_1")?;
+    hidden = mid_attention_spatial(weights, &hidden, "encoder.mid.attn_1")?;
+    hidden = resnet_block_spatial(weights, &hidden, "encoder.mid.block_2")?;
+
+    hidden = apply_group_norm_spatial(
+        weights,
+        &hidden,
+        "encoder.norm_out.weight",
+        "encoder.norm_out.bias",
+        32,
+    )?;
+    hidden = silu_spatial(&hidden)?;
+    let moments = apply_conv2d_spatial(
+        weights,
+        &hidden,
+        "encoder.conv_out.weight",
+        "encoder.conv_out.bias",
+        1,
+        1,
+    )?;
+
+    // `moments` is [2*z_channels][latent_h][latent_w] channel-major
+    // (`encoder.conv_out` has no quant_conv after it in FLUX's autoencoder,
+    // unlike vanilla SD): channels 0..16 are the mean, 16..32 the logvar we
+    // deliberately drop (see the doc comment above).
+    let z_channels = 16usize;
+    if moments.channels != z_channels * 2 {
+        return Err(DiffusionError::model(format!(
+            "flux vae encode: encoder.conv_out produced {} channels, expected {}",
+            moments.channels,
+            z_channels * 2
+        )));
+    }
+    let plane = moments.width * moments.height;
+    Ok(moments.data[..z_channels * plane].to_vec())
+}
+
+/// The FLUX/SD `Downsample` module: zero-pad width/height by 1 on the
+/// right/bottom only (`F.pad(x, (0,1,0,1))`), then a stride-2, padding-0,
+/// 3x3 conv. Exact output size is `width/2 x height/2` for even input
+/// (guaranteed by the caller: FLUX image sizes are always multiples of 16).
+/// No backend-accelerated conv2d takes a stride today (`try_conv2d_planar_f32`
+/// is stride-1 "same" only) — this is host f32 math, the same tier the
+/// fallback loop inside `apply_conv2d_spatial` already runs.
+fn downsample_conv2d_spatial(
+    weights: &LoadedFluxVaeWeights,
+    input: &SpatialTensor,
+    weight_name: &str,
+    bias_name: &str,
+) -> Result<SpatialTensor> {
+    let kernel = weights.tensor_kernel(weight_name)?;
+    let bias = weights.tensor_f32_values(bias_name)?;
+    if kernel.in_channels != input.channels {
+        return Err(DiffusionError::model(format!(
+            "flux vae downsample input channels mismatch: input={} kernel={}",
+            input.channels, kernel.in_channels
+        )));
+    }
+    if bias.len() != kernel.out_channels {
+        return Err(DiffusionError::model(format!(
+            "flux vae downsample bias len mismatch: bias={} out_channels={}",
+            bias.len(),
+            kernel.out_channels
+        )));
+    }
+    if kernel.kw != 3 || kernel.kh != 3 {
+        return Err(DiffusionError::model(format!(
+            "flux vae downsample expects a 3x3 kernel, got {}x{}",
+            kernel.kw, kernel.kh
+        )));
+    }
+    if input.width % 2 != 0 || input.height % 2 != 0 {
+        return Err(DiffusionError::model(format!(
+            "flux vae downsample expects even input size, got {}x{}",
+            input.width, input.height
+        )));
+    }
+    let out_width = input.width / 2;
+    let out_height = input.height / 2;
+    let mut output = vec![0.0f32; out_width * out_height * kernel.out_channels];
+    for out_c in 0..kernel.out_channels {
+        for oy in 0..out_height {
+            for ox in 0..out_width {
+                let mut acc = bias[out_c];
+                for in_c in 0..kernel.in_channels {
+                    for ky in 0..3usize {
+                        // Padded space has zero padding only on the
+                        // right/bottom, so a padded row/col index equal to
+                        // the (unpadded) input size is the zero pad and
+                        // contributes nothing.
+                        let py = oy * 2 + ky;
+                        if py >= input.height {
+                            continue;
+                        }
+                        for kx in 0..3usize {
+                            let px = ox * 2 + kx;
+                            if px >= input.width {
+                                continue;
+                            }
+                            let input_value = input.data[input.offset(px, py, in_c)];
+                            let weight_index = kx
+                                + kernel.kw
+                                    * (ky + kernel.kh * (in_c + kernel.in_channels * out_c));
+                            acc += input_value * kernel.data[weight_index];
+                        }
+                    }
+                }
+                output[ox + out_width * (oy + out_height * out_c)] = acc;
+            }
+        }
+    }
+    SpatialTensor::new(out_width, out_height, kernel.out_channels, output)
+}
+
+// ---------------------------------------------------------------------------
 // Device-resident decode path (mirrors the *_spatial helpers above; planar
 // [c][y][x] data lives in a GpuTensor with rows=channels, cols=width*height).
 // ---------------------------------------------------------------------------
@@ -2211,7 +2400,12 @@ fn vae_target_extents(entry: &MlxTensorEntry) -> Result<Vec<i64>> {
 
 fn vae_target_tensor_type(dtype: MlxDType) -> Result<TensorType> {
     match dtype {
-        MlxDType::F32 => Ok(TensorType::F32),
+        // BF16 source (e.g. the community flux-vae-bf16.safetensors repack
+        // used by the flux1-fill-dev split bundle) is upconverted to F32
+        // here; `vae_stored_tensor_type` below decides whether rank-4 conv
+        // kernels then get narrowed back to F16 for the im2col GEMM path,
+        // same as an F32 source would.
+        MlxDType::F32 | MlxDType::BF16 => Ok(TensorType::F32),
         other => Err(DiffusionError::model(format!(
             "flux vae unsupported tensor dtype {:?}",
             other
@@ -2241,6 +2435,15 @@ fn vae_target_bytes(
             let f32_bytes = header.read_tensor_bytes(name)?;
             f32_bytes_to_f16_bytes(&f32_bytes)
         }
+        (MlxDType::BF16, TensorType::F32) => {
+            let bf16_bytes = header.read_tensor_bytes(name)?;
+            bf16_bytes_to_f32_bytes(&bf16_bytes)
+        }
+        (MlxDType::BF16, TensorType::F16) => {
+            let bf16_bytes = header.read_tensor_bytes(name)?;
+            let f32_bytes = bf16_bytes_to_f32_bytes(&bf16_bytes)?;
+            f32_bytes_to_f16_bytes(&f32_bytes)
+        }
         (other, _) => Err(DiffusionError::model(format!(
             "flux vae unsupported tensor dtype {:?}",
             other
@@ -2253,6 +2456,21 @@ fn f32_bytes_to_f16_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(values.len() * 2);
     for value in values {
         out.extend_from_slice(&f32_to_f16(value).to_le_bytes());
+    }
+    Ok(out)
+}
+
+fn bf16_bytes_to_f32_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.len() % 2 != 0 {
+        return Err(DiffusionError::model(format!(
+            "flux vae bf16 byte length {} is not even",
+            bytes.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for chunk in bytes.chunks_exact(2) {
+        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+        out.extend_from_slice(&bf16_to_f32(bits).to_le_bytes());
     }
     Ok(out)
 }
@@ -3174,6 +3392,117 @@ mod tests {
 
     fn patterned_f32s(len: usize, start: f32, step: f32) -> Vec<f32> {
         (0..len).map(|index| start + index as f32 * step).collect()
+    }
+
+    fn make_test_vae_weights(entries: &[(&str, Vec<i64>, Vec<f32>)]) -> LoadedFluxVaeWeights {
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let mut tensor_ids = BTreeMap::new();
+        for (name, extents, values) in entries {
+            let id = ctx
+                .new_named_tensor(
+                    name.to_string(),
+                    TensorType::F32,
+                    extents.len(),
+                    extents,
+                    BufferUsage::Weights,
+                )
+                .unwrap();
+            ctx.write_tensor_data(id, &f32s_to_le_bytes(values)).unwrap();
+            tensor_ids.insert(name.to_string(), id);
+        }
+        LoadedFluxVaeWeights {
+            ctx,
+            tensor_ids,
+            path: PathBuf::from("<test>"),
+            graph_extra_bytes: 0,
+        }
+    }
+
+    /// The strided/asymmetric-pad downsample conv against a hand reference
+    /// (Python `F.pad(x, (0,1,0,1))` then `conv2d(k=3, stride=2, pad=0)`,
+    /// verified independently before porting): a 2-in/2-out 4x4 case with
+    /// non-trivial weights/bias, cross-checked value-for-value.
+    #[test]
+    fn downsample_conv2d_spatial_matches_python_reference() {
+        // extents are [kw, kh, in_channels, out_channels] (ggml ne order).
+        let weight = vec![
+            -0.4, -0.39, -0.38, -0.37, -0.36000000000000004, -0.35000000000000003, -0.34, -0.33,
+            -0.32, -0.31000000000000005, -0.30000000000000004, -0.29000000000000004, -0.28,
+            -0.27, -0.26, -0.25, -0.24000000000000002, -0.23, -0.22000000000000003,
+            -0.21000000000000002, -0.2, -0.19000000000000003, -0.18000000000000002, -0.17,
+            -0.16000000000000003, -0.15000000000000002, -0.14, -0.13, -0.12,
+            -0.11000000000000004, -0.10000000000000003, -0.09000000000000002,
+            -0.08000000000000002, -0.07, -0.06, -0.04999999999999999,
+        ]
+        .into_iter()
+        .map(|v: f64| v as f32)
+        .collect::<Vec<_>>();
+        let bias = vec![0.5f32, -0.25f32];
+        let weights = make_test_vae_weights(&[
+            ("t.downsample.conv.weight", vec![3, 3, 2, 2], weight),
+            ("t.downsample.conv.bias", vec![2], bias),
+        ]);
+
+        let x = vec![
+            -1.0, -0.9, -0.8, -0.7, -0.6, -0.5, -0.3999999999999999, -0.29999999999999993,
+            -0.19999999999999996, -0.09999999999999998, 0.0, 0.10000000000000009,
+            0.20000000000000018, 0.30000000000000004, 0.40000000000000013, 0.5,
+            0.6000000000000001, 0.7000000000000002, 0.8, 0.9000000000000001, 1.0, 1.1,
+            1.2000000000000002, 1.3000000000000003, 1.4000000000000004, 1.5, 1.6,
+            1.7000000000000002, 1.8000000000000003, 1.9000000000000004, 2.0, 2.1,
+        ]
+        .into_iter()
+        .map(|v: f64| v as f32)
+        .collect::<Vec<_>>();
+        let input = SpatialTensor::new(4, 4, 2, x).unwrap();
+
+        let output = downsample_conv2d_spatial(
+            &weights,
+            &input,
+            "t.downsample.conv.weight",
+            "t.downsample.conv.bias",
+        )
+        .unwrap();
+
+        assert_eq!((output.width, output.height, output.channels), (2, 2, 2));
+        let expected = [
+            -0.39700000000000024,
+            -0.6970000000000005,
+            -2.5880000000000005,
+            -2.0000000000000004,
+            -0.1750000000000001,
+            -0.4750000000000001,
+            -1.3940000000000001,
+            -1.2380000000000004,
+        ];
+        for (actual, expected) in output.data.iter().zip(expected.iter()) {
+            assert!(
+                (actual - *expected as f32).abs() < 1.0e-4,
+                "downsample mismatch: actual={} expected={}",
+                actual,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn encode_image_to_latent_mean_rejects_non_multiple_of_8_size() {
+        let weights = make_test_vae_weights(&[]);
+        let image = vec![0.0f32; 7 * 8 * 3];
+        let err = encode_image_to_latent_mean(&weights, &image, 7, 8).unwrap_err();
+        assert!(matches!(err, DiffusionError::Workflow(_)));
+    }
+
+    #[test]
+    fn encode_image_to_latent_mean_rejects_wrong_input_length() {
+        let weights = make_test_vae_weights(&[]);
+        let image = vec![0.0f32; 8 * 8 * 3 - 1];
+        let err = encode_image_to_latent_mean(&weights, &image, 8, 8).unwrap_err();
+        assert!(matches!(err, DiffusionError::Workflow(_)));
     }
 
     fn cpu_attention_f32(
