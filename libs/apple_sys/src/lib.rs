@@ -659,6 +659,9 @@ extern "C" {
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: CFStringRef;
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef;
     pub static kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef;
+    pub static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
+    pub static kVTProfileLevel_H264_Main_AutoLevel: CFStringRef;
+    pub static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
     pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
 
     pub fn VTCompressionSessionCreate(
