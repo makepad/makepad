@@ -139,6 +139,7 @@ impl ContentBackend for Flux2Backend {
                     seed: params.seed,
                     noise: None,
                     teacher_embeds: None,
+                    teacher_steps: None,
                 };
                 let steps_total = request.steps;
                 let result = {
