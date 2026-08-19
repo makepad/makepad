@@ -626,10 +626,19 @@ pub fn history_tiles(entries: Vec<GalleryEntry>) -> Vec<HistoryTile> {
 
 fn group_tile_representative<'a>(members: &[&'a GalleryEntry]) -> &'a GalleryEntry {
     let ct = |entry: &&GalleryEntry| entry.meta.content_type.to_ascii_lowercase();
+    // Final product first: the mesh of a mesh run, the clip of a video run,
+    // the take of an audio run — an image is the source of those, and only
+    // represents runs that produced nothing further.
     members
         .iter()
         .copied()
         .find(|entry| ct(entry).contains("gltf"))
+        .or_else(|| {
+            members.iter().copied().find(|entry| {
+                let ct = ct(entry);
+                ct.starts_with("video/") || ct.starts_with("audio/")
+            })
+        })
         .or_else(|| {
             members
                 .iter()
