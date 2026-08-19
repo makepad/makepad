@@ -9,3 +9,8 @@ license = "MIT"
 makepad-ai-common = { path = "../common" }
 makepad-ai-loader = { path = "../../loader" }
 makepad-ai-flux = { path = "../flux" }
+
+[dev-dependencies]
+# The in-repo 3DGS reader: the PLY this crate writes must load with the exact
+# parser the viewer uses, so the round trip is a test, not an assumption.
+makepad-splat = { path = "../../../splat" }
