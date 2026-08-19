@@ -1016,220 +1016,6 @@ impl Widget for RunTray {
 }
 
 // ---------------------------------------------------------------------------
-// Library grid (wrapping thumbnail gallery on the Library surface)
-// ---------------------------------------------------------------------------
-
-/// Grid card layout constants; `grid_columns` derives the per-row card count
-/// from the width the grid actually received.
-pub const GRID_CARD_W: f64 = 150.0;
-pub const GRID_GAP: f64 = 8.0;
-/// Card slots available in the Row template (c1..c8); extra width on very
-/// wide windows becomes margin instead of a ninth column.
-pub const GRID_MAX_COLS: usize = 8;
-
-pub fn grid_columns(width: f64) -> usize {
-    (((width + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as usize).clamp(1, GRID_MAX_COLS)
-}
-
-/// Vertically scrolling thumbnail grid over the filtered local History. Rows
-/// are virtualized; each PortalList row holds up to [`GRID_MAX_COLS`] card
-/// slots and the visible column count follows the widget's real width.
-#[derive(Script, ScriptHook, Widget)]
-pub struct LibraryGrid {
-    #[deref]
-    view: View,
-    #[rust]
-    entries: Vec<GalleryEntry>,
-    #[rust]
-    cache: PreviewCache,
-    /// Columns used on the last draw — the click handler needs the same
-    /// row-major mapping that layout used.
-    #[rust(4usize)]
-    pub last_cols: usize,
-    /// Set when the RESULT SET changed rather than its contents: the next
-    /// draw pins the viewport back to the top. A filter that shrinks the grid
-    /// under a scrolled viewport otherwise leaves the user staring past the
-    /// end of the results, which reads as "the filter found nothing".
-    #[rust]
-    reset_scroll: bool,
-}
-
-impl LibraryGrid {
-    /// `clear_thumbnails` drops decoded textures so a replaced sidecar at the
-    /// same path re-decodes; filter-only refreshes keep the cache warm.
-    pub fn set_entries(&mut self, cx: &mut Cx, entries: Vec<GalleryEntry>, clear_thumbnails: bool) {
-        self.entries = entries;
-        if clear_thumbnails {
-            self.cache.clear();
-        }
-        self.view.redraw(cx);
-    }
-
-    /// Show the first result again on the next draw.
-    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
-        self.reset_scroll = true;
-        self.view.redraw(cx);
-    }
-
-    pub fn file_at(&self, index: usize) -> Option<String> {
-        self.entries.get(index).map(|entry| entry.meta.file.clone())
-    }
-
-    /// Actual managed audio payload for a filtered grid card. This is never
-    /// the waveform preview sidecar.
-    pub fn file_drag_payload_path_at(&self, index: usize) -> Option<PathBuf> {
-        self.entries
-            .get(index)
-            .and_then(GalleryEntry::file_drag_payload_path)
-    }
-
-    pub fn take_preview_work(&mut self) -> Vec<(String, PreviewWork)> {
-        self.cache.take_pending()
-    }
-
-    pub fn install_preview(
-        &mut self,
-        cx: &mut Cx,
-        file: String,
-        source: Option<PathBuf>,
-        texture: Texture,
-    ) {
-        self.cache.install(file, source, texture);
-        self.view.redraw(cx);
-    }
-
-    pub fn install_anim_preview(
-        &mut self,
-        cx: &mut Cx,
-        file: String,
-        source: Option<PathBuf>,
-        frames: Vec<Texture>,
-        fps: f32,
-    ) {
-        self.cache.install_anim(file, source, frames, fps);
-        self.view.redraw(cx);
-        cx.new_next_frame();
-    }
-}
-
-const GRID_SLOTS: usize = GRID_MAX_COLS;
-
-impl Widget for LibraryGrid {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // The widget's area rect is one frame behind, which is fine: a resize
-        // re-chunks the rows on the next frame.
-        let width = self.view.area().rect(cx).size.x;
-        if width > GRID_CARD_W {
-            self.last_cols = grid_columns(width - 14.0); // scrollbar gutter
-        }
-        let cols = self.last_cols.max(1);
-        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
-            let list_ref = step.as_portal_list();
-            let Some(mut list) = list_ref.borrow_mut() else {
-                continue;
-            };
-            if self.entries.is_empty() {
-                // Draw the empty card once; skipping later yielded ids ends
-                // the viewport-fill walk (see LibraryGallery).
-                list.set_item_range(cx, 0, 1);
-                while let Some(item_id) = list.next_visible_item(cx) {
-                    if item_id == 0 {
-                        list.item(cx, item_id, id!(Empty)).draw_all_unscoped(cx);
-                    }
-                }
-                continue;
-            }
-            let rows = self.entries.len().div_ceil(cols);
-            // A new result set starts at the top; a set that merely shrank is
-            // clamped so the viewport can never sit past the last row.
-            if self.reset_scroll {
-                self.reset_scroll = false;
-                list.set_first_id_and_scroll(0, 0.0);
-            } else if list.first_id() >= rows {
-                list.set_first_id_and_scroll(rows.saturating_sub(1), 0.0);
-            }
-            list.set_item_range(cx, 0, rows);
-            while let Some(row_id) = list.next_visible_item(cx) {
-                // PortalList may ask past the declared item range while it
-                // tries to fill a viewport that is taller than the available
-                // content. Never instantiate those synthetic ids: an empty
-                // Row has zero-height hidden cells, so drawing it makes the
-                // list request another id forever (unbounded widget growth).
-                if row_id >= rows {
-                    continue;
-                }
-                let (item, _existed) = list.item_with_existed(cx, row_id, id!(Row));
-                let slots = [
-                    ids!(c1), ids!(c2), ids!(c3), ids!(c4),
-                    ids!(c5), ids!(c6), ids!(c7), ids!(c8),
-                ];
-                let thumbs = [
-                    ids!(c1.grid_thumb), ids!(c2.grid_thumb), ids!(c3.grid_thumb),
-                    ids!(c4.grid_thumb), ids!(c5.grid_thumb), ids!(c6.grid_thumb),
-                    ids!(c7.grid_thumb), ids!(c8.grid_thumb),
-                ];
-                let sprites = [
-                    ids!(c1.grid_sprite), ids!(c2.grid_sprite), ids!(c3.grid_sprite),
-                    ids!(c4.grid_sprite), ids!(c5.grid_sprite), ids!(c6.grid_sprite),
-                    ids!(c7.grid_sprite), ids!(c8.grid_sprite),
-                ];
-                let titles = [
-                    ids!(c1.grid_title), ids!(c2.grid_title), ids!(c3.grid_title),
-                    ids!(c4.grid_title), ids!(c5.grid_title), ids!(c6.grid_title),
-                    ids!(c7.grid_title), ids!(c8.grid_title),
-                ];
-                let drag_handles = [
-                    ids!(c1.file_drag), ids!(c2.file_drag), ids!(c3.file_drag),
-                    ids!(c4.file_drag), ids!(c5.file_drag), ids!(c6.file_drag),
-                    ids!(c7.file_drag), ids!(c8.file_drag),
-                ];
-                for slot in 0..GRID_SLOTS {
-                    let index = row_id * cols + slot;
-                    let visible = slot < cols && index < self.entries.len();
-                    item.view(cx, slots[slot]).set_visible(cx, visible);
-                    if !visible {
-                        continue;
-                    }
-                    let entry = self.entries[index].clone();
-                    item.label(cx, titles[slot]).set_text(cx, &entry.meta.label);
-                    item.view(cx, drag_handles[slot]).set_visible(cx, true);
-                    item.view(cx, slots[slot]).toggle_state(
-                        cx,
-                        entry.selected,
-                        Animate::No,
-                        ids!(select.on),
-                        ids!(select.off),
-                    );
-                    // Cache hit or typed badge — never a synchronous decode.
-                    let now = cx.time();
-                    let texture = self.cache.texture_for(cx, &entry, now);
-                    let sprite = entry.is_sprite_preview();
-                    item.image(cx, thumbs[slot]).set_visible(cx, !sprite);
-                    item.image(cx, sprites[slot]).set_visible(cx, sprite);
-                    if sprite {
-                        item.image(cx, sprites[slot]).set_texture(cx, Some(texture));
-                    } else {
-                        item.image(cx, thumbs[slot]).set_texture(cx, Some(texture));
-                    }
-                }
-                item.draw_all_unscoped(cx);
-            }
-        }
-        if self.cache.has_anims() {
-            cx.new_next_frame();
-        }
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
-        if matches!(event, Event::NextFrame(_)) && self.cache.has_anims() {
-            self.view.redraw(cx);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Flattened rows for Runs+Workers / Admin / server catalog lists
 // ---------------------------------------------------------------------------
 
@@ -1283,7 +1069,7 @@ pub enum StoreRow {
     },
     /// Generic titled record (server operation, game, room, namespace).
     Record { title: String, meta: String },
-    /// Server catalog asset row (Library → Server, connected).
+    /// Server catalog asset row (the Library surface, connected).
     Asset {
         title: String,
         meta: String,
@@ -1755,7 +1541,7 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
     rows
 }
 
-/// Library → Server catalog rows over the real typed search response.
+/// Library catalog rows over the real typed search response.
 pub fn catalog_rows(store: &AssetStore) -> Vec<StoreRow> {
     if !store.connected() {
         return vec![
@@ -1764,7 +1550,7 @@ pub fn catalog_rows(store: &AssetStore) -> Vec<StoreRow> {
                 detail: store.status_label(),
             },
             StoreRow::Note(
-                "Local History stays fully usable on the Local tab; nothing local is promoted into this view.".into(),
+                "The Library is the catalog: with no session there is nothing to show. Imports and generated artifacts appear here once they are published.".into(),
             ),
         ];
     }
@@ -1936,6 +1722,45 @@ mod tests {
             StoreRow::Asset { title, action: RowAction::SelectAsset(id), .. }
                 if title.contains("Fishing Trawler") && id == &asset_id.to_string()
         ));
+    }
+
+    /// The Library surface IS the catalog. Every state it can be in must
+    /// say so on its own terms — a row that points the user at a local
+    /// History tab describes a surface that no longer exists.
+    #[test]
+    fn catalog_rows_never_offer_a_local_library() {
+        let mut store = AssetStore::default();
+        let mut seen = Vec::new();
+        seen.extend(catalog_rows(&store));
+        store.server = Some(ServerInfo {
+            label: "asset.example:443".into(),
+            server_id: [9; 16],
+        });
+        for state in [
+            Remote::Idle,
+            Remote::Loading,
+            Remote::Failed("boom".into()),
+            Remote::Ready(SearchResults {
+                hits: Vec::new(),
+                total: 0,
+                more: false,
+            }),
+        ] {
+            store.search = state;
+            seen.extend(catalog_rows(&store));
+        }
+        for row in seen {
+            let text = match row {
+                StoreRow::Note(text) | StoreRow::Section(text) => text,
+                StoreRow::Disconnected { title, detail } => format!("{title} {detail}"),
+                other => format!("{other:?}"),
+            };
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                !lower.contains("local tab") && !lower.contains("local history"),
+                "catalog row still advertises a local library: {text}"
+            );
+        }
     }
 
     fn entry(file: &str, group_id: Option<&str>, group_label: Option<&str>) -> GalleryEntry {
@@ -2348,15 +2173,6 @@ mod tests {
         assert!(cards[1].failed);
         assert!(cards[1].status.contains("GPU disconnected"));
         assert!(!cards[1].selected);
-    }
-
-    #[test]
-    fn grid_columns_track_width_within_slot_bounds() {
-        assert_eq!(grid_columns(0.0), 1);
-        assert_eq!(grid_columns(GRID_CARD_W), 1);
-        assert_eq!(grid_columns(2.0 * GRID_CARD_W + GRID_GAP), 2);
-        assert_eq!(grid_columns(4.0 * (GRID_CARD_W + GRID_GAP)), 4);
-        assert_eq!(grid_columns(10_000.0), GRID_MAX_COLS);
     }
 
     #[test]

@@ -61,6 +61,22 @@ pub struct IoRequest {
     pub file: String,
     pub path: PathBuf,
     pub purpose: IoPurpose,
+    /// Where the bytes come from. `None` = the `path` above (drops, staged
+    /// files, the retiring local library). `Some` = the asset store, which
+    /// is the direction of travel: the app is a thin client over the
+    /// catalog, so a viewer open resolves an asset to its head revision and
+    /// streams the blob instead of trusting a local copy that can go stale.
+    pub store: Option<StoreSource>,
+}
+
+/// One store-resolved read: which asset, which roles are drawable, and the
+/// session to fetch with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreSource {
+    pub asset: makepad_asset_data::AssetId,
+    /// Roles a viewer can draw, best first (`RenderGlb`, then `Splat`, …).
+    pub prefer: Vec<makepad_asset_data::FileRole>,
+    pub session: crate::import::ServerSession,
 }
 
 pub enum IoDone {
@@ -154,12 +170,15 @@ fn is_gallery(purpose: &IoPurpose) -> bool {
 }
 
 fn dispatch_loop(rx: Receiver<IoRequest>, tx: Sender<IoDone>, gallery: Arc<GalleryStack>) {
+    // One connected client per session, reused across opens: against the
+    // local server a fresh connect costs more than the payload.
+    let mut store: Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)> = None;
     while let Ok(request) = rx.recv() {
         if is_gallery(&request.purpose) {
             gallery.push_latest(request);
             continue;
         }
-        let done = process(request);
+        let done = process_with_store(request, &mut store);
         if tx.send(done).is_err() {
             return;
         }
@@ -258,6 +277,72 @@ fn gallery_worker_count() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(2, 8)
+}
+
+/// A read whose bytes may come from the store. Everything past the fetch is
+/// the same decode the local-file path uses — one viewer, two sources.
+fn process_with_store(
+    request: IoRequest,
+    store: &mut Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)>,
+) -> IoDone {
+    let Some(source) = request.store.clone() else {
+        return process(request);
+    };
+    let bytes = fetch_from_store(store, &source);
+    match request.purpose {
+        IoPurpose::ViewerOpen { generation, copy_to } => {
+            let copy_to = match (&bytes, copy_to) {
+                (Ok(bytes), Some(target)) => std::fs::write(&target, bytes)
+                    .map(|_| target)
+                    .map_err(|error| format!("viewer copy failed: {error}"))
+                    .ok(),
+                _ => None,
+            };
+            IoDone::ViewerOpen {
+                file: request.file,
+                generation,
+                copy_to,
+                bytes,
+            }
+        }
+        IoPurpose::ThumbModel => IoDone::ThumbModel {
+            bytes,
+            file: request.file,
+        },
+        // Store-sourced reads only serve the viewer and the model
+        // thumbnailer today; anything else falls back to the path.
+        _ => process(IoRequest {
+            store: None,
+            ..request
+        }),
+    }
+}
+
+/// Resolve the asset to its head revision's drawable file and stream it.
+/// The client verifies every byte against the digest and holds it in its
+/// budgeted RAM cache — the app keeps no copy of its own.
+fn fetch_from_store(
+    store: &mut Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)>,
+    source: &StoreSource,
+) -> Result<Vec<u8>, String> {
+    let fresh = match store {
+        Some((session, _)) => session.endpoints != source.session.endpoints
+            || session.server_id != source.session.server_id
+            || session.token != source.session.token,
+        None => true,
+    };
+    if fresh {
+        let cache = crate::import::pack_icons_dir("store", "blobs")
+            .parent()
+            .map(|p| p.join("store-cache"))
+            .unwrap_or_else(|| std::env::temp_dir().join("asset-ui-store-cache"));
+        let client = crate::store_content::connect(&source.session, &cache)
+            .ok_or("cannot reach the asset server")?;
+        *store = Some((source.session.clone(), client));
+    }
+    let (_, client) = store.as_mut().expect("connected above");
+    crate::store_content::fetch_viewable(client, &source.asset, &source.prefer)
+        .map(|payload| payload.bytes)
 }
 
 fn process(request: IoRequest) -> IoDone {
@@ -408,12 +493,11 @@ fn decode_billboard_preview(request: IoRequest) -> IoDone {
     };
     let fps = bb.preview_fps() as f32;
     let mut sequence = Vec::new();
+    // One packed sheet decodes once; its cells become the same per-frame
+    // pixels loose frame PNGs used to give us.
+    let mut pixels = crate::billboard_view::BillboardFrames::new(&request.path, &bb);
     for frame in bb.preview_frames() {
-        let path = bb.resolve_frame(&request.path, frame);
-        if let Some(img) = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| decode_image_from_data(&bytes).ok())
-        {
+        if let Some(img) = pixels.image(frame) {
             sequence.push(PreviewPixels::Encoded(img));
         }
     }
@@ -440,6 +524,9 @@ pub struct PendingOpen {
     pub path: PathBuf,
     pub copy_to: Option<PathBuf>,
     pub generation: u64,
+    /// Set when the bytes come from the catalog rather than `path` — the
+    /// same latest-click-wins gate serves both sources.
+    pub store: Option<StoreSource>,
 }
 
 /// At most one viewer read in flight; only the newest click waits behind
@@ -461,6 +548,7 @@ impl ViewerOpenGate {
         file: &str,
         path: PathBuf,
         copy_to: Option<PathBuf>,
+        store: Option<StoreSource>,
     ) -> Option<PendingOpen> {
         self.next_generation += 1;
         self.wanted = self.next_generation;
@@ -469,6 +557,7 @@ impl ViewerOpenGate {
             path,
             copy_to,
             generation: self.next_generation,
+            store,
         };
         if self.in_flight.is_some() {
             self.queued = Some(open);
@@ -586,11 +675,11 @@ mod tests {
     fn stale_completions_are_suppressed_and_the_latest_click_wins() {
         let mut gate = ViewerOpenGate::default();
         let a = gate
-            .click("lib-1.png", PathBuf::from("/a"), None)
+            .click("lib-1.png", PathBuf::from("/a"), None, None)
             .expect("first click submits");
         // Two more clicks while A is in flight: only the NEWEST waits.
-        assert!(gate.click("lib-2.png", PathBuf::from("/b"), None).is_none());
-        assert!(gate.click("lib-3.png", PathBuf::from("/c"), None).is_none());
+        assert!(gate.click("lib-2.png", PathBuf::from("/b"), None, None).is_none());
+        assert!(gate.click("lib-3.png", PathBuf::from("/c"), None, None).is_none());
 
         // A lands: it is no longer the wanted selection — do not display,
         // and the queued newest click (C, not B) goes out.
@@ -610,7 +699,7 @@ mod tests {
         assert!(next.is_none());
 
         // A fresh click with the pipe idle submits immediately again.
-        assert!(gate.click("lib-4.png", PathBuf::from("/d"), None).is_some());
+        assert!(gate.click("lib-4.png", PathBuf::from("/d"), None, None).is_some());
     }
 
     #[test]
@@ -636,6 +725,7 @@ mod tests {
                 generation: 7,
                 copy_to: Some(copy.clone()),
             },
+            store: None,
         });
         let done = io.rx.recv_timeout(Duration::from_secs(5)).unwrap();
         match done {
@@ -659,6 +749,7 @@ mod tests {
             file: "gone.glb".into(),
             path: dir.join("gone.glb"),
             purpose: IoPurpose::ThumbModel,
+            store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             IoDone::ThumbModel { file, bytes } => {
@@ -683,6 +774,7 @@ mod tests {
             file: "lib-1.glb".into(),
             path: sidecar.clone(),
             purpose: IoPurpose::GalleryPreviewEncoded,
+            store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             IoDone::GalleryPreview { file, cache_source, pixels, sequence, fps } => {
@@ -704,6 +796,7 @@ mod tests {
             file: "lib-1.glb".into(),
             path: sidecar,
             purpose: IoPurpose::GalleryPreviewEncoded,
+            store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             IoDone::GalleryPreview { pixels, .. } => assert!(pixels.is_none()),
@@ -721,6 +814,7 @@ mod tests {
             file: "lib-kaykit.glb".into(),
             path: sheet,
             purpose: IoPurpose::GalleryPreviewEncoded,
+            store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             IoDone::GalleryPreview {
@@ -758,6 +852,7 @@ mod tests {
             file: "lib-flux.png".into(),
             path: render,
             purpose: IoPurpose::GalleryPreviewEncoded,
+            store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
             IoDone::GalleryPreview { file, pixels, sequence, fps, .. } => {
@@ -783,6 +878,7 @@ mod tests {
             file: file.into(),
             path: PathBuf::from(file),
             purpose: IoPurpose::GalleryPreviewEncoded,
+            store: None,
         };
         stack.push_latest(mk("old"));
         stack.push_latest(mk("mid"));
@@ -808,7 +904,8 @@ mod tests {
                 file: format!("f{i}"),
                 path: PathBuf::from("x"),
                 purpose: IoPurpose::GalleryPreviewEncoded,
-            });
+            store: None,
+        });
         }
         let latest = stack.pop_latest().unwrap();
         assert_eq!(latest.file, format!("f{}", GALLERY_STACK_CAP + 9));

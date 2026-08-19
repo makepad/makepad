@@ -437,6 +437,7 @@ fn pinning_survives_eviction_pressure_end_to_end() {
         max_object_bytes: 60_000,
         max_partial_bytes: 100_000,
         stale_partial_ms: 1_000_000,
+        max_ram_bytes: 512 * 1024,
     };
     let mut client = AssetClient::connect(cfg, fixture.endpoints(), None).unwrap();
 
@@ -494,6 +495,84 @@ fn dependency_closure_bounded_and_verified() {
         .resolve_closure(&root_ref, ClosureBudget { max_assets: 10, max_depth: 1 })
         .unwrap_err();
     assert!(matches!(err, ClientError::OverBudget { what: "closure depth", .. }), "{err:?}");
+}
+
+#[test]
+fn ram_cache_evicts_under_its_budget_and_refetches_verified_after_forget() {
+    // Five blobs, a budget that fits two: the client must stay inside it
+    // and still answer every fetch with verified bytes.
+    let mut store = FixtureStore::default();
+    let payloads: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i + 1; 40_000]).collect();
+    let blobs: Vec<BlobId> = payloads
+        .iter()
+        .map(|bytes| store.add_blob(bytes.clone()))
+        .collect();
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let mut cfg = config("ram_budget");
+    cfg.cache.max_ram_bytes = 100_000;
+    let mut client = AssetClient::connect(cfg, fixture.endpoints(), None).unwrap();
+
+    for (blob, expect) in blobs.iter().zip(&payloads) {
+        let got = client.fetch_blob_bytes(blob, Some(expect.len() as u64)).unwrap();
+        assert_eq!(&got, expect, "every fetch is the real, verified payload");
+        let (used, budget) = client.ram_cache_bytes();
+        assert!(used <= budget, "ram cache blew its budget: {used} > {budget}");
+    }
+    let (used, budget) = client.ram_cache_bytes();
+    assert_eq!(budget, 100_000);
+    assert!(used <= budget && used > 0, "some residency, under budget: {used}");
+
+    // Forget drops residency; the next fetch re-materialises and re-verifies
+    // from the server (or the disk cache) rather than serving a ghost.
+    let hot = &blobs[4];
+    assert!(client.forget_blob(hot), "the newest fetch was resident");
+    let (after_forget, _) = client.ram_cache_bytes();
+    assert!(after_forget < used, "forget freed its bytes: {after_forget} !< {used}");
+    let again = client.fetch_blob_bytes(hot, Some(payloads[4].len() as u64)).unwrap();
+    assert_eq!(&again, &payloads[4], "re-fetch is verified, not a ghost");
+
+    // Clearing empties it without breaking any later fetch.
+    client.clear_ram_cache();
+    assert_eq!(client.ram_cache_bytes().0, 0);
+    let cold = client.fetch_blob_bytes(&blobs[0], Some(payloads[0].len() as u64)).unwrap();
+    assert_eq!(&cold, &payloads[0]);
+}
+
+#[test]
+fn ram_cache_budget_holds_while_lanes_fetch_together() {
+    // Lane clones share one RAM cache. Eight threads pulling the same six
+    // blobs must never push it past the budget.
+    let mut store = FixtureStore::default();
+    let payloads: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i + 9; 30_000]).collect();
+    let blobs: Vec<BlobId> = payloads
+        .iter()
+        .map(|bytes| store.add_blob(bytes.clone()))
+        .collect();
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let mut cfg = config("ram_lanes");
+    cfg.cache.max_ram_bytes = 90_000;
+    let client = AssetClient::connect(cfg, fixture.endpoints(), None).unwrap();
+
+    std::thread::scope(|scope| {
+        for lane in 0..8 {
+            let mut lane_client = client.lane_clone();
+            let blobs = &blobs;
+            let payloads = &payloads;
+            scope.spawn(move || {
+                for round in 0..6 {
+                    let i = (lane + round) % blobs.len();
+                    let got = lane_client
+                        .fetch_blob_bytes(&blobs[i], Some(payloads[i].len() as u64))
+                        .unwrap();
+                    assert_eq!(got, payloads[i]);
+                    let (used, budget) = lane_client.ram_cache_bytes();
+                    assert!(used <= budget, "lane saw {used} > {budget}");
+                }
+            });
+        }
+    });
+    let (used, budget) = client.ram_cache_bytes();
+    assert!(used <= budget, "after the lanes: {used} > {budget}");
 }
 
 #[test]

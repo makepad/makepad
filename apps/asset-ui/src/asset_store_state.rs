@@ -175,6 +175,10 @@ pub struct AssetStore {
     /// Latest feed diagnostics (poll retry, resync) — honest, transient.
     pub event_note: Option<String>,
     refresh_after_events: bool,
+    /// Assets a catalog event touched since the app last looked. The viewer
+    /// drains this to re-open what it is showing: a new revision means a new
+    /// blob digest, so re-resolving is the whole of "stay current".
+    changed_assets: Vec<AssetId>,
     /// In-flight `RetireAsset`/`RetireRevision` requests, tracked only to
     /// surface a failure (or a mismatched output) honestly — success is
     /// applied locally via [`AssetStore::on_retired`] the moment the
@@ -374,6 +378,11 @@ impl AssetStore {
             }
             Err(error) => self.search = Remote::Failed(error.to_string()),
         }
+    }
+
+    /// Take the assets catalog events touched since the last call.
+    pub fn take_changed_assets(&mut self) -> Vec<AssetId> {
+        std::mem::take(&mut self.changed_assets)
     }
 
     /// Select a catalog asset and load its candidate/revision detail.
@@ -677,6 +686,11 @@ impl AssetStore {
             }
         }
         for event in events {
+            if let Some(asset_id) = event.asset_id {
+                if !self.changed_assets.contains(&asset_id) {
+                    self.changed_assets.push(asset_id);
+                }
+            }
             self.events.push_front(event);
         }
         self.events.truncate(EVENT_LOG_CAP);
@@ -1035,67 +1049,19 @@ pub fn hex16_string(id: &[u8; 16]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Local History filters (disk-backed generator library — unrelated to the
-// server catalog and deliberately kept separate).
+// Library filter state. The Library surface is the server catalog, so these
+// are mirrored straight onto the catalog query; `matches` is what the
+// Create-surface History strip filters its own rows with.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalLibraryFilters {
+    /// Free text, straight onto the catalog query. The server's text index
+    /// covers titles, categories and tags, so this is how a user reaches a
+    /// label without a dropdown for it.
     pub query: String,
-    pub category: Option<String>,
+    /// Selected `AssetKind` label, or None for "all kinds".
     pub kind: Option<String>,
-    /// Selected Library tags (AND). Each name is an import tag or a later
-    /// vision `enhanced_tags` entry from the index.
-    pub tags: Vec<String>,
-}
-
-impl LocalLibraryFilters {
-    pub fn matches(
-        &self,
-        label: &str,
-        prompt: &str,
-        domain: &str,
-        content_type: &str,
-        item_tags: &[String],
-    ) -> bool {
-        let query = self.query.trim().to_lowercase();
-        let category_matches = self.category.as_ref().is_none_or(|category| {
-            library_type(domain, content_type).eq_ignore_ascii_case(category)
-                || (*category == "maps"
-                    && (domain.eq_ignore_ascii_case("map")
-                        || domain.eq_ignore_ascii_case("world")
-                        || domain.eq_ignore_ascii_case("maps")))
-                || (*category == "music"
-                    && (domain.eq_ignore_ascii_case("audio")
-                        || domain.eq_ignore_ascii_case("sfx"))
-                    && (label.to_ascii_lowercase().contains("music")
-                        || label.to_ascii_lowercase().contains("jingle")
-                        || prompt.to_ascii_lowercase().contains("music")
-                        || prompt.to_ascii_lowercase().contains("jingle")))
-        });
-        let kind_matches = true;
-        let query_matches = query.is_empty()
-            || label.to_lowercase().contains(&query)
-            || prompt.to_lowercase().contains(&query)
-            || domain.to_lowercase().contains(&query)
-            || content_type.to_lowercase().contains(&query);
-        let tag_matches = self.tags.iter().all(|want| {
-            item_tags
-                .iter()
-                .any(|have| have.eq_ignore_ascii_case(want))
-        });
-        // Texture / atlas cards stay in the index. Hide the `images` shelf
-        // unless the user asks for it — those files are usually the
-        // colormap a GLB already embeds.
-        let wants_images = self
-            .tags
-            .iter()
-            .any(|tag| tag.eq_ignore_ascii_case("images"));
-        let is_image_card = library_type(domain, content_type) == "images"
-            || domain.eq_ignore_ascii_case("image");
-        let image_ok = wants_images || !is_image_card;
-        category_matches && kind_matches && query_matches && tag_matches && image_ok
-    }
 }
 
 /// One Library shelf name. Worlds (old `world` domain and new `map`) show
@@ -1159,6 +1125,30 @@ mod tests {
         assert_eq!(ep.data.port(), 9702);
     }
 
+    /// The Library's only facet dropdown is the server kind vocabulary, and
+    /// a pick travels back as a LABEL that `read_filters_from_ui` looks up
+    /// in `SERVER_KINDS`. That round trip is only sound while the labels are
+    /// unique and non-empty, so assert it here rather than discover a filter
+    /// that silently selects the wrong kind.
+    #[test]
+    fn every_server_kind_has_its_own_label_to_filter_by() {
+        let mut labels = Vec::new();
+        for kind in SERVER_KINDS {
+            let label = server_kind_label(kind);
+            assert!(!label.is_empty(), "{kind:?} has no label");
+            assert!(
+                !labels.contains(&label),
+                "label {label} is shared by two kinds — a dropdown pick would be ambiguous"
+            );
+            labels.push(label);
+            let found = SERVER_KINDS
+                .into_iter()
+                .find(|candidate| server_kind_label(*candidate) == label);
+            assert_eq!(found, Some(kind), "label {label} does not round-trip");
+        }
+        assert_eq!(labels.len(), SERVER_KINDS.len());
+    }
+
     #[test]
     fn status_labels_are_honest_for_every_lifecycle_phase() {
         let mut store = AssetStore::default();
@@ -1217,102 +1207,6 @@ mod tests {
         });
         assert!(!store.events_live);
         assert!(store.event_note.as_deref().unwrap().contains("retrying in 3s"));
-    }
-
-    #[test]
-    fn local_library_filters_do_not_claim_server_metadata() {
-        let filters = LocalLibraryFilters {
-            query: "trawler".into(),
-            category: Some("meshes".into()),
-            kind: None,
-            tags: vec!["weathered".into()],
-        };
-        assert!(filters.matches(
-            "Trawler GLB",
-            "a weathered fishing trawler",
-            "mesh",
-            "model/gltf-binary",
-            &["weathered".into()],
-        ));
-        assert!(!filters.matches(
-            "Trawler PNG",
-            "a clean fishing trawler",
-            "image",
-            "image/png",
-            &["weathered".into()],
-        ));
-        assert!(!filters.matches(
-            "Trawler GLB",
-            "a weathered fishing trawler",
-            "mesh",
-            "model/gltf-binary",
-            &["freedoom".into()],
-        ));
-        let untagged = LocalLibraryFilters {
-            query: String::new(),
-            category: None,
-            kind: None,
-            tags: Vec::new(),
-        };
-        assert!(untagged.matches("x", "", "mesh", "model/gltf-binary", &[]));
-        assert!(
-            !untagged.matches(
-                "colormap",
-                "Kenney space-kit · colormap",
-                "image",
-                "image/png",
-                &["images".into(), "kenney".into()],
-            ),
-            "loose pack textures stay hidden until the images tag is on"
-        );
-        let images_on = LocalLibraryFilters {
-            query: String::new(),
-            category: None,
-            kind: None,
-            tags: vec!["images".into()],
-        };
-        assert!(images_on.matches(
-            "colormap",
-            "Kenney space-kit · colormap",
-            "image",
-            "image/png",
-            &["images".into(), "kenney".into()],
-        ));
-        assert!(
-            untagged.matches(
-                "TILE-2070",
-                "billboard",
-                "billboard",
-                "image/png",
-                &["billboards".into()],
-            ),
-            "billboard sheets are not the images shelf"
-        );
-    }
-
-    #[test]
-    fn maps_filter_matches_imported_worlds() {
-        let filters = LocalLibraryFilters {
-            query: String::new(),
-            category: Some("maps".into()),
-            kind: None,
-            tags: vec!["maps".into()],
-        };
-        assert!(filters.matches(
-            "E1L1",
-            "Duke Nukem 3D (shareware) duke3d · world · e1l1",
-            "map",
-            "model/gltf-binary",
-            &["maps".into(), "duke3d".into()],
-        ));
-        assert!(!filters.matches(
-            "TILE-2070",
-            "billboard",
-            "billboard",
-            "image/png",
-            &["billboards".into(), "duke3d".into()],
-        ));
-        assert_eq!(library_type("map", "model/gltf-binary"), "maps");
     }
 
     // -----------------------------------------------------------------
