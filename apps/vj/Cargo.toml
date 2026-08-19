@@ -15,8 +15,12 @@ edition = "2021"
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
 makepad-asset-data = { path = "../../libs/asset/data" }
+# Four-stem source separation for the music decks' stem mix.
+makepad-ai-stems = { path = "../../libs/ai/models/stems" }
 makepad-asset-client = { path = "../../libs/asset/client" }
 # 3D program lane: skinned-GLB playback via the renderer.
 makepad-render = { path = "../../libs/render" }
 makepad-show-control = { path = "../../libs/show_control" }
 makepad-gltf = { path = "../../libs/gltf" }
+# Gaussian-splat program slots: XrSceneView offscreen pass + ViewSplat.
+makepad-xr = { path = "../../xr" }
