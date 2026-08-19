@@ -1,7 +1,7 @@
 // Bulk dense dequantization kernels: GGUF K-quant / legacy blocks and the
 // ComfyUI NVFP4 "pairs" layout -> bf16 row-major scratch, feeding the dense
 // cuBLAS linear path (f32-accumulate spine). CPU reference twins live in
-// src/quant.rs (dequantize_q4_k / dequantize_q6_k / dequantize_q4_0 /
+// src/quant.rs (dequantize_q4_k / dequantize_q5_k / dequantize_q6_k / dequantize_q4_0 /
 // dequantize_nvfp4_pairs_row) — keep them bit-identical in structure.
 //
 // Layout invariant shared with the Rust side: every weight tensor is
@@ -110,6 +110,66 @@ extern "C" cudaError_t makepad_cuda_dequant_q4_k_bf16(
     const uint32_t block_dim = 256u;
     const uint32_t grid = (total + block_dim - 1u) / block_dim;
     makepad_ggml_kq_dequant_q4_k_bf16_kernel<<<grid, block_dim, 0, stream>>>(
+        static_cast<const uint8_t *>(src_blocks),
+        static_cast<uint16_t *>(dst_bf16),
+        n_super_blocks);
+    return cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
+// Q5_K: 176-byte super-block (d f16 | dmin f16 | scales[12] | qh[32] |
+// qs[128]) -> 256 bf16 values. Same thread mapping as Q4_K (one thread per
+// low/high nibble pair, 128 per super-block); the 5th bit of each value
+// comes from qh with the per-64-value-group masks u1 = 1<<2g, u2 = 2<<2g
+// (upstream ggml dequantize_row_q5_K; CPU twin dequantize_q5_k in
+// src/quant.rs).
+// ---------------------------------------------------------------------------
+
+static __global__ void makepad_ggml_kq_dequant_q5_k_bf16_kernel(
+        const uint8_t * __restrict__ src,
+        uint16_t * __restrict__ dst,
+        uint32_t n_super_blocks) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = n_super_blocks * 128u;
+    if (idx >= total) {
+        return;
+    }
+    const uint32_t sb = idx >> 7;
+    const uint32_t t = idx & 127u;
+    const uint32_t group = t >> 5; // which 64-value pair group (0..3)
+    const uint32_t l = t & 31u;
+    const uint8_t *block = src + static_cast<size_t>(sb) * 176u;
+    const float d = makepad_ggml_kq_f16_bits_to_f32(
+        static_cast<uint16_t>(block[0]) | (static_cast<uint16_t>(block[1]) << 8));
+    const float dmin = makepad_ggml_kq_f16_bits_to_f32(
+        static_cast<uint16_t>(block[2]) | (static_cast<uint16_t>(block[3]) << 8));
+    const uint8_t *scales = block + 4;
+    const uint8_t qh = block[16 + l];
+    const uint8_t q = block[48 + 32 * group + l];
+    const uint8_t u1 = static_cast<uint8_t>(1u << (2u * group));
+    const uint8_t u2 = static_cast<uint8_t>(2u << (2u * group));
+    float sc1, m1, sc2, m2;
+    makepad_ggml_kq_scale_min_k4(2u * group, scales, &sc1, &m1);
+    makepad_ggml_kq_scale_min_k4(2u * group + 1u, scales, &sc2, &m2);
+    uint16_t *out = dst + static_cast<size_t>(sb) * 256u + group * 64u + l;
+    out[0] = makepad_ggml_kq_f32_to_bf16_bits(
+        d * sc1 * (static_cast<float>(q & 0x0Fu) + ((qh & u1) ? 16.0f : 0.0f)) - dmin * m1);
+    out[32] = makepad_ggml_kq_f32_to_bf16_bits(
+        d * sc2 * (static_cast<float>(q >> 4u) + ((qh & u2) ? 16.0f : 0.0f)) - dmin * m2);
+}
+
+extern "C" cudaError_t makepad_cuda_dequant_q5_k_bf16(
+        const void *src_blocks,
+        void *dst_bf16,
+        uint32_t n_super_blocks,
+        cudaStream_t stream) {
+    if (n_super_blocks == 0) {
+        return cudaSuccess;
+    }
+    const uint32_t total = n_super_blocks * 128u;
+    const uint32_t block_dim = 256u;
+    const uint32_t grid = (total + block_dim - 1u) / block_dim;
+    makepad_ggml_kq_dequant_q5_k_bf16_kernel<<<grid, block_dim, 0, stream>>>(
         static_cast<const uint8_t *>(src_blocks),
         static_cast<uint16_t *>(dst_bf16),
         n_super_blocks);

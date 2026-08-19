@@ -573,45 +573,52 @@ fn dequantize_row_q6_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
     }
 }
 
+/// q5_K super-block: `d` f16, `dmin` f16, 12 bytes of 6-bit packed
+/// scales/mins, 32 bytes of 5th bits (`qh`), 128 bytes of 4-bit quants —
+/// 176 bytes for 256 values. `y = d*sc*(q4 + 16*bit5) - dmin*m` per 32-value
+/// group, exactly upstream ggml `dequantize_row_q5_K` (the CUDA twin is
+/// `makepad_cuda_dequant_q5_k_bf16` in kernels/kquants.cu).
+pub fn dequantize_q5_k(block: &[u8], out: &mut [f32]) {
+    debug_assert!(block.len() >= 176);
+    debug_assert!(out.len() >= QK_K);
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+    let scales = &block[4..16];
+    let qh = &block[16..48];
+    let qs = &block[48..176];
+    let mut is = 0usize;
+    let mut u1 = 1u8;
+    let mut u2 = 2u8;
+    for group in 0..4 {
+        let (sc1, m1) = get_scale_min_k4(is, scales);
+        let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+        let d1 = d * sc1 as f32;
+        let d2 = d * sc2 as f32;
+        let min1 = dmin * m1 as f32;
+        let min2 = dmin * m2 as f32;
+        let ql = &qs[32 * group..32 * group + 32];
+        let base = 64 * group;
+        for l in 0..32 {
+            out[base + l] =
+                d1 * (((ql[l] & 0x0F) as f32) + if (qh[l] & u1) != 0 { 16.0 } else { 0.0 }) - min1;
+        }
+        for l in 0..32 {
+            out[base + 32 + l] =
+                d2 * (((ql[l] >> 4) as f32) + if (qh[l] & u2) != 0 { 16.0 } else { 0.0 }) - min2;
+        }
+        is += 2;
+        u1 <<= 2;
+        u2 <<= 2;
+    }
+}
+
 fn dequantize_row_q5_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
     debug_assert_eq!(n_cols % QK_K, 0);
     debug_assert_eq!(row_src.len(), (n_cols / QK_K) * block_size(GGML_TYPE_Q5_K));
-
+    let mut block_out = [0.0f32; QK_K];
     for block in row_src.chunks_exact(block_size(GGML_TYPE_Q5_K)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
-        let scales = &block[4..16];
-        let qh = &block[16..48];
-        let qs = &block[48..176];
-
-        let mut is = 0usize;
-        let mut u1 = 1u8;
-        let mut u2 = 2u8;
-        let mut ql_offset = 0usize;
-        for _ in 0..4 {
-            let (sc1, m1) = get_scale_min_k4(is + 0, scales);
-            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
-            let d1 = d * sc1 as f32;
-            let d2 = d * sc2 as f32;
-            let m1 = dmin * m1 as f32;
-            let m2 = dmin * m2 as f32;
-            let ql = &qs[ql_offset..ql_offset + 32];
-            for l in 0..32 {
-                out.push(
-                    d1 * (((ql[l] & 0x0F) as f32) + if (qh[l] & u1) != 0 { 16.0 } else { 0.0 })
-                        - m1,
-                );
-            }
-            for l in 0..32 {
-                out.push(
-                    d2 * (((ql[l] >> 4) as f32) + if (qh[l] & u2) != 0 { 16.0 } else { 0.0 }) - m2,
-                );
-            }
-            ql_offset += 32;
-            is += 2;
-            u1 <<= 2;
-            u2 <<= 2;
-        }
+        dequantize_q5_k(block, &mut block_out);
+        out.extend_from_slice(&block_out);
     }
 }
 
@@ -1170,6 +1177,37 @@ mod kquant_tests {
         // Row helper agrees via the public gather entry point.
         let gathered =
             get_rows_ggml_bytes_cpu(&block, GGML_TYPE_Q4_K, QK_K, 1, &[0]).unwrap();
+        assert_eq!(&gathered[..], &out[..]);
+    }
+
+    #[test]
+    fn q5_k_block_dequant_matches_hand_computation() {
+        let mut block = vec![0u8; block_size(GGML_TYPE_Q5_K)];
+        block[0..2].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // d
+        block[2..4].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // dmin
+        // 6-bit packed scales: sc0=2, m0=1; sc1=1 (group 0 high nibbles).
+        block[4] = 2;
+        block[5] = 1;
+        block[8] = 1;
+        // qh[0]: bit0 (u1 of group 0) set -> +16 on y[0]; bit1 clear -> y[32]
+        // gets no high bit; bit2 set -> group 1's low-nibble lane y[64].
+        block[16] = 0b0000_0101;
+        // qs[0]: low nibble 3 (y[0]), high nibble 5 (y[32]).
+        block[48] = 0x53;
+        // qs[32] (group 1, lane 0): low nibble 7 -> y[64] = d*sc2*(7+16) - 0.
+        block[80] = 0x07;
+        block[6] = 4; // sc2 = 4 (scales[2] low 6 bits)
+        let mut out = [0.0f32; QK_K];
+        dequantize_q5_k(&block, &mut out);
+        // y[0] = d*sc0*(3+16) - dmin*m0 = 19 - 1
+        assert_eq!(out[0], 37.0);
+        // y[32] = d*sc1*5 - dmin*m1(=0) = 5
+        assert_eq!(out[32], 5.0);
+        // y[64] = d*sc2*(7+16) = 92
+        assert_eq!(out[64], 92.0);
+        assert!(out[96..].iter().all(|&v| v == 0.0));
+        let gathered =
+            get_rows_ggml_bytes_cpu(&block, GGML_TYPE_Q5_K, QK_K, 1, &[0]).unwrap();
         assert_eq!(&gathered[..], &out[..]);
     }
 

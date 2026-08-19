@@ -880,32 +880,76 @@ fn flux2_dev_prof_mem(label: &str) {
     );
 }
 
-/// Resolve the dev weight layout under one root: the three Comfy files plus
-/// the HF tokenizer dir.
+/// Resolve the dev weight layout under one root: the Comfy fp8mixed DiT
+/// (`flux2_dev_fp8mixed.safetensors`) or, for a quantized tier, the single
+/// `*.gguf` DiT in the root (city96 `flux2-dev-Q4_K_M.gguf` & co.), plus
+/// the TE / VAE / tokenizer. Those three are identical across every dev tier
+/// (the tiers differ only in the DiT), so a tier root that lacks them falls
+/// back to the sibling canonical `flux2-dev/` dir — the registry lists them
+/// for each tier with the same `cache_as`, so the 18 GB TE is downloaded
+/// once and shared.
 pub fn flux2_dev_paths_from_root(root: impl AsRef<Path>) -> Result<Flux2DevPaths> {
     let root = root.as_ref();
-    let transformer = root.join("flux2_dev_fp8mixed.safetensors");
-    let text_encoder = root.join("mistral_3_small_flux2_fp8.safetensors");
-    let tokenizer = root.join("tokenizer");
-    let vae = [
-        root.join("flux2-vae.safetensors"),
-        root.join("vae/diffusion_pytorch_model.safetensors"),
-    ]
-    .into_iter()
-    .find(|p| p.exists())
-    .ok_or_else(|| {
-        DiffusionError::workflow(format!("flux2-dev vae not found under {}", root.display()))
-    })?;
-    for (label, path) in [
-        ("transformer", &transformer),
-        ("text_encoder", &text_encoder),
-    ] {
-        if !path.is_file() {
-            return Err(DiffusionError::workflow(format!(
-                "flux2-dev {label} missing: {}",
-                path.display()
-            )));
+    let canonical = root
+        .parent()
+        .map(|parent| parent.join("flux2-dev"))
+        .filter(|dir| dir != root && dir.is_dir());
+    let shared = |name: &str| -> PathBuf {
+        let own = root.join(name);
+        if own.exists() {
+            return own;
         }
+        match &canonical {
+            Some(dir) if dir.join(name).exists() => dir.join(name),
+            _ => own,
+        }
+    };
+    let fp8 = root.join("flux2_dev_fp8mixed.safetensors");
+    let transformer = if fp8.is_file() {
+        fp8
+    } else {
+        let mut ggufs: Vec<PathBuf> = std::fs::read_dir(root)
+            .map_err(|err| DiffusionError::io(root, err.to_string()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            })
+            .collect();
+        ggufs.sort();
+        match ggufs.len() {
+            0 => {
+                return Err(DiffusionError::workflow(format!(
+                    "flux2-dev transformer missing: neither {} nor a *.gguf under {}",
+                    fp8.display(),
+                    root.display()
+                )))
+            }
+            1 => ggufs.remove(0),
+            n => {
+                return Err(DiffusionError::workflow(format!(
+                    "flux2-dev root {} holds {n} *.gguf files; one DiT per tier root",
+                    root.display()
+                )))
+            }
+        }
+    };
+    let text_encoder = shared("mistral_3_small_flux2_fp8.safetensors");
+    let tokenizer = shared("tokenizer");
+    let vae = ["flux2-vae.safetensors", "vae/diffusion_pytorch_model.safetensors"]
+        .into_iter()
+        .map(shared)
+        .find(|p| p.exists())
+        .ok_or_else(|| {
+            DiffusionError::workflow(format!("flux2-dev vae not found under {}", root.display()))
+        })?;
+    if !text_encoder.is_file() {
+        return Err(DiffusionError::workflow(format!(
+            "flux2-dev text_encoder missing: {}",
+            text_encoder.display()
+        )));
     }
     if !tokenizer.is_dir() {
         return Err(DiffusionError::workflow(format!(
