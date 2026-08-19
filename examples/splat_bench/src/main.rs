@@ -52,8 +52,9 @@ script_mod! {
                         // to measure the scene z-buffer killing hidden splats.
                         occluder := Cube{
                             body: mod.widgets.XrBodyKind.Fixed
-                            visible: false
                             size: vec3(1.0, 1.0, 1.0)
+                            // Zero scale = not drawn; SPLAT_BENCH_OCCLUDER scales it up.
+                            scale: vec3(0.0, 0.0, 0.0)
                             pos: vec3(0.0, 0.0, 0.0)
                             color: #x6a7a8a
                         }
@@ -381,7 +382,6 @@ impl MatchEvent for App {
             let size = config.occluder;
             let mut occluder = self.ui.widget(cx, ids!(occluder));
             script_apply_eval!(cx, occluder, {
-                visible: true
                 scale: mod.pod.vec3(#(size), #(size), #(size))
             });
         }
