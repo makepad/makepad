@@ -1,7 +1,7 @@
 //! User-saved pipeline snapshots. Click to run, × to delete.
 
 use crate::pipeline::{
-    format_music_duration, GenParams, PRESETS, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS,
+    format_music_duration, GenParams, EDIT_STRENGTHS, PRESETS, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS,
     MESH_TEXTURE_SIZES, MUSIC_LENGTHS, VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use makepad_micro_serde::*;
@@ -40,6 +40,7 @@ pub struct SavedFastPreset {
     /// Option so presets saved before the flag existed still load (None =
     /// true — the H3 default is an audible clip).
     pub video_audio: Option<bool>,
+    pub edit_strength: Option<f32>,
     pub music_seconds: u32,
 }
 
@@ -160,6 +161,7 @@ pub fn snapshot(
         video_frames: gen.video_frames,
         video_steps: gen.video_steps,
         video_audio: Some(gen.video_audio),
+        edit_strength: Some(gen.edit_strength),
         music_seconds: gen.music_seconds,
     }
 }
@@ -176,8 +178,24 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
         video_frames: saved.video_frames,
         video_steps: saved.video_steps,
         video_audio: saved.video_audio.unwrap_or(true),
+        edit_strength: saved.edit_strength.unwrap_or(1.0),
         music_seconds: saved.music_seconds,
     }
+}
+
+/// Dropdown index of the nearest [`EDIT_STRENGTHS`] entry.
+pub fn nearest_edit_strength(strength: f32) -> usize {
+    EDIT_STRENGTHS
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            (a.1 - strength)
+                .abs()
+                .partial_cmp(&(b.1 - strength).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
 
 pub fn nearest_image_size(w: u32, h: u32) -> usize {
