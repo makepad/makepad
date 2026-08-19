@@ -33,7 +33,7 @@ use makepad_asset_data::{
     DerivedVariantId, DerivedVariantManifest, GameAlias, GameId, GameRevisionId,
     GameRevisionManifest, ImportRevisionId, ResolvedVariantMap, VariantSetId, VariantSetManifest,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -173,7 +173,7 @@ pub struct AssetClient {
     cache: Arc<Mutex<ContentCache>>,
     /// Verified blobs kept in process memory, shared with lane clones. The
     /// end-application streams here; the server already owns the disk cache.
-    ram: Arc<Mutex<HashMap<[u8; 32], Vec<u8>>>>,
+    ram: Arc<Mutex<crate::cache::RamCache>>,
     /// Serialises transfers of the SAME digest across lanes: two workers
     /// appending to one resumable partial would interleave bytes. It also
     /// coalesces duplicate fetches — the second waiter finds the committed
@@ -285,7 +285,9 @@ impl AssetClient {
             api,
             cache_root: config.cache_root.clone(),
             cache: Arc::new(Mutex::new(cache)),
-            ram: Arc::new(Mutex::new(HashMap::new())),
+            ram: Arc::new(Mutex::new(crate::cache::RamCache::new(
+                config.cache.max_ram_bytes,
+            ))),
             transfers: Arc::new(TransferGate::new()),
             server_id: health.server_id,
             protocol_version: health.protocol_version,
@@ -1226,6 +1228,27 @@ impl AssetClient {
         }
         let _ = stopped_at;
         Ok(())
+    }
+
+    /// Drop one blob from the in-process RAM cache. Returns whether it was
+    /// resident. The disk cache and the server are untouched: the next
+    /// fetch re-materialises and re-verifies it.
+    pub fn forget_blob(&self, blob: &BlobId) -> bool {
+        self.ram
+            .lock()
+            .expect("ram cache")
+            .forget(blob.as_bytes())
+    }
+
+    /// Drop every blob held in process memory.
+    pub fn clear_ram_cache(&self) {
+        self.ram.lock().expect("ram cache").clear();
+    }
+
+    /// Bytes currently resident in the RAM cache, and its budget.
+    pub fn ram_cache_bytes(&self) -> (u64, u64) {
+        let ram = self.ram.lock().expect("ram cache");
+        (ram.used_bytes(), ram.budget_bytes())
     }
 
     /// Fetch a blob and return its verified bytes in memory.
