@@ -810,6 +810,10 @@ pub struct Pipeline {
     /// payload `(content_type, bytes)` that replaces the producer stages
     /// this chain skipped. Set only via [`Pipeline::set_seed_input`].
     seed_input: Option<(String, Vec<u8>)>,
+    /// Extra reference payloads (content type, bytes) for multi-reference
+    /// editors — sent as named inputs `reference_1..N` next to the primary
+    /// seed. Set via [`Pipeline::set_seed_references`].
+    seed_references: Vec<(String, Vec<u8>)>,
     in_flight: HashMap<LiveId, Req>,
 }
 
@@ -871,6 +875,7 @@ impl Pipeline {
             fan_out_stages: Vec::new(),
             fan_out_templates: HashMap::new(),
             seed_input: None,
+            seed_references: Vec::new(),
             in_flight: HashMap::new(),
         };
         if pipeline.is_character_pipeline() {
@@ -1198,6 +1203,27 @@ impl Pipeline {
         Ok(())
     }
 
+    /// Extra references for multi-reference edit stages (`reference_1..N`).
+    /// Requires an edit stage in the chain — other consumers take exactly
+    /// one input, and an ignored reference would be a silent lie.
+    pub fn set_seed_references(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        if refs.is_empty() {
+            self.seed_references.clear();
+            return Ok(());
+        }
+        if !self.stages.iter().any(|stage| stage.domain == "edit") {
+            return Err("extra references need an edit stage in the chain".to_string());
+        }
+        if let Some((ct, _)) = refs
+            .iter()
+            .find(|(ct, _)| !ct.to_ascii_lowercase().starts_with("image/png"))
+        {
+            return Err(format!("extra references must be image/png, got {ct}"));
+        }
+        self.seed_references = refs;
+        Ok(())
+    }
+
     fn request_for_stage(&self, stage: usize) -> Result<GenerateRequestJson, String> {
         self.request_for_stage_routed(
             stage,
@@ -1400,6 +1426,23 @@ impl Pipeline {
         if let Some((b64, content_type)) = self.input_for_stage(stage) {
             request.input_b64 = Some(b64);
             request.input_content_type = Some(content_type);
+        }
+        if domain == "edit" && !self.seed_references.is_empty() {
+            request.inputs = Some(
+                self.seed_references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (ct, bytes))| NamedInputJson {
+                        name: format!("reference_{}", index + 1),
+                        content_type: ct.clone(),
+                        data_b64: String::from_utf8(makepad_base64::base64_encode(
+                            bytes,
+                            &makepad_base64::BASE64_STANDARD,
+                        ))
+                        .unwrap_or_default(),
+                    })
+                    .collect(),
+            );
         }
         if domain == "paint" {
             let mesh = self
@@ -4643,6 +4686,41 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(edit.input_content_type.as_deref(), Some("image/png"));
         assert_eq!(decoded_input(&edit), b"picture");
         assert_eq!(edit.width, None, "output size follows the reference");
+        assert!(edit.inputs.is_none(), "no extra references unless pinned");
+
+        // Extra references ride as reference_1..N named PNG inputs.
+        pipeline
+            .set_seed_references(vec![
+                ("image/png".to_string(), b"ref-a".to_vec()),
+                ("image/png".to_string(), b"ref-b".to_vec()),
+            ])
+            .unwrap();
+        let edit = pipeline.request_for_stage(0).unwrap();
+        let inputs = edit.inputs.expect("extra references attached");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].name, "reference_1");
+        assert_eq!(inputs[1].name, "reference_2");
+        assert_eq!(inputs[1].content_type, "image/png");
+        assert_eq!(
+            makepad_base64::base64_decode(inputs[1].data_b64.as_bytes()).unwrap(),
+            b"ref-b"
+        );
+        // Non-PNG references and non-edit chains are refused, never dropped.
+        assert!(pipeline
+            .set_seed_references(vec![("image/jpeg".to_string(), b"x".to_vec())])
+            .is_err());
+        let mut mesh_only = Pipeline::new(
+            "",
+            &["mesh"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(mesh_only
+            .set_seed_references(vec![("image/png".to_string(), b"x".to_vec())])
+            .is_err());
     }
 
     #[test]
