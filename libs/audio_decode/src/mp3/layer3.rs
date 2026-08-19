@@ -188,9 +188,13 @@ impl BandLayout {
         let mut count = 0usize;
         let mut line = 0usize;
         if gr.mixed_block {
-            // The long part of a mixed block is the first 36 lines, which is a
-            // different number of bands at every sample rate.
-            while line < 36 && count < 22 {
+            // The long part of a mixed block is the first 36 lines — a
+            // different number of bands at every rate — except at 8 kHz, whose
+            // bands are twice as wide and where it is the first 72. Both land
+            // exactly on a short band boundary, which is what lets the two
+            // halves of a mixed block meet without a gap.
+            let long_lines = if header.is_8khz() { 72 } else { 36 };
+            while line < long_lines && count < 22 {
                 let w = (long[count + 1] - long[count]) as usize;
                 width[count] = w as u16;
                 count += 1;
@@ -202,17 +206,7 @@ impl BandLayout {
         while sfb < 13 && (short[sfb] as usize) * 3 < line {
             sfb += 1;
         }
-        // At 8 kHz the short bands are wide enough that none starts exactly at
-        // the end of the long part; bridge the gap with one synthetic triple
-        // rather than leaving lines unscaled.
-        let short_start = line;
-        if sfb < 13 && (short[sfb] as usize) * 3 > line && count + 3 <= MAX_BANDS {
-            let bridge = (((short[sfb] as usize) * 3 - line) / 3) as u16;
-            width[count] = bridge;
-            width[count + 1] = bridge;
-            width[count + 2] = bridge;
-            count += 3;
-        }
+        let short_start = (short.get(sfb).copied().unwrap_or(0) as usize * 3).max(line);
         let first_short_sfb = sfb;
         while sfb < 13 && count + 3 <= MAX_BANDS {
             let w = short[sfb + 1] - short[sfb];
@@ -256,6 +250,7 @@ fn read_scalefactors_mpeg1(
     granule_index: usize,
     scfsi: &[bool; 4],
     previous: &Scalefactors,
+    previous_short: bool,
     out: &mut Scalefactors,
 ) {
     let (slen1, slen2) = SCALEFAC_SIZES_MPEG1[(gr.scalefac_compress & 0xf) as usize];
@@ -292,7 +287,10 @@ fn read_scalefactors_mpeg1(
     const SCFSI_BANDS: [(usize, usize); 4] = [(0, 6), (6, 11), (11, 16), (16, 21)];
     for (band, (lo, hi)) in SCFSI_BANDS.into_iter().enumerate() {
         let slen = if band < 2 { slen1 } else { slen2 };
-        if granule_index > 0 && scfsi[band] {
+        // Granule 0's short-block scalefactors are laid out per window, so
+        // there is nothing for a long granule 1 to inherit. The standard does
+        // not allow the combination; read the bands rather than copy nonsense.
+        if granule_index > 0 && scfsi[band] && !previous_short {
             out.value[lo..hi].copy_from_slice(&previous.value[lo..hi]);
         } else {
             for sfb in lo..hi {
@@ -441,9 +439,13 @@ fn read_spectrum(
             2
         };
         let select = gr.table_select[region] as usize;
-        let entry = HUFF_TABLES.get(select).copied().flatten();
-        let Some((tree_index, linbits)) = entry else {
-            // Table 0 (and the two the standard leaves empty) code only zeros.
+        if select == 4 || select == 14 {
+            // The standard leaves these two undefined; a stream that selects
+            // one is malformed, and decoding it as silence would hide that.
+            return Err(AudioError::Corrupt("undefined Huffman table"));
+        }
+        let Some((tree_index, linbits)) = HUFF_TABLES.get(select).copied().flatten() else {
+            // Table 0 codes only zeros.
             i += 2;
             continue;
         };
@@ -578,9 +580,11 @@ fn apply_stereo(
     }
     let pan = intensity_pan_mpeg1();
     // The intensity region starts above the highest band the right channel
-    // actually coded — separately per window for short blocks, since the three
-    // windows interleave.
+    // actually coded — separately per window for a pure short block, since the
+    // three windows interleave. A mixed block has long bands too, and those do
+    // not belong to any window, so its three boundaries collapse into one.
     let blocks = if layout.short { 3 } else { 1 };
+    let window_of = |band: usize| band.saturating_sub(layout.long_bands) % blocks;
     let mut top = [-1i32; 3];
     if intensity {
         let mut line = 0usize;
@@ -588,11 +592,11 @@ fn apply_stereo(
             let width = layout.width[band] as usize;
             let end = (line + width).min(LINES);
             if xr[1][line.min(LINES)..end].iter().any(|v| *v != 0.0) {
-                top[band % blocks] = band as i32;
+                top[window_of(band)] = band as i32;
             }
             line += width;
         }
-        if !layout.short {
+        if !layout.short || layout.long_bands > 0 {
             let max = top[0].max(top[1]).max(top[2]);
             top = [max; 3];
         }
@@ -607,9 +611,21 @@ fn apply_stereo(
         if start >= end {
             continue;
         }
-        let is_pos = right_scalefac.is_pos[band];
+        // The topmost band carries no transmitted scalefactor — MPEG-1 sends
+        // 21 long or 12 short, one short of the layout — so its position is
+        // taken from the band below rather than from the zero that is not
+        // there. Zero is not neutral: it is the hard-right end of the pan.
+        // The topmost band carries no transmitted scalefactor — MPEG-1 sends
+        // 21 long or 12 short, one short of the layout — so its position is
+        // taken from the band below rather than from the zero that is not
+        // there. Zero is not neutral: it is the hard-right end of the pan.
+        let is_pos = if band + blocks >= layout.count {
+            right_scalefac.is_pos[band.saturating_sub(blocks)]
+        } else {
+            right_scalefac.is_pos[band]
+        };
         let intensity_band = intensity
-            && band as i32 > top[band % blocks]
+            && band as i32 > top[window_of(band)]
             && is_pos != u8::MAX
             && (header.is_lsf() || is_pos < 7);
         if intensity_band {
@@ -673,11 +689,14 @@ fn reorder(header: &FrameHeader, layout: &BandLayout, xr: &mut [f32; LINES], scr
 /// Cancel the aliasing the analysis filterbank introduced between adjacent
 /// subbands. Short blocks are already alias-free; a mixed block only needs it
 /// at the one boundary inside its long region.
-fn antialias(gr: &GranuleInfo, xr: &mut [f32; LINES], cs: &[f32; 8], ca: &[f32; 8]) {
-    if gr.short_blocks() && !gr.mixed_block {
-        return;
-    }
-    let boundaries = if gr.short_blocks() { 1 } else { SUBBANDS - 1 };
+fn antialias(layout: &BandLayout, xr: &mut [f32; LINES], cs: &[f32; 8], ca: &[f32; 8]) {
+    // Only the long region needs it, and a mixed block's long region is two
+    // subbands wide at every rate but 8 kHz, where it is four.
+    let boundaries = if layout.short {
+        (layout.short_start / SLOTS).saturating_sub(1)
+    } else {
+        SUBBANDS - 1
+    };
     for sb in 0..boundaries {
         let base = sb * SLOTS;
         for i in 0..8 {
@@ -814,19 +833,22 @@ impl Default for ChannelState {
 fn hybrid(
     imdct: &Imdct,
     gr: &GranuleInfo,
+    layout: &BandLayout,
     xr: &[f32; LINES],
     state: &mut ChannelState,
     out: &mut [[f32; SUBBANDS]; SLOTS],
 ) {
+    // Subbands below the layout's short region stayed long: none for a pure
+    // short block, the lowest two (or four at 8 kHz) for a mixed one.
+    let long_subbands = if layout.short { layout.short_start / SLOTS } else { SUBBANDS };
     let mut block = [0.0f32; 36];
     for sb in 0..SUBBANDS {
-        // A mixed block keeps its two lowest subbands long.
-        let block_type = if gr.short_blocks() && !(gr.mixed_block && sb < 2) {
-            2
-        } else if gr.short_blocks() {
+        let block_type = if !layout.short {
+            gr.block_type
+        } else if sb < long_subbands {
             0
         } else {
-            gr.block_type
+            2
         };
         imdct.transform(&xr[sb * SLOTS..sb * SLOTS + SLOTS], block_type, &mut block);
         let overlap = &mut state.overlap[sb];
@@ -854,6 +876,8 @@ pub struct GranuleScratch {
     subband: Box<[[f32; SUBBANDS]; SLOTS]>,
     scalefac: [Scalefactors; 2],
     previous: [Scalefactors; 2],
+    /// Whether granule 0 of this frame used short blocks, per channel.
+    previous_short: [bool; 2],
     pow43: Box<[f32; MAX_QUANT + 1]>,
     imdct: Imdct,
     cs: [f32; 8],
@@ -870,6 +894,7 @@ impl GranuleScratch {
             subband: Box::new([[0.0; SUBBANDS]; SLOTS]),
             scalefac: [Scalefactors::default(); 2],
             previous: [Scalefactors::default(); 2],
+            previous_short: [false; 2],
             pow43: pow43_table(),
             imdct: Imdct::new(),
             cs,
@@ -909,6 +934,13 @@ pub fn decode_granule(
         let mut gr = side.granules[granule_index][ch];
         let part2_3 = gr.part2_3_length as usize;
         let end_bit = cursor.saturating_add(part2_3);
+        if end_bit > main_data.len() * 8 {
+            // Reading past the reservoir would return zeros, and zeros are not
+            // silence in the count1 region: the all-zero path through table A
+            // is a codeword, so a truncated granule would decode to a
+            // full-scale noise burst instead of nothing.
+            return Err(AudioError::Corrupt("granule runs past the main data"));
+        }
         let mut r = BitReader::at(main_data, cursor);
         let layout = BandLayout::new(header, &gr);
 
@@ -923,10 +955,12 @@ pub fn decode_granule(
                 granule_index,
                 &side.scfsi[ch],
                 &previous,
+                scratch.previous_short[ch],
                 &mut scratch.scalefac[ch],
             );
             if granule_index == 0 {
                 scratch.previous[ch] = scratch.scalefac[ch];
+                scratch.previous_short[ch] = gr.short_blocks();
             }
         }
         if r.pos() > end_bit {
@@ -956,10 +990,11 @@ pub fn decode_granule(
 
     for ch in 0..channel_count {
         reorder(header, &layouts[ch], &mut scratch.xr[ch], &mut scratch.spare);
-        antialias(&granules[ch], &mut scratch.xr[ch], &scratch.cs, &scratch.ca);
+        antialias(&layouts[ch], &mut scratch.xr[ch], &scratch.cs, &scratch.ca);
         hybrid(
             &scratch.imdct,
             &granules[ch],
+            &layouts[ch],
             &scratch.xr[ch],
             &mut channels[ch],
             &mut scratch.subband,
@@ -1171,25 +1206,50 @@ mod tests {
 
     #[test]
     fn antialias_is_energy_preserving_and_reversible() {
+        let header = mpeg1_header();
         let gr = GranuleInfo::default();
+        let layout = BandLayout::new(&header, &gr);
         let (cs, ca) = alias_coefficients();
         let mut xr = [0.0f32; LINES];
         for (i, slot) in xr.iter_mut().enumerate() {
             *slot = ((i % 17) as f32 - 8.0) * 0.1;
         }
         let before: f32 = xr.iter().map(|v| v * v).sum();
-        antialias(&gr, &mut xr, &cs, &ca);
+        antialias(&layout, &mut xr, &cs, &ca);
         let after: f32 = xr.iter().map(|v| v * v).sum();
         assert!((before - after).abs() < 1e-2, "{before} vs {after}");
     }
 
     #[test]
     fn short_blocks_skip_alias_reduction() {
+        let header = mpeg1_header();
         let gr = GranuleInfo { window_switching: true, block_type: 2, ..GranuleInfo::default() };
+        let layout = BandLayout::new(&header, &gr);
         let (cs, ca) = alias_coefficients();
         let mut xr = [1.0f32; LINES];
-        antialias(&gr, &mut xr, &cs, &ca);
-        assert!(xr.iter().all(|v| *v == 1.0));
+        antialias(&layout, &mut xr, &cs, &ca);
+        assert!(xr.iter().all(|v| *v == 1.0), "a pure short block has no aliasing to cancel");
+
+        // A mixed block cancels only inside its long region: two subbands at
+        // 44.1 kHz, four at 8 kHz where the bands are twice as wide.
+        let mixed = GranuleInfo { mixed_block: true, ..gr };
+        let layout = BandLayout::new(&header, &mixed);
+        assert_eq!(layout.short_start, 36);
+        let mut xr = [1.0f32; LINES];
+        antialias(&layout, &mut xr, &cs, &ca);
+        assert!(xr[..36].iter().any(|v| *v != 1.0));
+        assert!(xr[36..].iter().all(|v| *v == 1.0));
+
+        let eight_k = FrameHeader::parse(
+            (0x7ff << 21) | (1 << 17) | (1 << 16) | (4 << 12) | (2 << 10) | (3 << 6),
+        )
+        .expect("8 kHz header");
+        assert!(eight_k.is_8khz());
+        let layout = BandLayout::new(&eight_k, &mixed);
+        assert_eq!(layout.short_start, 72);
+        assert_eq!(layout.first_short_sfb, 3);
+        let total: usize = layout.width[..layout.count].iter().map(|w| *w as usize).sum();
+        assert_eq!(total, LINES, "the 8 kHz mixed layout must still tile the granule");
     }
 
     #[test]

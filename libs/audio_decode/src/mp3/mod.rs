@@ -73,10 +73,10 @@ pub struct Mp3Decoder<'a> {
     limits: Limits,
     samples_emitted: u64,
     gapless: bool,
-    /// Samples still to be dropped from the front for gapless playback.
+    /// What gapless playback trims, front and back: constants for the stream.
+    trim: (u64, u64),
+    /// Samples of the front trim still to be dropped.
     skip_front: u64,
-    /// Samples to drop from the end, applied by the whole-file decode.
-    skip_back: u64,
 }
 
 impl<'a> Mp3Decoder<'a> {
@@ -116,8 +116,8 @@ impl<'a> Mp3Decoder<'a> {
             limits,
             samples_emitted: 0,
             gapless: true,
+            trim: (skip_front, skip_back),
             skip_front,
-            skip_back,
         })
     }
 
@@ -140,24 +140,19 @@ impl<'a> Mp3Decoder<'a> {
         self.vbr.and_then(|v| v.delay)
     }
 
-    /// Turn gapless trimming off, so every sample the filterbank produces is
-    /// returned including the encoder's padding.
+    /// Turn gapless trimming on or off. Samples already emitted cannot be
+    /// un-emitted, but everything from here on follows the new setting.
     pub fn set_gapless(&mut self, on: bool) {
-        if !on && self.gapless {
-            // Already-skipped samples cannot be un-skipped, but stopping now
-            // is still the honest thing to do.
-            self.skip_front = 0;
-            self.skip_back = 0;
-        }
         self.gapless = on;
     }
 
-    /// Samples this decode trims from the front and the back for gapless
-    /// playback: the LAME encoder delay plus the filterbank's own 529, and the
-    /// encoder padding less the same 529.
+    /// Samples gapless playback trims from the front and the back: the LAME
+    /// encoder delay plus the filterbank's own 529, and the encoder padding
+    /// less the same 529. Constant for the stream, and zero once gapless is
+    /// switched off.
     pub fn trim(&self) -> (u64, u64) {
         if self.gapless {
-            (self.skip_front, self.skip_back)
+            self.trim
         } else {
             (0, 0)
         }
@@ -199,17 +194,24 @@ impl<'a> Mp3Decoder<'a> {
 
             let side_start = 4 + usize::from(header.protected) * 2;
             let main_start = side_start + header.side_info_bytes();
-            let Some(side_bytes) = frame.get(side_start..main_start) else {
-                continue; // truncated tail: nothing decodable here
+            let side = frame
+                .get(side_start..main_start)
+                .and_then(|bytes| layer3::read_side_info(bytes, &header).ok());
+            let produced = match side {
+                Some(side) => {
+                    let main = frame.get(main_start..).unwrap_or(&[]);
+                    self.decode_frame(&header, &side, main)?
+                }
+                None => {
+                    // Damaged side info. Dropping the frame would shorten the
+                    // timeline *and* leave the reservoir describing bytes that
+                    // no longer belong to what follows, so emit silence for it
+                    // and start the reservoir again.
+                    self.reservoir.clear();
+                    false
+                }
             };
-            let side = match layer3::read_side_info(side_bytes, &header) {
-                Ok(side) => side,
-                Err(_) => continue,
-            };
-            let main = frame.get(main_start..).unwrap_or(&[]);
-
-            let decoded = self.decode_frame(&header, &side, main)?;
-            self.emit(&header, decoded)?;
+            self.emit(&header, produced)?;
             if self.out.is_empty() {
                 // Wholly consumed by the gapless front trim; there is nothing
                 // to hand back, so decode the next frame instead of returning
@@ -251,7 +253,9 @@ impl<'a> Mp3Decoder<'a> {
         found
     }
 
-    /// Run the granules of one frame, returning whether real audio came out.
+    /// Run the granules of one frame. The bool says whether `self.out` was
+    /// filled; `false` means the reservoir could not supply this frame and the
+    /// caller must substitute silence.
     fn decode_frame(
         &mut self,
         header: &FrameHeader,
@@ -269,7 +273,6 @@ impl<'a> Mp3Decoder<'a> {
         self.push_reservoir(main);
 
         let mut bit_pos = start * 8;
-        let mut ok = true;
         for granule in 0..header.granules() {
             match layer3::decode_granule(
                 header,
@@ -286,20 +289,19 @@ impl<'a> Mp3Decoder<'a> {
                     self.append_granule(header, granule);
                 }
                 Err(_) => {
-                    // Corrupt granule: emit silence for the rest of the frame
-                    // rather than abandoning the file.
+                    // Corrupt granule: silence for the rest of the frame, but
+                    // keep whatever granules already decoded.
+                    self.granule[0].fill(0.0);
+                    self.granule[1].fill(0.0);
                     for g in granule..header.granules() {
-                        self.granule[0].fill(0.0);
-                        self.granule[1].fill(0.0);
                         self.append_granule(header, g);
                     }
-                    ok = false;
                     break;
                 }
             }
         }
         self.trim_reservoir();
-        Ok(ok)
+        Ok(true)
     }
 
     fn append_granule(&mut self, header: &FrameHeader, granule: usize) {
@@ -358,6 +360,11 @@ pub fn decode_all_limited(bytes: &[u8], limits: Limits) -> Result<DecodedAudio, 
     let mut pcm: Vec<f32> = Vec::new();
     let (mut rate, mut channels) = (0u32, 0u16);
     while let Some(frame) = decoder.next_frame()? {
+        if channels != 0 && (frame.channels != channels || frame.rate != rate) {
+            // One buffer cannot be both; a caller that wants the tail anyway
+            // can drive `next_frame` itself and watch the format.
+            return Err(AudioError::Unsupported("format changes mid-stream"));
+        }
         rate = frame.rate;
         channels = frame.channels;
         pcm.extend_from_slice(frame.pcm);
@@ -403,13 +410,13 @@ fn read_id3v2(bytes: &[u8], tags: &mut Tags) {
         let size = if major >= 4 {
             syncsafe(raw)
         } else {
-            u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize + 4
+            (u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize).saturating_add(4)
         };
         at = at.saturating_add(size.max(4));
     }
     // ID3v2.2 uses three-byte identifiers and sizes; 2.3 and 2.4 use four.
     let (id_len, header_len) = if major <= 2 { (3usize, 6usize) } else { (4, 10) };
-    while at + header_len <= body_end {
+    while at.saturating_add(header_len) <= body_end {
         let id = &bytes[at..at + id_len];
         if id[0] == 0 {
             break; // padding
