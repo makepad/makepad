@@ -63,17 +63,7 @@ pub struct PbrDisplayControls {
     /// is what makes metal read as metal, so it has its own control.
     pub env_intensity: f32,
     pub exposure: f32,
-    /// The viewer's Dark (night) stage: the same dim-sun / dim-ambient
-    /// ratios the game stage applies (`preview_world` dark sun 0.05 vs the
-    /// 0.72 day sun, ambient 0.035 vs 0.28), so the hero darkens with the
-    /// sky and slab instead of staying studio-lit over a night scene.
-    pub night: bool,
 }
-
-/// Night multipliers relative to the day rig (game-stage dark ratios).
-pub const NIGHT_KEY_FACTOR: f32 = 0.07;
-pub const NIGHT_AMBIENT_FACTOR: f32 = 0.125;
-pub const NIGHT_ENV_FACTOR: f32 = 0.10;
 
 impl Default for PbrDisplayControls {
     fn default() -> Self {
@@ -84,7 +74,6 @@ impl Default for PbrDisplayControls {
             ambient: 0.42,
             env_intensity: 1.2,
             exposure: 1.15,
-            night: false,
         }
     }
 }
@@ -107,16 +96,11 @@ impl PbrDisplayControls {
             DEFAULT_LIGHT_DIR
         };
         let exposure = self.exposure.max(0.0);
-        let (key, ambient, env) = if self.night {
-            (NIGHT_KEY_FACTOR, NIGHT_AMBIENT_FACTOR, NIGHT_ENV_FACTOR)
-        } else {
-            (1.0, 1.0, 1.0)
-        };
         ResolvedLightRig {
             light_dir,
-            light_color: self.light_color * (self.light_intensity.max(0.0) * exposure * key),
-            ambient: self.ambient.max(0.0) * exposure * ambient,
-            env_intensity: self.env_intensity.max(0.0) * exposure * env,
+            light_color: self.light_color * (self.light_intensity.max(0.0) * exposure),
+            ambient: self.ambient.max(0.0) * exposure,
+            env_intensity: self.env_intensity.max(0.0) * exposure,
         }
     }
 }
@@ -871,21 +855,6 @@ mod tests {
         assert_eq!(rig.light_color, vec3(0.0, 0.0, 0.0));
         assert_eq!(rig.ambient, 0.0);
         assert_eq!(rig.env_intensity, 0.0);
-    }
-
-    #[test]
-    fn night_dims_every_light_term_by_the_stage_ratios() {
-        let day = PbrDisplayControls::default().resolve();
-        let night = PbrDisplayControls {
-            night: true,
-            ..PbrDisplayControls::default()
-        }
-        .resolve();
-        assert_eq!(night.light_dir, day.light_dir);
-        assert!((night.light_color.x - day.light_color.x * NIGHT_KEY_FACTOR).abs() < 1e-6);
-        assert!((night.ambient - day.ambient * NIGHT_AMBIENT_FACTOR).abs() < 1e-6);
-        assert!((night.env_intensity - day.env_intensity * NIGHT_ENV_FACTOR).abs() < 1e-6);
-        assert!(night.light_color.x < 0.1 && night.ambient < 0.07);
     }
 
     #[test]
