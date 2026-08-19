@@ -558,9 +558,15 @@ const SQRT2_INV: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 /// Mid/side and intensity stereo, applied across a granule's two channels in
 /// bitstream (pre-reorder) order.
+///
+/// `right` is the *second* channel's granule info, which is the one that
+/// carries the intensity positions and, on MPEG-2/2.5, the intensity scale in
+/// the low bit of its `scalefac_compress`. Reading that bit from the first
+/// channel instead is wrong by a factor of 2^(1/4) per band, which is exactly
+/// what the CoreAudio comparison shows.
 fn apply_stereo(
     header: &FrameHeader,
-    gr: &GranuleInfo,
+    right: &GranuleInfo,
     layout: &BandLayout,
     right_scalefac: &Scalefactors,
     xr: &mut [[f32; LINES]; 2],
@@ -609,7 +615,7 @@ fn apply_stereo(
         if intensity_band {
             let (kl, kr) = if header.is_lsf() {
                 // LSF pans in quarter-log2 steps rather than by a tangent.
-                let shift = (gr.scalefac_compress & 1) as i32;
+                let shift = (right.scalefac_compress & 1) as i32;
                 let step = (((is_pos as i32 + 1) >> 1) << shift) as f32;
                 let k = (-step * 0.25).exp2();
                 if is_pos & 1 != 0 {
@@ -945,7 +951,7 @@ pub fn decode_granule(
 
     if channel_count == 2 {
         let right_scalefac = scratch.scalefac[1];
-        apply_stereo(header, &granules[0], &layouts[0], &right_scalefac, &mut scratch.xr);
+        apply_stereo(header, &granules[1], &layouts[0], &right_scalefac, &mut scratch.xr);
     }
 
     for ch in 0..channel_count {
