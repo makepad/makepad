@@ -838,6 +838,138 @@ impl Widget for LibraryGallery {
 }
 
 // ---------------------------------------------------------------------------
+// Run tray (one horizontal, virtualized row of the selected run's artifacts)
+// ---------------------------------------------------------------------------
+
+/// One member of the selected run as the tray shows it.
+#[derive(Clone)]
+pub struct RunTrayMember {
+    pub entry: GalleryEntry,
+    /// Stage-ish label under the thumb ("matte", "mesh", "paint", "image").
+    pub kind: String,
+}
+
+/// The selected run spread out: ONE row, horizontally scrolling and
+/// virtualized (imports bring hundreds of members), each chip a click-to-view
+/// / double-click-to-pin artifact. Same async preview rules as the History
+/// strip: decoded textures keyed by stable file id, never a synchronous read.
+#[derive(Script, ScriptHook, Widget)]
+pub struct RunTray {
+    #[deref]
+    view: View,
+    #[rust]
+    members: Vec<RunTrayMember>,
+    #[rust]
+    selected: Option<String>,
+    #[rust]
+    cache: PreviewCache,
+    #[rust]
+    stale_chips: HashSet<String>,
+}
+
+impl RunTray {
+    pub fn set_members(
+        &mut self,
+        cx: &mut Cx,
+        members: Vec<RunTrayMember>,
+        selected: Option<String>,
+        clear_previews: bool,
+    ) {
+        self.members = members;
+        self.selected = selected;
+        if clear_previews {
+            self.cache.clear();
+        }
+        self.view.redraw(cx);
+    }
+
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn file_at(&self, index: usize) -> Option<String> {
+        self.members.get(index).map(|m| m.entry.meta.file.clone())
+    }
+
+    pub fn take_preview_work(&mut self) -> Vec<(String, PreviewWork)> {
+        self.cache.take_pending()
+    }
+
+    /// Reuse a decode another widget already has (the History strip usually
+    /// holds every member of the selected run).
+    pub fn seed_texture(&mut self, file: &str, texture: Texture) {
+        if self.cache.cached(file).is_none() {
+            self.cache.install(file.to_string(), None, texture);
+            self.stale_chips.insert(file.to_string());
+        }
+    }
+
+    pub fn install_preview(
+        &mut self,
+        cx: &mut Cx,
+        file: String,
+        source: Option<PathBuf>,
+        texture: Texture,
+    ) {
+        self.stale_chips.insert(file.clone());
+        self.cache.install(file, source, texture);
+        self.view.redraw(cx);
+    }
+
+    pub fn install_anim_preview(
+        &mut self,
+        cx: &mut Cx,
+        file: String,
+        source: Option<PathBuf>,
+        frames: Vec<Texture>,
+        fps: f32,
+    ) {
+        self.stale_chips.insert(file.clone());
+        self.cache.install_anim(file, source, frames, fps);
+        self.view.redraw(cx);
+        cx.new_next_frame();
+    }
+}
+
+impl Widget for RunTray {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            let list_ref = step.as_portal_list();
+            let Some(mut list) = list_ref.borrow_mut() else {
+                continue;
+            };
+            list.set_item_range(cx, 0, self.members.len());
+            while let Some(item_id) = list.next_visible_item(cx) {
+                let Some(member) = self.members.get(item_id).cloned() else {
+                    continue;
+                };
+                let item = list.item(cx, item_id, id!(Chip));
+                item.label(cx, ids!(kind)).set_text(cx, &member.kind);
+                let selected = self.selected.as_deref() == Some(member.entry.meta.file.as_str());
+                item.as_view()
+                    .toggle_state(cx, selected, Animate::No, ids!(select.on), ids!(select.off));
+                let now = cx.time();
+                let texture = self.cache.texture_for(cx, &member.entry, now);
+                item.image(cx, ids!(thumb)).set_texture(cx, Some(texture));
+                self.stale_chips.remove(&member.entry.meta.file);
+                item.draw_all_unscoped(cx);
+            }
+        }
+        if self.cache.has_anims() {
+            cx.new_next_frame();
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        if matches!(event, Event::NextFrame(_)) && self.cache.has_anims() {
+            self.view.redraw(cx);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Library grid (wrapping thumbnail gallery on the Library surface)
 // ---------------------------------------------------------------------------
 

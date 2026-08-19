@@ -111,6 +111,11 @@ pub struct GenParams {
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
+    /// H3 always denoises video and audio jointly (no upstream mode drops
+    /// the audio rows from the packed sequence); this only controls whether
+    /// the service decodes the audio VAE and muxes an AAC track. Default on
+    /// (audible clip); off = silent mp4, faster by skipping decode + mux.
+    pub video_audio: bool,
     /// Requested Music3 song ceiling in seconds. Captured in each run spec,
     /// so moving the UI picker cannot mutate already queued/running songs.
     pub music_seconds: u32,
@@ -128,6 +133,7 @@ impl Default for GenParams {
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
+            video_audio: true,
             music_seconds: MUSIC_DEFAULT_SECONDS,
         }
     }
@@ -194,6 +200,9 @@ const CHARACTER_RIG_MODEL: &str = "skintokens";
 const CHARACTER_MOTION_MODEL: &str = "hy-motion";
 /// Instruction image editing (reference image + "change …" prompt).
 const EDIT_MODEL: &str = "flux2-klein-4b";
+/// General image 4x upscaling (RealESRGAN x4plus). Pinned — the domain has
+/// exactly one model, so no dropdown.
+const UPSCALE_MODEL: &str = "realesrgan-x4plus";
 
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
@@ -418,6 +427,14 @@ pub const PRESETS: &[Preset] = &[
     // — no segment/plan/composite chain needed. Consumer-only: refused
     // without a selected image.
     Preset::linear("edit selected image (instruction)", &["edit"], &[("edit", EDIT_MODEL)]),
+    // Native RealESRGAN x4plus: select a picture, get it back at 4x
+    // resolution. Consumer-only like `edit` — no prompt-only mode, refused
+    // without a selected image.
+    Preset::linear(
+        "image → upscale (×4)",
+        &["upscale"],
+        &[("upscale", UPSCALE_MODEL)],
+    ),
     Preset::linear("image → depthmap", &["image", "depth"], &[]),
     Preset::linear("image → segment", &["image", "segment"], &[("segment", "sam3-1-multiplex")]),
     // The character chain: prompt -> clean character image -> Trellis mesh ->
@@ -494,7 +511,9 @@ pub const PRESETS: &[Preset] = &[
 pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
-        "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" => Some(&["image/"]),
+        "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale" => {
+            Some(&["image/"])
+        }
         "paint" => Some(&["model/gltf-binary"]),
         _ => None,
     }
@@ -502,10 +521,11 @@ pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
 
 /// Domains that ONLY transform an input and have no prompt-only mode: a
 /// chain starting with one is seedable even though nothing is replaced
-/// (`edit`: "change the background to trees" needs the picture), and is
-/// refused without a selected input instead of failing on the box.
+/// (`edit`: "change the background to trees" needs the picture; `upscale`:
+/// RealESRGAN x4 has no prompt-only mode either), and is refused without a
+/// selected input instead of failing on the box.
 pub fn consumer_only_domain(domain: &str) -> bool {
-    matches!(domain, "edit")
+    matches!(domain, "edit" | "upscale")
 }
 
 /// Index of the first stage of `domains` that CONSUMES a payload of
@@ -540,6 +560,7 @@ pub fn stage_display_name(domain: &str) -> &str {
         "segment" => "SAM 3.1 segment",
         "paint" => "Hunyuan PBR paint",
         "edit" => "instruction edit",
+        "upscale" => "RealESRGAN x4 upscale",
         _ => domain,
     }
 }
@@ -1296,6 +1317,11 @@ impl Pipeline {
                 }
                 request.frames = Some(self.gen.video_frames);
                 request.steps = Some(self.gen.video_steps);
+                // H3 still denoises the audio rows jointly either way; off
+                // only skips the service's audio VAE decode + AAC mux.
+                if !self.gen.video_audio {
+                    request.audio = Some(false);
+                }
             }
             "mesh" => {
                 request.prompt = Some(prompt);
@@ -4358,6 +4384,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("speech", "indextts-2.5"),
             ("speech", "kokoro"),
             ("text", "qwen3.8-27b"),
+            ("upscale", "realesrgan-x4plus"),
             ("video", "minimax-h3"),
             ("video", "minimax-h3-bf16-96g"),
             ("video", "minimax-h3-nvfp4-32g"),
@@ -4597,6 +4624,29 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     }
 
     #[test]
+    fn upscale_chain_is_seeded_at_stage_zero_and_relays_the_picture() {
+        // Consumer-only first stage: seedable even though nothing is replaced.
+        assert_eq!(seed_replaces_prefix(&["upscale"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["upscale"], "model/gltf-binary"), None);
+        let mut pipeline = Pipeline::new(
+            "",
+            &["upscale"],
+            &[("upscale", UPSCALE_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline
+            .set_seed_input("image/png".to_string(), b"picture".to_vec())
+            .unwrap();
+        let upscale = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(upscale.input_content_type.as_deref(), Some("image/png"));
+        assert_eq!(decoded_input(&upscale), b"picture");
+        assert_eq!(upscale.width, None, "output size follows the reference (4x)");
+    }
+
+    #[test]
     fn motion_prompt_override_requests_one_prompted_take() {
         let mut pipeline = Pipeline::new(
             "a forest elf",
@@ -4621,6 +4671,29 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(decoded_input(&motion), b"rigged");
         // A selected GLB seeds this chain at the rig stage (mesh skipped).
         assert_eq!(seed_replaces_prefix(&["mesh", "rig", "motion"], "model/gltf-binary"), Some(1));
+    }
+
+    /// `video_audio` off requests a silent H3 clip (`request.audio =
+    /// Some(false)`); on (the default) leaves `request.audio` unset so the
+    /// service applies its own default (decode + mux the joint audio track).
+    #[test]
+    fn video_audio_toggle_sets_request_audio_field() {
+        let mut pipeline = Pipeline::new(
+            "dancing elf",
+            &["video"],
+            &[("video", "minimax-h3")],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        assert!(pipeline.gen.video_audio, "video_audio defaults on");
+        let video = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(video.audio, None, "default: no override, service decides");
+
+        pipeline.gen.video_audio = false;
+        let video = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(video.audio, Some(false));
     }
 
     #[test]
