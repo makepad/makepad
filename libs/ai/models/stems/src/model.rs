@@ -13,6 +13,63 @@ use makepad_ai_common::backend::{
 use makepad_ai_common::{DiffusionError, Result, TensorId};
 use std::path::Path;
 
+/// Command-buffer budget this model applies to the runtime it drives.
+///
+/// A chunk is ~700 GPU dispatches. Left at the runtime's throughput defaults
+/// those land in THREE command buffers of roughly half a second each, and an
+/// Apple GPU only preempts between command buffers — so a co-tenant trying to
+/// present a frame can wait that long. Rolling every `CB_MAX_OPS` dispatches
+/// cuts the worst-case wait to tens of milliseconds for a host-side cost of a
+/// few extra commits per chunk. Set `MAKEPAD_STEMS_CB_OPS=0` to leave the
+/// runtime's defaults alone (batch use with no interactive co-tenant).
+pub const CB_MAX_OPS: usize = 32;
+/// Shared-buffer byte budget paired with `CB_MAX_OPS`. Our one main buffer is
+/// multi-gigabyte and counted once per command buffer, so this alone would
+/// roll on every op; the op count is what actually governs. Kept generous so
+/// it never becomes the binding constraint by accident.
+pub const CB_MAX_BYTES: usize = 8 << 30;
+
+fn command_buffer_ops_limit() -> Option<usize> {
+    parse_cb_ops(std::env::var("MAKEPAD_STEMS_CB_OPS").ok().as_deref())
+}
+
+/// `None` = leave the runtime's own defaults in place.
+fn parse_cb_ops(value: Option<&str>) -> Option<usize> {
+    match value {
+        None => Some(CB_MAX_OPS),
+        Some(value) => match value.trim().parse::<usize>() {
+            Ok(0) => None,
+            Ok(ops) => Some(ops),
+            // Unparseable input must not silently disable the co-tenancy
+            // budget; fall back to the default rather than to "off".
+            Err(_) => Some(CB_MAX_OPS),
+        },
+    }
+}
+
+/// Worker threads for the per-(stem, channel) inverse STFT. Eight independent
+/// transforms exist per chunk; the default deliberately leaves cores for a
+/// host app's UI and audio threads rather than taking every core for ~100 ms.
+fn istft_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    parse_istft_threads(
+        std::env::var("MAKEPAD_STEMS_ISTFT_THREADS").ok().as_deref(),
+        cores,
+    )
+}
+
+fn parse_istft_threads(value: Option<&str>, cores: usize) -> usize {
+    let tasks = NUM_STEMS * AUDIO_CHANNELS;
+    if let Some(value) = value {
+        if let Ok(threads) = value.trim().parse::<usize>() {
+            return threads.clamp(1, tasks);
+        }
+    }
+    (cores / 2).clamp(1, tasks)
+}
+
 /// Planar stereo audio: one `Vec` per channel, equal length.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StereoBuf {
@@ -71,7 +128,7 @@ pub struct StemsModel {
     /// Reused per chunk so a long demix does not churn the allocator.
     features: Vec<f32>,
     spectrum: [Vec<f32>; AUDIO_CHANNELS],
-    masked: Vec<f32>,
+    istft_threads: usize,
 }
 
 impl StemsModel {
@@ -83,7 +140,13 @@ impl StemsModel {
         Self::load_with_runtime(checkpoint, runtime)
     }
 
+    /// NOTE: this configures `runtime`'s command-buffer budget for interactive
+    /// co-tenancy (see [`CB_MAX_OPS`]). Each `Runtime` owns its own command
+    /// queue, so only this separator's submissions are affected.
     pub fn load_with_runtime(checkpoint: impl AsRef<Path>, runtime: Runtime) -> Result<Self> {
+        if let Some(ops) = command_buffer_ops_limit() {
+            runtime.set_command_buffer_limits(ops, CB_MAX_BYTES);
+        }
         let mut weights =
             StemsWeights::load_with_extra(checkpoint, DEFAULT_GRAPH_EXTRA_BYTES)?;
         let graph = build_graph(&mut weights)?;
@@ -104,7 +167,7 @@ impl StemsModel {
                 vec![0.0; FREQ_BINS * CHUNK_FRAMES * 2],
                 vec![0.0; FREQ_BINS * CHUNK_FRAMES * 2],
             ],
-            masked: vec![0.0; FREQ_BINS * CHUNK_FRAMES * 2],
+            istft_threads: istft_threads(),
         })
     }
 
@@ -157,7 +220,12 @@ impl StemsModel {
         let t_forward = t0.elapsed();
 
         // -- complex mask + inverse STFT --
-        let mut stems = empty_stem_set(0);
+        // The eight (stem, channel) reconstructions are fully independent, and
+        // together they are the whole CPU cost of a chunk (the profile puts
+        // ~85% of on-CPU time in `Stft::inverse` and its FFT). Run them on a
+        // small pool: same arithmetic, a shorter window of CPU interference
+        // for whatever else the host is doing.
+        let mut masks: Vec<&[f32]> = Vec::with_capacity(NUM_STEMS);
         for (stem, mask_id) in self.graph.masks.iter().enumerate() {
             let bytes = execution.outputs.get(mask_id).ok_or_else(|| {
                 DiffusionError::model(format!("stems: graph returned no mask for stem {stem}"))
@@ -170,13 +238,46 @@ impl StemsModel {
                     FEATURES * CHUNK_FRAMES
                 )));
             }
-            for ch in 0..AUDIO_CHANNELS {
-                apply_mask(&self.spectrum[ch], mask, ch, &mut self.masked);
-                let samples = self
-                    .stft
-                    .inverse(&self.masked, CHUNK_FRAMES, CHUNK_SAMPLES);
-                *stems[stem].channel_mut(ch) = samples;
+            masks.push(mask);
+        }
+
+        let tasks: Vec<(usize, usize)> = (0..NUM_STEMS)
+            .flat_map(|stem| (0..AUDIO_CHANNELS).map(move |ch| (stem, ch)))
+            .collect();
+        let spectrum = &self.spectrum;
+        let stft = &self.stft;
+        let masks = &masks;
+        let threads = self.istft_threads.min(tasks.len()).max(1);
+        let per_thread = tasks.len().div_ceil(threads);
+        let mut done: Vec<(usize, usize, Vec<f32>)> = Vec::with_capacity(tasks.len());
+        std::thread::scope(|scope| -> Result<()> {
+            let mut handles = Vec::with_capacity(threads);
+            for group in tasks.chunks(per_thread) {
+                handles.push(scope.spawn(move || {
+                    let mut masked = vec![0.0f32; FREQ_BINS * CHUNK_FRAMES * 2];
+                    group
+                        .iter()
+                        .map(|&(stem, ch)| {
+                            apply_mask(&spectrum[ch], masks[stem], ch, &mut masked);
+                            (stem, ch, stft.inverse(&masked, CHUNK_FRAMES, CHUNK_SAMPLES))
+                        })
+                        .collect::<Vec<_>>()
+                }));
             }
+            for handle in handles {
+                // A panic in a worker must surface as an error, not as a
+                // silently short stem set.
+                let part = handle.join().map_err(|_| {
+                    DiffusionError::model("stems: inverse-STFT worker panicked")
+                })?;
+                done.extend(part);
+            }
+            Ok(())
+        })?;
+
+        let mut stems = empty_stem_set(0);
+        for (stem, ch, samples) in done {
+            *stems[stem].channel_mut(ch) = samples;
         }
         if timing {
             let total = t0.elapsed();
@@ -255,6 +356,36 @@ fn f32_from_bytes(bytes: &[u8]) -> Result<&[f32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_buffer_budget_parses() {
+        assert_eq!(parse_cb_ops(None), Some(CB_MAX_OPS));
+        assert_eq!(parse_cb_ops(Some("64")), Some(64));
+        // Explicit zero is the documented opt-out.
+        assert_eq!(parse_cb_ops(Some("0")), None);
+        // Garbage must not read as "opt out".
+        assert_eq!(parse_cb_ops(Some("banana")), Some(CB_MAX_OPS));
+        assert_eq!(parse_cb_ops(Some("")), Some(CB_MAX_OPS));
+        // 32 ops over ~713 dispatches is ~24 command buffers, measured as the
+        // knee: finer is free, coarser costs throughput.
+        assert!(CB_MAX_OPS > 0 && CB_MAX_OPS <= 64);
+    }
+
+    #[test]
+    fn istft_thread_count_is_clamped_to_the_work() {
+        let tasks = NUM_STEMS * AUDIO_CHANNELS;
+        // Never more threads than there are independent transforms.
+        assert_eq!(parse_istft_threads(Some("64"), 16), tasks);
+        assert_eq!(parse_istft_threads(Some("1"), 16), 1);
+        // Never zero.
+        assert_eq!(parse_istft_threads(Some("0"), 16), 1);
+        assert_eq!(parse_istft_threads(Some("nope"), 16), 8);
+        // Default leaves half the cores for the host's UI and audio threads.
+        assert_eq!(parse_istft_threads(None, 16), tasks);
+        assert_eq!(parse_istft_threads(None, 8), 4);
+        assert_eq!(parse_istft_threads(None, 2), 1);
+        assert_eq!(parse_istft_threads(None, 1), 1);
+    }
 
     #[test]
     fn feature_index_tiles_the_vector_once() {
