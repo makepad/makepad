@@ -678,6 +678,187 @@ impl Flux2DevPipeline {
     }
 }
 
+impl Flux2DevPipeline {
+    /// Instruction edit: `request.prompt` + reference images → edited image.
+    /// Same mechanism as Klein (`flux2_concat_ref_tokens`: reference latents
+    /// packed on T-axis offsets 10, 20, …, the DiT predicts only the first
+    /// `gen_tokens`), with dev's Mistral conditioning and guidance embed.
+    /// `guidance` = the distilled guidance value (dev default 4.0).
+    pub fn edit_with_hooks(
+        &mut self,
+        request: &Flux2EditRequest,
+        guidance: f32,
+        mut on_stage: Option<&mut dyn FnMut(&str, usize, usize)>,
+    ) -> Result<Flux2EditResult> {
+        if request.width % 16 != 0 || request.height % 16 != 0 {
+            return Err(DiffusionError::workflow(format!(
+                "flux2 dev edit size must be a multiple of 16, got {}x{}",
+                request.width, request.height
+            )));
+        }
+        if request.steps == 0 {
+            return Err(DiffusionError::workflow("flux2 dev edit needs at least 1 step"));
+        }
+        if request.references.is_empty() && request.teacher_ref_tokens.is_none() {
+            return Err(DiffusionError::workflow(
+                "flux2 dev edit requires at least one reference image",
+            ));
+        }
+        let total_started = std::time::Instant::now();
+
+        // Conditioning: identical to generate (system message + instruction,
+        // zero-left-padded to the 512 window), served from the prompt cache.
+        let width = FLUX2_MAX_SEQUENCE_LENGTH;
+        let cond_width = Mistral3TextConfig::flux2_dev().conditioning_dim() as usize;
+        let (prompt_embeds, input_ids) = if let Some(embeds) = &request.teacher_embeds {
+            if embeds.len() != width * cond_width {
+                return Err(DiffusionError::workflow(format!(
+                    "flux2 dev teacher embeds expected {} values, got {}",
+                    width * cond_width,
+                    embeds.len()
+                )));
+            }
+            (embeds.clone(), Vec::new())
+        } else if let Some((_, embeds, ids)) = self
+            .cached_prompt
+            .as_ref()
+            .filter(|(prompt, _, _)| *prompt == request.prompt)
+        {
+            (embeds.clone(), ids.clone())
+        } else {
+            let ids = self
+                .tokenizer
+                .encode_t2i_unpadded(FLUX2_SYSTEM_MESSAGE, &request.prompt);
+            let mut te_hook = on_stage
+                .as_deref_mut()
+                .map(|hook| move |done: usize, total: usize| hook("text-encode", done, total));
+            let (conditioning, _) = flux2_dev_text_encode(
+                &self.text_encoder,
+                &self.text_prepared,
+                &ids,
+                te_hook
+                    .as_mut()
+                    .map(|hook| hook as &mut dyn FnMut(usize, usize)),
+                false,
+            )?;
+            drop(te_hook);
+            let padded = flux2_dev_pad_conditioning(&conditioning, ids.len(), cond_width, width)?;
+            self.cached_prompt = Some((request.prompt.clone(), padded.clone(), ids.clone()));
+            (padded, ids)
+        };
+        let te_ms = total_started.elapsed().as_secs_f64() * 1000.0;
+
+        // Reference images → packed latents on successive T offsets.
+        let encode_started = std::time::Instant::now();
+        if let Some(hook) = on_stage.as_deref_mut() {
+            hook("encode-refs", 0, request.references.len().max(1));
+        }
+        let mut ref_packed = Vec::new();
+        if let Some(tokens) = &request.teacher_ref_tokens {
+            let packed_w = (request.width / 16) as usize;
+            let packed_h = (request.height / 16) as usize;
+            let packed = Flux2PackedLatents::from_tokens(tokens, packed_w, packed_h, 128)?;
+            let ids = flux2_image_ids(packed.width, packed.height, flux2_ref_time_offset(0));
+            ref_packed.push((tokens.clone(), ids, packed));
+        } else {
+            for (index, image) in request.references.iter().enumerate() {
+                let packed = flux2_vae_encode(&self.vae, image)?;
+                let tokens = packed.to_tokens();
+                let ids = flux2_image_ids(packed.width, packed.height, flux2_ref_time_offset(index));
+                ref_packed.push((tokens, ids, packed));
+                if let Some(hook) = on_stage.as_deref_mut() {
+                    hook("encode-refs", index + 1, request.references.len());
+                }
+            }
+        }
+        let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
+
+        let packed_w = (request.width / 16) as usize;
+        let packed_h = (request.height / 16) as usize;
+        let gen_tokens = packed_w * packed_h;
+        let channels = 128usize;
+        let mut sample = match &request.noise {
+            Some(noise) => {
+                if noise.len() != gen_tokens * channels {
+                    return Err(DiffusionError::workflow(format!(
+                        "flux2 dev edit noise expected {} values, got {}",
+                        gen_tokens * channels,
+                        noise.len()
+                    )));
+                }
+                noise.clone()
+            }
+            None => splitmix_noise(request.seed, gen_tokens * channels),
+        };
+        let gen_ids = flux2_image_ids(packed_w, packed_h, 0);
+        let refs: Vec<(Vec<f32>, Vec<Flux2PosId>)> = ref_packed
+            .iter()
+            .map(|(tokens, ids, _)| (tokens.clone(), ids.clone()))
+            .collect();
+        let txt_ids = flux2_text_ids(width);
+        let sigmas = flux2_schedule(request.steps, gen_tokens)?;
+
+        let denoise_started = std::time::Instant::now();
+        let mut step_residuals = Vec::new();
+        for step in 0..request.steps {
+            if let Some(hook) = on_stage.as_deref_mut() {
+                hook("denoise", step + 1, request.steps);
+            }
+            let (img_tokens, img_ids) = flux2_concat_ref_tokens(&sample, &gen_ids, &refs);
+            let run = flux2_transformer_forward(
+                &self.transformer,
+                &img_tokens,
+                &img_ids,
+                &prompt_embeds,
+                &txt_ids,
+                sigmas[step],
+                Some(guidance),
+                gen_tokens,
+            )?;
+            if step == 0 || step + 1 == request.steps {
+                step_residuals.push(run.prediction.clone());
+            }
+            flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
+        }
+        let warm_ms = denoise_started.elapsed().as_secs_f64() * 1000.0;
+        flux2_dit_clear_pool();
+        let _ = crate::backend::gpu_stream_ring_release_slots();
+
+        let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
+        let decode_started = std::time::Instant::now();
+        if let Some(hook) = on_stage.as_deref_mut() {
+            hook("decode", 0, 1);
+        }
+        let image = flux2_vae_decode(&self.vae, &packed)?;
+        let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+        let png_started = std::time::Instant::now();
+        let rgb = flux2_image_to_rgb_u8(&image);
+        let png = encode_png_rgb(
+            &planar_rgb_to_whcb(&rgb, image.width, image.height),
+            image.width,
+            image.height,
+        )?;
+        let png_ms = png_started.elapsed().as_secs_f64() * 1000.0;
+        Ok(Flux2EditResult {
+            image,
+            png,
+            packed_latents: packed,
+            ref_packed: ref_packed[0].2.clone(),
+            input_ids,
+            real_len: 0,
+            prompt_embeds,
+            step_residuals,
+            sigmas,
+            warm_ms,
+            te_ms,
+            encode_ms,
+            decode_ms,
+            png_ms,
+            total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
 /// `MAKEPAD_GPU_PROF` line: live device memory + weight-cache/pool counters
 /// (reset on each call) — the 32GB-card decode phase lives at the WDDM
 /// residency cliff, so "where the bytes are" is the first question.

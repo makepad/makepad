@@ -344,9 +344,9 @@ script_mod! {
     // One fleet box: status light + host + what it is busy with. Click =
     // per-box model list (enable/disable for routing).
     let BoxCard = RoundedView{
-        width: 126 height: 44
-        flow: Down spacing: 1
-        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+        width: 126 height: Fit
+        flow: Down spacing: 2
+        padding: Inset{left: 6 right: 6 top: 5 bottom: 5}
         cursor: MouseCursor.Hand
         draw_bg +: {
             color: #x161619
@@ -384,7 +384,13 @@ script_mod! {
             }
             host := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 8} } }
         }
-        busy := HintLabel{ text: "" draw_text +: { text_style: theme.font_regular{font_size: 7.5} } }
+        // Activity line sits under the host text (past the light), not at
+        // the card's left edge, so the two lines read as one block.
+        busy := HintLabel{
+            text: ""
+            margin: Inset{left: 13}
+            draw_text +: { text_style: theme.font_regular{font_size: 7.5} }
+        }
     }
     // One model on a box, inside the box popup.
     let FleetModelRow = View{
