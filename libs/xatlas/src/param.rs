@@ -306,9 +306,7 @@ impl PiecewiseParam {
                 self.texcoords[vertex as usize] = texcoords[i as usize];
             }
             self.add_face_to_patch(seed);
-            let tcs = self.texcoords.clone();
-            let idxs = self.mesh().indices().to_vec();
-            self.boundary_grid.reset(&tcs, &idxs, 0);
+            self.boundary_grid.reset(0);
             let mesh = unsafe { &*self.mesh };
             let mut it = mesh.face_edge_iter(seed);
             let mut seed_edges = Vec::new();
@@ -407,9 +405,13 @@ impl PiecewiseParam {
                     cur = self.candidate_store[i].next;
                 }
                 let eps = mesh.epsilon();
-                let new_e = self.new_boundary_edges.clone();
-                let ign = self.ignore_boundary_edges.clone();
-                invalid = self.boundary_grid.intersect(eps, Some(&new_e), &ign);
+                invalid = self.boundary_grid.intersect(
+                    &self.texcoords,
+                    mesh.indices(),
+                    eps,
+                    Some(&self.new_boundary_edges),
+                    &self.ignore_boundary_edges,
+                );
             }
             if invalid {
                 cur = Some(best_idx);
@@ -430,9 +432,7 @@ impl PiecewiseParam {
                     self.add_face_to_patch(f);
                 }
                 self.remove_linked_candidates(best_idx);
-                let tcs = self.texcoords.clone();
-                let idxs = self.mesh().indices().to_vec();
-                self.boundary_grid.reset(&tcs, &idxs, 0);
+                self.boundary_grid.reset(0);
                 let patch = self.patch.clone();
                 for &pf in &patch {
                     let mesh = unsafe { &*self.mesh };
@@ -697,12 +697,13 @@ pub struct Quality {
 
 impl Quality {
     pub fn compute_boundary_intersection(&mut self, mesh: &Mesh, grid: &mut UniformGrid2) {
-        let boundary_edges = mesh.boundary_edges().to_vec();
-        grid.reset(mesh.texcoords(), mesh.indices(), boundary_edges.len() as u32);
-        for &e in &boundary_edges {
+        let boundary_edges = mesh.boundary_edges();
+        grid.reset(boundary_edges.len() as u32);
+        for &e in boundary_edges {
             grid.append(e);
         }
-        self.boundary_intersection = grid.intersect(mesh.epsilon(), None, &[]);
+        self.boundary_intersection =
+            grid.intersect(mesh.texcoords(), mesh.indices(), mesh.epsilon(), None, &[]);
     }
 
     pub fn compute_flipped_faces(&mut self, mesh: &Mesh, flipped_faces: Option<&mut Vec<u32>>) {

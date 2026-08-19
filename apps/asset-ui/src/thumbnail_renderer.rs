@@ -20,7 +20,7 @@
 //! - FRAMING: every subject is scaled by its largest extent onto the same
 //!   studio box, feet on y=0. One camera frames every card.
 
-use crate::mesh_view::pbr_preview::{parse_mesh_glb, PbrPreview};
+use crate::mesh_view::pbr_preview::{parse_material_bearing_glb, PbrPreview};
 use crate::mesh_view::{extract_base_color, image_texture, is_playable_skin};
 use makepad_render::play::LocoState;
 use makepad_render::skin::{PoseBuffer, SkinnedModel};
@@ -453,6 +453,12 @@ pub struct ThumbnailRenderer {
     draw_bg: DrawSceneTexture,
     #[new]
     pass: DrawPass,
+    /// The pass's main draw list. The scene renderer opens and CLOSES its
+    /// own list, so anything drawn after it (the PBR hero) would otherwise
+    /// land in the host window's list — outside this pass, invisible in the
+    /// readback. Every draw of the pass nests inside this one.
+    #[new]
+    pass_list: DrawList,
     #[new]
     draw_list: DrawList,
     #[new]
@@ -683,8 +689,12 @@ impl ThumbnailRenderer {
             }
         }
 
-        // Raw Kenney / TRELLIS / factors-only: same DrawPbr MeshView uses.
-        if let Some(gltf) = parse_mesh_glb(&job.glb) {
+        // Same routing law as MeshView: a material-bearing GLB (paint
+        // output, textured Kenney) lights through DrawPbr; a bare TRELLIS
+        // hull or factors-only model takes the game statue lane, which
+        // computes normals and bakes baseColorFactor / COLOR_0 (DrawPbr on
+        // a mesh without normals came out as an unshaded white silhouette).
+        if let Some(gltf) = parse_material_bearing_glb(&job.glb) {
             match self
                 .pbr
                 .load(&mut self.draw_pbr, cx, gltf, self.generation)
@@ -870,6 +880,7 @@ impl ThumbnailRenderer {
         if let Some(scene_state) = preview_scene_state(look, rect, cx.time()) {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
+            self.pass_list.begin_always(cx3d);
             let mut character_items = Vec::new();
             let mut character_textures = Vec::new();
             let statues = match &active.subject {
@@ -926,6 +937,7 @@ impl ThumbnailRenderer {
             if is_pbr {
                 self.pbr.draw(&mut self.draw_pbr, cx3d);
             }
+            self.pass_list.end(cx3d);
         }
         cx.end_pass(&self.pass);
         self.pass.set_dpi_factor(cx, 1.0);

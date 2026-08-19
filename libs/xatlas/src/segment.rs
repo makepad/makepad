@@ -464,6 +464,13 @@ struct ClusteredCharts {
     shared_boundary_lengths_no_seams: Vec<f32>,
     shared_boundary_edge_count_no_seams: Vec<u32>,
     placing_seeds: bool,
+    /// Reused across add_face_to_chart candidate rebuilds.
+    candidate_scratch: Vec<(f32, u32)>,
+    /// Faces sorted by planar-region area (desc) then index (asc): the
+    /// order xatlas's per-seed full-mesh scan would pick them in. Claiming
+    /// is monotonic inside one claim pass, so a cursor replaces the scan.
+    seed_order: Vec<u32>,
+    seed_cursor: usize,
 }
 
 impl ClusteredCharts {
@@ -482,6 +489,9 @@ impl ClusteredCharts {
             shared_boundary_lengths_no_seams: Vec::new(),
             shared_boundary_edge_count_no_seams: Vec::new(),
             placing_seeds: false,
+            candidate_scratch: Vec::new(),
+            seed_order: Vec::new(),
+            seed_cursor: 0,
         }
     }
     fn data(&self) -> &AtlasData {
@@ -522,6 +532,7 @@ impl ClusteredCharts {
         let total = self.faces_left as f64;
         let max_cost = self.data().options.max_cost;
         let max_iterations = self.data().options.max_iterations;
+        self.build_seed_order(face_count);
         // Seeding claims every face once: 0.00..0.35.
         if !self.place_seeds(max_cost * 0.5, &mut |left| {
             progress(0.35 * (1.0 - left as f64 / total))
@@ -573,8 +584,27 @@ impl ClusteredCharts {
         ok
     }
 
+    /// xatlas picks each new seed by scanning every face for the largest
+    /// planar-region area not yet in a chart (`createChart`). That scan is
+    /// O(faces) per chart; sorting once and walking a cursor yields the
+    /// same face (largest area, lowest index on ties, area > 0 only).
+    fn build_seed_order(&mut self, face_count: u32) {
+        let mut order: Vec<(f32, u32)> = (0..face_count)
+            .map(|f| (self.planar().region_area(self.planar().region_id_from_face(f)), f))
+            .filter(|(area, _)| *area > 0.0)
+            .collect();
+        order.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        self.seed_order = order.into_iter().map(|(_, f)| f).collect();
+        self.seed_cursor = 0;
+    }
+
     fn claim_all_faces(&mut self, threshold: f32, progress: &mut dyn FnMut(u32) -> bool) -> bool {
         let mut since_report = 0u32;
+        self.seed_cursor = 0;
         while self.faces_left > 0 {
             let before = self.faces_left;
             if !self.create_chart(threshold) {
@@ -719,9 +749,12 @@ impl ClusteredCharts {
                     continue;
                 }
                 let mut external_boundary_length = 0.0f32;
-                self.shared_boundary_lengths = vec![0.0; chart_count];
-                self.shared_boundary_lengths_no_seams = vec![0.0; chart_count];
-                self.shared_boundary_edge_count_no_seams = vec![0; chart_count];
+                self.shared_boundary_lengths.clear();
+                self.shared_boundary_lengths.resize(chart_count, 0.0);
+                self.shared_boundary_lengths_no_seams.clear();
+                self.shared_boundary_lengths_no_seams.resize(chart_count, 0.0);
+                self.shared_boundary_edge_count_no_seams.clear();
+                self.shared_boundary_edge_count_no_seams.resize(chart_count, 0);
                 let face_count = self.charts[c as usize].as_ref().unwrap().faces.len();
                 for i in 0..face_count {
                     let f = self.charts[c as usize].as_ref().unwrap().faces[i];
@@ -840,24 +873,17 @@ impl ClusteredCharts {
         let id = self.charts.len() as i32;
         let mut chart = ClusteredChart::new();
         chart.id = id;
-        let mut seed = UINT32_MAX;
-        let mut largest_area = -1.0f32;
-        let face_count = self.data().mesh().face_count();
-        for f in 0..face_count {
-            if self.data().is_face_in_chart.get(f) {
-                continue;
-            }
-            let area = self.planar().region_area(self.planar().region_id_from_face(f));
-            if area > largest_area {
-                largest_area = area;
-                seed = f;
-            }
+        while self.seed_cursor < self.seed_order.len()
+            && self.data().is_face_in_chart.get(self.seed_order[self.seed_cursor])
+        {
+            self.seed_cursor += 1;
         }
-        if seed == UINT32_MAX {
-            // Nothing left to claim (faces_left is stale): don't seed a chart
-            // on an already-claimed face, which would double-count it.
+        if self.seed_cursor >= self.seed_order.len() {
+            // Nothing seedable is left (faces_left may be stale): don't seed
+            // a chart on an already-claimed face, which would double-count it.
             return false;
         }
+        let seed = self.seed_order[self.seed_cursor];
         chart.seed = seed;
         self.charts.push(Some(Box::new(chart)));
         let ci = self.charts.len() as u32 - 1;
@@ -891,16 +917,21 @@ impl ClusteredCharts {
     }
 
     fn compute_chart_basis(&mut self, chart_i: u32, basis: &mut Basis) -> bool {
-        let faces = self.charts[chart_i as usize].as_ref().unwrap().faces.clone();
+        // Borrow the face list in place: this runs once per face added, so a
+        // clone here made chart growth quadratic in allocation traffic.
+        let faces = std::mem::take(&mut self.charts[chart_i as usize].as_mut().unwrap().faces);
         self.temp_points.resize(faces.len() * 3, Vec3::splat(0.0));
-        for (i, &f) in faces.iter().enumerate() {
-            for j in 0..3 {
-                self.temp_points[i * 3 + j] = self
-                    .data()
-                    .mesh()
-                    .position(self.data().mesh().vertex_at(f * 3 + j as u32));
+        {
+            // AtlasData is reached through a raw pointer, so this borrow is
+            // independent of `self.temp_points`.
+            let mesh: &Mesh = unsafe { &*(*self.data).mesh };
+            for (i, &f) in faces.iter().enumerate() {
+                for j in 0..3 {
+                    self.temp_points[i * 3 + j] = mesh.position(mesh.vertex_at(f * 3 + j as u32));
+                }
             }
         }
+        self.charts[chart_i as usize].as_mut().unwrap().faces = faces;
         Fit::compute_basis(&self.temp_points, basis)
     }
 
@@ -914,25 +945,36 @@ impl ClusteredCharts {
 
     fn parameterize_chart(&mut self, chart_i: u32) {
         let (faces, tangent, bitangent) = {
-            let c = self.charts[chart_i as usize].as_ref().unwrap();
-            (c.faces.clone(), c.basis.tangent, c.basis.bitangent)
+            let c = self.charts[chart_i as usize].as_mut().unwrap();
+            (std::mem::take(&mut c.faces), c.basis.tangent, c.basis.bitangent)
         };
-        for &face in &faces {
-            for j in 0..3 {
-                let offset = face * 3 + j;
-                let pos = self.data().mesh().position(self.data().mesh().vertex_at(offset));
-                self.texcoords[offset as usize] = Vec2::new(dot3(tangent, pos), dot3(bitangent, pos));
+        {
+            let mesh: &Mesh = unsafe { &*(*self.data).mesh };
+            for &face in &faces {
+                for j in 0..3 {
+                    let offset = face * 3 + j;
+                    let pos = mesh.position(mesh.vertex_at(offset));
+                    self.texcoords[offset as usize] =
+                        Vec2::new(dot3(tangent, pos), dot3(bitangent, pos));
+                }
             }
         }
+        self.charts[chart_i as usize].as_mut().unwrap().faces = faces;
     }
 
     fn is_chart_parameterization_valid(&mut self, chart_i: u32) -> bool {
         let (faces, id) = {
-            let c = self.charts[chart_i as usize].as_ref().unwrap();
-            (c.faces.clone(), c.id)
+            let c = self.charts[chart_i as usize].as_mut().unwrap();
+            (std::mem::take(&mut c.faces), c.id)
         };
+        let valid = self.chart_parameterization_valid_inner(&faces, id);
+        self.charts[chart_i as usize].as_mut().unwrap().faces = faces;
+        valid
+    }
+
+    fn chart_parameterization_valid_inner(&mut self, faces: &[u32], id: i32) -> bool {
         let mut flipped = 0u32;
-        for &f in &faces {
+        for &f in faces {
             if self.is_face_flipped(f) {
                 flipped += 1;
             }
@@ -940,8 +982,8 @@ impl ClusteredCharts {
         if flipped != 0 && flipped != faces.len() as u32 {
             return false;
         }
-        self.boundary_grid.reset(&self.texcoords, &[], 0);
-        for &f in &faces {
+        self.boundary_grid.reset(0);
+        for &f in faces {
             for j in 0..3 {
                 let edge = f * 3 + j;
                 if self.is_chart_boundary_edge(id, edge) {
@@ -950,7 +992,7 @@ impl ClusteredCharts {
             }
         }
         let eps = self.data().mesh().epsilon();
-        !self.boundary_grid.intersect(eps, None, &[])
+        !self.boundary_grid.intersect(&self.texcoords, &[], eps, None, &[])
     }
 
     fn add_face_to_chart(&mut self, chart_i: u32, face: u32) -> bool {
@@ -1030,14 +1072,17 @@ impl ClusteredCharts {
         let nfaces = self.charts[chart_i as usize].as_ref().unwrap().faces.len() as f32;
         let sum = self.charts[chart_i as usize].as_ref().unwrap().centroid_sum;
         self.charts[chart_i as usize].as_mut().unwrap().centroid = sum / nfaces;
-        self.charts[chart_i as usize].as_mut().unwrap().candidates.clear();
-        let faces = self.charts[chart_i as usize].as_ref().unwrap().faces.clone();
-        let failed = self.charts[chart_i as usize]
-            .as_ref()
-            .unwrap()
-            .failed_planar_regions
-            .clone();
-        let mut cands: Vec<(f32, u32)> = Vec::new();
+        // Rebuild the candidate queue from every chart edge (xatlas does
+        // this per added face too). The chart's own vectors are borrowed
+        // via take/restore rather than cloned: the cost functions read the
+        // chart's id/area/boundary but never its face list.
+        let (faces, failed) = {
+            let c = self.charts[chart_i as usize].as_mut().unwrap();
+            c.candidates.clear();
+            (std::mem::take(&mut c.faces), std::mem::take(&mut c.failed_planar_regions))
+        };
+        let mut cands = std::mem::take(&mut self.candidate_scratch);
+        cands.clear();
         for &f in &faces {
             for j in 0..3 {
                 let edge = f * 3 + j;
@@ -1059,23 +1104,26 @@ impl ClusteredCharts {
                 }
             }
         }
-        for (cost, oface) in cands {
-            self.charts[chart_i as usize]
-                .as_mut()
-                .unwrap()
-                .candidates
-                .push(cost, oface);
+        {
+            let c = self.charts[chart_i as usize].as_mut().unwrap();
+            c.faces = faces;
+            c.failed_planar_regions = failed;
+            for &(cost, oface) in &cands {
+                c.candidates.push(cost, oface);
+            }
         }
+        self.candidate_scratch = cands;
         true
     }
 
     fn relocate_seed(&mut self, chart_i: u32) -> bool {
-        let faces = self.charts[chart_i as usize].as_ref().unwrap().faces.clone();
+        let faces = std::mem::take(&mut self.charts[chart_i as usize].as_mut().unwrap().faces);
         self.best_triangles.clear();
         for &f in &faces {
             let cost = self.compute_normal_deviation_metric(chart_i, f);
             self.best_triangles.push(cost, f);
         }
+        self.charts[chart_i as usize].as_mut().unwrap().faces = faces;
         let mut most_central = 0u32;
         let mut min_distance = f32::MAX;
         let centroid = self.charts[chart_i as usize].as_ref().unwrap().centroid;

@@ -160,6 +160,34 @@ pub fn alpha_is_segmented(rgba: &[u8]) -> bool {
 /// The second check catches a sheet split across several components.  A normal
 /// foot sole can touch the minimum Y plane, but it neither consumes 12% of all
 /// faces nor spans 80% of both other reconstruction axes.
+/// Piecewise-linear map from the generator's internal progress timeline to
+/// the fraction shown to clients. Knots are (internal, display); measured
+/// on an RTX PRO 6000 for an ~80k-face result: forward 28s, weld+fill 9s,
+/// BVH+field 3s, remesh/decimate 8s, xatlas unwrap 20-40s, bake 2s.
+pub fn display_fraction(internal: f64) -> f64 {
+    const KNOTS: [(f64, f64); 10] = [
+        (0.000, 0.00),
+        (0.880, 0.42), // native forward done
+        (0.890, 0.52), // weld + fill holes
+        (0.900, 0.56), // BVH + remesh field
+        (0.937, 0.62), // remesh faces, weld/fill/drop
+        (0.960, 0.70), // decimate
+        (0.967, 0.73), // final weld/fill/drop, orient, sampler
+        (0.973, 0.92), // xatlas unwrap
+        (0.980, 0.97), // texel bake
+        (1.000, 1.00), // encode + done
+    ];
+    let x = if internal.is_finite() { internal.clamp(0.0, 1.0) } else { 0.0 };
+    for pair in KNOTS.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        if x <= x1 {
+            return y0 + (y1 - y0) * ((x - x0) / (x1 - x0));
+        }
+    }
+    1.0
+}
+
 /// Advisory only: the reconstruction is logged against these heuristics but
 /// never rejected. Whatever TRELLIS produced is what the user gets.
 pub fn check_trellis_mesh_quality(
@@ -709,10 +737,16 @@ impl ContentBackend for TrellisBackend {
                 .clamp(256, 4096) as usize,
         };
         cancel.check()?;
+        // The generator reports on an internal timeline (native forward
+        // 0..0.88, then the CPU post-processing squeezed into 0.88..0.98).
+        // Wall time is the other way round on a real mesh — the unwrap alone
+        // outlasts the whole forward — so the client-visible fraction is
+        // re-banded to roughly follow elapsed time.
+        let mut display = |label: &str, internal: f64| progress(label, display_fraction(internal));
         let bytes = match &mut self.gen {
-            Gen::Stub(gen) => gen(&job, progress)?,
+            Gen::Stub(gen) => gen(&job, &mut display)?,
             #[cfg(feature = "mesh")]
-            Gen::Trellis(gen) => gen.generate(&job, progress, cancel)?,
+            Gen::Trellis(gen) => gen.generate(&job, &mut display, cancel)?,
         };
         cancel.check()?;
         Ok(vec![ArtifactData {
@@ -2060,6 +2094,25 @@ mod tests {
             AssetAiError::Params(msg) => assert!(msg.contains("input_b64")),
             other => panic!("expected Params error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn display_fraction_is_monotone_and_time_weighted() {
+        let mut last = -1.0;
+        for i in 0..=1000 {
+            let x = i as f64 / 1000.0;
+            let y = display_fraction(x);
+            assert!(y >= last, "not monotone at {x}: {y} < {last}");
+            assert!((0.0..=1.0).contains(&y));
+            last = y;
+        }
+        assert_eq!(display_fraction(0.0), 0.0);
+        assert_eq!(display_fraction(1.0), 1.0);
+        // The unwrap band (0.967..0.973 internally) must be a real stretch
+        // of the visible bar, not the 0.6% it was.
+        assert!(display_fraction(0.973) - display_fraction(0.967) > 0.15);
+        assert!(display_fraction(0.88) < 0.5, "forward is under half the wall time");
+        assert_eq!(display_fraction(f64::NAN), 0.0);
     }
 
     #[test]
