@@ -272,6 +272,11 @@ impl AppleStreamDecoder {
     }
 }
 
+// SAFETY: see `AppleStreamEncoder`'s identical `Send` impl in
+// apple_stream_encoder.rs — same reasoning (opaque refcounted VideoToolbox
+// session object, no thread affinity, caller-enforced exclusive access).
+unsafe impl Send for AppleStreamDecoder {}
+
 impl Drop for AppleStreamDecoder {
     fn drop(&mut self) {
         unsafe {
