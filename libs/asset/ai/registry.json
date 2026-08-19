@@ -182,6 +182,54 @@
    ]
   },
   {
+   "id": "flux2-dev-q4-24g",
+   "domain": "image",
+   "backend": "flux2",
+   "available": true,
+   "gated": false,
+   "vram_gb": 19.0,
+   "min_vram_gb": 22.0,
+   "note": "FLUX.2-dev 24 GB-class tier: the same 32B guidance-distilled dev DiT as flux2-dev, quantized to GGUF Q4_K_M by city96 (ComfyUI-GGUF's reference conversion: Q4_K bulk linears, Q5_K on the double-block qkv and some proj/mlp tensors, BF16 img_in/txt_in/time_in/guidance_in/final_layer/modulation, F32 norms), served by the in-repo CUDA port with K-quant weights resident as raw block streams and dequantized into bf16 scratch per GEMM (ComfyUI-GGUF's own dequant-on-the-fly numerics class — NOT the fp8mixed scaled-mm class of flux2-dev; expect its own look at the same seed). Text encoder, VAE and tokenizer are byte-identical to flux2-dev and share its cache blobs (same cache_as; the dev loader falls back to the sibling flux2-dev/ dir). Measured on the RTX 5090 (2026-08-19, 1024px/20 steps): resident floor ~16.5 GB, warm denoise 30.3 s, decode 0.27 s; vram_gb 19 is the admission estimate for a 24 GB card (19x1024+2048 reserve = 21.5 GB) pending a measured peak on a 4090; min_vram_gb 22 refuses 16 GB cards. FLUX [dev] Non-Commercial License applies to the quant too. Request: prompt (+ optional width/height/steps/guidance/seed, input_b64 reference for the instruction edit).",
+   "files": [
+    {
+     "role": "transformer",
+     "repo": "city96/FLUX.2-dev-gguf",
+     "path": "flux2-dev-Q4_K_M.gguf",
+     "revision": "ade5d688ddab0d9cf4a5b01bf4321e01c115020d",
+     "cache_as": "flux2-dev-q4-24g/flux2-dev-Q4_K_M.gguf",
+     "size": 20082414560,
+     "sha256": "fca680c7b221a713b5cf7db6cf6b33474875320ee61f4c585bc33fe391dab9a6"
+    },
+    {
+     "role": "text-encoder",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/mistral_3_small_flux2_fp8.safetensors",
+     "size": 18034640095,
+     "sha256": "e3467b7d912a234fb929cdf215dc08efdb011810b44bc21081c4234cc75b370e"
+    },
+    {
+     "role": "vae",
+     "repo": "Comfy-Org/flux2-dev",
+     "path": "split_files/vae/flux2-vae.safetensors",
+     "revision": "ab9055628ea245000e610f2aa2c96f4746093546",
+     "cache_as": "flux2-dev/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "tokenizer",
+     "repo": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+     "path": "tokenizer.json",
+     "revision": "68faf511d618ef198fef186659617cfd2eb8e33a",
+     "cache_as": "flux2-dev/tokenizer/tokenizer.json",
+     "size": 17078037,
+     "sha256": "b76085f9923309d873994d444989f7eb6ec074b06f25b58f1e8d7b7741070949"
+    }
+   ]
+  },
+  {
    "id": "trellis-2",
    "domain": "mesh",
    "backend": "trellis",
