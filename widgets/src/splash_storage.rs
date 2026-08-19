@@ -49,6 +49,35 @@ std::thread_local! {
     /// local like the isolate registry itself (isolates are UI-thread-owned).
     static SANDBOX_ROOTS: std::cell::RefCell<HashMap<usize, PathBuf>> =
         std::cell::RefCell::new(HashMap::new());
+
+    /// heap-key → total-bytes cap, for isolates the host has granted more
+    /// room than the default. Absent means [`MAX_TOTAL_BYTES`]. Kept host-side
+    /// beside the root so script can neither read nor raise its own quota.
+    static JAIL_QUOTAS: std::cell::RefCell<HashMap<usize, u64>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Raises (or clears) an isolate's whole-jail byte cap. `None` restores the
+/// default. Existing files are never deleted by lowering it — the smaller cap
+/// simply refuses further growth.
+pub(crate) fn set_quota_for_heap(heap_key: usize, total_bytes: Option<u64>) {
+    JAIL_QUOTAS.with(|q| {
+        let mut q = q.borrow_mut();
+        match total_bytes {
+            Some(bytes) => {
+                q.insert(heap_key, bytes);
+            }
+            None => {
+                q.remove(&heap_key);
+            }
+        }
+    });
+}
+
+/// This isolate's whole-jail cap.
+fn quota_for_vm(vm: &ScriptVm) -> u64 {
+    let heap_key = vm.bx.heap.heap_key();
+    JAIL_QUOTAS.with(|q| q.borrow().get(&heap_key).copied()).unwrap_or(MAX_TOTAL_BYTES)
 }
 
 /// Assigns (or clears) the sandbox root for an isolate, keyed by its heap.
@@ -72,6 +101,12 @@ pub(crate) fn gc_roots(dead_heaps: &[usize]) {
         let mut r = r.borrow_mut();
         for heap in dead_heaps {
             r.remove(heap);
+        }
+    });
+    JAIL_QUOTAS.with(|q| {
+        let mut q = q.borrow_mut();
+        for heap in dead_heaps {
+            q.remove(heap);
         }
     });
 }
@@ -238,8 +273,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 if new_len > MAX_FILE_BYTES {
                     return script_err_io!(vm.trap(), "file too large");
                 }
+                let cap = quota_for_vm(vm);
                 let (total, entries) = jail_usage(&root);
-                if total - existing.min(total) + new_len > MAX_TOTAL_BYTES {
+                if total - existing.min(total) + new_len > cap {
                     return script_err_io!(vm.trap(), "app storage is full");
                 }
                 // Charge the file AND any parent dirs create_dir_all would make,
