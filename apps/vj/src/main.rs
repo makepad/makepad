@@ -74,6 +74,7 @@ use crate::mixer::{
 use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
+use makepad_widgets::widget_tree::WidgetTreeStats;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
     JobId, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus, TierPreference,
@@ -3127,8 +3128,13 @@ pub struct App {
     // the anchor lane carry none; bounded, newest wins.
     #[rust]
     world_anchors: HashMap<AssetId, Vec<Anchor>>,
+    /// `VJ_TRACE_WTREE=1` — log widget-tree lookup counters every 2 s.
+    #[rust(std::env::var_os("VJ_TRACE_WTREE").is_some())]
+    trace_wtree: bool,
     #[rust]
     tstats_last: f64,
+    #[rust]
+    tstats_prev: WidgetTreeStats,
     #[rust]
     auto_pad_done: bool,
     /// Remaining pads of a `VJ_AUTO_PAD=<n>[,<n>…]` sequence, and the host
@@ -3265,6 +3271,11 @@ pub struct App {
     music_refs: MusicRefs,
     #[rust]
     music_refs_ready: bool,
+    /// Display-cadence pump for the deck surface. The wave view's own
+    /// `NextFrame` never comes back (measured: zero ticks a second), so the
+    /// app drives it the same way it drives video frames.
+    #[rust]
+    music_pump: NextFrame,
     /// Last text pushed into each label, so an unchanged readout costs
     /// nothing: a `set_text` re-formats and re-lays-out every call.
     #[rust]
@@ -5473,6 +5484,7 @@ impl App {
         self.pump_analysis(cx);
         self.pump_stems(cx);
         self.observe_decks();
+        self.schedule_music_frame(cx);
         for voice in self.mixer.drain_ended_voices() {
             self.pads.voice_ended(voice);
         }
@@ -6875,11 +6887,30 @@ impl App {
     }
 
     fn update_status_ui(&mut self, cx: &mut Cx) {
-        if makepad_widgets::widget_tree::tstats::on() {
+        // `VJ_TRACE_WTREE=1` — widget-tree lookup cost per 2 s. `walk_nodes`
+        // climbing means the per-frame UI sync is re-deriving lookups the
+        // path cache should be answering.
+        if self.trace_wtree {
             let now = cx.seconds_since_app_start();
             if now - self.tstats_last > 2.0 {
+                let s = cx.widget_tree().stats();
+                let d = (
+                    s.lookups - self.tstats_prev.lookups,
+                    s.cache_misses - self.tstats_prev.cache_misses,
+                    s.walk_nodes - self.tstats_prev.walk_nodes,
+                    s.invalidations - self.tstats_prev.invalidations,
+                    s.stores_skipped - self.tstats_prev.stores_skipped,
+                    s.misses_repeat - self.tstats_prev.misses_repeat,
+                    s.misses_fresh - self.tstats_prev.misses_fresh,
+                );
+                if self.tstats_last > 0.0 {
+                    log!(
+                        "wtree/2s: lookups={} misses={} walk_nodes={} inval={} skipped={} repeat={} fresh={}",
+                        d.0, d.1, d.2, d.3, d.4, d.5, d.6
+                    );
+                }
                 self.tstats_last = now;
-                log!("wtree: {}", makepad_widgets::widget_tree::tstats::dump());
+                self.tstats_prev = s;
             }
         }
         self.ui.label(cx, ids!(status_label)).set_text(cx, &self.status_text);
@@ -6987,22 +7018,32 @@ impl App {
         };
         let now = Instant::now();
         // One word, not a sentence: the bar has to fit MASTER and OUTPUT too.
-        let lock_text = match snap.lock_state {
-            BeatLockState::Unlocked => "FREE",
-            BeatLockState::Acquiring => "SEEK",
-            BeatLockState::Locked => "● LOCK",
-            BeatLockState::Holdover => "HOLD",
-            BeatLockState::Lost => "LOST",
+        // A playing deck owns the beat clock: its grid came from a whole
+        // file and its playhead from the device clock, which beats
+        // listening to the room. The detector is the fallback.
+        let deck_beat = self.deck_beat();
+        let deck_source = deck_beat.as_ref().and(self.decks.sync_leader());
+        let lock_text = match deck_source {
+            Some(DeckId::A) => "● DECK A",
+            Some(DeckId::B) => "● DECK B",
+            None => match snap.lock_state {
+                BeatLockState::Unlocked => "FREE",
+                BeatLockState::Acquiring => "SEEK",
+                BeatLockState::Locked => "● LOCK",
+                BeatLockState::Holdover => "HOLD",
+                BeatLockState::Lost => "LOST",
+            },
         };
-        let bpm_text = snap
-            .beat
+        let bpm_text = deck_beat
             .as_ref()
+            .or(snap.beat.as_ref())
             .map(|beat| format!("{:>5.1}", beat.bpm))
             .unwrap_or_else(|| "---.-".to_string());
         let confidence_text = format!(
             "CONF: {:>3.0}%",
-            snap.beat
+            deck_beat
                 .as_ref()
+                .or(snap.beat.as_ref())
                 .map(|beat| beat.confidence * 100.0)
                 .unwrap_or(0.0)
                 .clamp(0.0, 100.0)
@@ -7404,8 +7445,10 @@ impl App {
         let levels = self.mixer.deck_levels();
         for deck in [DeckId::A, DeckId::B] {
             let index = deck.index();
-            let (position, duration, playing) = self.mixer.deck_position(deck);
-            let scratching = self.mixer.deck_scratching(deck);
+            // One mixer lock per deck per frame: the audio callback
+            // `try_lock`s and goes silent on contention, so the UI must not
+            // grab it three times for three fields.
+            let (position, duration, playing, scratching) = self.mixer.deck_snapshot(deck);
             let state = self.decks.deck(deck);
             let (title, artist) = match &state.load {
                 DeckLoad::Empty => ("empty".to_string(), String::new()),
@@ -8151,6 +8194,26 @@ impl App {
         self.handle_wave_input(cx);
     }
 
+    /// One display frame of the deck surface: fresh playheads into the
+    /// lanes and nothing else. Scheduled while a deck is playing or a hand
+    /// is on a record, so a scratch tracks at the display's rate rather
+    /// than the console's poll rate.
+    fn pump_music_frame(&mut self, cx: &mut Cx) {
+        self.push_wave_positions(cx);
+        self.schedule_music_frame(cx);
+    }
+
+    /// Ask for another frame while anything on the surface is moving.
+    fn schedule_music_frame(&mut self, cx: &mut Cx) {
+        let moving = [DeckId::A, DeckId::B].iter().any(|deck| {
+            let (_, _, playing, scratching) = self.mixer.deck_snapshot(*deck);
+            playing || scratching
+        });
+        if moving {
+            self.music_pump = cx.new_next_frame();
+        }
+    }
+
     /// Fresh playheads into the lanes, and nothing else: this runs at
     /// display cadence during a scratch, so it stays uniform-only work.
     fn push_wave_positions(&mut self, cx: &mut Cx) {
@@ -8158,8 +8221,7 @@ impl App {
             return;
         };
         for deck in [DeckId::A, DeckId::B] {
-            let (position, _duration, playing) = self.mixer.deck_position(deck);
-            let scratching = self.mixer.deck_scratching(deck);
+            let (position, _duration, playing, scratching) = self.mixer.deck_snapshot(deck);
             scroll.set_position(cx, deck, position, playing, scratching);
         }
     }
@@ -9190,6 +9252,9 @@ impl AppMain for App {
         }
         if self.video_pump.is_event(event).is_some() {
             self.pump_video(cx);
+        }
+        if self.music_pump.is_event(event).is_some() {
+            self.pump_music_frame(cx);
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

@@ -101,52 +101,99 @@ pub enum StemsMsg {
 // resampling
 // ---------------------------------------------------------------------------
 
-/// Windowed-sinc resampler, used only when a track is not already at the
-/// model's 44.1 kHz. Runs on the worker, so quality beats speed.
+/// Polyphase sinc phases. The kernel is built once per rate change and
+/// indexed by the fractional position, so resampling costs multiply-adds
+/// and no transcendentals — the naive form (a sinc and a window evaluated
+/// per tap per output sample) was measurably the app's biggest CPU
+/// consumer while a track was being separated.
+const RESAMPLE_PHASES: usize = 256;
+/// Sinc taps either side of the centre, before the cutoff widening.
+const RESAMPLE_TAPS: usize = 16;
+
+/// A windowed-sinc kernel, precomputed for one rate ratio.
+struct ResampleKernel {
+    /// `[phase][tap]`, each phase row normalized to unity gain.
+    taps: Vec<f32>,
+    width: usize,
+    span: usize,
+}
+
+impl ResampleKernel {
+    fn new(ratio: f64) -> ResampleKernel {
+        // Anti-alias when downsampling: the cutoff follows the lower rate.
+        let cutoff = 0.5 * ratio.min(1.0);
+        let width = ((RESAMPLE_TAPS as f64) / (2.0 * cutoff)).ceil() as usize;
+        let span = 2 * width + 1;
+        let mut taps = vec![0.0f32; RESAMPLE_PHASES * span];
+        for phase in 0..RESAMPLE_PHASES {
+            let frac = phase as f64 / RESAMPLE_PHASES as f64;
+            let row = phase * span;
+            let mut sum = 0.0f64;
+            for tap in 0..span {
+                // Distance from the output position to this input sample.
+                let x = frac - (tap as f64 - width as f64);
+                let arg = 2.0 * cutoff * x;
+                let sinc = if arg.abs() < 1e-9 {
+                    1.0
+                } else {
+                    (std::f64::consts::PI * arg).sin() / (std::f64::consts::PI * arg)
+                };
+                let t = (x / width as f64).clamp(-1.0, 1.0);
+                let angle = std::f64::consts::PI * (t + 1.0);
+                let window = 0.42 - 0.5 * angle.cos() + 0.08 * (2.0 * angle).cos();
+                let weight = sinc * window;
+                taps[row + tap] = weight as f32;
+                sum += weight;
+            }
+            if sum.abs() > 1e-12 {
+                let inverse = (1.0 / sum) as f32;
+                for tap in 0..span {
+                    taps[row + tap] *= inverse;
+                }
+            }
+        }
+        ResampleKernel { taps, width, span }
+    }
+
+    fn apply(&self, input: &[f32], ratio: f64) -> Vec<f32> {
+        let out_len = ((input.len() as f64) * ratio).round() as usize;
+        let mut out = Vec::with_capacity(out_len);
+        let inverse_ratio = 1.0 / ratio;
+        for index in 0..out_len {
+            let center = index as f64 * inverse_ratio;
+            let base = center.floor() as isize;
+            let frac = center - base as f64;
+            let phase = ((frac * RESAMPLE_PHASES as f64) as usize).min(RESAMPLE_PHASES - 1);
+            let row = phase * self.span;
+            let mut sum = 0.0f32;
+            for tap in 0..self.span {
+                let sample_index = base + tap as isize - self.width as isize;
+                if sample_index < 0 {
+                    continue;
+                }
+                let Some(sample) = input.get(sample_index as usize) else { break };
+                sum += sample * self.taps[row + tap];
+            }
+            out.push(sum);
+        }
+        out
+    }
+}
+
+/// Resample, used only when a track is not already at the model's 44.1 kHz.
+/// Runs on the worker; each span is transformed exactly once and the result
+/// is what playback reads.
 fn resample(input: &[f32], from_rate: f64, to_rate: f64) -> Vec<f32> {
     if (from_rate - to_rate).abs() < 0.5 || input.is_empty() {
         return input.to_vec();
     }
     let ratio = to_rate / from_rate;
-    let out_len = ((input.len() as f64) * ratio).round() as usize;
-    let mut out = Vec::with_capacity(out_len);
-    // Anti-alias when downsampling: the kernel's cutoff follows the lower
-    // of the two rates.
-    let cutoff = 0.5 * ratio.min(1.0);
-    const TAPS: isize = 16;
-    let width = (TAPS as f64 / (2.0 * cutoff)).ceil() as isize;
-    for index in 0..out_len {
-        let center = index as f64 / ratio;
-        let base = center.floor() as isize;
-        let mut sum = 0.0f64;
-        let mut weight_sum = 0.0f64;
-        for tap in -width..=width {
-            let sample_index = base + tap;
-            if sample_index < 0 || sample_index as usize >= input.len() {
-                continue;
-            }
-            let x = center - sample_index as f64;
-            let sinc_arg = 2.0 * cutoff * x;
-            let sinc = if sinc_arg.abs() < 1e-9 {
-                1.0
-            } else {
-                (std::f64::consts::PI * sinc_arg).sin() / (std::f64::consts::PI * sinc_arg)
-            };
-            // Blackman window over the kernel's support.
-            let t = (x / width as f64).clamp(-1.0, 1.0);
-            let phase = std::f64::consts::PI * (t + 1.0);
-            let window = 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
-            let weight = sinc * window;
-            sum += input[sample_index as usize] as f64 * weight;
-            weight_sum += weight;
-        }
-        out.push(if weight_sum.abs() > 1e-12 {
-            (sum / weight_sum) as f32
-        } else {
-            0.0
-        });
-    }
-    out
+    ResampleKernel::new(ratio).apply(input, ratio)
+}
+
+/// The same, reusing a kernel across the lanes of one span.
+fn resample_with(kernel: &ResampleKernel, input: &[f32], ratio: f64) -> Vec<f32> {
+    kernel.apply(input, ratio)
 }
 
 fn to_stereo_buf(pcm: &TrackPcm) -> StereoBuf {
@@ -276,17 +323,29 @@ fn load_sidecar(source: &Path) -> Option<[TrackPcm; 4]> {
     Some([out.next()?, out.next()?, out.next()?, out.next()?])
 }
 
-fn i16_frames(buf: &StereoBuf, from: usize, len: usize, rate: f64, target: f64) -> Vec<[i16; 2]> {
+fn i16_frames(
+    buf: &StereoBuf,
+    from: usize,
+    len: usize,
+    rate: f64,
+    target: f64,
+    kernel: Option<&ResampleKernel>,
+) -> Vec<[i16; 2]> {
     let end = (from + len).min(buf.frames());
     if from >= end {
         return Vec::new();
     }
     let left = &buf.left[from..end];
     let right = &buf.right[from..end];
-    let (left, right) = if (rate - target).abs() < 0.5 {
-        (left.to_vec(), right.to_vec())
-    } else {
-        (resample(left, rate, target), resample(right, rate, target))
+    let (left, right) = match kernel {
+        None => (left.to_vec(), right.to_vec()),
+        Some(kernel) => {
+            let ratio = target / rate;
+            (
+                resample_with(kernel, left, ratio),
+                resample_with(kernel, right, ratio),
+            )
+        }
     };
     left.iter()
         .zip(right.iter())
@@ -359,6 +418,12 @@ fn run_demixer(
     let count = chunk_count(frames, rate);
     let mut writer = ChunkWriter::new(size, count);
 
+    // One kernel for the whole run, not one per lane per span.
+    let span_kernel = if (track_rate - model_rate).abs() < 0.5 {
+        None
+    } else {
+        Some(ResampleKernel::new(track_rate / model_rate))
+    };
     let mut demixer = Demixer::new(model, &track).map_err(|e| e.to_string())?;
     // Start where the needle is, not at the top of the file.
     let start_model_frame = (job.start_secs.max(0.0) * model_rate) as usize;
@@ -387,7 +452,14 @@ fn run_demixer(
         let mut lanes: Vec<Vec<[i16; 2]>> = Vec::with_capacity(4);
         for stem in STEM_ORDER {
             let buf = &span.stems[stem as usize];
-            lanes.push(i16_frames(buf, 0, buf.frames(), model_rate, track_rate));
+            lanes.push(i16_frames(
+                buf,
+                0,
+                buf.frames(),
+                model_rate,
+                track_rate,
+                span_kernel.as_ref(),
+            ));
         }
         let shortest = lanes.iter().map(Vec::len).min().unwrap_or(0);
         for lane in lanes.iter_mut() {
