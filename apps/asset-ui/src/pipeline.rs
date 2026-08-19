@@ -188,17 +188,19 @@ const CHARACTER_MOTION_MODEL: &str = "hy-motion";
 /// continue with it; the user can see and retry the failed LLM stage.
 const CHARACTER_EXPANSION_MIN_WORDS: usize = 24;
 
-/// A character reconstruction gets two deterministic second chances when a
-/// mesh, rig, or animated-skin quality gate rejects it. The matte/image are
+/// A character reconstruction gets two deterministic second chances when the
+/// rig or animated-skin quality gate rejects it. The matte/image are
 /// deliberately retained: changing only the mesh seed makes the retry cheap,
 /// attributable, and useful instead of silently rerolling the whole chain.
+/// Mesh geometry itself is never gated: whatever TRELLIS reconstructs is
+/// returned as-is (geometry reseeds never produced a better mesh).
 const CHARACTER_MESH_MAX_ATTEMPTS: u8 = 3;
-/// If every deterministic mesh seed for one raster is rejected, advance the
-/// Flux seed and rematte before trying mesh reconstruction again. Three image
-/// attempts × three mesh attempts is bounded, but avoids treating an unlucky
-/// akimbo/contact-pose raster as a terminal pipeline failure.
+/// If every deterministic mesh seed for one raster is rejected by the rig or
+/// motion gate, advance the Flux seed and rematte before trying mesh
+/// reconstruction again. Three image attempts × three mesh attempts is
+/// bounded, but avoids treating an unlucky akimbo/contact-pose raster as a
+/// terminal pipeline failure.
 const CHARACTER_IMAGE_MAX_ATTEMPTS: u8 = 3;
-const TRELLIS_GEOMETRY_QUALITY_MARKER: &str = "trellis-geometry-quality:";
 /// Stable fail-closed markers emitted after SkinTokens and HY-Motion quality
 /// validation.  These are deterministic content defects, not CUDA/model
 /// failures: a character run may retry its mesh seed while keeping the
@@ -1894,14 +1896,11 @@ impl Pipeline {
 
         let is_character = self.is_character_pipeline();
         let failed_domain = self.stages[failed_stage].domain.clone();
-        let mesh_quality = failed_domain == "mesh"
-            && error.contains(TRELLIS_GEOMETRY_QUALITY_MARKER);
-        let retryable = mesh_quality
-            || (is_character
-                && ((matches!(failed_domain.as_str(), "rig" | "motion")
-                    && error.contains(CHARACTER_RIG_QUALITY_MARKER))
-                    || (failed_domain == "motion"
-                        && error.contains(CHARACTER_MOTION_QUALITY_MARKER))));
+        let retryable = is_character
+            && ((matches!(failed_domain.as_str(), "rig" | "motion")
+                && error.contains(CHARACTER_RIG_QUALITY_MARKER))
+                || (failed_domain == "motion"
+                    && error.contains(CHARACTER_MOTION_QUALITY_MARKER)));
         let Some(mesh_stage) = self
             .stages
             .iter()
@@ -1917,7 +1916,7 @@ impl Pipeline {
             if self.stages[mesh_stage].mesh_attempt + 1 < CHARACTER_MESH_MAX_ATTEMPTS {
                 self.stages[mesh_stage].mesh_attempt += 1;
                 (mesh_stage, failed_domain.clone())
-            } else if is_character {
+            } else {
                 if self.character_image_attempt + 1 >= CHARACTER_IMAGE_MAX_ATTEMPTS {
                     return None;
                 }
@@ -1931,8 +1930,6 @@ impl Pipeline {
                 self.character_image_attempt += 1;
                 self.stages[mesh_stage].mesh_attempt = 0;
                 (image_stage, failed_domain.clone())
-            } else {
-                return None;
             };
 
         for stage in &mut self.stages[retry_stage..] {
@@ -3950,115 +3947,26 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     }
 
     #[test]
-    fn character_mesh_quality_retries_only_mesh_with_consecutive_seeds() {
-        let mut pipeline = character_pipeline("yoshi");
-        put_output(
-            &mut pipeline,
-            0,
-            "text/plain; charset=utf-8",
-            YOSHI_BRIEF.as_bytes(),
-        );
-        put_output(&mut pipeline, 1, "image/png", b"flux-png");
-        put_output(&mut pipeline, 2, "image/png", b"clean-matte");
-        put_output(&mut pipeline, 3, "model/gltf-binary", b"rejected-mesh");
-        let upstream_before = pipeline.stages[0..3]
-            .iter()
-            .map(|stage| stage.outputs.clone())
-            .collect::<Vec<_>>();
-        let first_seed = pipeline.stages[3].seed.unwrap();
-
-        assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                3,
-                "trellis: trellis-geometry-quality: floor component dominates"
-            ),
-            Some(3)
-        );
-        assert_eq!(pipeline.stages[3].seed, Some(first_seed.wrapping_add(1)));
-        assert!(pipeline.stages[3].outputs.is_empty());
-        assert_eq!(
-            decoded_input(&pipeline.request_for_stage(3).unwrap()),
-            b"clean-matte"
-        );
-        assert_eq!(pipeline.stages[0..3].iter().map(|stage| stage.outputs.clone()).collect::<Vec<_>>(), upstream_before);
-
-        assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                3,
-                "trellis-geometry-quality: disconnected ground sheet"
-            ),
-            Some(3)
-        );
-        assert_eq!(pipeline.stages[3].seed, Some(first_seed.wrapping_add(2)));
-        let first_image_seed = pipeline.stages[1].seed.unwrap();
-        assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                3,
-                "trellis-geometry-quality: still rejected"
-            ),
-            Some(1)
-        );
-        assert_eq!(pipeline.character_image_attempt, 1);
-        assert_eq!(pipeline.stages[3].mesh_attempt, 0);
-        assert_ne!(pipeline.stages[1].seed, Some(first_image_seed));
-        assert!(!pipeline.stages[0].outputs.is_empty());
-        assert!(pipeline.stages[1..].iter().all(|stage| stage.outputs.is_empty()));
-    }
-
-    #[test]
-    fn character_quality_retry_ladder_is_bounded_to_three_images_by_three_meshes() {
-        let mut pipeline = character_pipeline("yoshi");
-        let image_stage = pipeline
-            .stages
-            .iter()
-            .position(|stage| stage.domain == "image")
-            .unwrap();
-        let mesh_stage = pipeline
-            .stages
-            .iter()
-            .position(|stage| stage.domain == "mesh")
-            .unwrap();
-        let mut image_seeds = vec![pipeline.stages[image_stage].seed.unwrap()];
-
-        for rejection in 0..8 {
-            let retry_stage = pipeline
-                .prepare_character_mesh_retry(
-                    mesh_stage,
-                    "trellis-geometry-quality: deterministic rejection",
-                )
-                .unwrap_or_else(|| panic!("retry {rejection} ended the bounded ladder early"));
-            if retry_stage == image_stage {
-                image_seeds.push(pipeline.stages[image_stage].seed.unwrap());
-            }
-        }
-
-        assert_eq!(image_seeds.len(), CHARACTER_IMAGE_MAX_ATTEMPTS as usize);
-        assert!(image_seeds.windows(2).all(|pair| pair[0] != pair[1]));
-        assert_eq!(pipeline.character_image_attempt, 2);
-        assert_eq!(pipeline.stages[mesh_stage].mesh_attempt, 2);
-        assert_eq!(
-            pipeline.prepare_character_mesh_retry(
-                mesh_stage,
-                "trellis-geometry-quality: ninth rejection"
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn mesh_retry_does_not_swallow_other_failures_or_other_pipelines() {
+    fn mesh_geometry_is_never_retried_whatever_trellis_made_is_returned() {
+        // The mesh stage has no quality gate: an old-style geometry marker,
+        // a plain remesh complaint, or a CUDA failure all terminate the run
+        // instead of burning more TRELLIS passes on reseeds.
         let mut character = character_pipeline("yoshi");
-        assert_eq!(
-            character.prepare_character_mesh_retry(3, "trellis: CUDA out of memory"),
-            None
-        );
-        assert_eq!(
-            character.prepare_character_mesh_retry(
-                2,
-                "trellis-geometry-quality: not a mesh stage"
-            ),
-            None
-        );
+        put_output(&mut character, 0, "text/plain", YOSHI_BRIEF.as_bytes());
+        put_output(&mut character, 1, "image/png", b"flux-png");
+        put_output(&mut character, 2, "image/png", b"clean-matte");
+        let mesh_seed = character.stages[3].seed.unwrap();
+        for error in [
+            "trellis: trellis-geometry-quality: floor component dominates",
+            "trellis: remesh produced 0 faces",
+            "trellis: CUDA out of memory",
+        ] {
+            assert_eq!(character.prepare_character_mesh_retry(3, error), None, "{error}");
+        }
+        assert_eq!(character.stages[3].seed, Some(mesh_seed));
+        assert_eq!(character.stages[3].mesh_attempt, 0);
+        assert_eq!(character.character_image_attempt, 0);
+        assert!(character.stages[..3].iter().all(|stage| !stage.outputs.is_empty()));
 
         let mut ordinary = Pipeline::new(
             "a teapot",
@@ -4070,19 +3978,58 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             GenParams::default(),
         );
         assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis: CUDA out of memory"),
+            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
             None
         );
         assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
-            Some(1)
+            ordinary.prepare_character_mesh_retry(1, "trellis: CUDA out of memory"),
+            None
         );
+    }
+
+    #[test]
+    fn character_rig_retry_ladder_is_bounded_to_three_images_by_three_meshes() {
+        let mut pipeline = character_pipeline("yoshi");
+        let image_stage = pipeline
+            .stages
+            .iter()
+            .position(|stage| stage.domain == "image")
+            .unwrap();
+        let mesh_stage = pipeline
+            .stages
+            .iter()
+            .position(|stage| stage.domain == "mesh")
+            .unwrap();
+        let rig_stage = pipeline
+            .stages
+            .iter()
+            .position(|stage| stage.domain == "rig")
+            .unwrap();
+        let mut image_seeds = vec![pipeline.stages[image_stage].seed.unwrap()];
+
+        for rejection in 0..8 {
+            let retry_stage = pipeline
+                .prepare_character_mesh_retry(
+                    rig_stage,
+                    "native SkinTokens: character-rig-quality: deterministic rejection",
+                )
+                .unwrap_or_else(|| panic!("retry {rejection} ended the bounded ladder early"));
+            if retry_stage == image_stage {
+                image_seeds.push(pipeline.stages[image_stage].seed.unwrap());
+            } else {
+                assert_eq!(retry_stage, mesh_stage);
+            }
+        }
+
+        assert_eq!(image_seeds.len(), CHARACTER_IMAGE_MAX_ATTEMPTS as usize);
+        assert!(image_seeds.windows(2).all(|pair| pair[0] != pair[1]));
+        assert_eq!(pipeline.character_image_attempt, 2);
+        assert_eq!(pipeline.stages[mesh_stage].mesh_attempt, 2);
         assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
-            Some(1)
-        );
-        assert_eq!(
-            ordinary.prepare_character_mesh_retry(1, "trellis-geometry-quality: rejected"),
+            pipeline.prepare_character_mesh_retry(
+                rig_stage,
+                "native SkinTokens: character-rig-quality: ninth rejection"
+            ),
             None
         );
     }
@@ -4327,6 +4274,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("depth", "da3-metric-large"),
             ("image", "flux1-dev"),
             ("image", "flux1-schnell"),
+            ("image", "flux2-dev"),
             ("image", "flux2-klein-4b"),
             ("image", "testpattern"),
             ("matte", "birefnet-hr"),
