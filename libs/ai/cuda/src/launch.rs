@@ -2026,6 +2026,74 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        // -- Practical-RIFE v4.26 (kernels/rife.cu) --
+
+        fn makepad_cuda_rife_warp_f32(
+            input: *const f32,
+            flow: *const f32,
+            output: *mut f32,
+            width: u32,
+            height: u32,
+            channels: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_rife_conv_transpose2d_f32(
+            input: *const f32,
+            weight: *const f32,
+            bias: *const f32,
+            output: *mut f32,
+            in_width: u32,
+            in_height: u32,
+            out_width: u32,
+            out_height: u32,
+            in_channels: u32,
+            out_channels: u32,
+            kw: u32,
+            kh: u32,
+            pad: u32,
+            stride: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_rife_res_conv_f32(
+            conv: *const f32,
+            residual: *const f32,
+            beta: *const f32,
+            output: *mut f32,
+            plane: usize,
+            n: usize,
+            slope: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_rife_scale_f32(
+            input: *const f32,
+            output: *mut f32,
+            n: usize,
+            scale: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_rife_fill_f32(
+            output: *mut f32,
+            n: usize,
+            value: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_rife_merge_rgb8_f32(
+            warped0: *const f32,
+            warped1: *const f32,
+            mask: *const f32,
+            output: *mut u8,
+            padded_width: u32,
+            padded_height: u32,
+            width: u32,
+            height: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_cuda_birefnet_resize_bilinear_f32(
             input: *const f32,
             output: *mut f32,
@@ -14434,6 +14502,243 @@ mod imp {
                 )
             })?;
             let bytes = scratch.read_bytes(plane * 3, backend.stream)?;
+            gpu_pool_release(scratch);
+            Ok(bytes)
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Practical-RIFE v4.26 (kernels/rife.cu). The ops the released IFNet
+    // needs that no other family had; everything else it uses
+    // (gpu_conv2d_planar_strided, gpu_birefnet_resize_bilinear,
+    // gpu_pixel_shuffle_planar, gpu_slice_rows, gpu_concat_rows_many,
+    // gpu_add) is reused as-is.
+    // -----------------------------------------------------------------
+
+    /// RIFE's backward warp: samples `x` at `(px + flow_x, py + flow_y)`,
+    /// bilinear, border-clamped — the exact `F.grid_sample(mode="bilinear",
+    /// padding_mode="border", align_corners=True)` the reference calls once
+    /// its linspace grid and flow normalization are folded together.
+    /// `flow` is a `[2, plane]` tensor at the same extent as `x`.
+    pub fn gpu_rife_warp(
+        x: &GpuTensor,
+        flow: &GpuTensor,
+        width: usize,
+        height: usize,
+    ) -> Result<GpuTensor, String> {
+        let plane = width.saturating_mul(height);
+        if x.half || flow.half || x.cols != plane || flow.cols != plane || flow.rows < 2 {
+            return Err("gpu_rife_warp shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, plane)?;
+            gpu_check(unsafe {
+                makepad_cuda_rife_warp_f32(
+                    x.device_ptr()?,
+                    flow.device_ptr()?,
+                    out.device_ptr()?,
+                    width as u32,
+                    height as u32,
+                    x.rows as u32,
+                    backend.stream,
+                )
+            })?;
+            Ok(out)
+        })
+    }
+
+    /// `nn.ConvTranspose2d` with `output_padding = 0`; PyTorch weight layout
+    /// `[in, out, kh, kw]`. Weights are cached on device under
+    /// `namespace::key` like the other cached convolutions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_rife_conv_transpose2d(
+        x: &GpuTensor,
+        in_width: usize,
+        in_height: usize,
+        cache_namespace: &str,
+        weight_cache_key: &str,
+        weights: &[f32],
+        bias: &[f32],
+        out_channels: usize,
+        kw: usize,
+        kh: usize,
+        pad: usize,
+        stride: usize,
+    ) -> Result<GpuTensor, String> {
+        let in_channels = x.rows;
+        if x.half || x.cols != in_width.saturating_mul(in_height) {
+            return Err("gpu_rife_conv_transpose2d plane mismatch".to_string());
+        }
+        if weights.len() != in_channels * out_channels * kw * kh || bias.len() != out_channels {
+            return Err("gpu_rife_conv_transpose2d weight/bias shape mismatch".to_string());
+        }
+        if stride == 0 || kw <= 2 * pad || kh <= 2 * pad {
+            return Err("gpu_rife_conv_transpose2d invalid stride/padding".to_string());
+        }
+        let out_width = (in_width - 1) * stride + kw - 2 * pad;
+        let out_height = (in_height - 1) * stride + kh - 2 * pad;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let weight_bytes = weights.len() * size_of::<f32>();
+            let qualified_key = format!("{cache_namespace}::{weight_cache_key}");
+            backend.cached_weight_buffer(&qualified_key, weight_bytes, || {
+                let raw = unsafe {
+                    std::slice::from_raw_parts(weights.as_ptr().cast::<u8>(), weight_bytes)
+                };
+                Ok(raw.to_vec())
+            })?;
+            let bias_buf = gpu_upload_small(backend, bias)?;
+            let out = GpuTensor::from_pool(out_channels, out_width * out_height)?;
+            let weight = backend
+                .weight_buffers
+                .get(&qualified_key)
+                .ok_or_else(|| format!("missing cached CUDA deconv buffer {qualified_key}"))?;
+            let status = unsafe {
+                makepad_cuda_rife_conv_transpose2d_f32(
+                    x.device_ptr()?,
+                    weight.ptr.as_ptr().cast::<f32>(),
+                    bias_buf.ptr.as_ptr().cast::<f32>(),
+                    out.device_ptr()?,
+                    in_width as u32,
+                    in_height as u32,
+                    out_width as u32,
+                    out_height as u32,
+                    in_channels as u32,
+                    out_channels as u32,
+                    kw as u32,
+                    kh as u32,
+                    pad as u32,
+                    stride as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_pool_release(bias_buf);
+            Ok(out)
+        })
+    }
+
+    /// RIFE's `ResConv` epilogue: `LeakyReLU(conv * beta[c] + residual)`.
+    pub fn gpu_rife_res_conv(
+        conv: &GpuTensor,
+        residual: &GpuTensor,
+        beta: &[f32],
+        slope: f32,
+    ) -> Result<GpuTensor, String> {
+        if conv.half
+            || residual.half
+            || conv.rows != residual.rows
+            || conv.cols != residual.cols
+            || beta.len() != conv.rows
+        {
+            return Err("gpu_rife_res_conv shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(conv.rows, conv.cols)?;
+            let beta_buf = gpu_upload_small(backend, beta)?;
+            let status = unsafe {
+                makepad_cuda_rife_res_conv_f32(
+                    conv.device_ptr()?,
+                    residual.device_ptr()?,
+                    beta_buf.ptr.as_ptr().cast::<f32>(),
+                    out.device_ptr()?,
+                    conv.cols,
+                    conv.rows * conv.cols,
+                    slope,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_pool_release(beta_buf);
+            Ok(out)
+        })
+    }
+
+    /// `out = x * scale` (the flow's coarse-to-fine rescale).
+    pub fn gpu_rife_scale(x: &GpuTensor, scale: f32) -> Result<GpuTensor, String> {
+        if x.half {
+            return Err("gpu_rife_scale is f32-only".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, x.cols)?;
+            gpu_check(unsafe {
+                makepad_cuda_rife_scale_f32(
+                    x.device_ptr()?,
+                    out.device_ptr()?,
+                    x.rows * x.cols,
+                    scale,
+                    backend.stream,
+                )
+            })?;
+            Ok(out)
+        })
+    }
+
+    /// A constant `[rows, cols]` f32 tensor (RIFE's timestep plane), without
+    /// a host upload.
+    pub fn gpu_rife_fill(rows: usize, cols: usize, value: f32) -> Result<GpuTensor, String> {
+        if rows == 0 || cols == 0 {
+            return Err("gpu_rife_fill needs a non-empty extent".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(rows, cols)?;
+            gpu_check(unsafe {
+                makepad_cuda_rife_fill_f32(out.device_ptr()?, rows * cols, value, backend.stream)
+            })?;
+            Ok(out)
+        })
+    }
+
+    /// Sigmoid merge of the two warped frames, padding crop, clamp and RGB8
+    /// interleave in one pass: only the artifact bytes leave the device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_rife_merge_rgb8(
+        warped0: &GpuTensor,
+        warped1: &GpuTensor,
+        mask: &GpuTensor,
+        padded_width: usize,
+        padded_height: usize,
+        width: usize,
+        height: usize,
+    ) -> Result<Vec<u8>, String> {
+        let padded_plane = padded_width.saturating_mul(padded_height);
+        if warped0.half
+            || warped1.half
+            || mask.half
+            || warped0.rows != 3
+            || warped1.rows != 3
+            || mask.rows != 1
+            || warped0.cols != padded_plane
+            || warped1.cols != padded_plane
+            || mask.cols != padded_plane
+            || width > padded_width
+            || height > padded_height
+            || width == 0
+            || height == 0
+        {
+            return Err("gpu_rife_merge_rgb8 shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let scratch = gpu_pool_acquire(width * height * 3)?;
+            gpu_check(unsafe {
+                makepad_cuda_rife_merge_rgb8_f32(
+                    warped0.device_ptr()?,
+                    warped1.device_ptr()?,
+                    mask.device_ptr()?,
+                    scratch.ptr.as_ptr().cast::<u8>(),
+                    padded_width as u32,
+                    padded_height as u32,
+                    width as u32,
+                    height as u32,
+                    backend.stream,
+                )
+            })?;
+            let bytes = scratch.read_bytes(width * height * 3, backend.stream)?;
             gpu_pool_release(scratch);
             Ok(bytes)
         })
