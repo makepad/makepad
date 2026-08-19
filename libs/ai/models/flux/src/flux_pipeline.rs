@@ -1,7 +1,8 @@
 use crate::backend::{new_runtime, runtime_available};
 use crate::comfy::FluxPrompts;
 use crate::flux::{
-    pack_flux_latents_nchw, unpack_flux_latents_nchw, FluxLatentShape, FluxPromptToImagePlan,
+    concat_packed_latent_channels, pack_flux_latents_nchw, unpack_flux_latents_nchw,
+    FluxLatentShape, FluxPromptToImagePlan,
 };
 use crate::flux_schedule::{
     euler_step, FluxSchedule, FLUX_VAE_SCALING_FACTOR, FLUX_VAE_SHIFT_FACTOR,
@@ -175,7 +176,7 @@ impl FluxPipeline {
         let total_start = Instant::now();
         let width = image_width.unwrap_or(plan.generation.width);
         let height = image_height.unwrap_or(width);
-        let latent_shape = FluxLatentShape::from_image_size(width, height)?;
+        let mut latent_shape = FluxLatentShape::from_image_size(width, height)?;
 
         hook_emit(&mut hooks, "tokenize", 0.0);
         let tokenize_start = Instant::now();
@@ -239,6 +240,17 @@ impl FluxPipeline {
             )?
         };
         let transformer_load_ms = elapsed_ms(transformer_load_start);
+        // Generalizes the packed-latent width to whatever this checkpoint's
+        // `img_in` actually expects (already auto-inferred from the header
+        // by `FluxTransformerInspection::from_header` — see flux.rs): 64 for
+        // every plain dev/schnell checkpoint (a no-op override, same value),
+        // 128 for the FLUX.1-Depth-dev / FLUX.1-Canny-dev control variants
+        // (noisy + control packed latents concatenated on the channel axis
+        // every step — see `generate_control_with_hooks` below). Nothing
+        // else keyed on `FluxLatentShape` reads this field (see flux.rs's
+        // `FluxLatentShape::transformer_channels` doc) so this is safe for
+        // every existing caller.
+        latent_shape.transformer_channels = transformer_weights.config.in_channels;
 
         hook_check(&hooks)?;
         hook_emit(&mut hooks, "compile transformer", 0.78);
@@ -557,6 +569,212 @@ impl FluxPipeline {
         let vae_execute_start = Instant::now();
         let image = {
             // The lazy/device decode ticks "vae-decode block 5/19".
+            let mut sub = sub_hook_emit_only(&mut hooks, "vae-decode ".to_string(), 0.9, 0.1);
+            self.vae
+                .execute_hooked(&self.vae_weights, &latents, crate::hook_ref(&mut sub))?
+        };
+        let vae_execute_ms = elapsed_ms(vae_execute_start);
+        hook_check(&hooks)?;
+
+        Ok(FluxPipelineGenerateRun {
+            image,
+            timing: FluxPipelineRunTiming {
+                noise_ms,
+                pack_ms,
+                denoise_ms,
+                unpack_ms,
+                latent_rescale_ms,
+                vae_layout_ms,
+                vae_execute_ms,
+                total_ms: elapsed_ms(total_start),
+            },
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Structure-conditioned generation (FLUX.1-Depth-dev / FLUX.1-Canny-dev
+    // and any other checkpoint whose `img_in` accepts noise-latent +
+    // control-latent concatenated on the channel axis, matching diffusers'
+    // `FluxControlPipeline`). Additions only — `load`/`generate_with_hooks`
+    // above are unchanged except the one-line `transformer_channels`
+    // generalization in `load_with_hooks`.
+    // -----------------------------------------------------------------
+
+    /// Encodes a control image into packed control latents ready for
+    /// [`Self::generate_control_with_hooks`]: `pixel_chw_neg1_to_1` is
+    /// interleaved-by-channel (`[c][y][x]`) RGB already scaled to `[-1,1]`
+    /// and already sized to this pipeline's own
+    /// `latent_shape().image_width`/`image_height` (the control pipeline's
+    /// generation canvas — the caller resizes the source image to that size
+    /// before calling this, there is no resize here). Runs the VAE encoder
+    /// (`flux_vae::encode_control_image_hooked` — CUDA/Metal graph path when
+    /// a runtime is available, pure-CPU fallback otherwise), converts the
+    /// raw posterior mean into the trained-latent domain (the inverse of
+    /// `generate_with_hooks`'s `latent / scale + shift` decode step), and
+    /// packs it 16ch -> 64 features/token the same way the noise latents are
+    /// packed.
+    pub fn encode_control_image_with_hooks(
+        &self,
+        pixel_chw_neg1_to_1: &[f32],
+        mut hooks: Option<&mut FluxRunHooks>,
+    ) -> Result<Vec<f32>> {
+        let vae_path = self
+            .plan
+            .bundle
+            .vae_path
+            .as_ref()
+            .ok_or_else(|| DiffusionError::workflow("workflow bundle does not include vae"))?;
+        let vae_prefix = self.plan.bundle.component_prefixes().vae;
+
+        hook_check(&hooks)?;
+        hook_emit(&mut hooks, "vae-encode", 0.0);
+        let mean = {
+            let mut sub = sub_hook_emit_only(&mut hooks, String::new(), 0.0, 0.9);
+            crate::flux_vae::encode_control_image_hooked(
+                vae_path,
+                vae_prefix,
+                pixel_chw_neg1_to_1,
+                self.latent_shape.image_width as usize,
+                self.latent_shape.image_height as usize,
+                crate::hook_ref(&mut sub),
+            )?
+        };
+
+        hook_check(&hooks)?;
+        hook_emit(&mut hooks, "vae-encode pack", 0.95);
+        let mut latents = mean;
+        for value in &mut latents {
+            *value = (*value - FLUX_VAE_SHIFT_FACTOR) * FLUX_VAE_SCALING_FACTOR;
+        }
+        let packed = pack_flux_latents_nchw(
+            &latents,
+            1,
+            self.latent_shape.latent_height,
+            self.latent_shape.latent_width,
+        )?;
+        hook_emit(&mut hooks, "vae-encode", 1.0);
+        Ok(packed)
+    }
+
+    /// [`Self::generate_with_hooks`] for a structure-conditioned checkpoint:
+    /// identical noise/schedule/euler loop, except the transformer sees
+    /// `[noise_packed(64) | control_packed(64)]` (128 features/token — this
+    /// pipeline's `in_channels`, generalized at load time, see
+    /// `load_with_hooks`) at every step, freshly re-concatenated each time
+    /// since only the noise half changes. The transformer's PREDICTION stays
+    /// 64 features/token (only the input embedding widened, never the
+    /// output — `out_channels` is unchanged from the plain dev checkpoint),
+    /// so the euler step, unpack, rescale and VAE decode below are the same
+    /// steps `generate_with_hooks` runs. `control_latents_packed` comes from
+    /// [`Self::encode_control_image_with_hooks`] and must be exactly
+    /// `latent_shape().image_token_count * 64` values — asserted, never
+    /// silently truncated or padded.
+    pub fn generate_control_with_hooks(
+        &self,
+        control_latents_packed: &[f32],
+        seed: u64,
+        steps: usize,
+        guidance: f32,
+        mut hooks: Option<&mut FluxRunHooks>,
+    ) -> Result<FluxPipelineGenerateRun> {
+        let total_start = Instant::now();
+        let steps = steps.max(1);
+        let tokens = self.latent_shape.image_token_count as usize;
+        let expected_control = tokens
+            .checked_mul(64)
+            .ok_or_else(|| DiffusionError::model("flux control latent token count overflow"))?;
+        if control_latents_packed.len() != expected_control {
+            return Err(DiffusionError::workflow(format!(
+                "flux control generate expected {} packed control-latent values ({} tokens x 64 channels), got {}",
+                expected_control,
+                tokens,
+                control_latents_packed.len()
+            )));
+        }
+        let schedule = FluxSchedule::for_flux1(steps, self.plan.transformer.guidance_embed)?;
+
+        let noise_start = Instant::now();
+        let mut latents = gaussian_latents(
+            self.latent_shape.latent_width,
+            self.latent_shape.latent_height,
+            seed,
+        );
+        let noise_ms = elapsed_ms(noise_start);
+
+        let pack_start = Instant::now();
+        let mut packed = pack_flux_latents_nchw(
+            &latents,
+            1,
+            self.latent_shape.latent_height,
+            self.latent_shape.latent_width,
+        )?;
+        let pack_ms = elapsed_ms(pack_start);
+
+        let denoise_start = Instant::now();
+        for step_index in 0..steps {
+            hook_check(&hooks)?;
+            let label = if step_index == 0 {
+                format!("denoise 1/{steps} (streaming weights)")
+            } else {
+                format!("denoise {}/{}", step_index + 1, steps)
+            };
+            let step_base = 0.9 * step_index as f64 / steps as f64;
+            hook_emit(&mut hooks, &label, step_base);
+            let sigma = schedule.sigmas[step_index];
+            let sigma_next = schedule.sigmas[step_index + 1];
+            // Re-concatenated every step: only `packed` (the noise half)
+            // changes between steps, `control_latents_packed` is static
+            // conditioning computed once by encode_control_image_with_hooks.
+            let combined =
+                concat_packed_latent_channels(&packed, control_latents_packed, tokens, 64, 64)?;
+            let mut sub = sub_hook_emit_only(
+                &mut hooks,
+                format!("denoise {}/{} ", step_index + 1, steps),
+                step_base,
+                0.9 / steps as f64,
+            );
+            let run = self.transformer.execute_hooked(
+                &self.transformer_weights,
+                &self.conditioning,
+                &combined,
+                sigma,
+                guidance,
+                crate::hook_ref(&mut sub),
+            )?;
+            euler_step(&mut packed, &run.prediction, sigma, sigma_next)?;
+        }
+        let denoise_ms = elapsed_ms(denoise_start);
+        hook_check(&hooks)?;
+        hook_emit(&mut hooks, "vae-decode", 0.9);
+
+        let unpack_start = Instant::now();
+        latents = unpack_flux_latents_nchw(
+            &packed,
+            1,
+            self.latent_shape.latent_height,
+            self.latent_shape.latent_width,
+        )?;
+        let unpack_ms = elapsed_ms(unpack_start);
+
+        let latent_rescale_start = Instant::now();
+        for value in &mut latents {
+            *value = (*value / FLUX_VAE_SCALING_FACTOR) + FLUX_VAE_SHIFT_FACTOR;
+        }
+        let latent_rescale_ms = elapsed_ms(latent_rescale_start);
+
+        let vae_layout_start = Instant::now();
+        let latents = nchw_to_whcb(
+            &latents,
+            1,
+            16,
+            self.latent_shape.latent_height as usize,
+            self.latent_shape.latent_width as usize,
+        )?;
+        let vae_layout_ms = elapsed_ms(vae_layout_start);
+
+        hook_check(&hooks)?;
+        let vae_execute_start = Instant::now();
+        let image = {
             let mut sub = sub_hook_emit_only(&mut hooks, "vae-decode ".to_string(), 0.9, 0.1);
             self.vae
                 .execute_hooked(&self.vae_weights, &latents, crate::hook_ref(&mut sub))?

@@ -325,6 +325,56 @@ pub fn unpack_flux_latents_nchw(
     Ok(latents)
 }
 
+/// Concatenates two per-token packed-latent buffers along the feature
+/// (channel) dimension: `[token][a_channels]` + `[token][b_channels]` ->
+/// `[token][a_channels + b_channels]`. This is the `img_in` input structure
+/// FLUX.1-Depth-dev / FLUX.1-Canny-dev (and the diffusers `FluxControlPipeline`
+/// family generally) use: the packed noisy latents (64 features/token) and a
+/// packed VAE-encoded control-image latent (64 features/token) concatenated
+/// into 128 features/token, re-built fresh every denoise step since only the
+/// noise half changes (see `flux_pipeline::FluxPipeline::generate_control_with_hooks`).
+pub fn concat_packed_latent_channels(
+    a: &[f32],
+    b: &[f32],
+    token_count: usize,
+    a_channels: usize,
+    b_channels: usize,
+) -> Result<Vec<f32>> {
+    let expected_a = token_count
+        .checked_mul(a_channels)
+        .ok_or_else(|| DiffusionError::workflow("FLUX packed-latent concat a-size overflow"))?;
+    let expected_b = token_count
+        .checked_mul(b_channels)
+        .ok_or_else(|| DiffusionError::workflow("FLUX packed-latent concat b-size overflow"))?;
+    if a.len() != expected_a {
+        return Err(DiffusionError::workflow(format!(
+            "FLUX packed-latent concat expected {} values in `a` ({} tokens x {} channels), got {}",
+            expected_a,
+            token_count,
+            a_channels,
+            a.len()
+        )));
+    }
+    if b.len() != expected_b {
+        return Err(DiffusionError::workflow(format!(
+            "FLUX packed-latent concat expected {} values in `b` ({} tokens x {} channels), got {}",
+            expected_b,
+            token_count,
+            b_channels,
+            b.len()
+        )));
+    }
+    let out_channels = a_channels + b_channels;
+    let mut out = vec![0.0f32; token_count * out_channels];
+    for token in 0..token_count {
+        out[token * out_channels..token * out_channels + a_channels]
+            .copy_from_slice(&a[token * a_channels..(token + 1) * a_channels]);
+        out[token * out_channels + a_channels..(token + 1) * out_channels]
+            .copy_from_slice(&b[token * b_channels..(token + 1) * b_channels]);
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug)]
 pub struct FluxPromptToImagePlan {
     pub workflow_path: PathBuf,
@@ -1359,8 +1409,8 @@ mod combined_fp8_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonicalize_flux_diffusion_tensor_name, pack_flux_latents_nchw, unpack_flux_latents_nchw,
-        FluxLatentShape, FluxTransformerConfig,
+        canonicalize_flux_diffusion_tensor_name, concat_packed_latent_channels,
+        pack_flux_latents_nchw, unpack_flux_latents_nchw, FluxLatentShape, FluxTransformerConfig,
     };
 
     #[test]
@@ -1426,5 +1476,23 @@ mod tests {
 
         let unpacked = unpack_flux_latents_nchw(&packed, batch, h, w).unwrap();
         assert_eq!(unpacked, latents);
+    }
+
+    #[test]
+    fn concat_packed_latent_channels_interleaves_per_token() {
+        // 2 tokens, a=3 channels, b=2 channels.
+        let a = vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
+        let b = vec![100.0, 200.0, 1000.0, 2000.0];
+        let out = concat_packed_latent_channels(&a, &b, 2, 3, 2).unwrap();
+        assert_eq!(
+            out,
+            vec![1.0, 2.0, 3.0, 100.0, 200.0, 10.0, 20.0, 30.0, 1000.0, 2000.0]
+        );
+    }
+
+    #[test]
+    fn concat_packed_latent_channels_rejects_length_mismatch() {
+        assert!(concat_packed_latent_channels(&[1.0, 2.0], &[3.0], 2, 1, 1).is_err());
+        assert!(concat_packed_latent_channels(&[1.0], &[2.0, 3.0], 2, 1, 1).is_err());
     }
 }
