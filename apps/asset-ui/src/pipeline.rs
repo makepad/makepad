@@ -227,6 +227,9 @@ const CONTROL_DEPTH_MODEL: &str = "flux1-depth-dev";
 const CONTROL_CANNY_MODEL: &str = "flux1-canny-dev";
 /// FLUX.1 Fill-dev: mask inpaint/outpaint (named inputs image + mask).
 const INPAINT_MODEL: &str = "flux1-fill-dev";
+/// TripoSplat: single picture -> 3D Gaussian splat (.ply), the object-level
+/// splat backend (FlashWorld stays the scene/world one).
+const SPLAT_MODEL: &str = "triposplat";
 
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
@@ -439,6 +442,18 @@ pub const PRESETS: &[Preset] = &[
         1,
     ),
     Preset::linear("image → world (splat)", &["image", "world"], &[]),
+    // Object-level Gaussian splats: prompt → picture → TripoSplat .ply, or
+    // straight from a selected picture (consumer-only).
+    Preset::linear(
+        "image → splat (3D gaussians)",
+        &["image", "splat"],
+        &[("splat", SPLAT_MODEL)],
+    ),
+    Preset::linear(
+        "splat from selected image",
+        &["splat"],
+        &[("splat", SPLAT_MODEL)],
+    ),
     Preset::linear("expand → image → world", &["text", "image", "world"], &[]),
     Preset::linear("expand → sfx", &["text", "audio"], &[]),
     // Model is chosen in the settings panel, not baked into the type.
@@ -558,7 +573,7 @@ pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
         "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale"
-        | "control" | "inpaint" => Some(&["image/"]),
+        | "control" | "inpaint" | "splat" => Some(&["image/"]),
         "paint" => Some(&["model/gltf-binary"]),
         _ => None,
     }
@@ -573,7 +588,7 @@ pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
 pub fn consumer_only_domain(domain: &str) -> bool {
     matches!(
         domain,
-        "edit" | "upscale" | "control" | "inpaint" | "depth" | "matte" | "segment"
+        "edit" | "upscale" | "control" | "inpaint" | "depth" | "matte" | "segment" | "splat"
     )
 }
 
@@ -612,6 +627,7 @@ pub fn stage_display_name(domain: &str) -> &str {
         "upscale" => "RealESRGAN x4 upscale",
         "control" => "structure-guided render",
         "inpaint" => "Fill-dev inpaint",
+        "splat" => "TripoSplat 3D gaussians",
         _ => domain,
     }
 }
@@ -1334,12 +1350,15 @@ impl Pipeline {
                         later.iter().find(|s| {
                             matches!(
                                 s.domain.as_str(),
-                                "mesh" | "world" | "video" | "audio" | "music"
+                                "mesh" | "splat" | "world" | "video" | "audio" | "music"
                             )
                         })
                     })
                     .or_else(|| self.stages.get(stage + 1))
                     .map(|s| s.domain.clone())
+                    // A splat stage wants exactly what the mesh template
+                    // wants: one clean, fully visible subject.
+                    .map(|d| if d == "splat" { "mesh".to_string() } else { d })
                     .unwrap_or_else(|| "image".to_string());
                 let is_music_target = target == "music";
                 request.target_domain = Some(target);
@@ -1409,6 +1428,11 @@ impl Pipeline {
             // Fill-dev: named inputs image (the canvas = the relayed input)
             // + mask (painted in the viewer); prompt = what goes in the mask.
             "inpaint" => {
+                request.prompt = Some(prompt);
+            }
+            // TripoSplat: picture in, .ply out; the prompt is trace metadata
+            // only (no text conditioning in the model).
+            "splat" => {
                 request.prompt = Some(prompt);
             }
             "speech" => {
@@ -4592,6 +4616,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("rig", "skintokens"),
             ("rig", "skintokens-oracle"),
             ("segment", "sam3-1-multiplex"),
+            ("splat", "triposplat"),
             ("speech", "indextts-2.5"),
             ("speech", "kokoro"),
             ("text", "qwen3.8-27b"),
@@ -4904,6 +4929,38 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(control.prompt.as_deref(), Some("a knight in a cathedral"));
         assert_eq!(decoded_input(&control), b"photo");
         assert_eq!(control.width, None, "size follows the control image");
+    }
+
+    #[test]
+    fn splat_chains_seed_from_a_picture_and_expand_like_mesh() {
+        assert_eq!(seed_replaces_prefix(&["splat"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["image", "splat"], "image/png"), Some(1));
+        let mut pipeline = Pipeline::new(
+            "a bronze owl statuette",
+            &["splat"],
+            &[("splat", SPLAT_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"owl".to_vec()).unwrap();
+        let request = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(decoded_input(&request), b"owl");
+        assert_eq!(request.input_content_type.as_deref(), Some("image/png"));
+        assert_eq!(pipeline.pinned_model_for_domain("splat").as_deref(), Some(SPLAT_MODEL));
+        // text → image → splat expands for the mesh template (one subject).
+        let chain = Pipeline::new(
+            "a bronze owl statuette",
+            &["text", "image", "splat"],
+            &[],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        let expand = chain.request_for_stage(0).unwrap();
+        assert_eq!(expand.target_domain.as_deref(), Some("mesh"));
     }
 
     #[test]
