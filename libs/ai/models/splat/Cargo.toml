@@ -1,0 +1,11 @@
+[package]
+name = "makepad-ai-splat"
+version = "0.1.0"
+edition = "2021"
+description = "TripoSplat (VAST-AI) single image -> 3D gaussian splat: native CPU reference + CUDA forward."
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-ai-flux = { path = "../flux" }

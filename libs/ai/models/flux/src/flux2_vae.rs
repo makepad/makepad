@@ -276,10 +276,36 @@ pub fn flux2_vae_bn_denormalize(packed: &mut Flux2PackedLatents, weights: &Flux2
     }
 }
 
+/// Raw encoder moments: `(values, latent_width, latent_height)` with
+/// `values` laid out `[2 * z_channels, H * W]` (mean plane then logvar
+/// plane). ADDITIVE accessor: `flux2_vae_encode` is the mean-only FLUX.2
+/// path and stays exactly as it was, but a consumer that needs the
+/// posterior's variance — TripoSplat samples `mean + exp(0.5*logvar) * noise`
+/// for its image condition — cannot recover logvar from packed latents.
+pub fn flux2_vae_encode_moments(
+    weights: &Flux2VaeWeights,
+    image: &Flux2VaeImage,
+) -> Result<(Vec<f32>, usize, usize)> {
+    encode_moments(weights, image)
+}
+
 pub fn flux2_vae_encode(
     weights: &Flux2VaeWeights,
     image: &Flux2VaeImage,
 ) -> Result<Flux2PackedLatents> {
+    let (moments, width, height) = encode_moments(weights, image)?;
+    let z_channels = weights.config.z_channels as usize;
+    let plane = width * height;
+    let mean = &moments[..z_channels * plane];
+    let mut packed = flux2_pack_latents(mean, width, height, z_channels)?;
+    flux2_vae_bn_normalize(&mut packed, weights);
+    Ok(packed)
+}
+
+fn encode_moments(
+    weights: &Flux2VaeWeights,
+    image: &Flux2VaeImage,
+) -> Result<(Vec<f32>, usize, usize)> {
     if !gpu_device_available() {
         return Err(DiffusionError::workflow(
             "flux2 vae encode requires CUDA (MAKEPAD_GGML_REQUIRE_CUDA=1)",
@@ -338,13 +364,13 @@ pub fn flux2_vae_encode(
             moments.len()
         )));
     }
-    let mean = &moments[..z_channels * plane];
-    let mut packed = flux2_pack_latents(mean, hidden.width, hidden.height, z_channels)?;
-    flux2_vae_bn_normalize(&mut packed, weights);
+    let (width, height) = (hidden.width, hidden.height);
+    let _ = plane;
+    let _ = z_channels;
     drop(hidden);
     gpu_pool_clear();
     gpu_pool_cap_override(None);
-    Ok(packed)
+    Ok((moments, width, height))
 }
 
 /// Idle-pool cap for the VAE phases, sized from the VRAM that is actually

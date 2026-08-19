@@ -3649,6 +3649,27 @@ mod imp {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn gpu_splat_repo3d_tables(
+        _delta: &GpuTensor,
+        _freqs: &GpuTensor,
+        _head_count: usize,
+        _pairs: usize,
+        _dim0: usize,
+        _dim1: usize,
+    ) -> Result<(GpuTensor, GpuTensor), String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_splat_rope_pairs_per_head(
+        _x: &GpuTensor,
+        _head_count: usize,
+        _cos_table: &GpuTensor,
+        _sin_table: &GpuTensor,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn gpu_rife_merge_rgb8(
         _warped0: &GpuTensor,
         _warped1: &GpuTensor,
