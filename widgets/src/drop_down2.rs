@@ -599,8 +599,7 @@ impl DropDown2 {
         cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
     }
 
-    fn draw_popup(&mut self, cx: &mut Cx2d) {
-        let trigger = self.draw_bg.area().rect(cx);
+    fn draw_popup(&mut self, cx: &mut Cx2d, trigger: Rect) {
         let pass = cx.current_pass_size();
         let font_px = 9.0;
         let content_w = estimate_label_width(&self.labels, font_px);
@@ -900,9 +899,21 @@ impl Widget for DropDown2 {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.clamp_selected();
+        // Turtle alignment is deferred: a field laid out after a Fill sibling
+        // (or below a Fill one) is recorded at its pre-shift position and only
+        // moved when the ancestor turtle ends. Read the field's rect BEFORE
+        // redrawing it — the instance buffer still holds LAST frame's final,
+        // aligned rect — so the absolutely positioned popup opens under the
+        // field instead of at the pre-alignment origin of its row.
+        let previous_rect = self.draw_bg.area().rect(cx);
         self.draw_field(cx, walk);
         if self.is_active {
-            self.draw_popup(cx);
+            let trigger = if previous_rect.size.x > 0.0 && previous_rect.size.y > 0.0 {
+                previous_rect
+            } else {
+                self.draw_bg.area().rect(cx)
+            };
+            self.draw_popup(cx, trigger);
         }
         DrawStep::done()
     }

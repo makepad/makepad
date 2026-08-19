@@ -126,6 +126,10 @@ script_mod! {
         u_ambient: uniform(float(0.15))
         u_spec_strength: uniform(float(0.9))
         u_env_intensity: uniform(float(1.8))
+        // Inspection views: 0 lit, 1 albedo (unlit), 2 normals, 3 metallic,
+        // 4 roughness, 5 clay (white albedo, lit), 6 wire (clay + triangle
+        // edges; the mesh carries barycentrics in TEXCOORD_0).
+        u_view_mode: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -380,9 +384,20 @@ script_mod! {
 
         pixel: fn() {
             let uv = vec2(fract(self.v_uv.x), fract(self.v_uv.y));
-            let albedo = self.get_base_color(uv, self.v_color);
+            let albedo_in = self.get_base_color(uv, self.v_color);
+            let view_mode = self.u_view_mode;
+            if view_mode > 0.5 && view_mode < 1.5 {
+                return vec4(albedo_in.x, albedo_in.y, albedo_in.z, albedo_in.w)
+            }
+            // Clay / wire: neutral matte-ish surface so shading and topology
+            // read without the textures.
+            let albedo = if view_mode > 4.5 {
+                vec4(0.78, 0.78, 0.78, 1.0)
+            } else {
+                albedo_in
+            };
             let occlusion = self.get_occlusion(uv);
-            let emissive = self.get_emissive(uv);
+            let emissive = if view_mode > 4.5 { vec3(0.0, 0.0, 0.0) } else { self.get_emissive(uv) };
             let ambient = albedo.xyz * self.u_ambient;
             if self.u_enable_brdf <= 0.5 {
                 let color = self.tone_map_color(ambient * occlusion + emissive);
@@ -420,7 +435,18 @@ script_mod! {
             let ndotv = max(dot(n, v), 0.0001);
             let vdoth = max(dot(v, h), 0.0);
 
-            let mr = self.get_metal_roughness(uv);
+            let mr_in = self.get_metal_roughness(uv);
+            if view_mode > 1.5 && view_mode < 2.5 {
+                let nn = n * 0.5 + vec3(0.5, 0.5, 0.5);
+                return vec4(nn.x, nn.y, nn.z, 1.0)
+            }
+            if view_mode > 2.5 && view_mode < 3.5 {
+                return vec4(mr_in.x, mr_in.x, mr_in.x, 1.0)
+            }
+            if view_mode > 3.5 && view_mode < 4.5 {
+                return vec4(mr_in.y, mr_in.y, mr_in.y, 1.0)
+            }
+            let mr = if view_mode > 4.5 { vec2(0.0, 0.55) } else { mr_in };
             let metal = mr.x;
             let rough = mr.y;
             let f0 = mix(vec3(0.04, 0.04, 0.04), albedo.xyz, metal);
@@ -478,6 +504,20 @@ script_mod! {
 
             let indirect_diffuse = (ambient + ibl_diffuse) * occlusion;
             let color = self.tone_map_color(lit + indirect_diffuse + indirect_spec + emissive);
+            if view_mode > 5.5 {
+                // Triangle edges from the barycentrics smuggled in as UVs
+                // (u, v, 1-u-v), ~1.2 px wide in screen space.
+                let bary = vec3(self.v_uv.x, self.v_uv.y, 1.0 - self.v_uv.x - self.v_uv.y);
+                let fw = vec3(
+                    abs(dFdx(bary.x)) + abs(dFdy(bary.x)),
+                    abs(dFdx(bary.y)) + abs(dFdy(bary.y)),
+                    abs(dFdx(bary.z)) + abs(dFdy(bary.z))
+                );
+                let edge = min(min(bary.x / max(fw.x, 0.00001), bary.y / max(fw.y, 0.00001)), bary.z / max(fw.z, 0.00001));
+                let line = 1.0 - clamp(edge - 0.6, 0.0, 1.0);
+                let wire = mix(color, vec3(0.05, 0.85, 1.0), line * 0.9);
+                return vec4(wire.x, wire.y, wire.z, albedo.w)
+            }
             return vec4(color.x, color.y, color.z, albedo.w)
         }
     }
@@ -919,6 +959,9 @@ pub struct DrawPbr {
     pub spec_strength: f32,
     #[rust(1.8)]
     pub env_intensity: f32,
+    /// See `u_view_mode` in the shader (0 = lit).
+    #[rust(0.0)]
+    pub view_mode: f32,
     #[rust(0.0)]
     pub pad1: f32,
     #[deref]
@@ -1388,6 +1431,8 @@ impl DrawPbr {
             .set_uniform(cx.cx, live_id!(u_spec_strength), &[self.spec_strength]);
         self.draw_vars
             .set_uniform(cx.cx, live_id!(u_env_intensity), &[self.env_intensity]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_view_mode), &[self.view_mode]);
     }
 
     pub fn add_decoded_primitive(&mut self, primitive: &DecodedPrimitive) -> Result<(), String> {
