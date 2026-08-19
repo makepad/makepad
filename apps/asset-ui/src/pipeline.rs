@@ -214,6 +214,8 @@ const UPSCALE_MODEL: &str = "realesrgan-x4plus";
 /// Structure-conditioned FLUX.1 tiers (BFL official BF16; ~35 GB, gated).
 const CONTROL_DEPTH_MODEL: &str = "flux1-depth-dev";
 const CONTROL_CANNY_MODEL: &str = "flux1-canny-dev";
+/// FLUX.1 Fill-dev: mask inpaint/outpaint (named inputs image + mask).
+const INPAINT_MODEL: &str = "flux1-fill-dev";
 
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
@@ -460,6 +462,14 @@ pub const PRESETS: &[Preset] = &[
         &["control"],
         &[("control", CONTROL_CANNY_MODEL)],
     ),
+    // Mask inpaint/outpaint: select a picture, paint the area to repaint in
+    // the viewer (or Outpaint to grow the canvas), describe what goes there.
+    // Consumer-only; refused without a painted mask.
+    Preset::linear(
+        "inpaint / outpaint selected image (paint mask)",
+        &["inpaint"],
+        &[("inpaint", INPAINT_MODEL)],
+    ),
     Preset::linear("image → depthmap", &["image", "depth"], &[]),
     Preset::linear("image → segment", &["image", "segment"], &[("segment", "sam3-1-multiplex")]),
     // The character chain: prompt -> clean character image -> Trellis mesh ->
@@ -537,7 +547,7 @@ pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
         "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale"
-        | "control" => Some(&["image/"]),
+        | "control" | "inpaint" => Some(&["image/"]),
         "paint" => Some(&["model/gltf-binary"]),
         _ => None,
     }
@@ -552,7 +562,7 @@ pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
 pub fn consumer_only_domain(domain: &str) -> bool {
     matches!(
         domain,
-        "edit" | "upscale" | "control" | "depth" | "matte" | "segment"
+        "edit" | "upscale" | "control" | "inpaint" | "depth" | "matte" | "segment"
     )
 }
 
@@ -590,6 +600,7 @@ pub fn stage_display_name(domain: &str) -> &str {
         "edit" => "instruction edit",
         "upscale" => "RealESRGAN x4 upscale",
         "control" => "structure-guided render",
+        "inpaint" => "Fill-dev inpaint",
         _ => domain,
     }
 }
@@ -843,6 +854,9 @@ pub struct Pipeline {
     /// editors — sent as named inputs `reference_1..N` next to the primary
     /// seed. Set via [`Pipeline::set_seed_references`].
     seed_references: Vec<(String, Vec<u8>)>,
+    /// Inpaint mask PNG (white = repaint) for an `inpaint` stage; the seed
+    /// input is the canvas it applies to. Set via [`Pipeline::set_seed_mask`].
+    seed_mask: Option<Vec<u8>>,
     in_flight: HashMap<LiveId, Req>,
 }
 
@@ -905,6 +919,7 @@ impl Pipeline {
             fan_out_templates: HashMap::new(),
             seed_input: None,
             seed_references: Vec::new(),
+            seed_mask: None,
             in_flight: HashMap::new(),
         };
         if pipeline.is_character_pipeline() {
@@ -1232,6 +1247,19 @@ impl Pipeline {
         Ok(())
     }
 
+    /// The inpaint mask (PNG, white = repaint) for the chain's `inpaint`
+    /// stage. Refused for chains without one.
+    pub fn set_seed_mask(&mut self, mask_png: Vec<u8>) -> Result<(), String> {
+        if !self.stages.iter().any(|stage| stage.domain == "inpaint") {
+            return Err("a mask needs an inpaint stage in the chain".to_string());
+        }
+        if mask_png.is_empty() {
+            return Err("empty mask".to_string());
+        }
+        self.seed_mask = Some(mask_png);
+        Ok(())
+    }
+
     /// Extra references for multi-reference edit stages (`reference_1..N`).
     /// Requires an edit stage in the chain — other consumers take exactly
     /// one input, and an ignored reference would be a silent lie.
@@ -1358,6 +1386,11 @@ impl Pipeline {
             "control" => {
                 request.prompt = Some(prompt);
             }
+            // Fill-dev: named inputs image (the canvas = the relayed input)
+            // + mask (painted in the viewer); prompt = what goes in the mask.
+            "inpaint" => {
+                request.prompt = Some(prompt);
+            }
             "speech" => {
                 request.text = Some(prompt);
                 // Voice packs are a Kokoro concept. IndexTTS 2.5 takes
@@ -1465,6 +1498,33 @@ impl Pipeline {
         if let Some((b64, content_type)) = self.input_for_stage(stage) {
             request.input_b64 = Some(b64);
             request.input_content_type = Some(content_type);
+        }
+        if domain == "inpaint" {
+            let (b64, content_type) = self
+                .input_for_stage(stage)
+                .ok_or_else(|| "inpaint stage has no picture to paint on".to_string())?;
+            let mask = self
+                .seed_mask
+                .as_ref()
+                .ok_or_else(|| "inpaint stage has no mask — paint one in the viewer first".to_string())?;
+            request.input_b64 = None;
+            request.input_content_type = None;
+            request.inputs = Some(vec![
+                NamedInputJson {
+                    name: "image".to_string(),
+                    content_type,
+                    data_b64: b64,
+                },
+                NamedInputJson {
+                    name: "mask".to_string(),
+                    content_type: "image/png".to_string(),
+                    data_b64: String::from_utf8(makepad_base64::base64_encode(
+                        mask,
+                        &makepad_base64::BASE64_STANDARD,
+                    ))
+                    .unwrap_or_default(),
+                },
+            ]);
         }
         if domain == "edit" && !self.seed_references.is_empty() {
             request.inputs = Some(
@@ -4476,6 +4536,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("edit", "flux2-klein-4b"),
             ("image", "flux2-dev"),
             ("image", "flux2-dev-q4-24g"),
+            ("inpaint", "flux1-fill-dev"),
             ("matte", "birefnet-hr"),
             ("mesh", "trellis-2"),
             ("motion", "hy-motion"),
@@ -4799,6 +4860,42 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert_eq!(control.prompt.as_deref(), Some("a knight in a cathedral"));
         assert_eq!(decoded_input(&control), b"photo");
         assert_eq!(control.width, None, "size follows the control image");
+    }
+
+    #[test]
+    fn inpaint_chain_sends_image_and_mask_as_named_inputs() {
+        assert_eq!(seed_replaces_prefix(&["inpaint"], "image/png"), Some(0));
+        let mut pipeline = Pipeline::new(
+            "a red door",
+            &["inpaint"],
+            &[("inpaint", INPAINT_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"canvas".to_vec()).unwrap();
+        // No mask = refused, never a silent full-image repaint.
+        assert!(pipeline.request_for_stage(0).is_err());
+        pipeline.set_seed_mask(b"mask".to_vec()).unwrap();
+        let request = pipeline.request_for_stage(0).unwrap();
+        assert!(request.input_b64.is_none(), "dual named-input contract, no input_b64");
+        let inputs = request.inputs.unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].name, "image");
+        assert_eq!(inputs[1].name, "mask");
+        assert_eq!(
+            makepad_base64::base64_decode(inputs[0].data_b64.as_bytes()).unwrap(),
+            b"canvas"
+        );
+        assert_eq!(
+            makepad_base64::base64_decode(inputs[1].data_b64.as_bytes()).unwrap(),
+            b"mask"
+        );
+        assert_eq!(request.prompt.as_deref(), Some("a red door"));
+        // A mask on a chain without an inpaint stage is refused.
+        let mut edit = Pipeline::new("x", &["edit"], &[], vec![], None, None, GenParams::default());
+        assert!(edit.set_seed_mask(b"m".to_vec()).is_err());
     }
 
     #[test]

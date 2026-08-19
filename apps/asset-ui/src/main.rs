@@ -52,7 +52,9 @@ mod http;
 mod import;
 mod import_classic;
 mod library;
+mod mask_paint;
 mod mesh_view;
+use crate::mask_paint::{MaskPaint, MaskPaintAction};
 mod pipeline;
 mod scheduler;
 mod store_views;
@@ -1332,6 +1334,7 @@ script_mod! {
                         md_edit_row := DropField{ visible: false FieldCaption{ text: "Edit model" } md_edit := FieldDrop{} }
                         md_upscale_row := DropField{ visible: false FieldCaption{ text: "Upscale model" } md_upscale := FieldDrop{} }
                         md_control_row := DropField{ visible: false FieldCaption{ text: "Control model" } md_control := FieldDrop{} }
+                        md_inpaint_row := DropField{ visible: false FieldCaption{ text: "Inpaint model" } md_inpaint := FieldDrop{} }
                         DropField{
                             FieldCaption{ text: "Box" }
                             box_drop := FieldDrop{}
@@ -1881,12 +1884,26 @@ script_mod! {
                                         image_tools := View{
                                             width: Fill height: Fit flow: Right
                                             padding: Inset{left: 10 right: 10 top: 6}
+                                            // Inpaint/outpaint mask tools (inpaint preset + a
+                                            // pinned picture): paint on the picture below.
+                                            mask_tools := View{
+                                                visible: false
+                                                width: Fit height: Fit flow: Right spacing: 6
+                                                align: Align{y: 0.5}
+                                                HintLabel{ text: "MASK · drag = paint, ⌥drag = erase" }
+                                                mask_brush_drop := FieldDrop{ width: 120 }
+                                                mask_clear_btn := ChipButton{ text: "Clear" }
+                                                mask_invert_btn := ChipButton{ text: "Invert" }
+                                                mask_outpaint_btn := ChipButton{ text: "Outpaint +25%" }
+                                                mask_status := HintLabel{ text: "" }
+                                            }
                                             View{ width: Fill height: Fit }
                                             alpha_btn := ChipButton{ text: "Alpha matte" }
                                         }
                                         image_body := View{
                                             width: Fill height: Fill
                                             align: Align{x: 0.5 y: 0.5}
+                                            mask_paint := mod.widgets.MaskPaint{ visible: false }
                                             image_view := Image{
                                                 width: Fill
                                                 height: Fill
@@ -2693,7 +2710,13 @@ struct RunSeed {
     skip: usize,
     /// Extra edit references (content type, bytes), in tray order.
     references: Vec<(String, std::sync::Arc<Vec<u8>>)>,
+    /// Inpaint mask PNG (white = repaint) painted over `bytes` (which is
+    /// then the painter's canvas, possibly outpainted).
+    mask: Option<std::sync::Arc<Vec<u8>>>,
 }
+
+/// Brush radii (canvas px) for the inpaint mask painter.
+const MASK_BRUSH_SIZES: &[f32] = &[8.0, 24.0, 48.0, 96.0, 160.0];
 
 /// Webcam input tile: capture wiring + auto-run bookkeeping.
 #[derive(Default)]
@@ -2927,6 +2950,9 @@ pub struct App {
     /// Webcam input tile state.
     #[rust]
     webcam: WebcamState,
+    /// File loaded into the inpaint mask painter (None = mask mode off).
+    #[rust]
+    mask_file: Option<String>,
     /// Members of the selected run shown in the run tray, pipeline order
     /// (oldest first), one per chip slot.
     #[rust]
@@ -3049,7 +3075,10 @@ impl App {
         }
         // One shared, real Asset Server session. Discovery/auth/retry happen
         // off-thread; this call only starts the lifecycle.
-        self.store.start();
+        // The store hosts the embedded Asset Server; hand it the library it
+        // must publish. Library::open ran above, so the product backfill is
+        // already on disk when the watcher's first poll reads index.json.
+        self.store.start(PathBuf::from(repo_path("local/ai_content_library")));
         self.asset_store_timer = cx.start_interval(0.2);
         ChatData::push(
             ChatRole::System,
@@ -3121,6 +3150,11 @@ impl App {
                 .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
                 .collect(),
         );
+        self.ui.drop_down2(cx, ids!(mask_brush_drop)).set_labels(
+            cx,
+            MASK_BRUSH_SIZES.iter().map(|r| format!("brush {r:.0}px")).collect(),
+        );
+        self.ui.drop_down2(cx, ids!(mask_brush_drop)).set_selected_item(cx, 1);
         self.ui.drop_down2(cx, ids!(edit_strength_drop)).set_labels(
             cx,
             EDIT_STRENGTHS
@@ -3754,6 +3788,7 @@ impl App {
             "edit" => self.ui.drop_down2(cx, ids!(md_edit)),
             "upscale" => self.ui.drop_down2(cx, ids!(md_upscale)),
             "control" => self.ui.drop_down2(cx, ids!(md_control)),
+            "inpaint" => self.ui.drop_down2(cx, ids!(md_inpaint)),
             _ => return None,
         };
         let index = drop.selected_item().checked_sub(1)?;
@@ -3886,6 +3921,9 @@ impl App {
         );
         self.refresh_one_stage_model(
             cx, "control", ids!(md_control_row), ids!(md_control), active("control"), apply_preset_pin, pin_for("control"),
+        );
+        self.refresh_one_stage_model(
+            cx, "inpaint", ids!(md_inpaint_row), ids!(md_inpaint), active("inpaint"), apply_preset_pin, pin_for("inpaint"),
         );
         self.ui
             .widget(cx, ids!(speech_params_row))
@@ -4316,12 +4354,41 @@ impl App {
             Some(asset) => {
                 match seed_replaces_prefix(PRESETS[preset].domains, &asset.content_type) {
                     Some(skip) => {
-                        let bytes = std::fs::read(&asset.path).map_err(|error| {
+                        let mut bytes = std::fs::read(&asset.path).map_err(|error| {
                             format!(
                                 "selected input \u{201c}{}\u{201d} could not be read ({error}) — run not queued",
                                 asset.label
                             )
                         })?;
+                        // Inpaint: the painter's canvas (maybe outpainted) is
+                        // the picture the service repaints, its mask says where.
+                        let mut mask = None;
+                        if PRESETS[preset].domains.contains(&"inpaint") {
+                            let painted = self
+                                .ui
+                                .widget(cx, ids!(mask_paint))
+                                .borrow::<MaskPaint>()
+                                .filter(|paint| paint.has_image())
+                                .map(|paint| (paint.has_mask(), paint.canvas_png(), paint.mask_png()));
+                            match painted {
+                                Some((true, Some(canvas), Some(mask_png))) => {
+                                    bytes = canvas;
+                                    mask = Some(std::sync::Arc::new(mask_png));
+                                }
+                                Some((false, _, _)) => {
+                                    return Err(
+                                        "paint a mask on the picture first (drag in the viewer; Outpaint grows the canvas) — run not queued"
+                                            .to_string(),
+                                    );
+                                }
+                                _ => {
+                                    return Err(
+                                        "the mask painter has no picture loaded — select an image first"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
                         // Extra references only matter to edit chains; for
                         // anything else they stay in the tray, unused (the
                         // pipeline would refuse them), so don't even read.
@@ -4343,10 +4410,15 @@ impl App {
                         Some(RunSeed {
                             source_file: asset.file.clone(),
                             source_label: asset.label.clone(),
-                            content_type: asset.content_type.clone(),
+                            content_type: if mask.is_some() {
+                                "image/png".to_string()
+                            } else {
+                                asset.content_type.clone()
+                            },
                             bytes: std::sync::Arc::new(bytes),
                             skip,
                             references,
+                            mask,
                         })
                     }
                     None => {
@@ -4733,6 +4805,13 @@ impl App {
                 log!("run: seed input rejected at dispatch: {error}");
                 self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
                 return;
+            }
+            if let Some(mask) = &seed.mask {
+                if let Err(error) = pipeline.set_seed_mask(mask.as_ref().clone()) {
+                    log!("run: mask rejected at dispatch: {error}");
+                    self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
+                    return;
+                }
             }
             if let Err(error) = pipeline.set_seed_references(
                 seed.references
@@ -5353,6 +5432,15 @@ impl App {
                         .flatten();
                     let (domain, content_type, bytes) =
                         (s.domain.clone(), ct.clone(), bytes.clone());
+                    // The RUN's own chain decides product vs intermediate —
+                    // a seeded (transform) run has fewer stages than its
+                    // preset, so the preset must not be consulted here.
+                    let product = run_artifact_product(
+                        stage,
+                        pipeline.stages.len(),
+                        &domain,
+                        &content_type,
+                    );
                     let (prompt, group_id, group_label) = (
                         run.prompt.clone(),
                         run.group_id.clone(),
@@ -5368,6 +5456,7 @@ impl App {
                         Some((&group_id, &group_label)),
                         None,
                         true,
+                        product,
                     );
                 }
                 PipelineEvent::CandidateSetStarted { stage, set_id } => {
@@ -5484,6 +5573,10 @@ impl App {
                             Some((&group_id, &group_label)),
                             Some(&label),
                             false,
+                            // A candidate is a choice offered, never the
+                            // run's product — only the committed one is
+                            // promoted into the chain.
+                            Some(false),
                         );
                     }
                     self.refresh_candidate_ui(cx, run_id);
@@ -5540,6 +5633,18 @@ impl App {
                             "✓ CHOSEN · {model} @ {} · seed {seed}",
                             endpoint.trim_start_matches("http://")
                         );
+                        let product = self
+                            .runs
+                            .iter()
+                            .find(|run| run.id == run_id)
+                            .and_then(|run| {
+                                run_artifact_product(
+                                    stage,
+                                    run.pipeline.stages.len(),
+                                    "image",
+                                    &content_type,
+                                )
+                            });
                         let _ = self.route_artifact(
                             cx,
                             "image",
@@ -5550,6 +5655,7 @@ impl App {
                             Some((&group_id, &group_label)),
                             Some(&label),
                             false,
+                            product,
                         );
                     }
                     self.refresh_candidate_ui(cx, run_id);
@@ -5605,6 +5711,10 @@ impl App {
         group: Option<(&str, &str)>,
         label_override: Option<&str>,
         show_in_viewer: bool,
+        // PRODUCT vs intermediate for a pipeline run (see
+        // `run_artifact_product`); None for routes that are not a run stage
+        // — drops, webcam frames, manual imports.
+        product: Option<bool>,
     ) -> Option<String> {
         self.artifact_count += 1;
         let n = self.artifact_count;
@@ -5632,6 +5742,7 @@ impl App {
                 &bytes,
                 thumbnail,
                 group,
+                product,
             ) {
                 Ok(file) => {
                     if show_in_viewer {
@@ -6200,7 +6311,79 @@ impl App {
             }
         }
         self.refresh_transform_labels(cx);
+        self.sync_mask_mode(cx);
         self.ui.redraw(cx);
+    }
+
+    /// Inpaint mask mode: on when the selected preset has an `inpaint` stage
+    /// AND a picture is pinned — the viewer shows the mask painter over that
+    /// picture instead of the plain image. Off otherwise (plain viewer back).
+    fn sync_mask_mode(&mut self, cx: &mut Cx) {
+        let preset = self.current_preset_index(cx);
+        let wants = PRESETS[preset].domains.contains(&"inpaint");
+        let pinned = self
+            .input_tray
+            .current()
+            .filter(|asset| asset.content_type.to_ascii_lowercase().starts_with("image/"))
+            .cloned();
+        let target = if wants { pinned } else { None };
+        match target {
+            Some(asset) => {
+                if self.mask_file.as_deref() != Some(asset.file.as_str()) {
+                    let decoded = std::fs::read(&asset.path)
+                        .ok()
+                        .and_then(|bytes| decode_image_from_data(&bytes).ok());
+                    match decoded {
+                        Some(image) => {
+                            if let Some(mut paint) =
+                                self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>()
+                            {
+                                paint.set_image(cx, &image);
+                            }
+                            self.mask_file = Some(asset.file.clone());
+                        }
+                        None => {
+                            self.set_caption(cx, "INPAINT", "pinned picture could not be decoded for masking");
+                            self.mask_file = None;
+                            return;
+                        }
+                    }
+                }
+                self.ui.widget(cx, ids!(mask_tools)).set_visible(cx, true);
+                self.ui.widget(cx, ids!(mask_paint)).set_visible(cx, true);
+                self.ui.widget(cx, ids!(image_view)).set_visible(cx, false);
+                self.show_page(cx, id!(image_page));
+                self.refresh_mask_status(cx);
+            }
+            None => {
+                if self.mask_file.take().is_some() {
+                    if let Some(mut paint) =
+                        self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>()
+                    {
+                        paint.clear(cx);
+                    }
+                }
+                self.ui.widget(cx, ids!(mask_tools)).set_visible(cx, false);
+                self.ui.widget(cx, ids!(mask_paint)).set_visible(cx, false);
+                self.ui.widget(cx, ids!(image_view)).set_visible(cx, true);
+            }
+        }
+        self.ui.redraw(cx);
+    }
+
+    fn refresh_mask_status(&mut self, cx: &mut Cx) {
+        let (has_mask, size) = self
+            .ui
+            .widget(cx, ids!(mask_paint))
+            .borrow::<MaskPaint>()
+            .map(|paint| (paint.has_mask(), paint.canvas_size()))
+            .unwrap_or((false, (0, 0)));
+        let text = if has_mask {
+            format!("{}×{} · mask set", size.0, size.1)
+        } else {
+            format!("{}×{} · paint the area to repaint", size.0, size.1)
+        };
+        self.ui.label(cx, ids!(mask_status)).set_text(cx, &text);
     }
 
     fn input_ref_ids() -> [&'static [LiveId]; 3] {
@@ -6356,6 +6539,7 @@ impl App {
             Some((&group_id, "Webcam")),
             Some(&label),
             !auto_run,
+            None,
         ) else {
             self.set_webcam_status(cx, "snapshot could not be stored");
             return;
@@ -6474,6 +6658,7 @@ impl App {
                     Some((&group_id, "Dropped files")),
                     Some(&label),
                     !as_reference,
+                    None,
                 )
             }
         };
@@ -6547,6 +6732,7 @@ impl App {
                 group_label: None,
                 tags: None,
                 enhanced_tags: None,
+                product: None,
             },
             path: asset.path.clone(),
             preview_path: asset.preview_path.clone(),
@@ -9156,6 +9342,48 @@ fn auto_show_artifact(domain: &str, content_type: &str) -> bool {
     true
 }
 
+/// Is this run artifact the PRODUCT — the thing the user asked for — rather
+/// than an intermediate stage artifact? True only for the primary output of
+/// the chain's LAST stage: every earlier stage is scaffolding (source image,
+/// cutout matte, untextured mesh), and a stage's non-primary outputs (the
+/// PBR maps beside a painted GLB, the run's JSON sidecar) are never it.
+///
+/// Written into the library at route time, where the stage index is known —
+/// the importer's `classify_products` only has to infer this for legacy rows.
+fn run_artifact_product(
+    stage: usize,
+    stage_count: usize,
+    domain: &str,
+    content_type: &str,
+) -> Option<bool> {
+    if stage + 1 != stage_count {
+        return Some(false);
+    }
+    Some(stage_primary_output(domain, content_type))
+}
+
+/// The one artifact a stage exists to produce, per domain.
+fn stage_primary_output(domain: &str, content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    let d = domain.to_ascii_lowercase();
+    if ct == "application/json" || ct.starts_with("text/") {
+        // Only prompt expansion produces text as its product; everywhere
+        // else text/json is a provenance sidecar.
+        return d == "text" && ct.starts_with("text/");
+    }
+    match d.as_str() {
+        // Geometry stages: the GLB, never the channel maps beside it.
+        "mesh" | "paint" | "rig" | "motion" | "character" => {
+            ct.contains("gltf") || ct.contains("glb")
+        }
+        "world" => ct.contains("ply") || ct.contains("gltf") || ct.contains("glb"),
+        "video" => ct.starts_with("video/"),
+        "speech" | "audio" | "sfx" | "music" => ct.starts_with("audio/"),
+        // image / matte / depth / edit / upscale / control / segment
+        _ => ct.starts_with("image/"),
+    }
+}
+
 /// Named chip slots under the Library tag dropdown. Keep in sync with
 /// `ft0`…`ft7` in the Library filter row.
 fn set_lib_tag_chip(ui: &WidgetRef, cx: &mut Cx, index: usize, text: Option<&str>) {
@@ -9730,6 +9958,40 @@ impl MatchEvent for App {
             self.refresh_model_ui(cx, true);
             self.refresh_voice_ui(cx);
             self.sync_preset_name_box(cx);
+            self.sync_mask_mode(cx);
+        }
+        // Inpaint mask tools.
+        if let Some(index) = self.ui.drop_down2(cx, ids!(mask_brush_drop)).changed(actions) {
+            let radius = MASK_BRUSH_SIZES.get(index).copied().unwrap_or(24.0);
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.set_brush_radius(radius);
+            }
+        }
+        if self.ui.button(cx, ids!(mask_clear_btn)).clicked(actions) {
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.clear_mask(cx);
+            }
+            self.refresh_mask_status(cx);
+        }
+        if self.ui.button(cx, ids!(mask_invert_btn)).clicked(actions) {
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.invert_mask(cx);
+            }
+            self.refresh_mask_status(cx);
+        }
+        if self.ui.button(cx, ids!(mask_outpaint_btn)).clicked(actions) {
+            if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                paint.outpaint(cx, 0.25);
+            }
+            self.refresh_mask_status(cx);
+        }
+        if actions.iter().any(|action| {
+            matches!(
+                action.as_widget_action().map(|a| a.cast::<MaskPaintAction>()),
+                Some(MaskPaintAction::MaskChanged)
+            )
+        }) {
+            self.refresh_mask_status(cx);
         }
         if self.ui.button(cx, ids!(save_preset_btn)).clicked(actions) {
             self.save_current_preset(cx);
@@ -10166,6 +10428,7 @@ impl AppMain for App {
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
         crate::mesh_view::script_mod(vm);
+        crate::mask_paint::script_mod(vm);
         crate::billboard_view::script_mod(vm);
         crate::thumbnail_renderer::script_mod(vm);
         crate::chat::script_mod(vm);
@@ -10491,6 +10754,35 @@ impl AppMain for App {
                     .set_first_id_and_scroll(first, 0.0);
                 self.ui.redraw(cx);
             }
+            // ASSET_UI_MASK_SMOKE=<png>: inpaint preset + that picture pinned
+            // + a demo stroke and an outpaint border in the mask painter
+            // (headless shader/layout check of the mask lane).
+            if let Some(png) = crate::asset_store_state::env_alias(&["ASSET_UI_MASK_SMOKE"]) {
+                if let Some(index) = PRESETS.iter().position(|p| p.domains.contains(&"inpaint")) {
+                    self.ui
+                        .drop_down2(cx, ids!(preset_drop))
+                        .set_selected_item(cx, crate::pipeline::preset_row_for_index(index));
+                    self.refresh_model_ui(cx, true);
+                }
+                self.import_dropped_file(cx, Path::new(&png), false);
+                if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
+                    let (w, h) = paint.canvas_size();
+                    paint.set_brush_radius((w.min(h) as f32 * 0.06).max(4.0));
+                    let mask_w = w;
+                    let mask_h = h;
+                    // A diagonal demo stroke through the middle.
+                    let steps = 24;
+                    for i in 0..=steps {
+                        let t = i as f32 / steps as f32;
+                        let x = mask_w as f32 * (0.3 + 0.4 * t);
+                        let y = mask_h as f32 * (0.35 + 0.3 * t);
+                        let r = paint.brush_radius();
+                        paint.paint_at(x, y, r, true);
+                    }
+                    paint.outpaint(cx, 0.2);
+                }
+                self.refresh_mask_status(cx);
+            }
             if let Some(path) = self.auto.capture.clone() {
                 self.auto.captured = true;
                 log!("capture: {}", path.display());
@@ -10602,6 +10894,34 @@ fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> 
         "mp4" | "mov" => ("video", "video/mp4", false),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod product_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_last_stage_primary_output_is_the_product() {
+        // `image → mesh → PBR` (3 stages): source, untextured mesh, then
+        // the painted GLB + its channel maps + the provenance sidecar.
+        assert_eq!(run_artifact_product(0, 3, "image", "image/png"), Some(false));
+        assert_eq!(run_artifact_product(1, 3, "mesh", "model/gltf-binary"), Some(false));
+        assert_eq!(run_artifact_product(2, 3, "paint", "model/gltf-binary"), Some(true));
+        assert_eq!(run_artifact_product(2, 3, "paint", "image/png"), Some(false));
+        assert_eq!(run_artifact_product(2, 3, "paint", "application/json"), Some(false));
+
+        // Single-stage chains: the stage's own payload kind is the product.
+        assert_eq!(run_artifact_product(0, 1, "image", "image/png"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "matte", "image/png"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "video", "video/mp4"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "music", "audio/wav"), Some(true));
+        assert_eq!(run_artifact_product(0, 1, "text", "text/plain"), Some(true));
+
+        // A preview image a mesh/motion backend returns beside its GLB is
+        // never the product, even at the last stage.
+        assert_eq!(run_artifact_product(5, 6, "motion", "model/gltf-binary"), Some(true));
+        assert_eq!(run_artifact_product(5, 6, "motion", "image/png"), Some(false));
+    }
 }
 
 #[cfg(test)]
