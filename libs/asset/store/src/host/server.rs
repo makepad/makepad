@@ -124,7 +124,11 @@ impl AssetServer {
             );
         }
 
-        let janitor = Some(spawn_janitor(state.clone(), cfg.janitor_interval_ms)?);
+        let janitor = Some(spawn_janitor(
+            state.clone(),
+            cfg.janitor_interval_ms,
+            cfg.gc_janitor_steps,
+        )?);
 
         let beacon = match &cfg.discovery {
             None => None,
@@ -384,6 +388,7 @@ fn serve_conn(stream: TcpStream, rc: &RouteCtx, plane: Plane, stop: &AtomicBool)
 fn spawn_janitor(
     state: StateHandle,
     interval_ms: u64,
+    gc_steps: u32,
 ) -> ServerResult<(mpsc::Sender<()>, JoinHandle<()>)> {
     let (tx, rx) = mpsc::channel::<()>();
     let interval = Duration::from_millis(interval_ms.max(1));
@@ -396,6 +401,12 @@ fn spawn_janitor(
                     // Poisoned state returns None; keep ticking, health
                     // reports the outage.
                     let _ = state.call(move |ctx| ctx.core.jobs().expire_leases(now));
+                    // A GC run finishes even if nobody polls it: a bounded
+                    // number of steps per tick, each one transaction over
+                    // one batch, interleaved with every other state call.
+                    if gc_steps > 0 {
+                        let _ = state.call(move |ctx| ctx.core.gc_advance(gc_steps, now));
+                    }
                 }
                 _ => break,
             }

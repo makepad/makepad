@@ -40,6 +40,38 @@ pub struct ApiEndpoints {
     pub data: SocketAddr,
 }
 
+/// One blob-garbage-collection request. Every field is optional policy; the
+/// server owns the batch sizes, so a client can never ask for an unbounded
+/// unit of work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GcRequest {
+    /// Count what would be reclaimed; delete (and retire) nothing.
+    pub dry_run: bool,
+    /// Protect blobs recorded within this window of the run's start.
+    /// `None` = the server's configured default.
+    pub grace_ms: Option<u64>,
+    /// Also retire every revision of each asset except the newest `n` and
+    /// any revision an alias head still points at. `None` = keep all
+    /// revisions (the default: GC then only reclaims what is already
+    /// unreferenced).
+    pub retain_per_asset: Option<u32>,
+    /// How many bounded steps this ONE call may perform. `None` = the
+    /// server's per-request maximum.
+    pub max_steps: Option<u32>,
+}
+
+impl GcRequest {
+    /// Preview: no deletion, no retirement, exact byte accounting.
+    pub fn dry_run() -> Self {
+        Self { dry_run: true, ..Self::default() }
+    }
+
+    /// Collect what is already unreferenced.
+    pub fn collect() -> Self {
+        Self::default()
+    }
+}
+
 /// A validated catalog search. `text` empty = browse mode (filters only).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogQuery {
@@ -48,6 +80,9 @@ pub struct CatalogQuery {
     pub kind: Option<AssetKind>,
     pub category: Option<String>,
     pub tag: Option<String>,
+    /// Server-side exclusion: hits carrying this tag are dropped by the
+    /// server, so a page is never short of `page_size` for local reasons.
+    pub exclude_tag: Option<String>,
     pub creator: Option<String>,
     /// Only assets currently referenced by an alias head.
     pub live_only: bool,
@@ -74,7 +109,7 @@ impl CatalogQuery {
         if self.text.chars().any(char::is_control) {
             return Err(ClientError::InvalidInput { what: "search text control chars" });
         }
-        for v in [&self.namespace, &self.category, &self.tag, &self.creator]
+        for v in [&self.namespace, &self.category, &self.tag, &self.exclude_tag, &self.creator]
             .into_iter()
             .flatten()
         {
@@ -102,6 +137,9 @@ impl CatalogQuery {
         }
         if let Some(t) = &self.tag {
             pairs.push(("tag", json::s(t.clone())));
+        }
+        if let Some(t) = &self.exclude_tag {
+            pairs.push(("exclude_tag", json::s(t.clone())));
         }
         if let Some(c) = &self.creator {
             pairs.push(("creator", json::s(c.clone())));
@@ -1154,6 +1192,96 @@ impl Api {
         Ok(local)
     }
 
+    /// Delete an asset from the store: every revision is retired, every
+    /// alias head pointing at it drops, its search rows are removed, and its
+    /// bytes become collectable by [`Self::gc_blobs`]. Idempotent — a repeat
+    /// answers with `already_retired`.
+    ///
+    /// Requires the moderation capability (`asset_quarantine`) on the
+    /// asset's namespace, exactly like pulling content.
+    pub fn retire_asset(&self, asset: &AssetId) -> ClientResult<crate::dto::RetireDto> {
+        let path = wire::path_asset_retire(asset);
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        let dto = crate::dto::parse_retire(&v)?;
+        if &dto.asset_id != asset {
+            return Err(ClientError::Protocol { what: "retire response mismatch" });
+        }
+        Ok(dto)
+    }
+
+    /// Delete ONE revision (typically a superseded one); the asset stays
+    /// live. Idempotent.
+    pub fn retire_revision(
+        &self,
+        asset: &AssetId,
+        rev: &AssetRevisionId,
+    ) -> ClientResult<crate::dto::RetireDto> {
+        let path = wire::path_revision_retire(asset, rev);
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        let dto = crate::dto::parse_retire(&v)?;
+        if &dto.asset_id != asset || dto.revision.as_ref() != Some(rev) {
+            return Err(ClientError::Protocol { what: "retire response mismatch" });
+        }
+        Ok(dto)
+    }
+
+    /// Advance blob garbage collection, starting a run if none is active,
+    /// and return the run's durable progress. ONE call does a bounded amount
+    /// of work — poll until `done` (the server also finishes runs on its own
+    /// janitor, so a caller that stops polling does not strand one).
+    ///
+    /// `dry_run` counts what would be reclaimed and deletes nothing.
+    /// Whole-store admin operation: the bootstrap admin token.
+    pub fn gc_blobs(&self, req: &GcRequest) -> ClientResult<crate::dto::GcStatusDto> {
+        let mut pairs: Vec<(&str, Value)> = vec![("dry_run", Value::Bool(req.dry_run))];
+        if let Some(grace) = req.grace_ms {
+            pairs.push(("grace_ms", Value::Int(grace as i64)));
+        }
+        if let Some(keep) = req.retain_per_asset {
+            if keep == 0 {
+                return Err(ClientError::InvalidInput { what: "retain_per_asset zero" });
+            }
+            pairs.push(("retain_per_asset", Value::Int(keep as i64)));
+        }
+        if let Some(steps) = req.max_steps {
+            if steps == 0 {
+                return Err(ClientError::InvalidInput { what: "gc max_steps zero" });
+            }
+            pairs.push(("max_steps", Value::Int(steps as i64)));
+        }
+        let body = json::obj(pairs).to_json().into_bytes();
+        let path = wire::path_gc();
+        let mut http = Request::post(&path, &body);
+        http.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, http, &[200])?;
+        crate::dto::parse_gc_status(&v)
+    }
+
+    /// The newest GC run's progress, without starting or advancing one.
+    pub fn gc_status(&self) -> ClientResult<crate::dto::GcStatusDto> {
+        let path = wire::path_gc();
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        crate::dto::parse_gc_status(&v)
+    }
+
+    /// Abandon the active run. Returns whether one was stopped; anything
+    /// already collected stays collected.
+    pub fn gc_cancel(&self) -> ClientResult<bool> {
+        let path = wire::path_gc_cancel();
+        let mut req = Request::post(&path, b"{}");
+        req.bearer = self.bearer();
+        let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
+        v.get("cancelled")
+            .and_then(Value::as_bool)
+            .ok_or(ClientError::Protocol { what: "gc cancel flag" })
+    }
+
     pub fn publish_asset_revision(
         &self,
         asset: &AssetId,
@@ -2110,6 +2238,16 @@ mod tests {
         let mut q = CatalogQuery::browse(10);
         q.namespace = Some(String::new());
         assert!(q.validate().is_err());
+        // `exclude_tag` is bounded exactly like the other filter values.
+        let mut q = CatalogQuery::browse(10);
+        q.exclude_tag = Some(String::new());
+        assert!(q.validate().is_err());
+        q.exclude_tag = Some("bad\u{7}".into());
+        assert!(q.validate().is_err());
+        q.exclude_tag = Some("x".repeat(wire::MAX_FILTER_VALUE_BYTES + 1));
+        assert!(q.validate().is_err());
+        q.exclude_tag = Some("intermediate".into());
+        assert!(q.validate().is_ok());
     }
 
     #[test]
@@ -2124,6 +2262,14 @@ mod tests {
         assert_eq!(body.get("limit").unwrap().as_i64(), Some(25));
         assert_eq!(body.get("cursor").unwrap().as_str(), Some("ab12"));
         assert!(q.body(None).get("cursor").is_none());
+        // Absent filters emit no key at all; set ones travel verbatim.
+        assert!(body.get("tag").is_none());
+        assert!(body.get("exclude_tag").is_none());
+        q.tag = Some("keep".into());
+        q.exclude_tag = Some("intermediate".into());
+        let body = q.body(None);
+        assert_eq!(body.get("tag").unwrap().as_str(), Some("keep"));
+        assert_eq!(body.get("exclude_tag").unwrap().as_str(), Some("intermediate"));
     }
 
     #[test]

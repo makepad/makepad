@@ -113,6 +113,23 @@ pub struct ServerConfig {
     /// Most connection threads allowed to park in an event wait at once;
     /// over the cap a poll returns empty immediately instead of parking.
     pub event_max_waiters: usize,
+    /// Blob GC (see `crate::gc`). A run is a sequence of bounded steps, and
+    /// these knobs decide how much of it any one actor performs: a request
+    /// does at most `gc_max_steps_per_request` (so `POST /v1/gc` answers in
+    /// bounded time however large the store is), and each janitor tick does
+    /// at most `gc_janitor_steps`, which is what finishes a run nobody is
+    /// polling. Zero janitor steps = GC only advances when asked.
+    pub gc_max_steps_per_request: u32,
+    pub gc_janitor_steps: u32,
+    /// Default grace window: bytes recorded (or re-referenced by a deduped
+    /// upload) inside this window of a run's start are never swept, so an
+    /// upload whose manifest has not landed yet cannot be collected.
+    pub gc_grace_ms: u64,
+    /// Rows one mark/sweep step reads.
+    pub gc_mark_batch: u32,
+    pub gc_sweep_batch: u32,
+    /// Assets one retention step visits.
+    pub gc_retain_batch: u32,
     /// Ensure the admin principal + a fresh admin token at startup, writing
     /// the token (once, mode 0600) to `<root>/admin-token`.
     pub bootstrap_admin: bool,
@@ -239,6 +256,12 @@ impl ServerConfig {
             event_max_wait_ms: 30_000,
             event_max_batch: 256,
             event_max_waiters: 32,
+            gc_max_steps_per_request: 64,
+            gc_janitor_steps: 16,
+            gc_grace_ms: 60 * 60 * 1000,
+            gc_mark_batch: 64,
+            gc_sweep_batch: 128,
+            gc_retain_batch: 64,
             job_profiles: default_job_profiles(),
             bootstrap_admin: false,
             discovery: None,
@@ -295,6 +318,24 @@ impl ServerConfig {
         // already dominates; this bound only needs to stand on its own.
         if self.event_max_waiters == 0 || self.event_max_waiters > 1024 {
             return Err(ServerError::InvalidInput { what: "config event max waiters" });
+        }
+        // GC step budgets: a request or tick must always be bounded, and a
+        // batch must never be big enough to make one step a whole-store
+        // transaction.
+        if self.gc_max_steps_per_request == 0 || self.gc_max_steps_per_request > 4096 {
+            return Err(ServerError::InvalidInput { what: "config gc steps per request" });
+        }
+        if self.gc_janitor_steps > 4096 {
+            return Err(ServerError::InvalidInput { what: "config gc janitor steps" });
+        }
+        if self.gc_mark_batch == 0
+            || self.gc_mark_batch > 100_000
+            || self.gc_sweep_batch == 0
+            || self.gc_sweep_batch > 100_000
+            || self.gc_retain_batch == 0
+            || self.gc_retain_batch > 100_000
+        {
+            return Err(ServerError::InvalidInput { what: "config gc batch" });
         }
         if self.job_profiles.len() > 64 {
             return Err(ServerError::InvalidInput { what: "config job profiles count" });

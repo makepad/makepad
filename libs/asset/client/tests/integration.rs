@@ -14,6 +14,7 @@ use makepad_asset_client::json::{obj, s, Value};
 use makepad_asset_client::{
     AssetClient, CacheBudgets, CatalogQuery, ClientConfig, ClientError, ClientEvent, ClientOutput,
     ClientRequest, ClientRuntime, ClosureBudget, DiscoveryListener, HttpLimits, ResourceSlot,
+    RuntimeConfig, SubmitOptions,
     SourceCollectionRegistered, TierPreference,
 };
 use makepad_asset_data::*;
@@ -93,6 +94,58 @@ fn seeded_store() -> (FixtureStore, Vec<AssetRevisionRef>) {
     // A crate in another namespace.
     store.add_prop(40, "props", Some("props/crate"), "Wooden Crate", payload(200, 1_500), vec![]);
     (store, refs)
+}
+
+/// The VJ filter contract: `exclude_tag` travels on the wire and the SERVER
+/// drops the rows — the client never post-filters a page, so `total`, the
+/// page contents and the cursor walk all agree with the exclusion.
+#[test]
+fn catalog_search_exclude_tag_is_filtered_server_side() {
+    let (mut store, refs) = seeded_store();
+    // Rockets 1, 3, 5, 7, 9 are intermediates; 3 also carries `keep`.
+    for (i, r) in refs.iter().enumerate() {
+        if i % 2 == 1 {
+            store.tag_asset(r, &["keep", "intermediate"]);
+        } else {
+            store.tag_asset(r, &["keep"]);
+        }
+    }
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let client =
+        AssetClient::connect(config("exclude_tag"), fixture.endpoints(), None).unwrap();
+
+    let mut q = CatalogQuery::text("rocket", 10);
+    q.tag = Some("keep".into());
+    assert_eq!(client.catalog_search(&q, None).unwrap().total, 10);
+    q.exclude_tag = Some("intermediate".into());
+    let page = client.catalog_search(&q, None).unwrap();
+    assert_eq!(page.total, 5, "the server dropped the intermediates");
+    assert_eq!(page.hits.len(), 5);
+    assert!(page.next.is_none());
+    let kept: Vec<AssetId> =
+        refs.iter().step_by(2).map(|r| r.asset_id).collect();
+    let mut got: Vec<AssetId> = page.hits.iter().map(|h| h.asset_id).collect();
+    got.sort();
+    let mut want = kept.clone();
+    want.sort();
+    assert_eq!(got, want);
+
+    // Paging over the excluded set: excluded rows interleave the kept ones,
+    // and the cursor walk still yields each kept row exactly once.
+    q.page_size = 2;
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let page = client.catalog_search(&q, cursor.as_ref()).unwrap();
+        assert_eq!(page.total, 5);
+        seen.extend(page.hits.iter().map(|h| h.asset_id));
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, want);
 }
 
 #[test]
@@ -563,7 +616,10 @@ fn runtime_states_are_explicit() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(search_slot.state.ready(), Some(&10u64));
-    // Requests execute in submission order.
+    // Lanes run requests in parallel, so completion order across requests is
+    // NOT a guarantee any more (tests/runtime_lanes.rs pins what is): every
+    // submitted request starts exactly once, and its own events stay ordered.
+    started_order.sort_unstable();
     assert_eq!(started_order, vec![search_id, fail_id, manifest_id]);
 
     runtime.shutdown();
@@ -789,20 +845,35 @@ fn runtime_cancel_skips_queued_and_aborts_in_flight() {
     let cfg = config("cancel_rt");
     let cache_root = cfg.cache_root.clone();
     let client = AssetClient::connect(cfg, fx.endpoints(), None).unwrap();
-    let mut runtime = ClientRuntime::start(client).unwrap();
+    // This test is about the QUEUE: one worker per lane and both fetches
+    // pinned to the same lane, so the second is provably still queued when
+    // it is cancelled. (With the default pool it would simply run in
+    // parallel — which is the point of the lanes, proven in
+    // tests/runtime_lanes.rs.)
+    let mut runtime = ClientRuntime::start_with(
+        client,
+        RuntimeConfig { fast_workers: 1, bulk_workers: 1, ..RuntimeConfig::default_v1() },
+    )
+    .unwrap();
     let id_big = runtime
-        .submit(ClientRequest::FetchBlob {
-            blob: big_id,
-            expected_len: Some(big.len() as u64),
-            pin: true,
-        })
+        .submit_with(
+            ClientRequest::FetchBlob {
+                blob: big_id,
+                expected_len: Some(big.len() as u64),
+                pin: true,
+            },
+            SubmitOptions::bulk(),
+        )
         .unwrap();
     let id_queued = runtime
-        .submit(ClientRequest::FetchBlob {
-            blob: small_id,
-            expected_len: Some(small.len() as u64),
-            pin: true,
-        })
+        .submit_with(
+            ClientRequest::FetchBlob {
+                blob: small_id,
+                expected_len: Some(small.len() as u64),
+                pin: true,
+            },
+            SubmitOptions::bulk(),
+        )
         .unwrap();
     // Give the worker time to start the drip transfer, then cancel BOTH:
     // the in-flight one aborts between chunks, the queued one never starts.

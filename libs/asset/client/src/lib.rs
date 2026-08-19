@@ -26,7 +26,9 @@
 //!   content. Pinning and eviction budgets keep the cache bounded without
 //!   ever evicting pinned content.
 //! - **States are explicit** ([`runtime`]): background execution with typed
-//!   `Idle / Loading / Ready / Failed` resource states and typed errors.
+//!   `Idle / Loading / Ready / Failed` resource states and typed errors,
+//!   across two worker lanes ([`Lane`]) so a multi-megabyte transfer can
+//!   never park the thumbnail fetches queued behind it.
 //!
 //! The wire contract (route paths, beacon layout, token shape, budgets)
 //! lives in [`wire`] — the single coordination surface with the server
@@ -50,9 +52,9 @@ pub mod wire;
 
 pub use api::{
     AnnotationUpload, Api, ApiEndpoints, BlobHead, CatalogQuery, ChatAttachment, ChatCreateRequest,
-    ChatSendRequest, OperationAliasExpect, OperationCreateRequest, OperationFinalizeRequest,
-    OperationInputRef, OperationOutputFile, OperationPublicationRef, SourceCollectionRegistered,
-    MAX_LIST_LIMIT, MAX_SEARCH_LIMIT,
+    ChatSendRequest, GcRequest, OperationAliasExpect, OperationCreateRequest,
+    OperationFinalizeRequest, OperationInputRef, OperationOutputFile, OperationPublicationRef,
+    SourceCollectionRegistered, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT,
 };
 pub use cache::{CacheBudgets, CacheStats, ContentCache, PartialWriter};
 pub use client::{
@@ -60,11 +62,12 @@ pub use client::{
     JobControl, PageCursor, SourceCollectionsCursor, SourceCollectionsPage,
 };
 pub use discovery::{
-    content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
+    bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
 pub use dto::{
     AliasDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto, CatalogEventDto,
-    CatalogEventKind, CatalogHit, ClaimedJobDto, EventsPageDto, GameAliasDto, HealthDto, ImportEntryDto,
+    CatalogEventKind, CatalogHit, ClaimedJobDto, EventsPageDto, GameAliasDto, GcPhaseDto,
+    GcStatusDto, HealthDto, ImportEntryDto, RetireDto,
     ImportReportDto, ImportStatusDto, JobAttemptDto, JobDetailDto, JobId, JobProfileDto,
     ChatEventBodyDto, ChatEventDto, ChatEventsPageDto, ChatProviderDto, ChatProviderKind,
     JobProgressDto, JobResultDto, JobRowDto, JobStateDto, JobStatusDto, OperationEventDto,
@@ -87,8 +90,8 @@ pub use resolver::{
     select_file, ClosureBudget, ResolvedFile, ResolvedThumbnail, TierPreference,
 };
 pub use runtime::{
-    ClientEvent, ClientOutput, ClientRequest, ClientRuntime, RequestId, ResourceSlot,
-    ResourceState, StageEvent,
+    ClientEvent, ClientOutput, ClientRequest, ClientRuntime, Lane, RequestId, ResourceSlot,
+    ResourceState, RuntimeConfig, StageEvent, SubmitOptions,
 };
 pub use subscriber::{
     CatalogSubscriber, CatalogSubscriberConfig, CatalogSubscriptionEvent,

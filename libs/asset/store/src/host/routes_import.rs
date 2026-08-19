@@ -257,8 +257,6 @@ pub fn import_run(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
             // state thread, so journal order equals commit order.
             for entry in &report.entries {
                 ctx.asset_index_insert(entry.asset_id.as_bytes(), &ns, now)?;
-                ctx.asset_rev_insert(entry.asset_id.as_bytes(), entry.revision.as_bytes(), now)?;
-                ctx.asset_rev_mark(entry.asset_id.as_bytes(), entry.revision.as_bytes(), true, now)?;
                 hub.publish(
                     EventBody::asset(
                         events::KIND_ASSET_PUBLISHED,
@@ -604,6 +602,7 @@ fn parse_media(name: &str) -> Option<MediaType> {
         MediaType::Mp4,
         MediaType::Bin,
         MediaType::Text,
+        MediaType::Ply,
     ]
     .into_iter()
     .find(|m| media_str(*m) == name)
