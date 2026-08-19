@@ -26,6 +26,7 @@ default = [
     "matte-native",
     "depth-native",
     "segment-native",
+    "upscale-native",
     "motion-native",
     "rig-native",
 ]
@@ -64,6 +65,8 @@ matte-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 depth-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native SAM 3.1 multiplex segmentation. Independent of `mesh`.
 segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+# Native RealESRGAN x4plus general-image upscaling. Independent of `mesh`.
+upscale-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native HY-Motion decode -> rig retarget -> animated GLB.
 motion-native = ["dep:makepad-ai-motion", "dep:makepad-ai-common", "dep:makepad-gltf", "dep:makepad-render"]
 # Native SkinTokens checkpoint conversion, inference, surface transfer and

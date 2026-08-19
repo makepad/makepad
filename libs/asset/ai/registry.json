@@ -1354,6 +1354,26 @@
    ]
   },
   {
+   "id": "realesrgan-x4plus",
+   "domain": "upscale",
+   "backend": "upscale-native",
+   "available": true,
+   "gated": false,
+   "vram_gb": 3.0,
+   "note": "RealESRGAN x4plus (Comfy-Org/Real-ESRGAN_repackaged repack of xinntao/Real-ESRGAN, BSD-3) general image 4x upscaler (RRDBNet: conv_first, 23 RRDB blocks, conv_body trunk, two nearest-2x upsample stages, conv_hr, conv_last). Native Rust/CUDA inference beating the official fp16 forward inside its quality envelope (max_abs/mae/cosine/pixel-diff gates); no Python, Torch, subprocess, or silent fallback. The checkpoint is pinned to an immutable revision, byte size, and SHA-256. Request: input_b64 PNG -> image/png at 4x input resolution (RGBA in keeps its alpha, nearest-scaled onto the 4x canvas; the network itself only upscales the color planes).",
+   "files": [
+    {
+     "role": "native-upscale",
+     "repo": "Comfy-Org/Real-ESRGAN_repackaged",
+     "path": "RealESRGAN_x4plus.safetensors",
+     "revision": "ea19b4cd14f85a5b914eee8aa7ff77bc371039a0",
+     "cache_as": "upscale/realesrgan-x4plus/RealESRGAN_x4plus.safetensors",
+     "size": 66857836,
+     "sha256": "37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb"
+    }
+   ]
+  },
+  {
    "id": "skintokens",
    "domain": "rig",
    "backend": "rig-native",

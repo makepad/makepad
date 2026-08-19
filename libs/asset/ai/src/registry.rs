@@ -135,6 +135,10 @@ pub enum Domain {
     /// domain so image-domain affinity never routes a text-to-image job to
     /// a model that fails closed without a reference.
     Edit,
+    /// Image -> 4x upscaled image (RealESRGAN x4plus). Its own domain, like
+    /// `Edit`, so image-domain affinity never routes a text-to-image job to
+    /// a model that fails closed without an input image.
+    Upscale,
 }
 
 impl Domain {
@@ -155,6 +159,7 @@ impl Domain {
             "music" => Some(Domain::Music),
             "paint" => Some(Domain::Paint),
             "edit" => Some(Domain::Edit),
+            "upscale" => Some(Domain::Upscale),
             _ => None,
         }
     }
@@ -176,6 +181,7 @@ impl Domain {
             Domain::Music => "music",
             Domain::Paint => "paint",
             Domain::Edit => "edit",
+            Domain::Upscale => "upscale",
         }
     }
 }
@@ -1149,6 +1155,26 @@ mod tests {
         assert_eq!(segment_weights.repo, "Comfy-Org/sam3.1");
         assert!(!segment_weights.repo.starts_with("facebook/"));
         assert_eq!(segment.vram_gb, Some(4.0));
+
+        // Upscale domain: pinned native RealESRGAN x4plus CUDA artifact.
+        let upscale = registry.find("realesrgan-x4plus").unwrap();
+        assert_eq!(upscale.domain, Domain::Upscale);
+        assert_eq!(upscale.backend, "upscale-native");
+        assert!(upscale.available && !upscale.gated);
+        assert_eq!(upscale.files.len(), 1);
+        let upscale_weights = upscale.file_by_role("native-upscale").unwrap();
+        assert_eq!(upscale_weights.repo, "Comfy-Org/Real-ESRGAN_repackaged");
+        assert_eq!(upscale_weights.path, "RealESRGAN_x4plus.safetensors");
+        assert_eq!(
+            upscale_weights.revision.as_deref(),
+            Some("ea19b4cd14f85a5b914eee8aa7ff77bc371039a0")
+        );
+        assert_eq!(upscale_weights.size, Some(66_857_836));
+        assert_eq!(
+            upscale_weights.sha256.as_deref(),
+            Some("37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb")
+        );
+        assert!(upscale_weights.cache_as.starts_with("upscale/"));
     }
 
     #[test]
