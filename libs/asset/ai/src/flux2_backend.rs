@@ -113,16 +113,16 @@ impl ContentBackend for Flux2Backend {
             )));
         }
         cancel.check()?;
-        // img2img strength is not a FLUX.2 knob yet (the edit pipelines
-        // condition on reference TOKENS and always generate fully); refuse
-        // instead of silently ignoring a user setting.
-        if let Some(strength) = params.strength {
-            if (strength - 1.0).abs() > f32::EPSILON {
-                return Err(AssetAiError::Params(format!(
-                    "{} does not support img2img strength (got {strength}); instruction edits always regenerate from the reference tokens — omit `strength`",
-                    self.model_id
-                )));
-            }
+        // img2img strength: the input image is BOTH reference 0 (edit
+        // conditioning) and the img2img init — the sampler starts at sigma
+        // index floor((1-strength)*steps) from the VAE-encoded input. With
+        // no input there is nothing to start from: refuse, never ignore.
+        let img2img_strength = params.strength.filter(|s| *s < 1.0);
+        if img2img_strength.is_some() && params.input_bytes.is_empty() {
+            return Err(AssetAiError::Params(format!(
+                "{} img2img strength needs input_b64 (the image to start from)",
+                self.model_id
+            )));
         }
         let extra_refs = flux2_extra_reference_inputs(&params.inputs)?;
         progress("load", 0.05);
@@ -157,6 +157,14 @@ impl ContentBackend for Flux2Backend {
                             .map_err(|err| AssetAiError::Backend(format!("flux2 extra ref: {err}")))?,
                     );
                 }
+                let init = flux2_img2img_init(
+                    &rgb,
+                    width,
+                    height,
+                    out_w as usize,
+                    out_h as usize,
+                    img2img_strength,
+                )?;
                 cancel.check()?;
                 progress("edit", 0.1);
                 let request = Flux2EditRequest {
@@ -169,7 +177,7 @@ impl ContentBackend for Flux2Backend {
                     noise: None,
                     teacher_ref_tokens: None,
                     teacher_embeds: None,
-                    init: None,
+                    init,
                 };
                 let guidance = params.guidance.unwrap_or(FLUX2_DEV_DEFAULT_GUIDANCE);
                 let steps_total = request.steps;
@@ -260,6 +268,14 @@ impl ContentBackend for Flux2Backend {
                             .map_err(|err| AssetAiError::Backend(format!("flux2 extra ref: {err}")))?,
                     );
                 }
+                let init = flux2_img2img_init(
+                    &rgb,
+                    width,
+                    height,
+                    out_w as usize,
+                    out_h as usize,
+                    img2img_strength,
+                )?;
                 cancel.check()?;
                 progress("edit", 0.15);
                 let request = Flux2EditRequest {
@@ -272,7 +288,7 @@ impl ContentBackend for Flux2Backend {
                     noise: None,
                     teacher_ref_tokens: None,
                     teacher_embeds: None,
-                    init: None,
+                    init,
                 };
                 let result = pipe
                     .edit(&request)
@@ -476,6 +492,49 @@ fn resize_box_rgb(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec
 
 /// Center-crop an RGB8 buffer from `sw x sh` down to `dw x dh` (`dw <= sw`,
 /// `dh <= sh`).
+/// The img2img init for `strength` (None = plain edit): the input RGB fitted
+/// to the exact output size the pipeline demands (cover-resize, then center
+/// crop — never a stretch), VAE-ready. `rgb` must be `width*height*3`.
+fn flux2_img2img_init(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    out_w: usize,
+    out_h: usize,
+    strength: Option<f32>,
+) -> Result<Option<Flux2Img2Img>, AssetAiError> {
+    let Some(strength) = strength else {
+        return Ok(None);
+    };
+    let (rgb, width, height) = fit_cover_rgb(rgb, width, height, out_w, out_h);
+    let image = flux2_image_from_rgb_u8(&rgb, width, height)
+        .map_err(|err| AssetAiError::Backend(format!("flux2 img2img init: {err}")))?;
+    Ok(Some(Flux2Img2Img { image, strength }))
+}
+
+/// Resize so the image COVERS `dw x dh` (aspect preserved), then center-crop
+/// to exactly `dw x dh`.
+fn fit_cover_rgb(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    dw: usize,
+    dh: usize,
+) -> (Vec<u8>, usize, usize) {
+    if width == dw && height == dh {
+        return (rgb.to_vec(), width, height);
+    }
+    let scale = (dw as f64 / width as f64).max(dh as f64 / height as f64);
+    let rw = ((width as f64 * scale).ceil() as usize).max(dw);
+    let rh = ((height as f64 * scale).ceil() as usize).max(dh);
+    let resized = if rw == width && rh == height {
+        rgb.to_vec()
+    } else {
+        resize_box_rgb(rgb, width, height, rw, rh)
+    };
+    (center_crop_rgb(&resized, rw, rh, dw, dh), dw, dh)
+}
+
 fn center_crop_rgb(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
     let x0 = (sw - dw) / 2;
     let y0 = (sh - dh) / 2;
@@ -653,6 +712,31 @@ mod flux2_edit_reference_tests {
             content_type: content_type.to_string(),
             bytes: vec![0u8; 4],
         }
+    }
+
+    #[test]
+    fn fit_cover_never_stretches_and_hits_the_exact_size() {
+        // 8x4 -> 4x4: cover scale 1 (height already 4), crop the middle 4 columns.
+        let mut src = vec![0u8; 8 * 4 * 3];
+        for y in 0..4 {
+            for x in 0..8 {
+                let i = (y * 8 + x) * 3;
+                src[i] = x as u8;
+            }
+        }
+        let (out, w, h) = fit_cover_rgb(&src, 8, 4, 4, 4);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(out.len(), 4 * 4 * 3);
+        assert_eq!(out[0], 2, "center crop starts at column 2");
+        // 3x3 -> 16x16 upscales to cover, then exact size.
+        let (out, w, h) = fit_cover_rgb(&vec![7u8; 27], 3, 3, 16, 16);
+        assert_eq!((w, h), (16, 16));
+        assert_eq!(out.len(), 16 * 16 * 3);
+        // Same size = identity.
+        let (out, _, _) = fit_cover_rgb(&vec![5u8; 48], 4, 4, 4, 4);
+        assert_eq!(out, vec![5u8; 48]);
+        // No strength = no init.
+        assert!(flux2_img2img_init(&vec![0u8; 48], 4, 4, 4, 4, None).unwrap().is_none());
     }
 
     #[test]
