@@ -84,7 +84,8 @@ pub enum AudioFormat {
 pub struct Limits {
     /// Longest decode, in frames (sample positions), per stream.
     pub max_frames: usize,
-    /// Highest channel count accepted.
+    /// Highest channel count accepted. Vorbis streams can declare any number;
+    /// MP3 is always mono or stereo, so this only ever binds the Ogg path.
     pub max_channels: usize,
 }
 
