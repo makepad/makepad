@@ -1,11 +1,14 @@
 //! Makepad Asset Worker — the headless process beside the Asset Server.
 //!
-//! Default mode: the claim→dispatch→publish coordinator for
-//! `video.generate` jobs (see `coordinator.rs`). With
+//! Default mode: the claim→dispatch→publish coordinator for every wired
+//! generation kind (see `gen_kinds.rs` and `coordinator.rs`), running one
+//! claim loop per fleet box and advertising the fleet's currently
+//! executable job profiles to each server it is attached to. With
 //! `--import-ai-library <dir>` it instead runs one idempotent import pass
-//! over an existing ai-content library (see `import.rs`) and exits. With
-//! `--watch-ai-library <dir>` it continuously publishes stable new/changed
-//! library artifacts until clean shutdown (see `watch.rs`). With
+//! over the GENERATED rows of an existing ai-content library (see the lib's
+//! `import` module) and exits. With `--watch-ai-library <dir>` it
+//! continuously publishes stable new/changed library artifacts until clean
+//! shutdown (see the lib's `watch` module). With
 //! `--import-pack <dir>` it compiles a licensed local pack into canonical
 //! `SourceCollection` / `ImportManifest` bytes plus a local upload plan
 //! and exits without contacting the server (see `pack_import.rs`).
@@ -14,20 +17,18 @@
 //! local file (typically the server root's `admin-token`, or a scoped
 //! worker token minted for `job_worker`/publish capabilities).
 
-mod coordinator;
 // The derivation seam (Deriver trait + DeriveCoordinator) has no production
 // deriver wired into a CLI mode yet — the scripted contract executor lives
 // in its tests; compiling it always keeps the seam from rotting.
 #[cfg_attr(not(test), allow(dead_code))]
 mod derive;
-mod import;
 mod depth_from_image;
 mod mesh_from_image;
-mod watch;
 
-use makepad_asset_importer::pack_import;
+// The library importer/watcher now lives in the crate's lib so the Asset UI
+// can run the same publication loop in-process against its embedded server.
+use makepad_asset_importer::{games_import, import, pack_import, watch};
 
-use crate::coordinator::{AssetAiFleet, Coordinator};
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig, PublishRights};
 use makepad_asset_data::{DerivativePolicy, Redistribution};
 use std::net::{IpAddr, SocketAddr};
@@ -40,12 +41,24 @@ makepad-asset-importer --import-pack <dir> --out <dir> --source-config <file>
 makepad-asset-importer --import-pack <dir> --out <dir> [source/rights flags]
 
 Modes:
-  (default)                     Claim + dispatch video.generate jobs to the
-                                GPU fleet; publish results to the catalog.
+  (default)                     Claim + dispatch every wired generation kind
+                                (image/video/audio/music/speech/mesh/splat/
+                                world/edit/upscale/... — see gen_kinds) to the
+                                GPU fleet, one claim loop per fleet box;
+                                publish results to the catalog and advertise
+                                the executable profiles to the server(s).
   --import-ai-library <dir>     One idempotent import pass over an
                                 ai-content library directory, then exit.
   --watch-ai-library <dir>      Continuously publish stable new/changed
                                 library artifacts until SIGINT/SIGTERM.
+  --import-games <dir>          Publish every <slug>/game.splash folder
+                                under <dir> as a `game` asset (alias
+                                <namespace>/games/<slug>; unchanged
+                                sources skip, changed ones become a new
+                                revision), then exit. Rights default to the
+                                named CC0 grant (own-authored sandbox
+                                games) unless --license/--redistribution/
+                                --derivatives are given.
   --import-pack <dir>           Compile a licensed local pack (Kenney, …)
                                 into canonical SourceCollection and
                                 ImportManifest bytes plus a local upload
@@ -71,7 +84,8 @@ Options:
   --server-id <32 hex>          Pin the server identity.
   --fleet <path>                Optional URL list of GPU boxes. Default:
                                 LAN UDP discovery (same beacon as AI Content).
-  --namespace <ns>              Namespace for imports (default gen).
+  --namespace <ns>              Namespace for imports (default gen;
+                                --import-games defaults to sandbox).
   --suffix <name>               Worker lease suffix (default w1).
   --cache <dir>                 Client cache root (default
                                 ~/.makepad-asset-importer). Watch mode owns a
@@ -104,6 +118,8 @@ Options:
   --source <text>               Upstream origin (pack name/URL) of the
                                 imported content. Required for --import-pack.
   --once                        Coordinator: process at most one job, exit.
+  --no-announce                 Coordinator: do not advertise this fleet's
+                                executable job profiles to the server(s).
   --quiet                       No stderr logging.
   --help                        This text.
 ";
@@ -143,6 +159,8 @@ struct Args {
     fleet: Option<PathBuf>,
     import: Option<PathBuf>,
     watch: Option<PathBuf>,
+    /// Splash game folders -> `game` assets. Exclusive with every other mode.
+    import_games: Option<PathBuf>,
     namespace: String,
     suffix: String,
     cache: PathBuf,
@@ -161,6 +179,9 @@ struct Args {
     source_config: Option<PathBuf>,
     pack_source: pack_import::PackSourceSpec,
     once: bool,
+    /// Skip the live profile advertisement (a worker that only drains a
+    /// queue and must not touch what the server offers).
+    no_announce: bool,
     log: bool,
 }
 
@@ -201,7 +222,8 @@ fn parse_args() -> Args {
     let mut fleet: Option<PathBuf> = None;
     let mut import = None;
     let mut watch = None;
-    let mut namespace = "gen".to_string();
+    let mut import_games = None;
+    let mut namespace: Option<String> = None;
     let mut suffix = "w1".to_string();
     let mut cache: Option<PathBuf> = None;
     let mut license: Option<String> = None;
@@ -216,6 +238,7 @@ fn parse_args() -> Args {
     let mut source_config = None;
     let mut pack_source = pack_import::PackSourceSpec::default();
     let mut once = false;
+    let mut no_announce = false;
     let mut log = true;
     let value_of = |name: &str, args: &mut dyn Iterator<Item = String>| -> String {
         match args.next() {
@@ -245,6 +268,9 @@ fn parse_args() -> Args {
             }
             "--watch-ai-library" => {
                 watch = Some(PathBuf::from(value_of("--watch-ai-library", &mut args)))
+            }
+            "--import-games" => {
+                import_games = Some(PathBuf::from(value_of("--import-games", &mut args)))
             }
             "--import-pack" => {
                 import_pack = Some(PathBuf::from(value_of("--import-pack", &mut args)))
@@ -282,7 +308,7 @@ fn parse_args() -> Args {
                 pack_source.source_archive =
                     Some(value_of("--source-archive", &mut args).trim().to_string())
             }
-            "--namespace" => namespace = value_of("--namespace", &mut args),
+            "--namespace" => namespace = Some(value_of("--namespace", &mut args)),
             "--suffix" => suffix = value_of("--suffix", &mut args),
             "--cache" => cache = Some(PathBuf::from(value_of("--cache", &mut args))),
             "--license" => license = Some(value_of("--license", &mut args).trim().to_string()),
@@ -297,6 +323,7 @@ fn parse_args() -> Args {
             "--mesh-from-image" => mesh_ops = true,
             "--depth-from-image" => depth_ops = true,
             "--once" => once = true,
+            "--no-announce" => no_announce = true,
             "--quiet" => log = false,
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -330,6 +357,19 @@ fn parse_args() -> Args {
     if import.is_some() && watch.is_some() {
         fail("--import-ai-library and --watch-ai-library are mutually exclusive");
     }
+    if import_games.is_some()
+        && (import.is_some()
+            || watch.is_some()
+            || import_pack.is_some()
+            || mesh_ops
+            || depth_ops
+            || once)
+    {
+        fail("--import-games is exclusive with every other mode and --once");
+    }
+    let namespace = namespace.unwrap_or_else(|| {
+        if import_games.is_some() { "sandbox" } else { "gen" }.to_string()
+    });
     if mesh_ops && (import.is_some() || watch.is_some() || import_pack.is_some()) {
         fail("--mesh-from-image is exclusive with library import/watch/pack modes");
     }
@@ -438,6 +478,7 @@ fn parse_args() -> Args {
         fleet,
         import,
         watch,
+        import_games,
         namespace,
         suffix,
         cache,
@@ -449,6 +490,7 @@ fn parse_args() -> Args {
         source_config,
         pack_source,
         once,
+        no_announce,
         log,
     }
 }
@@ -458,6 +500,7 @@ fn parse_policy_redistribution(text: &str) -> Redistribution {
         "allowed" => Redistribution::Allowed,
         "attribution-required" => Redistribution::AttributionRequired,
         "forbidden" => Redistribution::Forbidden,
+        "lan-local" | "user-owned-local" => Redistribution::LanLocal,
         other => fail(&format!("unknown --redistribution policy {other}")),
     }
 }
@@ -467,6 +510,7 @@ fn parse_policy_derivatives(text: &str) -> DerivativePolicy {
         "allowed" => DerivativePolicy::Allowed,
         "attribution-required" => DerivativePolicy::AttributionRequired,
         "forbidden" => DerivativePolicy::Forbidden,
+        "local-preview-only" | "local-preview" => DerivativePolicy::LocalPreview,
         other => fail(&format!("unknown --derivatives policy {other}")),
     }
 }
@@ -536,10 +580,12 @@ fn main() {
         match import::import_library(&mut client, &dir, &args.namespace, &rights, args.log) {
             Ok(report) => {
                 println!(
-                    "import complete: {} published, {} already present, {} skipped by kind, {} failed",
+                    "import complete: {} published, {} already present, {} skipped by kind, \
+                     {} not generated, {} failed",
                     report.published.len(),
                     report.skipped_existing.len(),
                     report.skipped_kind.len(),
+                    report.skipped_scope.len(),
                     report.failed.len()
                 );
                 for (file, error) in &report.failed {
@@ -549,6 +595,32 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("makepad-asset-importer: import failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // ---- games import mode ----
+    if let Some(dir) = args.import_games {
+        // Own-authored games carry the named CC0 grant unless the operator
+        // declared otherwise; the trio is still honoured when present.
+        let rights = args.rights.clone().unwrap_or_else(PublishRights::generated_cc0);
+        match games_import::import_games(&mut client, &dir, &args.namespace, &rights, args.log) {
+            Ok(report) => {
+                println!(
+                    "games import complete: {} published, {} updated, {} unchanged, {} failed",
+                    report.published.len(),
+                    report.updated.len(),
+                    report.unchanged.len(),
+                    report.failed.len()
+                );
+                for (slug, error) in &report.failed {
+                    println!("  FAILED {slug}: {error}");
+                }
+                std::process::exit(if report.failed.is_empty() { 0 } else { 1 });
+            }
+            Err(error) => {
+                eprintln!("makepad-asset-importer: games import failed: {error}");
                 std::process::exit(1);
             }
         }
@@ -643,70 +715,40 @@ fn main() {
     }
 
     // ---- coordinator mode ----
-    for (i, endpoints) in args.extra_servers.into_iter().enumerate() {
-        let token = args.token.clone();
-        let suffix = format!("{}-s{}", args.suffix, i + 2);
-        let cache = args.cache.join(format!("cache-s{}", i + 2));
-        let fleet_file = args.fleet.clone();
-        let log = args.log;
-        std::thread::Builder::new()
-            .name(format!("asset-worker-{i}"))
-            .spawn(move || {
-                let mut config = ClientConfig::new(cache);
-                config.token = Some(token);
-                let client = match AssetClient::connect(config, endpoints, None) {
-                    Ok(c) => c,
-                    Err(error) => {
-                        eprintln!("[asset-worker] extra server connect failed: {error}");
-                        return;
-                    }
-                };
-                let mut fleet = match fleet_file.as_deref() {
-                    Some(path) => match AssetAiFleet::from_fleet_file(path, log) {
-                        Ok(f) => f,
-                        Err(error) => {
-                            eprintln!("[asset-worker] extra fleet: {error}");
-                            return;
-                        }
-                    },
-                    None => AssetAiFleet::from_urls(
-                        vec!["http://10.0.0.123:8765".into()],
-                        log,
-                    ),
-                };
-                Coordinator {
-                    client,
-                    fleet: &mut fleet,
-                    suffix,
-                    rights: PublishRights::generated_cc0(),
-                    log,
-                }
-                .run(&STOP);
-            })
-            .ok();
-    }
-    let mut fleet = match args.fleet.as_deref() {
-        Some(path) => match AssetAiFleet::from_fleet_file(path, args.log) {
-            Ok(fleet) => fleet,
-            Err(error) => {
-                eprintln!("makepad-asset-importer: {error}");
-                std::process::exit(1);
-            }
+    // The client built above only proves the endpoints/token work; the
+    // per-box claim loops each own their own connection and cache.
+    drop(client);
+    let mut servers = vec![args.endpoints];
+    servers.extend(args.extra_servers.iter().copied());
+    let rights = args.rights.clone().unwrap_or_else(PublishRights::generated_cc0);
+    run_fleet_coordinator(&args, &servers, rights);
+}
+
+/// Discover the GPU fleet and drive it through the shared generation
+/// service: one claim loop PER BOX per server (so N queued jobs of a kind
+/// fan out over the N boxes that serve it, one job per box), plus the
+/// profile announcer that keeps each server's advertisement in step with
+/// what the fleet can execute right now.
+fn run_fleet_coordinator(args: &Args, servers: &[ApiEndpoints], rights: PublishRights) {
+    use makepad_asset_importer::gen_service::{FleetSource, GenServiceConfig};
+    let config = GenServiceConfig {
+        servers: servers.to_vec(),
+        server_id: args.server_id,
+        token: args.token.clone(),
+        cache_root: args.cache.clone(),
+        namespace: args.namespace.clone(),
+        suffix: args.suffix.clone(),
+        rights,
+        fleet: match args.fleet.as_deref() {
+            Some(path) => FleetSource::File(path.to_path_buf()),
+            None => FleetSource::Lan,
         },
-        None => AssetAiFleet::from_lan(args.log),
-    };
-    let mut coordinator = Coordinator {
-        client,
-        fleet: &mut fleet,
-        suffix: args.suffix,
-        // Operator-declared terms when given; otherwise the NAMED CC0
-        // grant for born-here generated output.
-        rights: args.rights.unwrap_or_else(PublishRights::generated_cc0),
+        announce: !args.no_announce,
         log: args.log,
     };
     if args.once {
-        match coordinator.run_one(&STOP) {
-            Ok(Some(outcome)) => println!("processed one job: {outcome:?}"),
+        match makepad_asset_importer::gen_service::run_once(&config, &STOP) {
+            Ok(Some(outcome)) => println!("processed one job: {outcome}"),
             Ok(None) => println!("queue empty"),
             Err(error) => {
                 eprintln!("makepad-asset-importer: {error}");
@@ -715,8 +757,5 @@ fn main() {
         }
         return;
     }
-    coordinator.run(&STOP);
-    if args.log {
-        eprintln!("[asset-worker] stopped");
-    }
+    makepad_asset_importer::gen_service::run(&config, &STOP);
 }

@@ -29,6 +29,7 @@ pub mod config;
 pub mod discovery;
 pub mod http;
 pub mod json;
+pub mod profiles;
 pub mod server;
 pub mod util;
 

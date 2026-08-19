@@ -308,3 +308,140 @@ fn job_profiles_advertise_filter_and_require_auth() {
     let all = r.json().get("profiles").and_then(Value::as_arr).map(|a| a.len()).unwrap();
     assert!(all >= profiles.len());
 }
+
+/// A worker's live announcement is what makes the advertisement TRUE: the
+/// server's stock video profiles must vanish the moment the only process
+/// that could run them says it cannot, and reappear when it can.
+#[test]
+fn a_live_worker_announcement_overrides_the_static_advertisement() {
+    let ts = start_server("job_profiles_announce");
+    let admin_token = ts.admin_token();
+    let mut admin = ts.control(Some(&admin_token));
+    let wrk = principal_with(&mut admin, &[("job_worker", "gen")]);
+    let mut worker = ts.control(Some(&wrk));
+    let mut reader = ts.control(Some(&admin_token));
+
+    let profile_ids = |c: &mut Client| -> Vec<String> {
+        let r = c.get("/v1/job-profiles");
+        assert_eq!(r.status, 200);
+        r.json()
+            .get("profiles")
+            .and_then(Value::as_arr)
+            .unwrap()
+            .iter()
+            .map(|p| p.get("id").and_then(Value::as_str).unwrap().to_string())
+            .collect()
+    };
+    let stock = profile_ids(&mut reader);
+    assert!(!stock.is_empty(), "the deployment advertises stock profiles");
+
+    // Covering `video` with nothing executable withdraws every stock video
+    // profile — the H3 weights are not on any box.
+    let announce = |profiles: Value| {
+        jobj(vec![
+            ("worker", jstr("w1")),
+            ("namespace", jstr("gen")),
+            ("ttl_ms", Value::Int(60_000)),
+            ("domains", Value::Arr(vec![jstr("video"), jstr("image")])),
+            ("profiles", profiles),
+        ])
+    };
+    let r = worker.put_json("/v1/job-profiles", &announce(Value::Arr(vec![])));
+    assert_eq!(r.status, 204, "{}", String::from_utf8_lossy(&r.body));
+    assert!(profile_ids(&mut reader).is_empty());
+
+    // Now the fleet can run something: exactly that appears.
+    let flux = jobj(vec![
+        ("id", jstr("image-flux1-schnell")),
+        ("domain", jstr("image")),
+        ("label", jstr("flux1-schnell · image")),
+        ("kind", jstr("image.generate")),
+        ("namespace", jstr("gen")),
+        ("defaults", jobj(vec![("model", jstr("flux1-schnell"))])),
+    ]);
+    let r = worker.put_json("/v1/job-profiles", &announce(Value::Arr(vec![flux.clone()])));
+    assert_eq!(r.status, 204);
+    assert_eq!(profile_ids(&mut reader), vec!["image-flux1-schnell".to_string()]);
+    // The domain filter still works on announced rows.
+    let r = reader.get("/v1/job-profiles?domain=video");
+    assert_eq!(r.json().get("profiles").and_then(Value::as_arr).map(<[Value]>::len), Some(0));
+    let r = reader.get("/v1/job-profiles?domain=image");
+    assert_eq!(r.json().get("profiles").and_then(Value::as_arr).map(<[Value]>::len), Some(1));
+
+    // Retraction restores the deployment's own advertisement.
+    let r = worker.put_json(
+        "/v1/job-profiles",
+        &jobj(vec![
+            ("worker", jstr("w1")),
+            ("namespace", jstr("gen")),
+            ("retract", Value::Bool(true)),
+        ]),
+    );
+    assert_eq!(r.status, 204);
+    assert_eq!(profile_ids(&mut reader), stock);
+}
+
+/// Announcing is a worker privilege on the namespaces it touches, and every
+/// announced row has to be as well formed as a configured one.
+#[test]
+fn announcements_are_authorized_and_shape_checked() {
+    let ts = start_server("job_profiles_announce_auth");
+    let admin_token = ts.admin_token();
+    let mut admin = ts.control(Some(&admin_token));
+    let enq = principal_with(&mut admin, &[("job_enqueue", "gen")]);
+    let wrk = principal_with(&mut admin, &[("job_worker", "gen")]);
+
+    let body = |profiles: Vec<Value>| {
+        jobj(vec![
+            ("worker", jstr("w1")),
+            ("namespace", jstr("gen")),
+            ("ttl_ms", Value::Int(60_000)),
+            ("domains", Value::Arr(vec![jstr("image")])),
+            ("profiles", Value::Arr(profiles)),
+        ])
+    };
+    // Unauthenticated: uniform 401.
+    let mut anon = ts.control(None);
+    assert_eq!(anon.put_json("/v1/job-profiles", &body(vec![])).status, 401);
+    // An enqueuer is not a worker: it may not change what is advertised.
+    let mut enqueuer = ts.control(Some(&enq));
+    assert_eq!(enqueuer.put_json("/v1/job-profiles", &body(vec![])).status, 403);
+
+    let mut worker = ts.control(Some(&wrk));
+    // A namespace this worker cannot work is refused even though it can
+    // work its own.
+    let foreign = jobj(vec![
+        ("id", jstr("image-x")),
+        ("domain", jstr("image")),
+        ("label", jstr("x")),
+        ("kind", jstr("image.generate")),
+        ("namespace", jstr("someone-else")),
+        ("defaults", jobj(vec![])),
+    ]);
+    assert_eq!(worker.put_json("/v1/job-profiles", &body(vec![foreign])).status, 403);
+    // Malformed id / missing defaults / out-of-range ttl all refuse at 400.
+    let bad_id = jobj(vec![
+        ("id", jstr("Not An Id")),
+        ("domain", jstr("image")),
+        ("label", jstr("x")),
+        ("kind", jstr("image.generate")),
+        ("namespace", jstr("gen")),
+        ("defaults", jobj(vec![])),
+    ]);
+    assert_eq!(worker.put_json("/v1/job-profiles", &body(vec![bad_id])).status, 400);
+    let no_defaults = jobj(vec![
+        ("id", jstr("image-x")),
+        ("domain", jstr("image")),
+        ("label", jstr("x")),
+        ("kind", jstr("image.generate")),
+        ("namespace", jstr("gen")),
+    ]);
+    assert_eq!(worker.put_json("/v1/job-profiles", &body(vec![no_defaults])).status, 400);
+    let bad_ttl = jobj(vec![
+        ("worker", jstr("w1")),
+        ("namespace", jstr("gen")),
+        ("ttl_ms", Value::Int(1)),
+        ("profiles", Value::Arr(vec![])),
+    ]);
+    assert_eq!(worker.put_json("/v1/job-profiles", &bad_ttl).status, 400);
+}
