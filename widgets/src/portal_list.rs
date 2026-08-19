@@ -1738,6 +1738,12 @@ impl PortalList {
         self.visible_items
     }
 
+    /// The item currently shown first. A list whose content shrank under it
+    /// needs this to notice that its viewport is now past the end.
+    pub fn first_id(&self) -> usize {
+        self.first_id
+    }
+
     /// Computes the top position of `target_id` relative to the viewport top
     /// using `first_id`, `first_scroll`, and the height tree.
     ///
