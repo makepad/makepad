@@ -202,18 +202,6 @@ pub fn parse_material_bearing_glb(glb: &[u8]) -> Option<MaterialBearingGltf> {
     Some(MaterialBearingGltf(loaded))
 }
 
-/// Any GLB with a mesh primitive, including Kenney unlit / factors-only.
-/// Thumbnails use this so a mesh always has a DrawPbr subject.
-pub fn parse_mesh_glb(glb: &[u8]) -> Option<MaterialBearingGltf> {
-    let loaded = load_gltf_from_bytes(glb, None).ok()?;
-    let has_mesh = loaded
-        .document
-        .meshes_slice()
-        .iter()
-        .any(|mesh| !mesh.primitives.is_empty());
-    has_mesh.then_some(MaterialBearingGltf(loaded))
-}
-
 /// World AABB over every draw object (local bounds through the node's world
 /// transform). None for empty scenes or any non-finite corner — a malformed
 /// mesh is rejected rather than fitted to garbage.

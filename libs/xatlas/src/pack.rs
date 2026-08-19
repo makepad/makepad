@@ -761,7 +761,7 @@ fn bilinear_expand(
     mut dest_rotated: Option<&mut BitImage>,
     boundary_edge_grid: &mut UniformGrid2,
 ) {
-    boundary_edge_grid.reset(&chart.vertices, &chart.indices, 0);
+    boundary_edge_grid.reset(0);
     if let Some(ref be) = chart.boundary_edges {
         for &e in be {
             boundary_edge_grid.append(e);
@@ -805,7 +805,13 @@ fn bilinear_expand(
                     Vec2::new(centroid.x - 1.0, centroid.y + 1.0),
                 ];
                 for j in 0..4 {
-                    if boundary_edge_grid.intersect_segment(square[j], square[(j + 1) % 4], 0.0) {
+                    if boundary_edge_grid.intersect_segment(
+                        &chart.vertices,
+                        &chart.indices,
+                        square[j],
+                        square[(j + 1) % 4],
+                        0.0,
+                    ) {
                         set_pixel = true;
                         break;
                     }

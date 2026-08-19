@@ -619,6 +619,8 @@ pub struct MeshView {
     #[new]
     draw_list: DrawList,
     #[new]
+    pass_list: DrawList,
+    #[new]
     color_texture: Texture,
     #[new]
     depth_texture: Texture,
@@ -1757,6 +1759,9 @@ impl Widget for MeshView {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
             let now = cx.time();
             let cx3d = &mut Cx3d::new(cx.cx);
+            // Pass-level list: the scene renderer closes its own list, and
+            // the PBR hero drawn after it must still belong to THIS pass.
+            self.pass_list.begin_always(cx3d);
             let mut statue = match &self.instance {
                 Some(inst) => vec![inst.clone()],
                 None => Vec::new(),
@@ -1871,6 +1876,7 @@ impl Widget for MeshView {
             if self.character.is_none() {
                 self.pbr.draw(&mut self.draw_pbr, cx3d);
             }
+            self.pass_list.end(cx3d);
         }
         cx.end_pass(&self.pass);
 
