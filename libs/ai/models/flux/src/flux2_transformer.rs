@@ -29,12 +29,15 @@ use crate::backend::{
     gpu_slice_rows, gpu_stream_ring_active, gpu_stream_ring_advance, gpu_stream_ring_prime,
     gpu_stream_ring_setup,
     gpu_swiglu_gate_first_from_bf16, gpu_upload, gpu_upload_into,
-    gpu_weight_cache_ensure,
+    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant,
     gpu_weight_cache_evict_prefix, GpuBf16Buf, GpuLinearPart, GpuTensor,
 };
 use crate::flux2::{Flux2PosId, Flux2TransformerConfig, Flux2WeightFile};
 use crate::{DiffusionError, Result};
-use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
+use makepad_ai_common::quant::{
+    GGML_TYPE_BF16, GGML_TYPE_F8_E4M3, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
+    GGML_TYPE_Q6_K,
+};
 use std::path::{Path, PathBuf};
 
 pub const FLUX2_DIT_NAMESPACE: &str = "flux2-dit-bf16";
@@ -245,14 +248,29 @@ fn resolve_name(weights: &Flux2TransformerWeights, name: &str) -> Option<String>
     alias_one(name).filter(|alias| weights.file.has_tensor(alias))
 }
 
-/// The fp8mixed checkpoint's per-tensor dequant scale (`<name>_scale`
-/// sibling); `None` when the tensor is stored bf16 (or has no scale, which
-/// the raw e4m3 mapping treats as 1.0 — pinned: the Comfy dev file always
-/// carries scales on its fp8 tensors).
+/// A device-resident linear: bf16 (plain cache key), the fp8mixed
+/// checkpoint's F8_E4M3 (`::f8` key, per-tensor `<name>_scale` /
+/// `<module>.input_scale` siblings — pinned: the Comfy dev file always
+/// carries scales on its fp8 tensors), or a GGUF K-quant block stream
+/// (`::q<type>` key, the city96 `FLUX.2-dev-gguf` 24GB tier: Q4_K / Q5_K /
+/// Q6_K / Q4_0, dequantized to bf16 scratch per GEMM by the CUDA store).
 struct EnsuredLinear<'a> {
     part: GpuLinearPart<'a>,
-    /// `(weight_scale, input_scale)` when the tensor is F8_E4M3.
+    /// `(weight_scale, input_scale)` when the tensor is resident-quantized
+    /// (F8_E4M3, or a K-quant with the neutral `(1.0, None)`): routes the
+    /// GEMM to the quantized entry points.
     f8_scale: Option<(f32, Option<f32>)>,
+}
+
+/// ggml type of a GGUF K-quant linear the CUDA store can serve resident,
+/// `None` for anything else (bf16/f16/f32 tensors take the bf16 path).
+fn gguf_kquant_type(weights: &Flux2TransformerWeights, resolved: &str) -> Option<u32> {
+    let ggml_type = weights.file.gguf_ggml_type(resolved)?;
+    matches!(
+        ggml_type,
+        GGML_TYPE_Q4_K | GGML_TYPE_Q5_K | GGML_TYPE_Q6_K | GGML_TYPE_Q4_0
+    )
+    .then_some(ggml_type)
 }
 
 fn ensure_linear<'a>(
@@ -261,7 +279,8 @@ fn ensure_linear<'a>(
     output_cols: usize,
     input_cols: usize,
 ) -> Result<EnsuredLinear<'a>> {
-    let f8_scale = match resolve_name(weights, name) {
+    let resolved = resolve_name(weights, name);
+    let (bt_ggml_type, f8_scale) = match resolved {
         Some(resolved) if weights.file.tensor(&resolved)?.dtype == "F8_E4M3" => {
             let scales = weights.f8_scale(&resolved)?;
             gpu_weight_cache_ensure(
@@ -279,7 +298,25 @@ fn ensure_linear<'a>(
                 },
             )
             .map_err(DiffusionError::model)?;
-            Some(scales)
+            (GGML_TYPE_F8_E4M3, Some(scales))
+        }
+        Some(resolved) if gguf_kquant_type(weights, &resolved).is_some() => {
+            let ggml_type = gguf_kquant_type(weights, &resolved).expect("checked");
+            gpu_weight_cache_ensure_quant(
+                &ns(weights),
+                name,
+                ggml_type,
+                output_cols,
+                input_cols,
+                || {
+                    weights
+                        .file
+                        .read_bytes(&resolved)
+                        .map_err(|err| err.to_string())
+                },
+            )
+            .map_err(DiffusionError::model)?;
+            (ggml_type, Some((1.0, None)))
         }
         _ => {
             gpu_weight_cache_ensure(
@@ -292,16 +329,12 @@ fn ensure_linear<'a>(
                 || load_linear_bytes(weights, name).map_err(|err| err.to_string()),
             )
             .map_err(DiffusionError::model)?;
-            None
+            (GGML_TYPE_BF16, None)
         }
     };
     Ok(EnsuredLinear {
         part: GpuLinearPart {
-            bt_ggml_type: if f8_scale.is_some() {
-                GGML_TYPE_F8_E4M3
-            } else {
-                GGML_TYPE_BF16
-            },
+            bt_ggml_type,
             n: output_cols,
             cache_key: name,
             bytes: &[],
@@ -732,20 +765,54 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The 8 per-double-block weights that rotate through the ring, with their
-/// GEMM-lookup cache keys (`::f8` suffix for the fp8 mlps).
-fn double_block_ring_names(layer: usize) -> [(String, bool); 8] {
+/// The 8 per-double-block weights that rotate through the ring. The GEMM
+/// cache key each one streams under depends on how the file stores it:
+/// bf16 (plain key), F8_E4M3 (`::f8` — the fp8mixed mlps), or a GGUF
+/// K-quant (`::q<type>`, the same key `gpu_weight_cache_ensure_quant`
+/// builds) — see [`ring_tensor_key_and_bytes`].
+fn double_block_ring_names(layer: usize) -> [String; 8] {
     let prefix = format!("double_blocks.{layer}");
     [
-        (format!("{prefix}.img_attn.qkv.weight"), false),
-        (format!("{prefix}.img_attn.proj.weight"), false),
-        (format!("{prefix}.txt_attn.qkv.weight"), false),
-        (format!("{prefix}.txt_attn.proj.weight"), false),
-        (format!("{prefix}.img_mlp.0.weight"), true),
-        (format!("{prefix}.img_mlp.2.weight"), true),
-        (format!("{prefix}.txt_mlp.0.weight"), true),
-        (format!("{prefix}.txt_mlp.2.weight"), true),
+        format!("{prefix}.img_attn.qkv.weight"),
+        format!("{prefix}.img_attn.proj.weight"),
+        format!("{prefix}.txt_attn.qkv.weight"),
+        format!("{prefix}.txt_attn.proj.weight"),
+        format!("{prefix}.img_mlp.0.weight"),
+        format!("{prefix}.img_mlp.2.weight"),
+        format!("{prefix}.txt_mlp.0.weight"),
+        format!("{prefix}.txt_mlp.2.weight"),
     ]
+}
+
+/// (cache key, host bytes) of one ring-streamed linear, matching exactly
+/// what [`ensure_linear`] would have cached for it.
+fn ring_tensor_key_and_bytes(
+    weights: &Flux2TransformerWeights,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Vec<u8>)> {
+    let resolved = resolve_name(weights, name);
+    if let Some(resolved) = &resolved {
+        if weights.file.tensor(resolved)?.dtype == "F8_E4M3" {
+            // Warm the scale cache so the per-step ensure path never
+            // touches the file.
+            let _ = weights.f8_scale(resolved)?;
+            return Ok((
+                format!("{namespace}::{name}::f8"),
+                weights.file.read_bytes(resolved)?,
+            ));
+        }
+        if let Some(ggml_type) = gguf_kquant_type(weights, resolved) {
+            return Ok((
+                format!("{namespace}::{name}::q{ggml_type}"),
+                weights.file.read_bytes(resolved)?,
+            ));
+        }
+    }
+    Ok((
+        format!("{namespace}::{name}"),
+        load_linear_bytes(weights, name)?,
+    ))
 }
 
 /// Build + register the double-block stream ring for a dev transformer.
@@ -764,25 +831,8 @@ fn flux2_ensure_double_ring(weights: &Flux2TransformerWeights) -> Result<bool> {
     let mut groups = Vec::with_capacity(depth);
     for layer in 0..depth {
         let mut group = Vec::with_capacity(8);
-        for (name, is_f8) in double_block_ring_names(layer) {
-            let (key, bytes) = if is_f8 {
-                let resolved = resolve_name(weights, &name).ok_or_else(|| {
-                    DiffusionError::model(format!("flux2 ring missing {name}"))
-                })?;
-                // Warm the scale cache so the per-step ensure path never
-                // touches the file.
-                let _ = weights.f8_scale(&resolved)?;
-                (
-                    format!("{namespace}::{name}::f8"),
-                    weights.file.read_bytes(&resolved)?,
-                )
-            } else {
-                (
-                    format!("{namespace}::{name}"),
-                    load_linear_bytes(weights, &name)?,
-                )
-            };
-            group.push((key, bytes));
+        for name in double_block_ring_names(layer) {
+            group.push(ring_tensor_key_and_bytes(weights, &namespace, &name)?);
         }
         groups.push(group);
     }
