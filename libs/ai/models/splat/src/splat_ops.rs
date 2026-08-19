@@ -388,7 +388,17 @@ pub fn host_gelu_tanh(x: f32) -> f32 {
 /// `MultiHeadRMSNorm`: `F.normalize(x, dim=-1) * gamma * sqrt(head_dim)`,
 /// which is exactly an eps-free RMS norm scaled by `gamma`. `gamma` is
 /// `(heads, head_dim)` row-major.
-pub fn rms_norm_per_head(x: &Ten, heads: usize, head_dim: usize, gamma: &[f32]) -> Result<Ten> {
+/// `cache_namespace`/`cache_key` name the DEVICE-CACHED copy of `gamma`. The
+/// shared kernel uploads the vector once under `{namespace}::{key}::rmsph`
+/// and reuses it forever, so two different gammas must never share a key.
+pub fn rms_norm_per_head(
+    x: &Ten,
+    heads: usize,
+    head_dim: usize,
+    gamma: &[f32],
+    cache_namespace: &str,
+    cache_key: &str,
+) -> Result<Ten> {
     if x.cols != heads * head_dim || gamma.len() != heads * head_dim {
         return Err(DiffusionError::workflow("splat rms-norm shape mismatch"));
     }
@@ -413,14 +423,13 @@ pub fn rms_norm_per_head(x: &Ten, heads: usize, head_dim: usize, gamma: &[f32]) 
         Inner::Gpu(tensor) => {
             // The shared kernel is `x / rms(x) * gamma` with a caller-supplied
             // eps; rms = ||x|| / sqrt(head_dim), so it equals the reference
-            // formula above. Cache key is unused here (weights are per-block
-            // and already uploaded by the caller), so pass a unique name.
+            // formula above.
             let out = gpu_rms_norm_mul_perhead(
                 tensor,
                 heads,
                 head_dim,
-                "tsplat-inline",
-                "gamma",
+                cache_namespace,
+                cache_key,
                 gamma,
                 0.0,
             )
@@ -729,14 +738,14 @@ mod tests {
         // One head, dim 4, x = [1,1,1,1] -> ||x|| = 2, normalize -> 0.5 each,
         // * sqrt(4) = 2 -> 1.0 each, * gamma.
         let x = ten(&[1.0, 1.0, 1.0, 1.0], 1, 4);
-        let out = rms_norm_per_head(&x, 1, 4, &[1.0, 2.0, 3.0, 4.0])
+        let out = rms_norm_per_head(&x, 1, 4, &[1.0, 2.0, 3.0, 4.0], "test", "a")
             .unwrap()
             .to_host()
             .unwrap();
         assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0]);
         // Two heads must normalize independently.
         let x = ten(&[1.0, 0.0, 0.0, 3.0], 1, 4);
-        let out = rms_norm_per_head(&x, 2, 2, &[1.0, 1.0, 1.0, 1.0])
+        let out = rms_norm_per_head(&x, 2, 2, &[1.0, 1.0, 1.0, 1.0], "test", "b")
             .unwrap()
             .to_host()
             .unwrap();
