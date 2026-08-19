@@ -657,6 +657,16 @@ pub fn decode_png_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAi
                 rgba[i * 4..i * 4 + 3].copy_from_slice(chunk);
                 rgba[i * 4 + 3] = 255;
             }
+            // Grayscale / grayscale+alpha (common for hand-authored inpaint
+            // masks): replicate luma across R/G/B.
+            2 => {
+                rgba[i * 4..i * 4 + 3].copy_from_slice(&[chunk[0]; 3]);
+                rgba[i * 4 + 3] = chunk[1];
+            }
+            1 => {
+                rgba[i * 4..i * 4 + 3].copy_from_slice(&[chunk[0]; 3]);
+                rgba[i * 4 + 3] = 255;
+            }
             _ => return Err(bad(format!("{components} components unsupported"))),
         }
     }

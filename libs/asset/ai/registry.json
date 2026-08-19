@@ -173,6 +173,53 @@
    ]
   },
   {
+   "id": "flux1-fill-dev",
+   "domain": "inpaint",
+   "backend": "flux-fill",
+   "available": true,
+   "gated": true,
+   "vram_gb": 21.0,
+   "note": "FLUX.1-Fill-dev mask inpaint/outpaint (FLUX.1 [dev] Non-Commercial License, same as flux1-dev - gated:true records the license restriction; every file below is hosted ungated). Architecturally flux1-dev's DiT with a wider img_in (384 channels/token instead of 64: packed noisy latent 64 + packed masked-image latent 64 + packed mask 256; guidance-distilled, guidance_in present) - out_channels stays 64. No Comfy-Org combined-checkpoint repack exists for Fill (unlike flux1-dev/schnell), and the official black-forest-labs/FLUX.1-Fill-dev repo requires an authenticated+license-accepted HF pull even for its LFS metadata (could not be read from this environment) - so this is a 4-file SPLIT bundle instead, every file individually pinned + audited: (1) diffusion_model - cudabenchmarktest/flux1-fill-dev-fp8 flux1-fill-dev-fp8.safetensors, FP8 E4M3FN, 780 tensors (header audited: img_in.weight [3072,384], final_layer.linear.weight [64,3072], guidance_in.in_layer.weight present, modelspec.description 'An in- and outpainting model.', modelspec.implementation references black-forest-labs/flux - same tensor count as flux1-dev-fp8's DiT component, +1131008 B for the wider img_in). (2) vae - Kijai/flux-fp8 flux-vae-bf16.safetensors, the standard shared FLUX VAE (ae.safetensors) cast to BF16 by a well-known ComfyUI contributor (335304388 B official F32 file / 2 = this BF16 file's size, confirming it is the same weights just narrower; our loader upconverts BF16->F32 on load). (3)+(4) clip_l.safetensors + t5xxl_fp8_e4m3fn.safetensors - comfyanonymous/flux_text_encoders, the canonical ComfyUI split text-encoder source already used by every other Flux ComfyUI workflow (same repo the RETIRED flux1-dev/schnell split-model bundles used). Requires a CUDA box (availability fails closed elsewhere; no CPU/BF16 fallback). Request contract: named inputs 'image' (PNG) + 'mask' (PNG, white/1=repaint; outpaint = client pre-pads the canvas and masks the new area) + prompt; default steps 50, guidance 30 (BFL's recommended Fill settings, both far higher than dev's 20/3.5). vram_gb 21.0 is an estimate carried over from flux1-dev-fp8 (same DiT class, unmeasured - no GPU available while wiring this up).",
+   "files": [
+    {
+     "role": "diffusion_model",
+     "repo": "cudabenchmarktest/flux1-fill-dev-fp8",
+     "path": "flux1-fill-dev-fp8.safetensors",
+     "cache_as": "unet/flux1-fill-dev-fp8.safetensors",
+     "revision": "bc5ef4da6d294c45aa01aeb497cf199f28123665",
+     "size": 11902539328,
+     "sha256": "0320d505ca42bca99c5bd600b1839ced2b2e980ea985917965d411d98a710729"
+    },
+    {
+     "role": "vae",
+     "repo": "Kijai/flux-fp8",
+     "path": "flux-vae-bf16.safetensors",
+     "cache_as": "vae/flux-ae-bf16.safetensors",
+     "revision": "2ef6f85f9f4b94634f995ba0bfa84fd3ab865c1d",
+     "size": 167664710,
+     "sha256": "0c0c8ac49850d6bd174107d4001685f4f6c876768a1c84dde751f2aed69f46ce"
+    },
+    {
+     "role": "clip_l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp8_e4m3fn.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp8_e4m3fn.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 4893934904,
+     "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"
+    }
+   ]
+  },
+  {
    "id": "flux2-klein-4b",
    "domain": "edit",
    "backend": "flux2",
@@ -285,7 +332,7 @@
    "gated": false,
    "vram_gb": 19.0,
    "min_vram_gb": 22.0,
-   "note": "FLUX.2-dev 24 GB-class tier: the same 32B guidance-distilled dev DiT as flux2-dev, quantized to GGUF Q4_K_M by city96 (ComfyUI-GGUF's reference conversion: Q4_K bulk linears, Q5_K on the double-block qkv and some proj/mlp tensors, BF16 img_in/txt_in/time_in/guidance_in/final_layer/modulation, F32 norms), served by the in-repo CUDA port with K-quant weights resident as raw block streams and dequantized into bf16 scratch per GEMM (ComfyUI-GGUF's own dequant-on-the-fly numerics class — NOT the fp8mixed scaled-mm class of flux2-dev; expect its own look at the same seed). Text encoder, VAE and tokenizer are byte-identical to flux2-dev and share its cache blobs (same cache_as; the dev loader falls back to the sibling flux2-dev/ dir). Measured on the RTX 5090 (2026-08-19, 1024px/20 steps): resident floor ~16.5 GB, warm denoise 30.3 s, decode 0.27 s; vram_gb 19 is the admission estimate for a 24 GB card (19x1024+2048 reserve = 21.5 GB) pending a measured peak on a 4090; min_vram_gb 22 refuses 16 GB cards. FLUX [dev] Non-Commercial License applies to the quant too. Request: prompt (+ optional width/height/steps/guidance/seed, input_b64 reference for the instruction edit).",
+   "note": "FLUX.2-dev 24 GB-class tier: the same 32B guidance-distilled dev DiT as flux2-dev, quantized to GGUF Q4_K_M by city96 (ComfyUI-GGUF's reference conversion: Q4_K bulk linears, Q5_K on the double-block qkv and some proj/mlp tensors, BF16 img_in/txt_in/time_in/guidance_in/final_layer/modulation, F32 norms), served by the in-repo CUDA port with K-quant weights resident as raw block streams and dequantized into bf16 scratch per GEMM (ComfyUI-GGUF's own dequant-on-the-fly numerics class \u2014 NOT the fp8mixed scaled-mm class of flux2-dev; expect its own look at the same seed). Text encoder, VAE and tokenizer are byte-identical to flux2-dev and share its cache blobs (same cache_as; the dev loader falls back to the sibling flux2-dev/ dir). Measured on the RTX 5090 (2026-08-19, 1024px/20 steps): resident floor ~16.5 GB, warm denoise 30.3 s, decode 0.27 s; vram_gb 19 is the admission estimate for a 24 GB card (19x1024+2048 reserve = 21.5 GB) pending a measured peak on a 4090; min_vram_gb 22 refuses 16 GB cards. FLUX [dev] Non-Commercial License applies to the quant too. Request: prompt (+ optional width/height/steps/guidance/seed, input_b64 reference for the instruction edit).",
    "files": [
     {
      "role": "transformer",

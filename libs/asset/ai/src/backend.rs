@@ -957,7 +957,7 @@ pub fn backend_live_supported(spec: &ModelSpec) -> bool {
 pub fn backend_compiled(name: &str) -> bool {
     match name {
         "testpattern" => true,
-        "flux" | "flux2" | "control" => cfg!(feature = "flux"),
+        "flux" | "flux2" | "control" | "flux-fill" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
         "kokoro" => cfg!(feature = "tts"),
         "indextts" => cfg!(feature = "indextts"),
@@ -1006,6 +1006,8 @@ pub fn backend_provisioned(name: &str) -> bool {
         // there is still no CPU/Metal fallback: fail closed the same way.
         #[cfg(feature = "flux")]
         "control" => crate::control_backend::control_provisioned(),
+        #[cfg(feature = "flux")]
+        "flux-fill" => crate::inpaint_backend::inpaint_fp8_provisioned(),
         // CUDA Hunyuan Paint is default-on for Windows/Linux `paint-cuda`
         // builds. Weights may still be absent until first pull.
         #[cfg(feature = "paint")]
@@ -1152,6 +1154,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "control" => Ok(Box::new(crate::control_backend::ControlBackend::new(&spec.id))),
         #[cfg(not(feature = "flux"))]
         "control" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a CUDA build with the 'flux' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "flux")]
+        "flux-fill" => Ok(Box::new(crate::inpaint_backend::InpaintBackend::new(&spec.id))),
+        #[cfg(not(feature = "flux"))]
+        "flux-fill" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a CUDA build with the 'flux' cargo feature",
             spec.id
         ))),

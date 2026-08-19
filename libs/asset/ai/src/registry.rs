@@ -145,6 +145,11 @@ pub enum Domain {
     /// `Upscale`, so image-domain affinity never routes a text-to-image job
     /// to a model that fails closed without a control image.
     Control,
+    /// Image + mask + prompt -> inpainted/outpainted image (FLUX.1-Fill-dev).
+    /// Its own domain, like `Edit`/`Upscale`, so image-domain affinity never
+    /// routes a text-to-image job to a model that fails closed without an
+    /// image+mask pair.
+    Inpaint,
 }
 
 impl Domain {
@@ -167,6 +172,7 @@ impl Domain {
             "edit" => Some(Domain::Edit),
             "upscale" => Some(Domain::Upscale),
             "control" => Some(Domain::Control),
+            "inpaint" => Some(Domain::Inpaint),
             _ => None,
         }
     }
@@ -190,6 +196,7 @@ impl Domain {
             Domain::Edit => "edit",
             Domain::Upscale => "upscale",
             Domain::Control => "control",
+            Domain::Inpaint => "inpaint",
         }
     }
 }
@@ -1183,6 +1190,38 @@ mod tests {
             Some("37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb")
         );
         assert!(upscale_weights.cache_as.starts_with("upscale/"));
+
+        // Inpaint domain: flux1-fill-dev, a 4-file split bundle (no
+        // Comfy-Org combined-checkpoint repack exists for Fill).
+        let fill = registry.find("flux1-fill-dev").unwrap();
+        assert_eq!(fill.domain, Domain::Inpaint);
+        assert_eq!(fill.backend, "flux-fill");
+        assert!(fill.available && fill.gated);
+        assert_eq!(fill.files.len(), 4);
+        let dit = fill.file_by_role("diffusion_model").unwrap();
+        assert_eq!(dit.repo, "cudabenchmarktest/flux1-fill-dev-fp8");
+        assert_eq!(dit.size, Some(11_902_539_328));
+        assert_eq!(
+            dit.sha256.as_deref(),
+            Some("0320d505ca42bca99c5bd600b1839ced2b2e980ea985917965d411d98a710729")
+        );
+        assert!(dit.cache_as.starts_with("unet/"));
+        let vae = fill.file_by_role("vae").unwrap();
+        assert_eq!(vae.repo, "Kijai/flux-fp8");
+        assert!(vae.cache_as.starts_with("vae/"));
+        let clip_l = fill.file_by_role("clip_l").unwrap();
+        assert_eq!(clip_l.repo, "comfyanonymous/flux_text_encoders");
+        assert!(clip_l.cache_as.starts_with("text_encoders/"));
+        let t5xxl = fill.file_by_role("t5xxl").unwrap();
+        assert_eq!(t5xxl.repo, "comfyanonymous/flux_text_encoders");
+        assert!(t5xxl.cache_as.starts_with("text_encoders/"));
+        // Every pinned file has both size and sha256 (the RegistryEntryFileJson
+        // doc contract: a revision pin must carry both).
+        for file in &fill.files {
+            assert!(file.revision.is_some());
+            assert!(file.size.is_some());
+            assert!(file.sha256.is_some());
+        }
     }
 
     #[test]

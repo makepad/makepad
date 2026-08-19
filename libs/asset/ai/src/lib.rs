@@ -87,6 +87,8 @@ pub mod flux_backend;
 pub mod flux2_backend;
 #[cfg(feature = "flux")]
 pub mod control_backend;
+#[cfg(feature = "flux")]
+pub mod inpaint_backend;
 
 pub use error::AssetAiError;
 pub use server::{start_service, ServiceConfig, ServiceHandle};
