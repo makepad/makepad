@@ -235,10 +235,13 @@ impl FluxPipeline {
         let mut transformer_weights = {
             // Diffusion weight stream ("load unet 8.2/11.1GB" every ~256MB);
             // combined checkpoints scope the component out of the one file.
+            // Any requested LoRA adapters are merged into the arena here,
+            // before compile and before any device upload.
             let mut sub = sub_hook(&mut hooks, 0.72, 0.06);
-            LoadedFluxTransformerWeights::load_component_with_progress(
+            LoadedFluxTransformerWeights::load_component_with_loras(
                 &plan.bundle.diffusion_model_path,
                 plan.bundle.component_prefixes().diffusion,
+                &plan.loras,
                 crate::hook_ref(&mut sub),
             )?
         };
@@ -359,6 +362,14 @@ impl FluxPipeline {
     /// flux1-dev; vae/text-encoder files are typically shared).
     pub fn diffusion_model_path(&self) -> &std::path::Path {
         &self.plan.bundle.diffusion_model_path
+    }
+
+    /// Identity of the LoRA adaptation merged into the resident transformer
+    /// weights (`""` = pristine). The other half of the device weight-cache
+    /// key: a caller replacing this pipeline must evict when EITHER the
+    /// checkpoint path or this fingerprint changes.
+    pub fn lora_fingerprint(&self) -> &str {
+        &self.transformer_weights.lora_fingerprint
     }
 
     /// Device weight-cache namespaces of every resident component. All four
@@ -839,10 +850,14 @@ pub fn encode_png_rgb(image_whcb: &[f32], width: usize, height: usize) -> Result
 
 /// The pure warm-reuse check behind [`FluxPipeline::serves_plan`]: a
 /// resident pipeline (loaded for `current` at `current_shape`) can serve
-/// `next` at the requested image size iff the latent shape and every
-/// resolved model file path match. Prompt differences are fine (see
+/// `next` at the requested image size iff the latent shape, every resolved
+/// model file path AND the LoRA set match. Prompt differences are fine (see
 /// [`FluxPipeline::ensure_prompts_with_hooks`]); generation settings (seed,
 /// steps, guidance) are per-generate arguments and never key the pipeline.
+///
+/// LoRAs are merged into the resident weight bytes, so a different adapter
+/// set or strength cannot be served warm — it rebuilds. Strength 0 and "no
+/// LoRAs" share one identity (both are the pristine model).
 fn plan_reusable(
     current: &FluxPromptToImagePlan,
     current_shape: FluxLatentShape,
@@ -860,6 +875,7 @@ fn plan_reusable(
         && next.bundle.vae_path == current.bundle.vae_path
         && next.bundle.clip_l_path == current.bundle.clip_l_path
         && next.bundle.t5xxl_path == current.bundle.t5xxl_path
+        && next.loras.fingerprint() == current.loras.fingerprint()
 }
 
 pub(crate) fn elapsed_ms(start: Instant) -> f64 {
@@ -993,8 +1009,21 @@ mod tests {
     fn plan_reuse_keys_on_files_and_size_not_prompts() {
         use crate::comfy::{FluxGenerationConfig, FluxWorkflowKind};
         use crate::flux::{FluxResolvedBundle, FluxTransformerConfig};
+        use crate::flux_lora::{FluxLoraRef, FluxLoraStack};
         use std::path::PathBuf;
 
+        let lora_stack = |entries: &[(&str, f32)]| {
+            FluxLoraStack::new(
+                entries
+                    .iter()
+                    .map(|(name, strength)| FluxLoraRef {
+                        name: name.to_string(),
+                        path: PathBuf::from(format!("loras/{name}.safetensors")),
+                        strength: *strength,
+                    })
+                    .collect(),
+            )
+        };
         let plan_for = |unet: &str, prompt: &str, width: u32, height: u32| {
             let latent_shape = FluxLatentShape::from_image_size(width, height).unwrap();
             FluxPromptToImagePlan {
@@ -1026,6 +1055,7 @@ mod tests {
                 },
                 latent_shape,
                 transformer: FluxTransformerConfig::flux1_dev(),
+                loras: FluxLoraStack::default(),
             }
         };
 
@@ -1051,6 +1081,26 @@ mod tests {
         // Absent size args fall back to the plan's generation config.
         assert!(plan_reusable(&current, shape, &same, None, None));
         assert!(!plan_reusable(&current, shape, &other_size, None, None));
+
+        // LoRAs are merged into the resident weights, so they key the
+        // pipeline: adding, removing or restrengthening one rebuilds.
+        let mut with_lora = plan_for("unet/flux1-schnell.safetensors", "a red fox", 512, 512);
+        with_lora.loras = lora_stack(&[("style", 0.8)]);
+        assert!(!plan_reusable(&current, shape, &with_lora, Some(512), Some(512)));
+        assert!(!plan_reusable(&with_lora, shape, &current, Some(512), Some(512)));
+
+        let mut same_lora = plan_for("unet/flux1-schnell.safetensors", "a blue boat", 512, 512);
+        same_lora.loras = lora_stack(&[("style", 0.8)]);
+        assert!(plan_reusable(&with_lora, shape, &same_lora, Some(512), Some(512)));
+
+        let mut other_strength = plan_for("unet/flux1-schnell.safetensors", "a red fox", 512, 512);
+        other_strength.loras = lora_stack(&[("style", 0.4)]);
+        assert!(!plan_reusable(&with_lora, shape, &other_strength, Some(512), Some(512)));
+
+        // Strength 0 == pristine: reuses the un-adapted pipeline.
+        let mut zero_strength = plan_for("unet/flux1-schnell.safetensors", "a red fox", 512, 512);
+        zero_strength.loras = lora_stack(&[("style", 0.0)]);
+        assert!(plan_reusable(&current, shape, &zero_strength, Some(512), Some(512)));
     }
 }
 

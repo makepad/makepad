@@ -16,6 +16,7 @@ use crate::flux::{
     canonicalize_flux_diffusion_tensor_name, FluxLatentShape, FluxTransformerConfig,
     FluxTransformerInspection,
 };
+use crate::flux_lora::FluxLoraStack;
 use crate::flux_text::FluxConditioning;
 use crate::{emit_byte_progress, emit_progress, DiffusionError, ProgressHook, Result};
 use makepad_ai_common::backend::{try_matmul_nt_ggml_bytes, try_matmul_nt_ggml_bytes_cached};
@@ -52,6 +53,11 @@ pub struct LoadedFluxTransformerWeights {
     /// Compiled Metal graphs still assume dense F16/BF16/F8, so these
     /// stay on the lazy `try_matmul_nt_ggml_bytes` path.
     pub quantized: bool,
+    /// Identity of the LoRA adaptation merged into these weights (empty =
+    /// pristine). It is part of [`flux_cache_namespace`], so patched and
+    /// pristine bytes of the same checkpoint can never share a device
+    /// weight-cache entry.
+    pub lora_fingerprint: String,
     graph_extra_bytes: usize,
 }
 
@@ -205,6 +211,22 @@ impl LoadedFluxTransformerWeights {
         Self::load_scoped_with_extra_progress(path, prefix, DEFAULT_GRAPH_EXTRA_BYTES, progress)
     }
 
+    /// [`Self::load_component_with_progress`] with LoRA adapters merged in.
+    pub fn load_component_with_loras(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        loras: &FluxLoraStack,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_loras(
+            path,
+            prefix,
+            DEFAULT_GRAPH_EXTRA_BYTES,
+            loras,
+            progress,
+        )
+    }
+
     pub fn load_with_extra_progress(
         path: impl AsRef<Path>,
         extra_bytes: usize,
@@ -222,12 +244,41 @@ impl LoadedFluxTransformerWeights {
         path: impl AsRef<Path>,
         prefix: Option<&str>,
         extra_bytes: usize,
+        progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        Self::load_scoped_with_loras(
+            path,
+            prefix,
+            extra_bytes,
+            &FluxLoraStack::default(),
+            progress,
+        )
+    }
+
+    /// [`Self::load_scoped_with_extra_progress`] with LoRA adapters merged
+    /// into the resident weight bytes before anything reads them (see
+    /// [`crate::flux_lora`] for why merging beats a runtime adapter here).
+    /// An empty stack is byte-for-byte the pristine load.
+    pub fn load_scoped_with_loras(
+        path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        extra_bytes: usize,
+        loras: &FluxLoraStack,
         mut progress: Option<ProgressHook>,
     ) -> Result<Self> {
         if crate::flux_gguf::is_gguf_path(&path) {
             if prefix.is_some() {
                 return Err(DiffusionError::model(
                     "flux GGUF loader does not take a combined-checkpoint prefix",
+                ));
+            }
+            if !loras.is_empty() {
+                // Merging into a block-quant tier means dequant/requant of
+                // Q4_K super-blocks — a different problem with its own
+                // fidelity budget. Fail closed rather than ignore the LoRA.
+                return Err(DiffusionError::model(
+                    "flux LoRA adapters are not supported on the GGUF (block-quant) tier; \
+                     use the FP8 safetensors checkpoint",
                 ));
             }
             return crate::flux_gguf::load_weights(path, extra_bytes, progress);
@@ -247,6 +298,36 @@ impl LoadedFluxTransformerWeights {
             .values()
             .any(|entry| entry.dtype == MlxDType::F8E4M3 && entry.shape.len() == 2);
 
+        let lora_fingerprint = loras.fingerprint();
+        if !loras.is_empty() {
+            // Does THIS checkpoint use BFL names? The canonical combined-FP8
+            // tier does; a diffusers-named file does not, and only that
+            // decides whether a diffusers LoRA's final-layer adaLN rows need
+            // the scale/shift swap (see `flux_lora::diffusers_final_layer_key`).
+            let bfl_final_layer = header
+                .tensors
+                .contains_key("final_layer.adaLN_modulation.1.weight");
+            let report = crate::flux_lora::apply_lora_stack(
+                &mut ctx,
+                &tensor_ids,
+                inspect.config.hidden_size as usize,
+                bfl_final_layer,
+                loras,
+                &mut progress,
+            )?;
+            eprintln!(
+                "flux lora [{}]: merged {} modules into {} tensors{}",
+                lora_fingerprint,
+                report.merged_modules,
+                report.patched_tensors,
+                if report.skipped_keys.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (ignored keys e.g. {:?})", report.skipped_keys)
+                }
+            );
+        }
+
         Ok(Self {
             ctx,
             tensor_ids,
@@ -254,6 +335,7 @@ impl LoadedFluxTransformerWeights {
             path: header.path,
             f8_weights,
             quantized: false,
+            lora_fingerprint,
             graph_extra_bytes: extra_bytes,
         })
     }
@@ -274,6 +356,9 @@ impl LoadedFluxTransformerWeights {
             path,
             f8_weights,
             quantized,
+            // The GGUF tier refuses LoRAs outright (see
+            // `load_scoped_with_loras`), so a from_loaded arena is pristine.
+            lora_fingerprint: String::new(),
             graph_extra_bytes: extra_bytes,
         }
     }
@@ -2998,7 +3083,22 @@ fn push_debug_heads(
 }
 
 pub(crate) fn flux_cache_namespace(weights: &LoadedFluxTransformerWeights) -> String {
-    format!("flux_transformer:{}", weights.path.display())
+    flux_namespace_for(&weights.path, &weights.lora_fingerprint)
+}
+
+/// Device/host weight-cache namespace of a transformer arena.
+///
+/// The LoRA fingerprint is part of the identity: merged bytes must never
+/// land in (or be served from) the pristine checkpoint's cache entries.
+/// Pristine loads keep the historical namespace unchanged, and it stays a
+/// strict PREFIX of every adapted one, so evicting the checkpoint evicts all
+/// of its adaptations too.
+fn flux_namespace_for(path: &Path, lora_fingerprint: &str) -> String {
+    if lora_fingerprint.is_empty() {
+        format!("flux_transformer:{}", path.display())
+    } else {
+        format!("flux_transformer:{}#lora:{}", path.display(), lora_fingerprint)
+    }
 }
 
 /// The f16 activation spine requires f16-accumulate gemms, which the F8
@@ -3043,7 +3143,16 @@ fn match_activation_type(ctx: &mut Context, src: TensorId, like: TensorId) -> Re
 /// pipeline with a DIFFERENT model on the same thread, or a 32GB card ends
 /// up asked to hold two flux unets. Returns the number of buffers freed.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxTransformerWeights) -> usize {
-    crate::backend::gpu_weight_cache_evict_prefix(&flux_cache_namespace(weights)).unwrap_or(0)
+    // The host f32 expansions key on the same namespace and never evict on
+    // their own; a checkpoint (or LoRA) switch must drop them too, or the
+    // CPU fallback path can serve the outgoing model's decoded weights.
+    let namespace = flux_cache_namespace(weights);
+    DECODED_F32_MATRIX_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .retain(|key, _| !key.starts_with(&namespace));
+    });
+    crate::backend::gpu_weight_cache_evict_prefix(&namespace).unwrap_or(0)
 }
 
 fn flux_force_cpu_math() -> bool {
@@ -3110,12 +3219,14 @@ fn decode_ggml_matrix_to_f32(matrix: &ResidentMatrix<'_>) -> Result<Vec<f32>> {
     }
 }
 
-fn decoded_matrix_f32_cached(matrix: &ResidentMatrix<'_>) -> Result<Arc<Vec<f32>>> {
-    thread_local! {
-        static DECODED_F32_MATRIX_CACHE: RefCell<BTreeMap<String, Arc<Vec<f32>>>> =
-            const { RefCell::new(BTreeMap::new()) };
-    }
+thread_local! {
+    /// Host-side f32 expansions of resident weight matrices (the lazy/CPU
+    /// math fallback), keyed by `{namespace}::{tensor}`.
+    static DECODED_F32_MATRIX_CACHE: RefCell<BTreeMap<String, Arc<Vec<f32>>>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
 
+fn decoded_matrix_f32_cached(matrix: &ResidentMatrix<'_>) -> Result<Arc<Vec<f32>>> {
     DECODED_F32_MATRIX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(decoded) = cache.get(&matrix.cache_key) {
@@ -5020,6 +5131,28 @@ fn flux_position_ids(text_token_count: usize, latent_shape: FluxLatentShape) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LoRA-merged weights must not share a cache namespace with the
+    /// pristine checkpoint (or with a different adapter set), and the
+    /// pristine namespace must stay a prefix of every adapted one so one
+    /// evict frees them all.
+    #[test]
+    fn cache_namespace_separates_lora_variants_under_one_checkpoint_prefix() {
+        let path = Path::new("/models/flux1-dev-fp8.safetensors");
+        let pristine = flux_namespace_for(path, "");
+        let style = flux_namespace_for(path, "style@0.8");
+        let other = flux_namespace_for(path, "style@0.4");
+        assert_eq!(pristine, "flux_transformer:/models/flux1-dev-fp8.safetensors");
+        assert_ne!(pristine, style);
+        assert_ne!(style, other);
+        assert!(style.starts_with(&pristine));
+        assert!(other.starts_with(&pristine));
+        // A different checkpoint never collides with an adapted one.
+        assert!(
+            !flux_namespace_for(Path::new("/models/flux1-schnell-fp8.safetensors"), "style@0.8")
+                .starts_with(&pristine)
+        );
+    }
 
     #[test]
     fn flux_position_ids_are_axis_major_for_mrope() {
