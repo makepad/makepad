@@ -284,6 +284,16 @@ impl AppleStreamEncoder {
     }
 }
 
+// SAFETY: `VTCompressionSessionRef` is an opaque, atomically-refcounted
+// Core Foundation-style object with no thread-affinity requirement (unlike
+// e.g. UI objects) — VideoToolbox only requires the CALLER not invoke it
+// concurrently from multiple threads, which `AppleStreamEncoder`'s `&mut
+// self` API already enforces (exclusive access). Moving the whole struct
+// (ownership, not concurrent access) to a different thread between calls is
+// sound; `makepad-asset-ai`'s realtime session holds this behind a `Mutex`
+// precisely so it is never accessed from two threads at once.
+unsafe impl Send for AppleStreamEncoder {}
+
 impl Drop for AppleStreamEncoder {
     fn drop(&mut self) {
         unsafe {
