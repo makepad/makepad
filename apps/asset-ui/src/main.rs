@@ -1195,6 +1195,21 @@ script_mod! {
                             FieldCaption{ text: "Mesh faces" }
                             mesh_faces_drop := FieldDrop{}
                         }
+                        // TRELLIS bakes its own colors; mesh-only chains keep
+                        // them, PBR-paint chains skip the tex flow unless asked.
+                        mesh_colors_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "TRELLIS colors" }
+                            trellis_colors_toggle := CheckBox{
+                                text: "keep on mesh stage before PBR paint"
+                                active: false
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                        }
                         vid_size_row := DropField{
                             visible: false
                             FieldCaption{ text: "Video size" }
@@ -2953,6 +2968,9 @@ impl App {
             .widget(cx, ids!(mesh_faces_row))
             .set_visible(cx, active("mesh"));
         self.ui
+            .widget(cx, ids!(mesh_colors_row))
+            .set_visible(cx, active("mesh") && active("paint"));
+        self.ui
             .widget(cx, ids!(vid_size_row))
             .set_visible(cx, active("video"));
         self.ui
@@ -3005,6 +3023,7 @@ impl App {
             image_steps,
             mesh_texture_size,
             mesh_faces,
+            mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
             video_size: vid_size,
             video_frames,
             video_steps,
@@ -3121,6 +3140,9 @@ impl App {
             cx,
             fast_presets::nearest_mesh_faces(saved.mesh_faces),
         );
+        self.ui
+            .check_box(cx, ids!(trellis_colors_toggle))
+            .set_active(cx, saved.mesh_trellis_texture.unwrap_or(false), Animate::No);
         self.ui.drop_down2(cx, ids!(vid_size_drop)).set_selected_item(
             cx,
             fast_presets::nearest_video_size(saved.video_w, saved.video_h),
@@ -3394,6 +3416,7 @@ impl App {
                 image_steps,
                 mesh_texture_size,
                 mesh_faces,
+                mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
                 video_size: vid_size,
                 video_frames,
                 video_steps,

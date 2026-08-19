@@ -100,6 +100,10 @@ pub struct GenParams {
     pub mesh_texture_size: u32,
     /// QEM face target. `None` = auto (12k objects, 20k when a rig stage follows).
     pub mesh_faces: Option<u32>,
+    /// Keep TRELLIS's own baked colors on the mesh stage even when a PBR
+    /// paint stage follows (paint retextures anyway, so the default skips
+    /// the ~30 s tex flow there). Mesh-only chains always keep them.
+    pub mesh_trellis_texture: bool,
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
@@ -115,6 +119,7 @@ impl Default for GenParams {
             image_steps: None,
             mesh_texture_size: MESH_TEXTURE_SIZES[0],
             mesh_faces: None,
+            mesh_trellis_texture: false,
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
@@ -1268,8 +1273,9 @@ impl Pipeline {
                 }));
                 request.texture_size = Some(self.gen.mesh_texture_size);
                 // Hunyuan retextures from the photo. Skip TRELLIS volume PBR
-                // so the mesh stage is geometry + xatlas UV0 only.
-                if hunyuan_paint {
+                // so the mesh stage is geometry + xatlas UV0 only — unless
+                // the user asked to keep TRELLIS's colors on that stage.
+                if hunyuan_paint && !self.gen.mesh_trellis_texture {
                     request.texture = Some(false);
                 }
             }
@@ -4502,6 +4508,11 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         put_output(&mut pipeline, 1, "model/gltf-binary", b"glb-bytes");
         let mesh = pipeline.request_for_stage(1).unwrap();
         assert_eq!(mesh.texture, Some(false));
+        // Opting into TRELLIS colors keeps the tex flow on the mesh stage
+        // even though paint follows (texture unset = backend default true).
+        pipeline.gen.mesh_trellis_texture = true;
+        assert_eq!(pipeline.request_for_stage(1).unwrap().texture, None);
+        pipeline.gen.mesh_trellis_texture = false;
         let paint = pipeline.request_for_stage(2).unwrap();
         let inputs = paint.inputs.expect("paint named inputs");
         assert_eq!(inputs.len(), 2);
