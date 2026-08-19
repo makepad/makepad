@@ -150,7 +150,12 @@ pub fn convert_map(
     used_face: &mut BTreeSet<u16>,
 ) -> Result<Vec<ClassicAsset>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let map = parse_map_v7(&bytes)?;
+    let mut map = parse_map_v7(&bytes)?;
+    // BUILD doors and lifts are authored CLOSED: bake them open, or the
+    // level a walker gets is sealed at every doorway.
+    let movers = build_movers(&map);
+    open_movers(&mut map, &movers);
+    let map = map;
     let (glb, spawn, used_sprites) = map_to_glb(&map, art)?;
     let slug = stem_slug(rel);
     let key = format!("worlds/{slug}");
@@ -161,11 +166,25 @@ pub fn convert_map(
     }
     std::fs::write(&dest, &glb).map_err(|e| e.to_string())?;
     if let Some(spawn) = spawn {
-        let text = format!(
-            "world-spawn 1\n{:.4} {:.4} {:.4}\n{:.5} {:.5}\n",
-            spawn[0], spawn[1], spawn[2], spawn[3], spawn[4]
-        );
-        let _ = std::fs::write(dest.with_extension("spawn"), text);
+        // BUILD's player start is already the eye; the map header carries no
+        // floor or step, so only the start is published (no invented hints).
+        let mut nav =
+            crate::world_nav::WorldNav::single([spawn[0], spawn[1], spawn[2]], spawn[3], spawn[4]);
+        // Doors/lifts: baked open in the mesh, named here so a navigator
+        // knows the opening is a door and how far it travelled.
+        for (i, m) in movers.iter().enumerate() {
+            let Some(sector) = map.sectors.get(m.sector) else {
+                continue;
+            };
+            let centre = sector_centre(&map, sector);
+            nav.doors.push(crate::world_nav::NavDoor {
+                name: format!("door_{}", i + 1),
+                pos: [centre[0] * SCALE, -m.open_z as f32 * SCALE_Z, centre[1] * SCALE],
+                closed_y: -m.closed_z as f32 * SCALE_Z,
+                open_y: -m.open_z as f32 * SCALE_Z,
+            });
+        }
+        let _ = std::fs::write(dest.with_extension("spawn"), nav.to_text());
     }
     let place = map_to_place(&map, art, source_id, &key, spawn);
     for p in &place.places {
@@ -629,6 +648,25 @@ fn walk_ext(root: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `ST_20_CEILING_DOOR` and `ST_21_FLOOR_DOOR`: the two BUILD door tags
+/// whose sector is authored CLOSED, so a static bake seals the doorway.
+pub(crate) const ST_CEILING_DOOR: i16 = 20;
+pub(crate) const ST_FLOOR_DOOR: i16 = 21;
+/// `ST_15..17`: elevators. Authored at one end of their travel.
+pub(crate) const ST_LIFT_TAGS: &[i16] = &[15, 16, 17];
+
+/// One BUILD sector that moves, and where it moves to (BUILD z units).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BuildMover {
+    pub sector: usize,
+    /// Ceiling/floor as authored, and where the effect takes it.
+    pub closed_z: i32,
+    pub open_z: i32,
+    /// True for a ceiling door (the ceiling rises); false for a floor door
+    /// or lift (the floor drops).
+    pub ceiling: bool,
+}
+
 pub(crate) struct BuildMap {
     start: [i32; 3],
     start_ang: i16,
@@ -655,6 +693,8 @@ struct Sector {
     floorshade: i8,
     floorxpanning: u8,
     floorypanning: u8,
+    /// BUILD sector tag: what this sector DOES (20/21 doors, 15-17 lifts).
+    lotag: i16,
 }
 
 struct Wall {
@@ -683,6 +723,95 @@ struct Sprite {
     xrepeat: u8,
     yrepeat: u8,
     ang: i16,
+}
+
+/// Centre of a sector's wall loop, in BUILD x/y units.
+fn sector_centre(map: &BuildMap, sector: &Sector) -> [f32; 2] {
+    let first = sector.wallptr as usize;
+    let count = sector.wallnum as usize;
+    let mut lo = [f32::MAX; 2];
+    let mut hi = [f32::MIN; 2];
+    for w in first..first.saturating_add(count) {
+        let Some(wall) = map.walls.get(w) else { continue };
+        lo[0] = lo[0].min(wall.x as f32);
+        lo[1] = lo[1].min(wall.y as f32);
+        hi[0] = hi[0].max(wall.x as f32);
+        hi[1] = hi[1].max(wall.y as f32);
+    }
+    if lo[0] > hi[0] {
+        return [0.0, 0.0];
+    }
+    [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5]
+}
+
+/// Doors and lifts of a BUILD map: sector tags 20/21 (doors) and 15-17
+/// (elevators). A closed BUILD door has its ceiling on its floor exactly
+/// like Doom's, so the static bake must open it or the level is sealed.
+///
+/// The open height is the neighbouring sector the effect reveals: the
+/// HIGHEST neighbouring ceiling for a ceiling door, the LOWEST neighbouring
+/// floor for a floor door or lift.
+pub(crate) fn build_movers(map: &BuildMap) -> Vec<BuildMover> {
+    let mut out = Vec::new();
+    for (si, sector) in map.sectors.iter().enumerate() {
+        let ceiling = sector.lotag == ST_CEILING_DOOR;
+        let floor = sector.lotag == ST_FLOOR_DOOR || ST_LIFT_TAGS.contains(&sector.lotag);
+        if !ceiling && !floor {
+            continue;
+        }
+        let first = sector.wallptr as usize;
+        let count = sector.wallnum as usize;
+        let mut best: Option<i32> = None;
+        for w in first..first.saturating_add(count) {
+            let Some(wall) = map.walls.get(w) else { continue };
+            let next = wall.nextsector;
+            if next < 0 {
+                continue;
+            }
+            let Some(n) = map.sectors.get(next as usize) else {
+                continue;
+            };
+            if n.lotag == sector.lotag {
+                continue;
+            }
+            let z = if ceiling { n.ceilingz } else { n.floorz };
+            best = Some(match best {
+                // BUILD z grows DOWNWARD: a higher ceiling is a smaller z.
+                Some(b) if ceiling => b.min(z),
+                Some(b) => b.max(z),
+                None => z,
+            });
+        }
+        let Some(open_z) = best else { continue };
+        let closed_z = if ceiling { sector.ceilingz } else { sector.floorz };
+        // Only a sector that actually travels the right way is a door.
+        let moves = if ceiling { open_z < closed_z } else { open_z > closed_z };
+        if !moves {
+            continue;
+        }
+        out.push(BuildMover {
+            sector: si,
+            closed_z,
+            open_z,
+            ceiling,
+        });
+    }
+    out
+}
+
+/// Bake every mover at its OPEN position, so the level a walker gets is the
+/// one the game lets them walk through.
+pub(crate) fn open_movers(map: &mut BuildMap, movers: &[BuildMover]) {
+    for m in movers {
+        let Some(sector) = map.sectors.get_mut(m.sector) else {
+            continue;
+        };
+        if m.ceiling {
+            sector.ceilingz = m.open_z;
+        } else {
+            sector.floorz = m.open_z;
+        }
+    }
 }
 
 pub(crate) fn parse_map_v7(bytes: &[u8]) -> Result<BuildMap, String> {
@@ -721,6 +850,7 @@ pub(crate) fn parse_map_v7(bytes: &[u8]) -> Result<BuildMap, String> {
             floorshade: bytes[o + 28] as i8,
             floorxpanning: bytes[o + 30],
             floorypanning: bytes[o + 31],
+            lotag: i16_le(bytes, o + 34),
         });
         o += 40;
     }
@@ -798,7 +928,7 @@ fn map_to_glb(
         emit_sector_walls(&mut buckets, map, si, art, &fallback);
     }
     emit_sprites(&mut buckets, map, art, &fallback);
-    let sky = emit_parallax_sky(map, art, &fallback);
+    let mut sky = emit_parallax_sky(map, art, &fallback);
     // Darkening shades ride the material baseColorFactor over one shared
     // unshaded image per tile; the renderer's tint lane clamps at 1.0, so
     // brightening (negative) shades stay baked into their own PNG.
@@ -810,6 +940,51 @@ fn map_to_glb(
             shaded_png(t, baked)
         });
     }
+    // BUILD shade is already baked (baseColorFactor for darkening, into the
+    // PNG for brightening), so the level is PRELIT: without the
+    // `lightmapTexture` marker the analytic sun multiplies it again and
+    // interiors go black. The marker points at the part's own image — a
+    // prelit shader never samples it, and a second image would trip
+    // pack_import's one-texture rule.
+    // Weld the T-junctions BUILD leaves behind: a sector's floor and its
+    // neighbour's wall are cut at different points, and each texture bucket
+    // is a mesh of its own, so the grid spans every bucket and each is
+    // welded against it. Splitting only inserts positions the level already
+    // has, so bucket order does not matter.
+    {
+        let mut parts: Vec<&[[f32; 3]]> = buckets.values().map(|b| &b.positions[..]).collect();
+        if let Some(ref sky) = sky {
+            // The sky hull is a shell around the map rather than level
+            // surface, but it is cut from the same sector rings and can pick
+            // a corner up where the world does not.
+            parts.push(&sky.positions[..]);
+        }
+        let weld = crate::classic_import::weld_parts(&parts);
+        for bucket in buckets.values_mut() {
+            weld.split(crate::classic_import::WeldSoup {
+                positions: &mut bucket.positions,
+                uvs: &mut bucket.uvs,
+                normals: None,
+                colors: None,
+                indices: &mut bucket.indices,
+            });
+        }
+        if let Some(sky) = sky.as_mut() {
+            weld.split(crate::classic_import::WeldSoup {
+                positions: &mut sky.positions,
+                uvs: &mut sky.uvs,
+                normals: Some(&mut sky.normals),
+                colors: None,
+                indices: &mut sky.indices,
+            });
+        }
+    }
+    let marker_uvs: Vec<[f32; 2]> = vec![[0.0, 0.0]; buckets
+        .values()
+        .map(|b| b.positions.len())
+        .max()
+        .unwrap_or(0)
+        .max(sky.as_ref().map_or(0, |s| s.positions.len()))];
     let mut parts = Vec::new();
     for (key, bucket) in &buckets {
         if bucket.indices.len() < 3 {
@@ -832,8 +1007,8 @@ fn map_to_glb(
             normals: None,
             base_color_factor: factor,
             colors: None,
-            lightmap_png: None,
-            lightmap_uvs: None,
+            lightmap_png: Some(png),
+            lightmap_uvs: Some(&marker_uvs[..bucket.positions.len()]),
             detail_png: None,
             detail_scale: [0.0, 0.0],
         });
@@ -2364,7 +2539,7 @@ pub fn assemble_duke_billboards(
             }
             continue;
         }
-        let Some((bb, tiles)) =
+        let Some((mut bb, tiles)) =
             build_actor_billboard(&actor.name, pic as u16, &actions, art, &dir)
         else {
             continue;
@@ -2374,10 +2549,7 @@ pub fn assemble_duke_billboards(
         }
         let key = format!("billboards/{source_id}/{}", bb.prefix);
         let rel_path = format!("{key}.billboard");
-        if std::fs::write(staged.join(&rel_path), bb.to_text()).is_err() {
-            continue;
-        }
-        let Some(icon_name) = write_actor_sheet(&dir, &bb.prefix, &tiles, art) else {
+        let Some(icon_rel) = pack_actor_sheet(staged, &staged.join(&rel_path), &mut bb) else {
             continue;
         };
         for &t in &tiles {
@@ -2395,7 +2567,7 @@ pub fn assemble_duke_billboards(
                 bb.role.as_str().into(),
                 actor.name.to_ascii_lowercase(),
             ],
-            icon_rel: Some(format!("billboards/{source_id}/{icon_name}")),
+            icon_rel: Some(icon_rel),
         });
         consumed.extend(tiles);
     }
@@ -2564,11 +2736,10 @@ fn write_run_billboard(
     if frames.len() < 2 {
         return None;
     }
-    let bb = crate::stateful_billboard::sequential_idle(&slug, frames, role);
+    let mut bb = crate::stateful_billboard::sequential_idle(&slug, frames, role);
     let key = format!("billboards/{source_id}/{slug}");
     let rel_path = format!("{key}.billboard");
-    std::fs::write(staged.join(&rel_path), bb.to_text()).ok()?;
-    let icon_name = write_actor_sheet(&dir, &slug, &tiles, art)?;
+    let icon_rel = pack_actor_sheet(staged, &staged.join(&rel_path), &mut bb)?;
     extra.push(ClassicAsset {
         key: key.clone(),
         kind: AssetKind::Billboard,
@@ -2581,7 +2752,7 @@ fn write_run_billboard(
             kind_tag.into(),
             slug,
         ],
-        icon_rel: Some(format!("billboards/{source_id}/{icon_name}")),
+        icon_rel: Some(icon_rel),
     });
     Some(key)
 }
@@ -3454,6 +3625,7 @@ fn build_actor_billboard(
             mirrors: if stored >= 4 { 8 } else { 0 },
             states,
             frames,
+            sheet: None,
         },
         tiles,
     ))
@@ -3506,59 +3678,136 @@ fn push_frame_img(
         h: img.h,
         file: rel,
         flip: false,
+        cell: None,
     });
     true
 }
 
-fn write_actor_sheet(
-    dir: &Path,
-    prefix: &str,
-    tiles: &BTreeSet<u16>,
-    art: &ArtBank,
+/// Pack an actor's tiles into ONE sheet beside its manifest, write the
+/// manifest that indexes it and drop the per-tile PNGs it replaced. Returns
+/// the staged-relative animated preview strip.
+fn pack_actor_sheet(
+    staged: &Path,
+    manifest: &Path,
+    bb: &mut crate::stateful_billboard::StatefulBillboard,
 ) -> Option<String> {
-    let mut fronts: Vec<&TileRgba> = Vec::new();
-    for id in tiles {
-        if let Some(img) = art.tiles.get(id) {
-            fronts.push(img);
-            if fronts.len() >= 16 {
-                break;
+    let written = match crate::billboard_sheet::write_with_sheet(manifest, bb) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[duke-import] billboard sheet {}: {e}", manifest.display());
+            return None;
+        }
+    };
+    for frame in &written.consumed {
+        let _ = std::fs::remove_file(frame);
+        // Tiles live in `billboards/duke3d/NN/` buckets; the bucket goes
+        // once its last frame is packed (map-placed leftovers are flat).
+        if let Some(parent) = frame.parent() {
+            if Some(parent) != manifest.parent() {
+                let _ = std::fs::remove_dir(parent);
             }
         }
     }
-    if fronts.is_empty() {
-        return None;
-    }
-    let cell_w = fronts.iter().map(|t| t.w).max().unwrap_or(32).max(1);
-    let cell_h = fronts.iter().map(|t| t.h).max().unwrap_or(32).max(1);
-    let cols = fronts.len().min(8).max(1);
-    let rows = fronts.len().div_ceil(cols);
-    let aw = cell_w * cols as u32;
-    let ah = cell_h * rows as u32;
-    let mut rgba = vec![0u8; (aw * ah * 4) as usize];
-    for (i, img) in fronts.iter().enumerate() {
-        let cx = (i % cols) as u32 * cell_w;
-        let cy = (i / cols) as u32 * cell_h;
-        let ox = (cell_w.saturating_sub(img.w)) / 2;
-        let oy = (cell_h.saturating_sub(img.h)) / 2;
-        for y in 0..img.h {
-            for x in 0..img.w {
-                let si = ((y * img.w + x) * 4) as usize;
-                let di = (((cy + oy + y) * aw + cx + ox + x) * 4) as usize;
-                if si + 4 <= img.rgba.len() && di + 4 <= rgba.len() {
-                    rgba[di..di + 4].copy_from_slice(&img.rgba[si..si + 4]);
-                }
-            }
-        }
-    }
-    let png = encode_png_rgba(&rgba, aw, ah).ok()?;
-    let name = format!("{prefix}.png");
-    std::fs::write(dir.join(&name), png).ok()?;
-    Some(name)
+    written
+        .thumb
+        .as_deref()
+        .unwrap_or(&written.sheet)
+        .strip_prefix(staged)
+        .ok()
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A BUILD ceiling door (sector lotag 20) whose ceiling sits on its
+    /// floor: the mover opens it to the neighbour's ceiling.
+    #[test]
+    fn a_build_ceiling_door_bakes_open() {
+        let mut map = BuildMap {
+            start: [0, 0, 0],
+            start_ang: 0,
+            start_sec: 0,
+            sectors: vec![
+                Sector {
+                    wallptr: 0,
+                    wallnum: 2,
+                    ceilingz: -8192,
+                    floorz: 0,
+                    ceilingstat: 0,
+                    floorstat: 0,
+                    ceilingpicnum: 0,
+                    ceilingheinum: 0,
+                    ceilingshade: 0,
+                    ceilingxpanning: 0,
+                    ceilingypanning: 0,
+                    floorpicnum: 0,
+                    floorheinum: 0,
+                    floorshade: 0,
+                    floorxpanning: 0,
+                    floorypanning: 0,
+                    lotag: 0,
+                },
+                Sector {
+                    wallptr: 2,
+                    wallnum: 2,
+                    // Closed: ceiling on the floor.
+                    ceilingz: 0,
+                    floorz: 0,
+                    ceilingstat: 0,
+                    floorstat: 0,
+                    ceilingpicnum: 0,
+                    ceilingheinum: 0,
+                    ceilingshade: 0,
+                    ceilingxpanning: 0,
+                    ceilingypanning: 0,
+                    floorpicnum: 0,
+                    floorheinum: 0,
+                    floorshade: 0,
+                    floorxpanning: 0,
+                    floorypanning: 0,
+                    lotag: ST_CEILING_DOOR,
+                },
+            ],
+            walls: vec![
+                wall_to(0, 0, 1),
+                wall_to(1024, 0, -1),
+                wall_to(0, 0, 0),
+                wall_to(1024, 0, -1),
+            ],
+            sprites: Vec::new(),
+        };
+        let movers = build_movers(&map);
+        assert_eq!(movers.len(), 1, "{movers:?}");
+        assert_eq!(movers[0].sector, 1);
+        assert!(movers[0].ceiling);
+        assert_eq!(movers[0].closed_z, 0);
+        assert_eq!(movers[0].open_z, -8192, "up to the neighbour's ceiling");
+        open_movers(&mut map, &movers);
+        assert_eq!(map.sectors[1].ceilingz, -8192, "baked open");
+        // A sector with no door tag never moves.
+        map.sectors[1].lotag = 0;
+        assert!(build_movers(&map).is_empty());
+    }
+
+    fn wall_to(x: i32, y: i32, nextsector: i16) -> Wall {
+        Wall {
+            x,
+            y,
+            point2: 0,
+            nextwall: -1,
+            nextsector,
+            cstat: 0,
+            picnum: 0,
+            overpicnum: 0,
+            shade: 0,
+            xrepeat: 8,
+            yrepeat: 8,
+            xpanning: 0,
+            ypanning: 0,
+        }
+    }
 
     #[test]
     fn grp_roundtrip_one_file() {
@@ -4118,6 +4367,7 @@ enda
             floorshade: 0,
             floorxpanning: 0,
             floorypanning: 0,
+            lotag: 0,
         };
         let map = BuildMap {
             start: [0, 0, 0],
@@ -4153,6 +4403,7 @@ enda
             floorshade: 0,
             floorxpanning: 0,
             floorypanning: 0,
+            lotag: 0,
         };
         let map = BuildMap {
             start: [0, 0, 0],
@@ -4279,6 +4530,7 @@ enda
             floorshade: 0,
             floorxpanning: 0,
             floorypanning: 0,
+            lotag: 0,
         };
         let map = BuildMap {
             start: [0, 0, 0],
@@ -4452,6 +4704,30 @@ enda
         assert!(glb.len() > 8_000, "glb too small: {}", glb.len());
         assert!(glb.len() < 8_000_000, "glb too large: {}", glb.len());
         eprintln!("e1l1 glb {} bytes", glb.len());
+        // BUILD cuts a sector's floor and its neighbour's wall at different
+        // points, so E1L1 arrives full of T-junctions; the weld must close
+        // every one across every texture bucket.
+        let parts = crate::world_preview::extract_glb_parts(&glb).expect("parts");
+        let soup: Vec<(&[[f32; 3]], &[u32])> = parts
+            .iter()
+            .map(|part| (&part.pos[..], &part.indices[..]))
+            .collect();
+        let left = crate::classic_import::weld_t_junctions_left(&soup);
+        eprintln!(
+            "e1l1: {} parts, {} triangles, {left} T-junctions",
+            parts.len(),
+            soup.iter().map(|(_, i)| i.len() / 3).sum::<usize>()
+        );
+        // Three defects survive, counted from both sides of a shared edge:
+        // each is a pair of corners one to three BUILD units apart (a unit
+        // is 1/512 m) where cutting one edge puts the cut inside the chord
+        // the other needs, so the pass declines rather than grow the mesh
+        // forever. Closing them means MOVING a vertex, which this pass never
+        // does. The number may only fall.
+        assert!(
+            left <= 5,
+            "Duke E1L1 T-junctions rose to {left} (ratchet 5) — surfaces crack where they meet"
+        );
         let dest = tmp.join("e1l1.glb");
         std::fs::write(&dest, &glb).unwrap();
         if let Some(s) = spawn {
@@ -4547,6 +4823,7 @@ enda
             floorshade: 0,
             floorxpanning: 0,
             floorypanning: 0,
+            lotag: 0,
         };
         (sec, walls)
     }
@@ -4618,12 +4895,14 @@ enda
             y_min <= y_eye && y_eye <= y_max,
             "eye {y_eye} must sit inside sky y {y_min}..{y_max}"
         );
-        assert!(sky.png.len() > 32, "sky should carry the city tile, not the gray stub");
-        // Eight 128-wide panels of the 300-tall city.
-        assert!(
-            sky.png.len() > 8_000,
-            "atlas should be the 8-panel strip, {} bytes",
-            sky.png.len()
+        // Eight 128-wide panels of the 300-tall city tile — asserted on the
+        // decoded image, not on byte length (the PNG writer compresses).
+        let (rgba, aw, ah) = crate::classic_import::decode_png_stored(&sky.png).expect("sky png");
+        assert_eq!((aw, ah), (8 * 128, 300), "atlas should be the 8-panel strip");
+        assert_eq!(
+            &rgba[0..4],
+            &[40, 60, 120, 255],
+            "sky should carry the city tile, not the gray stub"
         );
     }
 

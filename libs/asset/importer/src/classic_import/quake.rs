@@ -1,7 +1,7 @@
 //! Quake 1 shareware / LibreQuake conversion (BSP, MDL, SPR, WAD2).
 
 use super::doom::{
-    emit_tri_st_atlas, is_character_mdl, lookup_slot, pack_atlas, quake_bsp_place, quake_bsp_spawn,
+    emit_tri_st_atlas, is_character_mdl, lookup_slot, pack_atlas, quake_bsp_nav, quake_bsp_place,
 };
 use super::shared::*;
 use crate::vertex_skin;
@@ -29,7 +29,8 @@ pub(crate) fn convert_bsp(
         }
         return Err(format!("unsupported IBSP version {ver}"));
     }
-    let glb = quake_bsp_to_glb(&bytes)?;
+    let map = quake_bsp_to_map(&bytes)?;
+    let glb = map.glb;
     let slug = stem_slug(rel);
     // `b_*` are inline brush models (ammo boxes, health), not walkable maps.
     // Treating them as worlds left empty cards: no spawn, no icon.
@@ -43,8 +44,26 @@ pub(crate) fn convert_bsp(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&dest, &glb).map_err(|e| e.to_string())?;
-    if let Some(spawn) = quake_bsp_spawn(&bytes) {
-        write_spawn_sidecar(&dest, spawn);
+    if let Some(mut nav) = quake_bsp_nav(&bytes) {
+        // A Quake door slides along its own axis: the anchor says WHERE it
+        // is and how far it travels; the direction is the GLB's clip.
+        nav.doors = map
+            .doors
+            .iter()
+            .map(|d| {
+                let travel = (d.travel[0] * d.travel[0]
+                    + d.travel[1] * d.travel[1]
+                    + d.travel[2] * d.travel[2])
+                    .sqrt();
+                crate::world_nav::NavDoor {
+                    name: d.name.clone(),
+                    pos: d.centre,
+                    closed_y: d.centre[1],
+                    open_y: d.centre[1] + travel,
+                }
+            })
+            .collect();
+        write_nav_sidecar(&dest, &nav);
     }
     let place = quake_bsp_place(&bytes, source.id(), &key);
     let _ = crate::world_place::write_place_sidecar(&dest, &place);
@@ -121,7 +140,17 @@ fn raster_glb_icon(glb: &[u8], yaw: f32, dim: usize) -> Option<Vec<u8>> {
     encode_png_rgba(&tile, dim as u32, dim as u32).ok()
 }
 
+/// A converted Quake map: the GLB plus what moves in it.
+pub(crate) struct QuakeMap {
+    pub glb: Vec<u8>,
+    pub doors: Vec<QuakeDoor>,
+}
+
 pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    quake_bsp_to_map(bytes).map(|m| m.glb)
+}
+
+pub(crate) fn quake_bsp_to_map(bytes: &[u8]) -> Result<QuakeMap, String> {
     if bytes.len() < 4 + 15 * 8 {
         return Err("BSP too small".into());
     }
@@ -172,6 +201,7 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     // Textures (miptex directory).
+    let mut sky_layers: Option<(Vec<u8>, Vec<u8>)> = None;
     let mut tex_names: Vec<String> = Vec::new();
     let mut tex_images: BTreeMap<String, RgbaImage> = BTreeMap::new();
     tex_images.insert(
@@ -201,7 +231,16 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 let th = u32_le(bytes, mo + 20) as usize;
                 let data_off = u32_le(bytes, mo + 24) as usize;
                 tex_names.push(name.clone());
-                if skip_quake_tex(&name) {
+                // The sky picture is not an atlas tile: it becomes the sky
+                // node's two scrolling layers.
+                if is_quake_sky(&name) && sky_layers.is_none() && data_off != 0 {
+                    let pix_off = mo + data_off;
+                    if tw >= 2 && th >= 1 && pix_off + tw * th <= bytes.len() {
+                        sky_layers =
+                            quake_sky_layers(&bytes[pix_off..pix_off + tw * th], tw as u32, th as u32);
+                    }
+                }
+                if skip_quake_tex(&name) || is_quake_sky(&name) {
                     continue;
                 }
                 if tw == 0 || th == 0 || tw > 512 || th > 512 {
@@ -246,6 +285,29 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
     let scale = 1.0 / 32.0; // Quake units → rough meters
 
+    // Faces that leave the level mesh: the sky, the liquids you swim in,
+    // and every brush a `func_door` moves.
+    let mut sky = crate::classic_import::doom::SkyFaces::default();
+    let (moff, mlen) = lump(14);
+    let models = quake_models(bytes, moff, mlen);
+    let (entoff, entlen) = lump(0);
+    let entities = if entoff + entlen <= bytes.len() {
+        std::str::from_utf8(&bytes[entoff..entoff + entlen]).unwrap_or("")
+    } else {
+        ""
+    };
+    let doors = quake_doors(entities, &models, scale);
+    let mut door_of_face: BTreeMap<usize, usize> = BTreeMap::new();
+    for (di, door) in doors.iter().enumerate() {
+        for f in door.first_face..door.first_face + door.num_faces {
+            door_of_face.insert(f, di);
+        }
+    }
+    let mut door_geom: Vec<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> =
+        vec![(Vec::new(), Vec::new(), Vec::new()); doors.len()];
+    let mut liquid_geom: BTreeMap<String, (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> =
+        BTreeMap::new();
+
     for fi in 0..n_faces {
         let o = foff + fi * 20;
         // face v29: short planenum; short side; int firstedge; short numedges; short texinfo; ...
@@ -281,6 +343,7 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
         if skip_quake_tex(&tex_name) {
             continue;
         }
+        let sky_face = is_quake_sky(&tex_name);
         // Water/slime/lava are two-sided in the BSP and the GLB is
         // double-sided — emitting both faces z-fights every liquid.
         if is_quake_liquid(&tex_name) {
@@ -288,7 +351,11 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 continue;
             }
         }
-        let slot = lookup_slot(&uv_map, &tex_name);
+        let slot = if sky_face {
+            crate::classic_import::doom::SKY_SLOT
+        } else {
+            lookup_slot(&uv_map, &tex_name)
+        };
         let tw = slot.w.max(1) as f32;
         let th = slot.h.max(1) as f32;
 
@@ -319,11 +386,26 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
         // face crosses a texture tile — same as a Quake engine with
         // GL_REPEAT, but we pack an atlas so we cannot interpolate across
         // a tile boundary.
+        // Where this face's triangles go: the sky node, a liquid node, the
+        // door that moves it, or the level mesh.
+        let (out_pos, out_uv, out_idx) = if sky_face {
+            (&mut sky.positions, &mut sky.uvs, &mut sky.indices)
+        } else if is_quake_liquid(&tex_name) {
+            let entry = liquid_geom
+                .entry(tex_name.clone())
+                .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
+            (&mut entry.0, &mut entry.1, &mut entry.2)
+        } else if let Some(&di) = door_of_face.get(&fi) {
+            let g = &mut door_geom[di];
+            (&mut g.0, &mut g.1, &mut g.2)
+        } else {
+            (&mut positions, &mut uvs, &mut indices)
+        };
         for i in 1..face_verts.len() - 1 {
             emit_tri_st_atlas(
-                &mut positions,
-                &mut uvs,
-                &mut indices,
+                out_pos,
+                out_uv,
+                out_idx,
                 face_verts[0],
                 face_verts[i],
                 face_verts[i + 1],
@@ -346,6 +428,51 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
         indices = vec![0, 1, 2, 0, 2, 3];
     }
 
+    // Weld the T-junctions the BSP leaves behind. A Quake face is split by
+    // the node tree wherever a neighbouring leaf ends, so the long face on
+    // one side of a wall meets several short ones on the other — the same
+    // hairline Doom subsectors produce, and the same fix. Doors, liquids
+    // and the sky are separate meshes, so the grid is built from all of
+    // them and every part is welded against it.
+    {
+        let mut parts: Vec<&[[f32; 3]]> = vec![&positions[..], &sky.positions[..]];
+        parts.extend(liquid_geom.values().map(|g| &g.0[..]));
+        parts.extend(door_geom.iter().map(|g| &g.0[..]));
+        let weld = super::weld::Weld::from_parts(&parts);
+        weld.split(super::weld::Soup {
+            positions: &mut positions,
+            uvs: &mut uvs,
+            normals: None,
+            colors: None,
+            indices: &mut indices,
+        });
+        weld.split(super::weld::Soup {
+            positions: &mut sky.positions,
+            uvs: &mut sky.uvs,
+            normals: None,
+            colors: None,
+            indices: &mut sky.indices,
+        });
+        for g in liquid_geom.values_mut() {
+            weld.split(super::weld::Soup {
+                positions: &mut g.0,
+                uvs: &mut g.1,
+                normals: None,
+                colors: None,
+                indices: &mut g.2,
+            });
+        }
+        for g in door_geom.iter_mut() {
+            weld.split(super::weld::Soup {
+                positions: &mut g.0,
+                uvs: &mut g.1,
+                normals: None,
+                colors: None,
+                indices: &mut g.2,
+            });
+        }
+    }
+
     let glb = write_glb_mesh_textured(&GlbTexturedMesh {
         positions: &positions,
         normals: None,
@@ -359,17 +486,248 @@ pub(crate) fn quake_bsp_to_glb(bytes: &[u8]) -> Result<Vec<u8>, String> {
     if !glb.starts_with(b"glTF") {
         return Err("GLB writer failed".into());
     }
-    Ok(glb)
+
+    let mut extra = Vec::new();
+    for (di, door) in doors.iter().enumerate() {
+        let (p, u, i) = &door_geom[di];
+        if i.len() < 3 {
+            continue;
+        }
+        extra.push(crate::glb_nodes::ExtraNode::door_vector(
+            door.name.clone(),
+            p.clone(),
+            u.clone(),
+            i.clone(),
+            door.travel,
+            door.axis,
+        ));
+    }
+    for (n, (name, (p, u, i))) in liquid_geom.iter().enumerate() {
+        if i.len() < 3 {
+            continue;
+        }
+        extra.push(crate::glb_nodes::ExtraNode::hazard(
+            format!("hazard_{}", n + 1),
+            p.clone(),
+            u.clone(),
+            i.clone(),
+            Vec::new(),
+            quake_liquid_damage(name),
+            name.trim_start_matches('*'),
+            true,
+            // Quake liquids are volumes you SWIM through, not floors you
+            // stand on — the surface must not stop a walker.
+            false,
+        ));
+    }
+    if !sky.is_empty() {
+        if let Some((back, front)) = sky_layers {
+            extra.push(crate::glb_nodes::ExtraNode::sky(
+                std::mem::take(&mut sky.positions),
+                std::mem::take(&mut sky.uvs),
+                std::mem::take(&mut sky.indices),
+                vec![back, front],
+                "quake_scroll",
+                1.0,
+                0.0,
+                "sky",
+                // Quake's own `R_DrawSkyChain`: the back layer slides at 8
+                // texture units a second, the keyed front at 16.
+                Some([8.0, 16.0]),
+                None,
+            ));
+        }
+    }
+    let glb = crate::glb_nodes::inject_nodes(&glb, &extra).unwrap_or(glb);
+    Ok(QuakeMap { glb, doors })
+}
+
+/// Split a Quake sky picture into its two layers: the RIGHT half is the
+/// solid back layer, the LEFT half the front layer whose palette index 0 is
+/// transparent (`R_InitSky`).
+pub(crate) fn quake_sky_layers(indices: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    let half = (w / 2) as usize;
+    if half == 0 || h == 0 || indices.len() < (w * h) as usize {
+        return None;
+    }
+    let pal = quake_palette();
+    let mut back = Vec::with_capacity(half * h as usize * 4);
+    let mut front = Vec::with_capacity(half * h as usize * 4);
+    for y in 0..h as usize {
+        let row = y * w as usize;
+        for x in 0..half {
+            let b = pal[indices[row + half + x] as usize];
+            back.extend_from_slice(&[b[0], b[1], b[2], 255]);
+            let i = indices[row + x];
+            let f = pal[i as usize];
+            let alpha = if i == 0 { 0 } else { 255 };
+            front.extend_from_slice(&[f[0], f[1], f[2], alpha]);
+        }
+    }
+    Some((
+        encode_png_rgba(&back, half as u32, h).ok()?,
+        encode_png_rgba(&front, half as u32, h).ok()?,
+    ))
+}
+
+/// A Quake sub-model that moves: `func_door` and friends, resolved from the
+/// entity's `model "*N"` to the face range in lump 14.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct QuakeDoor {
+    pub name: String,
+    pub first_face: usize,
+    pub num_faces: usize,
+    /// Brush centre in GLB space (metres), at its CLOSED pose.
+    pub centre: [f32; 3],
+    /// Open pose in GLB space (metres): the geometry is authored CLOSED.
+    pub travel: [f32; 3],
+    /// Dominant axis of `travel`, for the node extras.
+    pub axis: &'static str,
+}
+
+/// Quake's default door `lip`: how much of the door stays showing.
+pub(crate) const QUAKE_DOOR_LIP: f32 = 8.0;
+
+/// Brush models (lump 14). Only the face range and bounds are needed here.
+pub(crate) fn quake_models(bytes: &[u8], off: usize, len: usize) -> Vec<([f32; 6], usize, usize)> {
+    let mut out = Vec::new();
+    let n = len / 64;
+    for i in 0..n {
+        let o = off + i * 64;
+        if o + 64 > bytes.len() {
+            break;
+        }
+        let mut bounds = [0.0f32; 6];
+        for (k, b) in bounds.iter_mut().enumerate() {
+            *b = f32_le(bytes, o + k * 4);
+        }
+        let first = i32_le(bytes, o + 56).max(0) as usize;
+        let count = i32_le(bytes, o + 60).max(0) as usize;
+        out.push((bounds, first, count));
+    }
+    out
+}
+
+/// `func_door` entities, resolved to face ranges and their open offset.
+///
+/// Quake opens a door along `angle` (`-1` up, `-2` down, otherwise a compass
+/// direction) by the door's own size on that axis minus `lip`
+/// (`SP_func_door`/`LinkDoors`). The map authors the CLOSED pose.
+pub(crate) fn quake_doors(
+    entities: &str,
+    models: &[([f32; 6], usize, usize)],
+    scale: f32,
+) -> Vec<QuakeDoor> {
+    let mut out = Vec::new();
+    for block in entities.split(|c| c == '{' || c == '}') {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let mut class = String::new();
+        let mut model = String::new();
+        let mut angle = 0.0f32;
+        let mut lip = QUAKE_DOOR_LIP;
+        for line in block.lines() {
+            let kv: Vec<&str> = line
+                .trim()
+                .split('"')
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            if kv.len() < 2 {
+                continue;
+            }
+            match kv[0] {
+                "classname" => class = kv[1].to_string(),
+                "model" => model = kv[1].to_string(),
+                "angle" => angle = kv[1].trim().parse().unwrap_or(0.0),
+                "lip" => lip = kv[1].trim().parse().unwrap_or(QUAKE_DOOR_LIP),
+                _ => {}
+            }
+        }
+        if !class.starts_with("func_door") {
+            continue;
+        }
+        let Some(index) = model.strip_prefix('*').and_then(|n| n.parse::<usize>().ok()) else {
+            continue;
+        };
+        let Some((bounds, first, count)) = models.get(index).copied() else {
+            continue;
+        };
+        if count == 0 {
+            continue;
+        }
+        // Quake movement direction, Z-up.
+        let dir = if (angle - -1.0).abs() < 0.01 {
+            [0.0, 0.0, 1.0]
+        } else if (angle - -2.0).abs() < 0.01 {
+            [0.0, 0.0, -1.0]
+        } else {
+            let r = angle.to_radians();
+            [r.cos(), r.sin(), 0.0]
+        };
+        let size = [
+            bounds[3] - bounds[0],
+            bounds[4] - bounds[1],
+            bounds[5] - bounds[2],
+        ];
+        let span = (dir[0] * size[0]).abs() + (dir[1] * size[1]).abs() + (dir[2] * size[2]).abs();
+        let distance = (span - lip).max(0.0);
+        if distance <= 0.0 {
+            continue;
+        }
+        // Z-up -> Y-up, same mapping the geometry uses.
+        let travel = [
+            dir[0] * distance * scale,
+            dir[2] * distance * scale,
+            -dir[1] * distance * scale,
+        ];
+        let axis = if travel[1].abs() >= travel[0].abs() && travel[1].abs() >= travel[2].abs() {
+            "y"
+        } else if travel[0].abs() >= travel[2].abs() {
+            "x"
+        } else {
+            "z"
+        };
+        let mid = [
+            (bounds[0] + bounds[3]) * 0.5,
+            (bounds[1] + bounds[4]) * 0.5,
+            (bounds[2] + bounds[5]) * 0.5,
+        ];
+        out.push(QuakeDoor {
+            name: format!("door_{}", out.len() + 1),
+            first_face: first,
+            num_faces: count,
+            centre: [mid[0] * scale, mid[2] * scale, -mid[1] * scale],
+            travel,
+            axis,
+        });
+    }
+    out
+}
+
+/// What a Quake liquid does to a swimmer, as a percent-per-second figure on
+/// the same scale the Doom hazards use (`T_Damage` in `misc.qc`: lava is
+/// lethal, slime hurts, water is harmless).
+pub(crate) fn quake_liquid_damage(name: &str) -> u8 {
+    let n = name.trim_start_matches('*').to_ascii_lowercase();
+    if n.starts_with("lava") {
+        20
+    } else if n.starts_with("slime") {
+        10
+    } else {
+        0
+    }
 }
 
 pub(crate) fn skip_quake_tex(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.starts_with("clip")
-        || n.starts_with("trigger")
-        || n == "skip"
-        || n == "hint"
-        || n.starts_with("sky")
-        || n == "aaatrigger"
+    n.starts_with("clip") || n.starts_with("trigger") || n == "skip" || n == "hint" || n == "aaatrigger"
+}
+
+/// Quake's sky brushes: drawn as the sky, not as a wall.
+pub(crate) fn is_quake_sky(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("sky")
 }
 
 pub(crate) fn is_quake_liquid(name: &str) -> bool {

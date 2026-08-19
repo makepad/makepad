@@ -6,9 +6,29 @@
 
 mod shared;
 mod doom;
+mod doors;
+mod hazards;
+mod movers;
 mod quake;
+mod weld;
 
 pub use shared::*;
+
+/// T-junction weld, re-exported for the per-game converters that live in
+/// their own crate modules (Duke, Quake II/III, id Tech 4) — one pass, one
+/// definition of "this vertex sits on that edge", for every classic level.
+pub(crate) use weld::Soup as WeldSoup;
+
+pub(crate) fn weld_parts(parts: &[&[[f32; 3]]]) -> weld::Weld {
+    weld::Weld::from_parts(parts)
+}
+
+/// Test-only audit: T-junctions still present across a converted level's
+/// parts (see [`weld::t_junctions_left`]).
+#[cfg(test)]
+pub(crate) fn weld_t_junctions_left(parts: &[(&[[f32; 3]], &[u32])]) -> usize {
+    weld::t_junctions_left(parts)
+}
 
 use crate::ao_bake::BakeStats;
 use crate::pack_import;
@@ -970,7 +990,7 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
             }
         }
         let prefix = group.rsplit('/').next().unwrap_or("sprite");
-        let Some(bb) = assemble(prefix, &lumps) else {
+        let Some(mut bb) = assemble(prefix, &lumps) else {
             continue;
         };
         let rel_path = format!("{group}.billboard");
@@ -978,21 +998,9 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::write(&dest, bb.to_text()).is_err() {
+        let Some(icon_rel) = write_actor_sheet(staged, &dest, &mut bb) else {
             continue;
-        }
-        let icon_rel = bb.preview_frames().first().map(|f| {
-            if let Some(parent) = dest.parent() {
-                parent.join(&f.file)
-            } else {
-                PathBuf::from(&f.file)
-            }
-        });
-        let icon_rel = icon_rel.and_then(|p| {
-            p.strip_prefix(staged)
-                .ok()
-                .map(|r| r.to_string_lossy().replace('\\', "/"))
-        });
+        };
         let mut tags = tags_base;
         tags.push("stateful".into());
         tags.push(bb.role.as_str().into());
@@ -1001,17 +1009,24 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
             kind: AssetKind::Billboard,
             rel_path,
             tags,
-            icon_rel,
+            icon_rel: Some(icon_rel),
         });
         consumed.extend(idxs);
     }
 
     for (group, idxs) in spr_groups {
+        // The manifest sits BESIDE the frame folder (`quake/s_bubble.billboard`
+        // next to `quake/s_bubble/frame-00.png`), so a frame's file has to
+        // carry that folder or nothing can resolve it.
+        let manifest_dir = group.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
         let mut frames = Vec::new();
         let mut tags_base = Vec::new();
         for &i in &idxs {
             let rel = assets[i].rel_path.replace('\\', "/");
-            let file = rel.rsplit('/').next().unwrap_or("").to_string();
+            let file = rel
+                .strip_prefix(&format!("{manifest_dir}/"))
+                .unwrap_or(&rel)
+                .to_string();
             let path = staged.join(&assets[i].rel_path);
             let (w, h) = png_dims(&path).unwrap_or((1, 1));
             frames.push(SpriteFrame {
@@ -1021,6 +1036,7 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
                 h,
                 file,
                 flip: false,
+                cell: None,
             });
             if tags_base.is_empty() {
                 tags_base = assets[i].tags.clone();
@@ -1030,12 +1046,12 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
             continue;
         }
         let slug = group.rsplit('/').next().unwrap_or("sprite");
-        let bb = sequential_idle(slug, frames, SpriteRole::Effect);
+        let mut bb = sequential_idle(slug, frames, SpriteRole::Effect);
         let rel_path = format!("{group}.billboard");
         let dest = staged.join(&rel_path);
-        if std::fs::write(&dest, bb.to_text()).is_err() {
+        let Some(icon_rel) = write_actor_sheet(staged, &dest, &mut bb) else {
             continue;
-        }
+        };
         let mut tags = tags_base;
         tags.push("stateful".into());
         extra.push(ClassicAsset {
@@ -1043,7 +1059,7 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
             kind: AssetKind::Billboard,
             rel_path,
             tags,
-            icon_rel: None,
+            icon_rel: Some(icon_rel),
         });
         consumed.extend(idxs);
     }
@@ -1060,6 +1076,46 @@ fn collapse_stateful_billboards(assets: &mut Vec<ClassicAsset>, staged: &Path) {
             || !consumed_rels.contains(&a.rel_path.replace('\\', "/"))
     });
     assets.extend(extra);
+}
+
+/// Pack one actor's frames into a single sheet beside `dest`, write the
+/// manifest that indexes it, then delete the per-frame PNGs it replaced.
+/// Returns the staged-relative preview strip (the library/catalog icon).
+///
+/// One PNG per actor is the whole point: a Doom actor is ~40 lumps, and the
+/// catalog used to grow one card per lump.
+fn write_actor_sheet(
+    staged: &Path,
+    dest: &Path,
+    bb: &mut crate::stateful_billboard::StatefulBillboard,
+) -> Option<String> {
+    let written = match crate::billboard_sheet::write_with_sheet(dest, bb) {
+        Ok(w) => w,
+        Err(e) => {
+            log_line(&format!("billboard sheet {}: {e}", dest.display()));
+            return None;
+        }
+    };
+    for frame in &written.consumed {
+        let _ = std::fs::remove_file(frame);
+        // Frame folders (`quake/s_bubble/`, duke `14/`) go with them; the
+        // call only succeeds once the directory is actually empty.
+        if let Some(parent) = frame.parent() {
+            if Some(parent) != dest.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+    let rel = |p: &Path| {
+        p.strip_prefix(staged)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+    };
+    rel(written.thumb.as_deref().unwrap_or(&written.sheet))
+}
+
+fn log_line(message: &str) {
+    eprintln!("[classic-import] {message}");
 }
 
 fn png_dims(path: &Path) -> Option<(u32, u32)> {
@@ -1946,7 +2002,9 @@ mod tests {
         let mut pos = Vec::new();
         let mut uvs = Vec::new();
         let mut idx = Vec::new();
-        let emit = |pos: &mut _, uvs: &mut _, idx: &mut _, side: u16| {
+        let sec_light = [160i16, 160];
+        let mut colors = Vec::new();
+        let emit = |pos: &mut _, uvs: &mut _, idx: &mut _, colors: &mut _, side: u16| {
             emit_wall_piece(
                 pos,
                 uvs,
@@ -1966,14 +2024,18 @@ mod tests {
                 &sec_floor,
                 &sec_ceil,
                 &sec_ceil_tex,
+                &sec_light,
+                colors,
                 &uv_map,
                 1.0 / 64.0,
+                None,
+                None,
             );
         };
-        emit(&mut pos, &mut uvs, &mut idx, 0);
+        emit(&mut pos, &mut uvs, &mut idx, &mut colors, 0);
         let after_front = idx.len();
         assert!(after_front >= 6, "front mid must emit a quad");
-        emit(&mut pos, &mut uvs, &mut idx, 1);
+        emit(&mut pos, &mut uvs, &mut idx, &mut colors, 1);
         assert_eq!(idx.len(), after_front, "back mid must not stack a second grate");
     }
 
@@ -2179,6 +2241,102 @@ mod tests {
             return bytes.get(pos..pos + size).map(|s| s.to_vec());
         }
         None
+    }
+
+    #[test]
+    fn quake_e1m1_exports_its_sky_liquids_and_doors_as_nodes() {
+        use makepad_asset_client::json::{self, Value};
+        let Some(bytes) = pak0_entry("maps/e1m1.bsp") else {
+            eprintln!("no Quake PAK0; skipped");
+            return;
+        };
+        let map = crate::classic_import::quake::quake_bsp_to_map(&bytes).expect("e1m1");
+        // The door metadata that becomes anchors: a real centre and a real
+        // travel, not a zero vector.
+        assert!(!map.doors.is_empty());
+        for d in &map.doors {
+            let travel = (d.travel[0] * d.travel[0]
+                + d.travel[1] * d.travel[1]
+                + d.travel[2] * d.travel[2])
+                .sqrt();
+            assert!(travel > 0.0, "{d:?}");
+            assert!(d.centre.iter().all(|v| v.is_finite()), "{d:?}");
+        }
+        let glb = map.glb;
+        let root = json::parse(glb_json(&glb).as_bytes()).expect("glb json");
+        let nodes = root.get("nodes").unwrap().as_arr().unwrap();
+        let named = |name: &str| {
+            nodes
+                .iter()
+                .find(|n| n.get("name").and_then(Value::as_str) == Some(name))
+        };
+        let kinds: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| n.get("extras").and_then(|e| e.get("kind")).and_then(Value::as_str))
+            .collect();
+        eprintln!("quake e1m1 nodes: {kinds:?}");
+
+        // Quake 1's qbsp never fixed T-junctions — the "sparklies" are the
+        // engine's own famous artifact — so the level arrives full of them
+        // and the weld has to close every one, across the world mesh, the
+        // liquids, the doors and the sky alike.
+        let parts = crate::world_preview::extract_glb_parts(&glb).expect("parts");
+        let soup: Vec<(&[[f32; 3]], &[u32])> = parts
+            .iter()
+            .map(|part| (&part.pos[..], &part.indices[..]))
+            .collect();
+        let left = crate::classic_import::weld::t_junctions_left(&soup);
+        eprintln!(
+            "quake e1m1: {} parts, {} triangles, {left} T-junctions",
+            parts.len(),
+            soup.iter().map(|(_, i)| i.len() / 3).sum::<usize>()
+        );
+        assert_eq!(left, 0, "Quake e1m1 still cracks between its faces");
+
+        // The sky is two scrolling layers at Quake's own speeds.
+        let sky = named("sky").expect("sky node");
+        let extras = sky.get("extras").unwrap();
+        assert_eq!(
+            extras.get("projection").and_then(Value::as_str),
+            Some("quake_scroll")
+        );
+        let speeds: Vec<f64> = extras
+            .get("speeds")
+            .and_then(Value::as_arr)
+            .unwrap()
+            .iter()
+            .map(|v| match v {
+                Value::F64(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => f64::NAN,
+            })
+            .collect();
+        assert_eq!(speeds, vec![8.0, 16.0]);
+        let layers = extras.get("layers").and_then(Value::as_arr).expect("layers");
+        assert_eq!(layers.len(), 2, "back then keyed front");
+
+        // Liquids are hazards you swim through, not floors.
+        let hazard = nodes
+            .iter()
+            .find(|n| {
+                n.get("extras").and_then(|e| e.get("kind")).and_then(Value::as_str)
+                    == Some("hazard")
+            })
+            .expect("a liquid node");
+        let hx = hazard.get("extras").unwrap();
+        assert_eq!(hx.get("liquid").and_then(Value::as_bool), Some(true));
+        assert_eq!(hx.get("solid").and_then(Value::as_bool), Some(false));
+
+        // func_door brushes move.
+        let door = named("door_1").expect("door_1");
+        let dx = door.get("extras").unwrap();
+        assert_eq!(dx.get("kind").and_then(Value::as_str), Some("door"));
+        assert_eq!(dx.get("default").and_then(Value::as_str), Some("open"));
+        assert!(door.get("translation").is_some(), "rest pose is OPEN");
+        let anims = root.get("animations").unwrap().as_arr().unwrap();
+        assert!(anims
+            .iter()
+            .any(|a| a.get("name").and_then(Value::as_str) == Some("door_1")));
     }
 
     #[test]
@@ -2536,6 +2694,1531 @@ mesh {
                 .any(|a| a.kind == AssetKind::Billboard),
             "billboard in convert"
         );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// Two 256-unit rooms side by side, joined by a 64-unit door sector whose
+    /// ceiling is authored ON its floor (closed). Both door linedefs carry
+    /// special 1 (manual DR door).
+    fn write_two_room_door_wad(path: &Path) {
+        let mut lumps: Vec<(&str, Vec<u8>)> = Vec::new();
+        let mut playpal = vec![0u8; 768];
+        playpal[4] = 255;
+        lumps.push(("PLAYPAL", playpal));
+        lumps.push(("MAP01", vec![]));
+        let mut things = Vec::new();
+        for v in [64i16, 64, 0, 1, 7] {
+            things.extend_from_slice(&v.to_le_bytes());
+        }
+        lumps.push(("THINGS", things));
+
+        // x: room A 0..128, door 128..192, room B 192..320. y: 0..128.
+        let vert_xy: [(i16, i16); 8] = [
+            (0, 0),
+            (128, 0),
+            (192, 0),
+            (320, 0),
+            (320, 128),
+            (192, 128),
+            (128, 128),
+            (0, 128),
+        ];
+        let mut verts = Vec::new();
+        for (x, y) in vert_xy {
+            verts.extend_from_slice(&x.to_le_bytes());
+            verts.extend_from_slice(&y.to_le_bytes());
+        }
+        lumps.push(("VERTEXES", verts));
+
+        // (upper, mid, sector). A two-sided door line paints its UPPER
+        // (the door leaf) and leaves mid blank, exactly like a real one.
+        const BLANK: &[u8; 8] = b"-\0\0\0\0\0\0\0";
+        const WALL: &[u8; 8] = b"WALL1\0\0\0";
+        let sides: [(&[u8; 8], &[u8; 8], u16); 8] = [
+            (BLANK, WALL, 0),  // 0: room A outer
+            (BLANK, WALL, 2),  // 1: room B outer
+            (WALL, BLANK, 0),  // 2: room A -> door (upper = door leaf)
+            (WALL, BLANK, 1),  // 3: door -> room A
+            (WALL, BLANK, 2),  // 4: room B -> door
+            (WALL, BLANK, 1),  // 5: door -> room B
+            (BLANK, WALL, 1),  // 6: door outer
+            (BLANK, WALL, 1),  // 7: door outer
+        ];
+        let mut sidedefs = Vec::new();
+        for (upper, mid, sector) in sides {
+            sidedefs.extend_from_slice(&0i16.to_le_bytes());
+            sidedefs.extend_from_slice(&0i16.to_le_bytes());
+            sidedefs.extend_from_slice(upper);
+            sidedefs.extend_from_slice(BLANK);
+            sidedefs.extend_from_slice(mid);
+            sidedefs.extend_from_slice(&sector.to_le_bytes());
+        }
+        lumps.push(("SIDEDEFS", sidedefs));
+
+        // (v1, v2, flags, special, right side, left side)
+        let lines: [(u16, u16, u16, u16, u16, u16); 10] = [
+            (0, 1, 0, 0, 0, 0xFFFF),      // room A south
+            (1, 6, 0x0004, 1, 2, 3),      // A|door west face (two-sided door line)
+            (6, 7, 0, 0, 0, 0xFFFF),      // room A north
+            (7, 0, 0, 0, 0, 0xFFFF),      // room A west
+            (2, 3, 0, 0, 1, 0xFFFF),      // room B south
+            (3, 4, 0, 0, 1, 0xFFFF),      // room B east
+            (4, 5, 0, 0, 1, 0xFFFF),      // room B north
+            (5, 2, 0x0004, 1, 4, 5),      // B|door east face
+            (1, 2, 0, 0, 6, 0xFFFF),      // door south
+            (5, 6, 0, 0, 7, 0xFFFF),      // door north
+        ];
+        let mut linedefs = Vec::new();
+        for (v1, v2, flags, special, right, left) in lines {
+            for v in [v1, v2, flags, special, 0, right, left] {
+                linedefs.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        lumps.push(("LINEDEFS", linedefs));
+
+        // sector 0 room A, 1 door (ceiling on the floor), 2 room B.
+        let mut sectors = Vec::new();
+        for (floor, ceil) in [(0i16, 128i16), (0, 0), (0, 128)] {
+            sectors.extend_from_slice(&floor.to_le_bytes());
+            sectors.extend_from_slice(&ceil.to_le_bytes());
+            sectors.extend_from_slice(b"FLOOR0\0\0");
+            sectors.extend_from_slice(b"CEIL1\0\0\0");
+            for v in [0i16, 0, 0] {
+                sectors.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        lumps.push(("SECTORS", sectors));
+        lumps.push(("F_START", vec![]));
+        lumps.push(("FLOOR0", vec![1u8; 64 * 64]));
+        lumps.push(("F_END", vec![]));
+        // A real 64x32 sky patch: the exporter embeds it as the sky node's
+        // own picture.
+        lumps.push(("SKY1", doom_patch(64, 32)));
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IWAD");
+        data.extend_from_slice(&(lumps.len() as u32).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        let mut dir = Vec::new();
+        for (name, lump) in &lumps {
+            let pos = data.len() as u32;
+            data.extend_from_slice(lump);
+            dir.extend_from_slice(&pos.to_le_bytes());
+            dir.extend_from_slice(&(lump.len() as u32).to_le_bytes());
+            let mut n = [0u8; 8];
+            for (i, b) in name.bytes().take(8).enumerate() {
+                n[i] = b;
+            }
+            dir.extend_from_slice(&n);
+        }
+        let diroff = data.len() as u32;
+        data[8..12].copy_from_slice(&diroff.to_le_bytes());
+        data.extend_from_slice(&dir);
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn a_doom_door_exports_open_and_animatable() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        use makepad_asset_client::json::{self, Value};
+        let root = tmp_dir("door_map");
+        let wad_path = root.join("doors.wad");
+        write_two_room_door_wad(&wad_path);
+        let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        let palette = [[0u8; 3]; 256];
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &palette).expect("mesh");
+
+        assert_eq!(mesh.doors.len(), 1, "one door sector");
+        let door = &mesh.doors[0];
+        assert_eq!(door.name, "door_1");
+        // Closed on the floor, open at 128 - 4 headroom, at 1/64 scale.
+        assert!((door.closed_y - 0.0).abs() < 1e-6, "{door:?}");
+        assert!((door.open_y - 124.0 / 64.0).abs() < 1e-6, "{door:?}");
+        // Doorway centre in engine space (x 128..192, y 0..128).
+        assert!((door.centre[0] - 160.0 / 64.0).abs() < 1e-4, "{door:?}");
+        assert!((door.centre[2] - 64.0 / 64.0).abs() < 1e-4, "{door:?}");
+
+        // The exported GLB carries it as an animating node.
+        let json_text = glb_json(&mesh.glb);
+        let root_json = json::parse(json_text.as_bytes()).expect("glb json");
+        let nodes = root_json.get("nodes").unwrap().as_arr().unwrap();
+        let node = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("door_1"))
+            .expect("door_1 node");
+        let extras = node.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("door"));
+        assert_eq!(extras.get("default").and_then(Value::as_str), Some("open"));
+        let t = node.get("translation").unwrap().as_arr().unwrap();
+        let rest_y = match &t[1] {
+            Value::F64(f) => *f as f32,
+            Value::Int(i) => *i as f32,
+            _ => f32::NAN,
+        };
+        assert!(
+            (rest_y - (door.open_y - door.closed_y)).abs() < 1e-4,
+            "rest pose must be OPEN, got {rest_y}"
+        );
+        let anims = root_json.get("animations").unwrap().as_arr().unwrap();
+        assert!(anims
+            .iter()
+            .any(|a| a.get("name").and_then(Value::as_str) == Some("door_1")));
+
+        // Walk the corridor: a ray from room A to room B at chest height
+        // must hit nothing in the static level, and must hit the door leaf
+        // (which is authored in its CLOSED pose).
+        let parts = crate::world_preview::extract_glb_parts(&mesh.glb).expect("parts");
+        assert_eq!(parts.len(), 2, "level primitive + one door primitive");
+        let walk = |part: &crate::world_preview::Extracted| {
+            part.indices.chunks_exact(3).any(|tri| {
+                hits_segment(
+                    part.pos[tri[0] as usize],
+                    part.pos[tri[1] as usize],
+                    part.pos[tri[2] as usize],
+                    [1.0, 0.8, 1.0],
+                    [4.0, 0.8, 1.0],
+                )
+            })
+        };
+        assert!(
+            !walk(&parts[0]),
+            "the static level must not bake a slab across the doorway"
+        );
+        assert!(
+            walk(&parts[1]),
+            "the door leaf is the geometry that blocks it while closed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Möller-Trumbore: does the segment `from`..`to` cross this triangle?
+    fn hits_segment(a: [f32; 3], b: [f32; 3], c: [f32; 3], from: [f32; 3], to: [f32; 3]) -> bool {
+        let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+        let cross = |p: [f32; 3], q: [f32; 3]| {
+            [
+                p[1] * q[2] - p[2] * q[1],
+                p[2] * q[0] - p[0] * q[2],
+                p[0] * q[1] - p[1] * q[0],
+            ]
+        };
+        let dot = |p: [f32; 3], q: [f32; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+        let dir = sub(to, from);
+        let e1 = sub(b, a);
+        let e2 = sub(c, a);
+        let h = cross(dir, e2);
+        let det = dot(e1, h);
+        if det.abs() < 1e-9 {
+            return false;
+        }
+        let inv = 1.0 / det;
+        let s = sub(from, a);
+        let u = dot(s, h) * inv;
+        if !(0.0..=1.0).contains(&u) {
+            return false;
+        }
+        let q = cross(s, e1);
+        let v = dot(dir, q) * inv;
+        if v < 0.0 || u + v > 1.0 {
+            return false;
+        }
+        let t = dot(e2, q) * inv;
+        (0.0..=1.0).contains(&t)
+    }
+
+    fn glb_bin(glb: &[u8]) -> Vec<u8> {
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let at = 20 + json_len;
+        let bin_len = u32::from_le_bytes(glb[at..at + 4].try_into().unwrap()) as usize;
+        glb[at + 8..at + 8 + bin_len].to_vec()
+    }
+
+    /// Read a float accessor's values through its bufferView.
+    fn read_accessor(
+        root: &makepad_asset_client::json::Value,
+        bin: &[u8],
+        index: &makepad_asset_client::json::Value,
+    ) -> Vec<f32> {
+        use makepad_asset_client::json::Value;
+        let i = index.as_i64().unwrap() as usize;
+        let acc = &root.get("accessors").unwrap().as_arr().unwrap()[i];
+        let vi = acc.get("bufferView").and_then(Value::as_i64).unwrap() as usize;
+        let view = &root.get("bufferViews").unwrap().as_arr().unwrap()[vi];
+        let off = view.get("byteOffset").and_then(Value::as_i64).unwrap_or(0) as usize;
+        let len = view.get("byteLength").and_then(Value::as_i64).unwrap() as usize;
+        bin[off..off + len]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    fn glb_json(glb: &[u8]) -> String {
+        let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        String::from_utf8_lossy(&glb[20..20 + len]).to_string()
+    }
+
+    #[test]
+    fn sector_lightlevels_bake_into_color_0_and_mark_the_map_prelit() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        use makepad_asset_client::json::{self, Value};
+        let root = tmp_dir("light_map");
+        let wad_path = root.join("light.wad");
+        write_two_room_door_wad(&wad_path);
+        let mut bytes = std::fs::read(&wad_path).unwrap();
+        let wad = parse_wad(&bytes).expect("wad");
+        let sectors_lump = wad.lumps.iter().find(|l| l.name == "SECTORS").unwrap();
+        let at = bytes
+            .windows(sectors_lump.data.len())
+            .position(|w| w == sectors_lump.data.as_slice())
+            .expect("sector bytes");
+        // Room A fullbright, room B dim.
+        bytes[at + 20..at + 22].copy_from_slice(&255i16.to_le_bytes());
+        bytes[at + 2 * 26 + 20..at + 2 * 26 + 22].copy_from_slice(&64i16.to_le_bytes());
+        std::fs::write(&wad_path, &bytes).unwrap();
+
+        let wad = parse_wad(&bytes).expect("wad");
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        let root_json = json::parse(glb_json(&mesh.glb).as_bytes()).expect("glb json");
+        let bin = glb_bin(&mesh.glb);
+        let prim = &root_json.get("meshes").unwrap().as_arr().unwrap()[0]
+            .get("primitives")
+            .unwrap()
+            .as_arr()
+            .unwrap()[0];
+        let attr = prim.get("attributes").unwrap();
+        let pos = read_accessor(&root_json, &bin, attr.get("POSITION").unwrap());
+        let colors = read_accessor(
+            &root_json,
+            &bin,
+            attr.get("COLOR_0").expect("COLOR_0 baked into the level"),
+        );
+        assert_eq!(colors.len(), pos.len());
+        // Room A is at x < 2 m, room B at x > 3 m.
+        let light_at = |pick: fn(f32) -> bool| {
+            pos.chunks_exact(3)
+                .zip(colors.chunks_exact(3))
+                .find(|(p, _)| pick(p[0]))
+                .map(|(_, c)| c[0])
+                .expect("a vertex in that room")
+        };
+        // Walls carry Doom's fake contrast (+/- one 16-unit light level),
+        // so each room's vertices sit within a step of its lightlevel.
+        let bright = light_at(|x| x < 1.5);
+        let dim = light_at(|x| x > 3.5);
+        assert!(
+            (239.0 / 255.0..=1.0).contains(&bright),
+            "lightlevel 255 (+/- fake contrast) -> {bright}"
+        );
+        assert!(
+            (48.0 / 255.0..=80.0 / 255.0).contains(&dim),
+            "lightlevel 64 (+/- fake contrast) -> {dim}"
+        );
+        assert!(bright > dim + 0.4, "the two sectors must differ");
+
+        // And the material carries the prelit marker the renderer reads.
+        let materials = root_json.get("materials").unwrap().as_arr().unwrap();
+        assert!(
+            materials.iter().any(|m| m
+                .get("extras")
+                .and_then(|e| e.get("lightmapTexture"))
+                .is_some()),
+            "a Doom map is prelit: the sun must not light it again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A minimal Doom picture-format patch: one post per column.
+    fn doom_patch(w: u16, h: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&w.to_le_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+        out.extend_from_slice(&0i16.to_le_bytes());
+        out.extend_from_slice(&0i16.to_le_bytes());
+        let table = out.len();
+        out.extend(std::iter::repeat(0u8).take(w as usize * 4));
+        for col in 0..w as usize {
+            let pos = out.len() as u32;
+            out[table + col * 4..table + col * 4 + 4].copy_from_slice(&pos.to_le_bytes());
+            out.push(0); // rowstart
+            out.push(h as u8); // length
+            out.push(0); // unused
+            for row in 0..h as usize {
+                out.push(((col + row) % 255) as u8);
+            }
+            out.push(0); // unused
+            out.push(255); // terminator
+        }
+        out
+    }
+
+    /// The exported sky, read back by the RENDERER's own parser and its CPU
+    /// twin of the sky shader. A GPU capture is a separate step (the sandbox
+    /// resolves models through an asset index this tree stubs out), but the
+    /// mapping — projection, wrap count, phase, which faces left the static
+    /// stream — is exactly what a picture would be judged on, and this can
+    /// be asked in a test.
+    #[test]
+    fn the_renderer_reads_our_doom_sky_the_way_doom_drew_it() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        use makepad_render::model::{SkyProjection, StaticModel};
+
+        let root = tmp_dir("sky_read");
+        let wad_path = root.join("sky.wad");
+        write_two_room_door_wad(&wad_path);
+        let mut wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        for lump in &mut wad.lumps {
+            if lump.name == "SECTORS" {
+                // Room B's ceiling is the sky.
+                lump.data[2 * 26 + 12..2 * 26 + 20].copy_from_slice(b"F_SKY1\0\0");
+            }
+        }
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[64u8; 3]; 256]).expect("mesh");
+        let model = StaticModel::parse_glb(&mesh.glb).expect("renderer parses it");
+        // A direction of the model API's own vector type, without naming its
+        // math crate (not a dependency here).
+        let dir = |x: f32, y: f32, z: f32| {
+            let mut v = model.min;
+            v.x = x;
+            v.y = y;
+            v.z = z;
+            v
+        };
+        let sky = model.sky.expect("renderer found the sky part");
+        assert_eq!(sky.projection, SkyProjection::Cylinder);
+        assert_eq!(sky.repeat, 4.0);
+        assert_eq!(sky.offset, 0.0);
+        assert_eq!(sky.images.len(), 1, "one picture, embedded");
+        assert!(sky.images[0].starts_with(b"\x89PNG"));
+        assert_eq!(sky.texture.as_deref(), Some("sky1"));
+        assert!(!sky.vertices.is_empty(), "sky faces are real geometry");
+        assert!(sky.indices.len() >= 3);
+
+        // Doom shows sky column 0 when the player faces east (+X), and the
+        // strip wraps four times round the compass.
+        let east = sky.direction_uv(dir(1.0, 0.0, 0.0), 0, 0.0);
+        assert!((east[0] - 1.0).abs() < 1e-4 || east[0].abs() < 1e-4, "{east:?}");
+        let quarter = sky.direction_uv(dir(0.0, 0.0, 1.0), 0, 0.0);
+        assert!(
+            (quarter[0] - east[0]).abs() > 0.9,
+            "a quarter turn moves one whole image: {east:?} -> {quarter:?}"
+        );
+        // The horizon sits in the middle of the picture and the zenith clamps.
+        let horizon = sky.direction_uv(dir(1.0, 0.0, 0.0), 0, 0.0);
+        assert!((horizon[1] - 0.5).abs() < 1e-4, "{horizon:?}");
+        let up = sky.direction_uv(dir(0.0, 1.0, 0.0), 0, 0.0);
+        assert_eq!(up[1], 0.0, "looking up clamps to the top row");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exits_and_keys_become_markers_and_keyed_doors_say_so() {
+        use crate::classic_import::doom::{doom_map_nav, doom_map_to_mesh, map_verts, parse_wad};
+        use makepad_asset_client::json::{self, Value};
+        let root = tmp_dir("exit_map");
+        let wad_path = root.join("exit.wad");
+        write_two_room_door_wad(&wad_path);
+        let mut wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        for lump in &mut wad.lumps {
+            match lump.name.as_str() {
+                "LINEDEFS" => {
+                    // Room A's south wall is the exit switch (11); the west
+                    // door line becomes a RED-key door (28).
+                    lump.data[6..8].copy_from_slice(&11u16.to_le_bytes());
+                    lump.data[14 + 6..14 + 8].copy_from_slice(&28u16.to_le_bytes());
+                }
+                "THINGS" => {
+                    // A red keycard (type 13) at (96, 64).
+                    for v in [96i16, 64, 0, 13, 7] {
+                        lump.data.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let markers = doom_map_nav(&wad.lumps, "MAP01").expect("nav").markers;
+        let names: Vec<&str> = markers.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"exit"), "{names:?}");
+        assert!(names.contains(&"key_red"), "{names:?}");
+        let key = markers.iter().find(|m| m.name == "key_red").unwrap();
+        assert!((key.pos[0] - 96.0 / 64.0).abs() < 1e-4, "{key:?}");
+        assert!((key.pos[1] - 41.0 / 64.0).abs() < 1e-4, "eye above the floor");
+        let exit = markers.iter().find(|m| m.name == "exit").unwrap();
+        // Room A's south wall runs (0,0)->(128,0): its midpoint is x=64.
+        assert!((exit.pos[0] - 1.0).abs() < 1e-4, "{exit:?}");
+        assert!(exit.pos[2].abs() < 1e-4, "{exit:?}");
+        let _ = map_verts(&wad.lumps, "MAP01");
+
+        // And the door that needs the key says which one.
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        let root_json = json::parse(glb_json(&mesh.glb).as_bytes()).expect("glb json");
+        let door = root_json
+            .get("nodes")
+            .unwrap()
+            .as_arr()
+            .unwrap()
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("door_1"))
+            .expect("door_1");
+        assert_eq!(
+            door.get("extras").unwrap().get("key").and_then(Value::as_str),
+            Some("red")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Vertices that sit strictly INSIDE another triangle's edge on the
+    /// same plane: the T-junctions that crack under rasterisation even
+    /// when every coordinate is exact.
+    fn t_junctions(tris: &[[[f32; 3]; 3]]) -> usize {
+        use std::collections::{HashMap, HashSet};
+        // Unique vertices, bucketed by metre so the edge scan stays local.
+        let mut verts: HashSet<(u32, u32)> = HashSet::new();
+        for t in tris {
+            for p in t {
+                verts.insert((p[0].to_bits(), p[2].to_bits()));
+            }
+        }
+        let mut buckets: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+        for (bx, bz) in &verts {
+            let (x, z) = (f32::from_bits(*bx), f32::from_bits(*bz));
+            buckets.entry((x as i32, z as i32)).or_default().push((x, z));
+        }
+        // Snap quantum: `snap_pos` rounds to 1/1024 m, so anything within
+        // half of that of an edge is ON it. The end margin is the weld's own
+        // `MIN_FROM_END`, so this audit asks the same question the pass
+        // answers — see its doc for why a cut nearer than one source unit to
+        // a corner is not worth making.
+        const ON_EDGE: f32 = 1.0 / 2048.0;
+        const FROM_END: f32 = super::weld::MIN_FROM_END;
+        let mut hits = 0usize;
+        for t in tris {
+            if tri_area2(t[0], t[1], t[2]) < 1e-7 {
+                continue;
+            }
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                let (ax, az, bx, bz) = (a[0], a[2], b[0], b[2]);
+                let (dx, dz) = (bx - ax, bz - az);
+                let len2 = dx * dx + dz * dz;
+                if len2 < 1e-9 {
+                    continue;
+                }
+                let (lo_x, hi_x) = (ax.min(bx), ax.max(bx));
+                let (lo_z, hi_z) = (az.min(bz), az.max(bz));
+                for cx in (lo_x as i32 - 1)..=(hi_x as i32 + 1) {
+                    for cz in (lo_z as i32 - 1)..=(hi_z as i32 + 1) {
+                        for &(px, pz) in buckets.get(&(cx, cz)).map(Vec::as_slice).unwrap_or(&[]) {
+                            // Not an endpoint of this edge.
+                            if (px.to_bits() == ax.to_bits() && pz.to_bits() == az.to_bits())
+                                || (px.to_bits() == bx.to_bits() && pz.to_bits() == bz.to_bits())
+                            {
+                                continue;
+                            }
+                            let len = len2.sqrt();
+                            let t_along = ((px - ax) * dx + (pz - az) * dz) / len2;
+                            if t_along * len <= FROM_END || (1.0 - t_along) * len <= FROM_END {
+                                continue;
+                            }
+                            let perp = ((px - ax) * dz - (pz - az) * dx).abs() / len;
+                            if perp <= ON_EDGE {
+                                hits += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    /// Flat (horizontal) triangles of a GLB, grouped by their exact height.
+    /// Positions come back snapped, so equality here is bitwise.
+    fn flat_triangles(glb: &[u8]) -> std::collections::BTreeMap<u32, Vec<[[f32; 3]; 3]>> {
+        let parts = crate::world_preview::extract_glb_parts(glb).expect("parts");
+        let mut out: std::collections::BTreeMap<u32, Vec<[[f32; 3]; 3]>> = Default::default();
+        for part in &parts {
+            for tri in part.indices.chunks_exact(3) {
+                let ps = [
+                    part.pos[tri[0] as usize],
+                    part.pos[tri[1] as usize],
+                    part.pos[tri[2] as usize],
+                ];
+                if ps[0][1] != ps[1][1] || ps[1][1] != ps[2][1] {
+                    continue;
+                }
+                out.entry(ps[0][1].to_bits()).or_default().push(ps);
+            }
+        }
+        out
+    }
+
+    fn tri_area2(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+        ((b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0])).abs()
+    }
+
+    fn point_in_flat_tri(p: [f32; 2], t: &[[f32; 3]; 3]) -> bool {
+        let sign = |a: [f32; 3], b: [f32; 3]| {
+            (b[0] - a[0]) * (p[1] - a[2]) - (b[2] - a[2]) * (p[0] - a[0])
+        };
+        let (d1, d2, d3) = (sign(t[0], t[1]), sign(t[1], t[2]), sign(t[2], t[0]));
+        let neg = d1 < -1e-6 || d2 < -1e-6 || d3 < -1e-6;
+        let pos = d1 > 1e-6 || d2 > 1e-6 || d3 > 1e-6;
+        !(neg && pos)
+    }
+
+    /// How badly a flat plane's triangles overlap and how many edges are
+    /// shared by more than two triangles (duplicate coverage), plus edges
+    /// used exactly once that are NOT on the plane's outer boundary
+    /// (T-junction candidates — a crack).
+    fn flat_health(tris: &[[[f32; 3]; 3]]) -> (usize, usize) {
+        use std::collections::HashMap;
+        let mut edges: HashMap<(u64, u64, u64, u64), usize> = HashMap::new();
+        for t in tris {
+            // A degenerate sliver has no area to fight over and its edges
+            // duplicate its neighbours' by construction.
+            if tri_area2(t[0], t[1], t[2]) < 1e-7 {
+                continue;
+            }
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                let key = if (a[0].to_bits(), a[2].to_bits()) <= (b[0].to_bits(), b[2].to_bits()) {
+                    (
+                        a[0].to_bits() as u64,
+                        a[2].to_bits() as u64,
+                        b[0].to_bits() as u64,
+                        b[2].to_bits() as u64,
+                    )
+                } else {
+                    (
+                        b[0].to_bits() as u64,
+                        b[2].to_bits() as u64,
+                        a[0].to_bits() as u64,
+                        a[2].to_bits() as u64,
+                    )
+                };
+                *edges.entry(key).or_insert(0) += 1;
+            }
+        }
+        let over_used = edges.values().filter(|&&n| n > 2).count();
+        // Overlap: a triangle's centroid inside ANOTHER triangle of the
+        // same plane. Bucketed by metre so this stays linear-ish.
+        let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (i, t) in tris.iter().enumerate() {
+            let cx = (t[0][0] + t[1][0] + t[2][0]) / 3.0;
+            let cz = (t[0][2] + t[1][2] + t[2][2]) / 3.0;
+            buckets.entry((cx as i32, cz as i32)).or_default().push(i);
+        }
+        let mut overlaps = 0usize;
+        for t in tris.iter() {
+            if tri_area2(t[0], t[1], t[2]) < 1e-7 {
+                continue;
+            }
+            let cx = (t[0][0] + t[1][0] + t[2][0]) / 3.0;
+            let cz = (t[0][2] + t[1][2] + t[2][2]) / 3.0;
+            let mut hits = 0usize;
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    for &j in buckets
+                        .get(&(cx as i32 + dx, cz as i32 + dz))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[])
+                    {
+                        let other = &tris[j];
+                        if tri_area2(other[0], other[1], other[2]) < 1e-7 {
+                            continue;
+                        }
+                        if point_in_flat_tri([cx, cz], other) {
+                            hits += 1;
+                        }
+                    }
+                }
+            }
+            // Its own triangle always contains its centroid.
+            if hits > 1 {
+                overlaps += 1;
+            }
+        }
+        (overlaps, over_used)
+    }
+
+    /// Convert the real E1M1 when the shareware WAD is on this machine and
+    /// drop the GLB where a GPU capture can pick it up. Skipped otherwise.
+    #[test]
+    fn export_real_e1m1_for_capture() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        let wad_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local/packs/doom/DOOM1.WAD");
+        let Ok(bytes) = std::fs::read(&wad_path) else {
+            eprintln!("no DOOM1.WAD; skipped");
+            return;
+        };
+        let wad = parse_wad(&bytes).expect("wad");
+        let palette = wad.playpal.expect("PLAYPAL");
+        let mesh = doom_map_to_mesh(&wad.lumps, "E1M1", &palette).expect("e1m1");
+        let out = std::env::var("DOOM_E1M1_GLB").unwrap_or_default();
+        if !out.is_empty() {
+            std::fs::write(&out, &mesh.glb).unwrap();
+        }
+        eprintln!(
+            "E1M1: {} tris, {} doors, {} lifts, {} teleporters, glb {} bytes -> {out}",
+            mesh.tris,
+            mesh.doors.len(),
+            mesh.lifts.len(),
+            mesh.teleporters.len(),
+            mesh.glb.len()
+        );
+        let text = glb_json(&mesh.glb);
+        assert!(text.contains("\"kind\":\"sky\""), "E1M1 has sky sectors");
+
+        // No step lip on a REAL step: take every two-sided line of E1M1
+        // whose two floors differ, and check the wall standing in its plane
+        // tops out exactly at the higher floor. (A per-triangle invariant
+        // would be wrong here — `push_wall_tiled` splits a wall at texture
+        // boundaries, so a middle tile's top is a tile edge, not the wall's.)
+        let unit = 1.0f32 / 64.0;
+        let lump = |name: &str| {
+            crate::classic_import::doom::lump_by_name_after(&wad.lumps, "E1M1", name)
+                .expect(name)
+        };
+        let (linedefs, sidedefs, sectors, vertexes) =
+            (lump("LINEDEFS"), lump("SIDEDEFS"), lump("SECTORS"), lump("VERTEXES"));
+        let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+        let i16_at = |b: &[u8], o: usize| i16::from_le_bytes([b[o], b[o + 1]]);
+        let sector_of = |snum: u16| -> Option<usize> {
+            (snum != 0xFFFF && (snum as usize) < sidedefs.len() / 30)
+                .then(|| u16_at(sidedefs, snum as usize * 30 + 28) as usize)
+        };
+        let parts = crate::world_preview::extract_glb_parts(&mesh.glb).expect("parts");
+        let mut steps_checked = 0usize;
+        let mut straddles: Vec<(f32, f32, bool)> = Vec::new();
+        for li in 0..linedefs.len() / 14 {
+            let lo = li * 14;
+            let (Some(front), Some(back)) = (
+                sector_of(u16_at(linedefs, lo + 10)),
+                sector_of(u16_at(linedefs, lo + 12)),
+            ) else {
+                continue;
+            };
+            let (fl, bl) = (
+                i16_at(sectors, front * 26) as f32,
+                i16_at(sectors, back * 26) as f32,
+            );
+            if (fl - bl).abs() < 8.0 {
+                continue;
+            }
+            let v1 = u16_at(linedefs, lo) as usize;
+            let v2 = u16_at(linedefs, lo + 2) as usize;
+            if v1 >= vertexes.len() / 4 || v2 >= vertexes.len() / 4 {
+                continue;
+            }
+            let a = [
+                i16_at(vertexes, v1 * 4) as f32 * unit,
+                i16_at(vertexes, v1 * 4 + 2) as f32 * unit,
+            ];
+            let b = [
+                i16_at(vertexes, v2 * 4) as f32 * unit,
+                i16_at(vertexes, v2 * 4 + 2) as f32 * unit,
+            ];
+            let upper = fl.max(bl) * unit;
+            let lower = fl.min(bl) * unit;
+            // Triangles standing in this line's plane, inside its span.
+            let dx = b[0] - a[0];
+            let dz = b[1] - a[1];
+            let len = (dx * dx + dz * dz).sqrt();
+            if len < 0.05 {
+                continue;
+            }
+            let (nx, nz) = (dz / len, -dx / len);
+            let mut top = f32::MIN;
+            for part in &parts {
+                for tri in part.indices.chunks_exact(3) {
+                    let ps = [
+                        part.pos[tri[0] as usize],
+                        part.pos[tri[1] as usize],
+                        part.pos[tri[2] as usize],
+                    ];
+                    let on_plane = ps.iter().all(|p| {
+                        ((p[0] - a[0]) * nx + (p[2] - a[1]) * nz).abs() < 0.01
+                            && {
+                                let t = ((p[0] - a[0]) * dx + (p[2] - a[1]) * dz) / (len * len);
+                                (-0.01..=1.01).contains(&t)
+                            }
+                    });
+                    if !on_plane {
+                        continue;
+                    }
+                    let hi = ps.iter().fold(f32::MIN, |m, p| m.max(p[1]));
+                    let lo_y = ps.iter().fold(f32::MAX, |m, p| m.min(p[1]));
+                    // Only the RISER: it starts at or under the lower
+                    // floor. A two-sided mid (grate) starts at the upper
+                    // floor and an upper band at a ceiling — neither is a
+                    // step, and both legitimately reach higher.
+                    if lo_y > lower + 1e-3 {
+                        continue;
+                    }
+                    top = top.max(hi);
+                }
+            }
+            if top == f32::MIN {
+                continue;
+            }
+            steps_checked += 1;
+            // No flat may hang PAST this line onto the other sector's
+            // side: an overhanging floor tile shows its open edge as a
+            // ridge standing along the step.
+            for part in &parts {
+                for tri in part.indices.chunks_exact(3) {
+                    let ps = [
+                        part.pos[tri[0] as usize],
+                        part.pos[tri[1] as usize],
+                        part.pos[tri[2] as usize],
+                    ];
+                    // Flats only, and only at one of this line's two floors.
+                    if ps[0][1] != ps[1][1] || ps[1][1] != ps[2][1] {
+                        continue;
+                    }
+                    let y = ps[0][1];
+                    let is_upper = (y - upper).abs() < 1e-4;
+                    if !is_upper && (y - lower).abs() >= 1e-4 {
+                        continue;
+                    }
+                    // Does an EDGE of this triangle cross the line WITHIN
+                    // the linedef's own span? A wall is a segment: a flat
+                    // may sit either side of its infinite extension, but
+                    // nothing may cross the wall itself.
+                    let side_of = |p: &[f32; 3]| (p[0] - a[0]) * nx + (p[2] - a[1]) * nz;
+                    let along_of = |x: f32, z: f32| {
+                        ((x - a[0]) * dx + (z - a[1]) * dz) / (len * len)
+                    };
+                    let mut worst = 0.0f32;
+                    for k in 0..3 {
+                        let (p, q) = (ps[k], ps[(k + 1) % 3]);
+                        let (sp, sq) = (side_of(&p), side_of(&q));
+                        if (sp < -1e-4 && sq > 1e-4) || (sp > 1e-4 && sq < -1e-4) {
+                            let t = sp / (sp - sq);
+                            let cx = p[0] + (q[0] - p[0]) * t;
+                            let cz = p[2] + (q[2] - p[2]) * t;
+                            // Distance along the wall, in map units. Wall
+                            // JUNCTIONS (the last few units at either end)
+                            // are where several sectors' corner slivers
+                            // meet and clip against each other; the tread
+                            // itself is the span between them.
+                            let at = along_of(cx, cz) * len * 64.0;
+                            let span = len * 64.0;
+                            if at > 6.0 && at < span - 6.0 {
+                                worst = worst.max(sp.abs().min(sq.abs()));
+                            }
+                        }
+                    }
+                    if worst > 0.0 {
+                        let by = worst * 64.0;
+                        straddles.push((y, by, is_upper));
+                        // `snap_pos` quantises to 1/1024m, so a vertex ON the
+                        // line can land 0.03 units to either side. Anything
+                        // past that is a flat reaching over its own linedef —
+                        // the ridge standing along the step.
+                        // `snap_pos` quantises to 1/1024m, so a vertex ON
+                        // the line can land 0.03 units either side. Beyond
+                        // that the tread reaches over its own riser — the
+                        // ledge the user sees standing along every step.
+                        assert!(
+                            by <= 0.05,
+                            "tread at y={:.4} overhangs the riser line \
+                             ({:.1},{:.1})-({:.1},{:.1}) by {by:.3} map units",
+                            y,
+                            a[0] * 64.0,
+                            a[1] * 64.0,
+                            b[0] * 64.0,
+                            b[1] * 64.0
+                        );
+                    }
+                }
+            }
+            assert!(
+                top <= upper + 1e-4,
+                "step at ({:.1},{:.1})-({:.1},{:.1}): riser tops {:.4}m above the {:.4}m floor \
+                 — {:.2} map units of lip",
+                a[0] * 64.0,
+                a[1] * 64.0,
+                b[0] * 64.0,
+                b[1] * 64.0,
+                top,
+                upper,
+                (top - upper) * 64.0
+            );
+        }
+        straddles.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!(
+            "E1M1 tread/riser crossings: {} (largest {:.3} map units — snap noise is 0.031)",
+            straddles.len(),
+            straddles.first().map(|s| s.1).unwrap_or(0.0)
+        );
+        eprintln!("E1M1 real step edges checked: {steps_checked}");
+        assert!(steps_checked > 10, "E1M1 has many steps: {steps_checked}");
+
+        // Flats must tile their plane: no triangle centroid inside another
+        // (coplanar duplicates z-fight), no edge used by more than two
+        // triangles (duplicate coverage).
+        let flats = flat_triangles(&mesh.glb);
+        let mut total = 0usize;
+        let mut overlaps = 0usize;
+        let mut over_used = 0usize;
+        for tris in flats.values() {
+            total += tris.len();
+            let (o, e) = flat_health(tris);
+            overlaps += o;
+            over_used += e;
+        }
+        // T-junctions: a vertex sitting strictly inside a neighbour's edge
+        // on the same plane. They are not overlap and not a missing edge —
+        // they are the hairline a rasteriser opens between two triangles
+        // that agree geometrically but do not share the vertex.
+        let mut tees = 0usize;
+        let mut worst_plane = (0usize, 0f32);
+        for (height, tris) in &flats {
+            let t = t_junctions(tris);
+            tees += t;
+            if t > worst_plane.0 {
+                worst_plane = (t, f32::from_bits(*height));
+            }
+        }
+        eprintln!(
+            "E1M1 flats: {total} triangles on {} planes, {overlaps} overlapping, {over_used} over-shared edges, {tees} T-junctions (worst plane y={:.3}m with {})",
+            flats.len(),
+            worst_plane.1,
+            worst_plane.0
+        );
+        assert_eq!(overlaps, 0, "coplanar flat triangles overlap — that is the z-fight");
+        assert_eq!(over_used, 0, "a flat edge is shared by more than two triangles");
+        // Zero, and it stays zero: `weld::split_t_junctions` splits every
+        // edge at the vertices lying on it, across every part of the level
+        // (world, doors, lifts, hazard floors, sky), so no vertex is left
+        // sitting inside a neighbour's edge for the rasteriser to crack.
+        assert_eq!(
+            tees, 0,
+            "E1M1 carries T-junctions again — flats crack where they meet"
+        );
+
+        // The same audit the Quake and Duke maps get: every part, in 3D.
+        let all = crate::world_preview::extract_glb_parts(&mesh.glb).expect("parts");
+        let soup: Vec<(&[[f32; 3]], &[u32])> = all
+            .iter()
+            .map(|part| (&part.pos[..], &part.indices[..]))
+            .collect();
+        let left = weld::t_junctions_left(&soup);
+        eprintln!(
+            "E1M1 parts: {}, {} triangles, {left} T-junctions in 3D",
+            all.len(),
+            soup.iter().map(|(_, i)| i.len() / 3).sum::<usize>()
+        );
+
+        // The renderer's own parser must find the same sky in the real map.
+        let model = makepad_render::model::StaticModel::parse_glb(&mesh.glb).expect("parse");
+        let sky = model.sky.expect("E1M1 sky part");
+        assert_eq!(sky.repeat, 4.0);
+        assert_eq!(sky.images.len(), 1);
+        assert!(sky.indices.len() >= 3, "sky faces survive");
+        let nav = crate::classic_import::doom::doom_map_nav(&wad.lumps, "E1M1").expect("nav");
+        eprintln!(
+            "E1M1 markers: {:?}",
+            nav.markers.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            nav.markers.iter().any(|m| m.name == "exit"),
+            "E1M1 ends at a switch"
+        );
+    }
+
+    /// Two rooms joined by a two-sided line, with authored floor/ceiling
+    /// heights: the fixture for step-riser geometry.
+    fn write_step_wad(path: &Path, floors: [i16; 2], ceilings: [i16; 2]) {
+        let mut lumps: Vec<(&str, Vec<u8>)> = Vec::new();
+        lumps.push(("PLAYPAL", vec![0u8; 768]));
+        lumps.push(("MAP01", vec![]));
+        let mut things = Vec::new();
+        for v in [64i16, 64, 0, 1, 7] {
+            things.extend_from_slice(&v.to_le_bytes());
+        }
+        lumps.push(("THINGS", things));
+        // Room A x 0..128, room B x 128..256, both y 0..128. The shared
+        // wall is the line x = 128.
+        let vert_xy: [(i16, i16); 6] = [
+            (0, 0),
+            (128, 0),
+            (256, 0),
+            (256, 128),
+            (128, 128),
+            (0, 128),
+        ];
+        let mut verts = Vec::new();
+        for (x, y) in vert_xy {
+            verts.extend_from_slice(&x.to_le_bytes());
+            verts.extend_from_slice(&y.to_le_bytes());
+        }
+        lumps.push(("VERTEXES", verts));
+        const BLANK: &[u8; 8] = b"-\0\0\0\0\0\0\0";
+        const WALL: &[u8; 8] = b"WALL1\0\0\0";
+        // (upper, lower, mid, sector)
+        let sides: [(&[u8; 8], &[u8; 8], &[u8; 8], u16); 6] = [
+            (BLANK, BLANK, WALL, 0),
+            (BLANK, BLANK, WALL, 1),
+            (BLANK, BLANK, WALL, 1),
+            (BLANK, BLANK, WALL, 1),
+            // The shared line: both sides paint upper AND lower.
+            (WALL, WALL, BLANK, 0),
+            (WALL, WALL, BLANK, 1),
+        ];
+        let mut sidedefs = Vec::new();
+        for (upper, lower, mid, sector) in sides {
+            sidedefs.extend_from_slice(&0i16.to_le_bytes());
+            sidedefs.extend_from_slice(&0i16.to_le_bytes());
+            sidedefs.extend_from_slice(upper);
+            sidedefs.extend_from_slice(lower);
+            sidedefs.extend_from_slice(mid);
+            sidedefs.extend_from_slice(&sector.to_le_bytes());
+        }
+        lumps.push(("SIDEDEFS", sidedefs));
+        // (v1, v2, flags, right, left)
+        let lines: [(u16, u16, u16, u16, u16); 6] = [
+            (0, 1, 0, 0, 0xFFFF),
+            (1, 2, 0, 1, 0xFFFF),
+            (2, 3, 0, 2, 0xFFFF),
+            (3, 4, 0, 3, 0xFFFF),
+            (5, 0, 0, 0, 0xFFFF),
+            (4, 1, 0x0004, 5, 4),
+        ];
+        let mut linedefs = Vec::new();
+        for (v1, v2, flags, right, left) in lines {
+            for v in [v1, v2, flags, 0, 0, right, left] {
+                linedefs.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        lumps.push(("LINEDEFS", linedefs));
+        let mut sectors = Vec::new();
+        for i in 0..2 {
+            sectors.extend_from_slice(&floors[i].to_le_bytes());
+            sectors.extend_from_slice(&ceilings[i].to_le_bytes());
+            sectors.extend_from_slice(b"FLOOR0\0\0");
+            sectors.extend_from_slice(b"CEIL1\0\0\0");
+            for v in [200i16, 0, 0] {
+                sectors.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        lumps.push(("SECTORS", sectors));
+        lumps.push(("F_START", vec![]));
+        lumps.push(("FLOOR0", vec![1u8; 64 * 64]));
+        lumps.push(("F_END", vec![]));
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IWAD");
+        data.extend_from_slice(&(lumps.len() as u32).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        let mut dir = Vec::new();
+        for (name, lump) in &lumps {
+            let pos = data.len() as u32;
+            data.extend_from_slice(lump);
+            dir.extend_from_slice(&pos.to_le_bytes());
+            dir.extend_from_slice(&(lump.len() as u32).to_le_bytes());
+            let mut n = [0u8; 8];
+            for (i, b) in name.bytes().take(8).enumerate() {
+                n[i] = b;
+            }
+            dir.extend_from_slice(&n);
+        }
+        let diroff = data.len() as u32;
+        data[8..12].copy_from_slice(&diroff.to_le_bytes());
+        data.extend_from_slice(&dir);
+        std::fs::write(path, data).unwrap();
+    }
+
+    /// Every triangle standing in the plane of the shared wall (x = 128
+    /// units = 2 m), as (min_y, max_y).
+    fn wall_plane_spans(glb: &[u8]) -> Vec<(f32, f32)> {
+        let parts = crate::world_preview::extract_glb_parts(glb).expect("parts");
+        let mut out = Vec::new();
+        for part in &parts {
+            for tri in part.indices.chunks_exact(3) {
+                let ps = [
+                    part.pos[tri[0] as usize],
+                    part.pos[tri[1] as usize],
+                    part.pos[tri[2] as usize],
+                ];
+                if !ps.iter().all(|p| (p[0] - 2.0).abs() < 1e-3) {
+                    continue;
+                }
+                let lo = ps.iter().fold(f32::MAX, |a, p| a.min(p[1]));
+                let hi = ps.iter().fold(f32::MIN, |a, p| a.max(p[1]));
+                out.push((lo, hi));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_step_riser_stops_exactly_at_the_upper_floor() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        let root = tmp_dir("step_lip");
+        let wad_path = root.join("step.wad");
+        // Floors 0 and 24, one ceiling: only the lower riser exists.
+        write_step_wad(&wad_path, [0, 24], [128, 128]);
+        let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        let upper_floor = 24.0 / 64.0;
+        let spans = wall_plane_spans(&mesh.glb);
+        assert!(!spans.is_empty(), "the riser must exist");
+        let highest = spans.iter().fold(f32::MIN, |a, (_, hi)| a.max(*hi));
+        assert!(
+            highest <= upper_floor + 1e-6,
+            "step riser pokes {:.4}m above the upper floor — that is the lip",
+            highest - upper_floor
+        );
+        // Watertight: it reaches the upper floor, and its bottom is at or
+        // under the lower floor (the hidden end may overshoot).
+        assert!((highest - upper_floor).abs() < 1e-6, "riser must MEET the upper floor");
+        let lowest = spans.iter().fold(f32::MAX, |a, (lo, _)| a.min(*lo));
+        assert!(lowest <= 0.0 + 1e-6, "riser must reach the lower floor: {lowest}");
+        // A flat plane must not leave a vertex sitting strictly inside a
+        // neighbour's edge: that vertex is where the rasteriser opens the
+        // hairline between two tiles that otherwise agree exactly.
+        for (height, tris) in flat_triangles(&mesh.glb) {
+            assert_eq!(
+                t_junctions(&tris),
+                0,
+                "flat plane y={:.3}m has T-junctions",
+                f32::from_bits(height)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_upper_band_stops_exactly_at_the_lower_ceiling() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        let root = tmp_dir("ceil_lip");
+        let wad_path = root.join("ceil.wad");
+        // One floor, ceilings 128 and 96: only the upper band exists.
+        write_step_wad(&wad_path, [0, 0], [128, 96]);
+        let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        let lower_ceiling = 96.0 / 64.0;
+        let spans = wall_plane_spans(&mesh.glb);
+        assert!(!spans.is_empty(), "the band must exist");
+        let lowest = spans.iter().fold(f32::MAX, |a, (lo, _)| a.min(*lo));
+        assert!(
+            lowest >= lower_ceiling - 1e-6,
+            "upper band hangs {:.4}m below the lower ceiling — the mirrored lip",
+            lower_ceiling - lowest
+        );
+        assert!(
+            (lowest - lower_ceiling).abs() < 1e-6,
+            "band must MEET the lower ceiling"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sky_ceiling_becomes_a_sky_node_with_its_own_picture() {
+        use crate::classic_import::doom::{doom_map_to_mesh, doom_sky_lump, parse_wad};
+        use makepad_asset_client::json::{self, Value};
+        let root = tmp_dir("sky_map");
+        let wad_path = root.join("sky.wad");
+        write_two_room_door_wad(&wad_path);
+        let mut bytes = std::fs::read(&wad_path).unwrap();
+        let wad = parse_wad(&bytes).expect("wad");
+        let sectors_lump = wad.lumps.iter().find(|l| l.name == "SECTORS").unwrap();
+        let at = bytes
+            .windows(sectors_lump.data.len())
+            .position(|w| w == sectors_lump.data.as_slice())
+            .expect("sector bytes");
+        // Room B's ceiling is the sky.
+        bytes[at + 2 * 26 + 12..at + 2 * 26 + 20].copy_from_slice(b"F_SKY1\0\0");
+        std::fs::write(&wad_path, &bytes).unwrap();
+
+        // Doom 1 episode naming: MAP01 -> SKY1.
+        assert_eq!(doom_sky_lump("MAP01"), "SKY1");
+        assert_eq!(doom_sky_lump("E2M4"), "SKY2");
+        assert_eq!(doom_sky_lump("MAP15"), "SKY2");
+        assert_eq!(doom_sky_lump("MAP27"), "SKY3");
+
+        let wad = parse_wad(&bytes).expect("wad");
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        let root_json = json::parse(glb_json(&mesh.glb).as_bytes()).expect("glb json");
+        let nodes = root_json.get("nodes").unwrap().as_arr().unwrap();
+        let sky = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("sky"))
+            .expect("sky node");
+        let extras = sky.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("sky"));
+        assert_eq!(
+            extras.get("projection").and_then(Value::as_str),
+            Some("cylinder")
+        );
+        assert_eq!(extras.get("texture").and_then(Value::as_str), Some("sky1"));
+        let repeat = match extras.get("repeat").unwrap() {
+            Value::F64(f) => *f,
+            Value::Int(i) => *i as f64,
+            _ => f64::NAN,
+        };
+        assert_eq!(repeat, 4.0, "256-wide sky over a 1024-unit turn");
+        // Its own material and image, not the level atlas.
+        let mi = sky
+            .get("mesh")
+            .and_then(Value::as_i64)
+            .and_then(|m| root_json.get("meshes").unwrap().as_arr().unwrap().get(m as usize))
+            .and_then(|m| m.get("primitives"))
+            .and_then(Value::as_arr)
+            .and_then(|p| p[0].get("material"))
+            .and_then(Value::as_i64)
+            .expect("sky material");
+        assert!(mi > 0, "the sky does not paint with the level atlas");
+        assert!(
+            root_json.get("images").unwrap().as_arr().unwrap().len() >= 2,
+            "sky image is embedded alongside the atlas"
+        );
+        // And the level mesh no longer has a ceiling over room B.
+        let parts = crate::world_preview::extract_glb_parts(&mesh.glb).expect("parts");
+        let ceiling_over_b = parts[0].indices.chunks_exact(3).any(|tri| {
+            [
+                parts[0].pos[tri[0] as usize],
+                parts[0].pos[tri[1] as usize],
+                parts[0].pos[tri[2] as usize],
+            ]
+            .iter()
+            .all(|p| p[0] > 3.05 && (p[1] - 2.0).abs() < 1e-3)
+        });
+        assert!(!ceiling_over_b, "F_SKY1 is a hole, not a ceiling");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plat_sector_exports_as_a_lift_node_and_anchor() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        use makepad_asset_client::json::{self, Value};
+        let root = tmp_dir("lift_map");
+        let wad_path = root.join("lift.wad");
+        write_two_room_door_wad(&wad_path);
+        let mut bytes = std::fs::read(&wad_path).unwrap();
+        let wad = parse_wad(&bytes).expect("wad");
+        // Door sector 1 becomes a plat instead: tag 4, floor 64, and both
+        // its lines get lift special 10 with that tag.
+        let sectors_lump = wad.lumps.iter().find(|l| l.name == "SECTORS").unwrap();
+        let sat = bytes
+            .windows(sectors_lump.data.len())
+            .position(|w| w == sectors_lump.data.as_slice())
+            .unwrap();
+        bytes[sat + 26..sat + 28].copy_from_slice(&64i16.to_le_bytes()); // floor
+        bytes[sat + 26 + 2..sat + 26 + 4].copy_from_slice(&128i16.to_le_bytes()); // ceiling
+        bytes[sat + 26 + 24..sat + 26 + 26].copy_from_slice(&4u16.to_le_bytes()); // tag
+        let lines_lump = wad.lumps.iter().find(|l| l.name == "LINEDEFS").unwrap();
+        let lat = bytes
+            .windows(lines_lump.data.len())
+            .position(|w| w == lines_lump.data.as_slice())
+            .unwrap();
+        for li in [1usize, 7] {
+            bytes[lat + li * 14 + 6..lat + li * 14 + 8].copy_from_slice(&10u16.to_le_bytes());
+            bytes[lat + li * 14 + 8..lat + li * 14 + 10].copy_from_slice(&4u16.to_le_bytes());
+        }
+        std::fs::write(&wad_path, &bytes).unwrap();
+
+        let wad = parse_wad(&bytes).expect("wad");
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        assert_eq!(mesh.lifts.len(), 1, "one plat sector");
+        let lift = &mesh.lifts[0];
+        assert_eq!(lift.name, "lift_1");
+        assert!((lift.closed_y - 1.0).abs() < 1e-4, "up floor 64 units");
+        assert!((lift.open_y - 0.0).abs() < 1e-4, "down to the neighbours");
+
+        let root_json = json::parse(glb_json(&mesh.glb).as_bytes()).expect("glb json");
+        let nodes = root_json.get("nodes").unwrap().as_arr().unwrap();
+        let node = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("lift_1"))
+            .expect("lift_1 node");
+        let extras = node.get("extras").unwrap();
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("lift"));
+        assert_eq!(extras.get("default").and_then(Value::as_str), Some("up"));
+        let states: Vec<&str> = extras
+            .get("states")
+            .and_then(Value::as_arr)
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(states, vec!["up", "down"]);
+        // Rest is UP: the level is baked with lifts raised.
+        assert!(node.get("translation").is_none());
+        let anims = root_json.get("animations").unwrap().as_arr().unwrap();
+        assert!(anims
+            .iter()
+            .any(|a| a.get("name").and_then(Value::as_str) == Some("lift_1")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_teleport_line_publishes_its_pad_and_destination() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        let root = tmp_dir("tele_map");
+        let wad_path = root.join("tele.wad");
+        write_two_room_door_wad(&wad_path);
+        let mut wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        for lump in &mut wad.lumps {
+            match lump.name.as_str() {
+                // Room B (sector 2) is the teleport target, tag 3.
+                "SECTORS" => {
+                    lump.data[2 * 26 + 24..2 * 26 + 26].copy_from_slice(&3u16.to_le_bytes())
+                }
+                // The west door line teleports (special 39) to tag 3.
+                "LINEDEFS" => {
+                    lump.data[14 + 6..14 + 8].copy_from_slice(&39u16.to_le_bytes());
+                    lump.data[14 + 8..14 + 10].copy_from_slice(&3u16.to_le_bytes());
+                }
+                // Destination thing (type 14) at (256, 64) facing 90.
+                "THINGS" => {
+                    for v in [256i16, 64, 90, 14, 7] {
+                        lump.data.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &[[0u8; 3]; 256]).expect("mesh");
+        assert_eq!(mesh.teleporters.len(), 1, "{:?}", mesh.teleporters);
+        let t = &mesh.teleporters[0];
+        assert_eq!(t.name, "teleport_1");
+        // Destination in metres: (256, floor 0 + eye 41, 64) / 64.
+        assert!((t.dst[0] - 4.0).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[1] - 41.0 / 64.0).abs() < 1e-4, "{t:?}");
+        assert!((t.dst[2] - 1.0).abs() < 1e-4, "{t:?}");
+        assert!((t.yaw - (std::f32::consts::FRAC_PI_2 + 90f32.to_radians())).abs() < 1e-4);
+        // The pad hugs the teleport line (x = 128 units = 2 m), 16 units deep.
+        assert!(t.pad_min[0] >= 1.7 && t.pad_max[0] <= 2.3, "{t:?}");
+        assert!(
+            t.pad_max[1] - t.pad_min[1] > 1.5,
+            "pad spans the doorway: {t:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nukage_sector_exports_as_its_own_hazard_node() {
+        use crate::classic_import::doom::{doom_map_to_mesh, parse_wad};
+        use makepad_asset_client::json::{self, Value};
+        let root = tmp_dir("hazard_map");
+        let wad_path = root.join("nukage.wad");
+        // Same two rooms, but room B's floor is nukage with sector special 5.
+        write_two_room_door_wad(&wad_path);
+        let mut bytes = std::fs::read(&wad_path).unwrap();
+        let wad = parse_wad(&bytes).expect("wad");
+        let sectors_lump = wad
+            .lumps
+            .iter()
+            .find(|l| l.name == "SECTORS")
+            .expect("sectors");
+        // Sector 2 = room B: flat NUKAGE1, special 5 (10% damage).
+        let at = bytes
+            .windows(sectors_lump.data.len())
+            .position(|w| w == sectors_lump.data.as_slice())
+            .expect("sector bytes");
+        let sec2 = at + 2 * 26;
+        bytes[sec2 + 4..sec2 + 12].copy_from_slice(b"NUKAGE1\0");
+        bytes[sec2 + 22..sec2 + 24].copy_from_slice(&5u16.to_le_bytes());
+        std::fs::write(&wad_path, &bytes).unwrap();
+
+        let wad = parse_wad(&bytes).expect("wad");
+        let palette = [[0u8; 3]; 256];
+        let mesh = doom_map_to_mesh(&wad.lumps, "MAP01", &palette).expect("mesh");
+        let root_json = json::parse(glb_json(&mesh.glb).as_bytes()).expect("glb json");
+        let nodes = root_json.get("nodes").unwrap().as_arr().unwrap();
+        let hazard = nodes
+            .iter()
+            .find(|n| n.get("name").and_then(Value::as_str) == Some("hazard_1"))
+            .expect("hazard_1 node");
+        let extras = hazard.get("extras").expect("extras");
+        assert_eq!(extras.get("kind").and_then(Value::as_str), Some("hazard"));
+        assert_eq!(extras.get("damage").and_then(Value::as_i64), Some(10));
+        assert_eq!(extras.get("flat").and_then(Value::as_str), Some("nukage1"));
+        assert_eq!(extras.get("liquid").and_then(Value::as_bool), Some(true));
+        assert_eq!(extras.get("solid").and_then(Value::as_bool), Some(true));
+        // A hazard floor does not move.
+        assert!(hazard.get("translation").is_none());
+
+        // Its triangles live ONLY in that node: the level mesh has no
+        // geometry at room B's floor height inside room B.
+        let parts = crate::world_preview::extract_glb_parts(&mesh.glb).expect("parts");
+        let in_room_b_floor = |part: &crate::world_preview::Extracted| {
+            part.indices.chunks_exact(3).any(|tri| {
+                [
+                    part.pos[tri[0] as usize],
+                    part.pos[tri[1] as usize],
+                    part.pos[tri[2] as usize],
+                ]
+                .iter()
+                .all(|p| p[0] > 3.05 && p[1].abs() < 1e-3)
+            })
+        };
+        assert!(
+            !in_room_b_floor(&parts[0]),
+            "the nukage floor must leave the static level mesh"
+        );
+        assert!(
+            parts.iter().skip(1).any(in_room_b_floor),
+            "and land in the hazard node"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn doom_things_become_player_and_deathmatch_starts() {
+        use crate::classic_import::doom::{doom_map_nav, parse_wad};
+        let root = tmp_dir("doom_nav");
+        let wad_path = root.join("freedoom.wad");
+        write_minimal_doom_wad(&wad_path);
+        let wad = parse_wad(&std::fs::read(&wad_path).unwrap()).expect("wad");
+        let nav = doom_map_nav(&wad.lumps, "MAP01").expect("nav");
+
+        // THINGS: type 1 at (64, 64), angle 0. 64 map units = 1 m.
+        assert_eq!(nav.starts.len(), 1);
+        let start = &nav.starts[0];
+        assert_eq!(start.name, "player_start");
+        assert!((start.pos[0] - 1.0).abs() < 1e-6, "{start:?}");
+        assert!((start.pos[2] - 1.0).abs() < 1e-6, "{start:?}");
+        // Sector floor 0 + Doom VIEWHEIGHT 41 units.
+        assert!((start.pos[1] - 41.0 / 64.0).abs() < 1e-6, "{start:?}");
+        assert!((start.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(nav.floor_y, Some(0.0));
+        assert_eq!(nav.eye_height, Some(41.0 / 64.0));
+        assert_eq!(nav.step_height, Some(24.0 / 64.0));
+
+        // The anchors a World publishes.
+        let anchors = nav.anchors();
+        let names: Vec<&str> = anchors.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["floor_height", "step_height", "eye_height", "player_start"]
+        );
+        let ps = anchors.last().unwrap();
+        assert!((ps.transform.pos.y - 41.0 / 64.0).abs() < 1e-6);
+        // yaw pi/2 about +Y.
+        assert!((ps.transform.rot.y - std::f32::consts::FRAC_PI_4.sin()).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quake_entities_become_starts_with_quake_heights() {
+        use crate::classic_import::doom::quake_bsp_nav;
+        let ents = b"{\n\"classname\" \"info_player_start\"\n\"origin\" \"64 128 32\"\n\"angle\" \"90\"\n}\n\
+                     {\n\"classname\" \"info_player_deathmatch\"\n\"origin\" \"0 0 32\"\n}\n";
+        let mut bsp = Vec::new();
+        bsp.extend_from_slice(&29u32.to_le_bytes());
+        bsp.extend_from_slice(&12u32.to_le_bytes());
+        bsp.extend_from_slice(&(ents.len() as u32).to_le_bytes());
+        bsp.extend_from_slice(ents);
+        let nav = quake_bsp_nav(&bsp).expect("nav");
+        assert_eq!(
+            nav.starts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["player_start", "deathmatch_1"]
+        );
+        // Quake is Z-up: (x, y, z) -> (x, z, -y), 32 units = 1 m, eye +22.
+        let p = &nav.starts[0];
+        assert!((p.pos[0] - 2.0).abs() < 1e-6, "{p:?}");
+        assert!((p.pos[1] - (32.0 + 22.0) / 32.0).abs() < 1e-6, "{p:?}");
+        assert!((p.pos[2] + 4.0).abs() < 1e-6, "{p:?}");
+        assert!((p.yaw - (std::f32::consts::FRAC_PI_2 - 90f32.to_radians())).abs() < 1e-6);
+        // Origin sits 24 units above the floor it was dropped on.
+        assert_eq!(nav.floor_y, Some((32.0 - 24.0) / 32.0));
+        assert_eq!(nav.eye_height, Some((22.0 + 24.0) / 32.0));
+        assert_eq!(nav.step_height, Some(18.0 / 32.0));
+    }
+
+    #[test]
+    fn a_converted_world_publishes_its_spawn_as_anchors() {
+        use makepad_asset_data::ImportManifest;
+        let root = tmp_dir("world_anchor");
+        write_minimal_doom_wad(&root.join("freedoom.wad"));
+        let work = tmp_dir("world_anchor_work");
+        let report =
+            compile_classic(&root, &work, ClassicSource::Freedoom, "freedoom").expect("compile");
+        let staged = work.join("source");
+
+        // The library still reads the same three lines it always did.
+        let text = std::fs::read_to_string(staged.join("worlds/freedoom/map01.spawn")).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next().unwrap(), "world-spawn 1");
+        assert_eq!(lines.next().unwrap().split_whitespace().count(), 3);
+        assert_eq!(lines.next().unwrap().split_whitespace().count(), 2);
+        assert!(text.contains("\nstart player_start "), "{text}");
+        assert!(text.contains("\nstep "), "{text}");
+
+        // And the catalog carries them as anchors on the World asset.
+        let pack = report.pack.expect("pack");
+        let manifest =
+            ImportManifest::from_canonical_bytes(&std::fs::read(&pack.manifest_path).unwrap())
+                .unwrap();
+        let world = manifest
+            .assets
+            .iter()
+            .find(|a| a.kind == AssetKind::World)
+            .expect("world asset");
+        let names: Vec<&str> = world.anchors.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"player_start"), "{names:?}");
+        assert!(names.contains(&"floor_height"), "{names:?}");
+        assert!(names.contains(&"eye_height"), "{names:?}");
+        assert!(names.contains(&"step_height"), "{names:?}");
+        let ps = world
+            .anchors
+            .iter()
+            .find(|a| a.name == "player_start")
+            .unwrap();
+        assert!((ps.transform.pos.x - 1.0).abs() < 1e-4);
+        assert!((ps.transform.pos.y - 41.0 / 64.0).abs() < 1e-4);
+        assert!((ps.transform.pos.z - 1.0).abs() < 1e-4);
+        // Y-up metres, exactly what the GLB was exported in.
+        assert_eq!(world.coordinate_system.units_per_meter, 1.0);
+        assert_eq!(world.coordinate_system.up, makepad_asset_data::Axis::YPos);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn an_actor_publishes_one_card_carrying_its_packed_sheet() {
+        use makepad_asset_data::{FileRole, ImportManifest};
+        let root = tmp_dir("actor_card");
+        write_minimal_doom_wad(&root.join("freedoom.wad"));
+        let work = tmp_dir("actor_card_work");
+        let report =
+            compile_classic(&root, &work, ClassicSource::Freedoom, "freedoom").expect("compile");
+        let staged = work.join("source");
+
+        // On disk: manifest + ONE sheet + the preview strip. The per-lump
+        // frame PNG the sheet swallowed is gone.
+        assert!(staged.join("billboards/freedoom/troo.billboard").is_file());
+        assert!(staged.join("billboards/freedoom/troo.png").is_file());
+        assert!(staged.join("billboards/freedoom/troo_thumb.png").is_file());
+        assert!(
+            !staged.join("billboards/freedoom/trooa1.png").exists(),
+            "frames live in the sheet now"
+        );
+        let text = std::fs::read_to_string(staged.join("billboards/freedoom/troo.billboard")).unwrap();
+        let bb = crate::stateful_billboard::StatefulBillboard::parse(&text).unwrap();
+        let sheet = bb.sheet.expect("sheet header");
+        assert_eq!(sheet.cols, 1);
+        assert!(bb.frames.iter().all(|f| f.file == "troo.png" && f.cell.is_some()));
+
+        // In the catalog: exactly one Billboard row, sheet + manifest.
+        let pack = report.pack.expect("compiled pack");
+        let manifest =
+            ImportManifest::from_canonical_bytes(&std::fs::read(&pack.manifest_path).unwrap())
+                .unwrap();
+        let bills: Vec<_> = manifest
+            .assets
+            .iter()
+            .filter(|a| a.kind == AssetKind::Billboard)
+            .collect();
+        assert_eq!(bills.len(), 1, "one actor, one card");
+        assert_eq!(bills[0].key.as_str(), "billboards/freedoom/troo");
+        let roles: Vec<FileRole> = bills[0].files.iter().map(|f| f.file.role).collect();
+        assert_eq!(roles, vec![FileRole::Texture, FileRole::Source]);
+        assert!(bills[0].thumbnail.is_some(), "grids animate off the strip");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&work);
     }
