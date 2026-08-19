@@ -17,7 +17,11 @@
 //! (yaw per frame, 1.0), `SPLAT_BENCH_DISTANCE` (1.5), `SPLAT_BENCH_MAX_SPLATS`,
 //! `SPLAT_BENCH_CAPTURE` (comma list of frame indices), `SPLAT_BENCH_HOLD`
 //! (20: frames the camera holds before a capture so the async sort settles),
-//! `SPLAT_BENCH_OUT` (dir).
+//! `SPLAT_BENCH_OUT` (dir), `SPLAT_BENCH_MIN_PX` / `SPLAT_BENCH_MAX_PX`
+//! (draw_splat min/max_pixel_radius), `SPLAT_BENCH_SORT_ANGLE`
+//! (sort_min_camera_angle_deg), `SPLAT_BENCH_CULL_MARGIN` (sort_cull_margin),
+//! `SPLAT_BENCH_OCCLUDER` (edge of an opaque cube at the orbit target),
+//! `SPLAT_BENCH_SORT=0` (draw in record order, no sorter).
 pub use makepad_widgets;
 use makepad_widgets::*;
 use makepad_xr::obj::ViewSplat;
@@ -44,6 +48,14 @@ script_mod! {
                         height: Fill
                         camera.distance: 1.5
                         camera.distance_min: 0.03
+                        // Optional opaque occluder (SPLAT_BENCH_OCCLUDER=size)
+                        // to measure the scene z-buffer killing hidden splats.
+                        occluder := Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.0, 0.0, 0.0)
+                            pos: vec3(0.0, 0.0, 0.0)
+                            color: #x6a7a8a
+                        }
                         splat := ViewSplat{
                             scale: vec3(1.0, 1.0, 1.0)
                         }
@@ -66,6 +78,15 @@ struct BenchConfig {
     /// Frames the camera holds still before each capture (see camera_for_frame).
     hold: u64,
     out_dir: String,
+    /// Shader/sort knob overrides (None = widget defaults).
+    min_px: Option<f32>,
+    max_px: Option<f32>,
+    sort_angle_deg: Option<f32>,
+    cull_margin: Option<f32>,
+    /// Edge length of an opaque cube at the orbit target (0 = none).
+    occluder: f32,
+    /// SPLAT_BENCH_SORT=0 draws in record order (no sorter work).
+    sort: bool,
 }
 
 impl BenchConfig {
@@ -87,6 +108,12 @@ impl BenchConfig {
                 .unwrap_or_default(),
             hold: parse("SPLAT_BENCH_HOLD", 20.0) as u64,
             out_dir: env("SPLAT_BENCH_OUT").unwrap_or_else(|| ".".to_string()),
+            min_px: env("SPLAT_BENCH_MIN_PX").and_then(|v| v.parse().ok()),
+            max_px: env("SPLAT_BENCH_MAX_PX").and_then(|v| v.parse().ok()),
+            sort_angle_deg: env("SPLAT_BENCH_SORT_ANGLE").and_then(|v| v.parse().ok()),
+            cull_margin: env("SPLAT_BENCH_CULL_MARGIN").and_then(|v| v.parse().ok()),
+            occluder: parse("SPLAT_BENCH_OCCLUDER", 0.0) as f32,
+            sort: parse("SPLAT_BENCH_SORT", 1.0) != 0.0,
         }
     }
 }
@@ -321,6 +348,38 @@ impl MatchEvent for App {
         if let Some(max_splats) = config.max_splats {
             script_apply_eval!(cx, splat, {
                 max_splats: #(max_splats)
+            });
+        }
+        if let Some(min_px) = config.min_px {
+            script_apply_eval!(cx, splat, {
+                draw_splat +: { min_pixel_radius: #(min_px) }
+            });
+        }
+        if let Some(max_px) = config.max_px {
+            script_apply_eval!(cx, splat, {
+                draw_splat +: { max_pixel_radius: #(max_px) }
+            });
+        }
+        if let Some(angle) = config.sort_angle_deg {
+            script_apply_eval!(cx, splat, {
+                sort_min_camera_angle_deg: #(angle)
+            });
+        }
+        if let Some(margin) = config.cull_margin {
+            script_apply_eval!(cx, splat, {
+                sort_cull_margin: #(margin)
+            });
+        }
+        if !config.sort {
+            script_apply_eval!(cx, splat, {
+                sort_back_to_front: false
+            });
+        }
+        if config.occluder > 0.0 {
+            let size = config.occluder;
+            let mut occluder = self.ui.widget(cx, ids!(occluder));
+            script_apply_eval!(cx, occluder, {
+                size: vec3(#(size), #(size), #(size))
             });
         }
         if let Some(mut view) = splat.borrow_mut::<ViewSplat>() {

@@ -178,9 +178,9 @@ script_mod! {
 
             let focal = vec2(max(self.focal_pixels.x, 0.00001), max(self.focal_pixels.y, 0.00001))
             let inv_depth = 1.0 / max(-center_view.z, 0.000001)
-            let axis0_bound = max(abs(axis_local_0.x), max(abs(axis_local_0.y), abs(axis_local_0.z)))
-            let axis1_bound = max(abs(axis_local_1.x), max(abs(axis_local_1.y), abs(axis_local_1.z)))
-            let max_scale = 1.732051 * max(axis0_bound, max(axis1_bound, axis_2_len))
+            // The projected ellipse's semi-axes (in std devs) never exceed the
+            // longest 3D axis; the decoded lengths are exact, no component bound.
+            let max_scale = max(scale_0, max(scale_1, axis_2_len))
             let cull_guard = max(self.coarse_cull_guard, 0.0)
             let ndc_guard = 1.0 + cull_guard * max(abs(center_ndc.x), abs(center_ndc.y))
             let rough_radius_px = self.splat_std_dev * max_scale * max(focal.x, focal.y) * inv_depth * ndc_guard
@@ -509,6 +509,32 @@ struct GpuScene {
     scale: Vec4f,
     /// Moved to the sort worker on first use.
     sort_scene: Option<SortScene>,
+    /// The textures' CPU-side data is released once the backend has uploaded
+    /// it (16 B/splat of host RAM otherwise kept for the scene's lifetime).
+    cpu_mirrors_released: bool,
+}
+
+impl GpuScene {
+    fn release_cpu_mirrors(&mut self, cx: &mut Cx) {
+        if self.cpu_mirrors_released {
+            return;
+        }
+        let uploaded = |format: &TextureFormat| match format {
+            TextureFormat::VecBGRAu8_32 { updated, data, .. } => {
+                updated.is_empty() && data.is_some()
+            }
+            TextureFormat::VecRGBAf32 { updated, data, .. } => {
+                updated.is_empty() && data.is_some()
+            }
+            _ => false,
+        };
+        if !uploaded(self.splat_data.get_format(cx)) || !uploaded(self.chunk_bounds.get_format(cx)) {
+            return;
+        }
+        drop(self.splat_data.take_vec_u32(cx));
+        drop(self.chunk_bounds.take_vec_f32(cx));
+        self.cpu_mirrors_released = true;
+    }
 }
 
 /// Measured costs of the splat renderer, read by benchmarks/tests.
@@ -1099,6 +1125,7 @@ impl ViewSplat {
                 packed.radius_bound,
                 packed.axis_product,
             )),
+            cpu_mirrors_released: false,
         });
         self.instance_order.clear();
         self.spare_order = None;
@@ -1176,6 +1203,9 @@ impl Widget for ViewSplat {
         self.ensure_scene_loaded(cx);
         if !self.ensure_gpu_scene(cx) {
             return DrawStep::done();
+        }
+        if let Some(scene) = self.gpu_scene.as_mut() {
+            scene.release_cpu_mirrors(cx.cx);
         }
 
         let _ = self.poll_depth_sort_results();
