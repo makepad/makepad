@@ -11,9 +11,10 @@
 //!    a room graph: regions cut at chokepoints — doorway-width passages,
 //!    `door_N` footprints — with corridors as rooms of their own and a
 //!    portal (with a centre) wherever two rooms meet.
-//! 2. Entering a room for the first time, the player stops for a beat and
-//!    LOOKS — a short pan (~60–90° over a second or two) across the room's
-//!    far end and its exits — then commits.
+//! 2. The player WALKS — always, at the engine's walking speed. There is
+//!    no stop-and-look: a room is taken in because the route curves
+//!    through it. The only standstills are the beat waiting for a door to
+//!    finish opening and the instant of a teleport or region cut.
 //! 3. The player crosses the room to an exit that leads somewhere NEW,
 //!    preferring "deeper into the level" (farther from the start), walking
 //!    the MIDDLE of corridors and doorways in straight string-pulled legs,
@@ -39,7 +40,7 @@
 //! steers; ALL locomotion (turning, stepping, gravity, sliding, head-bob,
 //! doors, teleports) stays in `level.rs`, driven through its
 //! `player_nav seam` (`set_external_planner` / `set_route` /
-//! `set_target_yaw` / `request_door` / `set_hold` / `set_speed_scale`).
+//! `set_target_yaw` / `request_door`).
 
 use crate::level::{LevelCollision, LevelWalker, NavGrid, SurfaceKind, WalkerConfig};
 use makepad_draw::*;
@@ -584,19 +585,14 @@ pub struct PlayerStats {
 #[derive(Clone, Copy, PartialEq)]
 enum LegKind {
     Explore { to_room: u16 },
+    /// Finish the staircase underfoot before any other decision: a stair
+    /// run is a commitment, not a decision point.
+    Stairs,
     /// Walk INTO a room that has no onward exit — a dead end or the last
     /// room — before turning back. Entering a threshold is not seeing it.
     Tour { room: u16 },
     Goal { marker: usize },
     Escape,
-}
-
-enum Phase {
-    /// The look-around pan: stand, face each bearing in turn.
-    Survey { bearings: Vec<f32>, at: usize, dwell: f32, elapsed: f32 },
-    Travel,
-    /// A brief sidelong look at a feature mid-walk.
-    Glance { bearing: f32, left: f32, dwell: f32, saved: Vec<u32> },
 }
 
 struct Marker {
@@ -628,15 +624,8 @@ impl Rng {
 const UNREACHED: u32 = u32::MAX;
 /// Seconds a requested door may stay shut before it is written off.
 const DOOR_GIVE_UP: f32 = 2.5;
-/// Start asking for a door this far out (and slow down a touch).
+/// Start asking for a door this far out, so it is open on arrival.
 const DOOR_ASK_M: f32 = 1.7;
-const DOOR_SLOW_M: f32 = 2.5;
-/// Longest a look-around pan may run.
-const SURVEY_MAX_SECS: f32 = 2.4;
-/// Dwell on each pan target once facing it.
-const SURVEY_DWELL: f32 = 0.30;
-/// A glance is this long, all told.
-const GLANCE_SECS: f32 = 1.0;
 /// Sparse-route segments never exceed this many dense cells.
 const SEG_MAX_CELLS: usize = 12;
 
@@ -696,7 +685,6 @@ pub struct PlayerNav {
     entries: Vec<u32>,
     epoch: u32,
     current_room: Option<u16>,
-    phase: Phase,
     // The active leg.
     leg: Vec<u32>,
     leg_kind: Option<LegKind>,
@@ -714,11 +702,10 @@ pub struct PlayerNav {
     // Failures.
     blocked: std::collections::HashSet<u64>,
     marker_strikes: u32,
+    /// The last leg ended in a watchdog drop (not an arrival).
+    last_drop: bool,
     // Finale.
     finale: bool,
-    // Glances.
-    since_glance: f32,
-    next_glance: f32,
     // Misc.
     last_feet: Option<Vec3f>,
     pending: std::collections::VecDeque<Moment>,
@@ -787,7 +774,6 @@ impl PlayerNav {
             exit_marker: None,
             epoch: 0,
             current_room: None,
-            phase: Phase::Travel,
             leg: Vec::new(),
             leg_kind: None,
             dest_cell: None,
@@ -801,9 +787,8 @@ impl PlayerNav {
             door_since: 0.0,
             blocked: std::collections::HashSet::new(),
             marker_strikes: 0,
+            last_drop: false,
             finale: false,
-            since_glance: 0.0,
-            next_glance: 22.0,
             last_feet: None,
             pending: std::collections::VecDeque::new(),
             scratch_dist: Vec::new(),
@@ -890,18 +875,15 @@ impl PlayerNav {
                     .is_some_and(|c| horiz(c.pos, feet) < grid.cell_size() * 1.5);
                 if !expected {
                     self.drop_leg(walker);
-                    self.phase = Phase::Travel;
                     self.push(Moment::Teleported);
                 }
             }
         }
         self.last_feet = Some(feet);
         let here = grid.cell_at(feet);
-        // Room bookkeeping fires in every phase: crossing INTO a room is
-        // what starts the look-around.
         if let Some(room) = here.and_then(|c| self.graph.room_at(c)) {
             if self.current_room != Some(room) {
-                self.enter_room(room, feet, yaw, walker, grid);
+                self.enter_room(room);
             }
         }
         // Standing properly INSIDE the current room (on its wall-distance
@@ -933,47 +915,11 @@ impl PlayerNav {
         if in_hazard && self.leg_kind != Some(LegKind::Escape) {
             self.plan_escape(feet, here, walker, grid, level);
         }
-        match &mut self.phase {
-            Phase::Survey { bearings, at, dwell, elapsed } => {
-                *elapsed += dt;
-                walker.set_hold(true);
-                walker.set_speed_scale(1.0);
-                if *at < bearings.len() {
-                    let want = bearings[*at];
-                    walker.set_target_yaw(Some(want));
-                    if wrap_pi(yaw - want).abs() < 0.12 {
-                        *dwell += dt;
-                        if *dwell >= SURVEY_DWELL {
-                            *at += 1;
-                            *dwell = 0.0;
-                        }
-                    }
-                }
-                if *at >= bearings.len() || *elapsed >= SURVEY_MAX_SECS {
-                    walker.set_hold(false);
-                    walker.set_target_yaw(None);
-                    self.phase = Phase::Travel;
-                }
-            }
-            Phase::Glance { bearing, left, dwell, saved } => {
-                *left -= dt;
-                walker.set_hold(true);
-                walker.set_target_yaw(Some(*bearing));
-                if wrap_pi(yaw - *bearing).abs() < 0.15 {
-                    *dwell += dt;
-                }
-                if *left <= 0.0 || *dwell >= 0.35 {
-                    let saved = std::mem::take(saved);
-                    walker.set_route(saved);
-                    walker.set_hold(false);
-                    walker.set_target_yaw(None);
-                    self.phase = Phase::Travel;
-                }
-            }
-            Phase::Travel => {
-                self.travel(dt, feet, yaw, here, walker, grid, level);
-            }
-        }
+        // A Doom player WALKS — always. There is no stop-and-look state:
+        // the view sweeps a room because the route curves through it, and
+        // the only standstills are the beat waiting for a door to finish
+        // opening and the instant of a teleport/region cut.
+        self.travel(dt, feet, yaw, here, walker, grid, level);
         self.pending.pop_front()
     }
 
@@ -985,14 +931,7 @@ impl PlayerNav {
         }
     }
 
-    fn enter_room(
-        &mut self,
-        room: u16,
-        feet: Vec3f,
-        yaw: f32,
-        walker: &mut LevelWalker,
-        grid: &NavGrid,
-    ) {
+    fn enter_room(&mut self, room: u16) {
         self.current_room = Some(room);
         let first = !self.visited[room as usize];
         self.visited[room as usize] = true;
@@ -1003,102 +942,6 @@ impl PlayerNav {
             self.written_off.clear();
         }
         self.push(Moment::EnteredRoom { room, first, visited, rooms: self.graph.rooms.len() });
-        let r = &self.graph.rooms[room as usize];
-        // The look-around: only on a FIRST visit to a real room. Corridors
-        // and closets are walked, not admired; a nukage pool is left, fast.
-        if first && !r.corridor && !r.minor && !r.hazard {
-            let bearings = self.survey_bearings(room, feet, yaw, grid);
-            if bearings.len() > 1 {
-                walker.set_route(Vec::new());
-                self.leg.clear();
-                self.dest_cell = None;
-                self.leg_kind = None;
-                self.leg_seen = false;
-                self.phase = Phase::Survey { bearings, at: 0, dwell: 0.0, elapsed: 0.0 };
-            }
-        }
-    }
-
-    /// Where the eyes go on entering: the far end of the room, then its
-    /// other exits — capped to a ~90–100° sweep, ordered into ONE pan.
-    fn survey_bearings(&mut self, room: u16, feet: Vec3f, yaw: f32, grid: &NavGrid) -> Vec<f32> {
-        let r = &self.graph.rooms[room as usize];
-        let mut interest: Vec<Vec3f> = Vec::new();
-        // Farthest clean cell of the room: "how big is this place".
-        let mut far = (f32::MIN, None);
-        for c in &r.cells {
-            let cc = grid.cell(*c).expect("cell");
-            if cc.kind == SurfaceKind::Hazard {
-                continue; // never look longingly at the nukage
-            }
-            let d = horiz(cc.pos, feet);
-            if d > far.0 {
-                far = (d, Some(cc.pos));
-            }
-        }
-        if let Some(p) = far.1 {
-            if far.0 > 1.5 {
-                interest.push(p);
-            }
-        }
-        // The room's angular extremes: the glance is a SWEEP across the
-        // space, left edge to right edge, not a stare at one feature.
-        let step = (r.cells.len() / 160).max(1);
-        let (mut left, mut right): (Option<(f32, Vec3f)>, Option<(f32, Vec3f)>) = (None, None);
-        for c in r.cells.iter().step_by(step) {
-            let cc = grid.cell(*c).expect("cell");
-            if cc.kind == SurfaceKind::Hazard || horiz(cc.pos, feet) < 1.2 {
-                continue;
-            }
-            let b = wrap_pi(bearing(feet, cc.pos) - yaw);
-            if b.abs() > 1.65 {
-                continue; // behind the shoulder: not part of a frontal pan
-            }
-            if left.is_none_or(|(lb, _)| b < lb) {
-                left = Some((b, cc.pos));
-            }
-            if right.is_none_or(|(rb, _)| b > rb) {
-                right = Some((b, cc.pos));
-            }
-        }
-        for side in [left, right] {
-            if let Some((_, p)) = side {
-                interest.push(p);
-            }
-        }
-        for p in &r.portals {
-            if let Some(c) = self.graph.portals[*p as usize].centre_pos(grid) {
-                if horiz(c, feet) > 1.0 {
-                    interest.push(c);
-                }
-            }
-        }
-        for m in &self.markers {
-            if !m.reached {
-                if let Some(c) = grid.cell(m.cell) {
-                    if self.graph.room_at(m.cell) == Some(room) {
-                        interest.push(c.pos);
-                    }
-                }
-            }
-        }
-        // Bearings relative to the way we walked in, clamped to a frontal
-        // fan so the pan never turns the player right around.
-        let mut rel: Vec<f32> = interest
-            .iter()
-            .map(|p| wrap_pi(bearing(feet, *p) - yaw).clamp(-1.65, 1.65))
-            .collect();
-        rel.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
-        rel.dedup_by(|a, b| (*a - *b).abs() < 0.12);
-        if rel.len() > 3 {
-            // Keep the sweep's ends and its middle: a pan, not a checklist.
-            rel = vec![rel[0], rel[rel.len() / 2], rel[rel.len() - 1]];
-        }
-        // Sweep one way: start at whichever end is nearer the current gaze.
-        if !rel.is_empty() && (rel[0] - 0.0).abs() > (rel[rel.len() - 1] - 0.0).abs() {
-            rel.reverse();
-        }
-        rel.iter().map(|r| wrap_pi(yaw + r)).collect()
     }
 
     fn marker_reached(&mut self, i: usize, walker: &mut LevelWalker) {
@@ -1140,7 +983,6 @@ impl PlayerNav {
         self.finale = false;
         self.current_room = None;
         self.drop_leg(walker);
-        self.phase = Phase::Travel;
         walker.relocate(self.start_feet, self.start_yaw);
         self.last_feet = Some(self.start_feet);
         self.push(Moment::LevelRestart { epoch: self.epoch });
@@ -1149,7 +991,6 @@ impl PlayerNav {
     fn drop_leg(&mut self, walker: &mut LevelWalker) {
         walker.set_route(Vec::new());
         walker.request_door(None);
-        walker.set_speed_scale(1.0);
         self.requested = None;
         self.door_since = 0.0;
         self.leg.clear();
@@ -1170,13 +1011,12 @@ impl PlayerNav {
         grid: &NavGrid,
         level: &LevelCollision,
     ) {
-        // Doors on the near stretch of the leg.
-        let mut speed = 1.0f32;
+        // Doors on the near stretch of the leg. Asked for a body-length
+        // out, so an animated part is usually open by the time the body
+        // arrives; the walker's own door wait supplies the Doom-authentic
+        // beat at one that is still moving.
         if let Some((d, pos)) = self.leg_doors.first().copied() {
             let dist = horiz(feet, pos);
-            if dist < DOOR_SLOW_M {
-                speed = 0.6;
-            }
             if self.open_doors.contains(&d) || self.jammed.contains(&d) {
                 self.leg_doors.remove(0);
             } else if dist < DOOR_ASK_M {
@@ -1206,7 +1046,6 @@ impl PlayerNav {
                 }
             }
         }
-        walker.set_speed_scale(speed);
         let route = walker.route();
         if !route.is_empty() {
             self.leg_seen = true;
@@ -1219,18 +1058,6 @@ impl PlayerNav {
                     }
                 }
             }
-            // The occasional glance at a feature — rare, and never so long
-            // the tour reads as idle.
-            self.since_glance += dt;
-            if self.since_glance >= self.next_glance {
-                self.since_glance = 0.0;
-                self.next_glance = 16.0 + self.rng.unit() * 22.0;
-                if let Some(b) = self.glance_bearing(feet, yaw, grid) {
-                    let saved = route;
-                    walker.set_route(Vec::new());
-                    self.phase = Phase::Glance { bearing: b, left: GLANCE_SECS, dwell: 0.0, saved };
-                }
-            }
             return;
         }
         // Route empty: the leg finished, was dropped by the walker's stuck
@@ -1241,6 +1068,7 @@ impl PlayerNav {
                     && (c.pos.y - feet.y).abs() < self.cfg.step_up + 0.25
             });
             let kind = self.leg_kind;
+            self.last_drop = !arrived;
             if arrived {
                 self.careful = self.careful.saturating_sub(1);
                 match kind {
@@ -1326,38 +1154,6 @@ impl PlayerNav {
         self.plan_next(feet, yaw, here, walker, grid, level);
     }
 
-    /// A portal or marker off to the side, worth a half-second of gaze.
-    fn glance_bearing(&mut self, feet: Vec3f, yaw: f32, grid: &NavGrid) -> Option<f32> {
-        let room = self.current_room?;
-        let mut features: Vec<Vec3f> = Vec::new();
-        for p in &self.graph.rooms[room as usize].portals {
-            if let Some(c) = self.graph.portals[*p as usize].centre_pos(grid) {
-                features.push(c);
-            }
-        }
-        for m in &self.markers {
-            if !m.reached && self.graph.room_at(m.cell) == Some(room) {
-                if let Some(c) = grid.cell(m.cell) {
-                    features.push(c.pos);
-                }
-            }
-        }
-        let mut fits: Vec<f32> = features
-            .into_iter()
-            .filter(|p| {
-                let d = horiz(feet, *p);
-                d > 2.0 && d < 12.0
-            })
-            .map(|p| bearing(feet, p))
-            .filter(|b| wrap_pi(*b - yaw).abs() < 1.15 && wrap_pi(*b - yaw).abs() > 0.25)
-            .collect();
-        if fits.is_empty() {
-            return None;
-        }
-        let pick = (self.rng.unit() * fits.len() as f32) as usize;
-        Some(fits.swap_remove(pick.min(fits.len() - 1)))
-    }
-
     /// Escape the ooze by the shortest exit: the ONLY plan that may start
     /// from hazard ground, and it ends on the first clean cell.
     fn plan_escape(
@@ -1404,6 +1200,15 @@ impl PlayerNav {
         level: &LevelCollision,
     ) {
         let Some(from) = here.or_else(|| grid.cell_at(feet)) else { return };
+        // Mid-staircase, nothing planned (a leg truncated onto a run by a
+        // teleporter or a marker): finish the flight first. Goal
+        // re-selection never happens on the stairs themselves.
+        if !self.last_drop {
+            if let Some(chain) = self.stair_run_underfoot(grid, from, yaw) {
+                self.install_leg(chain, LegKind::Stairs, feet, walker, grid, level, false);
+                return;
+            }
+        }
         // One clean-floor flood answers every reachability question below.
         let dist = self.flood_from(grid, from, false);
         for _attempt in 0..4 {
@@ -1755,6 +1560,124 @@ impl PlayerNav {
         best.map(|(_, c)| c)
     }
 
+    /// The next tread of the stair run through `at`, continuing in the
+    /// same vertical direction: the most walk-aligned mutual neighbour a
+    /// real step (not a flat shuffle, not a jump) away. Zigzag flights
+    /// turn, so alignment only has to be "not straight back".
+    fn next_tread(
+        &self,
+        grid: &NavGrid,
+        at: u32,
+        came_from: Option<u32>,
+        dir: Vec3f,
+        sign: f32,
+        allow_hazard: bool,
+    ) -> Option<u32> {
+        let pa = grid.cell(at)?.pos;
+        let mut best: Option<(f32, u32)> = None;
+        for (b, _) in grid.edges(at) {
+            if Some(b) == came_from {
+                continue;
+            }
+            let cb = grid.cell(b)?;
+            let dy = cb.pos.y - pa.y;
+            if dy * sign < 0.1 || dy.abs() > self.cfg.step_up + 0.05 {
+                continue;
+            }
+            if !allow_hazard && cb.kind == SurfaceKind::Hazard {
+                continue;
+            }
+            // Mutual edges only: a stair is climbed both ways.
+            if !grid.edges(b).any(|(c, _)| c == at) {
+                continue;
+            }
+            let (dx, dz) = (cb.pos.x - pa.x, cb.pos.z - pa.z);
+            let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+            let align = (dx * dir.x + dz * dir.z) / len;
+            if align < -0.35 {
+                continue; // straight back down the way we came
+            }
+            if best.is_none_or(|(ba, bc)| align > ba + 1e-6 || (align > ba - 1e-6 && b < bc)) {
+                best = Some((align, b));
+            }
+        }
+        best.map(|(_, b)| b)
+    }
+
+    /// The rest of the stair run the body is standing ON: a tread behind,
+    /// treads ahead — the chain to the run's top (or bottom). None when
+    /// the feet are on flat ground or merely NEAR stairs (arriving beside
+    /// a staircase is a decision point; standing mid-flight is not).
+    fn stair_run_underfoot(&self, grid: &NavGrid, from: u32, yaw: f32) -> Option<Vec<u32>> {
+        let pf = grid.cell(from)?.pos;
+        let dir = crate::level::yaw_forward(yaw);
+        for sign in [1.0f32, -1.0] {
+            // Mid-run means a tread BEHIND in the same vertical sense.
+            let behind = grid.edges(from).any(|(b, _)| {
+                grid.cell(b).is_some_and(|c| {
+                    let dy = pf.y - c.pos.y;
+                    dy * sign >= 0.1 && dy.abs() <= self.cfg.step_up + 0.05
+                        && grid.edges(b).any(|(c2, _)| c2 == from)
+                })
+            });
+            if !behind {
+                continue;
+            }
+            let mut chain: Vec<u32> = Vec::new();
+            let (mut at, mut came, mut d) = (from, None, dir);
+            for _ in 0..96 {
+                let Some(b) = self.next_tread(grid, at, came, d, sign, false) else { break };
+                if b == from || chain.contains(&b) {
+                    break;
+                }
+                let (pa, pb) = (
+                    grid.cell(at).expect("cell").pos,
+                    grid.cell(b).expect("cell").pos,
+                );
+                d = vec3f(pb.x - pa.x, 0.0, pb.z - pa.z);
+                chain.push(b);
+                came = Some(at);
+                at = b;
+            }
+            if chain.len() >= 2 {
+                return Some(chain);
+            }
+        }
+        None
+    }
+
+    /// A leg never ENDS mid-flight: once its tail is climbing (or
+    /// descending) a stair run, carry it through to the first flat cell
+    /// beyond the run. The staircase is a commitment, not a decision point.
+    fn extend_through_stairs(&self, grid: &NavGrid, path: &mut Vec<u32>, allow_hazard: bool) {
+        for _ in 0..96 {
+            let n = path.len();
+            if n < 2 {
+                return;
+            }
+            let (last, prev) = (path[n - 1], path[n - 2]);
+            let (Some(pl), Some(pp)) = (
+                grid.cell(last).map(|c| c.pos),
+                grid.cell(prev).map(|c| c.pos),
+            ) else {
+                return;
+            };
+            let dy = pl.y - pp.y;
+            if dy.abs() < 0.1 {
+                return; // the leg ends on flat ground: fine as it is
+            }
+            let dir = vec3f(pl.x - pp.x, 0.0, pl.z - pp.z);
+            let Some(b) = self.next_tread(grid, last, Some(prev), dir, dy.signum(), allow_hazard)
+            else {
+                return; // the run's top/bottom: the leg now ends past it
+            };
+            if path.contains(&b) {
+                return;
+            }
+            path.push(b);
+        }
+    }
+
     /// Put a planned cell path onto the walker: sparsified into straight
     /// string-pulled legs (unless `careful`), doors collected, bookkeeping.
     #[allow(clippy::too_many_arguments)]
@@ -1771,8 +1694,9 @@ impl PlayerNav {
         if path.is_empty() {
             return;
         }
-        // A leg never walks past a teleporter pad: stepping on it cuts.
         let mut path = path;
+        self.extend_through_stairs(grid, &mut path, allow_hazard);
+        // A leg never walks past a teleporter pad: stepping on it cuts.
         if let Some(k) = path
             .iter()
             .position(|c| grid.cell(*c).is_some_and(|c| c.teleport.is_some()))
@@ -1805,7 +1729,6 @@ impl PlayerNav {
         self.stats.legs += 1;
         walker.set_route(sparse);
         walker.set_target_yaw(None);
-        walker.set_hold(false);
     }
 
     /// Dijkstra over the grid with the player's rules. `allow_hazard`
@@ -2180,6 +2103,10 @@ mod tests {
         moments: Vec<(f32, Moment)>,
         feet: Vec<Vec3f>,
         auto_open: bool,
+        /// Ticks a requested door stays shut before the "renderer" settles
+        /// it open (0 = instantly, like a fast part).
+        open_delay: u32,
+        door_wait_ticks: u32,
         opened: Vec<u16>,
         t: f32,
     }
@@ -2211,6 +2138,8 @@ mod tests {
                 moments: Vec::new(),
                 feet: Vec::new(),
                 auto_open: true,
+                open_delay: 0,
+                door_wait_ticks: 0,
                 opened: Vec::new(),
                 t: 0.0,
             }
@@ -2228,12 +2157,18 @@ mod tests {
                 self.walker.tick_in(1.0 / 60.0, &self.level, Some(&self.grid));
                 if self.auto_open {
                     if let Some(d) = self.walker.wanted_door() {
-                        // The "renderer": the part settles open a few ticks
-                        // after it is asked for.
-                        if !self.opened.contains(&d) {
-                            self.opened.push(d);
+                        // The "renderer": the part settles open after the
+                        // configured animation time.
+                        self.door_wait_ticks += 1;
+                        if self.door_wait_ticks > self.open_delay {
+                            if !self.opened.contains(&d) {
+                                self.opened.push(d);
+                            }
+                            self.walker.set_door_open(d, true);
+                            self.door_wait_ticks = 0;
                         }
-                        self.walker.set_door_open(d, true);
+                    } else {
+                        self.door_wait_ticks = 0;
                     }
                 }
                 self.feet.push(self.walker.feet());
@@ -2297,40 +2232,57 @@ mod tests {
             "crossed at x={:.2}, not through the middle of the doorway",
             crossing.x
         );
-        // And the walk was purposeful: from survey's end to the crossing it
-        // never wandered back to the far half of room A.
-        let survey_end = (3.0 * 60.0) as usize;
-        let max_z_after = sim.feet[survey_end.min(other)..other]
+        // And the walk was purposeful: once under way it never wandered
+        // back toward the far half of room A.
+        let under_way = (2.0 * 60.0) as usize;
+        let max_z_after = sim.feet[under_way.min(other)..other]
             .iter()
             .map(|p| p.z)
             .fold(f32::MIN, f32::max);
-        let z_at_survey_end = sim.feet[survey_end.min(other)].z;
+        let z_under_way = sim.feet[under_way.min(other)].z;
         assert!(
-            max_z_after <= z_at_survey_end + 1.0,
-            "swept back {max_z_after:.2} vs {z_at_survey_end:.2} instead of crossing"
+            max_z_after <= z_under_way + 1.0,
+            "swept back {max_z_after:.2} vs {z_under_way:.2} instead of crossing"
         );
     }
 
     #[test]
-    fn player_pans_the_room_on_first_entry_then_commits() {
-        let mut sim = Sim::new(two_rooms(), &[], 3);
-        // During the opening look-around the body stays put and the gaze
-        // sweeps a real arc — accumulated without wrap artefacts.
-        let start = sim.nav.start_hint().0;
-        let mut prev_yaw = sim.walker.yaw();
-        let (mut swept, mut lo, mut hi) = (0.0f32, 0.0f32, 0.0f32);
-        for _ in 0..150 {
-            sim.run(1.0 / 60.0);
-            let y = sim.walker.yaw();
-            swept += wrap_pi(y - prev_yaw);
-            prev_yaw = y;
-            lo = lo.min(swept);
-            hi = hi.max(swept);
+    fn player_never_stands_still_except_at_doors() {
+        // Doom players WALK, always. With a slow door on the route the only
+        // sub-walking-pace second of the whole tour is the beat spent at
+        // that door while it opens.
+        let door_box = (vec3f(-0.5, 0.0, -0.9), vec3f(0.5, 2.5, -0.1));
+        let anchors = [NavAnchor {
+            name: "player_start".into(),
+            pos: vec3f(0.0, 0.6, 3.0),
+            yaw: 0.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+        }];
+        let mut sim = Sim::with_doors(two_rooms(), &anchors, 8, &[door_box]);
+        sim.open_delay = 45; // a 0.75 s door animation
+        sim.run(60.0);
+        let mut k = 0usize;
+        while k + 60 <= sim.feet.len() {
+            let (mut path, mut cut) = (0.0f32, false);
+            for j in k..k + 59 {
+                let d = horiz(sim.feet[j], sim.feet[j + 1]);
+                if d > 0.5 {
+                    cut = true; // a restart/teleport frame, not walking
+                }
+                path += d;
+            }
+            if !cut && path < 0.2 {
+                let p = sim.feet[k + 30];
+                assert!(
+                    horiz(p, vec3f(0.0, 0.0, -0.5)) < 2.0,
+                    "stood still away from the door at {p:?} (t={}s)",
+                    k / 60
+                );
+            }
+            k += 20;
         }
-        let wander = sim.feet.iter().map(|p| horiz(start, *p)).fold(0.0, f32::max);
-        assert!(wander < 0.4, "walked {wander:.2} m during the look-around");
-        assert!(hi - lo > 0.7, "the pan swept only {:.2} rad", hi - lo);
-        assert!(hi - lo < 3.6, "the pan is a pan, not a pirouette: {:.2}", hi - lo);
+        // The door pause itself happened (the walker waited for the part).
+        assert!(sim.opened.contains(&0), "the door was asked for and opened");
     }
 
     #[test]
@@ -2734,6 +2686,75 @@ mod tests {
     }
 
     #[test]
+    fn player_committed_to_a_staircase_climbs_it_to_the_top() {
+        // A stair flight up to a high room, with a tempting flat side room
+        // off the start. Once the first tread is taken the whole flight is
+        // climbed — no mid-stair reversal, no goal change on the stairs.
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        floor(&mut p, &mut i, -3.0, 3.0, 0.0, 6.0, 0.0); // A
+        floor(&mut p, &mut i, 3.0, 9.0, 0.0, 6.0, 0.0); // side room S
+        for k in 0..8 {
+            let z1 = -(k as f32) * 0.5;
+            floor(&mut p, &mut i, -1.0, 1.0, z1 - 0.5, z1, 0.25 * (k + 1) as f32);
+        }
+        floor(&mut p, &mut i, -3.0, 3.0, -10.0, -4.0, 2.0); // upper room U
+        floor(&mut p, &mut i, -3.0, 9.0, -10.0, 6.0, 4.5); // ceiling
+        // A + S shell.
+        wall_x(&mut p, &mut i, 0.0, 6.0, -3.0, 0.0, 4.5);
+        wall_x(&mut p, &mut i, 0.0, 6.0, 9.0, 0.0, 4.5);
+        wall_z(&mut p, &mut i, -3.0, 9.0, 6.0, 0.0, 4.5);
+        wall_z(&mut p, &mut i, 3.0, 9.0, 0.0, 0.0, 4.5);
+        // Doorway between A and S.
+        wall_x(&mut p, &mut i, 0.0, 2.5, 3.0, 0.0, 4.5);
+        wall_x(&mut p, &mut i, 3.5, 6.0, 3.0, 0.0, 4.5);
+        // A's south wall, stair mouth open at x -1..1.
+        wall_z(&mut p, &mut i, -3.0, -1.0, 0.0, 0.0, 4.5);
+        wall_z(&mut p, &mut i, 1.0, 3.0, 0.0, 0.0, 4.5);
+        // Stair flanks and U shell.
+        wall_x(&mut p, &mut i, -4.0, 0.0, -1.0, 0.0, 4.5);
+        wall_x(&mut p, &mut i, -4.0, 0.0, 1.0, 0.0, 4.5);
+        wall_z(&mut p, &mut i, -3.0, -1.0, -4.0, 0.0, 4.5);
+        wall_z(&mut p, &mut i, 1.0, 3.0, -4.0, 0.0, 4.5);
+        wall_x(&mut p, &mut i, -10.0, -4.0, -3.0, 0.0, 4.5);
+        wall_x(&mut p, &mut i, -10.0, -4.0, 3.0, 0.0, 4.5);
+        wall_z(&mut p, &mut i, -3.0, 3.0, -10.0, 0.0, 4.5);
+        let level = LevelCollision::from_positions(p, i);
+        let anchors = [NavAnchor {
+            name: "player_start".into(),
+            pos: vec3f(0.0, 0.6, 4.5),
+            yaw: 0.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+        }];
+        let mut sim = Sim::new(level, &anchors, 7);
+        sim.run(60.0);
+        let start_climb = sim
+            .feet
+            .iter()
+            .position(|p| p.y > 0.3)
+            .expect("took the stairs at all");
+        let top = sim.feet[start_climb..]
+            .iter()
+            .position(|p| p.y >= 1.95)
+            .map(|k| k + start_climb)
+            .expect("reached the top of the flight");
+        let mut running_max = 0.0f32;
+        for p in &sim.feet[start_climb..top] {
+            running_max = running_max.max(p.y);
+            assert!(
+                p.y >= running_max - 0.06,
+                "reversed mid-staircase at y={:.2} after reaching {:.2}",
+                p.y,
+                running_max
+            );
+        }
+        // And the flat side room still gets its visit afterwards.
+        assert!(
+            sim.feet.iter().any(|p| p.x > 4.0 && p.y < 0.1),
+            "the side room was never toured"
+        );
+    }
+
+    #[test]
     fn player_prefers_the_staircase_over_the_flat_detour() {
         // Room A with two symmetric exits: a raised room up a short stair
         // to the right, a flat room to the left. A player takes the stairs.
@@ -2805,11 +2826,12 @@ mod tests {
         if std::env::var_os("DBG").is_some() {
             println!("chain moments: {:?}", sim.moments);
         }
+        let _ = restart_t;
         let (mut min_z, mut worst_regress) = (f32::MAX, 0.0f32);
         for (k, p) in sim.feet.iter().enumerate() {
-            // Feet index k lands at t=(k+1)/60 (the restart's teleported
-            // frame must not read as a "turn-around").
-            if ((k + 1) as f32 / 60.0) >= restart_t {
+            // Measure up to the restart CUT itself (a teleported frame is
+            // not a turn-around); the cut is the first frame jump.
+            if k > 0 && horiz(sim.feet[k - 1], *p) > 1.0 {
                 break;
             }
             min_z = min_z.min(p.z);
