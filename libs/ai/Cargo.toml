@@ -17,6 +17,7 @@ members = [
     "models/vision",
     "models/rig",
     "models/motion",
+    "models/rife",
     "models/sfx",
     "models/music",
     "models/speech",
