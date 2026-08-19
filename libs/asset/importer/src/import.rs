@@ -1085,12 +1085,7 @@ fn import_item(
     // attached files re-checks the published manifest below before it skips,
     // which is what lets maps/bakes that landed later still reach it.
     let published_head = match client.resolve_alias(&alias) {
-        Ok(resolved) if resolved.asset_id == asset_id => {
-            if attached.is_empty() {
-                return ItemOutcome::AlreadyPublished;
-            }
-            Some(resolved.head_revision)
-        }
+        Ok(resolved) if resolved.asset_id == asset_id => Some(resolved.head_revision),
         Ok(_) => None,
         Err(ClientError::NotFound { .. }) => None,
         Err(error) => return ItemOutcome::Failed(format!("alias probe: {error}")),
@@ -1119,11 +1114,13 @@ fn import_item(
         Ok(publication) => publication,
         Err(error) => return ItemOutcome::Failed(error),
     };
-    // Already published AND already carrying every attached file: nothing to
-    // do. A head that predates a map (or a bake sidecar) falls through and
-    // re-publishes the SAME asset id with the complete file set.
-    if let (Some(head), Publication::Bundle(bundle)) = (&published_head, &publication) {
-        if bundle_already_published(client, head, bundle) {
+    // Already published AND already carrying every attached file AND the
+    // same thumbnail: nothing to do. A head that predates a map, a bake
+    // sidecar or — the common one — the icon the app renders a moment after
+    // the payload lands falls through and re-publishes the SAME asset id
+    // with the complete file set and the real picture.
+    if let Some(head) = &published_head {
+        if head_matches(client, head, &publication) {
             return ItemOutcome::AlreadyPublished;
         }
     }
@@ -1148,23 +1145,49 @@ fn import_item(
 /// Does the published head already carry every file of this bundle, byte for
 /// byte? Blob identities are compared (not just slots), so a re-baked map is
 /// a real difference and lands as a new revision of the same asset.
-fn bundle_already_published(
+/// Is the published head byte-for-byte what this pass would publish — every
+/// typed file AND the thumbnail?
+///
+/// The thumbnail is part of the answer because it arrives LATE: the app
+/// lands a payload, the watcher publishes it, and only then does the GPU
+/// finish rendering the icon into `<file>.thumb`. Comparing files alone
+/// would leave the catalog showing a placeholder for the rest of the asset's
+/// life; comparing blobs means the re-publish happens exactly once, when the
+/// picture actually changed.
+fn head_matches(
     client: &mut AssetClient,
     head: &AssetRevisionId,
-    bundle: &PublishBundle,
+    publication: &Publication,
 ) -> bool {
     let Ok(manifest) = client.fetch_asset_manifest(head) else {
         return false;
     };
-    bundle.files.iter().all(|file| {
-        let blob = BlobId::hash_of(&file.bytes);
-        manifest.files.iter().any(|published| {
-            published.role == file.role
-                && published.tier == file.tier
-                && published.lod == file.lod
-                && published.blob == blob
-        })
-    })
+    let thumbnail = match publication {
+        Publication::Single(request) => &request.thumbnail,
+        Publication::Bundle(bundle) => &bundle.thumbnail,
+    };
+    let same_thumbnail = manifest
+        .thumbnail
+        .as_ref()
+        .is_some_and(|published| published.blob == BlobId::hash_of(&thumbnail.bytes));
+    if !same_thumbnail {
+        return false;
+    }
+    match publication {
+        // A single-file row is identified by its payload digest (that is
+        // where `asset_id` comes from), so the alias resolving to this asset
+        // already proves the artifact matches.
+        Publication::Single(_) => true,
+        Publication::Bundle(bundle) => bundle.files.iter().all(|file| {
+            let blob = BlobId::hash_of(&file.bytes);
+            manifest.files.iter().any(|published| {
+                published.role == file.role
+                    && published.tier == file.tier
+                    && published.lod == file.lod
+                    && published.blob == blob
+            })
+        }),
+    }
 }
 
 /// One typed file a mesh row carries, located but not yet read.
@@ -2193,6 +2216,99 @@ mod tests {
         assert!(rerun.published.is_empty(), "{:?}", rerun.published);
         assert_eq!(rerun.skipped_existing.len(), 2);
         let _ = std::fs::remove_dir_all(library);
+    }
+
+    /// The icon the app renders lands AFTER the payload was published: the
+    /// artifact is written, the watcher publishes it, and the GPU finishes
+    /// `<file>.thumb` a moment later. That icon has to reach the catalog,
+    /// because it is the picture every view of the asset shows.
+    #[test]
+    fn an_icon_rendered_after_publication_becomes_the_catalog_thumbnail() {
+        use makepad_asset_client::{ApiEndpoints, ClientConfig};
+        use makepad_asset_store::{AssetServer, ServerConfig};
+
+        let root = test_root("late-icon-server");
+        let mut config = ServerConfig::new(root.clone());
+        config.control_addr = "127.0.0.1:0".parse().unwrap();
+        config.data_addr = "127.0.0.1:0".parse().unwrap();
+        config.bootstrap_admin = true;
+        config.log = false;
+        let server = AssetServer::start(config).expect("isolated Asset Server");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        let mut client_config = ClientConfig::new(test_root("late-icon-cache"));
+        client_config.token = Some(token);
+        let mut client = AssetClient::connect(
+            client_config,
+            ApiEndpoints { control: server.control_addr(), data: server.data_addr() },
+            Some(server.server_id()),
+        )
+        .expect("connect");
+
+        let library = test_root("late-icon-library");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(library.join("lib-1.ply"), ascii_splat_ply(5)).unwrap();
+        std::fs::write(
+            library.join("index.json"),
+            br#"{"items":[
+                {"file":"lib-1.ply","label":"late stump","domain":"splat",
+                 "content_type":"application/x-ply","prompt":"a stump",
+                 "group_id":"run-41","tags":["generated"],"product":true}
+            ],"next_id":2}"#,
+        )
+        .unwrap();
+        let rights = PublishRights::declared(
+            "CC0-1.0",
+            "",
+            "",
+            makepad_asset_data::Redistribution::Allowed,
+            makepad_asset_data::DerivativePolicy::Allowed,
+        );
+
+        // First pass: no icon on disk yet, so the asset publishes with the
+        // honest placeholder the builder falls back to.
+        let first = import_library(&mut client, &library, "gen", &rights, false).unwrap();
+        assert_eq!(first.published.len(), 1, "{first:?}");
+        let alias = derived_alias(
+            &read_index(&library).unwrap()[0],
+            &std::fs::read(library.join("lib-1.ply")).unwrap(),
+            "gen",
+        )
+        .unwrap();
+        let placeholder = client
+            .fetch_asset_manifest(&client.resolve_alias(&alias).unwrap().head_revision)
+            .unwrap()
+            .thumbnail
+            .expect("a thumbnail is mandatory")
+            .blob;
+
+        // Nothing changed: the row is skipped, not republished.
+        let idle = import_library(&mut client, &library, "gen", &rights, false).unwrap();
+        assert!(idle.published.is_empty(), "{idle:?}");
+        assert_eq!(idle.skipped_existing.len(), 1);
+
+        // The GPU finishes the icon.
+        let icon = png_512(77);
+        std::fs::write(library.join("lib-1.ply.thumb"), &icon).unwrap();
+        let second = import_library(&mut client, &library, "gen", &rights, false).unwrap();
+        assert_eq!(second.published.len(), 1, "the icon republishes the row");
+        let head = client.resolve_alias(&alias).unwrap().head_revision;
+        let manifest = client.fetch_asset_manifest(&head).unwrap();
+        let published = manifest.thumbnail.expect("thumbnail").blob;
+        assert_eq!(
+            published,
+            makepad_asset_data::BlobId::hash_of(&icon),
+            "the catalog shows the icon the app rendered"
+        );
+        assert_ne!(published, placeholder, "and not the placeholder any more");
+
+        // Settled again: the same icon is not a reason to republish.
+        let third = import_library(&mut client, &library, "gen", &rights, false).unwrap();
+        assert!(third.published.is_empty(), "{third:?}");
+        let _ = std::fs::remove_dir_all(&library);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A single-triangle GLB with real measured topology, so the content
