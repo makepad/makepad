@@ -21,6 +21,7 @@ default = [
     "tts",
     "indextts",
     "video",
+    "interpolate",
     "audio",
     "mesh",
     "matte-native",
@@ -53,6 +54,12 @@ indextts = ["dep:makepad-ai-speech", "dep:makepad-ai-common"]
 # Real MiniMax H3 video generation via makepad-ai-h3 plus the hardware
 # video file encoder (makepad-video). Does NOT pull the UI platform crate.
 video = ["dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-video"]
+# Native Practical-RIFE v4.26 frame interpolation as an optional post-stage
+# of the video backend (`interpolate: 2|4`). Independent of `video`: the
+# stage sits after the generator, so the stubbed CI video path exercises it
+# too. Weights ride along with each H3 tier through the "interpolate" file
+# role, so the domain never grows a second selectable model.
+interpolate = ["dep:makepad-ai-rife", "dep:makepad-ai-common"]
 # Real SA3 / MOSS / Woosh / ACE / Music3 audio via the sfx + music crates.
 audio = ["dep:makepad-ai-sfx", "dep:makepad-ai-music", "dep:makepad-ai-common"]
 # Real TRELLIS.2 image->GLB via makepad-ai-trellis plus the in-repo remesher.
@@ -84,6 +91,7 @@ makepad-zip-file = { path = "../../zip_file" }
 makepad-ai-common = { path = "../../ai/models/common", optional = true }
 makepad-ai-flux = { path = "../../ai/models/flux", optional = true }
 makepad-ai-h3 = { path = "../../ai/models/h3", optional = true }
+makepad-ai-rife = { path = "../../ai/models/rife", optional = true }
 makepad-ai-vision = { path = "../../ai/models/vision", optional = true }
 makepad-ai-rig = { path = "../../ai/models/rig", optional = true }
 makepad-ai-motion = { path = "../../ai/models/motion", optional = true }

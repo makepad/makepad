@@ -56,6 +56,10 @@ pub struct GenerateParams {
     /// mux, producing a silent mp4 — the joint DiT still denoises the audio
     /// rows (no upstream mode drops them from the packed sequence).
     pub audio: Option<bool>,
+    /// Frame-rate multiplier for the RIFE interpolation post-stage: `None`
+    /// or `Some(1)` = off, `Some(2)` = 24 -> 48 fps, `Some(4)` = 24 -> 96
+    /// fps. Same clip duration, same audio; only the frame cadence changes.
+    pub interpolate: Option<u32>,
 
     // Text domain (llm backend).
     /// Domain the expanded prompt targets: "image" | "video" | "mesh".
@@ -278,6 +282,15 @@ impl GenerateParams {
             frames: request.frames.map(|v| v.clamp(1, 1024)),
             codec: request.codec.clone().unwrap_or_default(),
             audio: request.audio,
+            interpolate: match request.interpolate {
+                None | Some(1) => None,
+                Some(factor @ (2 | 4)) => Some(factor),
+                Some(other) => {
+                    return Err(AssetAiError::Params(format!(
+                        "interpolate: expected 1 (off), 2 or 4, got {other}"
+                    )))
+                }
+            },
 
             target_domain,
             identity_anchor: request.identity_anchor.clone().unwrap_or_default(),

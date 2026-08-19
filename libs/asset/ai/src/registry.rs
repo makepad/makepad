@@ -987,8 +987,13 @@ mod tests {
         assert_eq!(h3.domain, Domain::Video);
         assert_eq!(h3.backend, "h3");
         assert!(h3.available);
-        assert_eq!(h3.files.len(), 61);
-        assert!(h3.files.iter().all(|f| f.repo == "MiniMaxAI/MiniMax-H3"));
+        // 61 upstream MiniMax files + the shared RIFE flownet.
+        assert_eq!(h3.files.len(), 62);
+        assert!(h3
+            .files
+            .iter()
+            .filter(|f| f.role.as_deref() != Some("interpolate"))
+            .all(|f| f.repo == "MiniMaxAI/MiniMax-H3"));
         // The dir anchor the backend resolves the model root from.
         assert!(h3
             .files
@@ -1027,7 +1032,7 @@ mod tests {
         assert_eq!(q4.vram_gb, Some(20.0));
         assert_eq!(q4.min_vram_gb, Some(22.0));
         assert_eq!(q4.min_compute_cap, Some(8.9));
-        assert_eq!(q4.files.len(), 6);
+        assert_eq!(q4.files.len(), 7);
         for file in &q4.files {
             assert!(
                 file.role.is_some()
@@ -1037,7 +1042,13 @@ mod tests {
                 "q4 tier file {} must be fully pinned",
                 file.cache_as
             );
-            assert!(file.cache_as.starts_with("video/MiniMax-H3-tiers/"), "{}", file.cache_as);
+            // The RIFE flownet is shared by every tier, so it lives outside
+            // the tier root (one on-disk copy for the whole video domain).
+            let expected_root = match file.role.as_deref() {
+                Some("interpolate") => "video/rife/",
+                _ => "video/MiniMax-H3-tiers/",
+            };
+            assert!(file.cache_as.starts_with(expected_root), "{}", file.cache_as);
         }
         let dit = q4.file_by_role("dit-gguf").unwrap();
         assert_eq!(dit.repo, "unsloth/MiniMax-H3-GGUF");
@@ -1053,7 +1064,7 @@ mod tests {
         assert_eq!(nv4.vram_gb, Some(28.0));
         assert_eq!(nv4.min_vram_gb, Some(30.0));
         assert_eq!(nv4.min_compute_cap, Some(12.0));
-        assert_eq!(nv4.files.len(), 6);
+        assert_eq!(nv4.files.len(), 7);
         let nv_dit = nv4.file_by_role("dit-nvfp4").unwrap();
         assert_eq!(nv_dit.repo, "Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot");
         assert_eq!(nv_dit.size, Some(12_528_636_865));
@@ -1084,6 +1095,39 @@ mod tests {
         // The legacy id keeps its no-gate behavior (running boxes/apps).
         assert_eq!(h3.min_vram_gb, None);
         assert_eq!(h3.min_compute_cap, None);
+
+        // The RIFE v4.26 flownet is an AUXILIARY FILE of every video tier,
+        // never a model of its own: the domain must keep exactly one
+        // selectable generator per tier, so nothing may register it as an
+        // entry the UI model list can pick.
+        assert!(registry.find("rife").is_none());
+        assert!(registry.models.iter().all(|model| !model.id.contains("rife")));
+        let mut interpolate_files = Vec::new();
+        for tier in [&h3, &q4, &nv4, &bf16] {
+            let file = tier
+                .file_by_role("interpolate")
+                .unwrap_or_else(|| panic!("{} carries no interpolate role", tier.id));
+            assert_eq!(file.repo, "Comfy-Org/frame_interpolation");
+            assert_eq!(file.path, "frame_interpolation/rife_v4.26.safetensors");
+            assert_eq!(
+                file.revision.as_deref(),
+                Some("9bca6366a22473ccee25602fa82b224d78413960")
+            );
+            assert_eq!(file.cache_as, "video/rife/rife_v4.26.safetensors");
+            assert_eq!(file.size, Some(22_674_688));
+            assert_eq!(
+                file.sha256.as_deref(),
+                Some("151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94")
+            );
+            assert!(!file.local);
+            interpolate_files.push(file);
+        }
+        // One identity, so one on-disk copy no matter how many tiers a box
+        // pulls.
+        for file in &interpolate_files {
+            assert_eq!(file.cache_as, interpolate_files[0].cache_as);
+            assert_eq!(file.sha256, interpolate_files[0].sha256);
+        }
 
         // Audio domain #3: Woosh ships as GitHub release zips — absolute
         // URLs in `path` (the downloader uses them verbatim), each zip

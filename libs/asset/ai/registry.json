@@ -854,7 +854,7 @@
    "available": true,
    "gated": false,
    "vram_gb": 74.0,
-   "note": "MiniMax H3 t2va (video+audio) on the in-repo makepad-ggml CUDA port: 33B DiT + Qwen3-VL-32B TE + video/audio VAEs, f32 activation spine (validated config - H3 activations overflow f16), weights stream disk->device. vram_gb is the MEASURED cold-card peak (74.3 GB at 640x384x22f on RTX PRO 6000, 2026-08-18: TE streams to ~46 GB and releases BEFORE DiT+VAE climb to peak - stages never overlap; the old 90 assumed they did). Full-ladder large clips belong on minimax-h3-bf16-96g which keeps the hard 90 floor. Full bf16 set needs a 96GB-class card (RTX 6000 Blackwell verified; beats the diffusers reference at 640x352 and 864x480). Consumer tiers run the Q4_K_M GGUF stack instead (future backend variant): 24GB caps at 864x480x124 full-Q4 / 960x544x124 pruned-Q4, 32GB runs all canvases up to 1344x768x124; 64GB host RAM required for Q4 offload. Output: HEVC (or H264) mp4, 24 fps, stereo AAC 48kHz from the 32kHz audio VAE.",
+   "note": "MiniMax H3 t2va (video+audio) on the in-repo makepad-ggml CUDA port: 33B DiT + Qwen3-VL-32B TE + video/audio VAEs, f32 activation spine (validated config - H3 activations overflow f16), weights stream disk->device. vram_gb is the MEASURED cold-card peak (74.3 GB at 640x384x22f on RTX PRO 6000, 2026-08-18: TE streams to ~46 GB and releases BEFORE DiT+VAE climb to peak - stages never overlap; the old 90 assumed they did). Full-ladder large clips belong on minimax-h3-bf16-96g which keeps the hard 90 floor. Full bf16 set needs a 96GB-class card (RTX 6000 Blackwell verified; beats the diffusers reference at 640x352 and 864x480). Consumer tiers run the Q4_K_M GGUF stack instead (future backend variant): 24GB caps at 864x480x124 full-Q4 / 960x544x124 pruned-Q4, 32GB runs all canvases up to 1344x768x124; 64GB host RAM required for Q4 offload. Output: HEVC (or H264) mp4, 24 fps, stereo AAC 48kHz from the 32kHz audio VAE. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "repo": "MiniMaxAI/MiniMax-H3",
@@ -1282,6 +1282,15 @@
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
      "sha256": null
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   },
@@ -2152,7 +2161,7 @@
    "vram_gb": 20.0,
    "min_vram_gb": 22.0,
    "min_compute_cap": 8.9,
-   "note": "MiniMax H3 fl2va (t2v + first-frame i2v, video+stereo audio) NATIVE QUANTIZED 24GB tier: unsloth pruned Q4_K GGUF DiT (AdaLN rank-8 curve table, 11.4GB) + Q4_K_M Qwen3-VL TE (18.2GB), fp16 video VAE + fp32 audio VAE repacks. Runs on the in-repo CUDA stack (GGUF blocks resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine) with STAGED component residency: TE -> DiT -> video VAE load/unload sequentially so 24GB-class cards (RTX 4090, sm89+) really fit. Measured ceiling 960x544x124f (pruned ladder 2026-08-12); larger canvases are refused. Same MiniMax H3 Community License as the bf16 tree.",
+   "note": "MiniMax H3 fl2va (t2v + first-frame i2v, video+stereo audio) NATIVE QUANTIZED 24GB tier: unsloth pruned Q4_K GGUF DiT (AdaLN rank-8 curve table, 11.4GB) + Q4_K_M Qwen3-VL TE (18.2GB), fp16 video VAE + fp32 audio VAE repacks. Runs on the in-repo CUDA stack (GGUF blocks resident on device, bulk-dequant to bf16 scratch per gemm, f32-accumulate spine) with STAGED component residency: TE -> DiT -> video VAE load/unload sequentially so 24GB-class cards (RTX 4090, sm89+) really fit. Measured ceiling 960x544x124f (pruned ladder 2026-08-12); larger canvases are refused. Same MiniMax H3 Community License as the bf16 tree. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "role": "dit-gguf",
@@ -2207,6 +2216,15 @@
      "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
      "size": 7032403,
      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   },
@@ -2219,7 +2237,7 @@
    "vram_gb": 28.0,
    "min_vram_gb": 30.0,
    "min_compute_cap": 12.0,
-   "note": "MiniMax H3 fl2va NATIVE QUANTIZED Blackwell 32GB tier: Abiray pruned NVFP4 DiT (12.5GB, AdaLN curve) + NVFP4-AWQ Qwen3-VL TE (15.7GB), ComfyUI/TensorRT-ModelOpt layout (E2M1 nibbles + E4M3 block scales + f32 tensor scale, AWQ pre-scales folded per input column). Requires compute capability 12.0 (RTX 5090 / RTX PRO 6000, sm120a) \u2014 fails closed elsewhere. Staged component residency; v1 compute path is dequant-to-bf16 scratch + f32-accumulate gemms (numerics-safe; Blackwell FP4 MMA is a later perf lever). Measured full-ladder ceiling 1344x768x124f on 32GB. Shares VAE/tokenizer files with the q4-24g tier.",
+   "note": "MiniMax H3 fl2va NATIVE QUANTIZED Blackwell 32GB tier: Abiray pruned NVFP4 DiT (12.5GB, AdaLN curve) + NVFP4-AWQ Qwen3-VL TE (15.7GB), ComfyUI/TensorRT-ModelOpt layout (E2M1 nibbles + E4M3 block scales + f32 tensor scale, AWQ pre-scales folded per input column). Requires compute capability 12.0 (RTX 5090 / RTX PRO 6000, sm120a) \u2014 fails closed elsewhere. Staged component residency; v1 compute path is dequant-to-bf16 scratch + f32-accumulate gemms (numerics-safe; Blackwell FP4 MMA is a later perf lever). Measured full-ladder ceiling 1344x768x124f on 32GB. Shares VAE/tokenizer files with the q4-24g tier. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "role": "dit-nvfp4",
@@ -2274,6 +2292,15 @@
      "cache_as": "video/MiniMax-H3-tiers/tokenizer/tokenizer.json",
      "size": 7032403,
      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   },
@@ -2286,7 +2313,7 @@
    "vram_gb": 90.0,
    "min_vram_gb": 90.0,
    "min_compute_cap": 8.9,
-   "note": "MiniMax H3 fl2va CANONICAL BF16 tier (96GB class, RTX PRO 6000 verified) \u2014 the same file set and cache paths as the legacy 'minimax-h3' id (which stays as an alias), plus the hard fail-closed VRAM gate. Full quality reference: f32 activation spine, DiT+VAE stay warm across jobs, TE re-streams per prompt. The file identities are intentionally NOT pinned: seeded/junctioned boxes carry no verification receipts, and pinning would force a 134GB re-download.",
+   "note": "MiniMax H3 fl2va CANONICAL BF16 tier (96GB class, RTX PRO 6000 verified) \u2014 the same file set and cache paths as the legacy 'minimax-h3' id (which stays as an alias), plus the hard fail-closed VRAM gate. Full quality reference: f32 activation spine, DiT+VAE stay warm across jobs, TE re-streams per prompt. The file identities are intentionally NOT pinned: seeded/junctioned boxes carry no verification receipts, and pinning would force a 134GB re-download. Optional post-stage: interpolate=2 or 4 runs the native Practical-RIFE v4.26 flownet (pinned Comfy-Org safetensors repack, MIT, carried by the 'interpolate' file role) over the decoded frames, muxing at 48/96 fps for the same clip duration and unchanged audio.",
    "files": [
     {
      "repo": "MiniMaxAI/MiniMax-H3",
@@ -2714,6 +2741,15 @@
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
      "sha256": null
+    },
+    {
+     "role": "interpolate",
+     "repo": "Comfy-Org/frame_interpolation",
+     "path": "frame_interpolation/rife_v4.26.safetensors",
+     "revision": "9bca6366a22473ccee25602fa82b224d78413960",
+     "cache_as": "video/rife/rife_v4.26.safetensors",
+     "size": 22674688,
+     "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94"
     }
    ]
   }

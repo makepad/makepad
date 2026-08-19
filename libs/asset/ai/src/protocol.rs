@@ -256,6 +256,12 @@ pub struct GenerateRequestJson {
     /// skip both: silent mp4, no audio track (saves the audio VAE decode
     /// and the AAC mux work, not the joint denoise itself).
     pub audio: Option<bool>,
+    /// Frame-rate multiplier for the optional RIFE interpolation post-stage:
+    /// `2` doubles the frame count (24 -> 48 fps), `4` quadruples it
+    /// (24 -> 96 fps). Absent or `1` = off. The clip's DURATION is
+    /// unchanged — only the frame cadence gets denser; the audio track is
+    /// untouched. Any other value is refused.
+    pub interpolate: Option<u32>,
     /// Test hook honored by the testpattern backend only: sleep this long
     /// during generation so queue/reject behavior can be exercised.
     pub delay_ms: Option<u64>,

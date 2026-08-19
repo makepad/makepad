@@ -602,6 +602,7 @@ mod tests {
             frames: None,
             codec: String::new(),
             audio: None,
+            interpolate: None,
             target_domain: "image".to_string(),
             identity_anchor: String::new(),
             style: String::new(),
