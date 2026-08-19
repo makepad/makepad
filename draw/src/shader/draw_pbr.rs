@@ -1538,6 +1538,12 @@ impl DrawPbr {
         }
     }
 
+    /// Drop a host-installed equirect environment so the next
+    /// [`Self::default_env_texture`] rebuilds the procedural sky.
+    pub fn reset_default_env(&mut self) {
+        self.default_env_texture = None;
+    }
+
     pub fn default_env_texture(&mut self, cx: &mut CxDraw) -> Texture {
         if let Some(texture) = self.default_env_texture.clone() {
             return texture;

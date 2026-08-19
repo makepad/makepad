@@ -62,7 +62,17 @@ pub struct PbrDisplayControls {
     /// is what makes metal read as metal, so it has its own control.
     pub env_intensity: f32,
     pub exposure: f32,
+    /// The viewer's Dark (night) stage: the same dim-sun / dim-ambient
+    /// ratios the game stage applies (`preview_world` dark sun 0.05 vs the
+    /// 0.72 day sun, ambient 0.035 vs 0.28), so the hero darkens with the
+    /// sky and slab instead of staying studio-lit over a night scene.
+    pub night: bool,
 }
+
+/// Night multipliers relative to the day rig (game-stage dark ratios).
+pub const NIGHT_KEY_FACTOR: f32 = 0.07;
+pub const NIGHT_AMBIENT_FACTOR: f32 = 0.125;
+pub const NIGHT_ENV_FACTOR: f32 = 0.10;
 
 impl Default for PbrDisplayControls {
     fn default() -> Self {
@@ -73,6 +83,7 @@ impl Default for PbrDisplayControls {
             ambient: 0.42,
             env_intensity: 1.2,
             exposure: 1.15,
+            night: false,
         }
     }
 }
@@ -95,11 +106,16 @@ impl PbrDisplayControls {
             DEFAULT_LIGHT_DIR
         };
         let exposure = self.exposure.max(0.0);
+        let (key, ambient, env) = if self.night {
+            (NIGHT_KEY_FACTOR, NIGHT_AMBIENT_FACTOR, NIGHT_ENV_FACTOR)
+        } else {
+            (1.0, 1.0, 1.0)
+        };
         ResolvedLightRig {
             light_dir,
-            light_color: self.light_color * (self.light_intensity.max(0.0) * exposure),
-            ambient: self.ambient.max(0.0) * exposure,
-            env_intensity: self.env_intensity.max(0.0) * exposure,
+            light_color: self.light_color * (self.light_intensity.max(0.0) * exposure * key),
+            ambient: self.ambient.max(0.0) * exposure * ambient,
+            env_intensity: self.env_intensity.max(0.0) * exposure * env,
         }
     }
 }
@@ -296,11 +312,23 @@ pub struct PbrPreview {
     renderer: Option<GltfRenderer>,
     fit: Option<Mat4f>,
     bounds: Option<(Vec3f, Vec3f)>,
+    /// Fitted model height (feet at y=0), the tilt pivot for the turntable.
+    fit_height: f32,
+    /// Turntable: the model spins about +Y (feet stay grounded) and tilts
+    /// about `tilt_axis` through its mid-height, while camera, key light
+    /// and environment stay put — the way you judge speculars: turn the
+    /// object under a fixed studio, not the studio around the object.
+    pub turntable_yaw: f32,
+    pub turntable_tilt: f32,
+    pub tilt_axis: Vec3f,
     pub controls: PbrDisplayControls,
     pub status: Option<PbrStatus>,
     /// Host-supplied equirect environment, applied at the next draw (env
     /// cube building needs a CxDraw). Survives model reloads on purpose.
     pending_env: Option<Vec<u8>>,
+    /// Drop the custom environment at the next draw (back to the
+    /// procedural sky).
+    pending_env_reset: bool,
     custom_env: bool,
 }
 
@@ -361,6 +389,7 @@ impl PbrPreview {
             custom_env: self.custom_env,
         });
         self.bounds = Some((min, max));
+        self.fit_height = (max.y - min.y) * _scale;
         self.fit = Some(fit);
         self.renderer = Some(renderer);
         Ok(())
@@ -409,6 +438,13 @@ impl PbrPreview {
     #[allow(dead_code)]
     pub fn set_env_equirect(&mut self, bytes: Vec<u8>) {
         self.pending_env = Some(bytes);
+        self.pending_env_reset = false;
+    }
+
+    /// Back to DrawPbr's procedural sky environment at the next draw.
+    pub fn clear_env(&mut self) {
+        self.pending_env = None;
+        self.pending_env_reset = true;
     }
 
     /// Light/exposure/environment keys for the focused pane. Returns false
@@ -473,6 +509,13 @@ impl PbrPreview {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        if std::mem::take(&mut self.pending_env_reset) {
+            draw.reset_default_env();
+            self.custom_env = false;
+            if let Some(status) = &mut self.status {
+                status.custom_env = false;
+            }
+        }
         if let Some(bytes) = self.pending_env.take() {
             match draw.load_default_env_equirect_from_bytes(cx, &bytes, None) {
                 Ok(()) => {
@@ -493,15 +536,172 @@ impl PbrPreview {
         let Some(fit) = self.fit else {
             return;
         };
-        if let Err(e) = renderer.draw_with_transform(draw, cx, fit) {
+        let world = turntable_transform(
+            fit,
+            self.fit_height,
+            self.turntable_yaw,
+            self.turntable_tilt,
+            self.tilt_axis,
+        );
+        if let Err(e) = renderer.draw_with_transform(draw, cx, world) {
             log!("mesh_view pbr: draw failed: {e}");
         }
     }
 }
 
+/// `fit` followed by a spin about +Y (feet stay on the slab) and a tilt
+/// about `tilt_axis` through the model's mid-height.
+pub(crate) fn turntable_transform(
+    fit: Mat4f,
+    fit_height: f32,
+    yaw: f32,
+    tilt: f32,
+    tilt_axis: Vec3f,
+) -> Mat4f {
+    if yaw == 0.0 && tilt == 0.0 {
+        return fit;
+    }
+    let spin = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
+    let mut world = Mat4f::mul(&spin, &fit);
+    if tilt != 0.0 && tilt_axis.length() > 1.0e-6 {
+        let pivot = vec3f(0.0, fit_height.max(0.0) * 0.5, 0.0);
+        let rot = Pose {
+            orientation: Quat::from_axis_angle(tilt_axis.normalize(), tilt),
+            position: vec3f(0.0, 0.0, 0.0),
+        }
+        .to_mat4();
+        let about_pivot = Mat4f::mul(
+            &Mat4f::translation(pivot),
+            &Mat4f::mul(&rot, &Mat4f::translation(pivot * -1.0)),
+        );
+        world = Mat4f::mul(&about_pivot, &world);
+    }
+    world
+}
+
+/// Studio product-shot rig: a strong warm-white key from upper camera-left,
+/// a little less fill, and the reflections doing the talking. Pair with
+/// [`studio_equirect_png`].
+pub const STUDIO_LIGHT_DIR: Vec3f = Vec3f { x: -0.55, y: 0.75, z: 0.55 };
+pub const STUDIO_LIGHT_INTENSITY: f32 = 1.35;
+pub const STUDIO_AMBIENT: f32 = 0.30;
+pub const STUDIO_ENV_INTENSITY: f32 = 1.9;
+
+impl PbrDisplayControls {
+    /// The day-studio rig (see [`STUDIO_LIGHT_DIR`]).
+    pub fn studio() -> Self {
+        Self {
+            light_dir: STUDIO_LIGHT_DIR,
+            light_color: vec3(1.0, 0.98, 0.94),
+            light_intensity: STUDIO_LIGHT_INTENSITY,
+            ambient: STUDIO_AMBIENT,
+            env_intensity: STUDIO_ENV_INTENSITY,
+            ..Self::default()
+        }
+    }
+}
+
+/// Procedural studio environment as an equirect PNG (`W×H`, lon→u with
+/// +X at u=0.5 and +Z at u=0.75, +Y at the top): a neutral grey cyclorama
+/// with a large soft key box, a smaller fill box, a thin rim strip and a
+/// dark floor. Metallic and glossy surfaces read from the sharp bright
+/// boxes; the procedural sky gradient gave them nothing to reflect.
+pub fn studio_equirect_png() -> Vec<u8> {
+    const W: usize = 512;
+    const H: usize = 256;
+    let mut rgba = vec![0u8; W * H * 4];
+    let softbox = |dir: Vec3f, center: Vec3f, half_w: f32, half_h: f32, up: Vec3f| -> f32 {
+        // Angular box: distance of `dir` from the box centre measured along
+        // the box's own right/up axes (in radians), with soft edges.
+        let c = center.normalize();
+        let right = Vec3f::cross(up, c).normalize();
+        let up = Vec3f::cross(c, right).normalize();
+        let d = dir.dot(c);
+        if d <= 0.0 {
+            return 0.0;
+        }
+        let x = dir.dot(right).atan2(d).abs();
+        let y = dir.dot(up).atan2(d).abs();
+        // Wide, smooth edges: DrawPbr samples the environment without
+        // roughness prefiltering, so a hard box edge would print as a
+        // stripe across every rough surface. Smoothstep over ~0.35 rad.
+        let soft = |d: f32| {
+            let t = 1.0 - (d / 0.35).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        soft((x - half_w).max(0.0)) * soft((y - half_h).max(0.0))
+    };
+    for y in 0..H {
+        let v = (y as f32 + 0.5) / H as f32;
+        let lat = (0.5 - v) * std::f32::consts::PI;
+        for x in 0..W {
+            let u = (x as f32 + 0.5) / W as f32;
+            let lon = (u - 0.5) * 2.0 * std::f32::consts::PI;
+            let dir = vec3(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+            // Cyclorama: mid grey walls, lighter towards the top, dark floor.
+            let up_t = (dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
+            let mut c = if dir.y < -0.15 {
+                vec3(0.05, 0.05, 0.055)
+            } else {
+                vec3(0.16, 0.165, 0.175) + vec3(0.06, 0.06, 0.06) * up_t
+            };
+            let key = softbox(dir, STUDIO_LIGHT_DIR, 0.45, 0.32, vec3(0.0, 1.0, 0.0));
+            let fill = softbox(dir, vec3(0.75, 0.25, 0.60), 0.32, 0.26, vec3(0.0, 1.0, 0.0));
+            let rim = softbox(dir, vec3(0.30, 0.55, -0.85), 0.60, 0.10, vec3(0.0, 1.0, 0.0));
+            c = c + vec3(0.92, 0.90, 0.86) * key + vec3(0.50, 0.54, 0.60) * fill + vec3(0.7, 0.7, 0.7) * rim;
+            let i = (y * W + x) * 4;
+            rgba[i] = (c.x.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i + 1] = (c.y.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i + 2] = (c.z.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[i + 3] = 255;
+        }
+    }
+    makepad_asset_ai::testpattern::encode_png_rgba(&rgba, W, H).expect("studio equirect encodes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turntable_spins_about_the_feet_and_tilts_about_mid_height() {
+        let fit = Mat4f::identity();
+        // Pure yaw: a point on the ground plane stays on it, and a quarter
+        // turn about +Y maps +X to -Z.
+        let m = turntable_transform(fit, 2.0, std::f32::consts::FRAC_PI_2, 0.0, vec3f(1.0, 0.0, 0.0));
+        let p = m.transform_vec4(vec4(1.0, 0.0, 0.0, 1.0));
+        assert!(p.y.abs() < 1e-5 && (p.z + 1.0).abs() < 1e-5, "{p:?}");
+        // Pure tilt about X through mid-height (y=1): the pivot is fixed and
+        // the top comes forward while the feet go back.
+        let m = turntable_transform(fit, 2.0, 0.0, 0.5, vec3f(1.0, 0.0, 0.0));
+        let pivot = m.transform_vec4(vec4(0.0, 1.0, 0.0, 1.0));
+        assert!((pivot.x).abs() < 1e-5 && (pivot.y - 1.0).abs() < 1e-5 && pivot.z.abs() < 1e-5);
+        let top = m.transform_vec4(vec4(0.0, 2.0, 0.0, 1.0));
+        let feet = m.transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
+        assert!((top.z + feet.z).abs() < 1e-5 && top.z.abs() > 0.4, "{top:?} {feet:?}");
+        // Identity when nothing is dialed.
+        assert_eq!(turntable_transform(fit, 2.0, 0.0, 0.0, vec3f(1.0, 0.0, 0.0)).v, fit.v);
+    }
+
+    #[test]
+    fn studio_equirect_is_a_bright_key_over_a_grey_room() {
+        let png = studio_equirect_png();
+        let image = ImageBuffer::from_png(&png).unwrap();
+        assert_eq!((image.width, image.height), (512, 256));
+        // The key box centre (upper camera-left) is near white; the floor is dark.
+        let px = |u: f32, v: f32| {
+            let x = (u * 512.0) as usize;
+            let y = (v * 256.0) as usize;
+            let p = image.data[y * 512 + x];
+            ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff)
+        };
+        let lon = STUDIO_LIGHT_DIR.z.atan2(STUDIO_LIGHT_DIR.x);
+        let lat = STUDIO_LIGHT_DIR.normalize().y.asin();
+        let (kr, _, _) = px(0.5 + lon / (2.0 * std::f32::consts::PI), 0.5 - lat / std::f32::consts::PI);
+        assert!(kr > 240, "key box centre should be near white, got {kr}");
+        let (fr, _, _) = px(0.1, 0.95);
+        assert!(fr < 40, "floor should be dark, got {fr}");
+    }
 
     #[test]
     fn resolve_applies_exposure_to_every_light_source() {
@@ -521,6 +721,21 @@ mod tests {
         assert_eq!(rig.light_color, vec3(0.0, 0.0, 0.0));
         assert_eq!(rig.ambient, 0.0);
         assert_eq!(rig.env_intensity, 0.0);
+    }
+
+    #[test]
+    fn night_dims_every_light_term_by_the_stage_ratios() {
+        let day = PbrDisplayControls::default().resolve();
+        let night = PbrDisplayControls {
+            night: true,
+            ..PbrDisplayControls::default()
+        }
+        .resolve();
+        assert_eq!(night.light_dir, day.light_dir);
+        assert!((night.light_color.x - day.light_color.x * NIGHT_KEY_FACTOR).abs() < 1e-6);
+        assert!((night.ambient - day.ambient * NIGHT_AMBIENT_FACTOR).abs() < 1e-6);
+        assert!((night.env_intensity - day.env_intensity * NIGHT_ENV_FACTOR).abs() < 1e-6);
+        assert!(night.light_color.x < 0.1 && night.ambient < 0.07);
     }
 
     #[test]
