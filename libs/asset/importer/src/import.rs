@@ -683,7 +683,7 @@ fn strip_leading_article(prompt: &str) -> &str {
 /// word separator — the result is always inside the alias charset
 /// `[a-z0-9][a-z0-9_-]*`, and may be empty when the input carries no
 /// ASCII-able character at all.
-fn alias_slug(raw: &str, budget: usize) -> String {
+pub(crate) fn alias_slug(raw: &str, budget: usize) -> String {
     if budget == 0 {
         return String::new();
     }

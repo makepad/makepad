@@ -1861,6 +1861,15 @@ impl Cx {
             .push_back(CxOsOp::SelectFolderDialog(FileDialog::new()));
     }
 
+    /// Open the platform's native folder picker, configured (title, start
+    /// location) by `dialog`. The answer arrives later as a
+    /// [`crate::file_dialogs::FileDialogAction`] in the actions pass —
+    /// `FolderSelected` with the chosen path, or `FolderCancelled`.
+    pub fn open_select_folder_dialog(&mut self, dialog: FileDialog) {
+        self.platform_ops
+            .push_back(CxOsOp::SelectFolderDialog(dialog));
+    }
+
     pub fn event_id(&self) -> u64 {
         self.event_id
     }
