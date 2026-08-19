@@ -82,7 +82,7 @@ use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
     consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
-    EDIT_STRENGTHS, VIDEO_INTERPOLATE, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
+    EDIT_STRENGTHS, LORA_STRENGTHS, VIDEO_INTERPOLATE, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
@@ -1353,6 +1353,18 @@ script_mod! {
                             visible: false
                             FieldCaption{ text: "Image steps" }
                             steps_drop := FieldDrop{}
+                        }
+                        // FLUX.1 LoRA adapters (files the boxes list via
+                        // /loras); none = pristine model.
+                        lora_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "LoRA" }
+                            lora_drop := FieldDrop{}
+                        }
+                        lora_strength_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "LoRA strength" }
+                            lora_strength_drop := FieldDrop{}
                         }
                         mesh_params_row := DropField{
                             visible: false
@@ -2958,6 +2970,9 @@ pub struct App {
     /// File loaded into the inpaint mask painter (None = mask mode off).
     #[rust]
     mask_file: Option<String>,
+    /// LoRA names behind the LoRA dropdown (index 0 = none).
+    #[rust]
+    lora_names: Vec<String>,
     /// Members of the selected run shown in the run tray, pipeline order
     /// (oldest first), one per chip slot.
     #[rust]
@@ -3155,6 +3170,11 @@ impl App {
                 .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
                 .collect(),
         );
+        self.ui.drop_down2(cx, ids!(lora_strength_drop)).set_labels(
+            cx,
+            LORA_STRENGTHS.iter().map(|s| format!("{s:.1}")).collect(),
+        );
+        self.ui.drop_down2(cx, ids!(lora_drop)).set_labels(cx, vec!["none".to_string()]);
         self.ui.drop_down2(cx, ids!(vid_interp_drop)).set_labels(
             cx,
             VIDEO_INTERPOLATE
@@ -3949,6 +3969,14 @@ impl App {
         self.ui
             .widget(cx, ids!(edit_strength_row))
             .set_visible(cx, active("edit"));
+        self.refresh_lora_ui(cx);
+        self.ui
+            .widget(cx, ids!(lora_row))
+            .set_visible(cx, active("image"));
+        let lora_on = active("image") && self.selected_lora(cx).is_some();
+        self.ui
+            .widget(cx, ids!(lora_strength_row))
+            .set_visible(cx, lora_on);
         self.ui
             .widget(cx, ids!(mesh_params_row))
             .set_visible(cx, active("mesh") || active("paint"));
@@ -4036,6 +4064,7 @@ impl App {
                 .drop_down2(cx, ids!(vid_interp_drop))
                 .selected_item()
                 .min(VIDEO_INTERPOLATE.len() - 1)],
+            image_lora: self.selected_lora(cx),
             music_seconds,
         }
     }
@@ -4174,6 +4203,22 @@ impl App {
             cx,
             fast_presets::nearest_video_interpolate(saved.video_interpolate.unwrap_or(1)),
         );
+        self.refresh_lora_ui(cx);
+        let lora_index = saved
+            .image_lora
+            .as_ref()
+            .and_then(|name| self.lora_names.iter().position(|n| n == name))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.ui.drop_down2(cx, ids!(lora_drop)).set_selected_item(cx, lora_index);
+        let strength = saved.image_lora_strength.unwrap_or(1.0);
+        let strength_index = LORA_STRENGTHS
+            .iter()
+            .position(|s| (*s - strength).abs() < 0.05)
+            .unwrap_or(0);
+        self.ui
+            .drop_down2(cx, ids!(lora_strength_drop))
+            .set_selected_item(cx, strength_index);
         self.ui.drop_down2(cx, ids!(music_len_drop)).set_selected_item(
             cx,
             fast_presets::nearest_music_len(saved.music_seconds),
@@ -4522,6 +4567,7 @@ impl App {
                     .drop_down2(cx, ids!(vid_interp_drop))
                     .selected_item()
                     .min(VIDEO_INTERPOLATE.len() - 1)],
+                image_lora: self.selected_lora(cx),
                 music_seconds,
             },
             input,
@@ -6398,6 +6444,41 @@ impl App {
             }
         }
         self.ui.redraw(cx);
+    }
+
+    /// LoRA dropdown = "none" + every adapter any up box lists via /loras;
+    /// keeps the current pick when the list changes.
+    fn refresh_lora_ui(&mut self, cx: &mut Cx) {
+        let names = self
+            .fleet
+            .as_ref()
+            .map(|fleet| fleet.all_loras())
+            .unwrap_or_default();
+        if names == self.lora_names {
+            return;
+        }
+        let previous = self.selected_lora(cx).map(|(name, _)| name);
+        self.lora_names = names;
+        let labels: Vec<String> = std::iter::once("none".to_string())
+            .chain(self.lora_names.iter().cloned())
+            .collect();
+        self.ui.drop_down2(cx, ids!(lora_drop)).set_labels(cx, labels);
+        let select = previous
+            .and_then(|name| self.lora_names.iter().position(|n| *n == name))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.ui.drop_down2(cx, ids!(lora_drop)).set_selected_item(cx, select);
+    }
+
+    fn selected_lora(&self, cx: &mut Cx) -> Option<(String, f32)> {
+        let index = self.ui.drop_down2(cx, ids!(lora_drop)).selected_item().checked_sub(1)?;
+        let name = self.lora_names.get(index)?.clone();
+        let strength = LORA_STRENGTHS[self
+            .ui
+            .drop_down2(cx, ids!(lora_strength_drop))
+            .selected_item()
+            .min(LORA_STRENGTHS.len() - 1)];
+        Some((name, strength))
     }
 
     fn refresh_mask_status(&mut self, cx: &mut Cx) {
@@ -9989,6 +10070,11 @@ impl MatchEvent for App {
             self.sync_preset_name_box(cx);
             self.sync_mask_mode(cx);
         }
+        if self.ui.drop_down2(cx, ids!(lora_drop)).changed(actions).is_some() {
+            let on = self.selected_lora(cx).is_some();
+            self.ui.widget(cx, ids!(lora_strength_row)).set_visible(cx, on);
+            self.ui.redraw(cx);
+        }
         // Inpaint mask tools.
         if let Some(index) = self.ui.drop_down2(cx, ids!(mask_brush_drop)).changed(actions) {
             let radius = MASK_BRUSH_SIZES.get(index).copied().unwrap_or(24.0);
@@ -10881,6 +10967,7 @@ impl AppMain for App {
             if fleet_changed {
                 self.push_fleet_view();
                 self.refresh_fleet_ui(cx);
+                self.refresh_lora_ui(cx);
                 if self.surface == Surface::Runs {
                     self.refresh_runs_panel(cx);
                 }

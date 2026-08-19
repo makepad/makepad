@@ -27,7 +27,7 @@
 
 use makepad_asset_ai::discovery::DiscoveredNode;
 use makepad_asset_ai::fleet::BoxSnapshot;
-use makepad_asset_ai::protocol::{HealthJson, JobStatusJson, JobsJson, ModelsJson};
+use makepad_asset_ai::protocol::{HealthJson, JobStatusJson, JobsJson, LorasJson, ModelsJson};
 use makepad_micro_serde::DeJson;
 use makepad_widgets::*;
 use std::collections::HashMap;
@@ -36,6 +36,7 @@ enum Pending {
     Health,
     Models,
     Jobs,
+    Loras,
 }
 
 struct InFlight {
@@ -52,6 +53,9 @@ pub struct FleetPoll {
     /// clients' work included, so the UI can show and cancel it. Empty for
     /// services without the endpoint.
     pub jobs: Vec<Vec<JobStatusJson>>,
+    /// `GET /loras` per endpoint: adapter names the box can apply to FLUX.1.
+    /// Empty for services without the endpoint.
+    pub loras: Vec<Vec<String>>,
     /// Endpoints with any request in flight (index-parallel to snapshots).
     busy: Vec<bool>,
     in_flight: HashMap<LiveId, InFlight>,
@@ -63,6 +67,7 @@ impl FleetPoll {
             snapshots: Vec::new(),
             latency_ms: Vec::new(),
             jobs: Vec::new(),
+            loras: Vec::new(),
             busy: Vec::new(),
             in_flight: HashMap::new(),
         }
@@ -72,6 +77,7 @@ impl FleetPoll {
         self.snapshots.remove(index);
         self.latency_ms.remove(index);
         self.jobs.remove(index);
+        self.loras.remove(index);
         self.busy.remove(index);
     }
 
@@ -115,6 +121,7 @@ impl FleetPoll {
                 self.snapshots.push(BoxSnapshot::new(&node.base_url));
                 self.latency_ms.push(None);
                 self.jobs.push(Vec::new());
+                self.loras.push(Vec::new());
                 self.busy.push(false);
                 changed = true;
             }
@@ -300,9 +307,40 @@ impl FleetPoll {
                         .zip(&jobs)
                         .any(|(a, b)| a.job_id != b.job_id || a.state != b.state || a.stage != b.stage);
                 self.jobs[index] = jobs;
+                // LoRA inventory after the job list (cheap directory listing).
+                let base_url = self.snapshots[index].base_url.clone();
+                let url = format!("{base_url}/loras");
+                self.busy[index] = true;
+                self.get(cx, base_url, url, Pending::Loras);
+                changed
+            }
+            Pending::Loras => {
+                self.busy[index] = false;
+                let loras: Vec<String> = response
+                    .filter(|r| r.status_code == 200)
+                    .and_then(|r| r.get_string_body())
+                    .and_then(|body| LorasJson::deserialize_json_lenient(&body).ok())
+                    .map(|l| l.loras.into_iter().map(|l| l.name).collect())
+                    .unwrap_or_default();
+                let changed = self.loras[index] != loras;
+                self.loras[index] = loras;
                 changed
             }
         }
+    }
+
+    /// Every LoRA name any up endpoint offers (sorted, deduped).
+    pub fn all_loras(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .snapshots
+            .iter()
+            .zip(&self.loras)
+            .filter(|(snap, _)| snap.is_up())
+            .flat_map(|(_, loras)| loras.iter().cloned())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Fleet panel text: one block per physical host, its service
