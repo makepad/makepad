@@ -2692,11 +2692,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 }
                 AlignEntry::Area(Area::Rect(ra)) => {
                     let draw_list = &mut self.cx.draw_lists[ra.draw_list_id];
-                    let rect_area = &mut draw_list.rect_areas[ra.rect_id];
-                    rect_area.rect.pos += d;
-                    if shift_clip {
-                        rect_area.draw_clip.0 += d;
-                        rect_area.draw_clip.1 += d;
+                    if draw_list.redraw_id == ra.redraw_id {
+                        if let Some(rect_area) = draw_list.rect_areas.get_mut(ra.rect_id) {
+                            rect_area.rect.pos += d;
+                            if shift_clip {
+                                rect_area.draw_clip.0 += d;
+                                rect_area.draw_clip.1 += d;
+                            }
+                        }
                     }
                 }
                 AlignEntry::BeginClip(clip0, clip1) => {
@@ -2779,9 +2782,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 AlignEntry::Area(Area::Rect(ra)) => {
                     if let Some((clip0, clip1)) = self.turtle_clips.last() {
                         let draw_list = &mut self.cx.draw_lists[ra.draw_list_id];
-                        let rect_area = &mut draw_list.rect_areas[ra.rect_id];
-                        rect_area.draw_clip.0 = *clip0;
-                        rect_area.draw_clip.1 = *clip1;
+                        if draw_list.redraw_id == ra.redraw_id {
+                            if let Some(rect_area) = draw_list.rect_areas.get_mut(ra.rect_id) {
+                                rect_area.draw_clip.0 = *clip0;
+                                rect_area.draw_clip.1 = *clip1;
+                            }
+                        }
                     }
                 }
                 AlignEntry::Unset => {}
