@@ -15,8 +15,9 @@
 //! `SPLAT_BENCH_WARMUP` (30, frames excluded from the frame-time stats),
 //! `SPLAT_BENCH_FLIP_Y` (0/1, scan-class plys are y-down), `SPLAT_BENCH_ORBIT_DEG`
 //! (yaw per frame, 1.0), `SPLAT_BENCH_DISTANCE` (1.5), `SPLAT_BENCH_MAX_SPLATS`,
-//! `SPLAT_BENCH_CAPTURE` (comma list of frame indices), `SPLAT_BENCH_OUT` (dir),
-//! `SPLAT_BENCH_SIZE` ("1024x768").
+//! `SPLAT_BENCH_CAPTURE` (comma list of frame indices), `SPLAT_BENCH_HOLD`
+//! (20: frames the camera holds before a capture so the async sort settles),
+//! `SPLAT_BENCH_OUT` (dir).
 pub use makepad_widgets;
 use makepad_widgets::*;
 use makepad_xr::obj::ViewSplat;
@@ -62,6 +63,8 @@ struct BenchConfig {
     distance: f32,
     max_splats: Option<u32>,
     captures: Vec<u64>,
+    /// Frames the camera holds still before each capture (see camera_for_frame).
+    hold: u64,
     out_dir: String,
 }
 
@@ -82,6 +85,7 @@ impl BenchConfig {
             captures: env("SPLAT_BENCH_CAPTURE")
                 .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
                 .unwrap_or_default(),
+            hold: parse("SPLAT_BENCH_HOLD", 20.0) as u64,
             out_dir: env("SPLAT_BENCH_OUT").unwrap_or_else(|| ".".to_string()),
         }
     }
@@ -118,7 +122,17 @@ pub struct App {
 }
 
 impl App {
+    /// Camera for a frame. Frames in the `hold` window before a capture frame
+    /// reuse the capture frame's camera, so the (asynchronous) sort has
+    /// settled when the capture is taken and renderer versions compare
+    /// pixel-for-pixel instead of sort-staleness-for-sort-staleness.
     fn camera_for_frame(config: &BenchConfig, frame: u64) -> (f32, f32, f32) {
+        let frame = config
+            .captures
+            .iter()
+            .copied()
+            .find(|&c| frame <= c && frame + config.hold >= c)
+            .unwrap_or(frame);
         let f = frame as f32;
         let yaw = (f * config.orbit_deg).to_radians();
         let pitch = 0.35 * (f * 0.02).sin();
@@ -232,6 +246,8 @@ impl App {
         println!("SPLAT_BENCH_RESULT");
         println!("  file:                  {}", config.file);
         println!("  splats:                {}", stats.splat_count);
+        println!("  visible (last sort):   {}", stats.visible_count);
+        println!("  est_quad_overdraw:     {:.1} fragments/px (upper bound)", stats.est_quad_overdraw);
         println!("  load_ms:               {:.1}", stats.load_ms);
         println!("  build_ms:              {:.1}", stats.build_ms);
         println!(
@@ -258,6 +274,7 @@ impl App {
         );
         println!("  sort_latency_ms:       {:.1}", stats.last_sort_latency_ms);
         println!("  sort_apply_ms:         {:.2}", stats.last_sort_apply_ms);
+        println!("  draw_ms (main thread): {:.2}", stats.last_draw_ms);
         println!(
             "  frames:                {} (stats over {} after warmup)",
             self.frame_index,
