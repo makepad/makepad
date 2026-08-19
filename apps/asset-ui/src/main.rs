@@ -1585,6 +1585,17 @@ script_mod! {
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
+                                            speculars_toggle := CheckBox{
+                                                text: "Speculars"
+                                                active: true
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            HintLabel{ text: "View" }
+                                            pbr_view_drop := FieldDrop{ width: 110 }
                                         }
                                     }
 
@@ -2616,6 +2627,13 @@ impl App {
                     })
                     .collect(),
             );
+        self.ui.drop_down2(cx, ids!(pbr_view_drop)).set_labels(
+            cx,
+            crate::mesh_view::pbr_preview::PbrViewMode::ALL
+                .iter()
+                .map(|mode| mode.label().to_string())
+                .collect(),
+        );
         self.ui.drop_down2(cx, ids!(mesh_faces_drop)).set_labels(
             cx,
             MESH_FACE_COUNTS
@@ -8270,6 +8288,28 @@ impl MatchEvent for App {
                 mesh.set_studio_enabled(cx, on);
             }
         }
+        if let Some(on) = self.ui.check_box(cx, ids!(speculars_toggle)).changed(actions) {
+            if let Some(mut mesh) = self
+                .ui
+                .widget(cx, ids!(mesh_view))
+                .borrow_mut::<MeshView>()
+            {
+                mesh.set_pbr_speculars(cx, on);
+            }
+        }
+        if let Some(index) = self.ui.drop_down2(cx, ids!(pbr_view_drop)).changed(actions) {
+            let mode = crate::mesh_view::pbr_preview::PbrViewMode::ALL
+                .get(index)
+                .copied()
+                .unwrap_or_default();
+            if let Some(mut mesh) = self
+                .ui
+                .widget(cx, ids!(mesh_view))
+                .borrow_mut::<MeshView>()
+            {
+                mesh.set_pbr_view_mode(cx, mode);
+            }
+        }
         if self.ui.button(cx, ids!(sample_splat_btn)).clicked(actions) {
             self.load_sample_splat(cx);
         }
@@ -8574,6 +8614,27 @@ impl AppMain for App {
             // ASSET_UI_DARK=1: night stage for headless viewer captures.
             if crate::asset_store_state::env_alias(&["ASSET_UI_DARK", "AI_CONTENT_DARK"]).is_some() {
                 self.set_mesh_dark(cx, true);
+            }
+            // ASSET_UI_PBR_VIEW=<index|label>: inspection view for captures.
+            if let Some(view) =
+                crate::asset_store_state::env_alias(&["ASSET_UI_PBR_VIEW", "AI_CONTENT_PBR_VIEW"])
+            {
+                use crate::mesh_view::pbr_preview::PbrViewMode;
+                let index = PbrViewMode::ALL
+                    .iter()
+                    .position(|mode| mode.label().eq_ignore_ascii_case(&view))
+                    .or_else(|| view.parse::<usize>().ok())
+                    .unwrap_or(0);
+                self.ui
+                    .drop_down2(cx, ids!(pbr_view_drop))
+                    .set_selected_item(cx, index);
+                if let Some(mut mesh) = self
+                    .ui
+                    .widget(cx, ids!(mesh_view))
+                    .borrow_mut::<MeshView>()
+                {
+                    mesh.set_pbr_view_mode(cx, PbrViewMode::ALL[index.min(PbrViewMode::ALL.len() - 1)]);
+                }
             }
             let sample = self.auto.sample.clone();
             match sample.as_deref() {

@@ -1148,6 +1148,25 @@ impl MeshView {
         self.studio_enabled
     }
 
+    /// PBR inspection view (lit / albedo / normals / metallic / roughness /
+    /// clay / wireframe). Only the PBR lane honours it.
+    pub fn set_pbr_view_mode(&mut self, cx: &mut Cx, mode: pbr_preview::PbrViewMode) {
+        if self.pbr.view_mode == mode {
+            return;
+        }
+        self.pbr.view_mode = mode;
+        self.area.redraw(cx);
+    }
+
+    /// Direct + environment speculars on the PBR lane.
+    pub fn set_pbr_speculars(&mut self, cx: &mut Cx, on: bool) {
+        if self.pbr.speculars_off == !on {
+            return;
+        }
+        self.pbr.speculars_off = !on;
+        self.area.redraw(cx);
+    }
+
     pub fn set_studio_enabled(&mut self, cx: &mut Cx, on: bool) {
         if self.studio_enabled == on {
             return;

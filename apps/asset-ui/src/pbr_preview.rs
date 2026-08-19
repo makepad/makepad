@@ -23,9 +23,10 @@
 //! This file is a child module of mesh_view.rs (declared there via
 //! `#[path]`) because main.rs is owned by another lane and must not change.
 
-use makepad_gltf::{load_gltf_from_bytes, LoadedGltf};
+use makepad_gltf::{decode_mesh_primitive, load_gltf_from_bytes, LoadedGltf};
 use makepad_widgets::*;
 use makepad_xr::render::{GltfDrawObject, GltfMaterialState, GltfRenderer};
+use makepad_widgets::shader::draw_pbr::{DrawPbrMaterialState, DrawPbrTextureSet, PbrMeshHandle};
 
 /// Same fit rule as the statue path: normalize by the LARGEST dimension so
 /// wide/flat models don't blow past the view, feet on the ground plane.
@@ -303,6 +304,93 @@ pub(crate) fn scaled_step(value: f32, up: bool, lo: f32, hi: f32) -> f32 {
     stepped.clamp(lo, hi)
 }
 
+/// Inspection views of the PBR branch (DrawPbr `u_view_mode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PbrViewMode {
+    #[default]
+    Lit,
+    /// Base color as authored, no lighting.
+    Albedo,
+    /// Shading normals (normal map applied) as RGB.
+    Normals,
+    Metallic,
+    Roughness,
+    /// White matte-ish material, lit: shape and shading without textures.
+    Clay,
+    /// Clay + triangle edges (topology).
+    Wire,
+}
+
+impl PbrViewMode {
+    pub const ALL: [PbrViewMode; 7] = [
+        PbrViewMode::Lit,
+        PbrViewMode::Albedo,
+        PbrViewMode::Normals,
+        PbrViewMode::Metallic,
+        PbrViewMode::Roughness,
+        PbrViewMode::Clay,
+        PbrViewMode::Wire,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PbrViewMode::Lit => "Lit",
+            PbrViewMode::Albedo => "Albedo",
+            PbrViewMode::Normals => "Normals",
+            PbrViewMode::Metallic => "Metallic",
+            PbrViewMode::Roughness => "Roughness",
+            PbrViewMode::Clay => "Clay",
+            PbrViewMode::Wire => "Wireframe",
+        }
+    }
+
+    /// The shader's `u_view_mode` value.
+    pub fn shader_value(self) -> f32 {
+        match self {
+            PbrViewMode::Lit => 0.0,
+            PbrViewMode::Albedo => 1.0,
+            PbrViewMode::Normals => 2.0,
+            PbrViewMode::Metallic => 3.0,
+            PbrViewMode::Roughness => 4.0,
+            PbrViewMode::Clay => 5.0,
+            PbrViewMode::Wire => 6.0,
+        }
+    }
+}
+
+/// Per-triangle-unique copy of a primitive with barycentrics in TEXCOORD_0
+/// and flat normals — what DrawPbr's wire view draws. `None` for a
+/// primitive that is not a triangle list.
+pub(crate) fn wire_mesh_arrays(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Option<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
+    if indices.len() < 3 || indices.len() % 3 != 0 {
+        return None;
+    }
+    let tri_count = indices.len() / 3;
+    let mut pos = Vec::with_capacity(tri_count * 3);
+    let mut nrm = Vec::with_capacity(tri_count * 3);
+    let mut uv = Vec::with_capacity(tri_count * 3);
+    let mut idx = Vec::with_capacity(tri_count * 3);
+    for tri in indices.chunks_exact(3) {
+        let a = *positions.get(tri[0] as usize)?;
+        let b = *positions.get(tri[1] as usize)?;
+        let c = *positions.get(tri[2] as usize)?;
+        let e1 = vec3f(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+        let e2 = vec3f(c[0] - a[0], c[1] - a[1], c[2] - a[2]);
+        let n = Vec3f::cross(e1, e2);
+        let n = if n.length() > 1.0e-12 { n.normalize() } else { vec3f(0.0, 1.0, 0.0) };
+        let n = [n.x, n.y, n.z];
+        let base = pos.len() as u32;
+        pos.extend_from_slice(&[a, b, c]);
+        nrm.extend_from_slice(&[n, n, n]);
+        uv.extend_from_slice(&[[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]);
+        idx.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    Some((pos, nrm, uv, idx))
+}
+
 /// The static PBR branch state MeshView owns: the retained glTF renderer,
 /// its fitted transform, host controls and the honest status. The DrawPbr
 /// shader itself stays a `#[live]` field on MeshView (script registration);
@@ -321,6 +409,14 @@ pub struct PbrPreview {
     pub turntable_yaw: f32,
     pub turntable_tilt: f32,
     pub tilt_axis: Vec3f,
+    /// Inspection view (lit by default).
+    pub view_mode: PbrViewMode,
+    /// Direct + environment specular off (`u_spec_strength` = 0); default
+    /// (false) keeps them on.
+    pub speculars_off: bool,
+    /// Wire copies of the draw objects (parallel to `renderer.draw_objects`;
+    /// `None` where a primitive was not a triangle list). Built at load.
+    wire_meshes: Vec<Option<PbrMeshHandle>>,
     pub controls: PbrDisplayControls,
     pub status: Option<PbrStatus>,
     /// Host-supplied equirect environment, applied at the next draw (env
@@ -341,6 +437,7 @@ impl PbrPreview {
         self.fit = None;
         self.bounds = None;
         self.status = None;
+        self.wire_meshes.clear();
         draw.clear_meshes();
     }
 
@@ -391,6 +488,18 @@ impl PbrPreview {
         self.bounds = Some((min, max));
         self.fit_height = (max.y - min.y) * _scale;
         self.fit = Some(fit);
+        // Wire copies for the topology view: same primitives, per-triangle
+        // vertices with barycentric UVs (see `wire_mesh_arrays`).
+        self.wire_meshes = renderer
+            .draw_objects
+            .iter()
+            .map(|object| {
+                let decoded = decode_mesh_primitive(&loaded, object.mesh_index, object.primitive_index).ok()?;
+                let (pos, nrm, uv, idx) = wire_mesh_arrays(&decoded.positions, &decoded.indices)?;
+                draw.upload_indexed_triangles_mesh(cx, &pos, Some(&nrm), None, Some(&uv), None, &idx)
+                    .ok()
+            })
+            .collect();
         self.renderer = Some(renderer);
         Ok(())
     }
@@ -532,6 +641,8 @@ impl PbrPreview {
         draw.light_color = rig.light_color;
         draw.ambient = rig.ambient;
         draw.env_intensity = rig.env_intensity;
+        draw.spec_strength = if self.speculars_off { 0.0 } else { 0.9 };
+        draw.view_mode = self.view_mode.shader_value();
         draw.reset_matrix();
         let Some(fit) = self.fit else {
             return;
@@ -543,6 +654,27 @@ impl PbrPreview {
             self.turntable_tilt,
             self.tilt_axis,
         );
+        if self.view_mode == PbrViewMode::Wire {
+            // Wire copies with a neutral material (the shader ignores the
+            // textures in clay/wire anyway) and the default environment.
+            let env = Some(draw.default_env_texture(cx));
+            let material = DrawPbrMaterialState {
+                textures: DrawPbrTextureSet {
+                    env,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            for (object, wire) in renderer.draw_objects.iter().zip(&self.wire_meshes) {
+                let Some(handle) = *wire else { continue };
+                draw.set_transform(Mat4f::mul(&world, &object.world_transform));
+                draw.apply_material_state(&material);
+                if let Err(e) = draw.draw_mesh(cx, handle) {
+                    log!("mesh_view pbr: wire draw failed: {e}");
+                }
+            }
+            return;
+        }
         if let Err(e) = renderer.draw_with_transform(draw, cx, world) {
             log!("mesh_view pbr: draw failed: {e}");
         }
@@ -662,6 +794,24 @@ pub fn studio_equirect_png() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_mesh_carries_barycentrics_and_flat_normals() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]];
+        let indices = [0u32, 1, 2, 2, 1, 3];
+        let (pos, nrm, uv, idx) = wire_mesh_arrays(&positions, &indices).unwrap();
+        assert_eq!(pos.len(), 6);
+        assert_eq!(idx, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(uv[0], [1.0, 0.0]);
+        assert_eq!(uv[1], [0.0, 1.0]);
+        assert_eq!(uv[2], [0.0, 0.0]);
+        // Both triangles face +Z (counter-clockwise), flat per triangle.
+        assert!(nrm.iter().all(|n| (n[2] - 1.0).abs() < 1e-6));
+        assert!(wire_mesh_arrays(&positions, &indices[..4]).is_none());
+        assert!(wire_mesh_arrays(&positions, &[0, 1, 9]).is_none());
+        assert_eq!(PbrViewMode::Wire.shader_value(), 6.0);
+        assert_eq!(PbrViewMode::ALL.len(), 7);
+    }
 
     #[test]
     fn turntable_spins_about_the_feet_and_tilts_about_mid_height() {
