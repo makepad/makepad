@@ -30,10 +30,14 @@ makepad-zip-file = { path = "../../zip_file" }
 makepad-fast-inflate = { path = "../../fast_inflate" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
+# Gaussian-splat PLY validation (the splat payload the importer publishes).
+makepad-splat = { path = "../../splat" }
 # Thumbnail encoding (vendored, no_std-friendly).
 jpeg-encoder = { path = "../../jpeg-encoder" }
 # Fleet dispatch client (default features = [] — the light client side only).
 makepad-asset-ai = { path = "../ai", default-features = false }
+# Base64 for relaying a catalog input into a fleet generate request.
+makepad-base64 = { path = "../../base64" }
 # Hardware mp4 decode for representative first-frame thumbnails + measured
 # durations (standalone seam; no Cx, no window).
 makepad-platform = { path = "../../../platform" }
