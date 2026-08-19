@@ -58,6 +58,7 @@ mod scheduler;
 mod store_views;
 mod thumbnail_renderer;
 mod video_player;
+mod webcam;
 
 use crate::artifact_io::{
     ArtifactIo, IoDone, IoPurpose, IoRequest, PendingOpen, PreviewPixels, ViewerContent,
@@ -1471,6 +1472,45 @@ script_mod! {
                             input_clear := LibraryDeleteButton{ text: "×" }
                         }
 
+                        // Webcam as an input tile: live preview, "Snap" makes
+                        // the current frame a PNG input asset; "auto-run"
+                        // keeps snapping + generating with the selected
+                        // img2X preset while nothing else is running.
+                        webcam_tray := Card{
+                            width: Fill height: Fit
+                            flow: Right spacing: 8
+                            padding: 6
+                            align: Align{y: 0.5}
+                            webcam_toggle := CheckBox{
+                                text: "Webcam"
+                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                draw_text +: {
+                                    color: #x828a93
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
+                            }
+                            webcam_live := View{
+                                visible: false
+                                width: Fit height: Fit flow: Right spacing: 8
+                                align: Align{y: 0.5}
+                                View{
+                                    width: 44 height: 33
+                                    align: Align{x: 0.5 y: 0.5}
+                                    webcam_thumb := ThumbFitImage{}
+                                }
+                                webcam_snap := ChipButton{ text: "Snap → input" }
+                                webcam_auto := CheckBox{
+                                    text: "auto-run"
+                                    padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                    draw_text +: {
+                                        color: #x828a93
+                                        text_style: theme.font_regular{font_size: 8.5}
+                                    }
+                                }
+                            }
+                            webcam_status := HintLabel{ width: Fill text: "" }
+                        }
+
                         // The selected run, spread out: every artifact the
                         // pipeline produced (source image, matte, mesh, paint,
                         // rig, …) as clickable chips. History keeps ONE tile
@@ -2654,6 +2694,28 @@ struct RunSeed {
     references: Vec<(String, std::sync::Arc<Vec<u8>>)>,
 }
 
+/// Webcam input tile: capture wiring + auto-run bookkeeping.
+#[derive(Default)]
+struct WebcamState {
+    /// Camera descriptors from the last `Event::VideoInputs`.
+    descs: Vec<makepad_widgets::makepad_platform::video::VideoInputDesc>,
+    /// Shared newest-frame slot written by the capture thread.
+    frames: webcam::WebcamFrames,
+    /// Capture callback registered (once per process).
+    callback_installed: bool,
+    /// `use_video_input` is active.
+    capturing: bool,
+    /// Serial of the frame currently on the preview texture.
+    shown_serial: u64,
+    preview: Option<Texture>,
+    /// History group for this session's snapshots.
+    group_id: Option<String>,
+    /// Auto-run: the run group id we started and are waiting on.
+    auto_run_group: Option<String>,
+    /// Auto-run: earliest time (seconds) the next snapshot may fire.
+    auto_next_at: f64,
+}
+
 /// A pipeline waiting in the app-side run queue.
 #[derive(Clone)]
 struct PendingRun {
@@ -2861,6 +2923,9 @@ pub struct App {
     /// History group every OS-dropped file of this session lands in.
     #[rust]
     dropped_group_id: Option<String>,
+    /// Webcam input tile state.
+    #[rust]
+    webcam: WebcamState,
     /// Members of the selected run shown in the run tray, pipeline order
     /// (oldest first), one per chip slot.
     #[rust]
@@ -6162,6 +6227,176 @@ impl App {
         }
     }
 
+    // -- webcam input tile ------------------------------------------------
+
+    fn set_webcam_status(&mut self, cx: &mut Cx, text: &str) {
+        self.ui.label(cx, ids!(webcam_status)).set_text(cx, text);
+    }
+
+    /// Toggle on: ask for the camera, pick the first device's best raw YUV
+    /// format and start capturing. Frames land in the shared slot from the
+    /// capture thread; `pump_webcam` (timer) uploads the newest one.
+    fn webcam_start(&mut self, cx: &mut Cx) {
+        use makepad_widgets::makepad_platform::permission::Permission;
+        if self.webcam.capturing {
+            return;
+        }
+        if !self.webcam.callback_installed {
+            let frames = self.webcam.frames.clone();
+            cx.camera_frame_input(0, move |frame| frames.push(&frame));
+            self.webcam.callback_installed = true;
+        }
+        let Some(desc) = self.webcam.descs.first().cloned() else {
+            // No descriptors yet: permission/enumeration is in flight; the
+            // VideoInputs / PermissionResult events retry this.
+            cx.request_permission(Permission::Camera);
+            self.set_webcam_status(cx, "looking for a camera…");
+            return;
+        };
+        let Some(format) = webcam::pick_format(&desc).cloned() else {
+            self.set_webcam_status(cx, &format!("{}: no raw YUV format (MJPEG-only?)", desc.name));
+            return;
+        };
+        cx.use_video_input(&[(desc.input_id, format.format_id)]);
+        self.webcam.capturing = true;
+        self.webcam.shown_serial = 0;
+        self.ui.view(cx, ids!(webcam_live)).set_visible(cx, true);
+        self.set_webcam_status(
+            cx,
+            &format!("{} {}×{} · live", desc.name, format.width, format.height),
+        );
+        self.ui.redraw(cx);
+    }
+
+    fn webcam_stop(&mut self, cx: &mut Cx) {
+        if self.webcam.capturing {
+            cx.use_video_input(&[]);
+        }
+        self.webcam.capturing = false;
+        self.webcam.auto_run_group = None;
+        self.ui.check_box(cx, ids!(webcam_auto)).set_active(cx, false, Animate::No);
+        self.ui.view(cx, ids!(webcam_live)).set_visible(cx, false);
+        self.set_webcam_status(cx, "");
+        self.ui.redraw(cx);
+    }
+
+    /// Timer: upload the newest frame to the preview thumb (only when it
+    /// changed) and drive auto-run.
+    fn pump_webcam(&mut self, cx: &mut Cx) {
+        if let Some(frame) = self.webcam.frames.take_newer(self.webcam.shown_serial) {
+            self.webcam.shown_serial = frame.serial;
+            let texture = Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: frame.width,
+                    height: frame.height,
+                    data: Some(frame.bgra),
+                    updated: TextureUpdated::Full,
+                },
+            );
+            self.ui
+                .image(cx, ids!(webcam_thumb))
+                .set_texture(cx, Some(texture.clone()));
+            self.webcam.preview = Some(texture);
+            self.ui.widget(cx, ids!(webcam_thumb)).redraw(cx);
+        }
+        if !self.ui.check_box(cx, ids!(webcam_auto)).active(cx) {
+            return;
+        }
+        // Auto-run: one run of ours at a time, never while anything else of
+        // ours is running, with a short breather between runs.
+        let now = cx.seconds_since_app_start();
+        if now < self.webcam.auto_next_at {
+            return;
+        }
+        let waiting = self.webcam.auto_run_group.as_ref().is_some_and(|group| {
+            self.runs
+                .iter()
+                .any(|run| &run.group_id == group && run.pipeline.is_running())
+                || self.run_queue.iter().any(|run| &run.group_id == group)
+        });
+        if waiting || self.any_run_running() || !self.run_queue.is_empty() {
+            return;
+        }
+        self.webcam.auto_next_at = now + 1.5;
+        self.webcam_snap(cx, true);
+    }
+
+    /// Encode the newest frame as PNG, store it in History ("Webcam" group),
+    /// pin it as the input and — for auto-run — start the selected preset.
+    fn webcam_snap(&mut self, cx: &mut Cx, auto_run: bool) {
+        let Some(frame) = self.webcam.frames.latest() else {
+            self.set_webcam_status(cx, "no frame yet");
+            return;
+        };
+        let rgba = webcam::bgra_to_rgba8(&frame.bgra);
+        let Ok(png) = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, frame.width, frame.height)
+        else {
+            self.set_webcam_status(cx, "snapshot PNG encode failed");
+            return;
+        };
+        let group_id = self
+            .webcam
+            .group_id
+            .get_or_insert_with(|| crate::library::new_group_id("webcam"))
+            .clone();
+        let label = format!("webcam {}×{}", frame.width, frame.height);
+        let Some(file) = self.route_artifact(
+            cx,
+            "image",
+            "image/png",
+            png,
+            None,
+            &label,
+            Some((&group_id, "Webcam")),
+            Some(&label),
+            !auto_run,
+        ) else {
+            self.set_webcam_status(cx, "snapshot could not be stored");
+            return;
+        };
+        self.refresh_gallery(cx, false);
+        self.open_gallery(cx, &file);
+        if !auto_run {
+            self.set_webcam_status(cx, "snapped → input");
+            return;
+        }
+        // The preset must consume an image; otherwise auto-run would just
+        // generate from the prompt forever.
+        let preset = self.current_preset_index(cx);
+        if seed_replaces_prefix(PRESETS[preset].domains, "image/png").is_none() {
+            self.ui.check_box(cx, ids!(webcam_auto)).set_active(cx, false, Animate::No);
+            self.set_webcam_status(
+                cx,
+                "auto-run off: the selected type does not take an image input",
+            );
+            return;
+        }
+        let before: Vec<String> = self
+            .runs
+            .iter()
+            .map(|run| run.group_id.clone())
+            .chain(self.run_queue.iter().map(|run| run.group_id.clone()))
+            .collect();
+        self.start_generate(cx);
+        let started = self
+            .runs
+            .iter()
+            .map(|run| run.group_id.clone())
+            .chain(self.run_queue.iter().map(|run| run.group_id.clone()))
+            .find(|group| !before.contains(group));
+        match started {
+            Some(group) => {
+                self.webcam.auto_run_group = Some(group);
+                self.set_webcam_status(cx, "auto-run: snapped, generating…");
+            }
+            None => {
+                // start_generate refused (caption explains); back off.
+                self.webcam.auto_next_at = cx.seconds_since_app_start() + 5.0;
+            }
+        }
+    }
+
     /// A file dropped from the OS: read it, normalise images to PNG (the
     /// service's image inputs are PNG), add it to the library under a
     /// "Dropped files" group (byte-identical re-drops reuse the existing
@@ -9454,6 +9689,25 @@ impl MatchEvent for App {
             self.input_tray.clear();
             self.sync_input_tray(cx);
         }
+        // Webcam tile.
+        if let Some(on) = self.ui.check_box(cx, ids!(webcam_toggle)).changed(actions) {
+            if on {
+                self.webcam_start(cx);
+            } else {
+                self.webcam_stop(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(webcam_snap)).clicked(actions) {
+            self.webcam_snap(cx, false);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(webcam_auto)).changed(actions) {
+            self.webcam.auto_run_group = None;
+            self.webcam.auto_next_at = 0.0;
+            self.set_webcam_status(
+                cx,
+                if on { "auto-run armed: snaps + generates whenever idle" } else { "live" },
+            );
+        }
         if self.ui.button(cx, ids!(retry_btn)).clicked(actions) {
             // Retry re-dispatches the SAME spec — including its group id, so
             // retried artifacts join the original run's History group.
@@ -9955,6 +10209,30 @@ impl AppMain for App {
                 DragHit::NoHit | DragHit::DragEnd => {}
             }
         }
+        match event {
+            Event::VideoInputs(ev) => {
+                self.webcam.descs = ev.descs.clone();
+                if self.ui.check_box(cx, ids!(webcam_toggle)).active(cx) && !self.webcam.capturing {
+                    self.webcam_start(cx);
+                }
+            }
+            Event::PermissionResult(result) => {
+                use makepad_widgets::makepad_platform::permission::{Permission, PermissionStatus};
+                if result.permission == Permission::Camera {
+                    match result.status {
+                        PermissionStatus::Granted => {
+                            if self.ui.check_box(cx, ids!(webcam_toggle)).active(cx) {
+                                self.webcam_start(cx);
+                            }
+                        }
+                        status => {
+                            self.set_webcam_status(cx, &format!("camera permission: {status:?}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         if let Event::KeyDown(ke) = event {
             if ke.key_code == KeyCode::F8 && !ke.is_repeat {
                 let on = self
@@ -10045,6 +10323,9 @@ impl AppMain for App {
         self.scrub_audio(cx, event);
         if self.audio_timer.is_event(event).is_some() && audio::is_ready() {
             self.sync_audio_ui(cx);
+        }
+        if self.audio_timer.is_event(event).is_some() && self.webcam.capturing {
+            self.pump_webcam(cx);
         }
         self.drain_rendered_thumbnails(cx);
         // The IO worker wakes the loop with SignalToUI; drain on Signal (and
