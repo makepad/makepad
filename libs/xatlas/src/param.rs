@@ -1328,6 +1328,18 @@ impl ParamAtlas {
     }
 
     pub fn compute_charts(&mut self, options: &ChartOptions) -> bool {
+        self.compute_charts_with_progress(options, &mut |_, _| true)
+    }
+
+    /// Same as [`Self::compute_charts`]; `progress(done_groups, total_groups)`
+    /// is called before each chart group (the expensive per-group
+    /// parameterization). Returning false abandons the remaining groups and
+    /// returns false.
+    pub fn compute_charts_with_progress(
+        &mut self,
+        options: &ChartOptions,
+        progress: &mut dyn FnMut(usize, usize) -> bool,
+    ) -> bool {
         self.charts_computed = false;
         let mesh_count = self.meshes.len();
         self.mesh_chart_groups.clear();
@@ -1372,6 +1384,9 @@ impl ParamAtlas {
             let granks: Vec<u32> = rs.ranks().to_vec();
             let n = groups.len();
             for kk in 0..n {
+                if !progress(kk, n) {
+                    return false;
+                }
                 let gi = granks[n - 1 - kk] as usize;
                 groups[gi].compute_charts(
                     options,

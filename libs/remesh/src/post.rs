@@ -333,13 +333,41 @@ pub fn weld_vertices_ctl(
 /// tears flip boundary direction and never chain in the directed walk).
 /// Returns the number of loops filled; `indices` grows by the fan faces.
 pub fn fill_small_holes(indices: &mut Vec<u32>, max_loop: usize) -> usize {
+    fill_small_holes_ctl(indices, max_loop, &mut |_, _| true)
+}
+
+/// Same as [`fill_small_holes`]. `ctl(done, total)` is called as the edge
+/// maps build and boundary loops are walked (`total` = 4 phases × the item
+/// count of each phase, monotone); returning false stops early — the fills
+/// found so far stay applied.
+pub fn fill_small_holes_ctl(
+    indices: &mut Vec<u32>,
+    max_loop: usize,
+    ctl: &mut impl FnMut(usize, usize) -> bool,
+) -> usize {
     use std::collections::HashMap;
     let f = indices.len() / 3;
+    // Progress: phase 0 = directed edge map (f), 1 = directed loop walk
+    // (starts), 2 = undirected edge map (f), 3 = undirected walk (starts).
+    // Report on a per-4096-item cadence so the callback stays cheap.
+    const CADENCE: usize = 4096;
+    let phase_total = f.max(1);
+    let total = 4 * phase_total;
+    let mut report = |phase: usize, i: usize, n: usize, ctl: &mut dyn FnMut(usize, usize) -> bool| -> bool {
+        if i % CADENCE != 0 && i + 1 != n {
+            return true;
+        }
+        let frac = if n == 0 { 1.0 } else { i as f64 / n as f64 };
+        ctl(phase * phase_total + (frac * phase_total as f64) as usize, total)
+    };
     let dkey = |a: u32, b: u32| ((a as u64) << 32) | b as u64;
     let mut dir: HashMap<u64, u32> = HashMap::with_capacity(f * 3);
-    for tri in indices.chunks_exact(3) {
+    for (ti, tri) in indices.chunks_exact(3).enumerate() {
         for j in 0..3 {
             *dir.entry(dkey(tri[j], tri[(j + 1) % 3])).or_insert(0) += 1;
+        }
+        if !report(0, ti, f, ctl) {
+            return 0;
         }
     }
     // Directed boundary chains through unambiguous (out/in degree 1) verts.
@@ -358,7 +386,11 @@ pub fn fill_small_holes(indices: &mut Vec<u32>, max_loop: usize) -> usize {
     let mut used: HashMap<u32, bool> = HashMap::new();
     let mut filled = 0usize;
     let starts: Vec<u32> = nxt.keys().copied().collect();
-    for start in starts {
+    let n_starts = starts.len();
+    for (si, start) in starts.into_iter().enumerate() {
+        if !report(1, si, n_starts, ctl) {
+            return filled;
+        }
         if used.get(&start).copied().unwrap_or(false)
             || outd.get(&start) != Some(&1)
             || ind.get(&start) != Some(&1)
@@ -404,9 +436,12 @@ pub fn fill_small_holes(indices: &mut Vec<u32>, max_loop: usize) -> usize {
     {
         let f2 = indices.len() / 3;
         let mut und: HashMap<u64, u32> = HashMap::with_capacity(f2 * 3);
-        for tri in indices.chunks_exact(3) {
+        for (ti, tri) in indices.chunks_exact(3).enumerate() {
             for j in 0..3 {
                 *und.entry(ekey(tri[j], tri[(j + 1) % 3])).or_insert(0) += 1;
+            }
+            if !report(2, ti, f2, ctl) {
+                return filled;
             }
         }
         let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -421,8 +456,12 @@ pub fn fill_small_holes(indices: &mut Vec<u32>, max_loop: usize) -> usize {
         }
         let mut used2: HashMap<u32, bool> = HashMap::new();
         let starts: Vec<u32> = adj.keys().copied().collect();
+        let n_starts = starts.len();
         let mut fans: Vec<u32> = Vec::new();
-        for start in starts {
+        for (si, start) in starts.into_iter().enumerate() {
+            if !report(3, si, n_starts, ctl) {
+                break;
+            }
             if used2.get(&start).copied().unwrap_or(false) {
                 continue;
             }
@@ -476,11 +515,25 @@ pub fn drop_small_components(
     indices: &mut Vec<u32>,
     frac: f32,
 ) -> usize {
+    drop_small_components_ctl(positions, indices, frac, &mut |_, _| true)
+}
+
+/// Same as [`drop_small_components`]. `ctl(done, total)` reports the
+/// union-find (`total` = 3 × faces); returning false stops early with the
+/// mesh unchanged.
+pub fn drop_small_components_ctl(
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    frac: f32,
+    ctl: &mut impl FnMut(usize, usize) -> bool,
+) -> usize {
     let v = positions.len();
     let f = indices.len() / 3;
     if v == 0 || f == 0 {
         return 0;
     }
+    const CADENCE: usize = 8192;
+    let total = 3 * f;
     let mut par: Vec<u32> = (0..v as u32).collect();
     fn find(par: &mut [u32], mut x: u32) -> u32 {
         while par[x as usize] != x {
@@ -489,7 +542,7 @@ pub fn drop_small_components(
         }
         x
     }
-    for tri in indices.chunks_exact(3) {
+    for (ti, tri) in indices.chunks_exact(3).enumerate() {
         let ra = find(&mut par, tri[0]);
         let rb = find(&mut par, tri[1]);
         if ra != rb {
@@ -500,10 +553,16 @@ pub fn drop_small_components(
         if rb != rc {
             par[rb as usize] = rc;
         }
+        if ti % CADENCE == 0 && !ctl(ti, total) {
+            return 0;
+        }
     }
     let mut count = vec![0u32; v];
-    for tri in indices.chunks_exact(3) {
+    for (ti, tri) in indices.chunks_exact(3).enumerate() {
         count[find(&mut par, tri[0]) as usize] += 1;
+        if ti % CADENCE == 0 && !ctl(f + ti, total) {
+            return 0;
+        }
     }
     let maxfc = count.iter().copied().max().unwrap_or(0);
     let thresh = (frac * maxfc as f32) as u32;
@@ -517,11 +576,15 @@ pub fn drop_small_components(
         return 0;
     }
     let mut kept: Vec<u32> = Vec::with_capacity(indices.len());
-    for tri in indices.chunks_exact(3) {
+    for (ti, tri) in indices.chunks_exact(3).enumerate() {
         if count[find(&mut par, tri[0]) as usize] >= thresh {
             kept.extend_from_slice(tri);
         }
+        if ti % CADENCE == 0 && !ctl(2 * f + ti, total) {
+            return 0;
+        }
     }
+    let _ = ctl(total, total);
     // Compact to referenced vertices.
     let mut remap = vec![u32::MAX; v];
     let mut nv: Vec<[f32; 3]> = Vec::new();

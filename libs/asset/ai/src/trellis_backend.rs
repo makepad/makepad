@@ -1287,14 +1287,23 @@ mod trellis_gen {
             for face in mesh.faces {
                 surface_indices.extend_from_slice(&face);
             }
-            makepad_remesh::weld_vertices(
+            makepad_remesh::weld_vertices_ctl(
                 &mut surface_positions,
                 &mut surface_indices,
                 1.0 / 8192.0,
+                &mut |done, total| {
+                    let frac = done as f64 / total.max(1) as f64;
+                    coarse.emit("weld surface", 0.88 + 0.004 * frac.clamp(0.0, 1.0));
+                    !cancel.is_cancelled()
+                },
             );
             cancel.check()?;
-            coarse.emit("fill holes", 0.885);
-            makepad_remesh::fill_small_holes(&mut surface_indices, 64);
+            coarse.emit("fill holes", 0.884);
+            makepad_remesh::fill_small_holes_ctl(&mut surface_indices, 64, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("fill holes", 0.884 + 0.006 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
             cancel.check()?;
             coarse.emit("build BVH", 0.89);
             let surface_bvh = SurfaceBvh::build_ctl(
@@ -1331,9 +1340,24 @@ mod trellis_gen {
             )
             .map_err(trellis_err)?;
             let (mut positions, mut indices) = (remeshed.positions, remeshed.indices);
-            makepad_remesh::weld_vertices(&mut positions, &mut indices, 1.0 / 8192.0);
-            makepad_remesh::fill_small_holes(&mut indices, 64);
-            makepad_remesh::drop_small_components(&mut positions, &mut indices, 0.02);
+            cancel.check()?;
+            makepad_remesh::weld_vertices_ctl(&mut positions, &mut indices, 1.0 / 8192.0, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("weld remesh", 0.930 + 0.002 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            makepad_remesh::fill_small_holes_ctl(&mut indices, 64, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("fill holes (remesh)", 0.932 + 0.003 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            makepad_remesh::drop_small_components_ctl(&mut positions, &mut indices, 0.02, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("drop islands", 0.935 + 0.002 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
 
             // All remeshed outputs honor the requested game-density target,
             // including untextured jobs. Raw high-density output remains
@@ -1347,9 +1371,9 @@ mod trellis_gen {
                 &mut |_round, faces| {
                     let span = start_faces.saturating_sub(job.decimation_target).max(1);
                     let done = start_faces.saturating_sub(faces) as f64 / span as f64;
-                    progress(
+                    coarse.emit(
                         &format!("decimate {}k", faces / 1000),
-                        0.93 + 0.03 * done.clamp(0.0, 1.0),
+                        0.937 + 0.023 * done.clamp(0.0, 1.0),
                     );
                     !cancel.is_cancelled()
                 },
@@ -1357,15 +1381,31 @@ mod trellis_gen {
             let Some((mut dp, mut di)) = decimated else {
                 return Err(AssetAiError::Cancelled);
             };
-            makepad_remesh::weld_vertices(&mut dp, &mut di, 1.0 / 8192.0);
-            makepad_remesh::fill_small_holes(&mut di, 64);
-            makepad_remesh::drop_small_components(&mut dp, &mut di, 0.03);
+            cancel.check()?;
+            makepad_remesh::weld_vertices_ctl(&mut dp, &mut di, 1.0 / 8192.0, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("weld final", 0.960 + 0.001 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            makepad_remesh::fill_small_holes_ctl(&mut di, 64, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("fill holes (final)", 0.961 + 0.002 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            makepad_remesh::drop_small_components_ctl(&mut dp, &mut di, 0.03, &mut |done, total| {
+                let frac = done as f64 / total.max(1) as f64;
+                coarse.emit("drop islands (final)", 0.963 + 0.001 * frac.clamp(0.0, 1.0));
+                !cancel.is_cancelled()
+            });
+            cancel.check()?;
+            coarse.emit("quality gate", 0.964);
             super::check_trellis_mesh_quality(&dp, &di).map_err(|detail| {
                 AssetAiError::Params(format!(
                     "trellis: {} {detail}",
                     super::TRELLIS_GEOMETRY_QUALITY_MARKER
                 ))
             })?;
+            coarse.emit("orient faces", 0.965);
             let before_orient = makepad_remesh::audit_mesh_topology(&dp, &di);
             let reoriented = makepad_remesh::unify_face_orientations(&dp, &mut di);
             let after_orient = makepad_remesh::audit_mesh_topology(&dp, &di);
@@ -1382,7 +1422,7 @@ mod trellis_gen {
             let glb = match &voxel_pbr {
                 Some(pbr) => {
                     cancel.check()?;
-                    progress("bake", 0.96);
+                    coarse.emit("bake: sampler", 0.966);
                     let sampler = T2VoxelSampler::new(&voxel_coords, pbr, 6, 1024)
                         .map_err(trellis_err)?;
                     let sample = |p: [f32; 3]| -> Option<[f32; 6]> {
@@ -1398,12 +1438,26 @@ mod trellis_gen {
                     };
                     // Hunyuan-Paint's official unwrap is xatlas.parametrize.
                     // Chart/box projection stay as fallbacks if xatlas fails.
-                    let mut baked = makepad_remesh::uv_xatlas_bake(
+                    // xatlas unwrap 0.967..0.973 (chart groups), texel bake
+                    // 0.973..0.98 (per triangle).
+                    let mut baked = makepad_remesh::uv_xatlas_bake_ctl(
                         &dp,
                         &di,
                         job.texture_size,
                         &sample,
+                        &mut |stage, frac| {
+                            let frac = frac.clamp(0.0, 1.0);
+                            let (label, lo, span) = match stage {
+                                "unwrap" => ("unwrap (xatlas)", 0.967, 0.006),
+                                _ => ("bake texels", 0.973, 0.007),
+                            };
+                            coarse.emit(label, lo + span * frac);
+                            !cancel.is_cancelled()
+                        },
                     );
+                    if cancel.is_cancelled() {
+                        return Err(AssetAiError::Cancelled);
+                    }
                     if !baked.ok() {
                         baked = makepad_remesh::uv_chart_bake(
                             &dp,
@@ -1422,7 +1476,7 @@ mod trellis_gen {
                     }
                     if baked.ok() {
                         cancel.check()?;
-                        progress("encode", 0.98);
+                        coarse.emit("encode png", 0.98);
                         let t = baked.size;
                         let base_png =
                             crate::testpattern::encode_png_rgba(&baked.base_rgba, t, t)?;
@@ -1472,7 +1526,11 @@ mod trellis_gen {
                 None => {
                     // Geometry-only still carries Hunyuan-ready UV0 so a
                     // later paint stage can retexture without a second remesh.
-                    match makepad_remesh::uv_xatlas_unwrap(&dp, &di) {
+                    coarse.emit("unwrap (xatlas)", 0.967);
+                    match makepad_remesh::uv_xatlas_unwrap_ctl(&dp, &di, &mut |frac| {
+                        coarse.emit("unwrap (xatlas)", 0.967 + 0.012 * frac.clamp(0.0, 1.0));
+                        !cancel.is_cancelled()
+                    }) {
                         Ok((pos, uvs, idx, src)) => {
                             let pre_normals = makepad_gltf::compute_vertex_normals(&dp, &di);
                             let normals: Vec<[f32; 3]> = src

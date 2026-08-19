@@ -27,7 +27,8 @@ pub mod spatial;
 pub mod surface;
 
 pub use bake::{
-    uv_atlas_bake, uv_box_bake, uv_chart_bake, uv_xatlas_bake, uv_xatlas_unwrap, BakedMesh,
+    uv_atlas_bake, uv_atlas_bake_ctl, uv_box_bake, uv_chart_bake, uv_xatlas_bake,
+    uv_xatlas_bake_ctl, uv_xatlas_unwrap, uv_xatlas_unwrap_ctl, BakedMesh,
 };
 pub use decoder::{decode, DecodedMesh, TriangulationMode};
 pub use encoder::{encode, EncodeOptions, FctTokens};
@@ -35,8 +36,8 @@ pub use math::V3;
 pub use mesh::{load_glb_normalized, Mesh, NormalizeInfo};
 pub use post::{
     audit_mesh_topology, decimate_qem, decimate_qem_ctl, drop_small_components,
-    fill_small_holes, unify_face_orientations, weld_vertices, weld_vertices_ctl,
-    MeshTopologyAudit,
+    drop_small_components_ctl, fill_small_holes, fill_small_holes_ctl,
+    unify_face_orientations, weld_vertices, weld_vertices_ctl, MeshTopologyAudit,
 };
 pub use surface::{
     remesh_narrow_band_dc, remesh_narrow_band_dc_ctl, SurfaceBvh, SurfaceHit, SurfaceMesh,
