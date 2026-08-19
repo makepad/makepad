@@ -137,6 +137,27 @@ pub fn path_blob(blob: &BlobId) -> String {
 
 /// Content-addressed blob upload on the DATA plane; the namespace names the
 /// authorization context, the body is the bytes.
+/// Ordered batch pull of many blobs in ONE request (see the server's
+/// `blob_batch`). Absent on older servers, which answer 404 — callers fall
+/// back to single GETs.
+pub fn path_blobs_batch() -> String {
+    "/v1/blobs/fetch".to_string()
+}
+
+/// Media type of the framed batch body. A response that does not carry
+/// EXACTLY this type is not parsed as frames.
+pub const BLOB_BATCH_CONTENT_TYPE: &str = "application/vnd.makepad.blob-batch.v1";
+
+/// Fixed frame header: status(1) + digest(32) + length(8, big-endian).
+pub const BLOB_BATCH_FRAME_HEADER: usize = 41;
+
+/// Ceilings this client accepts from a batch response, independent of what
+/// the server claims: most frames it will parse, and the largest single item
+/// it will buffer.
+pub const MAX_BLOB_BATCH_ITEMS: usize = 64;
+pub const MAX_BLOB_BATCH_ITEM_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_BLOB_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
 pub fn path_blob_upload(ns: &str) -> String {
     format!("/v1/blobs?ns={ns}")
 }

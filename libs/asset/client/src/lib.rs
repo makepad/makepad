@@ -51,7 +51,8 @@ pub mod util;
 pub mod wire;
 
 pub use api::{
-    AnnotationUpload, Api, ApiEndpoints, BlobHead, CatalogQuery, ChatAttachment, ChatCreateRequest,
+    AnnotationUpload, Api, ApiEndpoints, BatchFlow, BatchFrame, BatchItem, BlobHead, CatalogQuery,
+    ChatAttachment, ChatCreateRequest,
     ChatSendRequest, GcRequest, OperationAliasExpect, OperationCreateRequest,
     OperationFinalizeRequest, OperationInputRef, OperationOutputFile, OperationPublicationRef,
     SourceCollectionRegistered, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT,

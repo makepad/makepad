@@ -50,6 +50,9 @@ pub fn dispatch(
             }
         }
         ["v1", "blobs"] if m == Method::Post => blob_upload(conn, head, rc),
+        // Ordered batch pull. Must be matched BEFORE `["v1","blobs",b]` so
+        // `fetch` is never parsed as a (malformed) blob id.
+        ["v1", "blobs", "fetch"] if m == Method::Post => blob_batch(conn, head, rc, force_close),
         ["v1", "blobs", b] if is_read(m) => {
             let id: BlobId = b.parse().map_err(|_| Fail::Http(400, "malformed blob id"))?;
             blob_get(conn, head, rc, force_close, id)
@@ -121,6 +124,161 @@ fn blob_upload(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<O
             ("deduped", Value::Bool(commit.deduped)),
         ]),
     )))
+}
+
+// ---------------------------------------------------------------------------
+// ordered batch pull
+// ---------------------------------------------------------------------------
+
+/// Frame status bytes. A frame ALWAYS appears for every requested blob, in
+/// the requested order, so a client can match frames to its own queue
+/// positionally and never has to guess what happened to an item.
+pub const BATCH_OK: u8 = 0;
+/// The store does not hold it (or it is not readable).
+pub const BATCH_MISSING: u8 = 1;
+/// Larger than the caller's declared per-item cap.
+pub const BATCH_OVER_ITEM_CAP: u8 = 2;
+/// The batch byte budget ran out before this item.
+pub const BATCH_SKIPPED: u8 = 3;
+
+/// Media type of the framed batch body. Versioned in the name: a client that
+/// does not recognise it must not try to parse frames.
+pub const BATCH_CONTENT_TYPE: &str = "application/vnd.makepad.blob-batch.v1";
+
+/// `POST /v1/blobs/fetch` — pull many blobs in ONE request, in the order the
+/// caller asked for.
+///
+/// Why it exists: a thumbnail grid asks for thirty small blobs. Thirty
+/// round-trips (even keep-alive ones) pay per-request latency thirty times
+/// and, worse, give the caller no way to say what matters FIRST. Here the
+/// order of the request list is the order of the response bytes, so a client
+/// that re-prioritises (the visible row changed) simply drops the connection
+/// and asks again — everything already framed is already committed on its
+/// side.
+///
+/// Framing: `status(1) | digest(32) | length(8, big-endian) | bytes[length]`
+/// per item, with `length = 0` on every non-OK status, under an exact
+/// `Content-Length` (this stack never chunks). Bytes come from the same
+/// verified read path single GETs use.
+fn blob_batch(
+    conn: &mut Conn,
+    head: &mut Head,
+    rc: &RouteCtx,
+    force_close: bool,
+) -> RouteResult<Outcome> {
+    let secret = secret_of(head)?;
+    let bytes = match super::routes::read_body(
+        conn,
+        head,
+        rc.cfg.max_json_body_bytes,
+        rc.cfg.control_body_deadline_ms,
+    ) {
+        Ok(b) => b,
+        Err(o) => return Ok(o),
+    };
+    let body = super::api::parse_json_body(&bytes)?;
+    let items = body
+        .get("blobs")
+        .and_then(Value::as_arr)
+        .ok_or(Fail::Http(400, "missing blobs array"))?;
+    if items.is_empty() {
+        return Err(Fail::Http(400, "empty batch"));
+    }
+    if items.len() > rc.cfg.batch_max_items as usize {
+        return Err(Fail::Http(400, "batch too large"));
+    }
+    let default_cap = match body.get("max_bytes") {
+        None => rc.cfg.batch_max_bytes,
+        Some(v) => v.as_u64().ok_or(Fail::Http(400, "malformed max_bytes"))?,
+    };
+    // Parse before touching the store: a malformed list costs nothing.
+    let mut wanted: Vec<(BlobId, u64)> = Vec::with_capacity(items.len());
+    for item in items {
+        let (id_text, cap) = match item {
+            Value::Str(t) => (t.as_str(), default_cap),
+            Value::Obj(_) => {
+                let t = item
+                    .get("blob")
+                    .and_then(Value::as_str)
+                    .ok_or(Fail::Http(400, "malformed batch item"))?;
+                let cap = match item.get("max_bytes") {
+                    None => default_cap,
+                    Some(v) => v.as_u64().ok_or(Fail::Http(400, "malformed max_bytes"))?,
+                };
+                (t, cap)
+            }
+            _ => return Err(Fail::Http(400, "malformed batch item")),
+        };
+        let id: BlobId = id_text.parse().map_err(|_| Fail::Http(400, "malformed blob id"))?;
+        wanted.push((id, cap.min(rc.cfg.batch_max_bytes)));
+    }
+
+    // Plan the whole response first: the exact Content-Length has to be
+    // known before a byte goes out, and planning on the state thread means
+    // one authenticate + one size lookup per item, no reads yet.
+    let budget = rc.cfg.batch_max_bytes;
+    let plan_items = wanted.clone();
+    let now = now_ms();
+    let plan = call_state(&rc.state, move |ctx| {
+        ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        let mut out: Vec<(BlobId, u8, u64)> = Vec::with_capacity(plan_items.len());
+        let mut total = 0u64;
+        for (id, cap) in &plan_items {
+            let size = ctx.core.catalog().blob_size(id)?;
+            let (status, len) = match size {
+                None => (BATCH_MISSING, 0),
+                Some(size) if size > *cap => (BATCH_OVER_ITEM_CAP, 0),
+                Some(size) if total.saturating_add(size) > budget => (BATCH_SKIPPED, 0),
+                Some(size) => {
+                    total += size;
+                    (BATCH_OK, size)
+                }
+            };
+            out.push((*id, status, len));
+        }
+        Ok(out)
+    })?;
+
+    let content_length: u64 = plan.iter().map(|(_, _, len)| 41 + *len).sum();
+    let close = force_close || head.close;
+    let headers: Vec<(&'static str, String)> = vec![
+        ("Content-Type", BATCH_CONTENT_TYPE.to_string()),
+        ("Cache-Control", "private, no-store".to_string()),
+    ];
+    if conn.write_stream_head(200, &headers, content_length, close).is_err() {
+        return Ok(Outcome::Hangup);
+    }
+    if head.method == Method::Head {
+        return Ok(Outcome::Streamed { close });
+    }
+    for (id, status, len) in &plan {
+        let mut frame = Vec::with_capacity(41);
+        frame.push(*status);
+        frame.extend_from_slice(id.as_bytes());
+        frame.extend_from_slice(&len.to_be_bytes());
+        if conn.write_chunk(&frame).is_err() {
+            return Ok(Outcome::Hangup);
+        }
+        if *status != BATCH_OK {
+            continue;
+        }
+        // One blob in memory at a time, read through the same digest-verified
+        // path a single GET uses.
+        let blob = *id;
+        let bytes = call_state(&rc.state, move |ctx| ctx.core.read_blob(&blob))?;
+        if bytes.len() as u64 != *len {
+            // The catalog size and the object disagree: the frame is already
+            // committed to a length, so the only honest move is to drop the
+            // connection rather than emit a lie.
+            return Ok(Outcome::Hangup);
+        }
+        for chunk in bytes.chunks(STREAM_CHUNK) {
+            if conn.write_chunk(chunk).is_err() {
+                return Ok(Outcome::Hangup);
+            }
+        }
+    }
+    Ok(Outcome::Streamed { close })
 }
 
 // ---------------------------------------------------------------------------

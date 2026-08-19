@@ -36,6 +36,8 @@ pub struct AssetServer {
     /// the tests) can SEE that reuse is really happening rather than assume
     /// it: thirty thumbnails should cost one accept, not thirty.
     accepted: [Arc<std::sync::atomic::AtomicU64>; 2],
+    /// Requests served per plane since start (see `RouteCtx::requests`).
+    requests: [Arc<std::sync::atomic::AtomicU64>; 2],
     server_id: [u8; 16],
     recover: RecoverReport,
     stop: Arc<AtomicBool>,
@@ -97,7 +99,12 @@ impl AssetServer {
             cfg.log,
             stop.clone(),
         )?;
+        let requests: [Arc<std::sync::atomic::AtomicU64>; 2] = [
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ];
         let rc = RouteCtx {
+            requests: requests[0].clone(),
             state: state.clone(),
             cfg: cfg.clone(),
             server_id,
@@ -123,7 +130,8 @@ impl AssetServer {
         .into_iter()
         .enumerate()
         {
-            let rc = rc.clone();
+            let mut rc = rc.clone();
+            rc.requests = requests[n].clone();
             let stop = stop.clone();
             let counter = accepted[n].clone();
             let name = format!(
@@ -176,6 +184,7 @@ impl AssetServer {
             control_addr,
             data_addr,
             accepted,
+            requests,
             server_id,
             recover,
             stop,
@@ -207,6 +216,16 @@ impl AssetServer {
     /// Connections accepted on the data plane since start.
     pub fn data_connections_accepted(&self) -> u64 {
         self.accepted[1].load(Ordering::Relaxed)
+    }
+
+    /// Requests served on the control plane since start.
+    pub fn control_requests_served(&self) -> u64 {
+        self.requests[0].load(Ordering::Relaxed)
+    }
+
+    /// Requests served on the data plane since start.
+    pub fn data_requests_served(&self) -> u64 {
+        self.requests[1].load(Ordering::Relaxed)
     }
 
     pub fn server_id(&self) -> [u8; 16] {
@@ -308,12 +327,20 @@ fn accept_loop(
 ) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut joins: Vec<JoinHandle<()>> = Vec::new();
+    // The listener is non-blocking so shutdown never has to interrupt a
+    // parked accept. That makes the idle wait a LATENCY budget: a flat 10 ms
+    // nap meant every new connection could wait 10 ms to be accepted, which
+    // on a localhost store is an order of magnitude more than serving the
+    // request. So poll fast right after activity — connections arrive in
+    // bursts, one per worker lane — and back off to a cheap idle poll.
+    let mut idle: u32 = 0;
     while !stop.load(Ordering::Relaxed) {
         // Reap finished connection threads so the handle list stays bounded
         // by the live-connection cap.
         joins.retain(|j| !j.is_finished());
         match listener.accept() {
             Ok((stream, _peer)) => {
+                idle = 0;
                 if active.load(Ordering::Relaxed) >= max_conns {
                     refuse_over_capacity(stream);
                     continue;
@@ -337,7 +364,13 @@ fn accept_loop(
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
+                idle = idle.saturating_add(1);
+                // ~40 ms of fast polling after the last accept, then idle.
+                if idle < 200 {
+                    std::thread::sleep(Duration::from_micros(200));
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
             Err(_) => {
                 // Transient accept failure (fd pressure, aborted handshake):
@@ -389,6 +422,7 @@ fn serve_conn(stream: TcpStream, rc: &RouteCtx, plane: Plane, stop: &AtomicBool)
             }
         };
         served += 1;
+        rc.requests.fetch_add(1, Ordering::Relaxed);
         let force_close =
             served >= cfg.max_requests_per_conn || stop.load(Ordering::Relaxed);
         match serve_request(&mut conn, &mut head, rc, plane, force_close) {

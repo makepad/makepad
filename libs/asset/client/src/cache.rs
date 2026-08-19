@@ -12,10 +12,20 @@
 //! lru/<64-hex>                     last-use stamps (ascii milliseconds)
 //! ```
 //!
+//! Durability policy: this is a CACHE of content-addressed bytes, not a
+//! store of record. Every read re-hashes (`resolve`), a mismatch evicts and
+//! reports absent, and anything missing is simply re-fetched — so a crash
+//! can only ever cost a re-download. Paying `F_FULLFSYNC` per committed
+//! object would buy nothing the digest does not already guarantee, and on a
+//! Mac it costs ~10 ms per object: a grid of thirty thumbnails would spend
+//! a third of a second waiting on disk barriers for bytes it can re-fetch in
+//! microseconds. Commits therefore flush to the OS and rename atomically,
+//! without a device barrier.
+//!
 //! Invariants:
 //! - Bytes are hashed while they stream into `partial/`/`tmp/`; nothing lands
 //!   under `objects/` without its digest having been computed from the exact
-//!   bytes on disk. Commit is fsync(file) → atomic rename → fsync(dir).
+//!   bytes on disk. Commit is flush → atomic rename.
 //! - Reads re-hash and refuse: a corrupt object is deleted and reported
 //!   absent, never served. The resolver's "verified path" promise rests here.
 //! - Partial downloads are keyed by their EXPECTED digest and survive both
@@ -89,6 +99,9 @@ pub struct CacheStats {
     pub corruption_evictions: u64,
 }
 
+/// Push a directory's entries out at cache OPEN time only: the root layout
+/// has to exist for anything else to make sense. Per-object commits do not
+/// call this — see the durability policy above.
 fn fsync_dir(dir: &Path) -> ClientResult<()> {
     File::open(dir).and_then(|f| f.sync_all()).map_err(io_err("cache fsync dir"))
 }
@@ -254,6 +267,13 @@ impl ContentCache {
         self.index.contains_key(digest)
     }
 
+    /// The path a committed digest occupies. Public because callers that
+    /// commit bytes themselves (the batch path) need the same answer
+    /// `resolve` would give without re-hashing what was just written.
+    pub fn object_path_of(&self, digest: &[u8; 32]) -> PathBuf {
+        self.object_path(digest)
+    }
+
     fn object_path(&self, digest: &[u8; 32]) -> PathBuf {
         let hex = to_hex(digest);
         self.objects.join(&hex[..2]).join(&hex)
@@ -411,7 +431,9 @@ impl ContentCache {
                 .open(&tmp_path)
                 .map_err(io_err("cache open tmp"))?;
             f.write_all(bytes).map_err(io_err("cache write tmp"))?;
-            f.sync_all().map_err(io_err("cache fsync tmp"))?;
+            // Flush to the OS, no device barrier: a lost cache object is a
+            // re-fetch, and `resolve` re-hashes anything that survives.
+            f.flush().map_err(io_err("cache flush tmp"))?;
         }
         match self.commit_file(&tmp_path, &digest, bytes.len() as u64, now_ms) {
             Ok(()) => Ok(digest),
@@ -432,13 +454,11 @@ impl ContentCache {
     ) -> ClientResult<()> {
         let final_path = self.object_path(digest);
         let dir = final_path.parent().expect("object path has parent");
-        let fanout_created = !dir.is_dir();
         fs::create_dir_all(dir).map_err(io_err("cache create fanout"))?;
-        if fanout_created {
-            fsync_dir(&self.objects)?;
-        }
+        // Atomic rename, no directory barrier: the rename is what makes the
+        // object visible-or-not, and a crash that loses the entry costs a
+        // re-fetch of bytes we can always ask for again.
         fs::rename(from, &final_path).map_err(io_err("cache commit rename"))?;
-        fsync_dir(dir)?;
         self.index.insert(*digest, size);
         self.total_bytes = self.total_bytes.saturating_add(size);
         self.touch(digest, now_ms)?;
@@ -564,7 +584,12 @@ impl ContentCache {
             return Ok(self.object_path(&digest));
         }
         self.admit(written)?;
-        file.sync_all().map_err(io_err("cache fsync partial"))?;
+        // Same policy as `put_bytes`: flush, do not barrier. A resumed
+        // partial is re-hashed from disk before it is extended, and a
+        // digest mismatch at commit deletes it, so torn tails are already
+        // handled by construction.
+        let mut file = file;
+        file.flush().map_err(io_err("cache flush partial"))?;
         drop(file);
         self.commit_file(&path, &digest, written, now_ms)?;
         Ok(self.object_path(&digest))
