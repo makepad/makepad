@@ -89,8 +89,9 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         cx.stop_timer(timer);
         cx.script_data.timers.timers.retain(|t| t.id != id);
     }
-    // Sandbox roots die with their isolates.
+    // Sandbox roots and host-bridge state die with their isolates.
     crate::splash_storage::gc_roots(&dead_heaps);
+    crate::splash_host::gc_bridge(&dead_heaps);
     let state = cx.global::<CxWidgetAsync>();
     for vm_id in dead {
         state.isolated_vms.vms.remove(&vm_id);
@@ -355,10 +356,12 @@ impl CxSplashVmExt for Cx {
             // through the gated net runtime. Raw sockets are gated separately:
             // the stdlib's `net.socket_stream` errors when no net runtime is
             // configured, same as `net.http_request`.
+            // `cx.quit` would let any mini-app close the whole host process.
             let strip = crate::makepad_script::script! {
                 mod.fs = nil
                 mod.run = nil
                 mod.res = nil
+                mod.cx.quit = nil
             };
             vm.eval(strip);
             // Re-register `fs` as the JAILED per-app storage module: inside an
@@ -366,6 +369,10 @@ impl CxSplashVmExt for Cx {
             // (assigned by the host via Splash::set_sandbox_dir; without one,
             // every call errors). See splash_storage.rs for the containment.
             crate::splash_storage::script_mod(&mut vm);
+            // `host` is the brokered doorway to host services (location,
+            // clipboard, IPC, ...); requests queue for the embedding host to
+            // answer, and no host = nothing resolves. See splash_host.rs.
+            crate::splash_host::script_mod(&mut vm);
             vm.bx
         };
 
@@ -428,6 +435,11 @@ impl CxSplashVmExt for Cx {
             .copied()
             .unwrap_or(MAIN_SPLASH_VM_ID)
     }
+}
+
+/// The isolate (if any) that owns a heap, for host-bridge response routing.
+pub(crate) fn vm_for_heap(cx: &mut Cx, heap_key: usize) -> Option<SplashVmId> {
+    cx.global::<CxWidgetAsync>().heap_to_vm.get(&heap_key).copied()
 }
 
 /// Deliver `Event::NetworkResponses` to a Splash isolate's script (resolving its
