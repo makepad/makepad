@@ -77,13 +77,16 @@ pub struct FluxRunHooks<'a> {
     pub cancel: &'a dyn Fn() -> bool,
 }
 
-fn hook_emit(hooks: &mut Option<&mut FluxRunHooks>, name: &str, fraction: f64) {
+/// Crate-visible (not just this file) so `flux_fill_pipeline.rs` can drive
+/// [`FluxRunHooks`] with the exact same banding conventions instead of
+/// duplicating them.
+pub(crate) fn hook_emit(hooks: &mut Option<&mut FluxRunHooks>, name: &str, fraction: f64) {
     if let Some(hooks) = hooks.as_deref_mut() {
         (hooks.progress)(name, fraction);
     }
 }
 
-fn hook_check(hooks: &Option<&mut FluxRunHooks>) -> Result<()> {
+pub(crate) fn hook_check(hooks: &Option<&mut FluxRunHooks>) -> Result<()> {
     if let Some(hooks) = hooks.as_deref() {
         if (hooks.cancel)() {
             return Err(DiffusionError::Cancelled);
@@ -96,7 +99,7 @@ fn hook_check(hooks: &Option<&mut FluxRunHooks>) -> Result<()> {
 /// `[base, base + span]` band of the hooked call. Labels pass through as-is;
 /// every emission doubles as a cancel poll (host-side phases only — the
 /// in-flight GPU step uses [`sub_hook_emit_only`]).
-fn sub_hook<'a>(
+pub(crate) fn sub_hook<'a>(
     hooks: &'a mut Option<&mut FluxRunHooks<'_>>,
     base: f64,
     span: f64,
@@ -115,7 +118,7 @@ fn sub_hook<'a>(
 /// [`sub_hook`] without the cancel poll and with a label prefix — used inside
 /// a denoise/decode step, where a single in-flight forward stays the cancel
 /// granularity floor.
-fn sub_hook_emit_only<'a>(
+pub(crate) fn sub_hook_emit_only<'a>(
     hooks: &'a mut Option<&mut FluxRunHooks<'_>>,
     prefix: String,
     base: f64,
@@ -859,11 +862,13 @@ fn plan_reusable(
         && next.bundle.t5xxl_path == current.bundle.t5xxl_path
 }
 
-fn elapsed_ms(start: Instant) -> f64 {
+pub(crate) fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-fn gaussian_latents(latent_width: u32, latent_height: u32, seed: u64) -> Vec<f32> {
+/// Crate-visible so `flux_fill_pipeline.rs` seeds its noise identically to
+/// flux1-dev/schnell (same seed -> same initial packed latents).
+pub(crate) fn gaussian_latents(latent_width: u32, latent_height: u32, seed: u64) -> Vec<f32> {
     let count = 16usize * latent_width as usize * latent_height as usize;
     let mut rng = XorShift64::new(seed);
     let mut out = Vec::with_capacity(count);
@@ -880,7 +885,7 @@ fn gaussian_latents(latent_width: u32, latent_height: u32, seed: u64) -> Vec<f32
     out
 }
 
-fn nchw_to_whcb(
+pub(crate) fn nchw_to_whcb(
     input: &[f32],
     batch: usize,
     channels: usize,

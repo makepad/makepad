@@ -19,6 +19,7 @@ pub mod comfy;
 pub mod t5;
 pub mod t5_encoder;
 pub mod flux;
+pub mod flux_fill_pipeline;
 pub mod flux_gguf;
 pub mod flux_pipeline;
 pub mod flux_schedule;
