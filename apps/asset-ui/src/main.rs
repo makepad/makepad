@@ -8866,6 +8866,12 @@ impl AppMain for App {
             if crate::asset_store_state::env_alias(&["ASSET_UI_DARK", "AI_CONTENT_DARK"]).is_some() {
                 self.set_mesh_dark(cx, true);
             }
+            // ASSET_UI_OPEN_VIEW_DROP=1: open the View popup (popup placement captures).
+            if crate::asset_store_state::env_alias(&["ASSET_UI_OPEN_VIEW_DROP", "AI_CONTENT_OPEN_VIEW_DROP"]).is_some() {
+                if let Some(mut drop) = self.ui.drop_down2(cx, ids!(pbr_view_drop)).borrow_mut() {
+                    drop.set_active(cx);
+                }
+            }
             // ASSET_UI_PBR_VIEW=<index|label>: inspection view for captures.
             if let Some(view) =
                 crate::asset_store_state::env_alias(&["ASSET_UI_PBR_VIEW", "AI_CONTENT_PBR_VIEW"])
