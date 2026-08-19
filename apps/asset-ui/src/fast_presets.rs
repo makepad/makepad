@@ -28,6 +28,9 @@ pub struct SavedFastPreset {
     pub image_steps: Option<u32>,
     pub mesh_texture: u32,
     pub mesh_faces: Option<u32>,
+    /// Option so presets saved before the flag existed still load (None =
+    /// false).
+    pub mesh_trellis_texture: Option<bool>,
     pub video_w: u32,
     pub video_h: u32,
     pub video_frames: u32,
@@ -145,6 +148,7 @@ pub fn snapshot(
         image_steps: gen.image_steps,
         mesh_texture: gen.mesh_texture_size,
         mesh_faces: gen.mesh_faces,
+        mesh_trellis_texture: Some(gen.mesh_trellis_texture),
         video_w: gen.video_size.0,
         video_h: gen.video_size.1,
         video_frames: gen.video_frames,
@@ -159,6 +163,7 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
         image_steps: saved.image_steps,
         mesh_texture_size: saved.mesh_texture,
         mesh_faces: saved.mesh_faces,
+        mesh_trellis_texture: saved.mesh_trellis_texture.unwrap_or(false),
         video_size: (saved.video_w, saved.video_h),
         video_frames: saved.video_frames,
         video_steps: saved.video_steps,
