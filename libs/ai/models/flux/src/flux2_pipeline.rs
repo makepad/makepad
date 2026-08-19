@@ -46,6 +46,77 @@ pub struct Flux2KleinPipeline {
     pub vae: Flux2VaeWeights,
 }
 
+/// img2img init for the FLUX.2 samplers (Klein edit, dev generate/edit): the
+/// image to start from (same size as the output, multiple of 16) and the
+/// denoise `strength` in `[0, 1]`. ComfyUI semantics for a flow model with
+/// CONST noise scaling: the init is VAE-encoded to packed latents `z0`, the
+/// sampler starts at sigma index `k = floor((1 - strength) * steps)` of the
+/// full schedule with `x = sigma_k * noise + (1 - sigma_k) * z0`, and runs
+/// the remaining `steps - k` steps. `strength = 1` is the plain t2i/edit run
+/// (`k = 0`, x = noise), `strength = 0` returns the init re-encoded
+/// (`k = steps`, no denoise). Fewer steps run at lower strength — the live
+/// feed loop relies on that.
+#[derive(Clone, Debug)]
+pub struct Flux2Img2Img {
+    pub image: Flux2VaeImage,
+    pub strength: f32,
+}
+
+/// Resolve the img2img start: `(start_step, sample)`. `noise` is the full
+/// sigma-1 noise (`[gen_tokens, 128]` token-major); `sigmas` the full
+/// `steps + 1` schedule.
+fn flux2_img2img_start(
+    vae: &Flux2VaeWeights,
+    init: &Flux2Img2Img,
+    noise: Vec<f32>,
+    sigmas: &[f32],
+    steps: usize,
+    packed_w: usize,
+    packed_h: usize,
+) -> Result<(usize, Vec<f32>)> {
+    if !(0.0..=1.0).contains(&init.strength) || !init.strength.is_finite() {
+        return Err(DiffusionError::workflow(format!(
+            "flux2 img2img strength must be in [0, 1], got {}",
+            init.strength
+        )));
+    }
+    if init.image.width != packed_w * 16 || init.image.height != packed_h * 16 {
+        return Err(DiffusionError::workflow(format!(
+            "flux2 img2img init is {}x{}, output is {}x{} — the init must match the output size",
+            init.image.width,
+            init.image.height,
+            packed_w * 16,
+            packed_h * 16
+        )));
+    }
+    let start = (((1.0 - init.strength) * steps as f32).floor() as usize).min(steps);
+    if start == 0 {
+        return Ok((0, noise));
+    }
+    let packed = flux2_vae_encode(vae, &init.image)?;
+    if packed.width != packed_w || packed.height != packed_h || packed.channels != 128 {
+        return Err(DiffusionError::workflow(format!(
+            "flux2 img2img init encoded to {}x{}x{}, expected {packed_w}x{packed_h}x128",
+            packed.width, packed.height, packed.channels
+        )));
+    }
+    let z0 = packed.to_tokens();
+    if z0.len() != noise.len() {
+        return Err(DiffusionError::workflow(format!(
+            "flux2 img2img init has {} latent values, noise has {}",
+            z0.len(),
+            noise.len()
+        )));
+    }
+    let sigma = sigmas[start];
+    let sample: Vec<f32> = noise
+        .iter()
+        .zip(z0.iter())
+        .map(|(n, z)| sigma * n + (1.0 - sigma) * z)
+        .collect();
+    Ok((start, sample))
+}
+
 #[derive(Clone, Debug)]
 pub struct Flux2EditRequest {
     pub prompt: String,
@@ -64,6 +135,10 @@ pub struct Flux2EditRequest {
     pub teacher_ref_tokens: Option<Vec<f32>>,
     /// Optional oracle prompt embeds (token-major `[512, 7680]`).
     pub teacher_embeds: Option<Vec<f32>>,
+    /// Optional img2img init (see [`Flux2Img2Img`]): start the sampler from
+    /// this image at the given strength instead of from pure noise. The
+    /// `references` still condition the edit as before.
+    pub init: Option<Flux2Img2Img>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +262,15 @@ impl Flux2KleinPipeline {
             .collect();
         let txt_ids = flux2_text_ids(tokenized.token_ids.len());
         let sigmas = flux2_schedule(request.steps, gen_tokens)?;
+        let start_step = match &request.init {
+            Some(init) => {
+                let (start, mixed) =
+                    flux2_img2img_start(&self.vae, init, sample, &sigmas, request.steps, packed_w, packed_h)?;
+                sample = mixed;
+                start
+            }
+            None => 0,
+        };
 
         let prof = std::env::var_os("MAKEPAD_GPU_PROF").is_some();
         if prof {
@@ -196,7 +280,7 @@ impl Flux2KleinPipeline {
         }
         let started = std::time::Instant::now();
         let mut step_residuals = Vec::new();
-        for step in 0..request.steps {
+        for step in start_step..request.steps {
             let step_started = std::time::Instant::now();
             let (img_tokens, img_ids) = flux2_concat_ref_tokens(&sample, &gen_ids, &refs);
             let run = flux2_transformer_forward(
@@ -209,7 +293,7 @@ impl Flux2KleinPipeline {
                 None,
                 gen_tokens,
             )?;
-            if step == request.steps / 2 || step == 0 {
+            if step == request.steps / 2 || step == start_step {
                 step_residuals.push(run.prediction.clone());
             }
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
@@ -414,6 +498,8 @@ pub struct Flux2GenerateRequest {
     /// steps — the per-step parity metric that is not polluted by the
     /// trajectory's chaotic amplification of fp8/bf16 ulps.
     pub teacher_steps: Option<Vec<Vec<f32>>>,
+    /// Optional img2img init (see [`Flux2Img2Img`]).
+    pub init: Option<Flux2Img2Img>,
 }
 
 #[derive(Clone, Debug)]
@@ -569,6 +655,20 @@ impl Flux2DevPipeline {
         let gen_ids = flux2_image_ids(packed_w, packed_h, 0);
         let txt_ids = flux2_text_ids(width);
         let sigmas = flux2_schedule(request.steps, gen_tokens)?;
+        let start_step = match &request.init {
+            Some(_) if request.teacher_steps.is_some() => {
+                return Err(DiffusionError::workflow(
+                    "flux2 dev: img2img init and teacher_steps are mutually exclusive",
+                ))
+            }
+            Some(init) => {
+                let (start, mixed) =
+                    flux2_img2img_start(&self.vae, init, sample, &sigmas, request.steps, packed_w, packed_h)?;
+                sample = mixed;
+                start
+            }
+            None => 0,
+        };
 
         let prof = std::env::var_os("MAKEPAD_GPU_PROF").is_some();
         if prof {
@@ -585,7 +685,7 @@ impl Flux2DevPipeline {
                 )));
             }
         }
-        for step in 0..request.steps {
+        for step in start_step..request.steps {
             let step_started = std::time::Instant::now();
             if let Some(hook) = on_stage.as_deref_mut() {
                 hook("denoise", step + 1, request.steps);
@@ -610,7 +710,7 @@ impl Flux2DevPipeline {
                 Some(request.guidance),
                 gen_tokens,
             )?;
-            if step == 0 || step + 1 == request.steps || request.teacher_steps.is_some() {
+            if step == start_step || step + 1 == request.steps || request.teacher_steps.is_some() {
                 step_predictions.push((step, run.prediction.clone()));
             }
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
@@ -797,10 +897,19 @@ impl Flux2DevPipeline {
             .collect();
         let txt_ids = flux2_text_ids(width);
         let sigmas = flux2_schedule(request.steps, gen_tokens)?;
+        let start_step = match &request.init {
+            Some(init) => {
+                let (start, mixed) =
+                    flux2_img2img_start(&self.vae, init, sample, &sigmas, request.steps, packed_w, packed_h)?;
+                sample = mixed;
+                start
+            }
+            None => 0,
+        };
 
         let denoise_started = std::time::Instant::now();
         let mut step_residuals = Vec::new();
-        for step in 0..request.steps {
+        for step in start_step..request.steps {
             if let Some(hook) = on_stage.as_deref_mut() {
                 hook("denoise", step + 1, request.steps);
             }
@@ -815,7 +924,7 @@ impl Flux2DevPipeline {
                 Some(guidance),
                 gen_tokens,
             )?;
-            if step == 0 || step + 1 == request.steps {
+            if step == start_step || step + 1 == request.steps {
                 step_residuals.push(run.prediction.clone());
             }
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;

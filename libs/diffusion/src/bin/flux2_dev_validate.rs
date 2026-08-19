@@ -275,6 +275,7 @@ fn run() -> Result<(), String> {
         noise: Some(noise.clone()),
         teacher_embeds: teacher_embeds.clone(),
         teacher_steps: None,
+        init: None,
     };
     let result = pipe.generate(&request).map_err(|err| err.to_string())?;
     let (pred0_max, pred0_cos) = compare(
@@ -372,6 +373,57 @@ fn run() -> Result<(), String> {
         }
     } else {
         rows.push("decoded_image    SKIP (no vae_out.npy)".into());
+    }
+
+    // --- img2img probe (FLUX2_IMG2IMG_STRENGTH=<0..1>) -------------------------
+    // Start from the ORACLE's decoded image at the given strength: a correct
+    // img2img path must land very close to that image at low strength (only
+    // the last floor(strength*steps) steps are regenerated) and drift toward
+    // the free t2i result as strength -> 1.
+    if let Some(strength) = std::env::var("FLUX2_IMG2IMG_STRENGTH")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        if vae_out_path.is_file() {
+            let oracle_img = load_npy(&vae_out_path)?;
+            let oracle_values = oracle_img.as_f32()?; // (1, H, W, 3) in [0,1]
+            let (h, w) = (oracle_img.shape[1], oracle_img.shape[2]);
+            let plane = h * w;
+            let mut planar = vec![0.0f32; plane * 3];
+            for i in 0..plane {
+                for ch in 0..3 {
+                    planar[ch * plane + i] = oracle_values[i * 3 + ch] * 2.0 - 1.0;
+                }
+            }
+            let init = makepad_diffusion::flux2_pipeline::Flux2Img2Img {
+                image: makepad_diffusion::flux2_vae::Flux2VaeImage {
+                    width: w,
+                    height: h,
+                    data: planar,
+                },
+                strength,
+            };
+            let i2i_request = Flux2GenerateRequest {
+                init: Some(init),
+                ..request.clone()
+            };
+            let i2i = pipe.generate(&i2i_request).map_err(|err| err.to_string())?;
+            let mut native_interleaved = vec![0.0f32; plane * 3];
+            for i in 0..plane {
+                for ch in 0..3 {
+                    native_interleaved[i * 3 + ch] = (i2i.image.data[ch * plane + i] + 1.0) * 0.5;
+                }
+            }
+            let (img_max, img_cos) = compare(&native_interleaved, &oracle_values)?;
+            let steps_run = i2i.step_predictions.last().map(|(s, _)| s + 1).unwrap_or(0)
+                - i2i.step_predictions.first().map(|(s, _)| *s).unwrap_or(0);
+            rows.push(format!(
+                "img2img          strength={strength} steps_run={steps_run} image max_abs={img_max:.5} \
+                 cosine={img_cos:.6} denoise_ms={:.0} total_ms={:.0}",
+                i2i.denoise_ms, i2i.total_ms
+            ));
+            std::fs::write(dumps.join("native_img2img.png"), &i2i.png).map_err(|err| err.to_string())?;
+        }
     }
 
     // save the native PNG next to the dumps for eyeballing
