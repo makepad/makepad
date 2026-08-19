@@ -223,6 +223,13 @@ pub struct GenerateRequestJson {
     /// Video codec: "h265"/"hevc" (default, hardware-decodable on Quest-class
     /// devices) or "h264" (compatibility fallback).
     pub codec: Option<String>,
+    /// H3 generates video and audio jointly in one denoising pass — the
+    /// audio latents cannot be dropped from the DiT's packed sequence
+    /// (no such mode exists upstream). Default true = decode the denoised
+    /// audio latents through the audio VAE and mux an AAC track. false =
+    /// skip both: silent mp4, no audio track (saves the audio VAE decode
+    /// and the AAC mux work, not the joint denoise itself).
+    pub audio: Option<bool>,
     /// Test hook honored by the testpattern backend only: sleep this long
     /// during generation so queue/reject behavior can be exercised.
     pub delay_ms: Option<u64>,

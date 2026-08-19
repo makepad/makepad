@@ -234,6 +234,11 @@ pub struct VideoJob {
     /// The video VISIBLY starts from this image — the pipeline VAE-encodes it
     /// into never-denoised leading rows and feeds it to the vision tower.
     pub input_rgb: Option<(Vec<u8>, u32, u32)>,
+    /// true (default) = decode the jointly-denoised audio latents and mux an
+    /// AAC track. false = skip the audio VAE decode and mux a silent mp4.
+    /// The DiT still denoises the audio rows either way — there is no
+    /// upstream mode that drops them from the packed t2va sequence.
+    pub audio: bool,
 }
 
 /// Raw decoded output of a video generator.
@@ -548,6 +553,7 @@ impl ContentBackend for H3Backend {
             steps: params.steps.unwrap_or(DEFAULT_STEPS).clamp(2, 100),
             seed: params.seed,
             input_rgb,
+            audio: params.audio.unwrap_or(true),
         };
         check_canvas_within_tier(
             &self.model_id,
@@ -864,7 +870,7 @@ mod h3_gen {
                 audio_noise_rows: None,
                 condition_rows_override: None,
                 act16: false,
-                decode_audio: true,
+                decode_audio: job.audio,
                 model_set: self.model_set.clone(),
                 staged_residency: self.staged_residency,
             };
@@ -1101,6 +1107,56 @@ mod tests {
         assert_eq!(artifacts[0].content_type, "video/mp4");
         assert_eq!(artifacts[0].ext, "mp4");
         assert_eq!(artifacts[0].bytes, b"MP4STUB");
+    }
+
+    /// `audio` defaults to true (the job wants the jointly-denoised audio
+    /// decoded); an explicit `audio: false` request reaches the generator as
+    /// `job.audio == false` so the real H3 pipeline can skip the audio VAE
+    /// decode + AAC mux (see `H3GenerateParams::decode_audio` in h3_pipeline).
+    #[test]
+    fn audio_request_field_reaches_the_job() {
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                assert!(job.audio, "audio omitted from the request must default to true");
+                Ok(stub_clip(job))
+            }),
+            Box::new(|_: &MuxInput| Ok(vec![1])),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            width: Some(32),
+            height: Some(16),
+            ..GenerateRequestJson::default()
+        });
+        let mut sink = |_: &str, _: f64| {};
+        backend.generate(&params, &mut sink, &CancelToken::new()).unwrap();
+
+        let mut backend = H3Backend::with_stubs(
+            "minimax-h3",
+            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| {
+                assert!(!job.audio, "audio: Some(false) must reach the job as false");
+                // The real pipeline (decode_audio: false) never populates
+                // audio_planar; the stub mirrors that.
+                let mut clip = stub_clip(job);
+                clip.audio_planar = None;
+                Ok(clip)
+            }),
+            Box::new(|input: &MuxInput| {
+                assert!(input.audio_i16.is_none(), "video-only request must mux no audio track");
+                Ok(vec![1])
+            }),
+        );
+        let params = video_params(GenerateRequestJson {
+            model: "minimax-h3".to_string(),
+            prompt: Some("p".to_string()),
+            width: Some(32),
+            height: Some(16),
+            audio: Some(false),
+            ..GenerateRequestJson::default()
+        });
+        backend.generate(&params, &mut sink, &CancelToken::new()).unwrap();
     }
 
     #[test]

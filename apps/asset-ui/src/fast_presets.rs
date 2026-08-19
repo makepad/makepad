@@ -37,6 +37,9 @@ pub struct SavedFastPreset {
     pub video_h: u32,
     pub video_frames: u32,
     pub video_steps: u32,
+    /// Option so presets saved before the flag existed still load (None =
+    /// true — the H3 default is an audible clip).
+    pub video_audio: Option<bool>,
     pub music_seconds: u32,
 }
 
@@ -156,6 +159,7 @@ pub fn snapshot(
         video_h: gen.video_size.1,
         video_frames: gen.video_frames,
         video_steps: gen.video_steps,
+        video_audio: Some(gen.video_audio),
         music_seconds: gen.music_seconds,
     }
 }
@@ -171,6 +175,7 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
         video_size: (saved.video_w, saved.video_h),
         video_frames: saved.video_frames,
         video_steps: saved.video_steps,
+        video_audio: saved.video_audio.unwrap_or(true),
         music_seconds: saved.music_seconds,
     }
 }

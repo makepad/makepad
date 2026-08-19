@@ -590,6 +590,7 @@ mod tests {
             input_content_type: String::new(),
             frames: None,
             codec: String::new(),
+            audio: None,
             target_domain: "image".to_string(),
             identity_anchor: String::new(),
             style: String::new(),
