@@ -178,6 +178,17 @@ impl PackAtlas {
     }
 
     pub fn pack_charts(&mut self, options: &PackOptions) -> bool {
+        self.pack_charts_with_progress(options, &mut |_| true)
+    }
+
+    /// Same as [`Self::pack_charts`]; `progress(frac)` advances per placed
+    /// chart (largest first, so early charts are the slow ones). Returning
+    /// false abandons packing and returns false.
+    pub fn pack_charts_with_progress(
+        &mut self,
+        options: &PackOptions,
+        progress: &mut dyn FnMut(f64) -> bool,
+    ) -> bool {
         let chart_count = self.charts.len() as u32;
         if chart_count == 0 {
             return true;
@@ -304,6 +315,9 @@ impl PackAtlas {
         let mut boundary_edge_grid = UniformGrid2::default();
         let mut atlas_sizes = vec![Vec2i::new(0, 0)];
         for i in 0..chart_count {
+            if i % 32 == 0 && !progress(i as f64 / chart_count as f64) {
+                return false;
+            }
             let c = ranks[(chart_count - i - 1) as usize];
             chart_image.resize(
                 (ftoi_ceil(chart_extents[c as usize].x) as u32) + options.padding,

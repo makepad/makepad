@@ -293,22 +293,23 @@ pub fn parametrize_with_options_progress(
 
     let mut param_atlas = ParamAtlas::default();
     param_atlas.add_mesh(&mesh);
-    if !param_atlas.compute_charts_with_progress(chart, &mut |done, total| {
-        progress(0.1 + 0.75 * done as f64 / total.max(1) as f64)
+    if !param_atlas.compute_charts_with_progress(chart, &mut |frac| {
+        progress(0.1 + 0.65 * frac.clamp(0.0, 1.0))
     }) {
         return Err(AddMeshError::Error);
     }
 
     let mut pack_atlas = PackAtlas::default();
     pack_atlas.add_charts(&mut param_atlas);
-    if pack.texels_per_unit < 0.0 {
+    let mut pack_progress = |frac: f64| progress(0.75 + 0.2 * frac.clamp(0.0, 1.0));
+    let packed = if pack.texels_per_unit < 0.0 {
         let mut p = pack.clone();
         p.texels_per_unit = 0.0;
-        pack_atlas.pack_charts(&p);
+        pack_atlas.pack_charts_with_progress(&p, &mut pack_progress)
     } else {
-        pack_atlas.pack_charts(pack);
-    }
-    if !progress(0.9) {
+        pack_atlas.pack_charts_with_progress(pack, &mut pack_progress)
+    };
+    if !packed || !progress(0.95) {
         return Err(AddMeshError::Error);
     }
 
