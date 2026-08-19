@@ -192,6 +192,8 @@ const CHARACTER_MATTE_MODEL: &str = "birefnet-hr";
 const CHARACTER_MESH_MODEL: &str = "trellis-2";
 const CHARACTER_RIG_MODEL: &str = "skintokens";
 const CHARACTER_MOTION_MODEL: &str = "hy-motion";
+/// Instruction image editing (reference image + "change …" prompt).
+const EDIT_MODEL: &str = "flux2-klein-4b";
 
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
@@ -410,6 +412,12 @@ pub const PRESETS: &[Preset] = &[
     Preset::linear("music", &["music"], &[]),
     Preset::linear("expand → music", &["text", "music"], &[]),
     Preset::linear("image → cutout (alpha)", &["image", "matte"], &[]),
+    // "Talk about it to change it": select a picture, type the instruction
+    // ("change the background to trees"), and the instruction-edit model
+    // (FLUX.2 klein, reference-image conditioned) returns the edited picture
+    // — no segment/plan/composite chain needed. Consumer-only: refused
+    // without a selected image.
+    Preset::linear("edit selected image (instruction)", &["edit"], &[("edit", EDIT_MODEL)]),
     Preset::linear("image → depthmap", &["image", "depth"], &[]),
     Preset::linear("image → segment", &["image", "segment"], &[("segment", "sam3-1-multiplex")]),
     // The character chain: prompt -> clean character image -> Trellis mesh ->
@@ -486,10 +494,18 @@ pub const PRESETS: &[Preset] = &[
 pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
-        "mesh" | "video" | "world" | "matte" | "depth" | "segment" => Some(&["image/"]),
+        "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" => Some(&["image/"]),
         "paint" => Some(&["model/gltf-binary"]),
         _ => None,
     }
+}
+
+/// Domains that ONLY transform an input and have no prompt-only mode: a
+/// chain starting with one is seedable even though nothing is replaced
+/// (`edit`: "change the background to trees" needs the picture), and is
+/// refused without a selected input instead of failing on the box.
+pub fn consumer_only_domain(domain: &str) -> bool {
+    matches!(domain, "edit")
 }
 
 /// Index of the first stage of `domains` that CONSUMES a payload of
@@ -510,7 +526,8 @@ pub fn seeded_stage_skip(domains: &[&str], seed_content_type: &str) -> Option<us
 /// text-to-video preset stays a pure prompt generator even while an input
 /// is selected — its dedicated `image → video` sibling is the transform.
 pub fn seed_replaces_prefix(domains: &[&str], seed_content_type: &str) -> Option<usize> {
-    seeded_stage_skip(domains, seed_content_type).filter(|skip| *skip >= 1)
+    seeded_stage_skip(domains, seed_content_type)
+        .filter(|skip| *skip >= 1 || domains.first().is_some_and(|d| consumer_only_domain(d)))
 }
 
 /// Human-facing stage name.  In particular, call the text stage what it is:
@@ -522,6 +539,7 @@ pub fn stage_display_name(domain: &str) -> &str {
         "matte" => "subject matte",
         "segment" => "SAM 3.1 segment",
         "paint" => "Hunyuan PBR paint",
+        "edit" => "instruction edit",
         _ => domain,
     }
 }
@@ -1226,6 +1244,12 @@ impl Pipeline {
                 request.width = Some(self.gen.image_size.0);
                 request.height = Some(self.gen.image_size.1);
                 request.steps = self.gen.image_steps;
+            }
+            // Instruction edit: the prompt IS the edit instruction; output
+            // size follows the reference (backend default), steps = model
+            // default (klein: 4 distilled).
+            "edit" => {
+                request.prompt = Some(prompt);
             }
             "speech" => {
                 request.text = Some(prompt);
@@ -4319,8 +4343,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("depth", "da3-metric-large"),
             ("image", "flux1-dev"),
             ("image", "flux1-schnell"),
+            ("edit", "flux2-klein-4b"),
             ("image", "flux2-dev"),
-            ("image", "flux2-klein-4b"),
             ("image", "testpattern"),
             ("matte", "birefnet-hr"),
             ("mesh", "trellis-2"),
@@ -4550,6 +4574,30 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             makepad_base64::base64_decode(inputs[1].data_b64.as_bytes()).unwrap();
         assert_eq!(mesh_bytes, b"glb-bytes");
         assert_eq!(image_bytes, b"photo");
+    }
+
+    #[test]
+    fn edit_chain_is_seeded_at_stage_zero_and_relays_the_picture() {
+        // Consumer-only first stage: seedable even though nothing is replaced.
+        assert_eq!(seed_replaces_prefix(&["edit"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["edit"], "model/gltf-binary"), None);
+        // Ordinary consumer-first chains keep the old rule (prompt generators).
+        assert_eq!(seed_replaces_prefix(&["video"], "image/png"), None);
+        let mut pipeline = Pipeline::new(
+            "change the background to trees",
+            &["edit"],
+            &[("edit", EDIT_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"picture".to_vec()).unwrap();
+        let edit = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(edit.prompt.as_deref(), Some("change the background to trees"));
+        assert_eq!(edit.input_content_type.as_deref(), Some("image/png"));
+        assert_eq!(decoded_input(&edit), b"picture");
+        assert_eq!(edit.width, None, "output size follows the reference");
     }
 
     #[test]
