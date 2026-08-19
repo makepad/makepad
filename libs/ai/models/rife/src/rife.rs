@@ -411,6 +411,15 @@ pub enum RifeBackendKind {
     Reference,
 }
 
+/// True when RIFE's own device ops are actually present, not merely that
+/// *a* GPU exists: `gpu_device_available()` is true on a Metal Mac, where
+/// the RIFE kernels have no counterpart.  Probing with the cheapest op
+/// (a one-element fill) turns that into a truthful answer at prepare time
+/// rather than a confusing failure inside the first block.
+pub fn rife_device_available() -> bool {
+    crate::backend::gpu_device_available() && crate::backend::gpu_rife_fill(1, 1, 0.0).is_ok()
+}
+
 /// A frame pair to interpolate between: tightly packed RGB8, `w * h * 3`.
 #[derive(Clone, Copy, Debug)]
 pub struct RifeFramePair<'a> {
@@ -470,7 +479,7 @@ impl Rife {
         let kind = if reference {
             RifeBackendKind::Reference
         } else {
-            if !crate::backend::gpu_device_available() {
+            if !rife_device_available() {
                 return Err(DiffusionError::model(
                     "native RIFE requires the Makepad CUDA backend \
                      (set MAKEPAD_RIFE_MODE=reference for the portable forward)",
@@ -622,6 +631,59 @@ mod tests {
         assert_eq!(find("blocks.4.conv0.0.0.weight"), vec![16, 28, 3, 3]);
         assert_eq!(find("blocks.4.lastconv.0.weight"), vec![32, 52, 4, 4]);
         assert_eq!(find("blocks.4.lastconv.0.bias"), vec![52]);
+    }
+
+    /// The CUDA-box smoke test: the device forward must reproduce the
+    /// portable reference. Runs only where both a checkpoint and a CUDA
+    /// device are present, so it is a no-op on macOS and in CI:
+    ///
+    /// ```text
+    /// MAKEPAD_RIFE_WEIGHTS=<cache>/video/rife/rife_v4.26.safetensors \
+    ///   cargo test --release -p makepad-ai-rife -- --nocapture device_matches
+    /// ```
+    #[test]
+    fn device_matches_the_reference_forward() {
+        let Ok(path) = std::env::var("MAKEPAD_RIFE_WEIGHTS") else {
+            return;
+        };
+        if !rife_device_available() {
+            return;
+        }
+        let weights = RifeWeights::load(&path).expect("load pinned rife checkpoint");
+        let model = weights.prepare_model(None).expect("prepare rife model");
+        let (width, height) = (128usize, 96usize);
+        let frame = |shift: usize| -> Vec<u8> {
+            (0..width * height * 3)
+                .map(|index| ((index * 7 + shift * 131) % 256) as u8)
+                .collect()
+        };
+        let (first, second) = (frame(0), frame(9));
+        let pair = RifeFramePair::new(&first, &second, width, height).unwrap();
+        let reference = Rife::from_model_weights(model.clone(), RifeBackendKind::Reference)
+            .interpolate_rgb8(pair, 0.5)
+            .expect("reference forward");
+        let device = Rife::from_model_weights(model, RifeBackendKind::Device)
+            .interpolate_rgb8(pair, 0.5)
+            .expect("device forward");
+        assert_eq!(reference.len(), device.len());
+        let max_abs = reference
+            .iter()
+            .zip(&device)
+            .map(|(a, b)| (i32::from(*a) - i32::from(*b)).unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        let mismatched = reference
+            .iter()
+            .zip(&device)
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "rife device vs reference: max_abs {max_abs} levels, {mismatched}/{} samples differ",
+            reference.len()
+        );
+        // Only f32 accumulation order differs between the two forwards, so
+        // a level or two of quantization drift is the whole budget.
+        assert!(max_abs <= 2, "device forward drifted by {max_abs} levels");
     }
 
     /// Opt-in end-to-end check against the real 22 MB checkpoint:
