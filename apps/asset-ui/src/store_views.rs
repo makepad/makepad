@@ -17,7 +17,7 @@ use crate::pipeline::{
 };
 use makepad_asset_ai::fleet::BoxSnapshot;
 use makepad_widgets::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -674,6 +674,12 @@ pub struct LibraryGallery {
     rows: Vec<HistoryTile>,
     #[rust]
     cache: PreviewCache,
+    /// Files whose preview landed since their tile last rendered. Tiles are
+    /// `CachedView`s: binding a new texture on the card's Image does nothing
+    /// visible until the cached content is forced to re-render, so a landed
+    /// preview used to stay a badge until scrolling moved the tile.
+    #[rust]
+    stale_tiles: HashSet<String>,
 }
 
 impl LibraryGallery {
@@ -706,6 +712,7 @@ impl LibraryGallery {
         source: Option<PathBuf>,
         texture: Texture,
     ) {
+        self.stale_tiles.insert(file.clone());
         self.cache.install(file, source, texture);
         self.view.redraw(cx);
     }
@@ -718,6 +725,7 @@ impl LibraryGallery {
         frames: Vec<Texture>,
         fps: f32,
     ) {
+        self.stale_tiles.insert(file.clone());
         self.cache.install_anim(file, source, frames, fps);
         self.view.redraw(cx);
         cx.new_next_frame();
@@ -806,6 +814,12 @@ impl Widget for LibraryGallery {
                 let texture = self.cache.texture_for(cx, &tile.entry, now);
                 item.image(cx, ids!(card.thumb))
                     .set_texture(cx, Some(texture));
+                // A preview that landed since this tile last rendered: the
+                // tile is a CachedView, so force its offscreen re-render or
+                // the new texture never shows (until a scroll moves it).
+                if self.stale_tiles.remove(&tile.entry.meta.file) || self.cache.has_anims() {
+                    item.as_view().redraw_texture_cache();
+                }
                 item.draw_all_unscoped(cx);
             }
         }

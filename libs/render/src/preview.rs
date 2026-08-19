@@ -40,7 +40,9 @@ pub struct PreviewStage {
     pub sky: bool,
     pub ground_half: f32,
     pub ground_color: Vec4f,
-    /// Near-black ground + night sky + dim sun. Independent of CSM.
+    /// Near-black ground + night sky. The SUN IS UNCHANGED: this is a dark
+    /// backdrop for judging a lit model, not a night scene. Independent of
+    /// CSM.
     pub dark: bool,
 }
 
@@ -130,8 +132,8 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
         Some(SkyConfig::default())
     };
     if stage.dark {
-        world.sun.color = Some(vec3f(0.05, 0.055, 0.07));
-        world.sun.ambient = Some(vec3f(0.035, 0.035, 0.04));
+        // Only the cast shadow deepens a little on the near-black slab; the
+        // subject keeps its full studio lighting.
         world.sun.shadow_alpha = Some(0.85);
     }
     world.terrain = None;

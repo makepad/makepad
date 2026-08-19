@@ -640,7 +640,7 @@ pub struct MeshView {
     /// quads) and does not kick an OnChange atlas bake.
     #[rust(true)]
     shadows_enabled: bool,
-    /// Night stage: dim sun, dark ground, dark sky.
+    /// Dark backdrop: near-black ground + sky; the model stays fully lit.
     #[rust(false)]
     dark_enabled: bool,
     /// Studio light for the PBR lane: softbox environment (bright boxes
@@ -1958,7 +1958,6 @@ impl Widget for MeshView {
             // lane above stays the only character path.
             if self.character.is_none() {
                 self.apply_studio();
-                self.pbr.controls.night = self.dark_enabled;
                 self.pbr.draw(&mut self.draw_pbr, cx3d);
             }
             self.pass_list.end(cx3d);
