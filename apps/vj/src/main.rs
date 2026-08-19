@@ -32,6 +32,7 @@ mod lanes;
 mod loop_detect;
 mod media;
 mod mesh_view;
+mod mix;
 mod mixer;
 // Two-deck music mode: deck DSP, off-thread track analysis, deck surface.
 mod music_dsp;
@@ -75,6 +76,7 @@ use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
+use crate::mix::{FxBus, MixId, MixState};
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
     JobId, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus, TierPreference,
@@ -423,6 +425,13 @@ script_mod! {
                             height: 28
                             flow: Right
                             spacing: 10
+                            // Its own draw list. The four OFFSCREEN 3D views
+                            // below live in this bar, and each one re-renders
+                            // a full pass every time the bar is walked — so
+                            // without this every scratch frame on the deck
+                            // surface re-rendered two levels and two splat
+                            // scenes. They now redraw when THEY change.
+                            new_batch: true
                             padding: Inset{left: 74.0 right: 8.0 top: 0.0 bottom: 0.0}
                             align: Align{x: 0.0, y: 0.5}
                             Label{
@@ -821,9 +830,31 @@ script_mod! {
                                                 Tick{text: "FADE"}
                                                 video_fade := ApcKnob{min: 0.05 max: 5.0 default: 1.0}
                                             }
-                                            mix_mode := ChromeButton{text: "MIX"}
+                                            // Downstream stage: how B reaches
+                                            // the program (dissolve, over, key,
+                                            // wipe) and the two knobs that mode
+                                            // reads. Hidden for the modes that
+                                            // have nothing to read.
+                                            mix_mode := DropDown{width: 92 labels: ["MIX"]}
+                                            mix_knobs := View{
+                                                width: Fit
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{x: 0.0, y: 0.5}
+                                                KnobCol{
+                                                    mix_p1_lab := Tick{text: "—"}
+                                                    mix_p1 := ApcKnob{default: 0.5}
+                                                }
+                                                KnobCol{
+                                                    mix_p2_lab := Tick{text: "—"}
+                                                    mix_p2 := ApcKnob{default: 0.35}
+                                                }
+                                            }
                                             video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
                                             View{width: 16 height: 1}
+                                            // Which bus the FX chain sits on.
+                                            fx_bus := ChromeButton{width: 60 text: "FX A+B"}
                                             KnobCol{
                                                 fx_p1_lab := Tick{text: "—"}
                                                 fx_p1 := ApcKnob{default: 0.45}
@@ -1124,6 +1155,9 @@ script_mod! {
                                     align: Align{x: 0.0, y: 0.5}
                                     gen_profile := DropDown{labels: ["…"]}
                                     gen_go := ChromeButton{text: "Queue"}
+                                    // Keep the queue topped up from the same
+                                    // prompt for as long as it is checked.
+                                    gen_loop := CheckBox{text: "CONT"}
                                 }
                                 gen_status := PanelLabel{text: ""}
                                 gen_jobs := VjJobList{}
@@ -3148,6 +3182,28 @@ pub struct App {
     /// `VJ_AUTO_FX` fired (once per run).
     #[rust]
     auto_fx_done: bool,
+    /// `VJ_MIX_MODE` fired (once per run), and whether its first numeric
+    /// field has been consumed as p1.
+    #[rust]
+    auto_mix_done: bool,
+    #[rust]
+    auto_mix_p1_set: bool,
+    /// `VJ_MIX_SWEEP` progress: next mode index and when it may fire.
+    #[rust]
+    mix_sweep_i: u8,
+    #[rust]
+    mix_sweep_at: Option<f64>,
+    /// `VJ_AUTO_PLAY=a|b|ab` fired (once per run): start the named decks so a
+    /// frame-time measurement has music under it without a pointer.
+    #[rust]
+    auto_play_done: bool,
+    /// `VJ_AUTO_SCRATCH=<hz>` — drive deck A's record from the host clock at
+    /// display cadence, so the scratch path can be measured without pointer
+    /// injection. `None` while idle.
+    #[rust]
+    auto_scratch_hz: Option<f64>,
+    #[rust]
+    auto_scratch_started: bool,
     #[rust]
     auto_filter_done: bool,
     /// `VJ_BILLBOARD_FIXTURE` fired (once per run).
@@ -3160,9 +3216,10 @@ pub struct App {
     /// Settled program mix (0 = slot A on screen, 1 = slot B).
     #[rust]
     program_mix: f32,
-    /// B composites over A instead of an A↔B crossfade.
+    /// The downstream mix stage: dissolve / over / chroma / luma / wipes,
+    /// its two knobs, and which bus the FX chain is inserted on.
     #[rust]
-    overlay_mode: bool,
+    mix: MixState,
     #[rust]
     fx: FxState,
     #[rust]
@@ -3263,6 +3320,12 @@ pub struct App {
     /// Last lit/unlit state pushed into each chrome button.
     #[rust]
     lit_state: HashMap<u64, bool>,
+    /// Last string pushed into each status label. The status panel is
+    /// mirrored on a 20 Hz pump and most of it never changes between
+    /// ticks; `set_text` on an unchanged string still costs a widget
+    /// lookup, a redraw flag and a text relayout.
+    #[rust]
+    label_state: HashMap<u64, String>,
     /// Last live/killed state painted onto each stem knob.
     #[rust]
     stem_paint: HashMap<u64, bool>,
@@ -3300,6 +3363,14 @@ pub struct App {
     // demand instead of leaving its WindowHandle permanently closed.
     #[rust(OutputWindowLifecycle::default())]
     output_window_lifecycle: OutputWindowLifecycle,
+    /// Which console page and which output page are up. A walked level
+    /// raycasts its collision mesh sixty times a second and re-renders a
+    /// full pass; `sync_mesh_liveness` uses these to stop that for a picture
+    /// no surface is showing.
+    #[rust(live_id!(video_page))]
+    console_page: LiveId,
+    #[rust(live_id!(video_out_page))]
+    out_page: LiveId,
 
     // Grid rebuild flag + timers.
     #[rust]
@@ -3425,6 +3496,46 @@ impl App {
         };
     }
 
+    /// Which 3D views are worth simulating. A walked level raycasts its
+    /// collision mesh sixty times a second and re-renders a full offscreen
+    /// pass per frame; none of that may run for a picture no surface is
+    /// showing — while the DJ page is up with the fader parked on the other
+    /// slot, that is pure heat under the deck.
+    ///
+    /// A slot's mesh reaches the eye through the program (output window) or
+    /// through the cue wells and preview on the video page, so it is live
+    /// while either shows it. `mesh_program` is the output window's own mesh
+    /// page. Nothing is forgotten when a view goes dormant: the tour keeps
+    /// its position and its map memory and resumes on the next frame.
+    fn sync_mesh_liveness(&mut self, cx: &mut Cx) {
+        let output_up = self.output_window_lifecycle == OutputWindowLifecycle::Open;
+        let video_front = self.console_page == live_id!(video_page);
+        let program_up = output_up && self.out_page == live_id!(video_out_page);
+        let mix = self.live_program_mix();
+        for slot in [SlotId::A, SlotId::B] {
+            // Every mode but a straight MIX keeps B on screen over A, so
+            // both sides carry weight there.
+            let weight = match (slot, self.mix.mode.keeps_b_resident()) {
+                (_, true) => 1.0,
+                (SlotId::A, false) => 1.0 - mix,
+                (SlotId::B, false) => mix,
+            };
+            let live = self.slot_media[slot.index()] == SlotMedia::Mesh
+                && (video_front || (program_up && weight > 0.002));
+            let widget = self.ui.widget(cx, Self::slot_mesh_path(slot));
+            let view = widget.borrow_mut::<mesh_view::VjMeshView>();
+            if let Some(mut view) = view {
+                view.set_live(cx, live);
+            }
+        }
+        let live = output_up && self.out_page == live_id!(mesh_out_page);
+        let widget = self.ui.widget(cx, ids!(mesh_program));
+        let view = widget.borrow_mut::<mesh_view::VjMeshView>();
+        if let Some(mut view) = view {
+            view.set_live(cx, live);
+        }
+    }
+
     /// `world` = a walkable level (catalog kind `World` with a GLB): shown
     /// at authored scale and toured by the NPC walker, not shrunk onto a
     /// turntable. Splat worlds never reach here (they are PLY).
@@ -3455,14 +3566,35 @@ impl App {
         Some((view.color_texture(), 16.0 / 9.0))
     }
 
+    /// Mirror the downstream mix stage: the mode list, the two knob
+    /// legends and values, the FX bus button, and deck B's role readout.
     fn sync_mix_mode_ui(&mut self, cx: &mut Cx) {
-        let (mode, role) = if self.overlay_mode {
-            ("OVER", "OVER")
-        } else {
-            ("MIX", "STANDBY")
-        };
-        self.ui.button(cx, ids!(mix_mode)).set_text(cx, mode);
-        self.ui.label(cx, ids!(slot_b_mode)).set_text(cx, role);
+        let info = self.mix.mode.info();
+        let drop = self.ui.drop_down(cx, ids!(mix_mode));
+        drop.set_labels(cx, crate::mix::mix_labels());
+        drop.set_selected_item(cx, self.mix.mode.0 as usize);
+        self.set_status_label(cx, ids!(slot_b_mode), info.role);
+        self.set_status_label(cx, ids!(mix_p1_lab), info.p1);
+        self.set_status_label(cx, ids!(mix_p2_lab), info.p2);
+        // A dissolve and an overlay have no knobs; hiding them keeps the
+        // row honest about what the mode actually reads.
+        let has_knobs = self.mix.mode != MixId::MIX
+            && self.mix.mode != MixId::OVER;
+        self.ui.view(cx, ids!(mix_knobs)).set_visible(cx, has_knobs);
+        self.ui.slider(cx, ids!(mix_p1)).set_value(cx, self.mix.p1 as f64);
+        self.ui.slider(cx, ids!(mix_p2)).set_value(cx, self.mix.p2 as f64);
+        self.ui.button(cx, ids!(fx_bus)).set_text(cx, self.mix.bus.label());
+        self.paint_lit(cx, ids!(fx_bus), self.mix.bus != FxBus::Both);
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// Switch the downstream mix mode. Every mode but a plain dissolve
+    /// keeps B resident on its slot, which is the cue engine's overlay
+    /// rule — so the two always agree.
+    fn set_mix_mode(&mut self, cx: &mut Cx, mode: MixId) {
+        self.mix.set_mode(mode);
+        self.cue.set_overlay(self.mix.mode.keeps_b_resident());
+        self.sync_mix_mode_ui(cx);
     }
 
     /// Toggle one kind chip; the grid re-queries the server for the new lane
@@ -4354,6 +4486,8 @@ impl App {
             ApcSurface::Sfx => id!(sfx_page),
         };
         self.ui.page_flip(cx, ids!(pages)).set_active_page(cx, page.into());
+        self.console_page = page.into();
+        self.sync_mesh_liveness(cx);
         self.paint_tabs(cx, page);
         self.ui.redraw(cx);
     }
@@ -5484,6 +5618,7 @@ impl App {
         self.pump_analysis(cx);
         self.pump_stems(cx);
         self.observe_decks();
+        self.sync_mesh_liveness(cx);
         self.schedule_music_frame(cx);
         for voice in self.mixer.drain_ended_voices() {
             self.pads.voice_ended(voice);
@@ -6001,6 +6136,80 @@ impl App {
                 }
             }
         }
+        // VJ_AUTO_PLAY=a|b|ab — press play once the deck actually holds PCM,
+        // so a frame-time run has music under it. VJ_AUTO_SCRATCH=<hz> then
+        // wobbles deck A's record from the host clock.
+        if !self.auto_play_done {
+            if let Ok(spec) = std::env::var("VJ_AUTO_PLAY") {
+                let spec = spec.to_ascii_lowercase();
+                let wanted: Vec<DeckId> = [('a', DeckId::A), ('b', DeckId::B)]
+                    .into_iter()
+                    .filter(|(ch, _)| spec.contains(*ch))
+                    .map(|(_, deck)| deck)
+                    .collect();
+                let ready = wanted
+                    .iter()
+                    .all(|deck| self.mixer.deck_snapshot(*deck).1 > 0.0);
+                if !wanted.is_empty() && ready {
+                    self.auto_play_done = true;
+                    for deck in wanted {
+                        log!("auto: play {deck:?}");
+                        let cmds = self.decks.play_pause(deck);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                    self.auto_scratch_hz = std::env::var("VJ_AUTO_SCRATCH")
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|hz| *hz > 0.0);
+                }
+            } else {
+                self.auto_play_done = true;
+            }
+        }
+        // VJ_MIX_MODE=<name|index>[:p1[:p2]][:A|B|AB] — arm one downstream
+        // mix mode once, so a capture can show it without a pointer.
+        if !self.auto_mix_done {
+            self.auto_mix_done = true;
+            if let Ok(spec) = std::env::var("VJ_MIX_MODE") {
+                let mut parts = spec.split(':');
+                if let Some(name) = parts.next() {
+                    let mode = crate::mix::MIX_INFO
+                        .iter()
+                        .position(|i| i.name.eq_ignore_ascii_case(name.replace('_', " ").trim()))
+                        .map(|i| MixId(i as u8))
+                        .or_else(|| name.parse::<u8>().ok().map(MixId::clamped));
+                    if let Some(mode) = mode {
+                        self.set_mix_mode(cx, mode);
+                        for part in parts {
+                            match part.to_ascii_uppercase().as_str() {
+                                "A" => self.mix.bus = FxBus::A,
+                                "B" => self.mix.bus = FxBus::B,
+                                "AB" | "BOTH" => self.mix.bus = FxBus::Both,
+                                value => {
+                                    if let Ok(v) = value.parse::<f32>() {
+                                        // First number is p1, second p2.
+                                        if self.auto_mix_p1_set {
+                                            self.mix.p2 = v.clamp(0.0, 1.0);
+                                        } else {
+                                            self.mix.p1 = v.clamp(0.0, 1.0);
+                                            self.auto_mix_p1_set = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        log!(
+                            "auto: mix {} p1 {:.2} p2 {:.2} bus {}",
+                            mode.info().name,
+                            self.mix.p1,
+                            self.mix.p2,
+                            self.mix.bus.label()
+                        );
+                        self.sync_mix_mode_ui(cx);
+                    }
+                }
+            }
+        }
         if !self.auto_pad_done {
             self.auto_pad_done = true;
             self.auto_pad_queue = std::env::var("VJ_AUTO_PAD")
@@ -6040,6 +6249,30 @@ impl App {
                     .unwrap_or(6.0);
                 // The capture lands after the LAST click of the sequence.
                 self.auto_capture_at = Some(now + gap * self.auto_pad_queue.len() as f64 + at);
+            }
+        }
+        // VJ_MIX_SWEEP=<dir> — once both cues are up, step through every
+        // downstream mix mode, writing one frame per mode. One run, one
+        // capture set: the modes are only meaningful with A and B both on
+        // screen, which is expensive to set up over and over.
+        if let Ok(dir) = std::env::var("VJ_MIX_SWEEP") {
+            let now = cx.seconds_since_app_start();
+            let ready = self.cue.live().is_some() && self.cue.held().is_some();
+            if ready && self.auto_pad_queue.is_empty() {
+                let due = self.mix_sweep_at.is_none_or(|at| now >= at);
+                if due && self.mix_sweep_i < crate::mix::MixId::COUNT {
+                    let mode = MixId(self.mix_sweep_i);
+                    self.set_mix_mode(cx, mode);
+                    // Park the fader mid-travel: a wipe shows its pattern,
+                    // a dissolve shows both, a key shows the cut.
+                    self.set_visual_mix(cx, 0.5);
+                    let name = mode.info().name.to_ascii_lowercase().replace(' ', "_");
+                    let path = format!("{dir}/mix_{}_{name}.png", self.mix_sweep_i);
+                    log!("auto: mix sweep -> {path}");
+                    cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
+                    self.mix_sweep_i += 1;
+                    self.mix_sweep_at = Some(now + 1.5);
+                }
             }
         }
         if let Some(at) = self.auto_capture_at {
@@ -6598,6 +6831,8 @@ impl App {
 
     fn show_output_page(&mut self, cx: &mut Cx, page: LiveId) {
         self.ui.page_flip(cx, ids!(out_pages)).set_active_page(cx, page);
+        self.out_page = page;
+        self.sync_mesh_liveness(cx);
         self.ui.redraw(cx);
     }
 
@@ -6721,20 +6956,54 @@ impl App {
             Surface::Sfx => &self.sfx_model,
             Surface::Mesh => &self.mesh_model,
         };
-        entries.extend(model.tiles()
-            .iter()
+        // The program strip is drawn in DISPLAY order — the PENDING head
+        // column (reserved to a full column height, so filling it never
+        // moves the body) and then the settled body. Every other surface is
+        // a plain list.
+        let cells: Vec<Option<&catalog::Tile>> = match surface {
+            Surface::Video => model
+                .display_order()
+                .into_iter()
+                .map(|slot| slot.and_then(|asset| model.tile(&asset)))
+                .collect(),
+            _ => model.tiles().iter().map(Some).collect(),
+        };
+        entries.extend(cells
+            .into_iter()
             // One-line legacy screen: the 483 pre-grouping per-lump Doom
             // sprites stay out of the grid until the server retires them.
-            .filter(|tile| {
-                !catalog::HIDE_LEGACY_LUMP_SPRITES
-                    || !catalog::is_legacy_lump_sprite(
-                        tile.kind,
-                        tile.alias.as_deref(),
-                        tile.source.is_some(),
-                    )
+            // They are stable rows, so dropping them never shifts anything
+            // under the operator's hand between refreshes.
+            .filter(|cell| {
+                cell.is_none_or(|tile| {
+                    !catalog::HIDE_LEGACY_LUMP_SPRITES
+                        || !catalog::is_legacy_lump_sprite(
+                            tile.kind,
+                            tile.alias.as_deref(),
+                            tile.source.is_some(),
+                        )
+                })
             })
             .enumerate()
-            .map(|(index, tile)| {
+            .map(|(index, cell)| {
+                let Some(tile) = cell else {
+                    // A reserved pending cell: nothing to draw, nothing to
+                    // click, and it holds the body still while the column
+                    // fills around it.
+                    return GridEntry {
+                        asset: AssetId::from_bytes([0; 16]),
+                        title: String::new(),
+                        sub: String::new(),
+                        state: String::new(),
+                        pad: String::new(),
+                        texture: None,
+                        frames: Vec::new(),
+                        fps: 0.0,
+                        active: false,
+                        secondary: false,
+                        placeholder: true,
+                    };
+                };
                 let texture = tile.revision.and_then(|rev| self.thumbs.get(&rev).cloned());
                 let state = match (&tile.state, surface) {
                     (catalog::TileState::Ready, Surface::Sfx) => {
@@ -6791,6 +7060,7 @@ impl App {
                     fps,
                     active,
                     secondary,
+                    placeholder: false,
                 }
             }));
         entries
@@ -6894,30 +7164,24 @@ impl App {
             let now = cx.seconds_since_app_start();
             if now - self.tstats_last > 2.0 {
                 let s = cx.widget_tree().stats();
-                let d = (
-                    s.lookups - self.tstats_prev.lookups,
-                    s.cache_misses - self.tstats_prev.cache_misses,
-                    s.walk_nodes - self.tstats_prev.walk_nodes,
-                    s.invalidations - self.tstats_prev.invalidations,
-                    s.stores_skipped - self.tstats_prev.stores_skipped,
-                    s.misses_repeat - self.tstats_prev.misses_repeat,
-                    s.misses_fresh - self.tstats_prev.misses_fresh,
-                );
                 if self.tstats_last > 0.0 {
                     log!(
-                        "wtree/2s: lookups={} misses={} walk_nodes={} inval={} skipped={} repeat={} fresh={}",
-                        d.0, d.1, d.2, d.3, d.4, d.5, d.6
+                        "wtree/2s: lookups={} misses={} walk_nodes={} inval={}",
+                        s.lookups - self.tstats_prev.lookups,
+                        s.cache_misses - self.tstats_prev.cache_misses,
+                        s.walk_nodes - self.tstats_prev.walk_nodes,
+                        s.invalidations - self.tstats_prev.invalidations,
                     );
                 }
                 self.tstats_last = now;
                 self.tstats_prev = s;
             }
         }
-        self.ui.label(cx, ids!(status_label)).set_text(cx, &self.status_text);
-        self.ui.label(cx, ids!(show_status_label)).set_text(
-            cx,
-            &format!("{} · {}", self.lighting_status, self.midi_status),
-        );
+        let status_text = std::mem::take(&mut self.status_text);
+        self.set_status_label(cx, ids!(status_label), &status_text);
+        self.status_text = status_text;
+        let show = format!("{} · {}", self.lighting_status, self.midi_status);
+        self.set_status_label(cx, ids!(show_status_label), &show);
         // Video program labels + position mirror. Each slot header says
         // what its well is showing: LIVE (on program), NEXT (the cue being
         // prepared), HOLD (the previous program, parked until replaced).
@@ -6926,14 +7190,12 @@ impl App {
             .next()
             .map(|i| i.title.clone())
             .unwrap_or_else(|| "—".to_string());
-        self.ui.label(cx, ids!(next_label)).set_text(
-            cx,
-            &if next == "—" {
-                "standby —".to_string()
-            } else {
-                format!("standby  {next}")
-            },
-        );
+        let next_text = if next == "—" {
+            "standby —".to_string()
+        } else {
+            format!("standby  {next}")
+        };
+        self.set_status_label(cx, ids!(next_label), &next_text);
         let live_slot = self.cue.live_slot();
         let held = self.cue.held().map(|(slot, item)| (slot, item.title.clone()));
         let live_title = self.cue.live().map(|i| i.title.clone());
@@ -6960,18 +7222,15 @@ impl App {
         let (a_role, a_title) = slot_line(SlotId::A);
         let (b_role, b_title) = slot_line(SlotId::B);
         self.sync_slot_controls_ui(cx);
-        self.ui.label(cx, ids!(slot_a_role)).set_text(cx, &a_role);
-        self.ui.label(cx, ids!(now_label)).set_text(cx, &a_title);
-        self.ui.label(cx, ids!(slot_b_role)).set_text(cx, &b_role);
-        self.ui.label(cx, ids!(slot_b_title)).set_text(cx, &b_title);
-        self.ui.label(cx, ids!(apc_map_label)).set_text(cx, "");
-        self.ui
-            .label(cx, ids!(video_error))
-            .set_text(cx, self.cue.last_error().unwrap_or(""));
-        self.ui.label(cx, ids!(sfx_voices)).set_text(
-            cx,
-            &format!("voices {}", self.pads.voice_count()),
-        );
+        self.set_status_label(cx, ids!(slot_a_role), &a_role);
+        self.set_status_label(cx, ids!(now_label), &a_title);
+        self.set_status_label(cx, ids!(slot_b_role), &b_role);
+        self.set_status_label(cx, ids!(slot_b_title), &b_title);
+        self.set_status_label(cx, ids!(apc_map_label), "");
+        let video_error = self.cue.last_error().unwrap_or("").to_string();
+        self.set_status_label(cx, ids!(video_error), &video_error);
+        let voices = format!("voices {}", self.pads.voice_count());
+        self.set_status_label(cx, ids!(sfx_voices), &voices);
 
         self.refresh_music_surface(cx);
 
@@ -6980,7 +7239,7 @@ impl App {
             Some(pad) => format!("pad: {}", pad.item.title),
             None => "pad: —".to_string(),
         };
-        self.ui.label(cx, ids!(sfx_sel)).set_text(cx, &sel);
+        self.set_status_label(cx, ids!(sfx_sel), &sel);
 
         // ---- stable EXTERNAL SYNC panel ---------------------------------
         // All widgets have fixed geometry; these fixed-width strings may
@@ -7068,9 +7327,9 @@ impl App {
             Some(_) | None => "BEAT -/4 [........] PHASE   0%".to_string(),
         };
 
-        self.ui.label(cx, ids!(external_capture)).set_text(cx, &capture_text);
-        self.ui.label(cx, ids!(external_lock)).set_text(cx, lock_text);
-        self.ui.label(cx, ids!(external_bpm)).set_text(cx, &bpm_text);
+        self.set_status_label(cx, ids!(external_capture), &capture_text);
+        self.set_status_label(cx, ids!(external_lock), lock_text);
+        self.set_status_label(cx, ids!(external_bpm), &bpm_text);
         // One column of scope per pump, with a mark on the beat the grid is
         // actually on — the block answers "is there sound and are we on it".
         let beat_mark = snap.beat.as_ref().and_then(|beat| {
@@ -7084,10 +7343,8 @@ impl App {
         if let Some(mut scope) = scope.borrow_mut::<views::VjBeatScope>() {
             scope.push(cx, snap.peak.clamp(0.0, 1.0), beat_mark);
         }
-        self.ui
-            .label(cx, ids!(external_confidence))
-            .set_text(cx, &confidence_text);
-        self.ui.label(cx, ids!(external_phase)).set_text(cx, &phase_text);
+        self.set_status_label(cx, ids!(external_confidence), &confidence_text);
+        self.set_status_label(cx, ids!(external_phase), &phase_text);
 
         let transition = self.mixer.video_transition_snapshot();
         let video_state = match transition {
@@ -7161,12 +7418,8 @@ impl App {
                 }
             }
         };
-        self.ui
-            .label(cx, ids!(external_video_state))
-            .set_text(cx, &video_state);
-        self.ui
-            .label(cx, ids!(external_loop_state))
-            .set_text(cx, &loop_text);
+        self.set_status_label(cx, ids!(external_video_state), &video_state);
+        self.set_status_label(cx, ids!(external_loop_state), &loop_text);
     }
 
     // ---- music mode: analysis results and the deck surface -----------------
@@ -7605,6 +7858,19 @@ impl App {
         });
     }
 
+    /// Write a status label only when its text actually changed. Both the
+    /// widget lookup and `set_text` (redraw + relayout) are skipped when it
+    /// did not — which, on the status pump, is nearly every tick.
+    fn set_status_label(&mut self, cx: &mut Cx, path: &[LiveId], text: &str) {
+        let key = path.iter().fold(0u64, |acc, id| acc ^ id.0.rotate_left(7));
+        match self.label_state.get(&key) {
+            Some(last) if last == text => return,
+            _ => {}
+        }
+        self.label_state.insert(key, text.to_string());
+        self.ui.label(cx, path).set_text(cx, text);
+    }
+
     /// Paint a chrome button as engaged / at rest. Re-applying script
     /// properties to a button every frame is both the app's most expensive
     /// per-frame habit and a way to disturb its own input state, so this
@@ -7860,7 +8126,7 @@ impl App {
             &self.slot_textures,
             &self.slot_aspect,
         );
-        let overlay = self.overlay_mode;
+        let mix_state = self.mix;
         let fx = self.fx;
         let beat = self.beat_phase_01();
         let time = cx.seconds_since_app_start() as f32;
@@ -7878,7 +8144,7 @@ impl App {
             let widget = self.ui.widget(cx, target);
             let borrow = widget.borrow_mut::<views::VideoProgram>();
             if let Some(mut program) = borrow {
-                program.set_sources(cx, a.clone(), b.clone(), mix, overlay);
+                program.set_sources(cx, a.clone(), b.clone(), mix, mix_state);
                 program.set_fx(cx, fx, beat, time, phases);
             }
         }
@@ -7887,14 +8153,14 @@ impl App {
             .widget(cx, ids!(preview_a))
             .borrow_mut::<views::VideoProgram>()
         {
-            deck.set_sources(cx, a.clone(), None, 0.0, false);
+            deck.set_sources(cx, a.clone(), None, 0.0, MixState::default());
         }
         if let Some(mut deck) = self
             .ui
             .widget(cx, ids!(preview_b))
             .borrow_mut::<views::VideoProgram>()
         {
-            deck.set_sources(cx, b.clone(), None, 0.0, false);
+            deck.set_sources(cx, b.clone(), None, 0.0, MixState::default());
         }
         self.ui.view(cx, ids!(deck_a_empty)).set_visible(cx, a.is_none());
         self.ui.view(cx, ids!(deck_b_empty)).set_visible(cx, b.is_none());
@@ -8199,8 +8465,26 @@ impl App {
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
+        self.pump_auto_scratch(cx);
         self.push_wave_positions(cx);
         self.schedule_music_frame(cx);
+    }
+
+    /// `VJ_AUTO_SCRATCH=<hz>`: a synthetic hand on deck A's record, driven
+    /// from the host clock at display cadence. It exercises exactly the load
+    /// a real drag does (scratch DSP + a wave redraw per frame) without
+    /// pointer injection, which is what makes the scratch path measurable.
+    fn pump_auto_scratch(&mut self, cx: &mut Cx) {
+        let Some(hz) = self.auto_scratch_hz else { return };
+        if !self.auto_scratch_started {
+            self.auto_scratch_started = true;
+            let cmds = self.decks.scratch(DeckId::A, ScratchMotion::Grab);
+            self.run_deck_cmds(cx, cmds);
+        }
+        let phase = cx.seconds_since_app_start() * hz * std::f64::consts::TAU;
+        let rate = (phase.sin() * 2.0) as f32;
+        let cmds = self.decks.scratch(DeckId::A, ScratchMotion::Move { rate });
+        self.run_deck_cmds(cx, cmds);
     }
 
     /// Ask for another frame while anything on the surface is moving.
@@ -8409,6 +8693,7 @@ impl MatchEvent for App {
             self.ui
                 .page_flip(cx, ids!(pages))
                 .set_active_page(cx, id!(music_page).into());
+            self.console_page = id!(music_page).into();
             self.paint_tabs(cx, id!(music_page));
             // Files on the command line open the local lane; a bare
             // `VJ_SURFACE=music` opens the store, like clicking the tab.
@@ -8756,7 +9041,21 @@ impl MatchEvent for App {
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
         }
+        if let Some(on) = self.ui.check_box(cx, ids!(gen_loop)).changed(actions) {
+            // Arming reads whatever is in the prompt box right now, so the
+            // operator never gets a loop of a stale prompt.
+            let text = self.ui.text_input(cx, ids!(gen_prompt)).text();
+            self.gen.set_prompt(text);
+            let cmds = self.gen.set_continuous(on, now_ms());
+            self.run_gen_cmds(cmds);
+            self.grids_dirty = true;
+        }
         if self.ui.button(cx, ids!(gen_clear)).clicked(actions) {
+            // Clearing the queue also disarms the loop: otherwise the next
+            // tick refills what the operator just emptied.
+            let cmds = self.gen.set_continuous(false, now_ms());
+            self.run_gen_cmds(cmds);
+            self.ui.check_box(cx, ids!(gen_loop)).set_active(cx, false, Animate::No);
             let cmds = self.gen.clear_queue();
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
@@ -8935,11 +9234,20 @@ impl MatchEvent for App {
                 self.toggle_kind_chip(cx, kinds);
             }
         }
-        if self.ui.button(cx, ids!(mix_mode)).clicked(actions) {
-            self.overlay_mode = !self.overlay_mode;
-            self.cue.set_overlay(self.overlay_mode);
-            self.sync_mix_mode_ui(cx);
+        if let Some(index) = self.ui.drop_down(cx, ids!(mix_mode)).selected(actions) {
+            self.set_mix_mode(cx, MixId::clamped(index as u8));
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(mix_p1)).slided(actions) {
+            self.mix.p1 = (v as f32).clamp(0.0, 1.0);
             self.video_pump = cx.new_next_frame();
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(mix_p2)).slided(actions) {
+            self.mix.p2 = (v as f32).clamp(0.0, 1.0);
+            self.video_pump = cx.new_next_frame();
+        }
+        if self.ui.button(cx, ids!(fx_bus)).clicked(actions) {
+            self.mix.bus = self.mix.bus.next();
+            self.sync_mix_mode_ui(cx);
         }
         for (index, id) in FX_BUTTONS.iter().enumerate() {
             if self.ui.button(cx, id).clicked(actions) {
@@ -9238,7 +9546,10 @@ impl AppMain for App {
                     .unwrap_or(f64::MAX);
                 let model = self.model(surface);
                 if model.refresh_wanted && !model.is_loading() && since >= EVENT_REFRESH_COOLDOWN_S {
-                    let cmds = model.refresh();
+                    // A publish, not a query change: whatever is new lands
+                    // in the PENDING head column and nothing on screen
+                    // moves (see `BrowseModel::refresh_event`).
+                    let cmds = model.refresh_event();
                     self.last_event_refresh[surface as usize] = Some(Instant::now());
                     self.run_cat_cmds(surface, cmds);
                 }
