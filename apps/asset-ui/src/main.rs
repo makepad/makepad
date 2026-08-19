@@ -51,9 +51,11 @@ mod fleet_poll;
 mod http;
 mod import;
 mod import_classic;
+mod store_content;
 mod library;
 mod mask_paint;
 mod mesh_view;
+mod music_page;
 use crate::mask_paint::{MaskPaint, MaskPaintAction};
 mod pipeline;
 mod scheduler;
@@ -69,7 +71,8 @@ use crate::artifact_io::{
 use crate::fleet_poll::FleetPoll;
 use crate::import::{ImportJob, ImportPage, ImportQueue};
 use crate::import_classic::ClassicImportPage;
-use crate::library::{collect_tag_stats, Library, TagStat, ThumbnailBackfillJob};
+use crate::music_page::MusicImportPage;
+use crate::library::{Library, ThumbnailBackfillJob};
 use crate::billboard_view::BillboardView;
 use crate::mesh_view::MeshView;
 use crate::thumbnail_renderer::ThumbnailRenderer;
@@ -77,6 +80,7 @@ use crate::asset_store_state::{
     server_kind_label, session_config_from_env, AssetStoreState, LocalLibraryFilters,
     Remote, SERVER_KINDS,
 };
+use makepad_asset_client::GcStatusDto;
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
 use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
@@ -89,7 +93,7 @@ use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 use crate::store_views::{
     admin_rows, candidate_cards, catalog_rows, format_bytes, runs_rows, short_digest, truncate,
     should_start_file_drag, upstream_preview_allowed, CandidateSheet, GalleryEntry, InputAsset,
-    InputTray, LibraryGallery, LibraryGrid, PreviewWork, RowAction, RunTray, RunTrayMember,
+    InputTray, LibraryGallery, PreviewWork, RowAction, RunTray, RunTrayMember,
     StoreListPanel, StoreRow,
     TileDelete,
 };
@@ -721,96 +725,6 @@ script_mod! {
                 width: Fill height: 140
                 align: Align{x: 0.5 y: 0.5}
                 HintLabel{ text: "Waiting for admitted image GPUs…" }
-            }
-        }
-    }
-
-    // Library-surface grid card: title uses the full caption row; a
-    // 18px grip is the only chrome (no kind badge — that ate the name).
-    let GridCell = GalleryCard{
-        width: 150 height: 126
-        flow: Down spacing: 4
-        padding: 5
-        View{
-            width: 140 height: 88
-            align: Align{x: 0.5 y: 0.5}
-            grid_thumb := ThumbFitImage{}
-            grid_sprite := SpriteFitImage{ visible: false }
-        }
-        View{
-            width: Fill height: Fit flow: Right spacing: 3
-            align: Align{y: 0.0}
-            grid_title := Label{
-                width: Fill
-                draw_text +: {
-                    color: #xc6cfd8
-                    text_style: theme.font_regular{font_size: 8}
-                }
-            }
-            file_drag := FileDragHandle{}
-        }
-    }
-
-    // Wrapping, virtualized thumbnail grid: PortalList rows of up to eight
-    // card slots; the Rust side shows `columns(width)` of them per row.
-    mod.widgets.LibraryGridBase = #(LibraryGrid::register_widget(vm))
-    mod.widgets.LibraryGrid = set_type_default() do mod.widgets.LibraryGridBase{
-        width: Fill
-        height: Fill
-        list := PortalList{
-            width: Fill height: Fill
-            flow: Down
-            spacing: 8
-            scroll_bar: ScrollBar{}
-            Row := View{
-                width: Fill height: Fit
-                flow: Right spacing: 8
-                c1 := GridCell{} c2 := GridCell{} c3 := GridCell{} c4 := GridCell{}
-                c5 := GridCell{} c6 := GridCell{} c7 := GridCell{} c8 := GridCell{}
-            }
-            Empty := View{
-                width: Fill height: 140
-                flow: Down spacing: 4
-                align: Align{x: 0.5 y: 0.5}
-                HintLabel{ text: "Nothing here matches." }
-                HintLabel{ text: "Clear the filters, or generate something from Create." }
-            }
-        }
-    }
-
-    // One active Library filter chip. Instances are shown/hidden from Rust.
-    let FilterTagChip = RoundedView{
-        visible: false
-        width: Fit height: 22
-        flow: Right
-        spacing: 3
-        padding: Inset{left: 8 right: 3 top: 0 bottom: 0}
-        align: Align{y: 0.5}
-        draw_bg +: {
-            color: #x14283c
-            border_color: #x3d9bf066
-            border_size: 1.0
-            border_radius: 11.0
-        }
-        chip_name := Label{
-            width: Fit
-            height: Fill
-            align: Align{y: 0.5}
-            draw_text +: {
-                color: #x9ec4ea
-                text_style: theme.font_bold{font_size: 8}
-            }
-        }
-        chip_x := GhostButton{
-            width: 16 height: Fill
-            margin: 0
-            padding: 0
-            align: Align{x: 0.5 y: 0.5}
-            text: "×"
-            draw_text +: {
-                color: #x8a939d
-                color_hover: #xe6ebf0
-                text_style: theme.font_bold{font_size: 10}
             }
         }
     }
@@ -2203,7 +2117,7 @@ script_mod! {
                                 }
                             }
 
-                            // ---- Library: the Local/Server asset browser ----
+                            // ---- Library: the server catalog, and only it ----
                             library_surface := SolidView{
                                 width: Fill
                                 height: Fill
@@ -2216,59 +2130,34 @@ script_mod! {
                                     width: Fill height: Fit flow: Right spacing: 8
                                     align: Align{y: 0.5}
                                     SurfaceTitle{ text: "Library" width: Fit }
-                                    lib_local_tab := ChipButton{ text: "● Local" }
-                                    lib_server_tab := ChipButton{ text: "Server" }
+                                    lib_source_note := HintLabel{ width: Fit text: "asset store catalog" }
                                     View{ width: Fill height: Fit }
                                     lib_count := HintLabel{ text: "" }
                                 }
                                 View{
-                                    width: Fill height: Fit flow: Down spacing: 6
-                                    View{
-                                        width: Fill height: Fit flow: Right spacing: 6
-                                        align: Align{y: 0.5}
-                                        lib_search := FilterInput{ width: 250 empty_text: "Search label, prompt, id…" }
-                                        FieldCaption{ text: "Tags" }
-                                        lib_tag_drop := FieldDrop{ width: 220 }
-                                        lib_clear_btn := GhostButton{ text: "Clear" }
-                                        lib_enhance_btn := GhostButton{ text: "Enhance metadata" }
-                                    }
-                                    lib_tag_chips := View{
-                                        visible: false
-                                        width: Fill height: 22
-                                        flow: Right
-                                        spacing: 6
-                                        align: Align{y: 0.5}
-                                        lib_tag_chips_label := HintLabel{
-                                            text: "filters"
-                                            width: Fit
-                                            height: Fill
-                                            align: Align{y: 0.5}
-                                        }
-                                        ft0 := FilterTagChip{}
-                                        ft1 := FilterTagChip{}
-                                        ft2 := FilterTagChip{}
-                                        ft3 := FilterTagChip{}
-                                        ft4 := FilterTagChip{}
-                                        ft5 := FilterTagChip{}
-                                        ft6 := FilterTagChip{}
-                                        ft7 := FilterTagChip{}
-                                    }
+                                    width: Fill height: Fit flow: Right spacing: 6
+                                    align: Align{y: 0.5}
+                                    lib_search := FilterInput{ width: 250 empty_text: "Search the catalog: title, alias, category, tag…" }
+                                    FieldCaption{ text: "Kind" }
+                                    lib_kind_drop := FieldDrop{ width: 220 }
+                                    lib_clear_btn := GhostButton{ text: "Clear" }
+                                    lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
                                 View{
                                     width: Fill height: Fill flow: Right spacing: 8
-                                    lib_pages := PageFlip{
-                                        width: Fill
-                                        height: Fill
-                                        active_page: @lib_local_page
-                                        lib_local_page := View{
-                                            width: Fill height: Fill
-                                            lib_grid := mod.widgets.LibraryGrid{}
+                                    lib_catalog_page := View{
+                                        width: Fill height: Fill flow: Down spacing: 6
+                                        lib_server_note := HintLabel{ width: Fill text: "" }
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 6
+                                            align: Align{y: 0.5}
+                                            gc_retain_check := CheckBox{ text: "keep newest 3 per asset" }
+                                            View{ width: Fill height: Fit }
+                                            gc_status := HintLabel{ width: Fit text: "" }
+                                            gc_cancel_btn := GhostButton{ text: "Cancel GC" visible: false }
+                                            gc_collect_btn := DangerButton{ text: "Collect garbage" }
                                         }
-                                        lib_server_page := View{
-                                            width: Fill height: Fill flow: Down spacing: 6
-                                            lib_server_note := HintLabel{ width: Fill text: "" }
-                                            lib_server_list := mod.widgets.StoreListPanel{}
-                                        }
+                                        lib_server_list := mod.widgets.StoreListPanel{}
                                     }
                                     // Selected-item rail: prompt + provenance +
                                     // revision/publish detail and the actions.
@@ -2318,13 +2207,12 @@ script_mod! {
                                             detail_rev := MonoLabel{ text: "—" }
                                             PanelHeading{ text: "Publish" }
                                             detail_publish := MonoLabel{ text: "—" }
-                                            detail_actions := View{
+                                            detail_server_actions := View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 margin: Inset{top: 10}
                                                 visible: false
-                                                detail_open_btn := ChipButton{ text: "Open in viewer" }
-                                                detail_reuse_btn := GhostButton{ text: "Reuse prompt" }
-                                                detail_delete_btn := DangerButton{ text: "Delete" }
+                                                detail_retire_version_btn := GhostButton{ text: "Delete this version" }
+                                                detail_retire_asset_btn := DangerButton{ text: "Delete from store" }
                                             }
                                         }
                                     }
@@ -2549,6 +2437,21 @@ script_mod! {
                                         HintLabel{ text: "© The Dark Mod team (thedarkmod.com). Credit required, non-commercial, share-alike. Fan missions stay with their authors. Not CC0, not BSD. Load fetches official tdm_installer.ini and reconstructs tdm_*.pk4 from the HTTP zipsync mirrors." }
                                     }
 
+                                    music_card := ImportRow{
+                                        flow: Down spacing: 2
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 8
+                                            align: Align{y: 0.5}
+                                            music_import_btn := PrimaryButton{ text: "Load" }
+                                            music_pick_btn := GhostButton{ text: "Choose folder…" }
+                                            BrightLabel{ text: "Music" width: 88 }
+                                            music_dir_label := HintLabel{ text: "no folder chosen" }
+                                            View{ width: Fill height: Fit }
+                                            music_status_label := BrightLabel{ text: "" width: 340 }
+                                        }
+                                        HintLabel{ text: "Your own music directory. Every track becomes one audio asset; every folder name under the picked root becomes a searchable tag, beside the constant `music` tag. ID3/Vorbis title, artist and album name the row when the file carries them. mp3/ogg/wav publish; flac and m4a are listed as unsupported for now. Your library, your rights: all rights reserved, LAN-local, local-preview derivatives." }
+                                    }
+
                                     kaykit_card := ImportRow{
                                         flow: Down spacing: 2
                                         View{
@@ -2634,6 +2537,120 @@ script_mod! {
                                     align: Align{x: 1.0 y: 0.5}
                                     license_decline := ChipButton{ text: "Decline" }
                                     license_accept := PrimaryButton{ text: "Accept and clear" }
+                                }
+                            }
+                        }
+                    }
+                    lib_retire_shown_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                lib_retire_shown_title := BrightLabel{
+                                    text: "Retire the shown catalog assets?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                lib_retire_shown_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    lib_retire_shown_cancel := ChipButton{ text: "Cancel" }
+                                    lib_retire_shown_confirm := DangerButton{ text: "Retire" }
+                                }
+                            }
+                        }
+                    }
+                    store_delete_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                store_delete_title := BrightLabel{
+                                    text: "Delete from store?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                store_delete_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    store_delete_cancel := ChipButton{ text: "Cancel" }
+                                    store_delete_confirm := DangerButton{ text: "Delete" }
+                                }
+                            }
+                        }
+                    }
+                    gc_confirm_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                gc_confirm_title := BrightLabel{
+                                    text: "Collect garbage?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                gc_confirm_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    gc_confirm_cancel := ChipButton{ text: "Cancel" }
+                                    gc_confirm_collect := DangerButton{ text: "Collect now" }
                                 }
                             }
                         }
@@ -2914,14 +2931,6 @@ enum Surface {
     Admin,
 }
 
-/// Which side of the Library the browser shows: the disk-backed local
-/// History, or the session-backed server catalog.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum LibSource {
-    #[default]
-    Local,
-    Server,
-}
 
 #[derive(Default)]
 struct AutoRun {
@@ -2946,6 +2955,13 @@ struct AutoRun {
     exit: bool,
     fired: bool,
     captured: bool,
+}
+
+/// What the store-delete confirm modal retires once the user confirms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingStoreDelete {
+    Asset(makepad_asset_data::AssetId),
+    Revision(makepad_asset_data::AssetId, makepad_asset_data::AssetRevisionId),
 }
 
 #[derive(Script, ScriptHook)]
@@ -3088,6 +3104,16 @@ pub struct App {
     license_prompt: Option<LicensePrompt>,
     #[rust]
     license_resume: Option<LicenseResume>,
+    /// What `store_delete_confirm` retires — set when the detail panel's
+    /// "Delete from store" / "Delete this version" button opens
+    /// `store_delete_modal`.
+    #[rust]
+    pending_store_delete: Option<PendingStoreDelete>,
+    /// The `GcStatusDto::run_id` `gc_confirm_modal` was last opened for —
+    /// a finished dry run only prompts once; a NEW dry run always carries a
+    /// different run_id, so no explicit reset is needed between runs.
+    #[rust]
+    gc_dry_run_prompted: Option<u64>,
     /// Per-box, per-domain preferred model: (box base_url, domain) → model.
     /// Routing drops the domain's OTHER models on that box while it stands.
     #[rust]
@@ -3135,10 +3161,9 @@ pub struct App {
     /// Active right-pane surface (nav tabs).
     #[rust]
     surface: Surface,
-    /// Library browser source: local History vs server catalog.
-    #[rust]
-    lib_source: LibSource,
-    /// Live filters over the local History (query/kind/category/tag).
+    /// Live Library filters (query/kind/category/tag). They are mirrored
+    /// straight onto the server query — the Library surface has no other
+    /// source than the catalog.
     #[rust]
     lib_filters: LocalLibraryFilters,
     /// Server-side state backed by one Asset Server session:
@@ -3163,6 +3188,10 @@ pub struct App {
     /// Freedoom / LibreQuake / Duke3D / Quake II / Quake III Import cards.
     #[rust]
     classic_import_page: ClassicImportPage,
+    /// "Import music directory" card: a folder the user picked in the native
+    /// dialog, published one `audio` asset per track.
+    #[rust]
+    music_import_page: MusicImportPage,
     /// One running import plus a user-editable wait list.
     #[rust]
     import_queue: ImportQueue,
@@ -3173,16 +3202,18 @@ pub struct App {
     /// responsive without ever blocking the UI thread.
     #[rust]
     asset_store_timer: Timer,
-    /// Kind strings behind the Library kind filter dropdown (minus "all").
+    /// Kind labels behind the Library kind dropdown, in dropdown order and
+    /// WITHOUT the leading "all kinds" row — index `n` of this list is row
+    /// `n + 1` of the dropdown. Every entry is a real `AssetKind` the
+    /// server filters on.
     #[rust]
     lib_kind_options: Vec<String>,
-    /// Category (domain) strings behind the category dropdown (minus "all").
+    /// The filter state the Library list was last drawn for. When it changes
+    /// the RESULT SET changes, so both list viewports go back to the top —
+    /// a filter that shrinks the results under a scrolled viewport otherwise
+    /// leaves the user looking past the end and reading it as "no results".
     #[rust]
-    lib_cat_options: Vec<String>,
-    /// Tag catalog behind the add-tag dropdown (minus the "add tag…" row).
-    /// Sorted by how many items carry the tag, most-used first.
-    #[rust]
-    lib_tag_options: Vec<TagStat>,
+    lib_view_signature: String,
     #[rust(AutoRun::default())]
     auto: AutoRun,
 }
@@ -6424,7 +6455,14 @@ impl App {
                     .as_ref()
                     .and_then(|file| self.library.as_ref().map(|lib| lib.ao_sidecar_bytes(file)))
                     .unwrap_or((None, None));
-                mesh.set_model_bytes_ao(cx, bytes.to_vec(), None, aomesh, ao_png);
+                // A playable rig's baked rest bundle caches beside the payload
+                // (`<stem>.skinao`), like the sandbox's cast does.
+                let rig_cache = self
+                    .selected_file
+                    .as_ref()
+                    .and_then(|file| self.library.as_ref().map(|lib| lib.rig_cache_path(file)))
+                    .flatten();
+                mesh.set_model_bytes_ao_rig(cx, bytes.to_vec(), None, aomesh, ao_png, rig_cache);
                 if let Some(spawn) = spawn {
                     mesh.enable_walk(cx, spawn);
                 }
@@ -6591,7 +6629,7 @@ impl App {
         );
         // The Library surface browses the same disk-backed store; keep its
         // grid, counts and detail rail in lockstep with every mutation.
-        self.refresh_library_ui(cx, clear_thumbnails);
+        self.refresh_library_ui(cx);
         // Every library mutation funnels through here — the input tray's
         // deletion sweep rides along so it can never advertise a payload
         // that no longer exists.
@@ -6606,26 +6644,35 @@ impl App {
     /// Decodes the History strip already holds are seeded into the tray's
     /// cache; the rest arrive through the shared async preview worker.
     fn sync_run_tray(&mut self, cx: &mut Cx) {
-        let members: Vec<crate::library::LibraryMeta> = match (&self.library, &self.selected_file) {
-            (Some(library), Some(selected)) => library
-                .get(selected)
-                .and_then(|item| item.group_id.clone())
-                .map(|group| {
-                    let mut members: Vec<_> = library
-                        .newest_items()
-                        .filter(|item| item.group_id.as_deref() == Some(group.as_str()))
-                        .cloned()
-                        .collect();
-                    members.reverse();
-                    members
-                })
-                .unwrap_or_default(),
+        let selected_group: Option<String> = match (&self.library, &self.selected_file) {
+            (Some(library), Some(selected)) => {
+                library.get(selected).and_then(|item| item.group_id.clone())
+            }
+            _ => None,
+        };
+        let members: Vec<crate::library::LibraryMeta> = match (&self.library, &selected_group) {
+            (Some(library), Some(group)) => {
+                let mut members: Vec<_> = library
+                    .newest_items()
+                    .filter(|item| item.group_id.as_deref() == Some(group.as_str()))
+                    .cloned()
+                    .collect();
+                members.reverse();
+                members
+            }
             _ => Vec::new(),
         };
         let files: Vec<String> = members.iter().map(|m| m.file.clone()).collect();
         let changed = files != self.run_tray_files;
         self.run_tray_files = files;
-        let show = members.len() > 1;
+        // The tray exists to walk one pipeline run's own stage artifacts
+        // (source image, mesh, PBR maps, final product) — never a pack
+        // import's whole haul (a Kenney kit or a Doom shareware pull can
+        // land hundreds of unrelated members under one `import:` group id).
+        let show = members.len() > 1
+            && !selected_group
+                .as_deref()
+                .is_some_and(crate::library::is_import_pack_group);
         self.ui.widget(cx, ids!(run_tray)).set_visible(cx, show);
         if !show {
             return;
@@ -6648,7 +6695,18 @@ impl App {
             .filter_map(|member| {
                 let path = library.payload_path(&member.file).ok()?;
                 let ct = member.content_type.to_ascii_lowercase();
-                let preview_path = if ct.starts_with("image/") {
+                // Same preview_path rule as the History strip and Library
+                // grid (`refresh_gallery` / `refresh_library_ui`): billboard
+                // and image payloads are their own preview, everything else
+                // falls back to the rendered `.thumb` sidecar. Keeping this
+                // identical across all three views is what lets one shared
+                // `store_views::preview_work` decode path (and the async
+                // pump/broadcast in `pump_gallery_previews`) serve whichever
+                // widget recorded the miss.
+                let preview_path = if member.domain.eq_ignore_ascii_case("billboard")
+                    || ct.contains("billboard")
+                    || ct.starts_with("image/")
+                {
                     Some(path.clone())
                 } else {
                     library.thumbnail_path(&member.file).ok().flatten()
@@ -7492,9 +7550,15 @@ impl App {
             .as_ref()
             .map(|library| library.ao_sidecar_bytes(file))
             .unwrap_or((None, None));
-        self.queue_glb_thumbnail_ao(cx, file, bytes, aomesh, ao_png);
+        let spawn = self.library.as_ref().and_then(|library| library.world_spawn(file));
+        self.queue_glb_thumbnail_ao(cx, file, bytes, aomesh, ao_png, spawn);
     }
 
+    /// `spawn` is passed in explicitly (rather than looked up from `file`
+    /// here) so this queues equally well for a LIBRARY row (caller reads
+    /// `library.world_spawn`) or a staged PACK item that has no library row
+    /// at all (caller reads the staged `.spawn` sidecar directly via
+    /// `library::parse_world_spawn`) — see `land_imported_pack`.
     fn queue_glb_thumbnail_ao(
         &mut self,
         cx: &mut Cx,
@@ -7502,6 +7566,7 @@ impl App {
         bytes: &[u8],
         aomesh: Option<Vec<u8>>,
         ao_png: Option<Vec<u8>>,
+        spawn: Option<([f32; 3], f32, f32)>,
     ) {
         if !bytes.starts_with(b"glTF") {
             return;
@@ -7511,10 +7576,6 @@ impl App {
             .widget(cx, ids!(thumbnail_renderer))
             .borrow_mut::<ThumbnailRenderer>()
         {
-            let spawn = self
-                .library
-                .as_ref()
-                .and_then(|library| library.world_spawn(file));
             renderer.queue_library_thumbnail_ao_spawn(
                 cx,
                 file.to_string(),
@@ -7555,6 +7616,31 @@ impl App {
             log!("library: thumbnail load failed for {file}");
         }
         for rendered in completed {
+            // Pack items never get a library row (`land_imported_pack`
+            // queues them under `crate::import::pack_icon_key`, never a
+            // `lib-N` id) — persist those into the pack icon store instead
+            // of `Library::replace_thumbnail_png`, which would reject them
+            // outright (no row to revalidate against).
+            if let Some((source_id, pack, stem, fingerprint)) =
+                crate::import::parse_pack_icon_key(&rendered.file)
+            {
+                let dir = crate::import::pack_icons_dir(&source_id, &pack);
+                match crate::import::write_pack_icon(&dir, &stem, &fingerprint, &rendered.png) {
+                    Ok(()) => {
+                        if self
+                            .import_page
+                            .note_rendered_icon(&rendered.file, &rendered.png)
+                        {
+                            import_preview_changed = true;
+                        }
+                        log!("import: rendered pack icon for {source_id}/{pack}/{stem}");
+                    }
+                    Err(error) => log!(
+                        "import: could not persist pack icon for {source_id}/{pack}/{stem}: {error}"
+                    ),
+                }
+                continue;
+            }
             let result = self
                 .library
                 .as_ref()
@@ -7653,6 +7739,7 @@ impl App {
             file: file.to_string(),
             path,
             purpose,
+            store: None,
         });
         self.thumb_read_in_flight = true;
     }
@@ -7697,6 +7784,26 @@ impl App {
                             continue;
                         }
                     };
+                    // A store open has no library row by design: what it
+                    // is comes from the BYTES the catalog served, and its
+                    // caption from the catalog row.
+                    if let Some(asset) = file.strip_prefix("store:") {
+                        let (domain, content_type) = store_media_of(&bytes);
+                        let title = self.store_asset_title(asset);
+                        if self.display_artifact(
+                            cx, domain, content_type, &bytes, 0, copy_to.as_deref(), false,
+                        ) {
+                            self.viewer = ViewerContent::Showing(file.clone());
+                            self.set_caption(cx, kind_label(domain, content_type), &title);
+                        } else {
+                            self.show_viewer_error(
+                                cx,
+                                &file,
+                                &format!("catalog asset could not be displayed ({content_type})."),
+                            );
+                        }
+                        continue;
+                    }
                     let Some(item) = self
                         .library
                         .as_ref()
@@ -7845,17 +7952,6 @@ impl App {
                             tray.install_preview(cx, file.clone(), cache_source.clone(), texture.clone());
                         }
                     }
-                    if let Some(mut grid) = self
-                        .ui
-                        .widget(cx, ids!(lib_grid))
-                        .borrow_mut::<LibraryGrid>()
-                    {
-                        if frames.len() > 1 {
-                            grid.install_anim_preview(cx, file, cache_source, frames, fps);
-                        } else {
-                            grid.install_preview(cx, file, cache_source, texture);
-                        }
-                    }
                     self.pump_gallery_previews(cx);
                 }
             }
@@ -7873,13 +7969,6 @@ impl App {
             .borrow_mut::<LibraryGallery>()
         {
             wanted.extend(gallery.take_preview_work());
-        }
-        if let Some(mut grid) = self
-            .ui
-            .widget(cx, ids!(lib_grid))
-            .borrow_mut::<LibraryGrid>()
-        {
-            wanted.extend(grid.take_preview_work());
         }
         if let Some(mut tray) = self
             .ui
@@ -7905,7 +7994,8 @@ impl App {
                 file: file.clone(),
                 path,
                 purpose,
-            });
+            store: None,
+        });
             self.preview_in_flight.push(file);
         }
     }
@@ -7930,6 +8020,55 @@ impl App {
         }
     }
 
+    /// Draw a catalog asset from the store: the IO worker resolves it to its
+    /// newest published revision, picks the file a viewer can draw, and
+    /// streams that blob. No library row, no staging file, nothing that can
+    /// be stale — a digest either matches the revision or it is refused.
+    fn open_store_asset(&mut self, cx: &mut Cx, asset: makepad_asset_data::AssetId) {
+        let Some(session) = self.import_server_session() else {
+            log!("asset store: no session — cannot open {asset}");
+            return;
+        };
+        let file = format!("store:{asset}");
+        let source = crate::artifact_io::StoreSource {
+            asset,
+            prefer: crate::store_content::default_viewable_roles(),
+            session,
+        };
+        // Same latest-click-wins gate the library uses: a fast second click
+        // must not race the first read onto the screen.
+        if let Some(open) =
+            self.viewer_gate
+                .click(&file, PathBuf::new(), None, Some(source))
+        {
+            self.submit_viewer_open(open);
+        }
+        let _ = cx;
+    }
+
+    /// Is the viewer currently showing this catalog asset?
+    fn viewer_shows_store_asset(&self, asset: &makepad_asset_data::AssetId) -> bool {
+        let wanted = format!("store:{asset}");
+        matches!(&self.viewer, ViewerContent::Showing(file) if *file == wanted)
+            || self.selected_file.as_deref() == Some(wanted.as_str())
+    }
+
+    /// The catalog row's title for a store open, so the caption says what
+    /// the user clicked instead of a raw id.
+    fn store_asset_title(&self, asset: &str) -> String {
+        self.store
+            .search
+            .ready()
+            .and_then(|results| {
+                results
+                    .hits
+                    .iter()
+                    .find(|hit| hit.asset_id.to_string() == asset)
+                    .map(|hit| hit.title.clone())
+            })
+            .unwrap_or_else(|| format!("catalog asset {asset}"))
+    }
+
     fn submit_viewer_open(&self, open: PendingOpen) {
         if let Some(io) = &self.artifact_io {
             io.request(IoRequest {
@@ -7939,7 +8078,8 @@ impl App {
                     generation: open.generation,
                     copy_to: open.copy_to,
                 },
-            });
+            store: None,
+        });
         }
     }
 
@@ -8029,7 +8169,7 @@ impl App {
         } else {
             None
         };
-        if let Some(open) = self.viewer_gate.click(file, path, copy_to) {
+        if let Some(open) = self.viewer_gate.click(file, path, copy_to, None) {
             self.submit_viewer_open(open);
         }
     }
@@ -8128,6 +8268,77 @@ impl App {
         self.refresh_gallery(cx, true);
     }
 
+    /// Short human description of the active Library filter, for the
+    /// confirm popup's "matching '<filter>'" text.
+    fn library_filter_description(&self) -> String {
+        let mut parts = Vec::new();
+        let query = self.lib_filters.query.trim();
+        if !query.is_empty() {
+            parts.push(format!("'{query}'"));
+        }
+        if let Some(kind) = &self.lib_filters.kind {
+            parts.push(format!("kind {kind}"));
+        }
+        if parts.is_empty() {
+            "the current filter".to_string()
+        } else {
+            parts.join(" + ")
+        }
+    }
+
+    /// Catalog assets the Library's active filter currently shows — the
+    /// exact hits the list renders, so the confirm popup's count and the
+    /// bulk retire can never disagree about what "shown" means.
+    fn shown_catalog_assets(&self) -> Vec<makepad_asset_data::AssetId> {
+        self.store
+            .search
+            .ready()
+            .map(|results| results.hits.iter().map(|hit| hit.asset_id).collect())
+            .unwrap_or_default()
+    }
+
+    fn open_retire_shown_modal(&mut self, cx: &mut Cx) {
+        let shown = self.shown_catalog_assets();
+        if shown.is_empty() {
+            return;
+        }
+        let filter_desc = self.library_filter_description();
+        self.ui.label(cx, ids!(lib_retire_shown_body)).set_text(
+            cx,
+            &format!(
+                "Retire {} catalog asset{} matching {filter_desc}? Every revision, alias and search row goes, and the bytes are handed to blob garbage collection. This cannot be undone.",
+                shown.len(),
+                if shown.len() == 1 { "" } else { "s" }
+            ),
+        );
+        self.ui.modal(cx, ids!(lib_retire_shown_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_retire_shown_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(lib_retire_shown_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// Retire every catalog asset the Library's active filter shows, one
+    /// server retire per asset — the same operation the per-asset "Delete
+    /// from store" button issues.
+    fn retire_shown_assets(&mut self, cx: &mut Cx) {
+        let shown = self.shown_catalog_assets();
+        if shown.is_empty() {
+            return;
+        }
+        let filter_desc = self.library_filter_description();
+        for id in &shown {
+            self.store.retire_asset(*id);
+        }
+        log!(
+            "asset store: retired {} shown asset(s) matching {filter_desc}",
+            shown.len()
+        );
+        self.refresh_library_ui(cx);
+    }
+
     // -- surfaces + Library browser --------------------------------------------
 
     fn show_surface(&mut self, cx: &mut Cx, surface: Surface) {
@@ -8197,7 +8408,7 @@ impl App {
         match surface {
             Surface::Create => {}
             Surface::Chat => self.refresh_chat_ui(cx),
-            Surface::Library => self.refresh_library_ui(cx, false),
+            Surface::Library => self.refresh_library_ui(cx),
             Surface::Import => self.refresh_import_ui(cx),
             Surface::Runs => self.refresh_runs_panel(cx),
             Surface::Admin => self.refresh_admin_panel(cx),
@@ -8394,218 +8605,96 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    fn set_lib_source(&mut self, cx: &mut Cx, source: LibSource) {
-        self.lib_source = source;
-        let page = match source {
-            LibSource::Local => id!(lib_local_page),
-            LibSource::Server => id!(lib_server_page),
-        };
-        self.ui
-            .page_flip(cx, ids!(lib_pages))
-            .set_active_page(cx, page.into());
-        self.refresh_library_ui(cx, false);
-    }
-
-    /// Pull the four filter controls into the local filter state and mirror
+    /// Pull the filter controls into the Library filter state and mirror
     /// them onto the real server query. A changed server query cancels and
     /// replaces its in-flight search; presentation-only refreshes do not.
     fn read_filters_from_ui(&mut self, cx: &mut Cx) {
         let query = self.ui.text_input(cx, ids!(lib_search)).text();
-        let kind = None;
-        let category = self.lib_filters.tags.iter().find_map(|tag| {
-            matches!(
-                tag.as_str(),
-                "maps"
-                    | "characters"
-                    | "props"
-                    | "weapons"
-                    | "billboards"
-                    | "images"
-                    | "video"
-                    | "music"
-                    | "speech"
-                    | "sfx"
-                    | "splats"
-                    | "meshes"
-                    | "other"
-            )
-            .then(|| tag.clone())
+        // The kind dropdown is the only structured filter; categories and
+        // tags reach the same rows through the text index, which the server
+        // builds from them.
+        let kind = self.lib_filters.kind.clone();
+        let server_kind = kind.as_deref().and_then(|label| {
+            SERVER_KINDS
+                .into_iter()
+                .find(|candidate| server_kind_label(*candidate) == label)
         });
-        let server_kind = kind
-            .as_deref()
-            .and_then(|label| {
-                SERVER_KINDS
-                    .into_iter()
-                    .find(|candidate| server_kind_label(*candidate) == label)
-            });
-        let server_category = category.clone();
-        let server_tag = self.lib_filters.tags.first().cloned();
-        let server_changed = self.store.filters.text != query
-            || self.store.filters.category != server_category
-            || self.store.filters.kind != server_kind
-            || self.store.filters.tag != server_tag;
+        let server_changed =
+            self.store.filters.text != query || self.store.filters.kind != server_kind;
         self.store.filters.text = query.clone();
-        self.store.filters.category = server_category;
         self.store.filters.kind = server_kind;
-        self.store.filters.tag = server_tag;
         self.lib_filters.query = query;
-        self.lib_filters.category = category;
-        self.lib_filters.kind = kind;
         if server_changed {
             self.store.submit_search();
         }
     }
 
-    /// Library surface: source tabs, filter options, grid, counts, server
-    /// pane and the detail rail. `clear_thumbnails` forces thumbnail
-    /// re-decode (library content changed); filter edits keep the cache.
-    fn run_enhance_metadata(&mut self, cx: &mut Cx) {
-        let Some(library) = &mut self.library else {
-            return;
-        };
-        let named = crate::enhance_meta::apply_catalog_names(library);
-        let models: Vec<String> = match &self.store.profiles {
-            Remote::Ready(profiles) => profiles
-                .iter()
-                .flat_map(|p| [p.id.clone(), p.domain.clone(), p.kind.clone()])
-                .collect(),
-            _ => Vec::new(),
-        };
-        let vision = crate::enhance_meta::fleet_has_vision(&models);
-        let dir = std::path::PathBuf::from(repo_path("local/ai_content_library"));
-        let skipped = if vision {
-            0
-        } else {
-            crate::enhance_meta::stamp_skipped_vision(
-                &dir,
-                &library.index.items,
-                "Qwen-VL not provisioned on this fleet — name table applied, no vision blob",
-            )
-        };
-        log!(
-            "enhance-metadata: renamed {named} · vision {} · stamped {skipped}",
-            if vision { "ready (captions not wired this pass)" } else { "skipped" }
-        );
-        self.ui.label(cx, ids!(lib_count)).set_text(
-            cx,
-            &if vision {
-                format!("enhanced {named} names · vision model present (caption loop next)")
-            } else {
-                format!("enhanced {named} names · no Qwen-VL on fleet (skipped {skipped})")
-            },
-        );
-        self.refresh_library_ui(cx, false);
-    }
-
-    fn refresh_library_ui(&mut self, cx: &mut Cx, clear_thumbnails: bool) {
-        let local = self.lib_source == LibSource::Local;
-        let total = self.library.as_ref().map_or(0, |library| library.len());
-        self.ui.button(cx, ids!(lib_local_tab)).set_text(
-            cx,
-            &if local {
-                format!("● Local ({total})")
-            } else {
-                format!("Local ({total})")
-            },
-        );
-        self.ui
-            .button(cx, ids!(lib_server_tab))
-            .set_text(cx, if local { "Server" } else { "● Server" });
-
-        let tag_stats = match &self.library {
-            Some(library) => collect_tag_stats(library.newest_items()),
-            None => Vec::new(),
-        };
-        let tag_labels: Vec<String> = if tag_stats.is_empty() {
-            vec!["None yet".to_string()]
-        } else {
-            tag_stats
-                .iter()
-                .map(|stat| {
-                    let on = self
-                        .lib_filters
-                        .tags
-                        .iter()
-                        .any(|selected| selected.eq_ignore_ascii_case(&stat.name));
-                    let mark = if on { "● " } else { "" };
-                    let star = if stat.enhanced { "✦ " } else { "" };
-                    format!("{mark}{star}{}   {}", stat.name, stat.count)
-                })
-                .collect()
-        };
-        let drop = self.ui.drop_down2(cx, ids!(lib_tag_drop));
-        drop.set_labels(cx, tag_labels);
-        self.lib_tag_options = tag_stats;
-
-        let chips = self.lib_filters.tags.clone();
-        self.ui
-            .widget(cx, ids!(lib_tag_chips))
-            .set_visible(cx, !chips.is_empty());
-        for i in 0..8 {
-            set_lib_tag_chip(&self.ui, cx, i, chips.get(i).map(String::as_str));
-        }
+    /// Library surface: filter options, catalog rows, counts, session note
+    /// and the detail rail. Every row here comes from the server catalog —
+    /// there is no local index behind this surface any more.
+    fn refresh_library_ui(&mut self, cx: &mut Cx) {
+        // The only facet the UI offers is the one the server actually
+        // filters on: the content-contract kind vocabulary. Nothing here is
+        // derived from a local index, and no option is offered that the
+        // catalog cannot answer.
+        let kinds: Vec<String> = SERVER_KINDS
+            .into_iter()
+            .map(|kind| server_kind_label(kind).to_string())
+            .collect();
+        let mut labels = vec!["all kinds".to_string()];
+        labels.extend(kinds.iter().cloned());
+        let selected_row = self
+            .lib_filters
+            .kind
+            .as_ref()
+            .and_then(|want| kinds.iter().position(|have| have == want))
+            .map_or(0, |index| index + 1);
+        let drop = self.ui.drop_down2(cx, ids!(lib_kind_drop));
+        drop.set_labels(cx, labels);
+        drop.set_selected_item(cx, selected_row);
+        self.lib_kind_options = kinds;
 
         self.read_filters_from_ui(cx);
 
-        // Filtered local grid.
-        let entries = match &self.library {
-            Some(library) => library
-                .newest_items()
-                .filter(|item| {
-                    self.lib_filters.matches(
-                        &item.label,
-                        &item.prompt,
-                        &item.domain,
-                        &item.content_type,
-                        &item.filter_tags(),
-                    )
-                })
-                .filter_map(|item| {
-                    let path = library.payload_path(&item.file).ok()?;
-                    let ct = item.content_type.to_ascii_lowercase();
-                    let preview_path = if item.domain.eq_ignore_ascii_case("billboard")
-                        || ct.contains("billboard")
-                    {
-                        Some(path.clone())
-                    } else if ct.starts_with("image/") {
-                        Some(path.clone())
-                    } else {
-                        library.thumbnail_path(&item.file).ok().flatten()
-                    };
-                    Some(GalleryEntry {
-                        meta: item.clone(),
-                        path,
-                        preview_path,
-                        selected: self.selected_file.as_deref() == Some(item.file.as_str()),
-                    })
-                })
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let shown = entries.len();
-        if let Some(mut grid) = self
-            .ui
-            .widget(cx, ids!(lib_grid))
-            .borrow_mut::<LibraryGrid>()
-        {
-            grid.set_entries(cx, entries, clear_thumbnails);
+        // A changed filter is a changed result set: send the viewport home
+        // before the new rows are laid out.
+        let signature = format!(
+            "{}|{:?}",
+            self.lib_filters.query.trim().to_ascii_lowercase(),
+            self.lib_filters.kind,
+        );
+        if self.lib_view_signature != signature {
+            self.lib_view_signature = signature;
+            if let Some(mut list) = self
+                .ui
+                .widget(cx, ids!(lib_server_list))
+                .borrow_mut::<StoreListPanel>()
+            {
+                list.scroll_to_top(cx);
+            }
         }
-        let count_text = match self.lib_source {
-            LibSource::Local => format!("{shown} shown · {total} local"),
-            LibSource::Server => match &self.store.search {
-                Remote::Ready(results) => format!(
-                    "{} shown · {} on server{}",
-                    results.hits.len(),
-                    results.total,
-                    if results.more { " · more available" } else { "" }
-                ),
-                Remote::Loading => "searching server…".to_string(),
-                Remote::Failed(error) => format!("server search failed · {error}"),
-                Remote::Idle if self.store.connected() => "server catalog not loaded".to_string(),
-                Remote::Idle => "server disconnected · 0 assets".to_string(),
-            },
+
+        let count_text = match &self.store.search {
+            Remote::Ready(results) => format!(
+                "{} shown · {} on server{}",
+                results.hits.len(),
+                results.total,
+                if results.more { " · more available" } else { "" }
+            ),
+            Remote::Loading => "searching server…".to_string(),
+            Remote::Failed(error) => format!("server search failed · {error}"),
+            Remote::Idle if self.store.connected() => "server catalog not loaded".to_string(),
+            Remote::Idle => "server disconnected · 0 assets".to_string(),
         };
         self.ui.label(cx, ids!(lib_count)).set_text(cx, &count_text);
+        // "Retire shown" is a bulk server delete: it stays disabled until a
+        // filter actually narrows the catalog to something.
+        let shown = self.shown_catalog_assets().len();
+        let filter_active =
+            !self.lib_filters.query.trim().is_empty() || self.lib_filters.kind.is_some();
+        let retire_btn = self.ui.button(cx, ids!(lib_retire_shown_btn));
+        retire_btn.set_text(cx, &format!("× Retire {shown} shown"));
+        retire_btn.set_enabled(cx, filter_active && shown > 0);
 
         // Server pane: the actual discovery/auth/session state and typed
         // catalog rows. Empty/loading/failure are intentionally distinct.
@@ -8624,13 +8713,14 @@ impl App {
             .label(cx, ids!(remote_connection))
             .set_text(cx, &self.store.status_label());
 
+        self.refresh_gc_ui(cx);
         self.refresh_library_detail(cx);
         self.ui.redraw(cx);
     }
 
-    /// Selected-item rail. Local items show exactly what the local index
-    /// records (and say so); server items show revision/provenance/publish
-    /// from the snapshot. Nothing is invented for either side.
+    /// Selected-item rail for the catalog selection: revision, provenance
+    /// and publish state straight from the server snapshot. Nothing is
+    /// invented, and nothing here reads a local file.
     fn refresh_library_detail(&mut self, cx: &mut Cx) {
         struct Detail {
             badge: String,
@@ -8641,7 +8731,15 @@ impl App {
             prov: String,
             rev: String,
             publish: String,
-            local_actions: bool,
+            /// `Some((asset, latest_revision))` shows the SERVER delete
+            /// actions; `detail_retire_asset_btn` always targets `asset`,
+            /// `detail_retire_version_btn` targets `latest_revision` when
+            /// known (hidden otherwise — nothing to retire "just this
+            /// version" of without a confirmed revision id).
+            server_delete: Option<(
+                makepad_asset_data::AssetId,
+                Option<makepad_asset_data::AssetRevisionId>,
+            )>,
         }
         let empty = |title: &str, meta: &str| Detail {
             badge: String::new(),
@@ -8652,180 +8750,131 @@ impl App {
             prov: "—".into(),
             rev: "—".into(),
             publish: "—".into(),
-            local_actions: false,
+            server_delete: None,
         };
-        let detail = match self.lib_source {
-            LibSource::Local => {
-                let selected = self.selected_file.clone().and_then(|file| {
-                    self.library.as_ref().and_then(|library| {
-                        let item = library.get(&file)?.clone();
-                        let size = library
-                            .payload_path(&file)
-                            .ok()
-                            .and_then(|path| std::fs::metadata(path).ok())
-                            .map(|meta| meta.len());
-                        Some((item, size))
-                    })
-                });
-                match selected {
-                    Some((item, size)) => Detail {
-                        badge: kind_label(&item.domain, &item.content_type).to_ascii_uppercase(),
-                        title: item.label.clone(),
-                        meta: {
-                            let tags = item.filter_tags();
-                            let tag_bit = if tags.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · tags {}", tags.join(", "))
-                            };
+        let detail = if !self.store.connected() {
+            empty(
+                "Asset Server not connected",
+                &self.store.status_label(),
+            )
+        } else {
+            match self.store.selected {
+                None => empty("Nothing selected", "Click a catalog row to inspect it."),
+                Some(selected) => {
+                    let hit = self
+                        .store
+                        .search
+                        .ready()
+                        .and_then(|results| {
+                            results.hits.iter().find(|hit| hit.asset_id == selected)
+                        });
+                    let badge = hit
+                        .and_then(|hit| hit.kind)
+                        .map(server_kind_label)
+                        .unwrap_or("asset")
+                        .to_ascii_uppercase();
+                    let title = hit
+                        .map(|hit| hit.title.clone())
+                        .unwrap_or_else(|| format!("Asset {selected}"));
+                    let meta = hit.map_or_else(
+                        || format!("asset {selected}"),
+                        |hit| {
+                            let alias = hit
+                                .alias
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "no alias".to_string());
                             format!(
-                                "{} · {} · {} · {}{tag_bit}",
-                                item.domain,
-                                item.content_type,
-                                size.map(format_bytes)
-                                    .unwrap_or_else(|| "size unknown".into()),
-                                item.file
+                                "{alias} · namespace {} · {}",
+                                hit.namespace,
+                                if hit.live { "live" } else { "not live" }
                             )
                         },
-                        head_a: "Prompt",
-                        prompt: if item.prompt.trim().is_empty() {
-                            "(no prompt recorded)".into()
-                        } else {
-                            item.prompt.clone()
-                        },
-                        prov: "Produced by this app (local pipeline run or explicit import). \
-                               The local index records domain, content type and prompt; fleet \
-                               candidate labels additionally preserve endpoint, model, seed, \
-                               remote artifact id, digest prefix and byte length."
-                            .into(),
-                        rev: "Single local copy — History keeps the latest payload only.".into(),
-                        publish: "Local only — not published to any Asset Store server.".into(),
-                        local_actions: true,
-                    },
-                    None => empty("Nothing selected", "Click a thumbnail to see its details."),
-                }
-            }
-            LibSource::Server => {
-                if !self.store.connected() {
-                    empty(
-                        "Asset Server not connected",
-                        &self.store.status_label(),
-                    )
-                } else {
-                    match self.store.selected {
-                        None => empty("Nothing selected", "Click a catalog row to inspect it."),
-                        Some(selected) => {
-                            let hit = self
-                                .store
-                                .search
-                                .ready()
-                                .and_then(|results| {
-                                    results.hits.iter().find(|hit| hit.asset_id == selected)
-                                });
-                            let badge = hit
-                                .and_then(|hit| hit.kind)
-                                .map(server_kind_label)
-                                .unwrap_or("asset")
-                                .to_ascii_uppercase();
-                            let title = hit
-                                .map(|hit| hit.title.clone())
-                                .unwrap_or_else(|| format!("Asset {selected}"));
-                            let meta = hit.map_or_else(
-                                || format!("asset {selected}"),
-                                |hit| {
-                                    let alias = hit
-                                        .alias
-                                        .as_ref()
-                                        .map(ToString::to_string)
-                                        .unwrap_or_else(|| "no alias".to_string());
-                                    format!(
-                                        "{alias} · namespace {} · {}",
-                                        hit.namespace,
-                                        if hit.live { "live" } else { "not live" }
-                                    )
-                                },
-                            );
-                            let snippet = hit
-                                .map(|hit| hit.snippet.clone())
-                                .filter(|text| !text.trim().is_empty())
-                                .unwrap_or_else(|| "(no search snippet returned)".to_string());
-                            let (provenance, revisions, publish) = match &self.store.detail {
-                                Remote::Idle => (
-                                    "Detail has not been requested.".to_string(),
-                                    "—".to_string(),
-                                    "—".to_string(),
-                                ),
-                                Remote::Loading => (
-                                    "Loading authoritative server detail…".to_string(),
-                                    "loading…".to_string(),
-                                    "loading…".to_string(),
-                                ),
-                                Remote::Failed(error) => (
-                                    format!("Server detail request failed: {error}"),
-                                    "unavailable".to_string(),
-                                    "unavailable".to_string(),
-                                ),
-                                Remote::Ready(detail) if detail.asset_id == selected => {
-                                    let revisions = if detail.candidates.is_empty() {
-                                        "no candidates returned".to_string()
-                                    } else {
-                                        detail
-                                            .candidates
-                                            .iter()
-                                            .map(|candidate| {
-                                                let revision = candidate.revision.to_string();
-                                                let when = candidate
-                                                    .published_ms
-                                                    .or(candidate.quarantined_ms)
-                                                    .unwrap_or(candidate.staged_ms);
-                                                format!(
-                                                    "{} · {} · {} ms",
-                                                    short_digest(&revision),
-                                                    candidate.state.as_str(),
-                                                    when
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    };
-                                    let publish = detail
-                                        .latest_published()
-                                        .map(|candidate| {
-                                            let revision = candidate.revision.to_string();
-                                            format!(
-                                                "latest published: {} · {} ms",
-                                                short_digest(&revision),
-                                                candidate.published_ms.unwrap_or_default()
-                                            )
-                                        })
-                                        .unwrap_or_else(|| "no published revision".to_string());
-                                    (
+                    );
+                    let snippet = hit
+                        .map(|hit| hit.snippet.clone())
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or_else(|| "(no search snippet returned)".to_string());
+                    let (provenance, revisions, publish, latest_revision) = match &self.store.detail {
+                        Remote::Idle => (
+                            "Detail has not been requested.".to_string(),
+                            "—".to_string(),
+                            "—".to_string(),
+                            None,
+                        ),
+                        Remote::Loading => (
+                            "Loading authoritative server detail…".to_string(),
+                            "loading…".to_string(),
+                            "loading…".to_string(),
+                            None,
+                        ),
+                        Remote::Failed(error) => (
+                            format!("Server detail request failed: {error}"),
+                            "unavailable".to_string(),
+                            "unavailable".to_string(),
+                            None,
+                        ),
+                        Remote::Ready(detail) if detail.asset_id == selected => {
+                            let revisions = if detail.candidates.is_empty() {
+                                "no candidates returned".to_string()
+                            } else {
+                                detail
+                                    .candidates
+                                    .iter()
+                                    .map(|candidate| {
+                                        let revision = candidate.revision.to_string();
+                                        let when = candidate
+                                            .published_ms
+                                            .or(candidate.quarantined_ms)
+                                            .unwrap_or(candidate.staged_ms);
                                         format!(
-                                            "namespace {} · asset {}\nManifest files and generator provenance are not part of the detail response.",
-                                            detail.namespace, detail.asset_id
-                                        ),
-                                        revisions,
-                                        publish,
-                                    )
-                                }
-                                Remote::Ready(_) => (
-                                    "Waiting for the selected asset detail…".to_string(),
-                                    "loading…".to_string(),
-                                    "loading…".to_string(),
-                                ),
+                                            "{} · {} · {} ms",
+                                            short_digest(&revision),
+                                            candidate.state.as_str(),
+                                            when
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
                             };
-                            Detail {
-                                badge,
-                                title,
-                                meta,
-                                head_a: "Search match",
-                                prompt: snippet,
-                                prov: provenance,
-                                rev: revisions,
+                            let publish = detail
+                                .latest_published()
+                                .map(|candidate| {
+                                    let revision = candidate.revision.to_string();
+                                    format!(
+                                        "latest published: {} · {} ms",
+                                        short_digest(&revision),
+                                        candidate.published_ms.unwrap_or_default()
+                                    )
+                                })
+                                .unwrap_or_else(|| "no published revision".to_string());
+                            (
+                                format!(
+                                    "namespace {} · asset {}\nManifest files and generator provenance are not part of the detail response.",
+                                    detail.namespace, detail.asset_id
+                                ),
+                                revisions,
                                 publish,
-                                local_actions: false,
-                            }
+                                detail.latest_published().map(|candidate| candidate.revision),
+                            )
                         }
+                        Remote::Ready(_) => (
+                            "Waiting for the selected asset detail…".to_string(),
+                            "loading…".to_string(),
+                            "loading…".to_string(),
+                            None,
+                        ),
+                    };
+                    Detail {
+                        badge,
+                        title,
+                        meta,
+                        head_a: "Search match",
+                        prompt: snippet,
+                        prov: provenance,
+                        rev: revisions,
+                        publish,
+                        server_delete: Some((selected, latest_revision)),
                     }
                 }
             }
@@ -8856,8 +8905,120 @@ impl App {
             .label(cx, ids!(detail_publish))
             .set_text(cx, &detail.publish);
         self.ui
-            .widget(cx, ids!(detail_actions))
-            .set_visible(cx, detail.local_actions);
+            .widget(cx, ids!(detail_server_actions))
+            .set_visible(cx, detail.server_delete.is_some());
+        self.ui
+            .button(cx, ids!(detail_retire_version_btn))
+            .set_visible(cx, matches!(detail.server_delete, Some((_, Some(_)))));
+    }
+
+    fn open_store_delete_modal(&mut self, cx: &mut Cx, action: PendingStoreDelete) {
+        let body = match action {
+            PendingStoreDelete::Asset(id) => format!(
+                "Delete asset {id} from the store? Every revision is retired, aliases and search rows are gone, and its bytes are handed to blob garbage collection. This cannot be undone."
+            ),
+            PendingStoreDelete::Revision(id, revision) => format!(
+                "Delete revision {} of asset {id}? The asset stays live if other revisions remain.",
+                short_digest(&revision.to_string())
+            ),
+        };
+        self.pending_store_delete = Some(action);
+        self.ui.label(cx, ids!(store_delete_body)).set_text(cx, &body);
+        self.ui.modal(cx, ids!(store_delete_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_store_delete_modal(&mut self, cx: &mut Cx) {
+        self.pending_store_delete = None;
+        self.ui.modal(cx, ids!(store_delete_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn confirm_store_delete(&mut self, cx: &mut Cx) {
+        let Some(action) = self.pending_store_delete.take() else {
+            return;
+        };
+        match action {
+            PendingStoreDelete::Asset(id) => self.store.retire_asset(id),
+            PendingStoreDelete::Revision(id, revision) => self.store.retire_revision(id, revision),
+        }
+        self.ui.modal(cx, ids!(store_delete_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// "Keep newest 3 per asset" checkbox on the Server tab's GC toolbar —
+    /// `Some(3)` when checked, `None` (GC only reclaims already-unreferenced
+    /// blobs) otherwise.
+    fn gc_retain_setting(&mut self, cx: &mut Cx) -> Option<u32> {
+        self.ui
+            .check_box(cx, ids!(gc_retain_check))
+            .active(cx)
+            .then_some(3)
+    }
+
+    fn open_gc_confirm_modal(&mut self, cx: &mut Cx, status: &GcStatusDto) {
+        let body = format!(
+            "Dry run found {} unreferenced blob{} — {} will be freed. Collect now?",
+            status.unreferenced_blobs,
+            if status.unreferenced_blobs == 1 { "" } else { "s" },
+            format_bytes(status.unreferenced_bytes),
+        );
+        self.ui.label(cx, ids!(gc_confirm_body)).set_text(cx, &body);
+        self.ui.modal(cx, ids!(gc_confirm_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_gc_confirm_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(gc_confirm_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// GC toolbar status line + button states — call whenever `self.store.gc`
+    /// might have changed and whenever the Server tab is visible.
+    fn refresh_gc_ui(&mut self, cx: &mut Cx) {
+        let busy = self.store.gc_busy();
+        self.ui.button(cx, ids!(gc_collect_btn)).set_enabled(cx, !busy);
+        self.ui.button(cx, ids!(gc_cancel_btn)).set_visible(cx, busy);
+        let text = match &self.store.gc {
+            Remote::Idle => String::new(),
+            Remote::Loading => "starting…".to_string(),
+            Remote::Failed(error) => format!("GC failed: {error}"),
+            Remote::Ready(status) => {
+                let verb = if status.dry_run { "dry run" } else { "collect" };
+                if status.done {
+                    format!(
+                        "{verb} done · {} blob{} / {} · {} freed",
+                        status.deleted_blobs.max(status.unreferenced_blobs),
+                        if status.deleted_blobs.max(status.unreferenced_blobs) == 1 { "" } else { "s" },
+                        format_bytes(status.deleted_bytes.max(status.unreferenced_bytes)),
+                        if status.dry_run { "would be" } else { "was" }
+                    )
+                } else {
+                    format!(
+                        "{verb} running · scanned {} · examined {} blobs",
+                        status.scanned_revisions, status.examined_blobs
+                    )
+                }
+            }
+        };
+        self.ui.label(cx, ids!(gc_status)).set_text(cx, &text);
+    }
+
+    /// A dry run this session started just finished — show what it found
+    /// and let the user confirm turning it into a real collect. Checked
+    /// every tick after `self.store.poll()`; `gc_dry_run_prompted` makes
+    /// this fire exactly once per run (a NEW dry run always carries a
+    /// fresh `run_id`).
+    fn maybe_open_gc_confirm(&mut self, cx: &mut Cx) {
+        let Remote::Ready(status) = &self.store.gc else {
+            return;
+        };
+        if !(status.dry_run && status.done) || self.gc_dry_run_prompted == status.run_id {
+            return;
+        }
+        self.gc_dry_run_prompted = status.run_id;
+        let status = *status;
+        self.open_gc_confirm_modal(cx, &status);
     }
 
     /// Runs+Workers surface rows: local pipeline + queue + LAN fleet (all
@@ -9076,6 +9237,44 @@ impl App {
             },
         );
 
+        let music_job = self.music_import_page.job();
+        self.ui.button(cx, ids!(music_import_btn)).set_text(
+            cx,
+            match &music_job {
+                Some(job) if self.import_queue.is_active(job) && self.music_import_page.compiling() => {
+                    "Loading…"
+                }
+                Some(job) if self.import_queue.has_job(job) => "Waiting",
+                Some(_) => "Load",
+                // Nothing to load until a folder is chosen — say so on the
+                // button rather than offering a click that does nothing.
+                None => "Pick first",
+            },
+        );
+        self.ui.button(cx, ids!(music_pick_btn)).set_text(
+            cx,
+            if self.music_import_page.picking {
+                "Choosing…"
+            } else if self.music_import_page.dir.is_empty() {
+                "Choose folder…"
+            } else {
+                "Change folder…"
+            },
+        );
+        self.ui
+            .label(cx, ids!(music_dir_label))
+            .set_text(cx, &self.music_import_page.dir_label());
+        // The queue row disappears the moment a job stops, so the card keeps
+        // the verdict: a refusal, a cancel, or the counts of the last run.
+        self.ui.label(cx, ids!(music_status_label)).set_text(
+            cx,
+            &if self.music_import_page.compiling() {
+                self.music_import_page.status_line(self.store.connected())
+            } else {
+                self.music_import_page.summary.clone()
+            },
+        );
+
         self.ui
             .label(cx, ids!(remote_connection))
             .set_text(cx, &self.store.status_label());
@@ -9083,7 +9282,9 @@ impl App {
     }
 
     fn import_busy(&self) -> bool {
-        self.import_page.compiling() || self.classic_import_page.compiling()
+        self.import_page.compiling()
+            || self.classic_import_page.compiling()
+            || self.music_import_page.compiling()
     }
 
     fn refresh_import_queue_list(&mut self, cx: &mut Cx) {
@@ -9185,6 +9386,15 @@ impl App {
                     self.classic_import_page.darkmod.progress_fraction(),
                     matches!(
                         self.classic_import_page.darkmod.phase,
+                        crate::import::ImportPhase::Failed { .. }
+                    ),
+                ),
+                ImportJob::Music { .. } => (
+                    active.job.title(),
+                    self.music_import_page.status_line(self.store.connected()),
+                    self.music_import_page.progress_fraction(),
+                    matches!(
+                        self.music_import_page.phase,
                         crate::import::ImportPhase::Failed { .. }
                     ),
                 ),
@@ -9337,6 +9547,9 @@ impl App {
                 .darkmod
                 .start_import(cx, path.clone(), server),
             ImportJob::KayKit => self.import_page.start_kaykit_import(server),
+            ImportJob::Music { path } => {
+                self.music_import_page.start_import(path.clone(), server)
+            }
         };
         if let Err(error) = result {
             log!("import: {} refused: {error}", item.job.title());
@@ -9386,6 +9599,9 @@ impl App {
             Some(ImportJob::DarkMod { .. }) => {
                 self.classic_import_page.darkmod.request_stop(cx);
             }
+            Some(ImportJob::Music { .. }) => {
+                self.music_import_page.request_stop();
+            }
             None => {}
         }
         if self.surface == Surface::Import {
@@ -9393,15 +9609,51 @@ impl App {
         }
     }
 
+    /// Where imports publish. The connected client session first; when
+    /// that is not up yet (imports often start seconds after launch) the
+    /// server this process HOSTS, read from its own root files — so a pack
+    /// never silently compiles local-only while we are the server.
+    /// Half of the icon-render handshake (`ImportPhase::IconsPending` /
+    /// `IconResumeGate`, the other half lives in `run_kenney_import`/
+    /// `run_kaykit_import`): a parked import thread already staged+baked and
+    /// is waiting right here for real icons before it will compile+publish
+    /// — nothing gets published with a placeholder thumbnail. Once every
+    /// icon this session queued has rendered (or the import was cancelled),
+    /// let it continue.
+    fn maybe_resume_icons_pending(&mut self, cx: &mut Cx) {
+        let drained = self.import_landings.is_empty();
+        // Classic packs park in the same handshake (their own per-source
+        // gate), so they resume on the same condition.
+        let resumed_classic = self
+            .classic_import_page
+            .resume_icons_pending(drained, self.import_page.icons_busy());
+        for source in &resumed_classic {
+            log!("import {source}: icons ready — resuming compile+publish");
+        }
+        let ready = self.import_page.icons_pending_ready(drained);
+        let cancelled = self.import_page.stop_requested();
+        if !ready && !cancelled {
+            if !resumed_classic.is_empty() && self.surface == Surface::Import {
+                self.refresh_import_ui(cx);
+            }
+            return;
+        }
+        if self.import_page.resume_icons_pending() || !resumed_classic.is_empty() {
+            log!("import: icons ready — resuming compile+publish");
+            if self.surface == Surface::Import {
+                self.refresh_import_ui(cx);
+            }
+        }
+    }
+
     fn import_server_session(&self) -> Option<crate::import::ServerSession> {
-        let endpoints = self.store.endpoints?;
-        let token = self.store.token.clone()?;
-        let server_id = self.store.server.as_ref()?.server_id;
-        Some(crate::import::ServerSession {
-            endpoints,
-            token,
-            server_id,
-        })
+        let from_session = (|| {
+            let endpoints = self.store.endpoints?;
+            let token = self.store.token.clone()?;
+            let server_id = self.store.server.as_ref()?.server_id;
+            Some(crate::import::ServerSession { endpoints, token, server_id })
+        })();
+        from_session.or_else(crate::import::hosted_server_session)
     }
 
     fn collect_import_landings(&mut self) {
@@ -9417,8 +9669,22 @@ impl App {
         }
     }
 
-    /// Persist a bounded slice of imported payloads so convert/AO can keep
-    /// painting the queue strip instead of freezing the UI on 800 files.
+    /// Feed a bounded slice of staged pack items to the GPU icon renderer so
+    /// convert/AO can keep painting the queue strip instead of freezing the
+    /// UI on 800 files. Pack content publishes to the ASSET STORE ONLY
+    /// (`publish_compiled_pack`, run once from `run_kenney_import`/
+    /// `run_kaykit_import` — but NOT YET when `LibraryLanding`s first reach
+    /// this function: the import thread is PARKED in `ImportPhase::IconsPending`,
+    /// waiting for every icon this function queues to finish, before it
+    /// will compile+publish at all — see `maybe_resume_icons_pending`); the
+    /// local AI-workspace library is never touched here. Each staged GLB
+    /// either reuses its already-persisted icon
+    /// (`crate::import::read_reusable_pack_icon`, keyed by a content
+    /// fingerprint — the staging-free analog of
+    /// `library::keep_existing_glb_thumbnail`) or gets queued for a fresh
+    /// GPU render whose result lands in `crate::import::pack_icons_dir` (see
+    /// `drain_rendered_thumbnails`), which survives the `work/`+`out/`
+    /// staging cleanup (`clear_pack_staging`) once the one publish succeeds.
     fn land_imported_pack(&mut self, cx: &mut Cx) {
         self.collect_import_landings();
         const BATCH: usize = 32;
@@ -9427,137 +9693,105 @@ impl App {
         }
         let n = BATCH.min(self.import_landings.len());
         let landings: Vec<_> = self.import_landings.drain(..n).collect();
-        let mut queued = 0usize;
+        let mut staged = 0usize;
         let mut reused = 0usize;
-        let mut thumbs: Vec<(String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = Vec::new();
+        type ThumbJob = (String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<([f32; 3], f32, f32)>);
+        let mut thumbs: Vec<ThumbJob> = Vec::new();
         let mut preview_images: Vec<(String, Vec<u8>)> = Vec::new();
         let mut icon_tracks: Vec<(String, Option<Vec<u8>>)> = Vec::new();
-        if let Some(library) = &mut self.library {
-            for landing in &landings {
-                let Ok(mut bytes) = std::fs::read(&landing.path) else {
-                    log!("import: cannot read {}", landing.path.display());
-                    continue;
-                };
-                if landing.content_type.contains("gltf") {
-                    if let Some(dir) = landing.path.parent() {
-                        match crate::import::embed_glb_file_images(&bytes, dir) {
-                            Ok(embedded) => bytes = embedded,
-                            Err(error) => log!(
-                                "import: embed textures {}: {error}",
-                                landing.label
-                            ),
-                        }
+        for landing in &landings {
+            let Ok(mut bytes) = std::fs::read(&landing.path) else {
+                log!("import: cannot read {}", landing.path.display());
+                continue;
+            };
+            if landing.content_type.contains("gltf") {
+                if let Some(dir) = landing.path.parent() {
+                    match crate::import::embed_glb_file_images(&bytes, dir) {
+                        Ok(embedded) => bytes = embedded,
+                        Err(error) => log!(
+                            "import: embed textures {}: {error}",
+                            landing.label
+                        ),
                     }
                 }
-                let source_id = if landing.source_id.is_empty() {
-                    "import".to_string()
+            }
+            let source_id = if landing.source_id.is_empty() {
+                "import".to_string()
+            } else {
+                landing.source_id.clone()
+            };
+            let pack = if landing.pack.is_empty() {
+                match source_id.as_str() {
+                    "kenney" => landing
+                        .label
+                        .split('/')
+                        .nth(1)
+                        .unwrap_or("kenney")
+                        .to_string(),
+                    other => other.to_string(),
+                }
+            } else {
+                landing.pack.clone()
+            };
+            staged += 1;
+            let premade = landing
+                .thumbnail
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .filter(|b| b.starts_with(b"\x89PNG") && !crate::import::is_blank_preview_png(b));
+            let stem = landing
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("item")
+                .to_string();
+            if landing.content_type.contains("gltf") && premade.is_none() {
+                let fingerprint = crate::import::content_fingerprint(&bytes);
+                let icon_key = crate::import::pack_icon_key(&source_id, &pack, &stem, &fingerprint);
+                let icons_dir = crate::import::pack_icons_dir(&source_id, &pack);
+                if let Some(existing) =
+                    crate::import::read_reusable_pack_icon(&icons_dir, &stem, &fingerprint)
+                {
+                    reused += 1;
+                    icon_tracks.push((icon_key, Some(existing)));
                 } else {
-                    landing.source_id.clone()
-                };
-                let pack = if landing.pack.is_empty() {
-                    match source_id.as_str() {
-                        "kenney" => landing
-                            .label
-                            .split('/')
-                            .nth(1)
-                            .unwrap_or("kenney")
-                            .to_string(),
-                        other => other.to_string(),
-                    }
-                } else {
-                    landing.pack.clone()
-                };
-                let group_id = format!("import:{source_id}:{pack}");
-                let group_label = match source_id.as_str() {
-                    "freedoom" => "Freedoom · BSD-3-Clause".to_string(),
-                    "doom" => "Doom shareware · id-Software-shareware".to_string(),
-                    "librequake" => "LibreQuake · Modified BSD".to_string(),
-                    "quake" => "Quake shareware · id-Software-shareware".to_string(),
-                    "duke3d" => "Duke3D shareware · 3D-Realms-shareware".to_string(),
-                    "quake2" => "Quake II shareware · id-Software-shareware".to_string(),
-                    "quake3" => "Quake III demo · id-Software-demo".to_string(),
-                    "darkmod" => "The Dark Mod · CC-BY-NC-SA-3.0".to_string(),
-                    "kaykit" => "KayKit · CC0-1.0".to_string(),
-                    _ => format!("Kenney {pack} · CC-BY-4.0"),
-                };
-                let premade = landing
-                    .thumbnail
-                    .as_ref()
-                    .and_then(|p| std::fs::read(p).ok())
-                    .filter(|b| {
-                        b.starts_with(b"\x89PNG") && !crate::import::is_blank_preview_png(b)
-                    });
-                match library.import_unique_with_thumbnail(
-                    landing.domain,
-                    landing.content_type,
-                    &landing.prompt,
-                    &landing.label,
-                    &bytes,
-                    premade.as_deref(),
-                    Some((group_id.as_str(), group_label.as_str())),
-                ) {
-                    Ok((file, created)) => {
-                        if created {
-                            queued += 1;
-                        } else {
-                            reused += 1;
-                        }
-                        // AO sidecars live beside the staged GLB after bake
-                        // (or seed-from-source). Fail-closed: absent means none.
-                        if landing.content_type.contains("gltf") {
-                            if let Err(error) = library.install_ao_sidecars(&file, &landing.path) {
-                                log!(
-                                    "import: AO sidecar copy for {} failed: {error}",
-                                    landing.label
-                                );
-                            }
-                        }
-                        if landing.content_type.contains("billboard") {
-                            if let Err(error) =
-                                library.install_billboard_frames(&file, &landing.path)
-                            {
-                                log!(
-                                    "import: billboard frames for {} failed: {error}",
-                                    landing.label
-                                );
-                            }
-                        }
-                        if landing.content_type.starts_with("image/") {
-                            let preview = premade.clone().unwrap_or(bytes.clone());
-                            preview_images.push((file.clone(), preview));
-                        }
-                        // Reimport rebuilds GPU icons unless a convert-time
-                        // anim sheet already is the thumbnail.
-                        if landing.content_type.contains("gltf") && premade.is_none() {
-                            if let Err(error) = library.discard_model_thumbnail(&file) {
-                                log!("import: could not drop old icon for {file}: {error}");
-                            }
-                            let (aomesh, ao_png) = library.ao_sidecar_bytes(&file);
-                            thumbs.push((file.clone(), bytes, aomesh, ao_png));
-                            icon_tracks.push((file, None));
-                        } else if premade.is_some() {
-                            icon_tracks.push((file, premade));
-                        }
-                    }
-                    Err(error) => log!("import: library persist {}: {error}", landing.label),
+                    // AO sidecars live beside the staged GLB after bake (or
+                    // seed-from-source); `.spawn` too for World items.
+                    // Fail-closed: absent means none.
+                    let aomesh = std::fs::read(landing.path.with_extension("aomesh")).ok();
+                    let ao_png = std::fs::read(landing.path.with_extension("ao.png")).ok();
+                    let spawn = crate::library::parse_world_spawn(&landing.path.with_extension("spawn"));
+                    thumbs.push((icon_key, bytes, aomesh, ao_png, spawn));
+                }
+            } else {
+                // Non-model (e.g. plain image) or already-thumbnailed
+                // (billboard sheet, premade beauty render) content needs no
+                // GPU render — the store publish already carries its real
+                // thumbnail straight from the staged file.
+                let key = crate::import::pack_icon_key(&source_id, &pack, &stem, "premade");
+                if landing.content_type.starts_with("image/") {
+                    let preview = premade.clone().unwrap_or_else(|| bytes.clone());
+                    preview_images.push((key.clone(), preview));
+                }
+                if premade.is_some() {
+                    icon_tracks.push((key, premade));
                 }
             }
         }
-        for (file, png) in preview_images {
-            self.import_page.push_preview_thumb(file, png);
+        for (key, png) in preview_images {
+            self.import_page.push_preview_thumb(key, png);
         }
-        for (file, existing) in icon_tracks {
-            self.import_page.track_import_icon(file, existing);
+        for (key, existing) in icon_tracks {
+            self.import_page.track_import_icon(key, existing);
         }
-        for (file, bytes, aomesh, ao_png) in thumbs {
-            self.queue_glb_thumbnail_ao(cx, &file, &bytes, aomesh, ao_png);
+        for (key, bytes, aomesh, ao_png, spawn) in thumbs {
+            self.queue_glb_thumbnail_ao(cx, &key, &bytes, aomesh, ao_png, spawn);
         }
         log!(
-            "import: library landed {queued} new / {reused} cached · icons {}/{}",
+            "import: staged {staged} pack item(s) ({reused} icon reused) · icons {}/{}",
             self.import_page.icons_done,
             self.import_page.icons_total()
         );
-        self.refresh_gallery(cx, false);
         if self.import_landings.is_empty()
             && matches!(
                 self.import_page.kenney_phase,
@@ -9566,10 +9800,9 @@ impl App {
                     | crate::import::ImportPhase::AllDone { .. }
             )
         {
+            // Pack content lives in the STORE — re-run the catalog search
+            // so a just-published pack shows up on the Library surface.
             self.store.submit_search();
-        }
-        if self.surface == Surface::Library {
-            self.refresh_library_ui(cx, false);
         }
         if self.surface == Surface::Import {
             self.refresh_import_ui(cx);
@@ -10010,6 +10243,26 @@ const MODEL_THUMBNAIL_MAX_PENDING: usize = 2;
 /// Finished runs kept visible on the Runs surface (running ones always are).
 const MAX_FINISHED_RUNS_SHOWN: usize = 3;
 
+/// What the catalog just handed us, from the bytes themselves: the store is
+/// the source of truth for CONTENT, so the viewer asks the content.
+fn store_media_of(bytes: &[u8]) -> (&'static str, &'static str) {
+    if bytes.starts_with(b"glTF") {
+        ("map", "model/gltf-binary")
+    } else if bytes.starts_with(b"ply\n") || bytes.starts_with(b"ply\r") {
+        ("splat", "application/ply")
+    } else if bytes.starts_with(b"\x89PNG") {
+        ("image", "image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        ("image", "image/jpeg")
+    } else if bytes.starts_with(b"RIFF") {
+        ("sfx", "audio/wav")
+    } else if bytes.len() > 8 && &bytes[4..8] == b"ftyp" {
+        ("video", "video/mp4")
+    } else {
+        ("asset", "application/octet-stream")
+    }
+}
+
 fn kind_label(domain: &str, content_type: &str) -> &'static str {
     crate::asset_store_state::library_type(domain, content_type)
 }
@@ -10072,83 +10325,6 @@ fn stage_primary_output(domain: &str, content_type: &str) -> bool {
 
 /// Named chip slots under the Library tag dropdown. Keep in sync with
 /// `ft0`…`ft7` in the Library filter row.
-fn set_lib_tag_chip(ui: &WidgetRef, cx: &mut Cx, index: usize, text: Option<&str>) {
-    let on = text.is_some();
-    match index {
-        0 => {
-            ui.widget(cx, ids!(ft0)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft0.chip_name)).set_text(cx, text);
-            }
-        }
-        1 => {
-            ui.widget(cx, ids!(ft1)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft1.chip_name)).set_text(cx, text);
-            }
-        }
-        2 => {
-            ui.widget(cx, ids!(ft2)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft2.chip_name)).set_text(cx, text);
-            }
-        }
-        3 => {
-            ui.widget(cx, ids!(ft3)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft3.chip_name)).set_text(cx, text);
-            }
-        }
-        4 => {
-            ui.widget(cx, ids!(ft4)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft4.chip_name)).set_text(cx, text);
-            }
-        }
-        5 => {
-            ui.widget(cx, ids!(ft5)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft5.chip_name)).set_text(cx, text);
-            }
-        }
-        6 => {
-            ui.widget(cx, ids!(ft6)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft6.chip_name)).set_text(cx, text);
-            }
-        }
-        7 => {
-            ui.widget(cx, ids!(ft7)).set_visible(cx, on);
-            if let Some(text) = text {
-                ui.label(cx, ids!(ft7.chip_name)).set_text(cx, text);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lib_tag_chip_removed(ui: &WidgetRef, cx: &mut Cx, actions: &Actions) -> Option<usize> {
-    if ui.button(cx, ids!(ft0.chip_x)).clicked(actions) {
-        Some(0)
-    } else if ui.button(cx, ids!(ft1.chip_x)).clicked(actions) {
-        Some(1)
-    } else if ui.button(cx, ids!(ft2.chip_x)).clicked(actions) {
-        Some(2)
-    } else if ui.button(cx, ids!(ft3.chip_x)).clicked(actions) {
-        Some(3)
-    } else if ui.button(cx, ids!(ft4.chip_x)).clicked(actions) {
-        Some(4)
-    } else if ui.button(cx, ids!(ft5.chip_x)).clicked(actions) {
-        Some(5)
-    } else if ui.button(cx, ids!(ft6.chip_x)).clicked(actions) {
-        Some(6)
-    } else if ui.button(cx, ids!(ft7.chip_x)).clicked(actions) {
-        Some(7)
-    } else {
-        None
-    }
-}
-
 /// The word a seeded transform label uses for the pinned input's class.
 fn seed_kind_word(content_type: &str) -> &'static str {
     let ct = content_type.to_ascii_lowercase();
@@ -10337,6 +10513,54 @@ impl MatchEvent for App {
             log!("import: queue KayKit");
             self.enqueue_import(cx, ImportJob::KayKit);
         }
+        if self.ui.button(cx, ids!(music_pick_btn)).clicked(actions) {
+            // The native directory dialog answers later, as a
+            // `FileDialogAction` in a following actions pass.
+            self.music_import_page.picking = true;
+            let mut dialog = FileDialog::new().set_title("Choose a music folder to import".into());
+            if !self.music_import_page.dir.trim().is_empty() {
+                dialog = dialog.set_location(PathBuf::from(self.music_import_page.dir.trim()));
+            }
+            cx.open_select_folder_dialog(dialog);
+            self.refresh_import_ui(cx);
+        }
+        if self.ui.button(cx, ids!(music_import_btn)).clicked(actions) {
+            match self.music_import_page.job() {
+                Some(job) => {
+                    log!("import: queue {}", job.title());
+                    self.enqueue_import(cx, job);
+                }
+                None => {
+                    log!("import: choose a music folder first");
+                    // No folder yet: opening the picker IS the next step, so
+                    // the click still moves the user forward.
+                    self.music_import_page.picking = true;
+                    cx.open_select_folder_dialog(
+                        FileDialog::new().set_title("Choose a music folder to import".into()),
+                    );
+                    self.refresh_import_ui(cx);
+                }
+            }
+        }
+        for action in actions {
+            let Some(picked) = action.downcast_ref::<FileDialogAction>() else {
+                continue;
+            };
+            match picked {
+                FileDialogAction::FolderSelected(path) => {
+                    log!("import music: folder {}", path.display());
+                    self.music_import_page
+                        .set_dir(path.to_string_lossy().into_owned());
+                }
+                FileDialogAction::FolderCancelled => {
+                    self.music_import_page.picking = false;
+                }
+                FileDialogAction::None => {}
+            }
+            if self.surface == Surface::Import {
+                self.refresh_import_ui(cx);
+            }
+        }
         let queue_widget = self.ui.widget(cx, ids!(import_queue_list));
         let queue_portal = queue_widget.portal_list(cx, ids!(list));
         let mut queue_action = None;
@@ -10378,146 +10602,84 @@ impl MatchEvent for App {
         if self.ui.text_input(cx, ids!(chat_input)).returned(actions).is_some() {
             self.send_chat(cx);
         }
-        if self.ui.button(cx, ids!(lib_local_tab)).clicked(actions) {
-            self.set_lib_source(cx, LibSource::Local);
-        }
-        if self.ui.button(cx, ids!(lib_server_tab)).clicked(actions) {
-            self.set_lib_source(cx, LibSource::Server);
-        }
-        // Library filters re-run on every keystroke / dropdown pick; the
-        // thumbnail cache survives (only the visible set changes).
+        // Library filters re-run on every keystroke / dropdown pick and go
+        // straight onto the server query.
         let mut filters_changed = self
             .ui
             .text_input(cx, ids!(lib_search))
             .changed(actions)
             .is_some();
-        if let Some(index) = self.ui.drop_down2(cx, ids!(lib_tag_drop)).changed(actions) {
-            if let Some(stat) = self.lib_tag_options.get(index).cloned() {
-                if let Some(pos) = self
-                    .lib_filters
-                    .tags
-                    .iter()
-                    .position(|have| have.eq_ignore_ascii_case(&stat.name))
-                {
-                    self.lib_filters.tags.remove(pos);
-                } else if self.lib_filters.tags.len() < 8 {
-                    self.lib_filters.tags.push(stat.name);
-                }
-                filters_changed = true;
-            }
-        }
-        if let Some(index) = lib_tag_chip_removed(&self.ui, cx, actions) {
-            if index < self.lib_filters.tags.len() {
-                self.lib_filters.tags.remove(index);
+        if let Some(index) = self.ui.drop_down2(cx, ids!(lib_kind_drop)).changed(actions) {
+            // Row 0 is "all kinds"; every other row is one server kind.
+            let picked = index
+                .checked_sub(1)
+                .and_then(|kind_index| self.lib_kind_options.get(kind_index).cloned());
+            if picked != self.lib_filters.kind {
+                self.lib_filters.kind = picked;
                 filters_changed = true;
             }
         }
         if filters_changed {
-            self.refresh_library_ui(cx, false);
+            self.refresh_library_ui(cx);
         }
         if self.ui.button(cx, ids!(lib_clear_btn)).clicked(actions) {
             self.ui.text_input(cx, ids!(lib_search)).set_text(cx, "");
-            self.lib_filters.tags.clear();
+            self.lib_filters.kind = None;
             self.ui
-                .drop_down2(cx, ids!(lib_tag_drop))
+                .drop_down2(cx, ids!(lib_kind_drop))
                 .set_selected_item(cx, 0);
-            self.refresh_library_ui(cx, false);
+            self.refresh_library_ui(cx);
         }
-        if self.ui.button(cx, ids!(lib_enhance_btn)).clicked(actions) {
-            self.run_enhance_metadata(cx);
+        if self.ui.button(cx, ids!(lib_retire_shown_btn)).clicked(actions) {
+            self.open_retire_shown_modal(cx);
         }
-        // Grid card clicks select + load into the viewer. Media file dragging
-        // is confined to the explicit handle so card-surface vertical scroll
-        // and ordinary selection keep their existing behavior.
-        let grid_widget = self.ui.widget(cx, ids!(lib_grid));
-        let grid_list = grid_widget.portal_list(cx, ids!(list));
-        let grid_cols = grid_widget
-            .borrow::<LibraryGrid>()
-            .map_or(1, |grid| grid.last_cols.max(1));
-        let mut grid_pick = None;
-        let mut grid_open = None;
-        let mut grid_drag = None;
-        let slots = [
-            ids!(c1), ids!(c2), ids!(c3), ids!(c4),
-            ids!(c5), ids!(c6), ids!(c7), ids!(c8),
-        ];
-        let drag_handles = [
-            ids!(c1.file_drag), ids!(c2.file_drag), ids!(c3.file_drag),
-            ids!(c4.file_drag), ids!(c5.file_drag), ids!(c6.file_drag),
-            ids!(c7.file_drag), ids!(c8.file_drag),
-        ];
-        'grid_rows: for (row_id, item) in grid_list.items_with_actions(actions) {
-            for (slot, path) in slots.iter().enumerate() {
-                let index = row_id * grid_cols + slot;
-                let handle = item.file_drag_handle(cx, drag_handles[slot]);
-                let drag_down = handle.finger_down(actions).is_some();
-                let drag_move = handle.finger_move(actions);
-                let drag_up = handle.finger_up(actions).is_some();
-                if drag_down || drag_move.is_some() || drag_up {
-                    // The handle owns the whole gesture, including a short
-                    // click. Otherwise its FingerDown can bubble to the card
-                    // and accidentally select/open before a drag begins.
-                    if let Some(event) = drag_move.filter(|event| {
-                        should_start_file_drag(event.move_distance(), self.file_drag_active)
-                    }) {
-                        if let Some(payload) = grid_widget
-                            .borrow::<LibraryGrid>()
-                            .and_then(|grid| grid.file_drag_payload_path_at(index))
-                        {
-                            grid_drag = Some((event.window_id, payload));
-                        }
-                    }
-                    break 'grid_rows;
-                }
-                if let Some(fe) = item.view(cx, *path).finger_down(actions) {
-                    if fe.tap_count >= 2 {
-                        grid_open = Some(index);
-                    } else {
-                        grid_pick = Some(index);
-                    }
-                    break 'grid_rows;
-                }
+        if self.ui.button(cx, ids!(lib_retire_shown_cancel)).clicked(actions) {
+            self.close_retire_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_retire_shown_confirm)).clicked(actions) {
+            self.close_retire_shown_modal(cx);
+            self.retire_shown_assets(cx);
+        }
+        if self.ui.button(cx, ids!(detail_retire_asset_btn)).clicked(actions) {
+            if let Some(id) = self.store.selected {
+                self.open_store_delete_modal(cx, PendingStoreDelete::Asset(id));
             }
         }
-        if let Some((window_id, payload)) = grid_drag {
-            self.start_file_payload_drag(cx, window_id, payload);
-        } else if let Some(index) = grid_open.or(grid_pick) {
-            let file = grid_widget
-                .borrow::<LibraryGrid>()
-                .and_then(|grid| grid.file_at(index));
-            if let Some(file) = file {
-                if grid_open.is_some() {
-                    self.open_gallery(cx, &file);
-                    self.show_surface(cx, Surface::Create);
-                } else {
-                    self.select_gallery(cx, &file);
-                }
+        if self.ui.button(cx, ids!(detail_retire_version_btn)).clicked(actions) {
+            let target = self.store.selected.zip(
+                self.store
+                    .detail
+                    .ready()
+                    .and_then(|detail| detail.latest_published())
+                    .map(|candidate| candidate.revision),
+            );
+            if let Some((id, revision)) = target {
+                self.open_store_delete_modal(cx, PendingStoreDelete::Revision(id, revision));
             }
         }
-        // Detail rail actions (local selection only).
-        if self.ui.button(cx, ids!(detail_open_btn)).clicked(actions) {
-            if let Some(file) = self.selected_file.clone() {
-                self.open_gallery(cx, &file);
-            }
-            self.show_surface(cx, Surface::Create);
+        if self.ui.button(cx, ids!(store_delete_cancel)).clicked(actions) {
+            self.close_store_delete_modal(cx);
         }
-        if self.ui.button(cx, ids!(detail_reuse_btn)).clicked(actions) {
-            let prompt = self.selected_file.clone().and_then(|file| {
-                self.library
-                    .as_ref()
-                    .and_then(|library| library.get(&file))
-                    .map(|item| item.prompt.clone())
-            });
-            if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
-                self.ui
-                    .text_input(cx, ids!(prompt_input))
-                    .set_text(cx, &prompt);
-            }
+        if self.ui.button(cx, ids!(store_delete_confirm)).clicked(actions) {
+            self.confirm_store_delete(cx);
         }
-        if self.ui.button(cx, ids!(detail_delete_btn)).clicked(actions) {
-            if let Some(file) = self.selected_file.clone() {
-                self.delete_gallery(cx, &file);
-            }
+        if self.ui.button(cx, ids!(gc_collect_btn)).clicked(actions) {
+            let retain = self.gc_retain_setting(cx);
+            self.store.gc_dry_run(retain);
+            self.refresh_gc_ui(cx);
+        }
+        if self.ui.button(cx, ids!(gc_cancel_btn)).clicked(actions) {
+            self.store.gc_cancel();
+            self.refresh_gc_ui(cx);
+        }
+        if self.ui.button(cx, ids!(gc_confirm_cancel)).clicked(actions) {
+            self.close_gc_confirm_modal(cx);
+        }
+        if self.ui.button(cx, ids!(gc_confirm_collect)).clicked(actions) {
+            let retain = self.gc_retain_setting(cx);
+            self.close_gc_confirm_modal(cx);
+            self.store.gc_collect(retain);
+            self.refresh_gc_ui(cx);
         }
         // Runs list: cancel the active stage / drop a queued run.
         let runs_widget = self.ui.widget(cx, ids!(runs_list));
@@ -10549,7 +10711,7 @@ impl MatchEvent for App {
         let server_portal = server_widget.portal_list(cx, ids!(list));
         let mut picked_asset = None;
         for (row_id, item) in server_portal.items_with_actions(actions) {
-            if item.view(cx, ids!(asset_card)).finger_down(actions).is_some() {
+            if let Some(fe) = item.view(cx, ids!(asset_card)).finger_down(actions) {
                 if let Some(StoreRow::Asset {
                     action: RowAction::SelectAsset(asset_id),
                     ..
@@ -10557,16 +10719,25 @@ impl MatchEvent for App {
                     .borrow::<StoreListPanel>()
                     .and_then(|panel| panel.row_at(row_id))
                 {
-                    picked_asset = Some(asset_id);
+                    picked_asset = Some((asset_id, fe.tap_count >= 2));
                     break;
                 }
             }
         }
-        if let Some(asset_id) = picked_asset {
+        if let Some((asset_id, to_viewer)) = picked_asset {
             match asset_id.parse::<makepad_asset_data::AssetId>() {
                 Ok(asset_id) => {
                     self.store.select(asset_id);
-                    self.refresh_library_ui(cx, false);
+                    // The catalog IS the content: open the head revision's
+                    // drawable file straight from the server, never a local
+                    // copy that can be older than what was published.
+                    self.open_store_asset(cx, asset_id);
+                    self.refresh_library_ui(cx);
+                    // Single click inspects (detail rail); a double click
+                    // is "show it to me" — the viewer lives on Create.
+                    if to_viewer {
+                        self.show_surface(cx, Surface::Create);
+                    }
                 }
                 Err(error) => log!("asset store: invalid catalog id {asset_id}: {error}"),
             }
@@ -11222,8 +11393,27 @@ impl AppMain for App {
         self.match_event(cx, event);
         if self.asset_store_timer.is_event(event).is_some() {
             let store_changed = self.store.poll();
+            // A revision landed for what the viewer is showing: re-resolve
+            // it. The bytes are named by digest, so "refresh" is simply
+            // asking the catalog again — no cache to invalidate by hand.
+            for asset in self.store.take_changed_assets() {
+                if self.viewer_shows_store_asset(&asset) {
+                    log!("asset store: {asset} changed — reopening from the catalog");
+                    self.open_store_asset(cx, asset);
+                }
+            }
+            self.maybe_open_gc_confirm(cx);
             let kenney_poll = self.import_page.poll();
             let classic_poll = self.classic_import_page.poll();
+            let music_poll = self.music_import_page.poll();
+            // Collect BEFORE checking resume-readiness: a freshly-polled
+            // `IconsPending` message's landings must be visible in
+            // `import_landings` (not yet drained) so the readiness check
+            // below correctly reads "not ready" this tick, not "nothing
+            // queued, resume now" — `land_imported_pack` further down
+            // re-collects (a no-op once already collected) as it drains.
+            self.collect_import_landings();
+            self.maybe_resume_icons_pending(cx);
             if self.surface == Surface::Import && self.import_page.icons_busy() {
                 let current = self
                     .ui
@@ -11234,7 +11424,13 @@ impl AppMain for App {
                 self.refresh_import_ui(cx);
             }
             self.drain_import_previews();
-            if kenney_poll || classic_poll || !self.import_landings.is_empty() {
+            if kenney_poll || classic_poll || music_poll || !self.import_landings.is_empty() {
+                if music_poll {
+                    log!(
+                        "import music: {}",
+                        self.music_import_page.status_line(self.store.connected())
+                    );
+                }
                 if kenney_poll {
                     log!(
                         "import: {}",
@@ -11288,7 +11484,7 @@ impl AppMain for App {
                 match self.surface {
                     Surface::Create => self.ui.redraw(cx),
                     Surface::Chat => self.refresh_chat_ui(cx),
-                    Surface::Library => self.refresh_library_ui(cx, false),
+                    Surface::Library => self.refresh_library_ui(cx),
                     Surface::Import => self.refresh_import_ui(cx),
                     Surface::Runs => self.refresh_runs_panel(cx),
                     Surface::Admin => self.refresh_admin_panel(cx),
@@ -11363,31 +11559,50 @@ impl AppMain for App {
                 Some("chat") => Surface::Chat,
                 _ => Surface::Create,
             };
-            if self.auto.surface.as_deref() == Some("library-server") {
-                self.set_lib_source(cx, LibSource::Server);
-            }
             self.show_surface(cx, surface);
-            if let Some(name) = self.auto.import.take() {
-                match name.to_ascii_lowercase().as_str() {
-                    "duke3d" | "duke" => {
-                        log!("auto: queue Duke3D shareware");
-                        self.enqueue_import(
-                            cx,
-                            ImportJob::Duke3d {
-                                path: String::new(),
-                            },
-                        );
+            // ASSET_UI_PICK_MUSIC=1 opens the native music-folder dialog;
+            // ASSET_UI_PICK_MUSIC=<dir> takes that folder and queues the
+            // import outright. Both exist because posted CGEvents do not
+            // reach this app without Accessibility, so the Music card is
+            // otherwise untestable end to end.
+            if let Some(value) = crate::asset_store_state::env_alias(&["ASSET_UI_PICK_MUSIC"]) {
+                if value == "1" {
+                    log!("auto: opening the music folder picker");
+                    self.music_import_page.picking = true;
+                    cx.open_select_folder_dialog(
+                        FileDialog::new().set_title("Choose a music folder to import".into()),
+                    );
+                } else {
+                    log!("auto: music folder {value}");
+                    self.music_import_page.set_dir(value);
+                    if let Some(job) = self.music_import_page.job() {
+                        self.enqueue_import(cx, job);
                     }
-                    "quake3" | "quakeiii" | "q3" => {
-                        log!("auto: queue Quake III demo");
-                        self.enqueue_import(
-                            cx,
-                            ImportJob::Quake3 {
-                                path: String::new(),
-                            },
-                        );
+                }
+            }
+            // ASSET_UI_IMPORT=a,b,c queues several imports in order; each
+            // pack is the same job the LOAD surface enqueues.
+            if let Some(names) = self.auto.import.take() {
+                for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    let empty = String::new;
+                    let job = match name.to_ascii_lowercase().as_str() {
+                        "duke3d" | "duke" => Some(ImportJob::Duke3d { path: empty() }),
+                        "quake3" | "quakeiii" | "q3" => Some(ImportJob::Quake3 { path: empty() }),
+                        "quake2" | "q2" => Some(ImportJob::Quake2 { path: empty() }),
+                        "quake" | "q1" => Some(ImportJob::Quake { path: empty() }),
+                        "doom" => Some(ImportJob::Doom { path: empty() }),
+                        "freedoom" => Some(ImportJob::Freedoom { path: empty() }),
+                        "librequake" => Some(ImportJob::LibreQuake { path: empty() }),
+                        "kenney" | "kenney-all" => Some(ImportJob::KenneyAll),
+                        _ => None,
+                    };
+                    match job {
+                        Some(job) => {
+                            log!("auto: queue import {name}");
+                            self.enqueue_import(cx, job);
+                        }
+                        None => log!("auto: unknown ASSET_UI_IMPORT={name}"),
                     }
-                    other => log!("auto: unknown ASSET_UI_IMPORT={other}"),
                 }
             }
         }
