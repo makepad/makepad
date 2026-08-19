@@ -1046,6 +1046,12 @@ pub struct LibraryGrid {
     /// row-major mapping that layout used.
     #[rust(4usize)]
     pub last_cols: usize,
+    /// Set when the RESULT SET changed rather than its contents: the next
+    /// draw pins the viewport back to the top. A filter that shrinks the grid
+    /// under a scrolled viewport otherwise leaves the user staring past the
+    /// end of the results, which reads as "the filter found nothing".
+    #[rust]
+    reset_scroll: bool,
 }
 
 impl LibraryGrid {
@@ -1056,6 +1062,12 @@ impl LibraryGrid {
         if clear_thumbnails {
             self.cache.clear();
         }
+        self.view.redraw(cx);
+    }
+
+    /// Show the first result again on the next draw.
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        self.reset_scroll = true;
         self.view.redraw(cx);
     }
 
@@ -1128,6 +1140,14 @@ impl Widget for LibraryGrid {
                 continue;
             }
             let rows = self.entries.len().div_ceil(cols);
+            // A new result set starts at the top; a set that merely shrank is
+            // clamped so the viewport can never sit past the last row.
+            if self.reset_scroll {
+                self.reset_scroll = false;
+                list.set_first_id_and_scroll(0, 0.0);
+            } else if list.first_id() >= rows {
+                list.set_first_id_and_scroll(rows.saturating_sub(1), 0.0);
+            }
             list.set_item_range(cx, 0, rows);
             while let Some(row_id) = list.next_visible_item(cx) {
                 // PortalList may ask past the declared item range while it
@@ -1283,6 +1303,10 @@ pub struct StoreListPanel {
     view: View,
     #[rust]
     pub rows: Vec<StoreRow>,
+    /// Set when the RESULT SET changed rather than its contents; the next
+    /// draw pins the viewport back to the first row (see `LibraryGrid`).
+    #[rust]
+    reset_scroll: bool,
 }
 
 impl StoreListPanel {
@@ -1291,6 +1315,12 @@ impl StoreListPanel {
             self.rows = rows;
             self.view.redraw(cx);
         }
+    }
+
+    /// Show the first row again on the next draw.
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        self.reset_scroll = true;
+        self.view.redraw(cx);
     }
 
     pub fn row_at(&self, index: usize) -> Option<StoreRow> {
@@ -1305,7 +1335,14 @@ impl Widget for StoreListPanel {
             let Some(mut list) = list_ref.borrow_mut() else {
                 continue;
             };
-            list.set_item_range(cx, 0, self.rows.len().max(1));
+            let count = self.rows.len().max(1);
+            if self.reset_scroll {
+                self.reset_scroll = false;
+                list.set_first_id_and_scroll(0, 0.0);
+            } else if list.first_id() >= count {
+                list.set_first_id_and_scroll(count - 1, 0.0);
+            }
+            list.set_item_range(cx, 0, count);
             while let Some(item_id) = list.next_visible_item(cx) {
                 let Some(row) = self.rows.get(item_id).cloned() else {
                     continue;
@@ -1913,6 +1950,7 @@ mod tests {
                 group_label: group_label.map(Into::into),
                 tags: None,
                 enhanced_tags: None,
+                product: None,
             },
             path: PathBuf::from(file),
             preview_path: None,

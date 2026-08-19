@@ -31,7 +31,16 @@ pub struct MusicImportPage {
     /// Human summary of the finished run, kept after the phase goes idle.
     pub summary: String,
     cancel: Arc<AtomicBool>,
-    rx: Option<Receiver<ImportPhase>>,
+    rx: Option<Receiver<MusicMsg>>,
+    /// The finished run, kept so the card can name skips and failures rather
+    /// than only a happy count.
+    pub last_report: Option<MusicReport>,
+}
+
+/// What the worker sends back: live progress, then exactly one verdict.
+pub enum MusicMsg {
+    Phase(ImportPhase),
+    Done(ImportPhase, Box<MusicReport>),
 }
 
 impl Default for MusicImportPage {
@@ -43,6 +52,7 @@ impl Default for MusicImportPage {
             summary: String::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
+            last_report: None,
         }
     }
 }
@@ -109,13 +119,16 @@ impl MusicImportPage {
                 ..
             } => {
                 if *total == 0 {
-                    "reading the folder…".into()
+                    "walking the folder…".into()
                 } else if current.is_empty() {
-                    format!("publishing · {done}/{total}")
+                    format!("reading tags · {done}/{total}")
                 } else {
-                    format!("publishing · {done}/{total} · {current}")
+                    format!("reading tags · {done}/{total} · {current}")
                 }
             }
+            ImportPhase::Publishing {
+                assets, blob_done, ..
+            } => format!("publishing · {blob_done}/{assets}"),
             ImportPhase::Published { assets, .. } => format!("published {assets} tracks"),
             ImportPhase::Failed { message, .. } => message.clone(),
             ImportPhase::Cancelled { message, .. } => message.clone(),
@@ -123,15 +136,25 @@ impl MusicImportPage {
         }
     }
 
-    /// Monotonic 0..1 for the queue row's bar. The scan is not counted
-    /// separately: it is the first thing the worker reports as `0/total`.
+    /// Monotonic 0..1 for the queue row's bar, in two honest bands: the
+    /// metadata read pass owns 0.02..0.20, the publish pass 0.20..1.00. One
+    /// bar that filled twice would be a lie about how much work is left.
     pub fn progress_fraction(&self) -> f32 {
         match &self.phase {
             ImportPhase::Compiling { done, total, .. } => {
                 if *total == 0 {
                     0.02
                 } else {
-                    0.02 + 0.96 * (*done as f32 / *total as f32)
+                    0.02 + 0.18 * (*done as f32 / *total as f32)
+                }
+            }
+            ImportPhase::Publishing {
+                assets, blob_done, ..
+            } => {
+                if *assets == 0 {
+                    0.20
+                } else {
+                    0.20 + 0.80 * (*blob_done as f32 / *assets as f32)
                 }
             }
             ImportPhase::Published { .. } => 1.0,
@@ -142,6 +165,11 @@ impl MusicImportPage {
 
     /// Start the worker. `server` absent = refuse rather than pretend: this
     /// import has no local-only half, it publishes or it does not run.
+    ///
+    /// Every refusal is ALSO written to `summary`. The queue row for a job
+    /// that never started is removed on the next tick, so a refusal that only
+    /// returned `Err` would show the user nothing at all — "Load does
+    /// nothing" is the one failure mode this card must never have.
     pub fn start_import(
         &mut self,
         path: String,
@@ -149,16 +177,20 @@ impl MusicImportPage {
     ) -> Result<(), String> {
         let dir = PathBuf::from(path.trim());
         if !dir.is_dir() {
-            return Err(format!("{} is not a folder", dir.display()));
+            return Err(self.refuse(format!("{} is not a folder", dir.display())));
         }
         let Some(server) = server else {
-            return Err("no Asset Server session — cannot publish music".into());
+            return Err(self.refuse(
+                "no Asset Server session yet — wait for the store to come up, then Load again"
+                    .into(),
+            ));
         };
         self.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.summary.clear();
+        self.last_report = None;
         self.phase = ImportPhase::Compiling {
             pack: "Music".into(),
             done: 0,
@@ -168,11 +200,23 @@ impl MusicImportPage {
         thread::Builder::new()
             .name("asset-ui-music-import".into())
             .spawn(move || {
-                let phase = run_music_import(&dir, server, &tx, &cancel);
-                let _ = tx.send(phase);
+                let msg = run_music_import(&dir, server, &tx, &cancel);
+                let _ = tx.send(msg);
             })
-            .map_err(|e| format!("failed to start music import thread: {e}"))?;
+            .map_err(|e| self.refuse(format!("failed to start music import thread: {e}")))?;
         Ok(())
+    }
+
+    /// Record a refusal where the card can show it, and hand the same text
+    /// back to the caller for the log.
+    fn refuse(&mut self, message: String) -> String {
+        self.phase = ImportPhase::Failed {
+            pack: "Music".into(),
+            message: message.clone(),
+        };
+        self.summary = message.clone();
+        self.rx = None;
+        message
     }
 
     /// Drain the worker channel. Returns true when anything changed, so the
@@ -182,8 +226,8 @@ impl MusicImportPage {
         loop {
             let Some(rx) = &self.rx else { break };
             match rx.try_recv() {
-                Ok(phase) => {
-                    self.ingest(phase);
+                Ok(msg) => {
+                    self.ingest(msg);
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -206,17 +250,25 @@ impl MusicImportPage {
         changed
     }
 
-    fn ingest(&mut self, phase: ImportPhase) {
-        match &phase {
-            ImportPhase::Published { assets, .. } => {
-                self.summary = format!("published {assets} tracks");
+    fn ingest(&mut self, msg: MusicMsg) {
+        let phase = match msg {
+            MusicMsg::Phase(phase) => phase,
+            MusicMsg::Done(phase, report) => {
+                // The verdict line names every outcome, so a run that
+                // published nothing cannot read as a clean one.
+                self.summary = match &phase {
+                    ImportPhase::Failed { message, .. }
+                    | ImportPhase::Cancelled { message, .. } => message.clone(),
+                    _ => summarise(&report),
+                };
+                self.last_report = Some(*report);
                 self.rx = None;
+                phase
             }
-            ImportPhase::Failed { message, .. } | ImportPhase::Cancelled { message, .. } => {
-                self.summary = message.clone();
-                self.rx = None;
-            }
-            _ => {}
+        };
+        if let ImportPhase::Failed { message, .. } = &phase {
+            self.summary = message.clone();
+            self.rx = None;
         }
         self.phase = phase;
     }
@@ -226,9 +278,9 @@ impl MusicImportPage {
 fn run_music_import(
     dir: &std::path::Path,
     server: ServerSession,
-    tx: &mpsc::Sender<ImportPhase>,
+    tx: &mpsc::Sender<MusicMsg>,
     cancel: &Arc<AtomicBool>,
-) -> ImportPhase {
+) -> MusicMsg {
     let cache = crate::asset_store_state::asset_ui_home().join("music-import-cache");
     let mut config = ClientConfig::new(cache);
     config.token = Some(server.token.clone());
@@ -236,20 +288,42 @@ fn run_music_import(
         match AssetClient::connect(config, server.endpoints, Some(server.server_id)) {
             Ok(client) => client,
             Err(error) => {
-                return ImportPhase::Failed {
-                    pack: "Music".into(),
-                    message: format!("asset client: {error}"),
-                }
+                return MusicMsg::Done(
+                    ImportPhase::Failed {
+                        pack: "Music".into(),
+                        message: format!("asset client: {error}"),
+                    },
+                    Box::default(),
+                )
             }
         };
     let rights = music_import::personal_library_rights(dir);
-    let mut progress = |done: usize, total: usize, current: &str| {
-        let _ = tx.send(ImportPhase::Compiling {
-            pack: "Music".into(),
-            done,
-            total,
-            current: current.to_string(),
-        });
+    // One channel message per file would flood a 5000-track library; the UI
+    // polls at 5 Hz, so send the first, the last, and roughly one per
+    // percent in between.
+    let mut last_sent = usize::MAX;
+    let mut progress = |p: music_import::MusicProgress| {
+        let step = (p.total / 100).max(1);
+        let boundary = p.done == 0 || p.done + 1 >= p.total || p.done % step == 0;
+        if !boundary && last_sent != usize::MAX {
+            return;
+        }
+        last_sent = p.done;
+        let phase = match p.stage {
+            music_import::MusicStage::Reading => ImportPhase::Compiling {
+                pack: "Music".into(),
+                done: p.done,
+                total: p.total,
+                current: p.current.to_string(),
+            },
+            music_import::MusicStage::Publishing => ImportPhase::Publishing {
+                pack: "Music".into(),
+                assets: p.total,
+                blobs: p.total,
+                blob_done: p.done,
+            },
+        };
+        let _ = tx.send(MusicMsg::Phase(phase));
     };
     let stop = || cancel.load(Ordering::SeqCst);
     match music_import::import_music(
@@ -261,24 +335,33 @@ fn run_music_import(
         &mut progress,
         &stop,
     ) {
-        Ok(report) if report.cancelled => ImportPhase::Cancelled {
-            pack: "Music".into(),
-            message: format!("cancelled · {}", summarise(&report)),
-        },
-        Ok(report) => ImportPhase::Published {
-            pack: "Music".into(),
-            assets: report.landed(),
-            blobs: report.landed(),
-            created: !report.published.is_empty(),
-            annotated: report.landed(),
-            out: dir.to_path_buf(),
-            library: Vec::new(),
-            bake: Default::default(),
-        },
-        Err(error) => ImportPhase::Failed {
-            pack: "Music".into(),
-            message: error,
-        },
+        Ok(report) if report.cancelled => MusicMsg::Done(
+            ImportPhase::Cancelled {
+                pack: "Music".into(),
+                message: format!("cancelled · {}", summarise(&report)),
+            },
+            Box::new(report),
+        ),
+        Ok(report) => {
+            let phase = ImportPhase::Published {
+                pack: "Music".into(),
+                assets: report.landed(),
+                blobs: report.landed(),
+                created: !report.published.is_empty(),
+                annotated: report.landed(),
+                out: dir.to_path_buf(),
+                library: Vec::new(),
+                bake: Default::default(),
+            };
+            MusicMsg::Done(phase, Box::new(report))
+        }
+        Err(error) => MusicMsg::Done(
+            ImportPhase::Failed {
+                pack: "Music".into(),
+                message: error,
+            },
+            Box::default(),
+        ),
     }
 }
 

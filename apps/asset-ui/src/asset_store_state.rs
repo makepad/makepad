@@ -755,7 +755,7 @@ pub fn asset_ui_home() -> PathBuf {
     checkout_root().join("local/asset-ui")
 }
 
-fn default_asset_server_root() -> PathBuf {
+pub(crate) fn default_asset_server_root() -> PathBuf {
     if let Ok(root) = std::env::var("AI_CONTENT_ASSET_ROOT") {
         return PathBuf::from(root);
     }
