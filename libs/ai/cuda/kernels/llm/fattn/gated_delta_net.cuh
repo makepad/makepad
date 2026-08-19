@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Substantial portions derived from ggml / llama.cpp
+// (https://github.com/ggml-org/llama.cpp), MIT licensed.
+// The original copyright notice and permission notice are retained.
+// See libs/ai/NOTICE and, where present, LICENSE in this directory.
+//
 #pragma once
 // Copied from llama.cpp ggml/src/ggml-cuda/gated_delta_net.cu:3-201
 // (kernel + launch_gated_delta_net). Host ggml_cuda_info trimmed to

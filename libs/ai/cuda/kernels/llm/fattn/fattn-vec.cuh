@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Substantial portions derived from ggml / llama.cpp
+// (https://github.com/ggml-org/llama.cpp), MIT licensed.
+// The original copyright notice and permission notice are retained.
+// See libs/ai/NOTICE and, where present, LICENSE in this directory.
+//
 // Copied from llama.cpp b10430 ggml/src/ggml-cuda/fattn-vec.cuh (kernel only).
 #include "common.cuh"
 #include "fattn-common.cuh"

@@ -441,6 +441,7 @@ script_mod! {
         mname := BrightLabel{ width: 170 text: "" draw_text +: { text_style: theme.font_regular{font_size: 8.5} } }
         mdomain := HintLabel{ width: 56 text: "" }
         mnote := HintLabel{ width: Fill text: "" }
+        terms := ChipButton{ text: "ack" }
         // Per-box, per-domain preference: "on THIS box use THIS model for
         // that domain" (a 3090 gets the small image model, the 5090 the
         // big one, same request). Routing hides the domain's other models
@@ -1175,6 +1176,10 @@ script_mod! {
                 window.inner_size: vec2(1560, 980)
                 window.title: "Asset UI"
                 body +: {
+                    flow: Overlay
+                    shell := View{
+                    width: Fill
+                    height: Fill
                     flow: Right
                     show_bg: true
                     // Plain-View DrawQuad ignores `color` (its pixel returns
@@ -2575,6 +2580,48 @@ script_mod! {
                         }
                     }
 
+                    }
+                    license_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 540
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                license_title := BrightLabel{
+                                    text: "Model license"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                license_model := HintLabel{ text: "" }
+                                license_kind := HintLabel{ text: "" }
+                                license_summary := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                license_link := LinkLabel{ text: "Read the full license" }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    license_decline := ChipButton{ text: "Decline" }
+                                    license_accept := PrimaryButton{ text: "Accept and clear" }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2789,6 +2836,23 @@ impl PendingRun {
     }
 }
 
+/// Weight-license text the operator must accept before a model is cleared
+/// for pull or generation.
+#[derive(Clone)]
+struct LicensePrompt {
+    model_id: String,
+    name: String,
+    url: String,
+    summary: String,
+    restriction: String,
+    identity: String,
+}
+
+enum LicenseResume {
+    Dispatch(PendingRun),
+    Pull,
+}
+
 /// One dispatched pipeline. Several may run concurrently on distinct fleet
 /// endpoints; artifact routing reads THIS run's prompt/group so completions
 /// arriving out of order can never cross-attribute.
@@ -2982,6 +3046,15 @@ pub struct App {
     /// snapshots (`routing_snapshots`), display sees the raw fleet.
     #[rust]
     fleet_disabled: HashSet<(String, String)>,
+    /// Accepted weight licenses: (model id, license identity). Identity is
+    /// the pinned sha256 when present, otherwise the license URL — a text
+    /// change forces a fresh acknowledgement.
+    #[rust]
+    license_acks: HashSet<(String, String)>,
+    #[rust]
+    license_prompt: Option<LicensePrompt>,
+    #[rust]
+    license_resume: Option<LicenseResume>,
     /// Per-box, per-domain preferred model: (box base_url, domain) → model.
     /// Routing drops the domain's OTHER models on that box while it stands.
     #[rust]
@@ -3448,6 +3521,10 @@ impl App {
                     self.fleet_prefer
                         .insert((url.to_string(), domain.to_string()), model.to_string());
                 }
+                ["license", model, identity] if !model.is_empty() && !identity.is_empty() => {
+                    self.license_acks
+                        .insert((model.to_string(), identity.to_string()));
+                }
                 _ => {}
             }
         }
@@ -3463,12 +3540,211 @@ impl App {
                     .iter()
                     .map(|((url, domain), model)| format!("\"prefer\t{url}\t{domain}\t{model}\"")),
             )
+            .chain(
+                self.license_acks.iter().map(|(model, identity)| {
+                    format!("\"license\t{model}\t{identity}\"")
+                }),
+            )
             .collect();
         lines.sort();
         let text = format!("[\n{}\n]\n", lines.join(",\n"));
         if let Err(error) = std::fs::write(Self::fleet_prefs_path(), text) {
             log!("fleet prefs: save failed: {error}");
         }
+    }
+
+    fn license_is_acked(&self, prompt: &LicensePrompt) -> bool {
+        self.license_acks
+            .contains(&(prompt.model_id.clone(), prompt.identity.clone()))
+    }
+
+    fn license_prompt_for(&self, model_id: &str) -> LicensePrompt {
+        if let Some(info) = self.fleet.as_ref().and_then(|fleet| {
+            fleet
+                .snapshots
+                .iter()
+                .flat_map(|snap| snap.models.iter())
+                .find(|model| model.id == model_id)
+        }) {
+            if let (Some(name), Some(url), Some(summary), Some(restriction)) = (
+                info.license_name.clone(),
+                info.license_url.clone(),
+                info.license_summary.clone(),
+                info.license_restriction.clone(),
+            ) {
+                let identity = info
+                    .license_sha256
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| url.clone());
+                return LicensePrompt {
+                    model_id: model_id.to_string(),
+                    name,
+                    url,
+                    summary,
+                    restriction,
+                    identity,
+                };
+            }
+        }
+        if let Some(license) = makepad_asset_ai::registry::license_for_model(model_id) {
+            let identity = license.identity();
+            return LicensePrompt {
+                model_id: model_id.to_string(),
+                name: license.name,
+                url: license.url,
+                summary: license.summary,
+                restriction: license.restriction.as_str().to_string(),
+                identity,
+            };
+        }
+        LicensePrompt {
+            model_id: model_id.to_string(),
+            name: "Unknown weight license".to_string(),
+            url: "https://huggingface.co/".to_string(),
+            summary: format!(
+                "{model_id} has no license record in the embedded registry. It will not be cleared for download or generation until a license is recorded and acknowledged."
+            ),
+            restriction: "restricted".to_string(),
+            identity: "missing".to_string(),
+        }
+    }
+
+    fn first_unacked_model<'a, I>(&self, model_ids: I) -> Option<LicensePrompt>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        for id in model_ids {
+            if id.is_empty() || id == "auto (affinity)" {
+                continue;
+            }
+            let prompt = self.license_prompt_for(id);
+            if !self.license_is_acked(&prompt) {
+                return Some(prompt);
+            }
+        }
+        None
+    }
+
+    fn models_for_run(&self, run: &PendingRun) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut push = |id: String| {
+            if !id.is_empty() && !ids.iter().any(|existing| existing == &id) {
+                ids.push(id);
+            }
+        };
+        for (_, model) in &run.model_overrides {
+            push(model.clone());
+        }
+        for (_, model) in PRESETS[run.preset].pins {
+            push((*model).to_string());
+        }
+        if let Some(fleet) = &self.fleet {
+            for domain in run.domains() {
+                if run.model_overrides.iter().any(|(d, _)| d == domain) {
+                    continue;
+                }
+                if PRESETS[run.preset]
+                    .pins
+                    .iter()
+                    .any(|(d, _)| d == domain)
+                {
+                    continue;
+                }
+                let mut picked = None;
+                for snap in &fleet.snapshots {
+                    if let Some(model) = Self::default_preference(snap, domain) {
+                        picked = Some(model);
+                        break;
+                    }
+                }
+                if let Some(model) = picked {
+                    push(model);
+                }
+            }
+        }
+        ids
+    }
+
+    fn open_license_modal(&mut self, cx: &mut Cx, prompt: LicensePrompt) {
+        let kind = match prompt.restriction.as_str() {
+            "non-commercial" => "Non-commercial weights. Personal / research use only.",
+            "community" => "Community license. Read the terms before any product use.",
+            "restricted" => "Restricted license. Review the full terms before use.",
+            _ => "Permissive weight license. Acknowledgement is still required to clear the model.",
+        };
+        self.ui
+            .label(cx, ids!(license_title))
+            .set_text(cx, &format!("Clear {}?", prompt.model_id));
+        self.ui
+            .label(cx, ids!(license_model))
+            .set_text(cx, &prompt.name);
+        self.ui.label(cx, ids!(license_kind)).set_text(cx, kind);
+        self.ui
+            .label(cx, ids!(license_summary))
+            .set_text(cx, &prompt.summary);
+        let link = self.ui.link_label(cx, ids!(license_link));
+        link.set_text(cx, &prompt.url);
+        link.set_url(&prompt.url);
+        self.license_prompt = Some(prompt);
+        self.ui.modal(cx, ids!(license_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_license_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(license_modal)).close(cx);
+        self.license_prompt = None;
+        self.ui.redraw(cx);
+    }
+
+    fn accept_license_prompt(&mut self, cx: &mut Cx) {
+        let Some(prompt) = self.license_prompt.clone() else {
+            return;
+        };
+        self.license_acks
+            .insert((prompt.model_id.clone(), prompt.identity.clone()));
+        self.save_fleet_prefs();
+        log!(
+            "license: acked {} ({})",
+            prompt.model_id,
+            prompt.restriction
+        );
+        self.close_license_modal(cx);
+        match self.license_resume.take() {
+            Some(LicenseResume::Dispatch(run)) => {
+                if let Some(next) = self.first_unacked_model(
+                    self.models_for_run(&run).iter().map(|id| id.as_str()),
+                ) {
+                    self.license_resume = Some(LicenseResume::Dispatch(run));
+                    self.open_license_modal(cx, next);
+                    return;
+                }
+                self.dispatch_run(cx, run, &[]);
+            }
+            Some(LicenseResume::Pull) => self.pull_model(cx),
+            None => {
+                self.refresh_fleet_cards(cx);
+                if self.fleet_modal_box.is_some() {
+                    self.refresh_fleet_modal(cx);
+                }
+            }
+        }
+        self.try_dispatch_pending(cx);
+    }
+
+    fn decline_license_prompt(&mut self, cx: &mut Cx) {
+        let model = self
+            .license_prompt
+            .as_ref()
+            .map(|p| p.model_id.clone())
+            .unwrap_or_else(|| "model".to_string());
+        self.close_license_modal(cx);
+        self.license_resume = None;
+        self.set_caption(
+            cx,
+            "LICENSE",
+            &format!("{model} not cleared — license declined"),
+        );
     }
 
     fn fleet_card_ids() -> [&'static [LiveId]; FLEET_CARD_SLOTS] {
@@ -3711,6 +3987,15 @@ impl App {
             let mut id = row.to_vec();
             id.push(live_id!(prefer));
             self.ui.button(cx, &id).set_text(cx, label);
+            let prompt = self.license_prompt_for(&model.id);
+            let terms = if self.license_is_acked(&prompt) {
+                "terms"
+            } else {
+                "ack"
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(terms));
+            self.ui.button(cx, &id).set_text(cx, terms);
             let color = match model.state.as_str() {
                 "loaded" => Vec4f { x: 0.24, y: 0.77, z: 0.43, w: 1.0 },
                 "ready" => Vec4f { x: 0.33, y: 0.55, z: 0.85, w: 1.0 },
@@ -4623,6 +4908,11 @@ impl App {
             self.set_caption(cx, "PULL", "pick a box in the box pin first");
             return;
         };
+        if let Some(prompt) = self.first_unacked_model(std::iter::once(model.as_str())) {
+            self.license_resume = Some(LicenseResume::Pull);
+            self.open_license_modal(cx, prompt);
+            return;
+        }
         let request = makepad_asset_ai::protocol::GenerateRequestJson {
             model: model.clone(),
             pull_only: Some(true),
@@ -4852,6 +5142,9 @@ impl App {
     /// a mesh run behind it whose slot is free. Bounded by
     /// [`MAX_ACTIVE_RUNS`] on top of per-endpoint capacity.
     fn try_dispatch_pending(&mut self, cx: &mut Cx) {
+        if self.ui.modal(cx, ids!(license_modal)).is_open() || self.license_resume.is_some() {
+            return;
+        }
         let mut index = 0;
         while index < self.run_queue.len() {
             if self.active_run_count() >= MAX_ACTIVE_RUNS {
@@ -4881,6 +5174,13 @@ impl App {
 
     fn dispatch_run(&mut self, cx: &mut Cx, run: PendingRun, avoid: &[String]) {
         if self.fleet.is_none() {
+            return;
+        }
+        if let Some(prompt) = self.first_unacked_model(
+            self.models_for_run(&run).iter().map(|id| id.as_str()),
+        ) {
+            self.license_resume = Some(LicenseResume::Dispatch(run));
+            self.open_license_modal(cx, prompt);
             return;
         }
         let keep: Vec<String> = run
@@ -10035,6 +10335,12 @@ impl MatchEvent for App {
             }
         }
 
+        if self.ui.button(cx, ids!(license_accept)).clicked(actions) {
+            self.accept_license_prompt(cx);
+        }
+        if self.ui.button(cx, ids!(license_decline)).clicked(actions) {
+            self.decline_license_prompt(cx);
+        }
         if self.ui.button(cx, ids!(generate_btn)).clicked(actions) {
             self.start_generate(cx);
         }
@@ -10516,6 +10822,16 @@ impl MatchEvent for App {
                             self.fleet_disabled.insert(key);
                         }
                         changed = true;
+                    }
+                }
+            }
+            for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(terms));
+                if self.ui.button(cx, &id).clicked(actions) {
+                    if let Some(model) = self.fleet_modal_models.get(slot).cloned() {
+                        self.license_resume = None;
+                        self.open_license_modal(cx, self.license_prompt_for(&model));
                     }
                 }
             }
