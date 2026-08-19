@@ -1537,6 +1537,75 @@ script_mod! {
                         }
                     }
 
+                    // Fleet node config: a column between the authoring panel
+                    // and the content, opened by a box card, closed with ×.
+                    // Every model the box advertises, a per-box enable
+                    // toggle and a per-domain ★ prefer; "Defaults" picks the
+                    // largest present model that fits the GPU per domain.
+                    fleet_node_panel := SolidView{
+                        visible: false
+                        width: 440
+                        height: Fill
+                        flow: Down spacing: 6
+                        padding: Inset{left: 12 right: 12 top: 12 bottom: 10}
+                        draw_bg +: { color: #x141418 }
+                        View{
+                            width: Fill height: Fit flow: Right spacing: 8
+                            align: Align{y: 0.5}
+                            fleet_box_title := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 11} } }
+                            View{ width: Fill height: Fit }
+                            fleet_box_defaults := ChipButton{ text: "Defaults" }
+                            fleet_box_close := LibraryDeleteButton{ text: "×" }
+                        }
+                        fleet_box_status := HintLabel{ text: "" }
+                        fleet_box_hint := HintLabel{ text: "Unchecked = never routed to this box by this app. ★ prefer = for that domain this box only ever runs that model (small GPU → small image model, big GPU → large, same request). Defaults = largest present model that fits, per domain. The box itself is untouched." }
+                        fleet_box_rows := QuietScrollY{
+                            width: Fill
+                            height: Fill
+                            flow: Down spacing: 2
+                            fm0 := FleetModelRow{}
+                            fm1 := FleetModelRow{}
+                            fm2 := FleetModelRow{}
+                            fm3 := FleetModelRow{}
+                            fm4 := FleetModelRow{}
+                            fm5 := FleetModelRow{}
+                            fm6 := FleetModelRow{}
+                            fm7 := FleetModelRow{}
+                            fm8 := FleetModelRow{}
+                            fm9 := FleetModelRow{}
+                            fm10 := FleetModelRow{}
+                            fm11 := FleetModelRow{}
+                            fm12 := FleetModelRow{}
+                            fm13 := FleetModelRow{}
+                            fm14 := FleetModelRow{}
+                            fm15 := FleetModelRow{}
+                            fm16 := FleetModelRow{}
+                            fm17 := FleetModelRow{}
+                            fm18 := FleetModelRow{}
+                            fm19 := FleetModelRow{}
+                            fm20 := FleetModelRow{}
+                            fm21 := FleetModelRow{}
+                            fm22 := FleetModelRow{}
+                            fm23 := FleetModelRow{}
+                            fm24 := FleetModelRow{}
+                            fm25 := FleetModelRow{}
+                            fm26 := FleetModelRow{}
+                            fm27 := FleetModelRow{}
+                            fm28 := FleetModelRow{}
+                            fm29 := FleetModelRow{}
+                            fm30 := FleetModelRow{}
+                            fm31 := FleetModelRow{}
+                            fm32 := FleetModelRow{}
+                            fm33 := FleetModelRow{}
+                            fm34 := FleetModelRow{}
+                            fm35 := FleetModelRow{}
+                            fm36 := FleetModelRow{}
+                            fm37 := FleetModelRow{}
+                            fm38 := FleetModelRow{}
+                            fm39 := FleetModelRow{}
+                        }
+                    }
+
                     right_panel := View{
                         width: Fill
                         height: Fill
@@ -2354,75 +2423,6 @@ script_mod! {
                         }
                     }
 
-                    // Per-box popup: every model the box advertises with a
-                    // per-box enable toggle (off = this app never routes that
-                    // model to that box) and its load state.
-                    fleet_box_modal := Modal{
-                        content +: {
-                            width: 520
-                            height: Fit
-                            RoundedView{
-                                width: Fill height: Fit
-                                flow: Down spacing: 6
-                                padding: 14
-                                draw_bg +: { color: #x161619 border_radius: 6.0 }
-                                View{
-                                    width: Fill height: Fit flow: Right
-                                    align: Align{y: 0.5}
-                                    fleet_box_title := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 10} } }
-                                    View{ width: Fill height: Fit }
-                                    fleet_box_close := GhostButton{ text: "Close" }
-                                }
-                                fleet_box_status := HintLabel{ text: "" }
-                                fleet_box_hint := HintLabel{ text: "Unchecked = never routed to this box by this app. ★ prefer = for that domain this box only ever runs that model (a small GPU can take the small image model while a big one takes the large model for the same request). The box itself is untouched." }
-                                fleet_box_rows := QuietScrollY{
-                                    width: Fill
-                                    height: 420
-                                    flow: Down spacing: 2
-                                    fm0 := FleetModelRow{}
-                                    fm1 := FleetModelRow{}
-                                    fm2 := FleetModelRow{}
-                                    fm3 := FleetModelRow{}
-                                    fm4 := FleetModelRow{}
-                                    fm5 := FleetModelRow{}
-                                    fm6 := FleetModelRow{}
-                                    fm7 := FleetModelRow{}
-                                    fm8 := FleetModelRow{}
-                                    fm9 := FleetModelRow{}
-                                    fm10 := FleetModelRow{}
-                                    fm11 := FleetModelRow{}
-                                    fm12 := FleetModelRow{}
-                                    fm13 := FleetModelRow{}
-                                    fm14 := FleetModelRow{}
-                                    fm15 := FleetModelRow{}
-                                    fm16 := FleetModelRow{}
-                                    fm17 := FleetModelRow{}
-                                    fm18 := FleetModelRow{}
-                                    fm19 := FleetModelRow{}
-                                    fm20 := FleetModelRow{}
-                                    fm21 := FleetModelRow{}
-                                    fm22 := FleetModelRow{}
-                                    fm23 := FleetModelRow{}
-                                    fm24 := FleetModelRow{}
-                                    fm25 := FleetModelRow{}
-                                    fm26 := FleetModelRow{}
-                                    fm27 := FleetModelRow{}
-                                    fm28 := FleetModelRow{}
-                                    fm29 := FleetModelRow{}
-                                    fm30 := FleetModelRow{}
-                                    fm31 := FleetModelRow{}
-                                    fm32 := FleetModelRow{}
-                                    fm33 := FleetModelRow{}
-                                    fm34 := FleetModelRow{}
-                                    fm35 := FleetModelRow{}
-                                    fm36 := FleetModelRow{}
-                                    fm37 := FleetModelRow{}
-                                    fm38 := FleetModelRow{}
-                                    fm39 := FleetModelRow{}
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -3107,9 +3107,6 @@ impl App {
         let Some(fleet) = &self.fleet else {
             return Vec::new();
         };
-        if self.fleet_disabled.is_empty() && self.fleet_prefer.is_empty() {
-            return fleet.snapshots.clone();
-        }
         fleet
             .snapshots
             .iter()
@@ -3121,7 +3118,7 @@ impl App {
                 // A preference only bites while the preferred model is
                 // actually advertised (and enabled) on the box; otherwise
                 // the domain keeps its full choice there.
-                let preferred: Vec<(String, String)> = self
+                let mut preferred: Vec<(String, String)> = self
                     .fleet_prefer
                     .iter()
                     .filter(|((pref_url, _), model)| {
@@ -3129,6 +3126,19 @@ impl App {
                     })
                     .map(|((_, domain), model)| (domain.clone(), model.clone()))
                     .collect();
+                // Domains without an explicit preference get the rule's
+                // pick (largest present model that fits this GPU).
+                let mut domains: Vec<String> = snap.models.iter().map(|m| m.domain.clone()).collect();
+                domains.sort();
+                domains.dedup();
+                for domain in domains {
+                    if preferred.iter().any(|(d, _)| d == &domain) {
+                        continue;
+                    }
+                    if let Some(model) = Self::default_preference(&snap, &domain) {
+                        preferred.push((domain, model));
+                    }
+                }
                 snap.models.retain(|model| {
                     preferred
                         .iter()
@@ -3338,15 +3348,16 @@ impl App {
             };
             let vram = model.vram_gb.map(|g| format!(" · {g:.0} GB")).unwrap_or_default();
             self.ui.label(cx, &id).set_text(cx, &format!("{note}{vram}"));
-            let preferred = self
-                .fleet_prefer
-                .get(&(url.clone(), model.domain.clone()))
-                .is_some_and(|m| m == &model.id);
+            let explicit = self.fleet_prefer.get(&(url.clone(), model.domain.clone()));
+            let label = match explicit {
+                Some(m) if m == &model.id => "★ preferred",
+                Some(_) => "prefer",
+                None if Self::default_preference(&snap, &model.domain).as_deref() == Some(model.id.as_str()) => "★ default",
+                None => "prefer",
+            };
             let mut id = row.to_vec();
             id.push(live_id!(prefer));
-            self.ui
-                .button(cx, &id)
-                .set_text(cx, if preferred { "★ preferred" } else { "prefer" });
+            self.ui.button(cx, &id).set_text(cx, label);
             let color = match model.state.as_str() {
                 "loaded" => Vec4f { x: 0.24, y: 0.77, z: 0.43, w: 1.0 },
                 "ready" => Vec4f { x: 0.33, y: 0.55, z: 0.85, w: 1.0 },
@@ -3365,7 +3376,70 @@ impl App {
     fn open_fleet_modal(&mut self, cx: &mut Cx, base_url: String) {
         self.fleet_modal_box = Some(base_url);
         self.refresh_fleet_modal(cx);
-        self.ui.modal(cx, ids!(fleet_box_modal)).open(cx);
+        self.ui.widget(cx, ids!(fleet_node_panel)).set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn close_fleet_modal(&mut self, cx: &mut Cx) {
+        self.fleet_modal_box = None;
+        self.ui.widget(cx, ids!(fleet_node_panel)).set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    /// Sensible per-domain preference for a box when the user set none: the
+    /// largest model that is PRESENT on the box (loaded/ready — never a
+    /// download trigger) and fits its total VRAM minus the service reserve;
+    /// reference/oracle/test variants never win. None = leave the domain to
+    /// plain affinity.
+    fn default_preference(snap: &BoxSnapshot, domain: &str) -> Option<String> {
+        let health = snap.health.as_ref()?;
+        let total_mb = health.vram_total_mb?;
+        let budget_gb = (total_mb.saturating_sub(health.vram_reserve_mb.unwrap_or(2048))) as f64 / 1024.0;
+        snap.models
+            .iter()
+            .filter(|m| m.available && m.domain == domain)
+            .filter(|m| matches!(m.state.as_str(), "loaded" | "ready"))
+            .filter(|m| {
+                let id = m.id.to_ascii_lowercase();
+                !id.contains("oracle") && !id.contains("python") && !id.contains("testpattern")
+            })
+            .filter(|m| m.vram_gb.map_or(true, |g| g <= budget_gb))
+            .max_by(|a, b| {
+                a.vram_gb
+                    .unwrap_or(0.0)
+                    .partial_cmp(&b.vram_gb.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // Same size: the lexically smaller id wins ("flux1-dev"
+                    // before "flux1-schnell", "-bf16" before "-q4").
+                    .then_with(|| b.id.cmp(&a.id))
+            })
+            .map(|m| m.id.clone())
+    }
+
+    /// Write the rule's picks as explicit ★ preferences for every domain
+    /// the box serves (replacing whatever was set).
+    fn apply_default_preferences(&mut self, base_url: &str) {
+        let Some(snap) = self
+            .fleet
+            .as_ref()
+            .and_then(|fleet| fleet.snapshots.iter().find(|s| s.base_url == base_url).cloned())
+        else {
+            return;
+        };
+        let mut domains: Vec<String> = snap.models.iter().map(|m| m.domain.clone()).collect();
+        domains.sort();
+        domains.dedup();
+        for domain in domains {
+            let key = (base_url.to_string(), domain.clone());
+            match Self::default_preference(&snap, &domain) {
+                Some(model) => {
+                    self.fleet_prefer.insert(key, model);
+                }
+                None => {
+                    self.fleet_prefer.remove(&key);
+                }
+            }
+        }
     }
 
     fn refresh_fleet_ui(&mut self, cx: &mut Cx) {
@@ -9272,14 +9346,15 @@ impl MatchEvent for App {
         if let Some(url) = card_hit {
             self.open_fleet_modal(cx, url);
         }
-        if self.ui.button(cx, ids!(fleet_box_close)).clicked(actions)
-            || self.ui.modal(cx, ids!(fleet_box_modal)).dismissed(actions)
-        {
-            self.ui.modal(cx, ids!(fleet_box_modal)).close(cx);
-            self.fleet_modal_box = None;
+        if self.ui.button(cx, ids!(fleet_box_close)).clicked(actions) {
+            self.close_fleet_modal(cx);
         }
         if let Some(url) = self.fleet_modal_box.clone() {
             let mut changed = false;
+            if self.ui.button(cx, ids!(fleet_box_defaults)).clicked(actions) {
+                self.apply_default_preferences(&url);
+                changed = true;
+            }
             for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
                 let mut id = row.to_vec();
                 id.push(live_id!(enable));
