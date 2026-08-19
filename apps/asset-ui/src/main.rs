@@ -1279,6 +1279,31 @@ script_mod! {
                         }
                         // TRELLIS bakes its own colors; mesh-only chains keep
                         // them, PBR-paint chains skip the tex flow unless asked.
+                        // Rig/motion chains: leave empty for the playable
+                        // idle/walk/jump/run/dance set (the backend's own body-
+                        // action prompts); type a motion to get ONE prompted
+                        // take instead ("A person dances the robot").
+                        motion_prompt_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Motion prompt" }
+                            motion_prompt_input := TextInputFlat{
+                                width: Fill
+                                height: 28
+                                margin: 0
+                                padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
+                                empty_text: "empty = playable set · e.g. A person dances the robot"
+                                draw_text +: {
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                    color: #xdfe6ec
+                                    color_hover: #xe6ebf0
+                                    color_focus: #xe6ebf0
+                                    color_down: #xdfe6ec
+                                    color_empty: #x5a616a
+                                    color_empty_hover: #x6a7178
+                                    color_empty_focus: #x6a7178
+                                }
+                            }
+                        }
                         mesh_colors_row := DropField{
                             visible: false
                             FieldCaption{ text: "TRELLIS colors" }
@@ -3063,6 +3088,9 @@ impl App {
             .widget(cx, ids!(mesh_colors_row))
             .set_visible(cx, active("mesh") && active("paint"));
         self.ui
+            .widget(cx, ids!(motion_prompt_row))
+            .set_visible(cx, active("motion"));
+        self.ui
             .widget(cx, ids!(vid_size_row))
             .set_visible(cx, active("video"));
         self.ui
@@ -3116,6 +3144,7 @@ impl App {
             mesh_texture_size,
             mesh_faces,
             mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
+            motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
             video_size: vid_size,
             video_frames,
             video_steps,
@@ -3235,6 +3264,9 @@ impl App {
         self.ui
             .check_box(cx, ids!(trellis_colors_toggle))
             .set_active(cx, saved.mesh_trellis_texture.unwrap_or(false), Animate::No);
+        self.ui
+            .text_input(cx, ids!(motion_prompt_input))
+            .set_text(cx, saved.motion_prompt.as_deref().unwrap_or(""));
         self.ui.drop_down2(cx, ids!(vid_size_drop)).set_selected_item(
             cx,
             fast_presets::nearest_video_size(saved.video_w, saved.video_h),
@@ -3481,6 +3513,16 @@ impl App {
             }
             None => None,
         };
+        // A chain whose first stage CONSUMES an input it cannot make itself
+        // (mesh-first rig chains: TRELLIS needs an image, and the only thing
+        // that can stand in is a selected GLB) is refused without a seed —
+        // the stage would just fail on the box with "needs an input image".
+        if input.is_none() && PRESETS[preset].domains.first() == Some(&"mesh") {
+            return Err(format!(
+                "\u{201c}{}\u{201d} needs a selected mesh — click a mesh in History or a run-tray chip first",
+                PRESETS[preset].name
+            ));
+        }
         let group_label = match &input {
             // Provenance in the run's durable group identity: this chain
             // was seeded FROM that exact managed artifact.
@@ -3509,6 +3551,7 @@ impl App {
                 mesh_texture_size,
                 mesh_faces,
                 mesh_trellis_texture: self.ui.check_box(cx, ids!(trellis_colors_toggle)).active(cx),
+                motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
                 video_size: vid_size,
                 video_frames,
                 video_steps,
