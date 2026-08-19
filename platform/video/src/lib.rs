@@ -44,7 +44,13 @@
 //! RGB entry points use the BT.709 converters in [`nv12`]. Audio may be pushed
 //! interleaved with video or in one block at the end for short clips.
 
+pub mod annex_b;
 pub mod nv12;
+pub mod stream_decoder;
+pub mod stream_encoder;
+
+pub use stream_decoder::{DecodedFrame, VideoStreamDecoder};
+pub use stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 
 use std::fmt;
 
@@ -155,6 +161,12 @@ mod windows_encoder;
 #[cfg(target_os = "windows")]
 mod windows_decoder;
 #[cfg(target_os = "windows")]
+mod windows_mft;
+#[cfg(target_os = "windows")]
+mod windows_stream_encoder;
+#[cfg(target_os = "windows")]
+mod windows_stream_decoder;
+#[cfg(target_os = "windows")]
 use windows_decoder::WindowsVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "windows")]
 use windows_encoder::WindowsVideoFileEncoder as OsVideoFileEncoder;
@@ -163,6 +175,10 @@ use windows_encoder::WindowsVideoFileEncoder as OsVideoFileEncoder;
 mod apple_decoder;
 #[cfg(target_os = "macos")]
 mod apple_encoder;
+#[cfg(target_os = "macos")]
+mod apple_stream_encoder;
+#[cfg(target_os = "macos")]
+mod apple_stream_decoder;
 #[cfg(target_os = "macos")]
 use apple_decoder::MacosVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "macos")]
