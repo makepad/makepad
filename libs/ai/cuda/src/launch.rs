@@ -2094,6 +2094,30 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_cuda_splat_repo3d_tables_f32(
+            delta: *const f32,
+            freqs: *const f32,
+            cos_out: *mut f32,
+            sin_out: *mut f32,
+            token_count: u32,
+            head_count: u32,
+            pairs: u32,
+            dim0: u32,
+            dim1: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_splat_rope_pairs_per_head_f32(
+            input: *const f32,
+            cos_table: *const f32,
+            sin_table: *const f32,
+            output: *mut f32,
+            token_count: u32,
+            head_count: u32,
+            pairs: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_cuda_birefnet_resize_bilinear_f32(
             input: *const f32,
             output: *mut f32,
@@ -14670,6 +14694,96 @@ mod imp {
                     out.device_ptr()?,
                     x.rows * x.cols,
                     scale,
+                    backend.stream,
+                )
+            })?;
+            Ok(out)
+        })
+    }
+
+    // --- TripoSplat device ops -------------------------------------------
+
+    /// RePo3D phase tables: `(cos, sin)` of shape `(tokens, heads * pairs)`
+    /// from a `(tokens, heads * 3)` delta projection and the `pairs` learned
+    /// per-axis frequencies. `dim0`/`dim1` are the first two axes' frequency
+    /// counts (the third takes the remainder).
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_splat_repo3d_tables(
+        delta: &GpuTensor,
+        freqs: &GpuTensor,
+        head_count: usize,
+        pairs: usize,
+        dim0: usize,
+        dim1: usize,
+    ) -> Result<(GpuTensor, GpuTensor), String> {
+        if delta.half || freqs.half {
+            return Err("gpu_splat_repo3d_tables is f32-only".to_string());
+        }
+        if head_count == 0 || pairs == 0 || delta.cols != head_count * 3 {
+            return Err("gpu_splat_repo3d_tables delta shape mismatch".to_string());
+        }
+        if freqs.rows * freqs.cols != pairs || dim0 + dim1 > pairs {
+            return Err("gpu_splat_repo3d_tables frequency mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let cos = GpuTensor::from_pool(delta.rows, head_count * pairs)?;
+            let sin = GpuTensor::from_pool(delta.rows, head_count * pairs)?;
+            gpu_check(unsafe {
+                makepad_cuda_splat_repo3d_tables_f32(
+                    delta.device_ptr()?,
+                    freqs.device_ptr()?,
+                    cos.device_ptr()?,
+                    sin.device_ptr()?,
+                    delta.rows as u32,
+                    head_count as u32,
+                    pairs as u32,
+                    dim0 as u32,
+                    dim1 as u32,
+                    backend.stream,
+                )
+            })?;
+            Ok((cos, sin))
+        })
+    }
+
+    /// Interleaved-pair rope with a per-token AND per-head phase table.
+    pub fn gpu_splat_rope_pairs_per_head(
+        x: &GpuTensor,
+        head_count: usize,
+        cos_table: &GpuTensor,
+        sin_table: &GpuTensor,
+    ) -> Result<GpuTensor, String> {
+        if x.half || cos_table.half || sin_table.half {
+            return Err("gpu_splat_rope_pairs_per_head is f32-only".to_string());
+        }
+        if head_count == 0 || x.cols % head_count != 0 {
+            return Err("gpu_splat_rope head mismatch".to_string());
+        }
+        let head_dim = x.cols / head_count;
+        if head_dim % 2 != 0 {
+            return Err("gpu_splat_rope odd head dim".to_string());
+        }
+        let pairs = head_dim / 2;
+        if cos_table.rows != x.rows
+            || cos_table.cols != head_count * pairs
+            || sin_table.rows != x.rows
+            || sin_table.cols != cos_table.cols
+        {
+            return Err("gpu_splat_rope table mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, x.cols)?;
+            gpu_check(unsafe {
+                makepad_cuda_splat_rope_pairs_per_head_f32(
+                    x.device_ptr()?,
+                    cos_table.device_ptr()?,
+                    sin_table.device_ptr()?,
+                    out.device_ptr()?,
+                    x.rows as u32,
+                    head_count as u32,
+                    pairs as u32,
                     backend.stream,
                 )
             })?;

@@ -81,6 +81,7 @@ pub use crate::gpu::{
     gpu_rife_conv_transpose2d, gpu_rife_fill, gpu_rife_merge_rgb8, gpu_rife_res_conv,
     gpu_rife_scale, gpu_rife_warp,
     gpu_rope_half, gpu_rope_half_bf16, gpu_rope_interleaved, gpu_silu, gpu_slice_cols, gpu_slice_rows,
+    gpu_splat_repo3d_tables, gpu_splat_rope_pairs_per_head,
     gpu_swiglu_gate_first, gpu_swiglu_value_gate, gpu_to_f16, gpu_upload, gpu_wavenet_gate,
     gpu_quant_linear_type_supported,
     gpu_runtime_trim, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
