@@ -88,7 +88,7 @@
   },
   {
    "id": "flux2-klein-4b",
-   "domain": "image",
+   "domain": "edit",
    "backend": "flux2",
    "available": true,
    "gated": false,

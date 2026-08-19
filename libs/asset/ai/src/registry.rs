@@ -131,6 +131,10 @@ pub enum Domain {
     /// maps (albedo/normal/ORM) + provenance manifest (Hunyuan3D-Paint-2.1;
     /// deterministic paint-test tier ships everywhere).
     Paint,
+    /// Reference image + instruction -> edited image (FLUX.2 klein). Its own
+    /// domain so image-domain affinity never routes a text-to-image job to
+    /// a model that fails closed without a reference.
+    Edit,
 }
 
 impl Domain {
@@ -150,6 +154,7 @@ impl Domain {
             "motion" => Some(Domain::Motion),
             "music" => Some(Domain::Music),
             "paint" => Some(Domain::Paint),
+            "edit" => Some(Domain::Edit),
             _ => None,
         }
     }
@@ -170,6 +175,7 @@ impl Domain {
             Domain::Motion => "motion",
             Domain::Music => "music",
             Domain::Paint => "paint",
+            Domain::Edit => "edit",
         }
     }
 }
@@ -856,7 +862,7 @@ mod tests {
         }
 
         let klein = registry.find("flux2-klein-4b").unwrap();
-        assert_eq!(klein.domain, Domain::Image);
+        assert_eq!(klein.domain, Domain::Edit);
         assert_eq!(klein.backend, "flux2");
         assert!(klein.available && !klein.gated);
         assert_eq!(klein.files.len(), 5);

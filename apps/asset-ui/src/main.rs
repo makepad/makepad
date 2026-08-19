@@ -77,7 +77,7 @@ use crate::asset_store_state::{
 use crate::chat::{ChatBridge, ChatData, ChatJob, ChatRole, FleetView};
 use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
-    format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
+    consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
     IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
@@ -3518,9 +3518,11 @@ impl App {
         // (mesh-first rig chains: TRELLIS needs an image, and the only thing
         // that can stand in is a selected GLB) is refused without a seed —
         // the stage would just fail on the box with "needs an input image".
-        if input.is_none() && PRESETS[preset].domains.first() == Some(&"mesh") {
+        let first = PRESETS[preset].domains.first().copied().unwrap_or("");
+        if input.is_none() && (first == "mesh" || consumer_only_domain(first)) {
+            let needs = if first == "mesh" { "mesh" } else { "image" };
             return Err(format!(
-                "\u{201c}{}\u{201d} needs a selected mesh — click a mesh in History or a run-tray chip first",
+                "\u{201c}{}\u{201d} needs a selected {needs} — click one in History or a run-tray chip first",
                 PRESETS[preset].name
             ));
         }
