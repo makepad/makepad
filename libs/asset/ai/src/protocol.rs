@@ -306,6 +306,14 @@ pub struct GenerateRequestJson {
     /// Baked texture atlas size in texels. Default 1024, clamped 256..=4096.
     pub texture_size: Option<u32>,
 
+    // -- motion domain (hy-motion backend) --
+    /// `"playable"` (default): the fixed playable-character clip set
+    /// (idle/walk/jump/run/dance) from the backend's own prompts — the
+    /// request prompt is trace metadata. `"prompt"`: ONE finite performance
+    /// clip generated from `prompt` (e.g. "A person dances the robot"),
+    /// retargeted onto the rig as clip `prompt`; viewers play it as the idle.
+    pub motion_mode: Option<String>,
+
     // -- peer-assisted model distribution (all domains; used by pull jobs
     //    and by any generate that must first download model files) --
     /// Coordinator-selected source boxes to try BEFORE Hugging Face: service

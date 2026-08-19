@@ -31,6 +31,8 @@ pub struct SavedFastPreset {
     /// Option so presets saved before the flag existed still load (None =
     /// false).
     pub mesh_trellis_texture: Option<bool>,
+    /// Motion-prompt override (None/empty = playable set).
+    pub motion_prompt: Option<String>,
     pub video_w: u32,
     pub video_h: u32,
     pub video_frames: u32,
@@ -149,6 +151,7 @@ pub fn snapshot(
         mesh_texture: gen.mesh_texture_size,
         mesh_faces: gen.mesh_faces,
         mesh_trellis_texture: Some(gen.mesh_trellis_texture),
+        motion_prompt: Some(gen.motion_prompt.clone()),
         video_w: gen.video_size.0,
         video_h: gen.video_size.1,
         video_frames: gen.video_frames,
@@ -164,6 +167,7 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
         mesh_texture_size: saved.mesh_texture,
         mesh_faces: saved.mesh_faces,
         mesh_trellis_texture: saved.mesh_trellis_texture.unwrap_or(false),
+        motion_prompt: saved.motion_prompt.clone().unwrap_or_default(),
         video_size: (saved.video_w, saved.video_h),
         video_frames: saved.video_frames,
         video_steps: saved.video_steps,

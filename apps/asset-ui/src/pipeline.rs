@@ -104,6 +104,10 @@ pub struct GenParams {
     /// paint stage follows (paint retextures anyway, so the default skips
     /// the ~30 s tex flow there). Mesh-only chains always keep them.
     pub mesh_trellis_texture: bool,
+    /// Motion stage override. Empty = the playable idle/walk/jump/run/dance
+    /// set from the backend's own prompts; otherwise ONE prompted take
+    /// (`motion_mode: "prompt"`) — "make them dance".
+    pub motion_prompt: String,
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
@@ -120,6 +124,7 @@ impl Default for GenParams {
             mesh_texture_size: MESH_TEXTURE_SIZES[0],
             mesh_faces: None,
             mesh_trellis_texture: false,
+            motion_prompt: String::new(),
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
@@ -439,6 +444,19 @@ pub const PRESETS: &[Preset] = &[
         &[
             ("image", CHARACTER_IMAGE_MODEL),
             ("matte", CHARACTER_MATTE_MODEL),
+            ("mesh", CHARACTER_MESH_MODEL),
+            ("rig", CHARACTER_RIG_MODEL),
+            ("motion", CHARACTER_MOTION_MODEL),
+        ],
+    ),
+    // Rig + animate a mesh you already have: select a mesh (History tile or
+    // run-tray chip) and it seeds the chain at the rig stage; the mesh stage
+    // only exists so the chain has a producer prefix to replace. Motion =
+    // playable set, or the Motion-prompt override ("dance").
+    Preset::linear(
+        "mesh → rig → motion (from selected mesh)",
+        &["mesh", "rig", "motion"],
+        &[
             ("mesh", CHARACTER_MESH_MODEL),
             ("rig", CHARACTER_RIG_MODEL),
             ("motion", CHARACTER_MOTION_MODEL),
@@ -1290,11 +1308,17 @@ impl Pipeline {
                 request.prompt = Some(prompt);
             }
             "motion" => {
-                // The native playable contract currently owns deterministic
-                // idle/walk/run/jump recipes, so this is trace/style metadata.
-                // Keep the identity-anchored expansion on the request instead
-                // of breaking provenance at the final stage.
-                request.prompt = Some(prompt);
+                let override_prompt = self.gen.motion_prompt.trim();
+                if override_prompt.is_empty() {
+                    // Playable contract: the backend's own deterministic
+                    // idle/walk/jump/run/dance recipes; the chain prompt is
+                    // trace/style metadata kept for provenance.
+                    request.prompt = Some(prompt);
+                } else {
+                    // One prompted take ("A person dances the robot").
+                    request.prompt = Some(override_prompt.to_string());
+                    request.motion_mode = Some("prompt".to_string());
+                }
             }
             // world: prompt + image input relay.
             _ => {
@@ -4526,6 +4550,33 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             makepad_base64::base64_decode(inputs[1].data_b64.as_bytes()).unwrap();
         assert_eq!(mesh_bytes, b"glb-bytes");
         assert_eq!(image_bytes, b"photo");
+    }
+
+    #[test]
+    fn motion_prompt_override_requests_one_prompted_take() {
+        let mut pipeline = Pipeline::new(
+            "a forest elf",
+            &["mesh", "rig", "motion"],
+            &[("rig", CHARACTER_RIG_MODEL), ("motion", CHARACTER_MOTION_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        put_output(&mut pipeline, 0, "model/gltf-binary", b"mesh");
+        put_output(&mut pipeline, 1, "model/gltf-binary", b"rigged");
+        // Empty override: playable set, chain prompt as trace metadata.
+        let motion = pipeline.request_for_stage(2).unwrap();
+        assert_eq!(motion.motion_mode, None);
+        assert_eq!(motion.prompt.as_deref(), Some("a forest elf"));
+        // Override: the motion text travels as the prompt with mode "prompt".
+        pipeline.gen.motion_prompt = "  A person dances the robot. ".to_string();
+        let motion = pipeline.request_for_stage(2).unwrap();
+        assert_eq!(motion.motion_mode.as_deref(), Some("prompt"));
+        assert_eq!(motion.prompt.as_deref(), Some("A person dances the robot."));
+        assert_eq!(decoded_input(&motion), b"rigged");
+        // A selected GLB seeds this chain at the rig stage (mesh skipped).
+        assert_eq!(seed_replaces_prefix(&["mesh", "rig", "motion"], "model/gltf-binary"), Some(1));
     }
 
     #[test]

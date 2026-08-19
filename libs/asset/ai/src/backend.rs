@@ -88,6 +88,11 @@ pub struct GenerateParams {
     /// Baked texture atlas size; `None` = backend default.
     pub texture_size: Option<u32>,
 
+    // Motion domain (hy-motion backend).
+    /// `"prompt"` = one clip from `prompt`; anything else/None = the fixed
+    /// playable set (see `GenerateRequestJson::motion_mode`).
+    pub motion_mode: Option<String>,
+
     // Peer-assisted model distribution (see crate::peer / crate::peer_fetch).
     /// Coordinator-selected source-box base URLs, tried before Hugging Face.
     pub peer_sources: Vec<String>,
@@ -307,6 +312,8 @@ impl GenerateParams {
                 .decimation_target
                 .map(|v| v.clamp(1_000, 2_000_000)),
             texture_size: request.texture_size.map(|v| v.clamp(256, 4096)),
+
+            motion_mode: request.motion_mode.clone(),
 
             peer_sources: {
                 let sources = request.peer_sources.clone().unwrap_or_default();
