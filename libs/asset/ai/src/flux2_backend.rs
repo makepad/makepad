@@ -45,8 +45,12 @@ impl Flux2Backend {
         }
     }
 
+    /// Every `flux2-dev*` registry id (the fp8 32 GB recipe and any
+    /// quantized 24 GB tier) is the dev pipeline — text-to-image AND the
+    /// reference-image instruction edit — so a new tier never silently
+    /// falls into the klein loader.
     fn is_dev(&self) -> bool {
-        self.model_id == "flux2-dev"
+        self.model_id.starts_with("flux2-dev")
     }
 }
 
