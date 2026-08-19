@@ -52,7 +52,8 @@ script_mod! {
                         // to measure the scene z-buffer killing hidden splats.
                         occluder := Cube{
                             body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.0, 0.0, 0.0)
+                            visible: false
+                            size: vec3(1.0, 1.0, 1.0)
                             pos: vec3(0.0, 0.0, 0.0)
                             color: #x6a7a8a
                         }
@@ -376,10 +377,12 @@ impl MatchEvent for App {
             });
         }
         if config.occluder > 0.0 {
+            // `vec3` is not in an eval fragment's scope; scale the unit cube.
             let size = config.occluder;
             let mut occluder = self.ui.widget(cx, ids!(occluder));
             script_apply_eval!(cx, occluder, {
-                size: vec3(#(size), #(size), #(size))
+                visible: true
+                scale: mod.pod.vec3(#(size), #(size), #(size))
             });
         }
         if let Some(mut view) = splat.borrow_mut::<ViewSplat>() {

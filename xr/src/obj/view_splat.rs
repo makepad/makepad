@@ -373,7 +373,7 @@ script_mod! {
         auto_normalize: true
         auto_antialias_blur: true
         sort_back_to_front: true
-        sort_min_camera_angle_deg: 0.25
+        sort_min_camera_angle_deg: 1.0
         sort_min_camera_move: 0.02
         sort_cull_margin: 0.5
         sort_behind_margin: 0.05
@@ -437,7 +437,10 @@ pub struct ViewSplat {
     auto_antialias_blur: bool,
     #[live(true)]
     sort_back_to_front: bool,
-    #[live(0.25)]
+    /// Camera turn that triggers a re-sort. 1 degree: far inside the
+    /// sorter's 0.5-NDC cull margin, and a view-z order is still right to
+    /// ~1.7% relative depth.
+    #[live(1.0)]
     sort_min_camera_angle_deg: f32,
     #[live(0.02)]
     sort_min_camera_move: f32,
@@ -493,7 +496,7 @@ pub struct ViewSplat {
     #[rust]
     depth_sort_last_camera_forward: Option<Vec3f>,
     #[rust]
-    depth_sort_last_depth_plane: Option<Vec4f>,
+    depth_sort_last_model: Option<Mat4f>,
     #[rust]
     depth_sort_request_started: Option<Instant>,
     #[rust]
@@ -588,13 +591,6 @@ enum ResourceResolve {
     Missing,
 }
 
-fn local_depth_from_view_model(view_matrix: &Mat4f, model_matrix: &Mat4f, center: [f32; 3]) -> f32 {
-    let local = vec4(center[0], center[1], center[2], 1.0);
-    let world = model_matrix.transform_vec4(local);
-    let view = view_matrix.transform_vec4(world);
-    view.z
-}
-
 impl ViewSplat {
     /// Node-transform scale; hosts use it to fix per-source axis conventions
     /// (generated worlds are y-up, scan-class plys are y-down and need a
@@ -677,7 +673,7 @@ impl ViewSplat {
         self.depth_sort_last_applied_request_id = 0;
         self.depth_sort_last_camera_pos = None;
         self.depth_sort_last_camera_forward = None;
-        self.depth_sort_last_depth_plane = None;
+        self.depth_sort_last_model = None;
         self.next_sort_generation();
     }
 
@@ -720,46 +716,25 @@ impl ViewSplat {
         vec3(-view.v[8], -view.v[9], -view.v[10]).normalize()
     }
 
-    fn depth_plane_from_view_and_model(view_matrix: &Mat4f, model_matrix: &Mat4f) -> Vec4f {
-        let depth_origin = local_depth_from_view_model(view_matrix, model_matrix, [0.0, 0.0, 0.0]);
-        let depth_x = local_depth_from_view_model(view_matrix, model_matrix, [1.0, 0.0, 0.0]);
-        let depth_y = local_depth_from_view_model(view_matrix, model_matrix, [0.0, 1.0, 0.0]);
-        let depth_z = local_depth_from_view_model(view_matrix, model_matrix, [0.0, 0.0, 1.0]);
-        vec4(
-            depth_x - depth_origin,
-            depth_y - depth_origin,
-            depth_z - depth_origin,
-            depth_origin,
-        )
+    fn model_changed(a: &Mat4f, b: &Mat4f) -> bool {
+        a.v.iter().zip(b.v.iter()).any(|(x, y)| (x - y).abs() >= 1e-6)
     }
 
-    fn depth_plane_delta(a: Vec4f, b: Vec4f) -> f32 {
-        (a.x - b.x)
-            .abs()
-            .max((a.y - b.y).abs())
-            .max((a.z - b.z).abs())
-            .max((a.w - b.w).abs())
-    }
-
-    fn should_request_depth_sort(
-        &self,
-        scene_state: &SceneState3D,
-        view_matrix: &Mat4f,
-        model_matrix: &Mat4f,
-    ) -> bool {
+    /// A new sort is worth asking for when the node moved, or the camera
+    /// moved / turned past the thresholds. Between sorts the previous order
+    /// (and visibility set, with its NDC margin) keeps drawing.
+    fn should_request_depth_sort(&self, scene_state: &SceneState3D, model_matrix: &Mat4f) -> bool {
         let Some(last_pos) = self.depth_sort_last_camera_pos else {
             return true;
         };
         let Some(last_forward) = self.depth_sort_last_camera_forward else {
             return true;
         };
-
-        let depth_plane = Self::depth_plane_from_view_and_model(view_matrix, model_matrix);
-        let depth_plane_changed = self
-            .depth_sort_last_depth_plane
-            .map(|last| Self::depth_plane_delta(last, depth_plane) >= 0.0005)
-            .unwrap_or(true);
-        if depth_plane_changed {
+        if self
+            .depth_sort_last_model
+            .map(|last| Self::model_changed(&last, model_matrix))
+            .unwrap_or(true)
+        {
             return true;
         }
 
@@ -809,7 +784,6 @@ impl ViewSplat {
         &mut self,
         cx: &mut CxDraw,
         scene_state: &SceneState3D,
-        view_matrix: Mat4f,
         model_matrix: Mat4f,
     ) {
         if !self.sort_back_to_front || self.gpu_scene.is_none() {
@@ -820,9 +794,7 @@ impl ViewSplat {
         {
             return;
         }
-        if self.depth_sort_in_flight
-            || !self.should_request_depth_sort(scene_state, &view_matrix, &model_matrix)
-        {
+        if self.depth_sort_in_flight || !self.should_request_depth_sort(scene_state, &model_matrix) {
             return;
         }
 
@@ -843,10 +815,7 @@ impl ViewSplat {
             self.depth_sort_last_camera_pos = Some(scene_state.camera_pos);
             self.depth_sort_last_camera_forward =
                 Some(Self::camera_forward_from_view(&scene_state.view));
-            self.depth_sort_last_depth_plane = Some(Self::depth_plane_from_view_and_model(
-                &view_matrix,
-                &model_matrix,
-            ));
+            self.depth_sort_last_model = Some(model_matrix);
         } else {
             self.depth_sort_thread_started = false;
             self.depth_sort_scene_uploaded_generation = 0;
@@ -1136,7 +1105,7 @@ impl ViewSplat {
         self.depth_sort_last_applied_request_id = 0;
         self.depth_sort_last_camera_pos = None;
         self.depth_sort_last_camera_forward = None;
-        self.depth_sort_last_depth_plane = None;
+        self.depth_sort_last_model = None;
         self.next_sort_generation();
         self.stats.splat_count = packed.records;
         self.stats.build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
@@ -1211,13 +1180,13 @@ impl Widget for ViewSplat {
         let _ = self.poll_depth_sort_results();
         if self.sort_back_to_front {
             self.apply_pending_depth_sort();
-            self.request_depth_sort_if_needed(cx, &scene_state, scene_state.view, node_matrix);
+            self.request_depth_sort_if_needed(cx, &scene_state, node_matrix);
         } else {
             self.depth_sort_pending_result = None;
             self.depth_sort_in_flight = false;
             self.depth_sort_last_camera_pos = None;
             self.depth_sort_last_camera_forward = None;
-            self.depth_sort_last_depth_plane = None;
+            self.depth_sort_last_model = None;
             self.ensure_identity_order();
         }
         if self.instance_order.is_empty() {
