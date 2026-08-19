@@ -20,4 +20,4 @@ pub use tank::{tank_drive_command, Tank, TankDriveConfig};
 pub use tree::{
     CpuPythagoreanTree, DrawTreeBranches, DrawTreeLeaves, Tree, PYTHAGOREAN_TREE_ROOT_DROP,
 };
-pub use view_splat::{DrawSplatPbr, ViewSplat};
+pub use view_splat::{DrawSplatPbr, ViewSplat, ViewSplatStats};

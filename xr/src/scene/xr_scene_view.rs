@@ -90,10 +90,18 @@ pub struct XrSceneView {
 }
 
 impl XrSceneView {
-    /// Desktop orbit camera (distance / target / limits), for hosts that
-    /// re-frame the scene per content (e.g. an object splat vs a world).
+    /// The desktop orbit camera (distance / target / limits): hosts re-frame
+    /// the scene per content (object splat vs world); scripted drivers
+    /// (benchmarks, tests) set yaw/pitch/distance here instead of
+    /// synthesizing mouse events.
     pub fn camera_mut(&mut self) -> &mut XrCamera {
         &mut self.camera
+    }
+
+    /// The scene's color render target. Valid after the first draw; read it
+    /// back with `Cx::debug_read_render_texture` for pixel checks.
+    pub fn color_texture(&self) -> &Texture {
+        &self.color_texture
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {

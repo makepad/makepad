@@ -42,6 +42,7 @@ workspace.members = [
     "examples/bugfix",
     "examples/move_after_draw",
     "examples/xr",
+    "examples/splat_bench",
     "examples/cad",
     "examples/box3d",
     "examples/hello_world",

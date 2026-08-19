@@ -4,7 +4,13 @@ use makepad_widgets::{
     makepad_draw::{shader::draw_pbr::PbrMeshHandle, *},
     widget::*,
 };
-use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError};
+use std::{
+    mem,
+    path::PathBuf,
+    rc::Rc,
+    sync::mpsc::TryRecvError,
+    time::Instant,
+};
 
 use crate::util::scene_draw::{
     apply_scene_to_draw_pbr, compose_scene_node_transform, scene_node_world_transform_from_cx,
@@ -408,6 +414,39 @@ pub struct ViewSplat {
     depth_sort_last_camera_forward: Option<Vec3f>,
     #[rust]
     depth_sort_last_depth_plane: Option<Vec4f>,
+    #[rust]
+    depth_sort_request_started: Option<Instant>,
+    #[rust]
+    stats: ViewSplatStats,
+}
+
+/// Measured costs of the splat renderer, read by benchmarks/tests.
+/// Times are milliseconds; byte counts are what was handed to the GPU.
+#[derive(Clone, Debug, Default)]
+pub struct ViewSplatStats {
+    /// Splats drawn (after opacity/scale filtering).
+    pub splat_count: usize,
+    /// File decode (`load_splat_from_bytes`).
+    pub load_ms: f64,
+    /// Building the GPU-side representation from the decoded scene.
+    pub build_ms: f64,
+    /// Static per-scene upload: vertex/index/texture bytes.
+    pub static_upload_bytes: u64,
+    /// Bytes re-uploaded for the last applied depth sort.
+    pub last_sort_upload_bytes: u64,
+    /// Bytes pushed into the instance buffer on the last draw (re-uploaded
+    /// by the backend every redraw).
+    pub last_frame_instance_bytes: u64,
+    /// Number of depth-sort results applied.
+    pub sorts_applied: u64,
+    /// Worker-side time of the last sort (sort + payload build).
+    pub last_sort_ms: f64,
+    /// Sum of worker-side sort times.
+    pub total_sort_ms: f64,
+    /// Request-to-applied latency of the last sort.
+    pub last_sort_latency_ms: f64,
+    /// Main-thread time of applying the last sort result (upload/copy).
+    pub last_sort_apply_ms: f64,
 }
 
 enum ResourceResolve {
@@ -444,6 +483,8 @@ struct SplatSortResult {
     generation: u64,
     request_id: u64,
     indices: Vec<u32>,
+    /// Worker-side wall time for this sort.
+    sort_ms: f64,
 }
 
 fn float_depth_key(depth: f32) -> u32 {
@@ -581,6 +622,7 @@ fn run_depth_sort_worker(
                 sort_radial,
             } => {
                 if generation == scene_generation && !centers_local.is_empty() {
+                    let started = Instant::now();
                     sort_splats_radix(
                         view_matrix,
                         model_matrix,
@@ -592,16 +634,19 @@ fn run_depth_sort_worker(
                         &mut order_b,
                     );
                     build_sorted_triangle_indices(&order_a, &mut sorted_indices);
+                    let sort_ms = started.elapsed().as_secs_f64() * 1000.0;
                     let _ = result_tx.send(SplatSortResult {
                         generation,
                         request_id,
                         indices: mem::take(&mut sorted_indices),
+                        sort_ms,
                     });
                 } else {
                     let _ = result_tx.send(SplatSortResult {
                         generation,
                         request_id,
                         indices: Vec::new(),
+                        sort_ms: 0.0,
                     });
                 }
             }
@@ -615,6 +660,17 @@ impl ViewSplat {
     /// (1,-1,1) flip). Takes effect on the next draw — no re-mesh needed.
     pub fn set_scale(&mut self, scale: Vec3f) {
         self.scale = scale;
+    }
+
+    /// Measured load/build/upload/sort costs (see [`ViewSplatStats`]).
+    pub fn stats(&self) -> &ViewSplatStats {
+        &self.stats
+    }
+
+    /// True once the source resource has been decoded (or failed) and the
+    /// GPU representation for it exists.
+    pub fn is_scene_ready(&self) -> bool {
+        self.loaded_src_handle.is_some() && self.splat_mesh.is_some()
     }
 
     fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
@@ -842,6 +898,7 @@ impl ViewSplat {
         };
         if self.depth_sort_request_tx.send(request).is_ok() {
             self.depth_sort_in_flight = true;
+            self.depth_sort_request_started = Some(Instant::now());
             self.depth_sort_last_camera_pos = Some(scene_state.camera_pos);
             self.depth_sort_last_camera_forward =
                 Some(Self::camera_forward_from_view(&scene_state.view));
@@ -893,6 +950,8 @@ impl ViewSplat {
             self.depth_sort_last_applied_request_id = result.request_id;
             return;
         }
+        let apply_started = Instant::now();
+        let upload_bytes = (result.indices.len() * mem::size_of::<u32>()) as u64;
         match self
             .draw_splat
             .draw_super
@@ -901,6 +960,15 @@ impl ViewSplat {
             Ok(()) => {
                 self.depth_sort_last_applied_request_id = result.request_id;
                 self.base_indices_applied = false;
+                self.stats.sorts_applied += 1;
+                self.stats.last_sort_ms = result.sort_ms;
+                self.stats.total_sort_ms += result.sort_ms;
+                self.stats.last_sort_upload_bytes = upload_bytes;
+                self.stats.last_sort_latency_ms = self
+                    .depth_sort_request_started
+                    .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                self.stats.last_sort_apply_ms = apply_started.elapsed().as_secs_f64() * 1000.0;
             }
             Err(error) => {
                 log!("ViewSplat depth-sort index update error: {}", error);
@@ -973,7 +1041,13 @@ impl ViewSplat {
                 abs_path,
                 data,
             } => {
-                match load_splat_from_bytes(&data, Some(abs_path.as_path())) {
+                let load_started = Instant::now();
+                let loaded = load_splat_from_bytes(&data, Some(abs_path.as_path()));
+                self.stats = ViewSplatStats {
+                    load_ms: load_started.elapsed().as_secs_f64() * 1000.0,
+                    ..Default::default()
+                };
+                match loaded {
                     Ok(scene) => {
                         if self.auto_antialias_blur {
                             self.draw_splat.blur_pixels = if scene.antialias { 0.3 } else { 0.0 };
@@ -1035,6 +1109,7 @@ impl ViewSplat {
         let radius_scale = self.radius_scale.max(0.0);
         let opacity_scale = self.opacity_scale.max(0.0);
 
+        let build_started = Instant::now();
         let estimated = max_splats.min(scene.splats.len());
         let mut positions: Vec<[f32; 3]> = Vec::with_capacity(estimated * 4); // packed center_local xyz
         let mut normals: Vec<[f32; 3]> = Vec::with_capacity(estimated * 4); // packed local axis_0 xyz
@@ -1124,6 +1199,9 @@ impl ViewSplat {
             return None;
         }
 
+        // PbrVertex is 16 floats per vertex.
+        let vertex_bytes = (positions.len() * 16 * mem::size_of::<f32>()) as u64;
+        let index_bytes = (indices.len() * mem::size_of::<u32>()) as u64;
         match self.draw_splat.draw_super.upload_indexed_triangles_mesh(
             cx,
             &positions,
@@ -1134,6 +1212,9 @@ impl ViewSplat {
             &indices,
         ) {
             Ok(mesh) => {
+                self.stats.splat_count = centers_local.len();
+                self.stats.build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+                self.stats.static_upload_bytes = vertex_bytes + index_bytes;
                 self.splat_mesh = Some(mesh);
                 self.base_indices = indices;
                 self.base_indices_applied = true;
@@ -1216,3 +1297,6 @@ impl Widget for ViewSplat {
         DrawStep::done()
     }
 }
+
+#[cfg(test)]
+include!("../tests/obj/view_splat.rs");
