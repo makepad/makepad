@@ -141,6 +141,10 @@ fn resize(x: &GpuTensor, from: Extent, to: Extent) -> Result<GpuTensor> {
         .map_err(|error| device_error("resize", error))
 }
 
+/// The reference clamps `Head`'s input (and IFNet's images) to `[0, 1]`.
+/// Here the images are `u8 / 255` with zero padding, so the clamp is
+/// provably a no-op and no kernel is spent on it — the portable reference
+/// still performs it, which keeps the two paths comparable on any input.
 fn head_forward(
     image: &GpuTensor,
     extent: Extent,
