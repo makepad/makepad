@@ -97,7 +97,7 @@ use makepad_widgets::*;
 use makepad_xr::obj::ViewSplat;
 use std::collections::{HashMap, HashSet, VecDeque};
 use makepad_asset_ai::fleet::BoxSnapshot;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 app_main!(App);
 
@@ -1328,6 +1328,8 @@ script_mod! {
                         md_world_row := DropField{ visible: false FieldCaption{ text: "World model" } md_world := FieldDrop{} }
                         md_rig_row := DropField{ visible: false FieldCaption{ text: "Rig model" } md_rig := FieldDrop{} }
                         md_motion_row := DropField{ visible: false FieldCaption{ text: "Motion model" } md_motion := FieldDrop{} }
+                        md_edit_row := DropField{ visible: false FieldCaption{ text: "Edit model" } md_edit := FieldDrop{} }
+                        md_upscale_row := DropField{ visible: false FieldCaption{ text: "Upscale model" } md_upscale := FieldDrop{} }
                         DropField{
                             FieldCaption{ text: "Box" }
                             box_drop := FieldDrop{}
@@ -1448,6 +1450,17 @@ script_mod! {
                                 width: Fill height: Fit flow: Down spacing: 2
                                 input_chip_kind := HintLabel{ text: "" }
                                 input_chip_title := BrightLabel{ text: "" }
+                            }
+                            // Extra references for multi-reference editors
+                            // (⇧ double-click on any image adds one; click a
+                            // thumb here to drop it).
+                            input_refs := View{
+                                visible: false
+                                width: Fit height: Fit flow: Right spacing: 4
+                                align: Align{y: 0.5}
+                                input_ref0 := View{ visible: false width: 44 height: 33 cursor: MouseCursor.Hand align: Align{x: 0.5 y: 0.5} input_ref0_thumb := ThumbFitImage{} }
+                                input_ref1 := View{ visible: false width: 44 height: 33 cursor: MouseCursor.Hand align: Align{x: 0.5 y: 0.5} input_ref1_thumb := ThumbFitImage{} }
+                                input_ref2 := View{ visible: false width: 44 height: 33 cursor: MouseCursor.Hand align: Align{x: 0.5 y: 0.5} input_ref2_thumb := ThumbFitImage{} }
                             }
                             input_clear := LibraryDeleteButton{ text: "×" }
                         }
@@ -2631,6 +2644,8 @@ struct RunSeed {
     /// and validated by [`pipeline::seed_replaces_prefix`] at spec time,
     /// so it is always a valid in-bounds stage index.
     skip: usize,
+    /// Extra edit references (content type, bytes), in tray order.
+    references: Vec<(String, std::sync::Arc<Vec<u8>>)>,
 }
 
 /// A pipeline waiting in the app-side run queue.
@@ -2833,6 +2848,13 @@ pub struct App {
     /// thumbnail refreshes and drops stale async chip previews.
     #[rust]
     input_chip_file: Option<String>,
+    /// Files shown in the extra-reference thumbs (index-parallel to
+    /// `input_ref0..2`), for async preview installs.
+    #[rust]
+    input_ref_files: Vec<String>,
+    /// History group every OS-dropped file of this session lands in.
+    #[rust]
+    dropped_group_id: Option<String>,
     /// Members of the selected run shown in the run tray, pipeline order
     /// (oldest first), one per chip slot.
     #[rust]
@@ -3617,7 +3639,10 @@ impl App {
                 continue;
             }
             for model in &snap.models {
-                if model.available && model.domain == domain && !ids.contains(&model.id) {
+                if model.available
+                    && model_serves_domain(&model.id, &model.domain, domain)
+                    && !ids.contains(&model.id)
+                {
                     ids.push(model.id.clone());
                 }
             }
@@ -3641,6 +3666,8 @@ impl App {
             "world" => self.ui.drop_down2(cx, ids!(md_world)),
             "rig" => self.ui.drop_down2(cx, ids!(md_rig)),
             "motion" => self.ui.drop_down2(cx, ids!(md_motion)),
+            "edit" => self.ui.drop_down2(cx, ids!(md_edit)),
+            "upscale" => self.ui.drop_down2(cx, ids!(md_upscale)),
             _ => return None,
         };
         let index = drop.selected_item().checked_sub(1)?;
@@ -3764,6 +3791,12 @@ impl App {
         );
         self.refresh_one_stage_model(
             cx, "motion", ids!(md_motion_row), ids!(md_motion), active("motion"), apply_preset_pin, pin_for("motion"),
+        );
+        self.refresh_one_stage_model(
+            cx, "edit", ids!(md_edit_row), ids!(md_edit), active("edit"), apply_preset_pin, pin_for("edit"),
+        );
+        self.refresh_one_stage_model(
+            cx, "upscale", ids!(md_upscale_row), ids!(md_upscale), active("upscale"), apply_preset_pin, pin_for("upscale"),
         );
         self.ui
             .widget(cx, ids!(speech_params_row))
@@ -4188,12 +4221,31 @@ impl App {
                                 asset.label
                             )
                         })?;
+                        // Extra references only matter to edit chains; for
+                        // anything else they stay in the tray, unused (the
+                        // pipeline would refuse them), so don't even read.
+                        let mut references = Vec::new();
+                        if PRESETS[preset].domains.contains(&"edit") {
+                            for extra in self.input_tray.extras() {
+                                let bytes = std::fs::read(&extra.path).map_err(|error| {
+                                    format!(
+                                        "reference \u{201c}{}\u{201d} could not be read ({error}) — run not queued",
+                                        extra.label
+                                    )
+                                })?;
+                                references.push((
+                                    extra.content_type.clone(),
+                                    std::sync::Arc::new(bytes),
+                                ));
+                            }
+                        }
                         Some(RunSeed {
                             source_file: asset.file.clone(),
                             source_label: asset.label.clone(),
                             content_type: asset.content_type.clone(),
                             bytes: std::sync::Arc::new(bytes),
                             skip,
+                            references,
                         })
                     }
                     None => {
@@ -4573,6 +4625,16 @@ impl App {
                 pipeline.set_seed_input(seed.content_type.clone(), seed.bytes.as_ref().clone())
             {
                 log!("run: seed input rejected at dispatch: {error}");
+                self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
+                return;
+            }
+            if let Err(error) = pipeline.set_seed_references(
+                seed.references
+                    .iter()
+                    .map(|(ct, bytes)| (ct.clone(), bytes.as_ref().clone()))
+                    .collect(),
+            ) {
+                log!("run: extra references rejected at dispatch: {error}");
                 self.set_caption(cx, "INPUT", &format!("run not started: {error}"));
                 return;
             }
@@ -5975,17 +6037,44 @@ impl App {
         self.input_tray
             .retain_existing(|file| library.is_some_and(|library| library.get(file).is_some()));
         let current = self.input_tray.current().cloned();
-        if current.as_ref().map(|asset| asset.file.clone()) == self.input_chip_file {
+        let extras: Vec<InputAsset> = self.input_tray.extras().to_vec();
+        let extra_files: Vec<String> = extras.iter().map(|a| a.file.clone()).collect();
+        if current.as_ref().map(|asset| asset.file.clone()) == self.input_chip_file
+            && extra_files == self.input_ref_files
+        {
             return;
         }
         self.input_chip_file = current.as_ref().map(|asset| asset.file.clone());
+        self.input_ref_files = extra_files;
+        // Extra-reference thumbs: typed badge now, decoded preview async.
+        self.ui
+            .widget(cx, ids!(input_refs))
+            .set_visible(cx, !extras.is_empty());
+        for (slot, row) in Self::input_ref_ids().iter().enumerate() {
+            match extras.get(slot) {
+                Some(asset) => {
+                    self.ui.view(cx, row).set_visible(cx, true);
+                    let badge = crate::store_views::badge_texture(cx, &asset.domain);
+                    let mut id = row.to_vec();
+                    id.push(Self::input_ref_thumb_id(slot));
+                    self.ui.image(cx, &id).set_texture(cx, Some(badge));
+                    self.request_input_chip_preview(cx, asset);
+                }
+                None => self.ui.view(cx, row).set_visible(cx, false),
+            }
+        }
         match current {
             Some(asset) => {
                 self.ui.widget(cx, ids!(input_tray)).set_visible(cx, true);
+                let refs = match extras.len() {
+                    0 => String::new(),
+                    1 => " · +1 reference".to_string(),
+                    n => format!(" · +{n} references"),
+                };
                 self.ui.label(cx, ids!(input_chip_kind)).set_text(
                     cx,
                     &format!(
-                        "INPUT · {}",
+                        "INPUT · {}{refs}",
                         crate::asset_store_state::local_kind(&asset.domain, &asset.content_type)
                     ),
                 );
@@ -6006,6 +6095,166 @@ impl App {
         }
         self.refresh_transform_labels(cx);
         self.ui.redraw(cx);
+    }
+
+    fn input_ref_ids() -> [&'static [LiveId]; 3] {
+        [ids!(input_ref0), ids!(input_ref1), ids!(input_ref2)]
+    }
+
+    fn input_ref_thumb_id(slot: usize) -> LiveId {
+        match slot {
+            0 => live_id!(input_ref0_thumb),
+            1 => live_id!(input_ref1_thumb),
+            _ => live_id!(input_ref2_thumb),
+        }
+    }
+
+    /// A decoded preview for `file` lands on every input-tray thumb that
+    /// shows it (primary chip and/or extra-reference slots).
+    fn install_input_thumb(&mut self, cx: &mut Cx, file: &str, texture: Texture) {
+        if self.input_chip_file.as_deref() == Some(file) {
+            self.ui
+                .image(cx, ids!(input_chip_thumb))
+                .set_texture(cx, Some(texture.clone()));
+        }
+        for (slot, row) in Self::input_ref_ids().iter().enumerate() {
+            if self.input_ref_files.get(slot).map(String::as_str) == Some(file) {
+                let mut id = row.to_vec();
+                id.push(Self::input_ref_thumb_id(slot));
+                self.ui.image(cx, &id).set_texture(cx, Some(texture.clone()));
+            }
+        }
+    }
+
+    /// A file dropped from the OS: read it, normalise images to PNG (the
+    /// service's image inputs are PNG), add it to the library under a
+    /// "Dropped files" group (byte-identical re-drops reuse the existing
+    /// record), then pin it as the input — or add it as an extra edit
+    /// reference when ⇧ is held.
+    fn import_dropped_file(&mut self, cx: &mut Cx, path: &Path, as_reference: bool) {
+        let Some((domain, content_type, needs_png)) = dropped_file_kind(path) else {
+            self.set_caption(
+                cx,
+                "INPUT",
+                &format!(
+                    "unsupported drop {:?} (images, .glb, .wav, .mp4)",
+                    path.file_name().unwrap_or_default()
+                ),
+            );
+            return;
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.set_caption(cx, "INPUT", &format!("drop could not be read: {error}"));
+                return;
+            }
+        };
+        let bytes = if needs_png {
+            match decode_image_from_data(&bytes).ok().and_then(|image| {
+                let mut rgba = Vec::with_capacity(image.data.len() * 4);
+                for px in &image.data {
+                    rgba.extend_from_slice(&[
+                        (px >> 16) as u8,
+                        (px >> 8) as u8,
+                        *px as u8,
+                        (px >> 24) as u8,
+                    ]);
+                }
+                makepad_asset_ai::testpattern::encode_png_rgba(&rgba, image.width, image.height)
+                    .ok()
+            }) {
+                Some(png) => png,
+                None => {
+                    self.set_caption(cx, "INPUT", "dropped image could not be decoded");
+                    return;
+                }
+            }
+        } else {
+            bytes
+        };
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "dropped file".to_string());
+        let existing = self
+            .library
+            .as_ref()
+            .and_then(|library| library.find_exact_payload(&bytes));
+        let file = match existing {
+            Some(file) => Some(file),
+            None => {
+                let group_id = self
+                    .dropped_group_id
+                    .get_or_insert_with(|| crate::library::new_group_id("drop"))
+                    .clone();
+                self.route_artifact(
+                    cx,
+                    domain,
+                    content_type,
+                    bytes,
+                    None,
+                    &label,
+                    Some((&group_id, "Dropped files")),
+                    Some(&label),
+                    !as_reference,
+                )
+            }
+        };
+        let Some(file) = file else {
+            self.set_caption(cx, "INPUT", "dropped file could not be stored in the library");
+            return;
+        };
+        self.refresh_gallery(cx, false);
+        if as_reference {
+            self.add_input_reference(cx, &file);
+        } else {
+            self.open_gallery(cx, &file);
+        }
+        log!("drop: imported {} as {file} ({content_type})", path.display());
+    }
+
+    /// ⇧ double-click: add `file` as an extra edit reference (first one
+    /// without a primary becomes the primary input).
+    fn add_input_reference(&mut self, cx: &mut Cx, file: &str) {
+        let Some(item) = self
+            .library
+            .as_ref()
+            .and_then(|library| library.get(file).cloned())
+        else {
+            return;
+        };
+        if !item.content_type.to_ascii_lowercase().starts_with("image/") {
+            self.set_caption(cx, "INPUT", "only images can be extra references");
+            return;
+        }
+        let Some(path) = self
+            .library
+            .as_ref()
+            .and_then(|library| library.payload_path(&item.file).ok())
+        else {
+            return;
+        };
+        let changed = self.input_tray.add_extra(InputAsset {
+            file: item.file.clone(),
+            label: item.label.clone(),
+            domain: item.domain.clone(),
+            content_type: item.content_type.clone(),
+            path: path.clone(),
+            preview_path: Some(path),
+        });
+        if !changed {
+            self.set_caption(
+                cx,
+                "INPUT",
+                &format!(
+                    "reference not added (duplicate, or already {} references)",
+                    InputTray::MAX_EXTRAS
+                ),
+            );
+        }
+        self.reopen_gallery(cx, file);
+        self.sync_input_tray(cx);
     }
 
     /// Route the chip's display thumbnail through the bounded preview
@@ -6037,9 +6286,7 @@ impl App {
             .borrow::<LibraryGallery>()
             .and_then(|gallery| gallery.cached_texture(&asset.file));
         if let Some(texture) = cached {
-            self.ui
-                .image(cx, ids!(input_chip_thumb))
-                .set_texture(cx, Some(texture));
+            self.install_input_thumb(cx, &asset.file, texture);
             return;
         }
         if let Some(work) = crate::store_views::preview_work(&entry) {
@@ -6457,11 +6704,7 @@ impl App {
                             );
                         }
                     }
-                    if self.input_chip_file.as_deref() == Some(file.as_str()) {
-                        self.ui
-                            .image(cx, ids!(input_chip_thumb))
-                            .set_texture(cx, Some(texture.clone()));
-                    }
+                    self.install_input_thumb(cx, &file, texture.clone());
                     if let Some(mut tray) = self
                         .ui
                         .widget(cx, ids!(run_tray_list))
@@ -9382,6 +9625,8 @@ impl MatchEvent for App {
             View(usize),
             /// Double click: view AND pin as the next transform's input.
             Open(usize),
+            /// ⇧ double click: view AND add as an extra edit reference.
+            AddReference(usize),
         }
         let mut gallery_action = None;
         for (index, item) in gallery_list.items_with_actions(actions) {
@@ -9415,7 +9660,9 @@ impl MatchEvent for App {
             // the next transform's input (pinning on every click meant
             // clearing the input tray before each ordinary generate).
             if let Some(fe) = item.view(cx, ids!(card)).finger_down(actions) {
-                gallery_action = Some(if fe.tap_count >= 2 {
+                gallery_action = Some(if fe.tap_count >= 2 && fe.modifiers.shift {
+                    GalleryAct::AddReference(index)
+                } else if fe.tap_count >= 2 {
                     GalleryAct::Open(index)
                 } else {
                     GalleryAct::View(index)
@@ -9459,6 +9706,14 @@ impl MatchEvent for App {
                     self.open_gallery(cx, &file);
                 }
             }
+            Some(GalleryAct::AddReference(index)) => {
+                let file = gallery_widget
+                    .borrow::<LibraryGallery>()
+                    .and_then(|gallery| gallery.file_at(index));
+                if let Some(file) = file {
+                    self.add_input_reference(cx, &file);
+                }
+            }
             None => {}
         }
         // Run tray chips: single click views the member, double click also
@@ -9472,16 +9727,27 @@ impl MatchEvent for App {
                     chip_hit = tray_widget
                         .borrow::<RunTray>()
                         .and_then(|tray| tray.file_at(index))
-                        .map(|f| (f, fe.tap_count >= 2));
+                        .map(|f| (f, fe.tap_count >= 2, fe.modifiers.shift));
                     break;
                 }
             }
         }
-        if let Some((file, pin)) = chip_hit {
-            if pin {
+        if let Some((file, pin, shift)) = chip_hit {
+            if pin && shift {
+                self.add_input_reference(cx, &file);
+            } else if pin {
                 self.open_gallery(cx, &file);
             } else {
                 self.reopen_gallery(cx, &file);
+            }
+        }
+        // Extra-reference thumbs: a click drops that reference.
+        for (slot, row) in Self::input_ref_ids().iter().enumerate() {
+            if self.ui.view(cx, row).finger_down(actions).is_some() {
+                if self.input_tray.remove_extra(slot) {
+                    self.sync_input_tray(cx);
+                }
+                break;
             }
         }
         // Fleet box cards → per-box model popup; toggles in the popup flip
@@ -9614,6 +9880,44 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if matches!(event, Event::DragEnd) {
             self.file_drag_active = false;
+        }
+        // External file drop (Finder screenshot, exported render, GLB…)
+        // onto the authoring column: import into the library and pin as the
+        // input (⇧ = add as an extra edit reference).
+        if matches!(event, Event::Drag(_) | Event::Drop(_)) && !self.file_drag_active {
+            let area = self.ui.view(cx, ids!(left_panel)).area();
+            match event.drag_hits(cx, area) {
+                DragHit::Drag(drag) => {
+                    let accepts = drag.items.iter().any(|item| match item {
+                        DragItem::FilePath { path, internal_id: None } => {
+                            dropped_file_kind(Path::new(path)).is_some()
+                        }
+                        _ => false,
+                    });
+                    *drag.response.lock().unwrap() = if accepts {
+                        DragResponse::Copy
+                    } else {
+                        DragResponse::None
+                    };
+                }
+                DragHit::Drop(drop) => {
+                    let paths: Vec<PathBuf> = drop
+                        .items
+                        .iter()
+                        .filter_map(|item| match item {
+                            DragItem::FilePath { path, internal_id: None } => {
+                                Some(PathBuf::from(path))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let as_reference = drop.modifiers.shift;
+                    for path in paths {
+                        self.import_dropped_file(cx, &path, as_reference);
+                    }
+                }
+                DragHit::NoHit | DragHit::DragEnd => {}
+            }
         }
         if let Event::KeyDown(ke) = event {
             if ke.key_code == KeyCode::F8 && !ke.is_repeat {
@@ -9952,5 +10256,51 @@ impl AppMain for App {
         // Draw passes above recorded any gallery-preview cache misses;
         // route them through the IO worker (bounded, deduplicated).
         self.pump_gallery_previews(cx);
+    }
+}
+
+/// Does `model_id` (registered under `model_domain`) serve stage `domain`?
+/// Mirrors the service's routing law: besides the exact-domain models, every
+/// `flux2-dev*` tier (registered as an image generator) also runs the
+/// instruction-edit path when an input image is supplied.
+fn model_serves_domain(model_id: &str, model_domain: &str, domain: &str) -> bool {
+    model_domain == domain || (domain == "edit" && model_id.starts_with("flux2-dev"))
+}
+
+/// What an OS-dropped file imports as: (domain, content type, re-encode to
+/// PNG?). PNG screenshots go in byte-identical; other raster formats are
+/// decoded and re-encoded because every image-consuming model input is PNG.
+fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => ("image", "image/png", false),
+        "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" => ("image", "image/png", true),
+        "glb" => ("mesh", "model/gltf-binary", false),
+        "wav" => ("audio", "audio/wav", false),
+        "mp4" | "mov" => ("video", "video/mp4", false),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_file_kinds() {
+        assert_eq!(
+            dropped_file_kind(Path::new("/x/Screenshot 2026.png")),
+            Some(("image", "image/png", false))
+        );
+        assert_eq!(
+            dropped_file_kind(Path::new("/x/photo.JPG")),
+            Some(("image", "image/png", true))
+        );
+        assert_eq!(
+            dropped_file_kind(Path::new("/x/elf.glb")),
+            Some(("mesh", "model/gltf-binary", false))
+        );
+        assert_eq!(dropped_file_kind(Path::new("/x/notes.txt")), None);
+        assert_eq!(dropped_file_kind(Path::new("/x/noext")), None);
     }
 }

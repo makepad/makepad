@@ -304,37 +304,83 @@ pub struct InputAsset {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct InputTray {
     current: Option<InputAsset>,
+    /// Extra references for multi-reference editors (⇧ double-click adds
+    /// one); ordered, deduped, capped at [`Self::MAX_EXTRAS`].
+    extras: Vec<InputAsset>,
 }
 
 impl InputTray {
+    pub const MAX_EXTRAS: usize = 3;
+
     pub fn current(&self) -> Option<&InputAsset> {
         self.current.as_ref()
     }
 
-    /// Explicit user pick; returns whether the tray changed.
+    pub fn extras(&self) -> &[InputAsset] {
+        &self.extras
+    }
+
+    /// Explicit user pick; returns whether the tray changed. A new primary
+    /// that was pinned as an extra reference leaves the extras list.
     pub fn select(&mut self, asset: InputAsset) -> bool {
+        let removed = self.extras.iter().position(|a| a.file == asset.file);
+        if let Some(index) = removed {
+            self.extras.remove(index);
+        }
         if self.current.as_ref() == Some(&asset) {
-            return false;
+            return removed.is_some();
         }
         self.current = Some(asset);
         true
     }
 
+    /// Add an extra reference. Without a primary input the asset becomes
+    /// the primary instead (a reference list needs something to refer to).
+    /// Returns whether the tray changed; a duplicate or a full list is a
+    /// no-op.
+    pub fn add_extra(&mut self, asset: InputAsset) -> bool {
+        if self.current.is_none() {
+            return self.select(asset);
+        }
+        if self.current.as_ref().is_some_and(|c| c.file == asset.file)
+            || self.extras.iter().any(|a| a.file == asset.file)
+            || self.extras.len() >= Self::MAX_EXTRAS
+        {
+            return false;
+        }
+        self.extras.push(asset);
+        true
+    }
+
+    pub fn remove_extra(&mut self, index: usize) -> bool {
+        if index < self.extras.len() {
+            self.extras.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn clear(&mut self) -> bool {
-        self.current.take().is_some()
+        let had_extras = !self.extras.is_empty();
+        self.extras.clear();
+        self.current.take().is_some() || had_extras
     }
 
     /// Deletion sweep: drop the pinned asset when its managed record no
     /// longer exists (single delete, group delete, cap eviction — every
     /// mutation path revalidates). Returns whether the tray changed.
-    pub fn retain_existing(&mut self, exists: impl FnOnce(&str) -> bool) -> bool {
-        match &self.current {
-            Some(asset) if !exists(&asset.file) => {
+    pub fn retain_existing(&mut self, exists: impl Fn(&str) -> bool) -> bool {
+        let before = self.extras.len();
+        self.extras.retain(|asset| exists(&asset.file));
+        let mut changed = self.extras.len() != before;
+        if let Some(asset) = &self.current {
+            if !exists(&asset.file) {
                 self.current = None;
-                true
+                changed = true;
             }
-            _ => false,
         }
+        changed
     }
 }
 
@@ -2081,6 +2127,43 @@ mod tests {
         // Idempotent afterwards.
         assert!(!tray.retain_existing(|_| false));
         assert!(!tray.clear());
+    }
+
+    #[test]
+    fn input_tray_extra_references_dedupe_cap_and_sweep() {
+        let mut tray = InputTray::default();
+        let mk = |name: &str| {
+            let mut e = entry(name, Some("run-a"), Some("image"));
+            e.meta.content_type = "image/png".into();
+            e.path = PathBuf::from(format!("/library/{name}"));
+            input_asset(&e)
+        };
+        // No primary yet: the first "add reference" becomes the primary.
+        assert!(tray.add_extra(mk("a.png")));
+        assert_eq!(tray.current().map(|a| a.file.as_str()), Some("a.png"));
+        assert!(tray.extras().is_empty());
+        // Extras dedupe against the primary and each other, and cap.
+        assert!(!tray.add_extra(mk("a.png")));
+        assert!(tray.add_extra(mk("b.png")));
+        assert!(!tray.add_extra(mk("b.png")));
+        assert!(tray.add_extra(mk("c.png")));
+        assert!(tray.add_extra(mk("d.png")));
+        assert!(!tray.add_extra(mk("e.png")), "capped at MAX_EXTRAS");
+        assert_eq!(tray.extras().len(), InputTray::MAX_EXTRAS);
+        // Promoting an extra to primary removes it from the extras.
+        assert!(tray.select(mk("c.png")));
+        assert_eq!(tray.current().map(|a| a.file.as_str()), Some("c.png"));
+        assert_eq!(
+            tray.extras().iter().map(|a| a.file.as_str()).collect::<Vec<_>>(),
+            vec!["b.png", "d.png"]
+        );
+        // Deletion sweep drops only the vanished reference.
+        assert!(tray.retain_existing(|file| file != "b.png"));
+        assert_eq!(tray.extras().len(), 1);
+        assert!(tray.remove_extra(0));
+        assert!(!tray.remove_extra(0));
+        assert!(tray.clear());
+        assert!(tray.current().is_none() && tray.extras().is_empty());
     }
 
     #[test]
