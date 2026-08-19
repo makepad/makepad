@@ -5102,7 +5102,7 @@ impl App {
         self.ui.label(cx, ids!(library_hint)).set_text(
             cx,
             &format!(
-                "{count} resources · one tile per run · click to view · drag audio/video by DRAG · × removes the whole run"
+                "{count} resources · one tile per run · click to view · double-click = use as input · drag audio/video by DRAG · × removes the whole run"
             ),
         );
         // The Library surface browses the same disk-backed store; keep its
@@ -5166,7 +5166,7 @@ impl App {
             .unwrap_or_else(|| "run".to_string());
         self.ui.label(cx, ids!(run_tray_title)).set_text(
             cx,
-            &format!("RUN · {} · {} artifacts — click to view / use as input", truncate(&label, 34), members.len()),
+            &format!("RUN · {} · {} artifacts — click to view · double-click = use as input", truncate(&label, 34), members.len()),
         );
         let library = self.library.as_ref().expect("members imply a library");
         let gallery_widget = self.ui.widget(cx, ids!(library_gallery));
@@ -8627,6 +8627,9 @@ impl MatchEvent for App {
                 payload: PathBuf,
             },
             SuppressOpen,
+            /// Single click: view only.
+            View(usize),
+            /// Double click: view AND pin as the next transform's input.
             Open(usize),
         }
         let mut gallery_action = None;
@@ -8657,10 +8660,19 @@ impl MatchEvent for App {
                     .or(Some(GalleryAct::SuppressOpen));
                 break;
             }
-            if item.button(cx, ids!(card.title)).clicked(actions)
-                || item.view(cx, ids!(card)).finger_down(actions).is_some()
-            {
-                gallery_action = Some(GalleryAct::Open(index));
+            // Single click views; a double click also pins the artifact as
+            // the next transform's input (pinning on every click meant
+            // clearing the input tray before each ordinary generate).
+            if let Some(fe) = item.view(cx, ids!(card)).finger_down(actions) {
+                gallery_action = Some(if fe.tap_count >= 2 {
+                    GalleryAct::Open(index)
+                } else {
+                    GalleryAct::View(index)
+                });
+                break;
+            }
+            if item.button(cx, ids!(card.title)).clicked(actions) {
+                gallery_action = Some(GalleryAct::View(index));
                 break;
             }
         }
@@ -8680,6 +8692,14 @@ impl MatchEvent for App {
                 self.start_file_payload_drag(cx, window_id, payload);
             }
             Some(GalleryAct::SuppressOpen) => {}
+            Some(GalleryAct::View(index)) => {
+                let file = gallery_widget
+                    .borrow::<LibraryGallery>()
+                    .and_then(|gallery| gallery.file_at(index));
+                if let Some(file) = file {
+                    self.reopen_gallery(cx, &file);
+                }
+            }
             Some(GalleryAct::Open(index)) => {
                 let file = gallery_widget
                     .borrow::<LibraryGallery>()
@@ -8690,16 +8710,21 @@ impl MatchEvent for App {
             }
             None => {}
         }
-        // Run tray chips: an explicit pick — view it and pin it as input.
-        let mut chip_open = None;
+        // Run tray chips: single click views the member, double click also
+        // pins it as the next transform's input.
+        let mut chip_hit = None;
         for (slot, chip) in Self::run_chip_ids().iter().enumerate() {
-            if self.ui.view(cx, chip).finger_down(actions).is_some() {
-                chip_open = self.run_tray_files.get(slot).cloned();
+            if let Some(fe) = self.ui.view(cx, chip).finger_down(actions) {
+                chip_hit = self.run_tray_files.get(slot).cloned().map(|f| (f, fe.tap_count >= 2));
                 break;
             }
         }
-        if let Some(file) = chip_open {
-            self.open_gallery(cx, &file);
+        if let Some((file, pin)) = chip_hit {
+            if pin {
+                self.open_gallery(cx, &file);
+            } else {
+                self.reopen_gallery(cx, &file);
+            }
         }
         // Run-queue rows: cancel / move up.
         for (k, (cancel, up)) in [
