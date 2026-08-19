@@ -73,6 +73,7 @@ pub mod sa3_backend;
 pub mod discovery;
 pub mod server;
 pub mod sha256;
+pub mod splat_backend;
 pub mod subproc_img;
 pub mod testpattern;
 pub mod trellis_backend;

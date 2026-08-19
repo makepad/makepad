@@ -11,7 +11,8 @@
 // tables are built and consumed entirely on device here.
 
 #include <cuda_runtime.h>
-#include <cstdint>
+#include <math_constants.h>
+#include <stdint.h>
 
 #ifndef M_PIf
 #define M_PIf 3.14159265358979323846f
@@ -51,11 +52,8 @@ static __global__ void makepad_cuda_splat_repo3d_tables_f32_kernel(
     for (uint32_t p = threadIdx.x; p < pairs; p += blockDim.x) {
         const float value = (p < dim0) ? d0 : ((p < dim0 + dim1) ? d1 : d2);
         const float angle = value * freqs[p] * M_PIf;
-        float s;
-        float c;
-        sincosf(angle, &s, &c);
-        cos_out[out_base + p] = c;
-        sin_out[out_base + p] = s;
+        cos_out[out_base + p] = cosf(angle);
+        sin_out[out_base + p] = sinf(angle);
     }
 }
 

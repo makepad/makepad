@@ -30,6 +30,7 @@ default = [
     "upscale-native",
     "motion-native",
     "rig-native",
+    "splat-native",
 ]
 # Box-provisioned Python/Torch reference backends (FlashWorld, Music3,
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native
@@ -76,6 +77,10 @@ segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 upscale-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
 # Native HY-Motion decode -> rig retarget -> animated GLB.
 motion-native = ["dep:makepad-ai-motion", "dep:makepad-ai-common", "dep:makepad-gltf", "dep:makepad-render"]
+# Native TripoSplat image -> 3D gaussian splat. Needs BiRefNet (via
+# matte-native) for the cutout and the FLUX.2 VAE encoder (via the flux
+# family crate, which makepad-ai-splat depends on directly).
+splat-native = ["matte-native", "dep:makepad-ai-splat", "dep:makepad-ai-common"]
 # Native SkinTokens checkpoint conversion, inference, surface transfer and
 # lossless skinned-GLB augmentation. The reference Torch/bpy backend remains
 # separately available as `rig-oracle` through `python-backends`.
@@ -98,6 +103,7 @@ makepad-ai-motion = { path = "../../ai/models/motion", optional = true }
 makepad-ai-sfx = { path = "../../ai/models/sfx", optional = true }
 makepad-ai-music = { path = "../../ai/models/music", optional = true }
 makepad-ai-trellis = { path = "../../ai/models/trellis", optional = true }
+makepad-ai-splat = { path = "../../ai/models/splat", optional = true }
 makepad-ai-paint = { path = "../../ai/models/paint", optional = true }
 makepad-remesh = { path = "../../remesh", optional = true }
 makepad-gltf = { path = "../../gltf", optional = true }

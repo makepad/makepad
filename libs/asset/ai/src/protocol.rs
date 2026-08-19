@@ -353,6 +353,14 @@ pub struct GenerateRequestJson {
     /// Baked texture atlas size in texels. Default 1024, clamped 256..=4096.
     pub texture_size: Option<u32>,
 
+    // -- splat domain (triposplat backend) --
+    /// Target gaussian count for the splat PLY. Default 262144 (the model's
+    /// maximum); clamped to 32768..=262144 and rounded to a multiple of 32,
+    /// the decoder's gaussians-per-anchor stride. More gaussians = more
+    /// detail at linear storage and render cost; the denoiser runs once
+    /// regardless, only the decode scales.
+    pub gaussians: Option<u32>,
+
     // -- motion domain (hy-motion backend) --
     /// `"playable"` (default): the fixed playable-character clip set
     /// (idle/walk/jump/run/dance) from the backend's own prompts — the

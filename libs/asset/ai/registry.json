@@ -1555,6 +1555,63 @@
    "files": []
   },
   {
+   "id": "triposplat",
+   "domain": "splat",
+   "backend": "triposplat",
+   "available": true,
+   "gated": false,
+   "vram_gb": 20.0,
+   "min_vram_gb": 16.0,
+   "note": "TripoSplat (VAST-AI-Research, MIT code + weights) single image -> 3D gaussian splat on the native Rust/CUDA stack: native BiRefNet cutout, DINOv3 ViT-H/16+ conditioning, a FLUX.2 VAE latent condition, a 24-block rectified-flow denoiser over 8192 splat-latent tokens, and an 8-level octree + 16-block gaussian decoder. The whole bundle is role-addressed and pinned to an immutable revision, byte size and SHA-256. CUDA-only - availability fails closed without a GPU device. Request: input_b64 PNG -> one application/x-ply artifact (standard 3DGS binary little endian, pre-activation columns: opacity logit, log scales, wxyz quaternion). Params: seed, steps (default 20), guidance (default 3.0; <=1 disables CFG and halves the per-step cost), gaussians (32768..262144, default 262144, rounded to a multiple of 32 - the denoiser runs once regardless, only the decode scales). TripoSplat ships its OWN BiRefNet repack: same architecture and byte length as the birefnet-hr entry but different weights, so it is pinned separately rather than aliasing that cache blob. No Python/ComfyUI fallback.",
+   "files": [
+    {
+     "role": "dit",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "diffusion_models/triposplat_fp16.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/diffusion_models/triposplat_fp16.safetensors",
+     "size": 741106994,
+     "sha256": "c870b97ac1d6bc9177608a5ec625e19ef9f3c5019aa68f64b0fb7803abcd6d20"
+    },
+    {
+     "role": "splat-decoder",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "vae/triposplat_vae_decoder_fp16.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/vae/triposplat_vae_decoder_fp16.safetensors",
+     "size": 576148442,
+     "sha256": "ed0d0c3d43b599e326845d0ec70f3cf77be9a55e2d97627ac3b34d2830763cc8"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "clip_vision/dino_v3_vit_h.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/clip_vision/dino_v3_vit_h.safetensors",
+     "size": 1681247696,
+     "sha256": "a29ef35101a16966972a0d50732a6f3a608ff7cfffb2afa9bbe9007cb842cc53"
+    },
+    {
+     "role": "vae",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "vae/flux2-vae.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/vae/flux2-vae.safetensors",
+     "size": 336213556,
+     "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    {
+     "role": "native-matte",
+     "repo": "VAST-AI/TripoSplat",
+     "path": "background_removal/birefnet.safetensors",
+     "revision": "56a96e603204ec410c4da60c13ea4fa09a2169a9",
+     "cache_as": "triposplat/background_removal/birefnet.safetensors",
+     "size": 444473596,
+     "sha256": "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154"
+    }
+   ]
+  },
+  {
    "id": "birefnet-hr",
    "domain": "matte",
    "backend": "matte-native",

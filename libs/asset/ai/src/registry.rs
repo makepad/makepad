@@ -166,6 +166,11 @@ pub enum Domain {
     /// routes a text-to-image job to a model that fails closed without an
     /// image+mask pair.
     Inpaint,
+    /// Single object image -> 3D gaussian splat PLY (TripoSplat). Distinct
+    /// from `World`, which reconstructs a walkable SCENE from an image or
+    /// prompt: this is one object, reconstructed at the requested gaussian
+    /// budget, and the two are neither substitutable nor comparable in cost.
+    Splat,
 }
 
 impl Domain {
@@ -189,6 +194,7 @@ impl Domain {
             "upscale" => Some(Domain::Upscale),
             "control" => Some(Domain::Control),
             "inpaint" => Some(Domain::Inpaint),
+            "splat" => Some(Domain::Splat),
             _ => None,
         }
     }
@@ -213,6 +219,7 @@ impl Domain {
             Domain::Upscale => "upscale",
             Domain::Control => "control",
             Domain::Inpaint => "inpaint",
+            Domain::Splat => "splat",
         }
     }
 }

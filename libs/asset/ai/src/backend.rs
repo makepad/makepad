@@ -16,6 +16,12 @@ use crate::protocol::{GenerateRequestJson, RealtimeRequestJson};
 use crate::registry::{FileSpec, ModelSpec};
 use std::path::{Path, PathBuf};
 
+/// Splat-domain gaussian budget bounds, mirrored from
+/// `makepad_ai_splat::{GAUSSIANS_MIN, GAUSSIANS_MAX}` so the wire contract is
+/// enforced in builds without the `splat-native` feature too.
+pub const SPLAT_GAUSSIANS_MIN: u32 = 32_768;
+pub const SPLAT_GAUSSIANS_MAX: u32 = 262_144;
+
 /// Normalized generation parameters. Ranges are clamped here; `None` means
 /// "not requested" so each backend can apply its own domain default (image
 /// 512x512/4 steps, video 640x352/50 steps/124 frames, ...).
@@ -99,6 +105,11 @@ pub struct GenerateParams {
     pub decimation_target: Option<u32>,
     /// Baked texture atlas size; `None` = backend default.
     pub texture_size: Option<u32>,
+
+    // Splat domain (triposplat backend).
+    /// Target gaussian count; `None` = backend default (262144). Clamped and
+    /// rounded to the decoder stride by the model crate.
+    pub gaussians: Option<u32>,
 
     // Motion domain (hy-motion backend).
     /// `"prompt"` = one clip from `prompt`; anything else/None = the fixed
@@ -353,6 +364,9 @@ impl GenerateParams {
                 .decimation_target
                 .map(|v| v.clamp(1_000, 2_000_000)),
             texture_size: request.texture_size.map(|v| v.clamp(256, 4096)),
+            gaussians: request
+                .gaussians
+                .map(|v| v.clamp(SPLAT_GAUSSIANS_MIN, SPLAT_GAUSSIANS_MAX)),
 
             motion_mode: request.motion_mode.clone(),
 
@@ -1132,6 +1146,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
+        "triposplat" => cfg!(feature = "splat-native"),
         "rig-native" => cfg!(feature = "rig-native"),
         "motion-native" => cfg!(feature = "motion-native"),
         // Native Music3 lives on the same CUDA stack as SA3 (`audio`).
@@ -1180,6 +1195,13 @@ pub fn backend_provisioned(name: &str) -> bool {
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
+        // TripoSplat is CUDA-only like flux2/trellis: ~1.9B parameters of
+        // resident f32 with no CPU/Metal production path, so a box without a
+        // device must not advertise it.
+        #[cfg(feature = "splat-native")]
+        "triposplat" => crate::splat_backend::splat_cuda_provisioned(),
+        #[cfg(not(feature = "splat-native"))]
+        "triposplat" => false,
         #[cfg(feature = "python-backends")]
         "depth" => crate::depth_backend::depth_provisioned(),
         #[cfg(feature = "python-backends")]
@@ -1399,6 +1421,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         "flashworld" => Ok(Box::new(
             crate::world_backend::WorldBackend::new_flashworld(&spec.id),
         )),
+        #[cfg(feature = "splat-native")]
+        "triposplat" => Ok(Box::new(crate::splat_backend::SplatBackend::new_native(
+            &spec.id,
+        ))),
+        #[cfg(not(feature = "splat-native"))]
+        "triposplat" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a CUDA build with the 'splat-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(any(feature = "audio", feature = "python-backends"))]
         "music3" => Ok(Box::new(
             crate::music3_backend::Music3Backend::new_music3(&spec.id),

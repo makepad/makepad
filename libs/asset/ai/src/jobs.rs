@@ -619,6 +619,7 @@ mod tests {
             texture: None,
             decimation_target: None,
             texture_size: None,
+            gaussians: None,
             motion_mode: None,
             canny_low: None,
             canny_high: None,

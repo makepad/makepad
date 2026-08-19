@@ -693,6 +693,7 @@ mod tests {
             texture: None,
             decimation_target: None,
             texture_size: None,
+            gaussians: None,
             motion_mode: None,
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
