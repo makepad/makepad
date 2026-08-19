@@ -12,7 +12,7 @@ use crate::error::AssetAiError;
 use makepad_ai_common::backend::gpu_device_available;
 use makepad_ai_flux::flux2_pipeline::{
     flux2_dev_paths_from_root, flux2_klein_paths_from_root, Flux2DevPipeline, Flux2EditRequest,
-    Flux2GenerateRequest, Flux2KleinPipeline, FLUX2_DEV_DEFAULT_GUIDANCE,
+    Flux2GenerateRequest, Flux2Img2Img, Flux2KleinPipeline, FLUX2_DEV_DEFAULT_GUIDANCE,
     FLUX2_DEV_DEFAULT_SIZE, FLUX2_DEV_DEFAULT_STEPS,
 };
 use makepad_ai_flux::flux2_vae::flux2_image_from_rgb_u8;
@@ -113,6 +113,18 @@ impl ContentBackend for Flux2Backend {
             )));
         }
         cancel.check()?;
+        // img2img strength is not a FLUX.2 knob yet (the edit pipelines
+        // condition on reference TOKENS and always generate fully); refuse
+        // instead of silently ignoring a user setting.
+        if let Some(strength) = params.strength {
+            if (strength - 1.0).abs() > f32::EPSILON {
+                return Err(AssetAiError::Params(format!(
+                    "{} does not support img2img strength (got {strength}); instruction edits always regenerate from the reference tokens — omit `strength`",
+                    self.model_id
+                )));
+            }
+        }
+        let extra_refs = flux2_extra_reference_inputs(&params.inputs)?;
         progress("load", 0.05);
         let model_id = self.model_id.clone();
         let pipe = self
@@ -134,6 +146,17 @@ impl ContentBackend for Flux2Backend {
                     .map_err(|err| AssetAiError::Backend(format!("flux2 ref: {err}")))?;
                 let out_w = params.width.unwrap_or(width as u32).max(16) / 16 * 16;
                 let out_h = params.height.unwrap_or(height as u32).max(16) / 16 * 16;
+                // Extra references (`inputs` reference_1..N) get the same
+                // diffusers preprocessing as the primary one.
+                let mut references = vec![reference];
+                for (rgb, width, height) in &extra_refs {
+                    let (rgb, width, height) =
+                        flux2_prepare_edit_reference(rgb, *width, *height)?;
+                    references.push(
+                        flux2_image_from_rgb_u8(&rgb, width, height)
+                            .map_err(|err| AssetAiError::Backend(format!("flux2 extra ref: {err}")))?,
+                    );
+                }
                 cancel.check()?;
                 progress("edit", 0.1);
                 let request = Flux2EditRequest {
@@ -142,10 +165,11 @@ impl ContentBackend for Flux2Backend {
                     height: out_h,
                     steps: params.steps.unwrap_or(FLUX2_DEV_DEFAULT_STEPS as u32) as usize,
                     seed: params.seed,
-                    references: vec![reference],
+                    references,
                     noise: None,
                     teacher_ref_tokens: None,
                     teacher_embeds: None,
+                    init: None,
                 };
                 let guidance = params.guidance.unwrap_or(FLUX2_DEV_DEFAULT_GUIDANCE);
                 let steps_total = request.steps;
@@ -195,6 +219,7 @@ impl ContentBackend for Flux2Backend {
                     noise: None,
                     teacher_embeds: None,
                     teacher_steps: None,
+                    init: None,
                 };
                 let steps_total = request.steps;
                 let result = {
@@ -228,6 +253,13 @@ impl ContentBackend for Flux2Backend {
                     .map_err(|err| AssetAiError::Backend(format!("flux2 ref: {err}")))?;
                 let out_w = params.width.unwrap_or(width as u32).max(16) / 16 * 16;
                 let out_h = params.height.unwrap_or(height as u32).max(16) / 16 * 16;
+                let mut references = vec![reference];
+                for (rgb, width, height) in &extra_refs {
+                    references.push(
+                        flux2_image_from_rgb_u8(rgb, *width, *height)
+                            .map_err(|err| AssetAiError::Backend(format!("flux2 extra ref: {err}")))?,
+                    );
+                }
                 cancel.check()?;
                 progress("edit", 0.15);
                 let request = Flux2EditRequest {
@@ -236,10 +268,11 @@ impl ContentBackend for Flux2Backend {
                     height: out_h,
                     steps: params.steps.unwrap_or(4) as usize,
                     seed: params.seed,
-                    references: vec![reference],
+                    references,
                     noise: None,
                     teacher_ref_tokens: None,
                     teacher_embeds: None,
+                    init: None,
                 };
                 let result = pipe
                     .edit(&request)
@@ -313,12 +346,22 @@ impl ContentBackend for Flux2Backend {
         let out_w = config.width.max(16) / 16 * 16;
         let out_h = config.height.max(16) / 16 * 16;
         cancel.check()?;
-        // TODO(realtime): Flux2EditRequest has no denoise-strength / noise-
-        // scale knob exposed today (see flux2_pipeline.rs) — `config.strength`
-        // is accepted on the live wire protocol but NOT applied here; every
-        // live_step call is a full Klein edit at `config.steps`. Wire it
-        // through `Flux2EditRequest.noise` (or a new pipeline field) if/when
-        // flux2_pipeline grows one — do not invent pipeline internals here.
+        // img2img: the incoming frame is ALSO the sampler's init at
+        // `config.strength` (ComfyUI CONST semantics — start at sigma index
+        // floor((1-strength)*steps), run the remaining steps; strength 1.0 =
+        // the full Klein edit from noise, lower = fewer steps, closer to the
+        // frame). The init must match the output size; a feed frame of another
+        // size is resampled by the session before it gets here, so mismatch is
+        // a protocol error we surface rather than silently restyle from noise.
+        let init = if config.strength < 1.0 {
+            Some(Flux2Img2Img {
+                image: flux2_image_from_rgb_u8(&init.data, init.width as usize, init.height as usize)
+                    .map_err(|err| AssetAiError::Backend(format!("flux2 live init: {err}")))?,
+                strength: config.strength.clamp(0.0, 1.0),
+            })
+        } else {
+            None
+        };
         let request = Flux2EditRequest {
             prompt: config.prompt.clone(),
             width: out_w,
@@ -329,6 +372,7 @@ impl ContentBackend for Flux2Backend {
             noise: None,
             teacher_ref_tokens: None,
             teacher_embeds: None,
+            init,
         };
         let result = pipe
             .edit(&request)
@@ -442,6 +486,41 @@ fn center_crop_rgb(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Ve
         out[drow..drow + dw * 3].copy_from_slice(&src[srow..srow + dw * 3]);
     }
     out
+}
+
+/// Extra edit references from the named inputs: every `reference_N` /
+/// `reference` PNG, in wire order, decoded to RGB8. Any other named input
+/// is refused (a FLUX.2 edit has no other input roles; a typo must not be
+/// silently dropped). Capped so a runaway client can't submit a 40-image
+/// context window.
+pub const FLUX2_MAX_EXTRA_REFERENCES: usize = 7;
+
+fn flux2_extra_reference_inputs(
+    inputs: &[crate::backend::NamedInput],
+) -> Result<Vec<(Vec<u8>, usize, usize)>, AssetAiError> {
+    let mut out = Vec::new();
+    for input in inputs {
+        let is_ref = input.name == "reference" || input.name.starts_with("reference_");
+        if !is_ref {
+            return Err(AssetAiError::Params(format!(
+                "flux2 edit: unknown named input {:?} (only reference_1..N PNGs are accepted next to input_b64)",
+                input.name
+            )));
+        }
+        if !input.content_type.to_ascii_lowercase().starts_with("image/png") {
+            return Err(AssetAiError::Params(format!(
+                "flux2 edit: named input {:?} must be image/png, got {:?}",
+                input.name, input.content_type
+            )));
+        }
+        if out.len() >= FLUX2_MAX_EXTRA_REFERENCES {
+            return Err(AssetAiError::Params(format!(
+                "flux2 edit: at most {FLUX2_MAX_EXTRA_REFERENCES} extra references"
+            )));
+        }
+        out.push(decode_png_rgb(&input.bytes)?);
+    }
+    Ok(out)
 }
 
 fn decode_png_rgb(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
@@ -566,5 +645,26 @@ mod flux2_edit_reference_tests {
         let out = center_crop_rgb(&src, 4, 4, 2, 2);
         assert_eq!(out.len(), 2 * 2 * 3);
         assert!(out.chunks_exact(3).any(|px| px == [9, 9, 9]));
+    }
+
+    fn named(name: &str, content_type: &str) -> crate::backend::NamedInput {
+        crate::backend::NamedInput {
+            name: name.to_string(),
+            content_type: content_type.to_string(),
+            bytes: vec![0u8; 4],
+        }
+    }
+
+    #[test]
+    fn extra_references_refuse_unknown_roles_and_non_png() {
+        assert!(flux2_extra_reference_inputs(&[]).unwrap().is_empty());
+        let err = flux2_extra_reference_inputs(&[named("mesh", "image/png")]).unwrap_err();
+        assert!(format!("{err:?}").contains("unknown named input"), "{err:?}");
+        let err =
+            flux2_extra_reference_inputs(&[named("reference_1", "image/jpeg")]).unwrap_err();
+        assert!(format!("{err:?}").contains("must be image/png"), "{err:?}");
+        // A reference role with undecodable bytes fails at decode (not
+        // silently skipped).
+        assert!(flux2_extra_reference_inputs(&[named("reference_1", "image/png")]).is_err());
     }
 }
