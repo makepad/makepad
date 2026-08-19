@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023-2026 The ggml authors
+//
+// Substantial portions derived from ggml / llama.cpp
+// (https://github.com/ggml-org/llama.cpp), MIT licensed.
+// The original copyright notice and permission notice are retained.
+// See libs/ai/NOTICE and, where present, LICENSE in this directory.
+//
 #pragma once
 // This file contains primitives that expose the tensor core PTX instructions for CUDA code.
 // The primitives can be used in a similar way as the nvcuda::wmma interface but with a well-defined memory layout.
