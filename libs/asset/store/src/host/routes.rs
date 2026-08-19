@@ -34,6 +34,10 @@ pub enum Outcome {
 /// Everything a route handler may reach, shared per worker thread.
 #[derive(Clone)]
 pub struct RouteCtx {
+    /// Requests served on this plane since start. Paired with the accept
+    /// counter it shows what a client's transport really costs: 30 blobs as
+    /// 30 requests over 30 connections, or as 2 requests over 1.
+    pub requests: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub state: StateHandle,
     pub cfg: std::sync::Arc<ServerConfig>,
     pub server_id: [u8; 16],

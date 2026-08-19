@@ -3,9 +3,18 @@
 //! This is the only module that touches a TCP socket for HTTP. Hard rules,
 //! all fail-closed:
 //!
-//! - One request per connection. Every request carries `Connection: close`;
-//!   body framing is always an exact `Content-Length`, never read-to-EOF and
+//! - Body framing is always an exact `Content-Length`, never read-to-EOF and
 //!   never chunked. A response with `Transfer-Encoding` is refused outright.
+//! - Connections are REUSED when a pool is supplied ([`ConnPool`]): the
+//!   request says `Connection: keep-alive`, and the socket goes back to the
+//!   pool only when the response was framed exactly, its body was consumed
+//!   to the last declared byte, and neither side asked to close. Anything
+//!   else drops the socket — a connection whose framing we are not certain
+//!   of is never reused. Without a pool the old behaviour stands: one
+//!   request per connection, `Connection: close`.
+//! - A pooled socket the server has since closed shows up as EOF before any
+//!   response byte; that exact case (and only that case) retries once on a
+//!   fresh connection, because the server provably processed nothing.
 //! - The response head is budgeted: total head bytes, line bytes, header
 //!   count, status-line shape. `HTTP/1.1` only.
 //! - Redirects are never followed; 3xx is a protocol refusal. 1xx and
@@ -23,7 +32,56 @@ use crate::error::{io_err, ClientError, ClientResult};
 use crate::wire::{target_byte_ok, MAX_TARGET_BYTES};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Idle keep-alive sockets, keyed by peer. One pool belongs to ONE worker:
+/// [`crate::api::Api`] gives every clone its own, so two lanes never
+/// interleave requests on one socket.
+///
+/// Bounded on purpose — a pool is a latency optimisation, not a resource to
+/// accumulate. Sockets past the cap are dropped rather than kept.
+pub struct ConnPool {
+    idle: Mutex<Vec<(SocketAddr, TcpStream)>>,
+    max_idle: usize,
+}
+
+impl Default for ConnPool {
+    fn default() -> Self {
+        ConnPool::new(4)
+    }
+}
+
+impl std::fmt::Debug for ConnPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnPool").finish_non_exhaustive()
+    }
+}
+
+impl ConnPool {
+    pub fn new(max_idle: usize) -> ConnPool {
+        ConnPool { idle: Mutex::new(Vec::new()), max_idle: max_idle.max(1) }
+    }
+
+    fn take(&self, addr: SocketAddr) -> Option<TcpStream> {
+        let mut idle = self.idle.lock().ok()?;
+        let i = idle.iter().position(|(a, _)| *a == addr)?;
+        Some(idle.swap_remove(i).1)
+    }
+
+    fn put(&self, addr: SocketAddr, stream: TcpStream) {
+        let Ok(mut idle) = self.idle.lock() else { return };
+        if idle.len() >= self.max_idle {
+            return;
+        }
+        idle.push((addr, stream));
+    }
+
+    /// Idle sockets currently parked (diagnostics and tests).
+    pub fn idle_len(&self) -> usize {
+        self.idle.lock().map(|i| i.len()).unwrap_or(0)
+    }
+}
 
 pub const MAX_HEAD_BYTES: usize = 32 * 1024;
 pub const MAX_HEADER_LINE: usize = 8 * 1024;
@@ -176,8 +234,9 @@ pub struct ResponseHead {
 
 /// An accepted response with its body still on the socket. Exactly
 /// `content_length` bytes will be read; the connection is then dropped.
-pub struct Response {
-    stream: TcpStream,
+pub struct Response<'a> {
+    /// `None` once the socket has been handed back to the pool.
+    stream: Option<TcpStream>,
     head: ResponseHead,
     /// Body bytes over-read while parsing the head.
     buffered: Vec<u8>,
@@ -185,11 +244,35 @@ pub struct Response {
     remaining: u64,
     deadline: Instant,
     read_timeout: Duration,
+    /// Where a fully consumed, cleanly framed socket goes back to.
+    pool: Option<&'a ConnPool>,
+    addr: SocketAddr,
+    /// Cleared by any framing doubt: a protocol error, a body error, an
+    /// early drop, or `Connection: close` from either side.
+    reusable: bool,
 }
 
-impl Response {
+impl Response<'_> {
     pub fn head(&self) -> &ResponseHead {
         &self.head
+    }
+
+    /// Hand a fully consumed socket back to the pool. Called when the body
+    /// ends and on drop; doing it here (not at the call site) means every
+    /// early exit — abort, error, `?` — simply keeps the socket out of the
+    /// pool, which is the safe direction.
+    fn recycle(&mut self) {
+        if !self.reusable || self.remaining != 0 || self.buffered.len() != self.pos {
+            return;
+        }
+        let (Some(pool), Some(stream)) = (self.pool, self.stream.take()) else {
+            return;
+        };
+        pool.put(self.addr, stream);
+    }
+
+    fn stream_mut(&mut self) -> ClientResult<&mut TcpStream> {
+        self.stream.as_mut().ok_or(ClientError::Protocol { what: "response socket gone" })
     }
 
     /// Read up to `out.len()` body bytes. `Ok(0)` exactly when the body is
@@ -197,6 +280,7 @@ impl Response {
     /// bytes read so far are still valid); anything else is final.
     pub fn read_chunk(&mut self, out: &mut [u8]) -> ClientResult<usize> {
         if self.remaining == 0 {
+            self.recycle();
             return Ok(0);
         }
         if out.is_empty() {
@@ -212,22 +296,29 @@ impl Response {
                 self.pos = 0;
             }
             self.remaining -= n as u64;
+            if self.remaining == 0 {
+                self.recycle();
+            }
             return Ok(n);
         }
         loop {
             let now = Instant::now();
             if now >= self.deadline {
+                self.reusable = false;
                 return Err(ClientError::Timeout { op: "http body" });
             }
             let timeout = (self.deadline - now).min(self.read_timeout).max(Duration::from_millis(1));
-            self.stream
+            let remaining = self.remaining;
+            let want = (out.len() as u64).min(remaining) as usize;
+            let stream = self.stream_mut()?;
+            stream
                 .set_read_timeout(Some(timeout))
                 .map_err(io_err("http set body timeout"))?;
-            let want = (out.len() as u64).min(self.remaining) as usize;
-            match self.stream.read(&mut out[..want]) {
+            match stream.read(&mut out[..want]) {
                 Ok(0) => {
                     // Peer closed with body bytes still owed: a truncated
                     // transfer, retryable via Range resume.
+                    self.reusable = false;
                     return Err(ClientError::Io {
                         op: "http body",
                         kind: std::io::ErrorKind::UnexpectedEof,
@@ -235,13 +326,19 @@ impl Response {
                 }
                 Ok(n) => {
                     self.remaining -= n as u64;
+                    if self.remaining == 0 {
+                        self.recycle();
+                    }
                     return Ok(n);
                 }
                 Err(e) => match e.kind() {
                     std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::TimedOut
                     | std::io::ErrorKind::Interrupted => continue,
-                    kind => return Err(ClientError::Io { op: "http body", kind }),
+                    kind => {
+                        self.reusable = false;
+                        return Err(ClientError::Io { op: "http body", kind });
+                    }
                 },
             }
         }
@@ -270,21 +367,98 @@ impl Response {
     }
 }
 
+impl Drop for Response<'_> {
+    fn drop(&mut self) {
+        // A body that was not read to its last byte leaves the socket at an
+        // unknown offset: never pooled, just closed.
+        self.recycle();
+    }
+}
+
 /// Issue one request and parse the response head. On success the body (if
-/// any) is still unread inside the returned [`Response`].
-pub fn http_call(addr: SocketAddr, req: &Request<'_>, limits: &HttpLimits) -> ClientResult<Response> {
+/// any) is still unread inside the returned [`Response`]. One connection per
+/// call; see [`http_call_pooled`] for keep-alive.
+pub fn http_call<'a>(
+    addr: SocketAddr,
+    req: &Request<'_>,
+    limits: &HttpLimits,
+) -> ClientResult<Response<'a>> {
+    http_call_pooled(addr, req, limits, None)
+}
+
+/// As [`http_call`], reusing (and returning) a keep-alive socket from `pool`.
+///
+/// A socket taken from the pool may have been closed by the server while it
+/// sat idle. That failure is invisible until the read, and it is provably
+/// harmless — the server processed nothing — so it is retried once on a
+/// fresh connection. Any other failure is reported as-is.
+pub fn http_call_pooled<'a>(
+    addr: SocketAddr,
+    req: &Request<'_>,
+    limits: &HttpLimits,
+    pool: Option<&'a ConnPool>,
+) -> ClientResult<Response<'a>> {
+    match call_once(addr, req, limits, pool, true) {
+        Err(HttpAttemptError::StaleIdle) => call_once(addr, req, limits, pool, false)
+            .map_err(|e| e.into_client_error()),
+        other => other.map_err(|e| e.into_client_error()),
+    }
+}
+
+/// Failure of one attempt. `StaleIdle` is the only retryable shape: a pooled
+/// socket that died before the server said anything.
+enum HttpAttemptError {
+    StaleIdle,
+    Client(ClientError),
+}
+
+impl HttpAttemptError {
+    fn into_client_error(self) -> ClientError {
+        match self {
+            HttpAttemptError::Client(e) => e,
+            HttpAttemptError::StaleIdle => {
+                ClientError::Io { op: "http response head", kind: std::io::ErrorKind::UnexpectedEof }
+            }
+        }
+    }
+}
+
+impl From<ClientError> for HttpAttemptError {
+    fn from(e: ClientError) -> Self {
+        HttpAttemptError::Client(e)
+    }
+}
+
+fn call_once<'a>(
+    addr: SocketAddr,
+    req: &Request<'_>,
+    limits: &HttpLimits,
+    pool: Option<&'a ConnPool>,
+    allow_pooled: bool,
+) -> Result<Response<'a>, HttpAttemptError> {
     limits.validate()?;
     check_target(req.target)?;
     if req.body.is_some() && !req.method.takes_body() {
-        return Err(ClientError::InvalidInput { what: "body on bodyless method" });
+        return Err(ClientError::InvalidInput { what: "body on bodyless method" }.into());
     }
 
-    let stream = TcpStream::connect_timeout(
-        &addr,
-        Duration::from_millis(limits.connect_timeout_ms.max(1)),
-    )
-    .map_err(io_err("http connect"))?;
-    stream.set_nodelay(true).map_err(io_err("http nodelay"))?;
+    let pooled = match (pool, allow_pooled) {
+        (Some(p), true) => p.take(addr),
+        _ => None,
+    };
+    let from_pool = pooled.is_some();
+    let stream = match pooled {
+        Some(s) => s,
+        None => {
+            let s = TcpStream::connect_timeout(
+                &addr,
+                Duration::from_millis(limits.connect_timeout_ms.max(1)),
+            )
+            .map_err(io_err("http connect"))?;
+            s.set_nodelay(true).map_err(io_err("http nodelay"))?;
+            s
+        }
+    };
     stream
         .set_write_timeout(Some(Duration::from_millis(limits.write_timeout_ms.max(1))))
         .map_err(io_err("http set write timeout"))?;
@@ -311,12 +485,22 @@ pub fn http_call(addr: SocketAddr, req: &Request<'_>, limits: &HttpLimits) -> Cl
         out.extend_from_slice(format!("Content-Type: {}\r\n", req.body_content_type).as_bytes());
         out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     }
-    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(if pool.is_some() {
+        b"Connection: keep-alive\r\n\r\n" as &[u8]
+    } else {
+        b"Connection: close\r\n\r\n"
+    });
     if let Some(body) = req.body {
         out.extend_from_slice(body);
     }
     let mut stream = stream;
-    stream.write_all(&out).map_err(io_err("http write request"))?;
+    if let Err(e) = stream.write_all(&out) {
+        if from_pool {
+            // The server closed this idle socket; nothing was processed.
+            return Err(HttpAttemptError::StaleIdle);
+        }
+        return Err(io_err("http write request")(e).into());
+    }
 
     // ---- response head ----
     let head_ms = req.head_deadline_ms.unwrap_or(limits.head_deadline_ms).max(1);
@@ -328,11 +512,11 @@ pub fn http_call(addr: SocketAddr, req: &Request<'_>, limits: &HttpLimits) -> Cl
             break idx;
         }
         if buf.len() > MAX_HEAD_BYTES {
-            return Err(ClientError::Protocol { what: "response head too large" });
+            return Err(ClientError::Protocol { what: "response head too large" }.into());
         }
         let now = Instant::now();
         if now >= head_deadline {
-            return Err(ClientError::Timeout { op: "http response head" });
+            return Err(ClientError::Timeout { op: "http response head" }.into());
         }
         let timeout = (head_deadline - now).min(read_timeout).max(Duration::from_millis(1));
         stream
@@ -343,10 +527,16 @@ pub fn http_call(addr: SocketAddr, req: &Request<'_>, limits: &HttpLimits) -> Cl
         match stream.read(&mut buf[len..]) {
             Ok(0) => {
                 buf.truncate(len);
+                if from_pool && buf.is_empty() {
+                    // Idle socket the server had already closed: retry once
+                    // on a fresh connection, because nothing was processed.
+                    return Err(HttpAttemptError::StaleIdle);
+                }
                 return Err(ClientError::Io {
                     op: "http response head",
                     kind: std::io::ErrorKind::UnexpectedEof,
-                });
+                }
+                .into());
             }
             Ok(n) => buf.truncate(len + n),
             Err(e) => {
@@ -355,30 +545,47 @@ pub fn http_call(addr: SocketAddr, req: &Request<'_>, limits: &HttpLimits) -> Cl
                     std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::TimedOut
                     | std::io::ErrorKind::Interrupted => continue,
-                    kind => return Err(ClientError::Io { op: "http response head", kind }),
+                    kind => {
+                        if from_pool && buf.is_empty() {
+                            return Err(HttpAttemptError::StaleIdle);
+                        }
+                        return Err(ClientError::Io { op: "http response head", kind }.into());
+                    }
                 }
             }
         }
     };
 
-    let head =
-        parse_response_head(&buf[..head_end], req.method == Method::Head, req.allow_no_content)?;
+    let (head, peer_keeps_alive) = parse_response_head_conn(
+        &buf[..head_end],
+        req.method == Method::Head,
+        req.allow_no_content,
+    )?;
     let body_ms = req.body_deadline_ms.unwrap_or(limits.body_deadline_ms).max(1);
     let remaining = if req.method == Method::Head { 0 } else { head.content_length };
     let buffered = buf.split_off(head_end + 4);
     // Over-read past the declared body is a framing violation.
     if buffered.len() as u64 > remaining {
-        return Err(ClientError::Protocol { what: "bytes past declared body" });
+        return Err(ClientError::Protocol { what: "bytes past declared body" }.into());
     }
-    Ok(Response {
-        stream,
+    let mut resp = Response {
+        stream: Some(stream),
         head,
         buffered,
         pos: 0,
         remaining,
         deadline: Instant::now() + Duration::from_millis(body_ms),
         read_timeout,
-    })
+        pool,
+        addr,
+        reusable: pool.is_some() && peer_keeps_alive,
+    };
+    // A bodyless response is already complete: pool it now rather than on a
+    // read the caller may never make.
+    if resp.remaining == 0 {
+        resp.recycle();
+    }
+    Ok(resp)
 }
 
 fn check_target(target: &str) -> ClientResult<()> {
@@ -417,6 +624,17 @@ pub fn parse_response_head(
     is_head_request: bool,
     allow_no_content: bool,
 ) -> ClientResult<ResponseHead> {
+    parse_response_head_conn(block, is_head_request, allow_no_content).map(|(head, _)| head)
+}
+
+/// As [`parse_response_head`], also reporting whether the peer is willing to
+/// keep the connection alive. `Connection: close` (or anything that is not
+/// exactly `keep-alive`) means this socket is single-use.
+pub fn parse_response_head_conn(
+    block: &[u8],
+    is_head_request: bool,
+    allow_no_content: bool,
+) -> ClientResult<(ResponseHead, bool)> {
     let mut lines = SplitCrlf { rest: block };
     let status_line = lines.next().ok_or(ClientError::Protocol { what: "empty response" })?;
 
@@ -458,6 +676,7 @@ pub fn parse_response_head(
     let mut content_type: Option<String> = None;
     let mut content_range: Option<String> = None;
     let mut etag: Option<String> = None;
+    let mut connection: Option<String> = None;
     let mut count = 0usize;
     for line in lines {
         count += 1;
@@ -496,6 +715,7 @@ pub fn parse_response_head(
             "transfer-encoding" => &mut transfer_encoding,
             "content-type" => &mut content_type,
             "content-range" => &mut content_range,
+            "connection" => &mut connection,
             "etag" => &mut etag,
             _ => continue,
         };
@@ -563,7 +783,14 @@ pub fn parse_response_head(
         return Err(ClientError::Protocol { what: "206 on head" });
     }
 
-    Ok(ResponseHead { status, content_length, content_type, content_range, etag })
+    // Keep-alive is claimed only on an explicit `keep-alive`: HTTP/1.1's
+    // default is persistent, but a client that guesses wrong here corrupts
+    // its NEXT request, so the conservative reading is the only safe one.
+    let keep_alive = matches!(
+        connection.as_deref().map(str::trim),
+        Some(v) if v.eq_ignore_ascii_case("keep-alive")
+    );
+    Ok((ResponseHead { status, content_length, content_type, content_range, etag }, keep_alive))
 }
 
 fn parse_content_length(cl: &str) -> ClientResult<u64> {
