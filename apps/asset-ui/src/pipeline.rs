@@ -17,8 +17,7 @@
 
 use makepad_asset_ai::fleet::{self, BoxSnapshot};
 use makepad_asset_ai::protocol::{
-    ArtifactRefJson, GenerateRequestJson, GenerateResponseJson, JobStatusJson, NamedInputJson,
-};
+    ArtifactRefJson, GenerateRequestJson, GenerateResponseJson, JobStatusJson, NamedInputJson, LoraRefJson};
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +42,8 @@ pub const IMAGE_STEPS: &[u32] = &[4, 8, 12, 20, 28, 50];
 /// (reference tokens only); lower = the sampler starts from the VAE-encoded
 /// input at sigma index floor((1-strength)*steps), keeping more of it.
 pub const EDIT_STRENGTHS: &[f32] = &[1.0, 0.85, 0.7, 0.55, 0.4, 0.25];
+/// LoRA strength choices for the image stage.
+pub const LORA_STRENGTHS: &[f32] = &[1.0, 0.8, 0.6, 0.4, 1.2];
 /// RIFE interpolation factors offered for video (1 = off).
 pub const VIDEO_INTERPOLATE: &[u32] = &[1, 2, 4];
 /// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
@@ -117,6 +118,9 @@ pub struct GenParams {
     /// Edit-stage img2img strength; 1.0 = full edit (no init), see
     /// [`EDIT_STRENGTHS`].
     pub edit_strength: f32,
+    /// FLUX.1 LoRA adapter for the image stage: (name under the box's
+    /// `loras/` drop-box, strength). None = pristine model.
+    pub image_lora: Option<(String, f32)>,
     pub video_size: (u32, u32),
     pub video_frames: u32,
     pub video_steps: u32,
@@ -143,6 +147,7 @@ impl Default for GenParams {
             mesh_trellis_texture: false,
             motion_prompt: String::new(),
             edit_strength: 1.0,
+            image_lora: None,
             video_size: VIDEO_SIZES[0],
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
@@ -1375,6 +1380,15 @@ impl Pipeline {
                 request.width = Some(self.gen.image_size.0);
                 request.height = Some(self.gen.image_size.1);
                 request.steps = self.gen.image_steps;
+                // LoRA: only the FLUX.1 (`flux`) backend applies adapters;
+                // the service refuses them elsewhere (visible error, never
+                // a silently un-adapted picture).
+                if let Some((name, strength)) = &self.gen.image_lora {
+                    request.loras = Some(vec![LoraRefJson {
+                        name: name.clone(),
+                        strength: Some(*strength as f64),
+                    }]);
+                }
             }
             // Instruction edit: the prompt IS the edit instruction; output
             // size follows the reference (backend default), steps = model

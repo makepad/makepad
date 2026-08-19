@@ -42,6 +42,8 @@ pub struct SavedFastPreset {
     pub video_audio: Option<bool>,
     pub edit_strength: Option<f32>,
     pub video_interpolate: Option<u32>,
+    pub image_lora: Option<String>,
+    pub image_lora_strength: Option<f32>,
     pub music_seconds: u32,
 }
 
@@ -164,6 +166,8 @@ pub fn snapshot(
         video_audio: Some(gen.video_audio),
         edit_strength: Some(gen.edit_strength),
         video_interpolate: Some(gen.video_interpolate),
+        image_lora: gen.image_lora.as_ref().map(|(name, _)| name.clone()),
+        image_lora_strength: gen.image_lora.as_ref().map(|(_, strength)| *strength),
         music_seconds: gen.music_seconds,
     }
 }
@@ -182,6 +186,11 @@ pub fn apply_gen(saved: &SavedFastPreset) -> GenParams {
         video_audio: saved.video_audio.unwrap_or(true),
         edit_strength: saved.edit_strength.unwrap_or(1.0),
         video_interpolate: saved.video_interpolate.unwrap_or(1),
+        image_lora: saved
+            .image_lora
+            .clone()
+            .filter(|name| !name.is_empty())
+            .map(|name| (name, saved.image_lora_strength.unwrap_or(1.0))),
         music_seconds: saved.music_seconds,
     }
 }
