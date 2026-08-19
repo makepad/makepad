@@ -130,6 +130,11 @@ pub struct ServerConfig {
     pub gc_sweep_batch: u32,
     /// Assets one retention step visits.
     pub gc_retain_batch: u32,
+    /// Ordered batch blob pull (`POST /v1/blobs/fetch`). Bounded so one
+    /// request can never become an unbounded read: most items per batch, and
+    /// most bytes one batch may stream.
+    pub batch_max_items: u32,
+    pub batch_max_bytes: u64,
     /// Ensure the admin principal + a fresh admin token at startup, writing
     /// the token (once, mode 0600) to `<root>/admin-token`.
     pub bootstrap_admin: bool,
@@ -262,6 +267,8 @@ impl ServerConfig {
             gc_mark_batch: 64,
             gc_sweep_batch: 128,
             gc_retain_batch: 64,
+            batch_max_items: 32,
+            batch_max_bytes: 16 * 1024 * 1024,
             job_profiles: default_job_profiles(),
             bootstrap_admin: false,
             discovery: None,
@@ -336,6 +343,12 @@ impl ServerConfig {
             || self.gc_retain_batch > 100_000
         {
             return Err(ServerError::InvalidInput { what: "config gc batch" });
+        }
+        if self.batch_max_items == 0 || self.batch_max_items > 256 {
+            return Err(ServerError::InvalidInput { what: "config batch max items" });
+        }
+        if self.batch_max_bytes == 0 || self.batch_max_bytes > 256 * 1024 * 1024 {
+            return Err(ServerError::InvalidInput { what: "config batch max bytes" });
         }
         if self.job_profiles.len() > 64 {
             return Err(ServerError::InvalidInput { what: "config job profiles count" });

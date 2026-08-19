@@ -49,7 +49,7 @@ use makepad_asset_data::{
     DerivedVariantId, DerivedVariantManifest, FileRole, GameAlias, GameRevisionId,
     GameRevisionManifest, ImportRevisionId, ResolvedVariantMap, VariantSetId, VariantSetManifest,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -366,11 +366,21 @@ pub struct RuntimeConfig {
     /// A blob fetch whose declared length is at or below this goes FAST.
     /// Thumbnails and icons are far below it; media and models are above.
     pub fast_blob_max_bytes: u64,
+    /// Most blob fetches one fast-lane worker coalesces into a single
+    /// ordered request. 1 disables batching (every fetch is its own GET).
+    /// Kept at or under the server's own batch ceiling; a server that
+    /// refuses the route makes this a no-op through the fallback path.
+    pub fast_batch_max_items: usize,
 }
 
 impl RuntimeConfig {
     pub fn default_v1() -> RuntimeConfig {
-        RuntimeConfig { fast_workers: 4, bulk_workers: 2, fast_blob_max_bytes: 512 * 1024 }
+        RuntimeConfig {
+            fast_workers: 4,
+            bulk_workers: 2,
+            fast_blob_max_bytes: 512 * 1024,
+            fast_batch_max_items: 16,
+        }
     }
 
     fn validate(&self) -> ClientResult<()> {
@@ -379,6 +389,11 @@ impl RuntimeConfig {
         }
         if self.fast_workers + self.bulk_workers > 64 {
             return Err(ClientError::InvalidInput { what: "runtime lane workers over budget" });
+        }
+        if self.fast_batch_max_items == 0
+            || self.fast_batch_max_items > crate::wire::MAX_BLOB_BATCH_ITEMS
+        {
+            return Err(ClientError::InvalidInput { what: "runtime batch size" });
         }
         Ok(())
     }
@@ -442,6 +457,23 @@ impl LaneQueue {
         }
     }
 
+    /// Take up to `max` further blob fetches from the head of the queue, in
+    /// queue order — which IS priority order, including anything a
+    /// newest-first submit pushed to the front. Only ever called by a worker
+    /// that just took a batchable request, so it never blocks.
+    fn drain_batchable(&self, out: &mut Vec<(RequestId, ClientRequest)>, max: usize) {
+        let mut state = self.state.lock().expect("lane queue");
+        while out.len() < max {
+            match state.items.front() {
+                Some((_, request)) if batchable(request) => {
+                    let item = state.items.pop_front().expect("front exists");
+                    out.push(item);
+                }
+                _ => break,
+            }
+        }
+    }
+
     fn close(&self) {
         self.state.lock().expect("lane queue").closed = true;
         self.wake.notify_all();
@@ -498,9 +530,12 @@ impl ClientRuntime {
             } else {
                 format!("asset-client-bulk-{}", n - config.fast_workers)
             };
+            // Only the fast lane coalesces: a bulk transfer is already one
+            // big body, and batching two of them would just delay the first.
+            let batch_max = if lane_is_fast { config.fast_batch_max_items } else { 1 };
             let join = std::thread::Builder::new()
                 .name(name)
-                .spawn(move || worker(client, queue, tx, stage, cancelled))
+                .spawn(move || worker(client, queue, tx, stage, cancelled, batch_max))
                 .map_err(|e| ClientError::Io { op: "spawn runtime worker", kind: e.kind() })?;
             joins.push(join);
         }
@@ -645,14 +680,159 @@ fn classify(request: &ClientRequest, fast_blob_max_bytes: u64) -> Lane {
     }
 }
 
+/// A request that can ride an ordered batch pull: a blob fetch whose size the
+/// caller declared (an undeclared size cannot honour a per-item cap, and it
+/// is a bulk-lane request anyway).
+fn batchable(request: &ClientRequest) -> bool {
+    matches!(request, ClientRequest::FetchBlob { expected_len: Some(_), .. })
+}
+
+/// Serve several queued blob fetches as ONE ordered request.
+///
+/// Queue order is priority order, and the server streams the frames in
+/// exactly that order, so the first thing the UI asked for is the first thing
+/// it gets. Anything the batch could not deliver — an older server without
+/// the route, a missing blob, an item over budget — falls back to the normal
+/// single-fetch path, so a batch is a pure optimisation and never a
+/// behaviour change.
+fn run_batch(
+    client: &mut AssetClient,
+    batch: Vec<(RequestId, ClientRequest)>,
+    tx: &Sender<ClientEvent>,
+    stage_tx: &Sender<StageEvent>,
+    cancelled: &Arc<Mutex<HashSet<RequestId>>>,
+) -> bool {
+    // Cancelled-while-queued items never start, exactly as in the single path.
+    let mut live: Vec<(RequestId, BlobId, Option<u64>, bool)> = Vec::new();
+    for (id, request) in batch {
+        let ClientRequest::FetchBlob { blob, expected_len, pin } = request else {
+            continue;
+        };
+        if cancelled.lock().expect("cancel set").remove(&id) {
+            if tx.send(ClientEvent::Failed { id, error: ClientError::Cancelled }).is_err() {
+                return false;
+            }
+            continue;
+        }
+        if tx.send(ClientEvent::Started { id }).is_err() {
+            return false;
+        }
+        live.push((id, blob, expected_len, pin));
+    }
+    if live.is_empty() {
+        return true;
+    }
+
+    // One wire item per distinct digest, first occurrence keeping its place;
+    // several requests may be waiting on the same bytes.
+    let mut order: Vec<(BlobId, Option<u64>)> = Vec::new();
+    let mut waiting: HashMap<[u8; 32], Vec<(RequestId, bool)>> = HashMap::new();
+    for (id, blob, expected_len, pin) in &live {
+        let key = *blob.as_bytes();
+        if !waiting.contains_key(&key) {
+            order.push((*blob, *expected_len));
+        }
+        waiting.entry(key).or_default().push((*id, *pin));
+    }
+
+    let mut resolved: HashSet<RequestId> = HashSet::new();
+    let mut pins: Vec<(BlobId, RequestId)> = Vec::new();
+    let mut events: Vec<ClientEvent> = Vec::new();
+    {
+        let abort = |blob: &BlobId| -> bool {
+            let set = cancelled.lock().expect("cancel set");
+            waiting
+                .get(blob.as_bytes())
+                .map(|ids| ids.iter().all(|(id, _)| set.contains(id)))
+                .unwrap_or(true)
+        };
+        let mut on_item = |blob: BlobId, outcome: ClientResult<std::path::PathBuf>| {
+            let Some(ids) = waiting.get(blob.as_bytes()) else {
+                return;
+            };
+            for (id, pin) in ids {
+                match &outcome {
+                    Ok(path) => {
+                        resolved.insert(*id);
+                        if *pin {
+                            pins.push((blob, *id));
+                        }
+                        events.push(ClientEvent::Done {
+                            id: *id,
+                            output: ClientOutput::Blob { blob, path: path.clone() },
+                        });
+                    }
+                    Err(ClientError::Cancelled) => {
+                        resolved.insert(*id);
+                        events.push(ClientEvent::Failed {
+                            id: *id,
+                            error: ClientError::Cancelled,
+                        });
+                    }
+                    // Anything else: leave it unresolved and let the
+                    // single-fetch path produce the authoritative outcome.
+                    Err(_) => {}
+                }
+            }
+        };
+        // A batch that fails outright (no route, transport refusal) simply
+        // leaves everything unresolved for the fallback below.
+        let _ = client.fetch_blobs_ordered(&order, &abort, &mut on_item);
+    }
+    // Pins are transactional exactly as in the single path: only a fetched,
+    // verified, committed object is pinned.
+    for (blob, id) in pins {
+        if let Err(error) = client.pin_blob(&blob) {
+            resolved.remove(&id);
+            events.retain(|e| e.id() != id);
+            events.push(ClientEvent::Failed { id, error });
+        }
+    }
+    for event in events {
+        let id = event.id();
+        cancelled.lock().expect("cancel set").remove(&id);
+        if tx.send(event).is_err() {
+            return false;
+        }
+    }
+    // Fallback: whatever the batch did not deliver runs the ordinary path,
+    // which owns progress reporting, resume and the typed refusal.
+    for (id, blob, expected_len, pin) in live {
+        if resolved.contains(&id) {
+            continue;
+        }
+        let request = ClientRequest::FetchBlob { blob, expected_len, pin };
+        let event = match run_one(client, id, tx, stage_tx, request, cancelled) {
+            Ok(output) => ClientEvent::Done { id, output },
+            Err(error) => ClientEvent::Failed { id, error },
+        };
+        cancelled.lock().expect("cancel set").remove(&id);
+        if tx.send(event).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 fn worker(
     mut client: AssetClient,
     queue: Arc<LaneQueue>,
     tx: Sender<ClientEvent>,
     stage_tx: Sender<StageEvent>,
     cancelled: Arc<Mutex<HashSet<RequestId>>>,
+    batch_max_items: usize,
 ) {
     while let Some((id, request)) = queue.pop() {
+        // Coalesce: a grid submits thumbnails one by one, and asking for them
+        // in one ordered request costs one round trip instead of thirty.
+        if batch_max_items > 1 && batchable(&request) {
+            let mut batch = vec![(id, request)];
+            queue.drain_batchable(&mut batch, batch_max_items);
+            if !run_batch(&mut client, batch, &tx, &stage_tx, &cancelled) {
+                return;
+            }
+            continue;
+        }
         // Cancelled while queued: never starts.
         if cancelled.lock().expect("cancel set").remove(&id) {
             if tx.send(ClientEvent::Failed { id, error: ClientError::Cancelled }).is_err() {
