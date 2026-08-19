@@ -678,9 +678,13 @@ fn main() {
             .rights
             .clone()
             .unwrap_or_else(|| music_import::personal_library_rights(&dir));
-        let mut progress = |done: usize, total: usize, current: &str| {
-            if args.log && !current.is_empty() {
-                eprintln!("[music-import] {done}/{total} {current}");
+        let mut progress = |p: music_import::MusicProgress| {
+            if args.log && !p.current.is_empty() {
+                let stage = match p.stage {
+                    music_import::MusicStage::Reading => "reading",
+                    music_import::MusicStage::Publishing => "publishing",
+                };
+                eprintln!("[music-import] {stage} {}/{} {}", p.done, p.total, p.current);
             }
         };
         let cancel = || STOP.load(Ordering::SeqCst);

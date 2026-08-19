@@ -947,28 +947,64 @@ pub fn music_tags(dirs: &[String], artist: &str, album: &str) -> Vec<String> {
     out
 }
 
-/// Turn a scan into publishable tracks: read each file's metadata, measure
-/// it, and resolve alias collisions across the whole batch at once.
+/// Bytes read from the head of a file to find its metadata. An ID3v2 tag with
+/// embedded cover art is a few hundred KB at worst; a Vorbis comment header
+/// sits in the first pages. Planning a 5000-track library must not read the
+/// whole library — that is the difference between a card that starts moving
+/// and one that looks dead for minutes.
+const METADATA_HEAD_BYTES: u64 = 1 << 20;
+
+/// The metadata window of one file: a bounded head plus the 128-byte ID3v1
+/// trailer, which is at the very END of the file by definition.
+fn read_metadata_window(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    if len == 0 {
+        return Err("empty file".into());
+    }
+    if len <= METADATA_HEAD_BYTES {
+        let mut all = Vec::with_capacity(len as usize);
+        file.read_to_end(&mut all).map_err(|e| e.to_string())?;
+        return Ok(all);
+    }
+    let mut head = vec![0u8; METADATA_HEAD_BYTES as usize];
+    file.read_exact(&mut head).map_err(|e| e.to_string())?;
+    let mut tail = [0u8; 128];
+    file.seek(SeekFrom::End(-128)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut tail).map_err(|e| e.to_string())?;
+    head.extend_from_slice(&tail);
+    Ok(head)
+}
+
+/// Turn a scan into publishable tracks: read each file's metadata, name it,
+/// and resolve alias collisions across the whole batch at once.
 ///
-/// A file that cannot be measured is NOT published (an `AssetKind::Audio`
-/// manifest refuses a zero duration) — it lands in `skipped` with the reason.
-pub fn plan_tracks(root: &Path, scan: &MusicScan, namespace: &str) -> (Vec<PlannedTrack>, Vec<SkippedFile>) {
+/// `progress(done, total, rel)` is called per file — planning a big library is
+/// minutes of work and must not look like a hang.
+pub fn plan_tracks(
+    root: &Path,
+    scan: &MusicScan,
+    namespace: &str,
+    progress: &mut dyn FnMut(usize, usize, &str),
+    cancel: &dyn Fn() -> bool,
+) -> (Vec<PlannedTrack>, Vec<SkippedFile>) {
     let mut skipped = scan.skipped.clone();
     let mut planned = Vec::new();
-    for file in &scan.files {
-        let bytes = match std::fs::read(&file.path) {
-            Ok(bytes) if !bytes.is_empty() => bytes,
-            Ok(_) => {
-                skipped.push(SkippedFile {
-                    rel: file.rel.clone(),
-                    reason: "empty file".into(),
-                });
-                continue;
-            }
+    let total = scan.files.len();
+    for (index, file) in scan.files.iter().enumerate() {
+        if cancel() {
+            break;
+        }
+        progress(index, total, &file.rel);
+        // Only the metadata window: the payload is read again at publish
+        // time, once, for the file that is actually going up.
+        let bytes = match read_metadata_window(&file.path) {
+            Ok(bytes) => bytes,
             Err(error) => {
                 skipped.push(SkippedFile {
                     rel: file.rel.clone(),
-                    reason: format!("read: {error}"),
+                    reason: error,
                 });
                 continue;
             }
@@ -1008,6 +1044,7 @@ pub fn plan_tracks(root: &Path, scan: &MusicScan, namespace: &str) -> (Vec<Plann
             tags: music_tags(&file.dirs, &artist, &album),
         });
     }
+    progress(total, total, "");
     assign_aliases(&mut planned, namespace);
     (planned, skipped)
 }
@@ -1113,26 +1150,63 @@ impl MusicReport {
     }
 }
 
+/// Which half of the run a progress report belongs to. A library import is
+/// two passes over the tree and the UI must not show one bar that fills
+/// twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MusicStage {
+    /// Walking the tree and reading each file's metadata window.
+    Reading,
+    /// Uploading and publishing one track at a time.
+    Publishing,
+}
+
+/// One progress report. `total` is 0 only before the walk has finished.
+#[derive(Clone, Copy, Debug)]
+pub struct MusicProgress<'a> {
+    pub stage: MusicStage,
+    pub done: usize,
+    pub total: usize,
+    /// The file (reading) or the track title (publishing) in hand.
+    pub current: &'a str,
+}
+
 /// Publish every audio file under `root` into `namespace`.
 ///
-/// `progress(done, total, current)` is called before each track so a UI can
-/// draw an honest bar; `cancel()` is polled between tracks and stops the run
-/// with `cancelled: true` and whatever landed so far — never a rollback, the
-/// catalog rows already published are real.
+/// `progress` is called for every file of both passes so a UI can draw an
+/// honest bar from the first second; `cancel()` is polled throughout and
+/// stops the run with `cancelled: true` and whatever landed so far — never a
+/// rollback, the catalog rows already published are real.
 pub fn import_music(
     client: &mut AssetClient,
     root: &Path,
     namespace: &str,
     rights: &PublishRights,
     log: bool,
-    progress: &mut dyn FnMut(usize, usize, &str),
+    progress: &mut dyn FnMut(MusicProgress),
     cancel: &dyn Fn() -> bool,
 ) -> Result<MusicReport, String> {
+    progress(MusicProgress {
+        stage: MusicStage::Reading,
+        done: 0,
+        total: 0,
+        current: "",
+    });
     let scan = scan_music(root);
     if scan.files.is_empty() && scan.skipped.is_empty() {
         return Err(format!("no audio files under {}", root.display()));
     }
-    let (tracks, skipped) = plan_tracks(root, &scan, namespace);
+    let (tracks, skipped) = {
+        let mut on_file = |done: usize, total: usize, rel: &str| {
+            progress(MusicProgress {
+                stage: MusicStage::Reading,
+                done,
+                total,
+                current: rel,
+            })
+        };
+        plan_tracks(root, &scan, namespace, &mut on_file, cancel)
+    };
     let mut report = MusicReport {
         skipped: skipped
             .into_iter()
@@ -1140,13 +1214,25 @@ pub fn import_music(
             .collect(),
         ..MusicReport::default()
     };
+    if cancel() {
+        report.cancelled = true;
+        return Ok(report);
+    }
+    if tracks.is_empty() {
+        return Ok(report);
+    }
     let total = tracks.len();
     for (index, track) in tracks.iter().enumerate() {
         if cancel() {
             report.cancelled = true;
             break;
         }
-        progress(index, total, &track.title);
+        progress(MusicProgress {
+            stage: MusicStage::Publishing,
+            done: index,
+            total,
+            current: &track.title,
+        });
         match publish_track(client, track, namespace, rights) {
             Ok(TrackOutcome::Published) => {
                 if log {
@@ -1174,7 +1260,12 @@ pub fn import_music(
             }
         }
     }
-    progress(total, total, "");
+    progress(MusicProgress {
+        stage: MusicStage::Publishing,
+        done: total,
+        total,
+        current: "",
+    });
     Ok(report)
 }
 
@@ -1684,7 +1775,7 @@ mod tests {
         write(&root, "Artist/Album B/Song.mp3", &mp3_file(3, 180, None));
         write(&root, "Artist/Album A/Other.mp3", &mp3_file(2, 180, None));
         let scan = scan_music(&root);
-        let (tracks, _) = plan_tracks(&root, &scan, "rik2");
+        let (tracks, _) = plan_tracks(&root, &scan, "rik2", &mut |_, _, _| {}, &|| false);
         let by_rel = |rel: &str| {
             tracks
                 .iter()
@@ -1701,7 +1792,7 @@ mod tests {
         // The uncontested name stays clean.
         assert_eq!(by_rel("Artist/Album A/Other.mp3"), "rik2/music/artist/other");
         // Stable across runs over the same tree.
-        let (again, _) = plan_tracks(&root, &scan_music(&root), "rik2");
+        let (again, _) = plan_tracks(&root, &scan_music(&root), "rik2", &mut |_, _, _| {}, &|| false);
         assert_eq!(
             again.iter().map(|t| t.alias.clone()).collect::<Vec<_>>(),
             tracks.iter().map(|t| t.alias.clone()).collect::<Vec<_>>()
@@ -1721,7 +1812,7 @@ mod tests {
             &mp3_file(2, 180, Some(id3v2(3, frames))),
         );
         write(&root, "Bare Artist/Bare Album/untagged.mp3", &mp3_file(2, 180, None));
-        let (tracks, _) = plan_tracks(&root, &scan_music(&root), "rik2");
+        let (tracks, _) = plan_tracks(&root, &scan_music(&root), "rik2", &mut |_, _, _| {}, &|| false);
         let tagged = tracks.iter().find(|t| t.rel.contains("file name")).unwrap();
         assert_eq!(tagged.title, "Real Title");
         assert_eq!(tagged.artist, "Real Artist");
@@ -1778,7 +1869,7 @@ mod tests {
         write(&music, "Echo, Red Axes/Nofar/02.mp3", &mp3_file(30, 170, None));
         write(&music, "Lossless/keeper.flac", b"fLaC not decoded");
         let rights = personal_library_rights(&music);
-        let mut noop = |_: usize, _: usize, _: &str| {};
+        let mut noop = |_: MusicProgress| {};
         let never = || false;
 
         let first = import_music(&mut client, &music, "rik2", &rights, false, &mut noop, &never)
@@ -1854,7 +1945,7 @@ mod tests {
     fn cancel_stops_between_tracks_and_keeps_what_landed() {
         use makepad_asset_client::{ApiEndpoints, ClientConfig};
         use makepad_asset_store::{AssetServer, ServerConfig};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let base = temp_root("cancel");
         let server_root = base.join("server");
@@ -1886,16 +1977,25 @@ mod tests {
         for i in 0..4 {
             write(&music, &format!("A/B/{i}.mp3"), &mp3_file(5 + i, 180, None));
         }
-        let seen = AtomicUsize::new(0);
-        let mut noop = |_: usize, _: usize, _: &str| {};
-        let stop_after_two = || seen.fetch_add(1, Ordering::SeqCst) >= 2;
+        // Cancel once two tracks have actually gone up — the reading pass
+        // polls `cancel` too, so a plain call counter would stop the run
+        // before anything was published at all.
+        let stop = AtomicBool::new(false);
+        let mut watch = |p: MusicProgress| {
+            // `done` is reported BEFORE that track goes up, so arming at
+            // 1 stops the run after exactly two publications.
+            if p.stage == MusicStage::Publishing && p.done >= 1 {
+                stop.store(true, Ordering::SeqCst);
+            }
+        };
+        let stop_after_two = || stop.load(Ordering::SeqCst);
         let report = import_music(
             &mut client,
             &music,
             "rik2",
             &personal_library_rights(&music),
             false,
-            &mut noop,
+            &mut watch,
             &stop_after_two,
         )
         .expect("import");
