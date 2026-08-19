@@ -757,19 +757,162 @@ impl Flux2TextEncoderIndex {
 
 pub use makepad_ai_common::raw_st::{Flux2SafetensorsHeader, Flux2TensorInfo};
 
+/// Safetensors-style uppercase dtype tag for a ggml tensor type (what the
+/// rest of the flux2 loader matches on: `"BF16"`, `"F32"`, `"Q4_K"`, …).
+pub fn flux2_gguf_dtype_name(ggml_type: u32) -> &'static str {
+    use makepad_ai_loader::quant::*;
+    match ggml_type {
+        GGML_TYPE_F32 => "F32",
+        GGML_TYPE_F16 => "F16",
+        GGML_TYPE_BF16 => "BF16",
+        GGML_TYPE_Q4_0 => "Q4_0",
+        GGML_TYPE_Q4_1 => "Q4_1",
+        GGML_TYPE_Q5_0 => "Q5_0",
+        GGML_TYPE_Q5_1 => "Q5_1",
+        GGML_TYPE_Q8_0 => "Q8_0",
+        GGML_TYPE_Q2_K => "Q2_K",
+        GGML_TYPE_Q3_K => "Q3_K",
+        GGML_TYPE_Q4_K => "Q4_K",
+        GGML_TYPE_Q5_K => "Q5_K",
+        GGML_TYPE_Q6_K => "Q6_K",
+        GGML_TYPE_Q8_K => "Q8_K",
+        _ => "UNKNOWN",
+    }
+}
+
+/// A GGUF DiT file (city96 / ComfyUI-GGUF `FLUX.2-dev-gguf`) behind the
+/// same tensor-name API as the safetensors headers: names are the canonical
+/// BFL `double_blocks.*` / `single_blocks.*` / `img_in.*` set, GGUF dims are
+/// ggml order (`[k, n]`) and are reported reversed as a `[n, k]` shape,
+/// `dtype` is the ggml type name (`"Q4_K"`, `"Q5_K"`, `"BF16"`, `"F32"`, …).
+/// Quantized tensors are served raw (`read_bytes`); the f32/bf16/f16 readers
+/// only accept scalar types.
+pub struct Flux2GgufSource {
+    pub file: makepad_ai_llm::GgufFile,
+    tensors: HashMap<String, Flux2TensorInfo>,
+}
+
+impl Flux2GgufSource {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = makepad_ai_llm::GgufFile::open(path)
+            .map_err(|err| DiffusionError::io(path, err.to_string()))?;
+        let mut tensors = HashMap::with_capacity(file.tensors.len());
+        for tensor in &file.tensors {
+            let shape: Vec<u64> = tensor.dimensions.iter().rev().copied().collect();
+            tensors.insert(
+                tensor.name.clone(),
+                Flux2TensorInfo {
+                    dtype: flux2_gguf_dtype_name(tensor.tensor_type.ggml_type()).to_string(),
+                    shape,
+                    data_offsets: (tensor.offset, tensor.offset + tensor.size_bytes),
+                },
+            );
+        }
+        Ok(Self { file, tensors })
+    }
+
+    pub fn has_tensor(&self, name: &str) -> bool {
+        self.tensors.contains_key(name)
+    }
+
+    pub fn tensor(&self, name: &str) -> Result<&Flux2TensorInfo> {
+        self.tensors
+            .get(name)
+            .ok_or_else(|| DiffusionError::model(format!("flux2 gguf tensor '{name}' not found")))
+    }
+
+    /// ggml type id of a tensor (for the quantized linear path).
+    pub fn ggml_type(&self, name: &str) -> Result<u32> {
+        Ok(self
+            .file
+            .get_tensor(name)
+            .ok_or_else(|| DiffusionError::model(format!("flux2 gguf tensor '{name}' not found")))?
+            .tensor_type
+            .ggml_type())
+    }
+
+    pub fn read_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        self.file
+            .read_tensor_bytes(name)
+            .map_err(|err| DiffusionError::io(&self.file.path, err.to_string()))
+    }
+
+    pub fn read_f32(&self, name: &str) -> Result<Vec<f32>> {
+        let info = self.tensor(name)?;
+        let bytes = self.read_bytes(name)?;
+        match info.dtype.as_str() {
+            "F32" => Ok(bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect()),
+            "F16" => Ok(bytes
+                .chunks_exact(2)
+                .map(|chunk| makepad_ai_common::f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+                .collect()),
+            "BF16" => Ok(bytes
+                .chunks_exact(2)
+                .map(|chunk| f32::from_bits((u16::from_le_bytes([chunk[0], chunk[1]]) as u32) << 16))
+                .collect()),
+            other => Err(DiffusionError::model(format!(
+                "flux2 gguf tensor '{name}' is {other}: not readable as f32 (quantized linears go through the resident quant path)"
+            ))),
+        }
+    }
+
+    pub fn read_bf16_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        if self.tensor(name)?.dtype == "BF16" {
+            return self.read_bytes(name);
+        }
+        let values = self.read_f32(name)?;
+        let mut out = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            // RN-even to the bf16 grid (same rounding as the safetensors twin).
+            let bits = value.to_bits();
+            let rounding = 0x7fffu32 + ((bits >> 16) & 1);
+            out.extend_from_slice(&(((bits.wrapping_add(rounding)) >> 16) as u16).to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    pub fn read_f16_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        if self.tensor(name)?.dtype == "F16" {
+            return self.read_bytes(name);
+        }
+        let values = self.read_f32(name)?;
+        let mut out = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            out.extend_from_slice(&makepad_ai_common::f32_to_f16(value).to_le_bytes());
+        }
+        Ok(out)
+    }
+}
+
 /// Single-file (or sharded-dir) Klein/FLUX.2 weight source. Tensor lookup
 /// prefers the first file that contains the name. FP8 weights dequant to
-/// f16/f32 at read (see [`Flux2SafetensorsHeader::read_f32`]).
+/// f16/f32 at read (see [`Flux2SafetensorsHeader::read_f32`]). A `.gguf`
+/// file opens as a [`Flux2GgufSource`] instead (quantized DiT tiers).
 pub struct Flux2WeightFile {
     pub files: Vec<Flux2SafetensorsHeader>,
+    pub gguf: Option<Flux2GgufSource>,
 }
 
 impl Flux2WeightFile {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if path.is_file() {
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            {
+                return Ok(Self {
+                    files: Vec::new(),
+                    gguf: Some(Flux2GgufSource::open(path)?),
+                });
+            }
             return Ok(Self {
                 files: vec![Flux2SafetensorsHeader::load(path)?],
+                gguf: None,
             });
         }
         let mut files: Vec<PathBuf> = std::fs::read_dir(path)
@@ -788,7 +931,10 @@ impl Flux2WeightFile {
             .iter()
             .map(Flux2SafetensorsHeader::load)
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { files: headers })
+        Ok(Self {
+            files: headers,
+            gguf: None,
+        })
     }
 
     pub fn header_for(&self, name: &str) -> Result<&Flux2SafetensorsHeader> {
@@ -798,27 +944,54 @@ impl Flux2WeightFile {
             .ok_or_else(|| DiffusionError::model(format!("flux2 tensor '{name}' not found")))
     }
 
+    pub fn is_gguf(&self) -> bool {
+        self.gguf.is_some()
+    }
+
     pub fn has_tensor(&self, name: &str) -> bool {
+        if let Some(gguf) = &self.gguf {
+            return gguf.has_tensor(name);
+        }
         self.files.iter().any(|file| file.has_tensor(name))
     }
 
     pub fn tensor(&self, name: &str) -> Result<&Flux2TensorInfo> {
+        if let Some(gguf) = &self.gguf {
+            return gguf.tensor(name);
+        }
         Ok(self.header_for(name)?.tensor(name).unwrap())
     }
 
+    /// ggml type id of a GGUF tensor; `None` for safetensors sources.
+    pub fn gguf_ggml_type(&self, name: &str) -> Option<u32> {
+        self.gguf.as_ref().and_then(|gguf| gguf.ggml_type(name).ok())
+    }
+
     pub fn read_f32(&self, name: &str) -> Result<Vec<f32>> {
+        if let Some(gguf) = &self.gguf {
+            return gguf.read_f32(name);
+        }
         self.header_for(name)?.read_f32(name)
     }
 
     pub fn read_f16_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(gguf) = &self.gguf {
+            return gguf.read_f16_bytes(name);
+        }
         self.header_for(name)?.read_f16_bytes(name)
     }
 
     pub fn read_bf16_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(gguf) = &self.gguf {
+            return gguf.read_bf16_bytes(name);
+        }
         self.header_for(name)?.read_bf16_bytes(name)
     }
 
     pub fn read_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(gguf) = &self.gguf {
+            return gguf.read_bytes(name);
+        }
         self.header_for(name)?.read_bytes(name)
     }
 

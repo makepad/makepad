@@ -5,7 +5,7 @@ mod imp {
         block_elements, block_size, h3_nvfp4_pairs_bytes, quantize_bf16_to_q8_1,
         quantize_f32_to_q8_1, GGML_TYPE_BF16, GGML_TYPE_F16, GGML_TYPE_H3_NVFP4_PAIRS,
         GGML_TYPE_F8_E4M3, GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE, GGML_TYPE_NVFP4,
-        GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, QK, QK_NVFP4,
+        GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, QK, QK_NVFP4,
     };
     use crate::{cudaError_t, cudaStream_t};
     use std::cell::RefCell;
@@ -349,6 +349,13 @@ mod imp {
         ) -> cudaError_t;
 
         fn makepad_cuda_dequant_q6_k_bf16(
+            src_blocks: *const std::ffi::c_void,
+            dst_bf16: *mut std::ffi::c_void,
+            n_super_blocks: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_dequant_q5_k_bf16(
             src_blocks: *const std::ffi::c_void,
             dst_bf16: *mut std::ffi::c_void,
             n_super_blocks: u32,
@@ -5136,6 +5143,12 @@ mod imp {
                                     (part.n * k / 256) as u32,
                                     backend.stream,
                                 ),
+                                GGML_TYPE_Q5_K => makepad_cuda_dequant_q5_k_bf16(
+                                    src,
+                                    dst,
+                                    (part.n * k / 256) as u32,
+                                    backend.stream,
+                                ),
                                 GGML_TYPE_Q4_0 => makepad_cuda_dequant_q4_0_bf16(
                                     src,
                                     dst,
@@ -8358,8 +8371,8 @@ mod imp {
     /// step boundaries, the whole single-block phase).
     struct FluxStreamRing {
         groups: Vec<Vec<RingTensor>>,
-        /// Per-tensor byte lengths (identical across groups) — slots re-alloc
-        /// from this after a release.
+        /// Per-tensor slot byte lengths (the max over groups per index) —
+        /// slots re-alloc from this after a release.
         shape: Vec<usize>,
         slots: [Vec<DeviceBuffer>; 2],
         copy_stream: cudaStream_t,
@@ -8486,11 +8499,20 @@ mod imp {
         }
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let shape: Vec<usize> = groups[0].iter().map(|(_, bytes)| bytes.len()).collect();
+            // Slot buffers are sized to the per-index MAXIMUM over groups: the
+            // fp8mixed dev file has identical shapes in every double block,
+            // but a GGUF K-quant file mixes Q4_K/Q5_K per block (the "_M"
+            // recipe bumps some projections), so same index = same tensor
+            // role, not necessarily the same byte length. The GEMM reads
+            // each tensor's own `len` (ring_weight_ptr), never the slot size.
+            let width = groups[0].len();
+            let mut shape: Vec<usize> = vec![0; width];
             for group in &groups {
-                let lens: Vec<usize> = group.iter().map(|(_, bytes)| bytes.len()).collect();
-                if lens != shape {
-                    return Err("stream ring groups must share tensor shapes".to_string());
+                if group.len() != width {
+                    return Err("stream ring groups must have the same tensor count".to_string());
+                }
+                for (index, (_, bytes)) in group.iter().enumerate() {
+                    shape[index] = shape[index].max(bytes.len());
                 }
             }
             let mut ring_groups = Vec::with_capacity(groups.len());
@@ -8623,6 +8645,13 @@ mod imp {
     ///   on any Lt refusal (odd shapes etc.).
     /// - otherwise: dequant into pooled bf16 scratch (exact e4m3->bf16
     ///   kernel) + bf16 GEMM f32-accumulate with alpha = weight_scale.
+    ///
+    /// GGUF K-quant parts (Q4_K / Q5_K / Q6_K / Q4_0 — the FLUX.2-dev 24GB
+    /// GGUF tier) ride the same entry points: the block stream stays
+    /// resident under the `::q<type>` key `gpu_weight_cache_ensure_quant`
+    /// uses, is bulk-dequantized into pooled bf16 scratch right before the
+    /// gemm (kernels/kquants.cu), and runs the identical bf16 GEMM
+    /// f32-accumulate — ComfyUI-GGUF's own dequant-on-the-fly class.
     #[allow(clippy::too_many_arguments)]
     fn f8_linear_gemm(
         backend: &mut CudaDenseLinearBackend,
@@ -8636,6 +8665,17 @@ mod imp {
         out_bf16_ptr: *const std::ffi::c_void,
     ) -> Result<(), String> {
         let n = part.n;
+        if part.bt_ggml_type != GGML_TYPE_F8_E4M3 {
+            return kq_linear_gemm(
+                backend,
+                input_bf16_ptr,
+                cache_namespace,
+                part,
+                m,
+                k,
+                out_bf16_ptr,
+            );
+        }
         let weight_bytes = n
             .checked_mul(k)
             .ok_or_else(|| "f8 mm weight size overflow".to_string())?;
@@ -8703,6 +8743,88 @@ mod imp {
             )
         }
         .map_err(|err| format!("f8 mm failed: m={m} k={k} n={n}: {err}"));
+        gpu_pool_release(scratch);
+        result
+    }
+
+    /// K-quant twin of the f8 body: cached block stream -> pooled bf16
+    /// scratch (`makepad_cuda_dequant_*_bf16`) -> bf16 GEMM f32-accumulate.
+    #[allow(clippy::too_many_arguments)]
+    fn kq_linear_gemm(
+        backend: &mut CudaDenseLinearBackend,
+        input_bf16_ptr: *const std::ffi::c_void,
+        cache_namespace: &str,
+        part: &GpuLinearPart<'_>,
+        m: usize,
+        k: usize,
+        out_bf16_ptr: *const std::ffi::c_void,
+    ) -> Result<(), String> {
+        let n = part.n;
+        let ggml_type = part.bt_ggml_type;
+        let payload_bytes = quant_linear_payload_bytes(ggml_type, n, k)?;
+        let weight_key = quant_part_key(cache_namespace, part.cache_key, ggml_type);
+        backend.cached_weight_buffer(&weight_key, payload_bytes, || {
+            if part.bytes.len() != payload_bytes {
+                return Err(format!(
+                    "kq linear {weight_key}: got {} payload bytes, expected {payload_bytes}",
+                    part.bytes.len()
+                ));
+            }
+            Ok(part.bytes.to_vec())
+        })?;
+        let (weight_ptr, _) = backend.weight_ptr(&weight_key)?;
+        let values = n
+            .checked_mul(k)
+            .ok_or_else(|| "kq mm weight size overflow".to_string())?;
+        let scratch = gpu_pool_acquire(values * size_of::<u16>())?;
+        let elems = block_elements(ggml_type);
+        if k % elems != 0 {
+            gpu_pool_release(scratch);
+            return Err(format!("kq linear k={k} not divisible by {elems} (ggml type {ggml_type})"));
+        }
+        let blocks = u32::try_from(values / elems)
+            .map_err(|_| "kq dequant block count exceeds u32".to_string())?;
+        let src = weight_ptr.cast_const();
+        let dst = scratch.ptr.as_ptr();
+        let status = unsafe {
+            match ggml_type {
+                GGML_TYPE_Q4_K => makepad_cuda_dequant_q4_k_bf16(src, dst, blocks, backend.stream),
+                GGML_TYPE_Q5_K => makepad_cuda_dequant_q5_k_bf16(src, dst, blocks, backend.stream),
+                GGML_TYPE_Q6_K => makepad_cuda_dequant_q6_k_bf16(src, dst, blocks, backend.stream),
+                GGML_TYPE_Q4_0 => makepad_cuda_dequant_q4_0_bf16(src, dst, blocks, backend.stream),
+                other => {
+                    gpu_pool_release(scratch);
+                    return Err(format!("kq linear: unsupported ggml type {other}"));
+                }
+            }
+        };
+        gpu_check(status)?;
+        let alpha = 1.0f32;
+        let beta = 0.0f32;
+        let result = unsafe {
+            crate::cublas_gemm_ex(
+                backend.blas,
+                crate::CUBLAS_OP_T,
+                crate::CUBLAS_OP_N,
+                n as i32,
+                m as i32,
+                k as i32,
+                &alpha,
+                scratch.ptr.as_ptr(),
+                crate::CUDA_R_16BF,
+                k as i32,
+                input_bf16_ptr,
+                crate::CUDA_R_16BF,
+                k as i32,
+                &beta,
+                out_bf16_ptr.cast_mut(),
+                crate::CUDA_R_16BF,
+                n as i32,
+                crate::CUDA_R_32F,
+                crate::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            )
+        }
+        .map_err(|err| format!("kq mm failed: m={m} k={k} n={n}: {err}"));
         gpu_pool_release(scratch);
         result
     }
@@ -8908,8 +9030,14 @@ mod imp {
         parts: &'b [GpuLinearPart<'a>],
         who: &str,
     ) -> Result<&'b GpuLinearPart<'a>, String> {
-        if parts.len() != 1 || parts[0].bt_ggml_type != GGML_TYPE_F8_E4M3 {
-            return Err(format!("{who} requires one F8_E4M3 weight part"));
+        // F8_E4M3 or a GGUF K-quant block stream (see `f8_linear_gemm`).
+        if parts.len() != 1
+            || !matches!(
+                parts[0].bt_ggml_type,
+                GGML_TYPE_F8_E4M3 | GGML_TYPE_Q4_K | GGML_TYPE_Q5_K | GGML_TYPE_Q6_K | GGML_TYPE_Q4_0
+            )
+        {
+            return Err(format!("{who} requires one F8_E4M3 / K-quant weight part"));
         }
         Ok(&parts[0])
     }
@@ -9477,6 +9605,7 @@ mod imp {
         matches!(
             ggml_type,
             GGML_TYPE_Q4_K
+                | GGML_TYPE_Q5_K
                 | GGML_TYPE_Q6_K
                 | GGML_TYPE_Q4_0
                 | GGML_TYPE_H3_NVFP4_PAIRS
@@ -9488,7 +9617,7 @@ mod imp {
     /// Device payload size of one quantized `(n out-rows, k in-cols)` linear.
     fn quant_linear_payload_bytes(ggml_type: u32, n: usize, k: usize) -> Result<usize, String> {
         match ggml_type {
-            GGML_TYPE_Q4_K | GGML_TYPE_Q6_K | GGML_TYPE_Q4_0 => {
+            GGML_TYPE_Q4_K | GGML_TYPE_Q5_K | GGML_TYPE_Q6_K | GGML_TYPE_Q4_0 => {
                 let elems = block_elements(ggml_type);
                 if k == 0 || k % elems != 0 {
                     return Err(format!(
