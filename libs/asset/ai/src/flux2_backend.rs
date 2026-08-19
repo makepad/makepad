@@ -116,6 +116,51 @@ impl ContentBackend for Flux2Backend {
             .as_mut()
             .ok_or_else(|| AssetAiError::Backend(format!("{model_id} not loaded")))?;
         match pipe {
+            // A reference image makes dev an instruction editor (same
+            // multi-reference mechanism as klein, dev's conditioning +
+            // guidance); without one it is the text-to-image model.
+            Flux2Pipeline::Dev(pipe) if !params.input_bytes.is_empty() => {
+                let (rgb, width, height) = decode_png_rgb(&params.input_bytes)?;
+                let reference = flux2_image_from_rgb_u8(&rgb, width, height)
+                    .map_err(|err| AssetAiError::Backend(format!("flux2 ref: {err}")))?;
+                let out_w = params.width.unwrap_or(width as u32).max(16) / 16 * 16;
+                let out_h = params.height.unwrap_or(height as u32).max(16) / 16 * 16;
+                cancel.check()?;
+                progress("edit", 0.1);
+                let request = Flux2EditRequest {
+                    prompt: params.prompt.clone(),
+                    width: out_w,
+                    height: out_h,
+                    steps: params.steps.unwrap_or(FLUX2_DEV_DEFAULT_STEPS as u32) as usize,
+                    seed: params.seed,
+                    references: vec![reference],
+                    noise: None,
+                    teacher_ref_tokens: None,
+                    teacher_embeds: None,
+                };
+                let guidance = params.guidance.unwrap_or(FLUX2_DEV_DEFAULT_GUIDANCE);
+                let steps_total = request.steps;
+                let result = {
+                    let mut on_stage = |stage: &str, done: usize, total: usize| {
+                        let fraction = match stage {
+                            "text-encode" => 0.1 + 0.12 * done as f64 / total.max(1) as f64,
+                            "encode-refs" => 0.22 + 0.03 * done as f64 / total.max(1) as f64,
+                            "denoise" => 0.25 + 0.65 * done as f64 / steps_total.max(1) as f64,
+                            _ => 0.92,
+                        };
+                        progress(stage, fraction);
+                    };
+                    pipe.edit_with_hooks(&request, guidance, Some(&mut on_stage))
+                }
+                .map_err(|err| AssetAiError::Backend(format!("flux2-dev edit: {err}")))?;
+                cancel.check()?;
+                progress("png", 0.97);
+                Ok(vec![ArtifactData {
+                    content_type: "image/png",
+                    ext: "png",
+                    bytes: result.png,
+                }])
+            }
             Flux2Pipeline::Dev(pipe) => {
                 let out_w = params
                     .width
