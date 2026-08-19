@@ -25,7 +25,7 @@
 //! also buys back precision on quiet spans.
 
 use crate::config::*;
-use crate::model::{StemSet, StereoBuf};
+use crate::model::StemSet;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

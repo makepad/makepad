@@ -254,6 +254,8 @@ mod imp {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
+        pub fn set_command_buffer_limits(&self, _max_ops: usize, _max_bytes: usize) {}
+
         pub fn begin_command_batch(&self) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
@@ -1064,6 +1066,26 @@ mod imp {
             self.ctx.borrow_mut().wait_queue_idle()
         }
 
+        /// Override how much work one MTLCommandBuffer accumulates before
+        /// this runtime rolls to the next one.
+        ///
+        /// The defaults are tuned for THROUGHPUT (llama decode wants one or
+        /// two large command buffers per graph; rolling often costs host tax
+        /// per token). A co-tenant that shares the GPU with an interactive
+        /// presenter wants the opposite: an Apple GPU preempts BETWEEN command
+        /// buffers, not inside one, so a single multi-hundred-millisecond
+        /// command buffer is exactly how long a window present can be stalled
+        /// behind it. Lowering the limits trades a little host tax for a much
+        /// finer preemption grain.
+        ///
+        /// Per runtime instance — each `MetalRuntime` owns its own command
+        /// queue, so this cannot affect another lane's runtime.
+        pub fn set_command_buffer_limits(&self, max_ops: usize, max_bytes: usize) {
+            self.ctx
+                .borrow_mut()
+                .set_command_buffer_limits(max_ops, max_bytes);
+        }
+
         pub fn begin_command_batch(&self) -> MetalResult<()> {
             self.ctx.borrow_mut().begin_command_batch()
         }
@@ -1543,6 +1565,13 @@ mod imp {
                         self.counters.gpu_elapsed_ns.saturating_add(gpu_elapsed_ns);
                 }
             }
+        }
+
+        fn set_command_buffer_limits(&mut self, max_ops: usize, max_bytes: usize) {
+            // Zero would roll on every single op; clamp to something that can
+            // still make progress.
+            self.max_ops_per_command_buffer = max_ops.max(1);
+            self.max_bytes_per_command_buffer = max_bytes.max(1 << 20);
         }
 
         fn roll_active_command_buffer_if_needed(&mut self) -> MetalResult<()> {
