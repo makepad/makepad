@@ -211,6 +211,9 @@ const EDIT_MODEL: &str = "flux2-klein-4b";
 /// General image 4x upscaling (RealESRGAN x4plus). Pinned — the domain has
 /// exactly one model, so no dropdown.
 const UPSCALE_MODEL: &str = "realesrgan-x4plus";
+/// Structure-conditioned FLUX.1 tiers (BFL official BF16; ~35 GB, gated).
+const CONTROL_DEPTH_MODEL: &str = "flux1-depth-dev";
+const CONTROL_CANNY_MODEL: &str = "flux1-canny-dev";
 
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
@@ -443,6 +446,20 @@ pub const PRESETS: &[Preset] = &[
         &["upscale"],
         &[("upscale", UPSCALE_MODEL)],
     ),
+    // Structure-guided re-rendering of a selected picture: the prompt says
+    // WHAT to render, the picture's depth (DA3 metric depth → FLUX.1
+    // Depth-dev) or edges (FLUX.1 Canny-dev runs its own Canny pass) says
+    // WHERE. Consumer-only like `edit`.
+    Preset::linear(
+        "image → depth-guided image",
+        &["depth", "control"],
+        &[("control", CONTROL_DEPTH_MODEL)],
+    ),
+    Preset::linear(
+        "image → edge-guided image (canny)",
+        &["control"],
+        &[("control", CONTROL_CANNY_MODEL)],
+    ),
     Preset::linear("image → depthmap", &["image", "depth"], &[]),
     Preset::linear("image → segment", &["image", "segment"], &[("segment", "sam3-1-multiplex")]),
     // The character chain: prompt -> clean character image -> Trellis mesh ->
@@ -519,9 +536,8 @@ pub const PRESETS: &[Preset] = &[
 pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
     match domain {
         "rig" | "motion" => Some(&["model/gltf-binary"]),
-        "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale" => {
-            Some(&["image/"])
-        }
+        "mesh" | "video" | "world" | "matte" | "depth" | "segment" | "edit" | "upscale"
+        | "control" => Some(&["image/"]),
         "paint" => Some(&["model/gltf-binary"]),
         _ => None,
     }
@@ -530,10 +546,14 @@ pub fn stage_input_accept(domain: &str) -> Option<&'static [&'static str]> {
 /// Domains that ONLY transform an input and have no prompt-only mode: a
 /// chain starting with one is seedable even though nothing is replaced
 /// (`edit`: "change the background to trees" needs the picture; `upscale`:
-/// RealESRGAN x4 has no prompt-only mode either), and is refused without a
-/// selected input instead of failing on the box.
+/// RealESRGAN x4 has no prompt-only mode either; `depth`/`matte`/`segment`
+/// analyse a picture; `control` renders from a control image), and is
+/// refused without a selected input instead of failing on the box.
 pub fn consumer_only_domain(domain: &str) -> bool {
-    matches!(domain, "edit" | "upscale")
+    matches!(
+        domain,
+        "edit" | "upscale" | "control" | "depth" | "matte" | "segment"
+    )
 }
 
 /// Index of the first stage of `domains` that CONSUMES a payload of
@@ -569,6 +589,7 @@ pub fn stage_display_name(domain: &str) -> &str {
         "paint" => "Hunyuan PBR paint",
         "edit" => "instruction edit",
         "upscale" => "RealESRGAN x4 upscale",
+        "control" => "structure-guided render",
         _ => domain,
     }
 }
@@ -1329,6 +1350,13 @@ impl Pipeline {
                 if self.gen.edit_strength < 1.0 {
                     request.strength = Some(self.gen.edit_strength);
                 }
+            }
+            // Structure control: prompt = what to render; the control image
+            // (depth map / photo for canny) is the relayed input; output
+            // size follows the control image (backend default), steps/
+            // guidance = the model-card defaults.
+            "control" => {
+                request.prompt = Some(prompt);
             }
             "speech" => {
                 request.text = Some(prompt);
@@ -4440,6 +4468,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("audio", "moss-sfx"),
             ("audio", "sa3-sfx"),
             ("audio", "woosh-sfx"),
+            ("control", "flux1-canny-dev"),
+            ("control", "flux1-depth-dev"),
             ("depth", "da3-metric-large"),
             ("image", "flux1-dev"),
             ("image", "flux1-schnell"),
@@ -4746,6 +4776,29 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         assert!(mesh_only
             .set_seed_references(vec![("image/png".to_string(), b"x".to_vec())])
             .is_err());
+    }
+
+    #[test]
+    fn control_chains_seed_from_the_picture_and_relay_the_control_image() {
+        // depth → control: the picture seeds the depth stage (consumer-only
+        // chain), the control stage relays the depth stage's PNG.
+        assert_eq!(seed_replaces_prefix(&["depth", "control"], "image/png"), Some(0));
+        assert_eq!(seed_replaces_prefix(&["control"], "image/png"), Some(0));
+        let mut pipeline = Pipeline::new(
+            "a knight in a cathedral",
+            &["control"],
+            &[("control", CONTROL_CANNY_MODEL)],
+            vec![],
+            None,
+            None,
+            GenParams::default(),
+        );
+        pipeline.set_seed_input("image/png".to_string(), b"photo".to_vec()).unwrap();
+        let control = pipeline.request_for_stage(0).unwrap();
+        assert_eq!(pipeline.pinned_model_for_domain("control").as_deref(), Some(CONTROL_CANNY_MODEL));
+        assert_eq!(control.prompt.as_deref(), Some("a knight in a cathedral"));
+        assert_eq!(decoded_input(&control), b"photo");
+        assert_eq!(control.width, None, "size follows the control image");
     }
 
     #[test]
