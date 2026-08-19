@@ -9682,6 +9682,17 @@ impl AppMain for App {
             }
         }
         if self.capture_timer.is_event(event).is_some() && !self.auto.captured {
+            // ASSET_UI_HISTORY_FIRST=<n>: scroll the History strip to item n
+            // right before the shot (scrollbar captures).
+            if let Some(first) = crate::asset_store_state::env_alias(&["ASSET_UI_HISTORY_FIRST", "AI_CONTENT_HISTORY_FIRST"])
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                self.ui
+                    .widget(cx, ids!(library_gallery))
+                    .portal_list(cx, ids!(list))
+                    .set_first_id_and_scroll(first, 0.0);
+                self.ui.redraw(cx);
+            }
             if let Some(path) = self.auto.capture.clone() {
                 self.auto.captured = true;
                 log!("capture: {}", path.display());
