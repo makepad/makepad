@@ -536,8 +536,14 @@ static int mkllm_kind_block_bytes(int kind) {
     }
 }
 
-template <ggml_type type, bool has_fusion>
-static void mkllm_launch_mmvq_official(
+// llama.cpp mmvq.cu ggml_cuda_mul_mat_vec_q: ONE weight read serves up to
+// MMVQ_MAX_BATCH_SIZE destination columns. Pinning this at ncols_dst=1 sent
+// every 2..8-token batch to the generic float mat-vec, which costs ~2/3 of a
+// full forward PER EXTRA TOKEN — exactly what stops speculative decoding from
+// paying. The kernel template already spans the whole range; only the
+// launcher had to learn it.
+template <ggml_type type, int ncols_dst, bool has_fusion>
+static void mkllm_launch_mmvq_official_ncols(
         const void * vx, const void * vgate, const void * vy, float * dst,
         int k, int n, int stride_row_x, cudaStream_t stream) {
     ggml_cuda_mm_fusion_args_device fusion{};
@@ -545,43 +551,58 @@ static void mkllm_launch_mmvq_official(
         fusion.gate = vgate;
         fusion.glu_op = GGML_GLU_OP_SWIGLU;
     }
-    // mmvq.cu:729-731 + :807-814: ncols_dst=1, ids=null, small_k=false.
-    // nchannels_y_fd is zero when ids is null; channel/sample ratios are
-    // fastdiv(1); channel/sample strides are 1 (ggml_cuda_op_mul_mat_vec_q).
+    // mmvq.cu:729-731 + :807-814: ids=null, small_k=false. nchannels_y_fd is
+    // zero when ids is null; channel/sample ratios are fastdiv(1) and their
+    // strides 1 (ggml_cuda_op_mul_mat_vec_q).
     const uint3 nchannels_y = make_uint3(0, 0, 0);
     const uint3 channel_ratio = init_fastdiv_values(1);
     const uint3 sample_ratio = init_fastdiv_values(1);
-    const int nwarps = calc_nwarps(type, 1, MMVQ_PARAMETERS_GENERIC);
+    const int nwarps = calc_nwarps(type, ncols_dst, MMVQ_PARAMETERS_GENERIC);
+    const int rows_per_block =
+        calc_rows_per_block(ncols_dst, MMVQ_PARAMETERS_GENERIC, false, nwarps);
     const dim3 block_dims(32, (unsigned) nwarps, 1);
-    const dim3 block_nums((unsigned) n, 1, 1);
+    const dim3 block_nums((unsigned) ((n + rows_per_block - 1) / rows_per_block), 1, 1);
     const uint32_t stride_col_y = (uint32_t) (k / QK8_1);
     static int trace_mode = -1;
     static int traces = 0;
     if (trace_mode < 0) {
         trace_mode = getenv("MAKEPAD_LLAMA_MMVQ_TRACE") ? 1 : 0;
     }
-    if (trace_mode && traces < 12) {
-        const void * kn = (const void *) mul_mat_vec_q<type, 1, has_fusion, false>;
-        const char * name = nullptr;
-#if CUDART_VERSION >= 11030
-        cudaFuncGetName(&name, kn);
-#endif
+    if (trace_mode && traces < 16) {
         fprintf(stderr,
-            "mmvq.launch: official=mmvq.cu:389 type=%d fuse=%d small_k=0 nwarps=%d "
-            "grid=(%u,1,1) block=(32,%d,1) shared=0 k=%d n=%d stride_row_x=%d "
-            "stride_col_y=%u stride_col_dst=%d nchannels_y=0 ch_stride=1 sm_stride=1 "
-            "ids=null q81=block_q8_1(36) pad=k%%512==0 gate=%p glu=%d kernel=%p name=%s\n",
-            (int) type, (int) has_fusion, nwarps, (unsigned) n, nwarps,
-            k, n, stride_row_x, stride_col_y, n, vgate,
-            has_fusion ? (int) GGML_GLU_OP_SWIGLU : -1,
-            kn, name ? name : "?");
+            "mmvq.launch: official=mmvq.cu:389 type=%d ncols_dst=%d fuse=%d nwarps=%d "
+            "rows_per_block=%d grid=(%u,1,1) k=%d n=%d stride_row_x=%d stride_col_y=%u\n",
+            (int) type, ncols_dst, (int) has_fusion, nwarps, rows_per_block,
+            block_nums.x, k, n, stride_row_x, stride_col_y);
         ++traces;
     }
-    mul_mat_vec_q<type, 1, has_fusion, false><<<block_nums, block_dims, 0, stream>>>(
+    mul_mat_vec_q<type, ncols_dst, has_fusion, false><<<block_nums, block_dims, 0, stream>>>(
         vx, vy, nullptr, fusion, dst,
         (uint32_t) k, nchannels_y, (uint32_t) stride_row_x, stride_col_y,
         (uint32_t) n, channel_ratio, 1u, 1u, 1u,
         sample_ratio, 1u, 1u, 1u, 0u);
+}
+
+template <ggml_type type, bool has_fusion>
+static cudaError_t mkllm_launch_mmvq_official(
+        const void * vx, const void * vgate, const void * vy, float * dst,
+        int k, int n, int m, int stride_row_x, cudaStream_t stream) {
+#define MKLLM_MMVQ_CASE(NC) \
+    case NC: mkllm_launch_mmvq_official_ncols<type, NC, has_fusion>( \
+        vx, vgate, vy, dst, k, n, stride_row_x, stream); break;
+    switch (m) {
+        MKLLM_MMVQ_CASE(1)
+        MKLLM_MMVQ_CASE(2)
+        MKLLM_MMVQ_CASE(3)
+        MKLLM_MMVQ_CASE(4)
+        MKLLM_MMVQ_CASE(5)
+        MKLLM_MMVQ_CASE(6)
+        MKLLM_MMVQ_CASE(7)
+        MKLLM_MMVQ_CASE(8)
+        default: return cudaErrorInvalidValue;
+    }
+#undef MKLLM_MMVQ_CASE
+    return cudaSuccess;
 }
 
 // llama.cpp mmq.cuh:3960 launch_mul_mat_q (shared size, stream-k nsm, fixup).
@@ -929,9 +950,9 @@ static __global__ void __launch_bounds__(MKLLM_MMVQ_NWARPS * 32, 1) mkllm_mmvq_q
 static cudaError_t mkllm_launch_mmvq_q81(
         int kind, int fuse,
         const void * src0, const void * gate, const void * y, float * dst,
-        int K, int N, size_t src0_row_bytes, size_t gate_row_bytes,
+        int K, int N, int M, size_t src0_row_bytes, size_t gate_row_bytes,
         cudaStream_t stream) {
-    if (K <= 0 || N <= 0 || (K % QK_K) != 0) {
+    if (K <= 0 || N <= 0 || (K % QK_K) != 0 || M < 1 || M > MMVQ_MAX_BATCH_SIZE) {
         return cudaErrorInvalidValue;
     }
     if (kind < MKLLM_QUANT_Q4K || kind > MKLLM_QUANT_Q80) {
@@ -949,34 +970,32 @@ static cudaError_t mkllm_launch_mmvq_q81(
         return cudaErrorInvalidValue;
     }
     const int stride_row_x = (int) (src0_row_bytes / (size_t) blk_bytes);
+    cudaError_t launch_err = cudaSuccess;
     switch (kind) {
         case MKLLM_QUANT_Q5K:
-            if (fuse) {
-                mkllm_launch_mmvq_official<GGML_TYPE_Q5_K, true>(
-                    src0, gate, y, dst, K, N, stride_row_x, stream);
-            } else {
-                mkllm_launch_mmvq_official<GGML_TYPE_Q5_K, false>(
-                    src0, nullptr, y, dst, K, N, stride_row_x, stream);
-            }
+            launch_err = fuse
+                ? mkllm_launch_mmvq_official<GGML_TYPE_Q5_K, true>(
+                    src0, gate, y, dst, K, N, M, stride_row_x, stream)
+                : mkllm_launch_mmvq_official<GGML_TYPE_Q5_K, false>(
+                    src0, nullptr, y, dst, K, N, M, stride_row_x, stream);
             break;
         case MKLLM_QUANT_Q6K:
-            if (fuse) {
-                mkllm_launch_mmvq_official<GGML_TYPE_Q6_K, true>(
-                    src0, gate, y, dst, K, N, stride_row_x, stream);
-            } else {
-                mkllm_launch_mmvq_official<GGML_TYPE_Q6_K, false>(
-                    src0, nullptr, y, dst, K, N, stride_row_x, stream);
-            }
+            launch_err = fuse
+                ? mkllm_launch_mmvq_official<GGML_TYPE_Q6_K, true>(
+                    src0, gate, y, dst, K, N, M, stride_row_x, stream)
+                : mkllm_launch_mmvq_official<GGML_TYPE_Q6_K, false>(
+                    src0, nullptr, y, dst, K, N, M, stride_row_x, stream);
             break;
         default:
-            if (fuse) {
-                mkllm_launch_mmvq_official<GGML_TYPE_Q4_K, true>(
-                    src0, gate, y, dst, K, N, stride_row_x, stream);
-            } else {
-                mkllm_launch_mmvq_official<GGML_TYPE_Q4_K, false>(
-                    src0, nullptr, y, dst, K, N, stride_row_x, stream);
-            }
+            launch_err = fuse
+                ? mkllm_launch_mmvq_official<GGML_TYPE_Q4_K, true>(
+                    src0, gate, y, dst, K, N, M, stride_row_x, stream)
+                : mkllm_launch_mmvq_official<GGML_TYPE_Q4_K, false>(
+                    src0, nullptr, y, dst, K, N, M, stride_row_x, stream);
             break;
+    }
+    if (launch_err != cudaSuccess) {
+        return launch_err;
     }
     return cudaGetLastError();
 }
@@ -984,22 +1003,22 @@ static cudaError_t mkllm_launch_mmvq_q81(
 extern "C" cudaError_t mkllm_mmv_quant_q81(
         int kind,
         const void * src0, const void * y, float * dst,
-        int K, int N,
+        int K, int N, int M,
         size_t src0_row_bytes, size_t dst_col_elems,
         cudaStream_t stream) {
     (void) dst_col_elems;
     return mkllm_launch_mmvq_q81(
-        kind, 0, src0, nullptr, y, dst, K, N, src0_row_bytes, 0, stream);
+        kind, 0, src0, nullptr, y, dst, K, N, M, src0_row_bytes, 0, stream);
 }
 
 extern "C" cudaError_t mkllm_mmv_quant_q81_swiglu(
         int kind,
         const void * up, const void * gate, const void * y, float * dst,
-        int K, int N,
+        int K, int N, int M,
         size_t up_row_bytes, size_t gate_row_bytes,
         cudaStream_t stream) {
     return mkllm_launch_mmvq_q81(
-        kind, 1, up, gate, y, dst, K, N, up_row_bytes, gate_row_bytes, stream);
+        kind, 1, up, gate, y, dst, K, N, M, up_row_bytes, gate_row_bytes, stream);
 }
 
 #if 0

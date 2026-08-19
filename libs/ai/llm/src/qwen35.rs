@@ -95,14 +95,43 @@ pub struct Qwen35LayerTensors {
     pub ffn: Qwen35DenseFfnTensors,
 }
 
+/// The `blk.N.nextn.*` tensors that turn the trailing decoder block into the
+/// multi-token-prediction (MTP) draft head. `blk.N` itself is an ordinary
+/// full-attention Qwen3.5 block and lives in `Qwen35Tensors::layers`; these
+/// four extra tensors are the prologue (`enorm`/`hnorm`/`eh_proj`) and the
+/// head norm that replaces `output_norm` on the draft path.
+/// Mirrors llama.cpp `src/models/qwen35.cpp::load_block_mtp`.
+#[derive(Clone, Debug)]
+pub struct Qwen35MtpTensors {
+    pub layer_index: u32,
+    pub enorm: GgufTensorInfo,
+    pub hnorm: GgufTensorInfo,
+    pub eh_proj: GgufTensorInfo,
+    pub eh_proj_scale: Option<GgufTensorInfo>,
+    /// Optional per-head overrides; when absent the draft shares the main
+    /// model's `output_norm` / `output` / `token_embd`.
+    pub shared_head_norm: Option<GgufTensorInfo>,
+    pub shared_head: Option<GgufTensorInfo>,
+    pub embed_tokens: Option<GgufTensorInfo>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Qwen35Tensors {
     pub globals: Qwen35GlobalTensors,
+    /// Main blocks `0..main_block_count`, plus the MTP block appended last
+    /// when `mtp` is `Some` (so per-index spec builders work unchanged).
     pub layers: Vec<Qwen35LayerTensors>,
+    pub mtp: Option<Qwen35MtpTensors>,
 }
 
 impl Qwen35Tensors {
     pub fn from_model(model: &LlamaModel) -> Result<Self> {
+        Self::from_model_with_mtp(model, false)
+    }
+
+    /// `load_mtp` mirrors llama.cpp's `mparams.load_mtp`: the nextn block is
+    /// skipped entirely (zero VRAM) unless speculative decoding wants it.
+    pub fn from_model_with_mtp(model: &LlamaModel, load_mtp: bool) -> Result<Self> {
         let cfg = model.require_qwen35()?;
         let token_embd = required_tensor(model, "token_embd.weight")?;
         let output_norm = required_tensor(model, "output_norm.weight")?;
@@ -111,14 +140,92 @@ impl Qwen35Tensors {
         // MTP/draft blocks past main_block_count belong to the speculative
         // draft network and are not part of the main forward pass.
         let main_block_count = cfg.main_block_count()?;
-        let mut layers = Vec::with_capacity(main_block_count as usize);
+        let mut layers = Vec::with_capacity(main_block_count as usize + 1);
         for index in 0..main_block_count {
             let kind = layer_kind(index, cfg.full_attention_interval)?;
-            let attn_norm = required_tensor(model, &layer_name(index, "attn_norm", "weight"))?;
-            let post_attention_norm =
-                required_tensor(model, &layer_name(index, "post_attention_norm", "weight"))?;
+            layers.push(load_layer_tensors(model, index, kind)?);
+        }
 
-            let attention = match kind {
+        let mtp = if load_mtp && cfg.nextn_predict_layers > 0 {
+            if cfg.nextn_predict_layers != 1 {
+                return Err(LlamaError::format(format!(
+                    "qwen35 MTP draft supports exactly one nextn layer, model has {}",
+                    cfg.nextn_predict_layers
+                )));
+            }
+            let layer_index = main_block_count;
+            // The MTP block is a full-attention decoder block regardless of
+            // where it falls in the full_attention_interval cycle
+            // (llama.cpp `load_block_mtp`).
+            layers.push(load_layer_tensors(
+                model,
+                layer_index,
+                Qwen35LayerKind::Attention,
+            )?);
+            Some(Qwen35MtpTensors {
+                layer_index,
+                enorm: required_tensor(model, &layer_name(layer_index, "nextn.enorm", "weight"))?,
+                hnorm: required_tensor(model, &layer_name(layer_index, "nextn.hnorm", "weight"))?,
+                eh_proj: required_tensor(
+                    model,
+                    &layer_name(layer_index, "nextn.eh_proj", "weight"),
+                )?,
+                eh_proj_scale: optional_tensor(
+                    model,
+                    &layer_name(layer_index, "nextn.eh_proj", "scale"),
+                ),
+                shared_head_norm: optional_tensor(
+                    model,
+                    &layer_name(layer_index, "nextn.shared_head_norm", "weight"),
+                ),
+                shared_head: optional_tensor(
+                    model,
+                    &layer_name(layer_index, "nextn.shared_head_head", "weight"),
+                ),
+                embed_tokens: optional_tensor(
+                    model,
+                    &layer_name(layer_index, "nextn.embed_tokens", "weight"),
+                ),
+            })
+        } else {
+            None
+        };
+
+        Ok(Self {
+            globals: Qwen35GlobalTensors {
+                token_embd,
+                output_norm,
+                output,
+            },
+            layers,
+            mtp,
+        })
+    }
+
+    /// Index of the first block that is not part of the main forward pass.
+    pub fn main_block_count(&self) -> usize {
+        match &self.mtp {
+            Some(mtp) => mtp.layer_index as usize,
+            None => self.layers.len(),
+        }
+    }
+
+    /// Main-model blocks only (the MTP block is excluded).
+    pub fn main_layers(&self) -> &[Qwen35LayerTensors] {
+        &self.layers[..self.main_block_count()]
+    }
+}
+
+fn load_layer_tensors(
+    model: &LlamaModel,
+    index: u32,
+    kind: Qwen35LayerKind,
+) -> Result<Qwen35LayerTensors> {
+    let attn_norm = required_tensor(model, &layer_name(index, "attn_norm", "weight"))?;
+    let post_attention_norm =
+        required_tensor(model, &layer_name(index, "post_attention_norm", "weight"))?;
+
+    let attention = match kind {
                 Qwen35LayerKind::Attention => Some(Qwen35AttentionTensors {
                     wq: required_tensor(model, &layer_name(index, "attn_q", "weight"))?,
                     wk: required_tensor(model, &layer_name(index, "attn_k", "weight"))?,
@@ -164,36 +271,27 @@ impl Qwen35Tensors {
                 }),
             };
 
-            layers.push(Qwen35LayerTensors {
-                index,
-                kind,
-                attn_norm,
-                post_attention_norm,
-                attention,
-                recurrent,
-                ffn: Qwen35DenseFfnTensors {
-                    gate: required_tensor(model, &layer_name(index, "ffn_gate", "weight"))?,
-                    up: required_tensor(model, &layer_name(index, "ffn_up", "weight"))?,
-                    down: required_tensor(model, &layer_name(index, "ffn_down", "weight"))?,
-                    scales: Qwen35DenseFfnScales {
-                        gate: optional_tensor(model, &layer_name(index, "ffn_gate", "scale")),
-                        up: optional_tensor(model, &layer_name(index, "ffn_up", "scale")),
-                        down: optional_tensor(model, &layer_name(index, "ffn_down", "scale")),
-                    },
-                },
-            });
-        }
-
-        Ok(Self {
-            globals: Qwen35GlobalTensors {
-                token_embd,
-                output_norm,
-                output,
+    Ok(Qwen35LayerTensors {
+        index,
+        kind,
+        attn_norm,
+        post_attention_norm,
+        attention,
+        recurrent,
+        ffn: Qwen35DenseFfnTensors {
+            gate: required_tensor(model, &layer_name(index, "ffn_gate", "weight"))?,
+            up: required_tensor(model, &layer_name(index, "ffn_up", "weight"))?,
+            down: required_tensor(model, &layer_name(index, "ffn_down", "weight"))?,
+            scales: Qwen35DenseFfnScales {
+                gate: optional_tensor(model, &layer_name(index, "ffn_gate", "scale")),
+                up: optional_tensor(model, &layer_name(index, "ffn_up", "scale")),
+                down: optional_tensor(model, &layer_name(index, "ffn_down", "scale")),
             },
-            layers,
-        })
-    }
+        },
+    })
+}
 
+impl Qwen35Tensors {
     pub fn unique_tensor_count(&self) -> usize {
         self.unique_tensors().len()
     }
@@ -264,6 +362,16 @@ impl Qwen35Tensors {
             visit_optional(&layer.ffn.scales.gate, &mut visit);
             visit_optional(&layer.ffn.scales.up, &mut visit);
             visit_optional(&layer.ffn.scales.down, &mut visit);
+        }
+
+        if let Some(mtp) = &self.mtp {
+            visit(&mtp.enorm);
+            visit(&mtp.hnorm);
+            visit(&mtp.eh_proj);
+            visit_optional(&mtp.eh_proj_scale, &mut visit);
+            visit_optional(&mtp.shared_head_norm, &mut visit);
+            visit_optional(&mtp.shared_head, &mut visit);
+            visit_optional(&mtp.embed_tokens, &mut visit);
         }
     }
 }
