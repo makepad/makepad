@@ -1,5 +1,16 @@
 //! Native SAM 3.1 Multiplex foundation (Comfy-Org FP16 checkpoint).
 //!
+//! The architecture realised here is implemented after the Apache-2.0
+//! Hugging Face `transformers` SAM 3 implementation —
+//! `src/transformers/models/sam3/{modeling,configuration,image_processing,processing}_sam3.py`,
+//! "Copyright 2025 The Meta AI Authors and The HuggingFace Team". Runtime
+//! numerics are matched against reference tensor dumps of the Comfy-Org
+//! multiplex checkpoint pipeline this port targets. See
+//! `../THIRD_PARTY_NOTICES.md`; our own code stays MIT with the crate.
+//!
+//! Weights are SAM-Licensed. The operator pulls them at runtime from the
+//! Comfy-Org repack; this repository never redistributes them.
+//!
 //! Production identity is `Comfy-Org/sam3.1` `checkpoints/sam3.1_multiplex_fp16.safetensors`.
 //! Facebook TOS checkpoints (`facebook/sam3*`) are never fetched or accepted.
 //! The detector is a Perception-Encoder ViT-L/14 + CLIP-L text tower + 6-layer
@@ -43,14 +54,16 @@ pub const SAM3_NUM_QUERIES: usize = 200;
 pub const SAM3_MULTIPLEX_SLOTS: usize = 16;
 pub const SAM3_LN_EPS: f32 = 1e-5;
 pub const SAM3_SCORE_THRESH: f32 = 0.5;
-/// Comfy SAM3_Detect `refine_iterations` default.
+/// Interactive-head refinement passes per accepted detection. Two is the
+/// value the reference dumps were produced at.
 pub const SAM3_REFINE_ITERS: usize = 2;
 pub const SAM3_CACHE_NAMESPACE: &str = "sam3-1-multiplex";
 
 /// PE L++ windowed layers keep 24×24 windows; these four layers are global.
 pub const SAM3_GLOBAL_LAYERS: [usize; 4] = [7, 15, 23, 31];
 
-/// SAM3 CLIP pad id is 0 (not EOS). Matches Comfy SAM3TokenizerWrapper dumps.
+/// SAM3's CLIP tokenizer pads with 0, not with EOS. Confirmed against the
+/// reference tokenizer dumps.
 pub const SAM3_PAD_ID: i32 = 0;
 
 pub type Sam3Cancel<'a> = &'a dyn Fn() -> bool;
@@ -552,6 +565,13 @@ pub fn stretch_hwc_to_planar(src_hwc: &[f32], src_w: usize, src_h: usize, dst: u
 
 /// Bilinear stretch to 1008×1008, align_corners=False, no letterbox, no norm.
 /// Matches the locked oracle tap `01_preprocessed_rgb_01_nchw.npy`.
+///
+/// NOTE "no norm": the tensor handed to the trunk is plain `[0, 1]` RGB. The
+/// HF `Sam3ImageProcessor` and Meta's own transform both follow the resize
+/// with `Normalize(mean=0.5, std=0.5)`; the target checkpoint pipeline — which
+/// is what our oracle dumps come from — does not, and this port reproduces
+/// the oracle. Anyone re-basing this on the HF processor must add the
+/// normalization here and re-pin every downstream tap.
 pub fn preprocess_image(image: Sam3Image<'_>) -> Result<Sam3Preprocessed> {
     let src_w = image.width;
     let src_h = image.height;
