@@ -121,6 +121,11 @@ impl ContentBackend for Flux2Backend {
             // guidance); without one it is the text-to-image model.
             Flux2Pipeline::Dev(pipe) if !params.input_bytes.is_empty() => {
                 let (rgb, width, height) = decode_png_rgb(&params.input_bytes)?;
+                // diffusers `Flux2Pipeline.__call__`: a reference over 1024x1024
+                // px is downscaled to that area (aspect-preserving) before the
+                // multiple-of-16 floor+crop; an unspecified output size is then
+                // inherited from THIS processed reference, not the raw upload.
+                let (rgb, width, height) = flux2_prepare_edit_reference(&rgb, width, height)?;
                 let reference = flux2_image_from_rgb_u8(&rgb, width, height)
                     .map_err(|err| AssetAiError::Backend(format!("flux2 ref: {err}")))?;
                 let out_w = params.width.unwrap_or(width as u32).max(16) / 16 * 16;
@@ -333,6 +338,108 @@ impl ContentBackend for Flux2Backend {
     }
 }
 
+/// FLUX.2 [dev] edit-mode reference-image area cap (diffusers
+/// `Flux2Pipeline.__call__`: `image_width * image_height > 1024 * 1024`
+/// triggers `image_processor._resize_to_target_area(img, 1024*1024)`). BFL's
+/// own reference repo (`black-forest-labs/flux2` `encode_image_refs`) caps a
+/// single reference at 2024^2 and only drops to 1024^2 once more than one
+/// reference is supplied; we follow the diffusers `Flux2Pipeline` number
+/// since the rest of this port (schedule, TE padding) is already pinned
+/// against it and our service only ever sends a single reference per call.
+const FLUX2_DEV_EDIT_REF_AREA_LIMIT: usize = 1024 * 1024;
+
+/// Mirrors the reference pipelines' edit-mode preprocessing: downscale a
+/// reference over the area cap (aspect-preserving), then floor+center-crop
+/// to a multiple of 16 (`vae_scale_factor * 2`) — diffusers does this via
+/// `image_processor.preprocess(..., resize_mode="crop")`, BFL via
+/// `cap_pixels` + `center_crop_to_multiple_of_x`. `flux2_vae_encode` and
+/// `Flux2EditRequest` both require multiple-of-16 input; the pipeline layer
+/// deliberately does not enforce this itself (see `Flux2EditRequest.
+/// references` doc), so the backend owns it, same as klein already assumes.
+///
+/// Uses a plain box-filter downscale rather than PIL's LANCZOS — this runs
+/// host-side ahead of the numerically-gated GPU path, so exact pixel parity
+/// with the oracle is not the goal, only respecting the area cap (VRAM) and
+/// the multiple-of-16 contract the VAE encoder requires.
+fn flux2_prepare_edit_reference(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+    if width < 16 || height < 16 {
+        return Err(AssetAiError::Params(format!(
+            "flux2-dev edit reference {width}x{height} is smaller than the 16px minimum"
+        )));
+    }
+    let (mut rgb, mut width, mut height) = (rgb.to_vec(), width, height);
+    let area = width * height;
+    if area > FLUX2_DEV_EDIT_REF_AREA_LIMIT {
+        let scale = (FLUX2_DEV_EDIT_REF_AREA_LIMIT as f64 / area as f64).sqrt();
+        let new_w = ((width as f64 * scale).round() as usize).max(1);
+        let new_h = ((height as f64 * scale).round() as usize).max(1);
+        rgb = resize_box_rgb(&rgb, width, height, new_w, new_h);
+        width = new_w;
+        height = new_h;
+    }
+    let cropped_w = (width / 16) * 16;
+    let cropped_h = (height / 16) * 16;
+    if cropped_w == 0 || cropped_h == 0 {
+        return Err(AssetAiError::Params(format!(
+            "flux2-dev edit reference {width}x{height} rounds to 0 at the 16px multiple"
+        )));
+    }
+    if cropped_w != width || cropped_h != height {
+        rgb = center_crop_rgb(&rgb, width, height, cropped_w, cropped_h);
+    }
+    Ok((rgb, cropped_w, cropped_h))
+}
+
+/// Aspect-agnostic box-filter downscale (average of the source rectangle
+/// mapped to each destination pixel) — only ever called with `dw <= sw` and
+/// `dh <= sh` (downscale-only, see `flux2_prepare_edit_reference`).
+fn resize_box_rgb(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh * 3];
+    for oy in 0..dh {
+        let sy0 = oy * sh / dh;
+        let sy1 = (((oy + 1) * sh / dh).max(sy0 + 1)).min(sh);
+        for ox in 0..dw {
+            let sx0 = ox * sw / dw;
+            let sx1 = (((ox + 1) * sw / dw).max(sx0 + 1)).min(sw);
+            let mut sum = [0u64; 3];
+            let mut count = 0u64;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let idx = (sy * sw + sx) * 3;
+                    sum[0] += src[idx] as u64;
+                    sum[1] += src[idx + 1] as u64;
+                    sum[2] += src[idx + 2] as u64;
+                    count += 1;
+                }
+            }
+            let count = count.max(1);
+            let didx = (oy * dw + ox) * 3;
+            out[didx] = (sum[0] / count) as u8;
+            out[didx + 1] = (sum[1] / count) as u8;
+            out[didx + 2] = (sum[2] / count) as u8;
+        }
+    }
+    out
+}
+
+/// Center-crop an RGB8 buffer from `sw x sh` down to `dw x dh` (`dw <= sw`,
+/// `dh <= sh`).
+fn center_crop_rgb(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let x0 = (sw - dw) / 2;
+    let y0 = (sh - dh) / 2;
+    let mut out = vec![0u8; dw * dh * 3];
+    for y in 0..dh {
+        let srow = ((y0 + y) * sw + x0) * 3;
+        let drow = y * dw * 3;
+        out[drow..drow + dw * 3].copy_from_slice(&src[srow..srow + dw * 3]);
+    }
+    out
+}
+
 fn decode_png_rgb(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
     let cursor = std::io::Cursor::new(bytes.to_vec());
     let reader = BufReader::new(cursor);
@@ -363,4 +470,97 @@ fn decode_png_rgb(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError>
         rgb[i * 3..i * 3 + 3].copy_from_slice(&chunk[..3]);
     }
     Ok((rgb, w, h))
+}
+
+#[cfg(test)]
+mod flux2_edit_reference_tests {
+    use super::*;
+
+    fn solid(width: usize, height: usize, rgb: [u8; 3]) -> Vec<u8> {
+        let mut out = vec![0u8; width * height * 3];
+        for px in out.chunks_exact_mut(3) {
+            px.copy_from_slice(&rgb);
+        }
+        out
+    }
+
+    #[test]
+    fn already_valid_reference_is_untouched() {
+        // 512x512 is under the area cap and already a multiple of 16: the
+        // pipeline's assumed "already cropped to a multiple of 16" input
+        // must round-trip byte-for-byte, not just same-size.
+        let src = solid(512, 512, [10, 20, 30]);
+        let (out, w, h) = flux2_prepare_edit_reference(&src, 512, 512).expect("prepare");
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn non_multiple_of_16_is_center_cropped_not_stretched() {
+        // 500x500 is under the area cap, so this exercises ONLY the
+        // multiple-of-16 floor+crop path (500 -> 496).
+        let src = solid(500, 500, [1, 2, 3]);
+        let (out, w, h) = flux2_prepare_edit_reference(&src, 500, 500).expect("prepare");
+        assert_eq!((w, h), (496, 496));
+        assert_eq!(out.len(), 496 * 496 * 3);
+        assert!(out.chunks_exact(3).all(|px| px == [1, 2, 3]));
+    }
+
+    #[test]
+    fn oversized_reference_is_capped_under_the_area_limit() {
+        // 2000x1500 = 3,000,000px, well over the 1024*1024 (1,048,576) cap;
+        // diffusers `Flux2Pipeline.__call__` downscales aspect-preserving
+        // before flooring to a multiple of 16.
+        let (sw, sh) = (2000usize, 1500usize);
+        let src = solid(sw, sh, [200, 100, 50]);
+        let (out, w, h) = flux2_prepare_edit_reference(&src, sw, sh).expect("prepare");
+        assert!(w * h <= FLUX2_DEV_EDIT_REF_AREA_LIMIT, "{w}x{h} exceeds the area cap");
+        assert_eq!(w % 16, 0);
+        assert_eq!(h % 16, 0);
+        // Aspect ratio preserved within the rounding the multiple-of-16
+        // floor introduces.
+        let src_ar = sw as f64 / sh as f64;
+        let dst_ar = w as f64 / h as f64;
+        assert!((src_ar - dst_ar).abs() < 0.02, "aspect drifted: {src_ar} vs {dst_ar}");
+        assert_eq!(out.len(), w * h * 3);
+        // A solid-color source must resample to the same solid color.
+        assert!(out.chunks_exact(3).all(|px| px == [200, 100, 50]));
+    }
+
+    #[test]
+    fn single_pixel_short_side_over_16_survives_floor() {
+        // 16x2000: pixel count is small (32,000, under the cap) so only the
+        // multiple-of-16 floor applies; the short side is already 16.
+        let (sw, sh) = (16usize, 2000usize);
+        let src = solid(sw, sh, [5, 6, 7]);
+        let (out, w, h) = flux2_prepare_edit_reference(&src, sw, sh).expect("prepare");
+        assert_eq!(w, 16);
+        assert_eq!(h, 2000);
+        assert_eq!(out.len(), w * h * 3);
+    }
+
+    #[test]
+    fn reference_below_16px_is_rejected() {
+        let src = solid(8, 8, [0, 0, 0]);
+        assert!(flux2_prepare_edit_reference(&src, 8, 8).is_err());
+    }
+
+    #[test]
+    fn box_resize_preserves_solid_color() {
+        let src = solid(100, 100, [42, 84, 126]);
+        let out = resize_box_rgb(&src, 100, 100, 37, 41);
+        assert_eq!(out.len(), 37 * 41 * 3);
+        assert!(out.chunks_exact(3).all(|px| px == [42, 84, 126]));
+    }
+
+    #[test]
+    fn center_crop_keeps_the_middle_pixel() {
+        // 4x4 with a distinct center-left pixel; crop to 2x2 must keep it.
+        let mut src = solid(4, 4, [0, 0, 0]);
+        let center_idx = (1 * 4 + 1) * 3;
+        src[center_idx..center_idx + 3].copy_from_slice(&[9, 9, 9]);
+        let out = center_crop_rgb(&src, 4, 4, 2, 2);
+        assert_eq!(out.len(), 2 * 2 * 3);
+        assert!(out.chunks_exact(3).any(|px| px == [9, 9, 9]));
+    }
 }
