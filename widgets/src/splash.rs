@@ -45,6 +45,24 @@ pub struct Splash {
     /// between eval and a later call).
     #[rust]
     body_id: Option<u16>,
+    /// Host-trusted identity carried on every `host.request` this isolate
+    /// makes (see splash_host.rs). None = requests arrive untagged, which a
+    /// policy-enforcing host treats as deniable — right for previews.
+    #[rust]
+    host_tag: Option<String>,
+    /// Granted-capability names `host.capabilities()` reports. Informational
+    /// for the script's UI; enforcement is the host's per-request decision.
+    #[rust]
+    host_caps: Vec<String>,
+    /// Whether this isolate's surface may raise user prompts (true for a
+    /// foreground app host, false for background surfaces like home-screen
+    /// widget tiles). Rides on every host.request as `may_prompt`.
+    #[rust(true)]
+    host_prompts: bool,
+    /// Whole-jail byte cap when the host has granted this app extra room.
+    /// None leaves the storage default.
+    #[rust]
+    storage_quota: Option<u64>,
     /// What to call this script in error messages. Set by the host to the
     /// mini-app's id; empty for previews and one-off evals.
     ///
@@ -61,18 +79,22 @@ pub struct Splash {
 // scope as a bare name — app scripts say `fs.read("/x")`, not `mod.fs.read`.
 // A script reassigning `fs` only sabotages its own binding; the jail itself
 // lives host-side.
-/// Lines the prefixes below occupy, which is the amount every reported script
-/// line is ahead of the app's own file. Subtract it to get the line in the
-/// `.splash` source.
+/// Lines the no-net prefix occupies, which is the amount every reported
+/// script line is ahead of the app's own file. Subtract it to get the line in
+/// the `.splash` source; net-enabled apps carry one extra line
+/// ([`SPLASH_NET_PREFIX_LINES`]).
 ///
 /// It cannot be zero: the prefix would then have to share line 1 with the
 /// app's first line, and a generated app's first line is its `// name:`
 /// header — a comment, which would swallow the rest of the prefix.
-pub const SPLASH_PREFIX_LINES: u32 = 2;
+pub const SPLASH_PREFIX_LINES: u32 = 3;
+/// Line offset for net-enabled apps (their prefix adds `use mod.net`).
+pub const SPLASH_NET_PREFIX_LINES: u32 = 4;
 
-const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nlet fs = mod.fs\nView{height:Fit, ";
+const SPLASH_PREFIX: &str =
+    "use mod.prelude.widgets.*\nlet fs = mod.fs\nlet host = mod.host\nView{height:Fit, ";
 const SPLASH_NET_PREFIX: &str =
-    "use mod.prelude.widgets.*\nuse mod.net\nlet fs = mod.fs\nView{height:Fit, ";
+    "use mod.prelude.widgets.*\nuse mod.net\nlet fs = mod.fs\nlet host = mod.host\nView{height:Fit, ";
 const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
 
 impl Splash {
@@ -120,10 +142,14 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
         }
-        // (Re)bind this isolate's storage jail. Keyed by heap so the script
-        // can neither read nor retarget it.
+        // (Re)bind this isolate's storage jail and host-bridge identity.
+        // Keyed by heap so the script can neither read nor retarget them.
         let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
         crate::splash_storage::set_root_for_heap(heap_key, self.sandbox_dir.clone());
+        crate::splash_host::set_tag_for_heap(heap_key, self.host_tag.clone());
+        crate::splash_host::set_caps_for_heap(heap_key, self.host_caps.clone());
+        crate::splash_host::set_prompts_for_heap(heap_key, self.host_prompts);
+        crate::splash_storage::set_quota_for_heap(heap_key, self.storage_quota);
 
         let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
@@ -382,6 +408,30 @@ impl Splash {
         })
     }
 
+    /// Like [`Self::call_script_fn`], but with string arguments — those are
+    /// heap values, so they must be minted inside this isolate's own heap
+    /// right before the call (a cross-heap ScriptValue would resolve in the
+    /// wrong arena). Used for host->script deliveries like IPC messages.
+    pub fn call_script_fn_with_strings(&mut self, cx: &mut Cx, name: LiveId, args: &[&str]) -> bool {
+        let Some(scope) = self.body_scope(cx) else {
+            return false;
+        };
+        cx.with_script_vm_id(self.vm_id, |vm| {
+            let fnval = vm.bx.heap.scope_value(scope, name, NoTrap);
+            if fnval.is_nil() || fnval.is_err() {
+                return false;
+            }
+            let vals: Vec<ScriptValue> = args
+                .iter()
+                .map(|s| vm.new_string_with(|_vm, out| out.push_str(s)))
+                .collect();
+            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                vm.call(fnval, &vals);
+            });
+            true
+        })
+    }
+
     /// Sets whether this Splash's isolate gets the networking runtime. Must be
     /// called before the body is first evaluated (i.e. before `set_text`) — the
     /// VM is allocated with or without network on that first eval and isn't
@@ -400,6 +450,60 @@ impl Splash {
             let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
             crate::splash_storage::set_root_for_heap(heap_key, dir);
         }
+    }
+
+    /// Assigns the host-trusted identity for this app's `host.request` calls.
+    /// Call BEFORE set_text so boot-time requests already carry it; takes
+    /// effect immediately when the isolate is live.
+    pub fn set_host_tag(&mut self, cx: &mut Cx, tag: Option<String>) {
+        self.host_tag = tag.clone();
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_host::set_tag_for_heap(heap_key, tag);
+        }
+    }
+
+    /// Replaces the capability list `host.capabilities()` reports to this
+    /// app. Informational (the host still decides every request); push it
+    /// again whenever grants change so the script's UI can adapt.
+    pub fn set_host_caps(&mut self, cx: &mut Cx, caps: Vec<String>) {
+        self.host_caps = caps.clone();
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_host::set_caps_for_heap(heap_key, caps);
+        }
+    }
+
+    /// Raises this app's whole-jail storage cap (None = the default). Takes
+    /// effect immediately; a lowered cap refuses further growth rather than
+    /// deleting anything the app already wrote.
+    pub fn set_storage_quota(&mut self, cx: &mut Cx, total_bytes: Option<u64>) {
+        self.storage_quota = total_bytes;
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_storage::set_quota_for_heap(heap_key, total_bytes);
+        }
+    }
+
+    /// Marks whether this isolate's surface may raise user prompts; see
+    /// `SplashHostRequest::may_prompt`. Defaults true.
+    pub fn set_host_prompts(&mut self, cx: &mut Cx, may_prompt: bool) {
+        self.host_prompts = may_prompt;
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_host::set_prompts_for_heap(heap_key, may_prompt);
+        }
+    }
+
+    /// This Splash's live isolate heap identity (None while stopped) — the
+    /// same key `SplashHostRequest::heap_key` carries, so hosts can relate a
+    /// request to a specific widget (e.g. to skip an IPC sender's own isolate
+    /// when fanning a message out).
+    pub fn isolate_heap_key(&mut self, cx: &mut Cx) -> Option<usize> {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return None;
+        }
+        Some(cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key()))
     }
 
     /// Sets (or replaces) a global visible to this Splash's script, like the
@@ -452,10 +556,56 @@ impl SplashRef {
         }
     }
 
+    /// See [`Splash::set_host_tag`].
+    pub fn set_host_tag(&self, cx: &mut Cx, tag: Option<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_host_tag(cx, tag);
+        }
+    }
+
+    /// See [`Splash::set_host_caps`].
+    pub fn set_host_caps(&self, cx: &mut Cx, caps: Vec<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_host_caps(cx, caps);
+        }
+    }
+
+    /// See [`Splash::set_storage_quota`].
+    pub fn set_storage_quota(&self, cx: &mut Cx, total_bytes: Option<u64>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_storage_quota(cx, total_bytes);
+        }
+    }
+
+    /// See [`Splash::set_host_prompts`].
+    pub fn set_host_prompts(&self, cx: &mut Cx, may_prompt: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_host_prompts(cx, may_prompt);
+        }
+    }
+
+    /// See [`Splash::isolate_heap_key`].
+    pub fn isolate_heap_key(&self, cx: &mut Cx) -> Option<usize> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.isolate_heap_key(cx)
+        } else {
+            None
+        }
+    }
+
     /// See [`Splash::call_script_fn`].
     pub fn call_script_fn(&self, cx: &mut Cx, name: LiveId, args: &[ScriptValue]) -> bool {
         if let Some(mut inner) = self.borrow_mut() {
             inner.call_script_fn(cx, name, args)
+        } else {
+            false
+        }
+    }
+
+    /// See [`Splash::call_script_fn_with_strings`].
+    pub fn call_script_fn_with_strings(&self, cx: &mut Cx, name: LiveId, args: &[&str]) -> bool {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.call_script_fn_with_strings(cx, name, args)
         } else {
             false
         }
