@@ -1341,6 +1341,20 @@ script_mod! {
                             pull_btn := GhostButton{ text: "Pull model" }
                             retry_btn := ChipButton{ text: "Retry last" visible: false }
                         }
+                        // One run per IDLE capable box (not up, not busy with
+                        // another job, not already holding one of our stages),
+                        // each its own History item — a quick spread of
+                        // variations across the fleet. Off = the normal single
+                        // run placed by affinity.
+                        parallel_toggle := CheckBox{
+                            text: "all free boxes in parallel"
+                            active: false
+                            padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                            draw_text +: {
+                                color: #x828a93
+                                text_style: theme.font_regular{font_size: 8.5}
+                            }
+                        }
 
                         PanelHeading{ text: "Now running" }
                         now_card := Card{
@@ -3607,7 +3621,37 @@ impl App {
     /// Generate: every click enqueues its own run (own group id); the
     /// fleet-aware planner starts as many as free compatible slots allow.
     fn start_generate(&mut self, cx: &mut Cx) {
+        let parallel = self.ui.check_box(cx, ids!(parallel_toggle)).active(cx);
         match self.current_run_spec(cx) {
+            Ok(run) if parallel => {
+                let boxes = self.idle_capable_boxes(&run);
+                if boxes.is_empty() {
+                    self.set_caption(
+                        cx,
+                        "FLEET",
+                        "no idle capable box right now — queued one run by affinity",
+                    );
+                    self.run_queue.push(run);
+                } else {
+                    let count = boxes.len();
+                    for base_url in boxes {
+                        // Own group id per box: each spread run is its own
+                        // History item; the label says where it ran.
+                        let host = base_url
+                            .trim_start_matches("http://")
+                            .trim_start_matches("https://")
+                            .to_string();
+                        self.run_queue.push(PendingRun {
+                            box_override: Some(base_url),
+                            group_id: crate::library::new_group_id("run"),
+                            group_label: format!("{} @ {host}", run.group_label),
+                            ..run.clone()
+                        });
+                    }
+                    self.set_caption(cx, "FLEET", &format!("spread across {count} idle boxes"));
+                }
+                self.try_dispatch_pending(cx);
+            }
             Ok(run) => {
                 self.run_queue.push(run);
                 self.try_dispatch_pending(cx);
@@ -3617,6 +3661,30 @@ impl App {
                 self.set_caption(cx, "INPUT", &message);
             }
         }
+    }
+
+    /// Boxes that could take `run`'s first stage RIGHT NOW and are doing
+    /// nothing else: up, capable (advertised model + VRAM fit), zero
+    /// service-reported jobs (nobody's video in flight), none of our own
+    /// stages committed there. One per physical GPU slot.
+    fn idle_capable_boxes(&self, run: &PendingRun) -> Vec<String> {
+        let (_, loads) = self.endpoint_loads(run);
+        let mut seen_slots = Vec::new();
+        let mut out = Vec::new();
+        for load in loads {
+            if !load.up || !load.capable || load.vram_waiting {
+                continue;
+            }
+            if load.reported_pending > 0 || load.ours_active > 0 {
+                continue;
+            }
+            if seen_slots.contains(&load.slot_key) {
+                continue;
+            }
+            seen_slots.push(load.slot_key.clone());
+            out.push(load.base_url.clone());
+        }
+        out
     }
 
     /// Runs currently occupying a GPU slot.
