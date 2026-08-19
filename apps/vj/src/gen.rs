@@ -27,6 +27,18 @@ pub const MAX_POLLS_PER_TICK: usize = 4;
 /// Longest prompt accepted.
 pub const MAX_PROMPT_BYTES: usize = 2_000;
 
+/// How many generations CONTINUOUS mode keeps in flight. One is the
+/// honest default: today a server runs a VJ job at a time, and a queue
+/// deeper than the fleet can serve just buries the operator's own manual
+/// submissions behind an hour of backlog. The fleet worker's server-side
+/// fan-out lands separately; the loop reads this constant, so raising it is
+/// the only change needed then.
+pub const CONTINUOUS_IN_FLIGHT: usize = 1;
+
+/// Wait after a failed continuous submission before trying again, so a
+/// broken profile cannot spin the queue.
+pub const CONTINUOUS_BACKOFF_MS: u64 = 8_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilesState {
     Idle,
@@ -313,6 +325,12 @@ pub struct GenModel {
     jobs: Vec<GenJob>,
     next_tag: GenTag,
     pub last_error: Option<String>,
+    /// CONTINUOUS: keep [`CONTINUOUS_IN_FLIGHT`] generations running,
+    /// submitting the next as each one finishes.
+    continuous: bool,
+    /// Host clock before which the loop must not submit again (error
+    /// backoff). Never blocks a manual GENERATE.
+    continuous_hold_ms: u64,
 }
 
 impl Default for ProfilesState {
@@ -336,6 +354,53 @@ impl GenModel {
 
     pub fn active_jobs(&self) -> usize {
         self.jobs.iter().filter(|j| !j.state.is_terminal()).count()
+    }
+
+    pub fn continuous(&self) -> bool {
+        self.continuous
+    }
+
+    /// Arm or disarm CONTINUOUS. Arming submits immediately if there is
+    /// room; disarming stops submitting and lets what is running finish —
+    /// a VJ never wants their screen to go dark mid-clip.
+    pub fn set_continuous(&mut self, on: bool, now_ms: u64) -> Vec<GenCmd> {
+        if self.continuous == on {
+            return Vec::new();
+        }
+        self.continuous = on;
+        if !on {
+            return Vec::new();
+        }
+        self.continuous_hold_ms = 0;
+        self.pump_continuous(now_ms)
+    }
+
+    /// Top the queue back up to [`CONTINUOUS_IN_FLIGHT`]. Degrades to plain
+    /// serial execution wherever the server runs one job at a time: with
+    /// the constant at 1 this submits exactly one job, then nothing until
+    /// it reaches a terminal state.
+    fn pump_continuous(&mut self, now_ms: u64) -> Vec<GenCmd> {
+        if !self.continuous || now_ms < self.continuous_hold_ms {
+            return Vec::new();
+        }
+        if self.profiles_state != ProfilesState::Ready {
+            return Vec::new();
+        }
+        let mut cmds = Vec::new();
+        while self.active_jobs() < CONTINUOUS_IN_FLIGHT {
+            let before = self.jobs.len();
+            let next = self.generate(now_ms);
+            if next.is_empty() {
+                // An empty prompt, a full queue, a refused profile: hold
+                // off rather than spin. `generate` already set last_error.
+                if self.jobs.len() == before {
+                    self.continuous_hold_ms = now_ms + CONTINUOUS_BACKOFF_MS;
+                }
+                break;
+            }
+            cmds.extend(next);
+        }
+        cmds
     }
 
     fn job_by_tag(&mut self, tag: GenTag) -> Option<&mut GenJob> {
@@ -635,7 +700,9 @@ impl GenModel {
 
     /// Bounded round-robin status polling for active jobs.
     pub fn tick(&mut self, now_ms: u64) -> Vec<GenCmd> {
-        let mut cmds = Vec::new();
+        // CONTINUOUS submits from the same tick that polls: a job reaching
+        // a terminal state frees the slot, and the next tick fills it.
+        let mut cmds = self.pump_continuous(now_ms);
         for row in self.jobs.iter_mut() {
             if cmds.len() >= MAX_POLLS_PER_TICK {
                 break;
@@ -684,6 +751,116 @@ mod tests {
         assert!(m.ensure_profiles().is_empty());
         m.profiles_arrived(vec![profile("a"), profile("b")]);
         m
+    }
+
+    /// Take the (single) enqueue out of a command batch.
+    fn enqueue_tag(cmds: &[GenCmd]) -> GenTag {
+        cmds.iter()
+            .find_map(|c| match c {
+                GenCmd::Enqueue { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .expect("expected an enqueue")
+    }
+
+    /// Drive one continuous submission all the way to a terminal state.
+    fn finish(m: &mut GenModel, cmds: &[GenCmd], job: JobId, now_ms: u64) {
+        let tag = enqueue_tag(cmds);
+        m.queued_at(tag, job, Some(now_ms));
+        m.status_arrived_at(&status(job, JobStateDto::Succeeded), now_ms);
+    }
+
+    /// CONTINUOUS is a refill loop, not a burst: it submits when a slot is
+    /// free and never runs more than the configured depth, so it degrades
+    /// to plain serial execution on a server that runs one job at a time.
+    #[test]
+    fn continuous_keeps_exactly_one_generation_in_flight_and_refills_on_completion() {
+        let mut m = ready_model();
+        m.set_prompt("a cathedral of static".into());
+
+        let armed = m.set_continuous(true, 1_000);
+        assert!(m.continuous());
+        assert_eq!(
+            armed.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
+            CONTINUOUS_IN_FLIGHT,
+            "arming fills the queue once"
+        );
+        assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
+
+        // While it runs, ticks poll but never submit.
+        for t in 0..4u64 {
+            let now = 3_000 + t * POLL_MS;
+            let cmds = m.tick(now);
+            assert!(
+                cmds.iter().all(|c| matches!(c, GenCmd::PollStatus { .. })),
+                "a full queue must not be topped up: {cmds:?}"
+            );
+            assert_eq!(m.active_jobs(), CONTINUOUS_IN_FLIGHT);
+        }
+
+        // It finishes; the very next tick submits the next one.
+        finish(&mut m, &armed, job_id(1), 10_000);
+        assert_eq!(m.active_jobs(), 0);
+        let cmds = m.tick(11_000);
+        assert_eq!(
+            cmds.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
+            1,
+            "a completed job frees the slot and the loop refills it"
+        );
+        assert_eq!(m.active_jobs(), 1);
+    }
+
+    #[test]
+    fn unchecking_stops_submitting_but_lets_the_running_job_finish() {
+        let mut m = ready_model();
+        m.set_prompt("keep going".into());
+        let armed = m.set_continuous(true, 0);
+        assert_eq!(m.active_jobs(), 1);
+
+        assert!(m.set_continuous(false, 1_000).is_empty(), "disarming submits nothing");
+        assert!(!m.continuous());
+        assert_eq!(m.active_jobs(), 1, "what is already running keeps running");
+
+        // Its completion does NOT start another.
+        finish(&mut m, &armed, job_id(2), 2_000);
+        let cmds = m.tick(3_000);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, GenCmd::Enqueue { .. })),
+            "an unchecked loop never submits again: {cmds:?}"
+        );
+        // Re-arming is a fresh start, and idempotent.
+        assert_eq!(
+            m.set_continuous(true, 4_000)
+                .iter()
+                .filter(|c| matches!(c, GenCmd::Enqueue { .. }))
+                .count(),
+            1
+        );
+        assert!(m.set_continuous(true, 5_000).is_empty(), "arming twice is one arm");
+    }
+
+    /// A submission the model refuses (an empty prompt) must not spin the
+    /// queue: the loop backs off and retries later, and recovers by itself
+    /// once the operator fixes the prompt.
+    #[test]
+    fn a_refused_submission_backs_off_instead_of_spinning() {
+        let mut m = ready_model();
+        m.set_prompt("   ".into());
+        let armed = m.set_continuous(true, 1_000);
+        assert!(armed.is_empty(), "an empty prompt submits nothing");
+        assert_eq!(m.last_error.as_deref(), Some("prompt is empty"));
+
+        // Inside the backoff window nothing is attempted again.
+        let cmds = m.tick(1_000 + CONTINUOUS_BACKOFF_MS - 1);
+        assert!(!cmds.iter().any(|c| matches!(c, GenCmd::Enqueue { .. })));
+
+        // After it, with a usable prompt, the loop starts on its own.
+        m.set_prompt("now with words".into());
+        let cmds = m.tick(1_000 + CONTINUOUS_BACKOFF_MS);
+        assert_eq!(
+            cmds.iter().filter(|c| matches!(c, GenCmd::Enqueue { .. })).count(),
+            1
+        );
     }
 
     fn status(job: JobId, state: JobStateDto) -> JobStatusDto {

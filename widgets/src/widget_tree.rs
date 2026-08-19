@@ -24,6 +24,25 @@ unsafe impl Sync for WidgetTree {}
 
 const NONE: u32 = u32::MAX;
 
+/// Cheap always-on counters for the path lookup hot path. Three integer
+/// adds; no hashing, no allocation. They exist because "does this lookup
+/// walk the tree?" is the difference between a hash probe and a thousand
+/// node visits, and that is not observable any other way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WidgetTreeStats {
+    /// Path lookups served (hit or miss).
+    pub lookups: u64,
+    /// Lookups that could not be answered from the path cache.
+    pub cache_misses: u64,
+    /// Graph nodes visited by tree walks.
+    pub walk_nodes: u64,
+    /// Path-cache invalidations (anything that could turn a miss into a hit).
+    pub invalidations: u64,
+    /// Walks whose result could not be cached because the walk itself
+    /// changed the graph underneath it.
+    pub stores_skipped: u64,
+}
+
 fn allow_duplicate_sibling_names(name: LiveId) -> bool {
     name == LiveId(0)
 }
@@ -73,6 +92,13 @@ struct WidgetTreeInner {
     graph: HashMap<WidgetUid, GraphNode>,
     // Per-entrypoint path cache keyed by xor-combined path hash.
     path_cache: HashMap<WidgetUid, HashMap<u64, Vec<PathCacheEntry>>>,
+    /// Bumped by every invalidation that could turn a cached MISS into a
+    /// hit (a node appearing, being renamed, re-parented, becoming
+    /// searchable). A walk snapshots it and only writes its result back if
+    /// nothing invalidated underneath it — otherwise the walk's own graph
+    /// discoveries could persist a stale "not found" forever.
+    path_cache_epoch: u64,
+    stats: WidgetTreeStats,
     dirty: HashSet<WidgetUid>,
     // Only set when tree topology changes (nodes added/removed, parent changes).
     // Property-only changes (name, widget ref, skip_search) are patched in-place.
@@ -113,6 +139,14 @@ impl Default for WidgetTree {
             inner: RefCell::new(WidgetTreeInner::default()),
         }
     }
+}
+
+/// One step of the iterative graph walk the finders share.
+#[derive(Clone, Copy)]
+struct WalkFrame {
+    uid: WidgetUid,
+    next_child_idx: usize,
+    is_root: bool,
 }
 
 impl WidgetTree {
@@ -167,25 +201,13 @@ impl WidgetTree {
         path: &[LiveId],
         matches: Vec<PathCacheMatch>,
     ) {
+        // An EMPTY match list is stored, not dropped: "this path is not in
+        // this subtree" is the answer a UI asks for most often (every
+        // per-frame sync probing a control that lives on another page), and
+        // re-deriving it means walking the entire widget tree. Every
+        // mutation that could turn the answer into a hit invalidates the
+        // entry (`invalidate_path_cache*`, guarded by `path_cache_epoch`).
         let hash = Self::path_hash(path);
-        if matches.is_empty() {
-            let mut remove_root_cache = false;
-            if let Some(root_cache) = inner.path_cache.get_mut(&root_uid) {
-                let mut remove_hash_bucket = false;
-                if let Some(bucket) = root_cache.get_mut(&hash) {
-                    bucket.retain(|entry| entry.path.as_slice() != path);
-                    remove_hash_bucket = bucket.is_empty();
-                }
-                if remove_hash_bucket {
-                    root_cache.remove(&hash);
-                }
-                remove_root_cache = root_cache.is_empty();
-            }
-            if remove_root_cache {
-                inner.path_cache.remove(&root_uid);
-            }
-            return;
-        }
         let root_cache = inner.path_cache.entry(root_uid).or_default();
         let bucket = root_cache.entry(hash).or_default();
         if let Some(entry) = bucket
@@ -203,6 +225,8 @@ impl WidgetTree {
 
     fn invalidate_path_cache(inner: &mut WidgetTreeInner, uid: WidgetUid) {
         if uid != WidgetUid(0) {
+            inner.stats.invalidations += 1;
+            inner.path_cache_epoch = inner.path_cache_epoch.wrapping_add(1);
             inner.path_cache.remove(&uid);
         }
     }
@@ -212,6 +236,8 @@ impl WidgetTree {
             return;
         }
 
+        inner.stats.invalidations += 1;
+        inner.path_cache_epoch = inner.path_cache_epoch.wrapping_add(1);
         let mut current = Some(start_uid);
         let mut visited = HashSet::new();
         while let Some(uid) = current {
@@ -564,13 +590,23 @@ impl WidgetTree {
         }
     }
 
+    /// "Re-read this node's children before answering anything." It is a
+    /// hint that the GRAPH may be behind the widget tree — not a statement
+    /// that anything actually changed, and widgets raise it every frame
+    /// (a `PortalList` does it on every draw that recycles a row).
+    ///
+    /// It deliberately does NOT drop cached lookups. Dropping them here
+    /// threw away every cached path under every ancestor — including the
+    /// window root — so one recycling list turned every other lookup in the
+    /// frame into a full tree walk. The dirty node is re-read before the
+    /// next lookup consults the cache (see `flush_dirty`), and if that
+    /// re-read finds a real change it invalidates precisely then.
     pub fn mark_dirty(&self, uid: WidgetUid) {
         if uid == WidgetUid(0) {
             return;
         }
         let mut inner = self.inner.borrow_mut();
         inner.dirty.insert(uid);
-        Self::invalidate_path_cache_upward(&mut inner, uid);
     }
 
     pub fn seed_from_widget(&self, widget: WidgetRef) {
@@ -799,21 +835,31 @@ impl WidgetTree {
         if inner.dirty.is_empty() && !inner.structure_dirty {
             return;
         }
+        Self::flush_dirty(&mut inner, true);
+        if inner.structure_dirty {
+            Self::rebuild_dense(&mut inner);
+        }
+    }
 
+    /// Re-read every node whose children were flagged stale, so the graph
+    /// matches the widget tree. Whatever this actually changes invalidates
+    /// the path cache from inside `refresh_node_children_from_discovered`;
+    /// what it does not change leaves the cache intact, which is the whole
+    /// point — a list recycling its rows must not cost every other lookup
+    /// in the frame a tree walk.
+    ///
+    /// Nodes that cannot be read right now (their widget is borrowed
+    /// mid-draw) stay dirty and are retried by the next caller.
+    fn flush_dirty(inner: &mut WidgetTreeInner, mark_structure_dirty: bool) {
         let mut pending: Vec<WidgetUid> = inner.dirty.drain().collect();
         let mut retry = Vec::new();
         while let Some(uid) = pending.pop() {
-            if !Self::refresh_node_children(&mut inner, uid, &mut pending, true) {
+            if !Self::refresh_node_children(inner, uid, &mut pending, mark_structure_dirty) {
                 retry.push(uid);
             }
         }
-
         for uid in retry {
             inner.dirty.insert(uid);
-        }
-
-        if inner.structure_dirty {
-            Self::rebuild_dense(&mut inner);
         }
     }
 
@@ -837,19 +883,21 @@ impl WidgetTree {
     }
 
     fn ensure_node_cached(inner: &mut WidgetTreeInner, uid: WidgetUid) -> bool {
-        if uid == WidgetUid(0) || !inner.graph.contains_key(&uid) {
+        if uid == WidgetUid(0) {
             return false;
         }
-
-        let stale = inner.graph.get(&uid).map_or(false, |node| {
-            !node.placeholder && node.widget.upgrade().is_none()
-        });
-        if stale {
+        // One hash lookup, not three: this runs once per node of every tree
+        // walk, so `contains_key` + `get` + `dirty.contains` was the single
+        // hottest hashing site in the whole UI.
+        let Some(node) = inner.graph.get(&uid) else {
+            return false;
+        };
+        if !node.placeholder && node.widget.upgrade().is_none() {
             Self::discard_stale_cache_item(inner, uid);
             return false;
         }
 
-        if !inner.dirty.contains(&uid) {
+        if inner.dirty.is_empty() || !inner.dirty.contains(&uid) {
             return true;
         }
 
@@ -894,6 +942,39 @@ impl WidgetTree {
         true
     }
 
+    /// Discarding a stale node leaves its live parent dirty with a shorter
+    /// child list, while that parent's walk frame keeps iterating the OLD
+    /// indices — the replacement subtree would only be seen by the NEXT
+    /// query, and a subtree rebuilt several levels deep (the first draw
+    /// replacing a panel) needs one query per level to heal. Re-walk the
+    /// parent right away instead: its refresh reads the live children.
+    fn requeue_parent_after_stale(
+        inner: &WidgetTreeInner,
+        uid: WidgetUid,
+        parent: Option<WidgetUid>,
+        root_uid: WidgetUid,
+        visited: &mut HashSet<WidgetUid>,
+        stack: &mut Vec<WalkFrame>,
+    ) {
+        // Only a discard removes the node; a refresh that could not borrow
+        // leaves it in the graph (and dirty) for the next query.
+        if inner.graph.contains_key(&uid) {
+            return;
+        }
+        let Some(parent) = parent else {
+            return;
+        };
+        if !inner.graph.contains_key(&parent) {
+            return;
+        }
+        visited.remove(&parent);
+        stack.push(WalkFrame {
+            uid: parent,
+            next_child_idx: 0,
+            is_root: parent == root_uid,
+        });
+    }
+
     fn find_within_graph(
         inner: &mut WidgetTreeInner,
         root_uid: WidgetUid,
@@ -910,13 +991,6 @@ impl WidgetTree {
         exclude_subtree_root: Option<WidgetUid>,
         respect_skip_search: bool,
     ) -> WidgetRef {
-        #[derive(Clone, Copy)]
-        struct Frame {
-            uid: WidgetUid,
-            next_child_idx: usize,
-            is_root: bool,
-        }
-
         if path.is_empty() || root_uid == WidgetUid(0) || exclude_subtree_root == Some(root_uid) {
             return WidgetRef::empty();
         }
@@ -926,7 +1000,7 @@ impl WidgetTree {
 
         let target = path[path.len() - 1];
         let mut visited = HashSet::new();
-        let mut stack = vec![Frame {
+        let mut stack = vec![WalkFrame {
             uid: root_uid,
             next_child_idx: 0,
             is_root: true,
@@ -937,7 +1011,17 @@ impl WidgetTree {
                 if !visited.insert(frame.uid) {
                     continue;
                 }
+                inner.stats.walk_nodes += 1;
+                let parent_before = inner.graph.get(&frame.uid).and_then(|n| n.parent);
                 if !Self::ensure_node_cached(inner, frame.uid) {
+                    Self::requeue_parent_after_stale(
+                        inner,
+                        frame.uid,
+                        parent_before,
+                        root_uid,
+                        &mut visited,
+                        &mut stack,
+                    );
                     continue;
                 }
 
@@ -992,7 +1076,7 @@ impl WidgetTree {
             if exclude_subtree_root == Some(child_uid) {
                 continue;
             }
-            stack.push(Frame {
+            stack.push(WalkFrame {
                 uid: child_uid,
                 next_child_idx: 0,
                 is_root: false,
@@ -1027,13 +1111,6 @@ impl WidgetTree {
         results: &mut Vec<WidgetRef>,
         respect_skip_search: bool,
     ) {
-        #[derive(Clone, Copy)]
-        struct Frame {
-            uid: WidgetUid,
-            next_child_idx: usize,
-            is_root: bool,
-        }
-
         if path.is_empty() || root_uid == WidgetUid(0) || exclude_subtree_root == Some(root_uid) {
             return;
         }
@@ -1043,7 +1120,7 @@ impl WidgetTree {
 
         let target = path[path.len() - 1];
         let mut visited = HashSet::new();
-        let mut stack = vec![Frame {
+        let mut stack = vec![WalkFrame {
             uid: root_uid,
             next_child_idx: 0,
             is_root: true,
@@ -1054,7 +1131,17 @@ impl WidgetTree {
                 if !visited.insert(frame.uid) {
                     continue;
                 }
+                inner.stats.walk_nodes += 1;
+                let parent_before = inner.graph.get(&frame.uid).and_then(|n| n.parent);
                 if !Self::ensure_node_cached(inner, frame.uid) {
+                    Self::requeue_parent_after_stale(
+                        inner,
+                        frame.uid,
+                        parent_before,
+                        root_uid,
+                        &mut visited,
+                        &mut stack,
+                    );
                     continue;
                 }
 
@@ -1105,7 +1192,7 @@ impl WidgetTree {
             if exclude_subtree_root == Some(child_uid) {
                 continue;
             }
-            stack.push(Frame {
+            stack.push(WalkFrame {
                 uid: child_uid,
                 next_child_idx: 0,
                 is_root: false,
@@ -1121,45 +1208,66 @@ impl WidgetTree {
         if path.is_empty() || root_uid == WidgetUid(0) || !inner.graph.contains_key(&root_uid) {
             return Vec::new();
         }
+        // The cache may only be trusted over a graph that is up to date
+        // with the widget tree, so settle the stale nodes first. This is
+        // bounded by what actually changed (the recycling list's own
+        // children), never by the size of the tree.
+        if !inner.dirty.is_empty() {
+            Self::flush_dirty(inner, false);
+        }
         if !Self::ensure_node_cached(inner, root_uid) {
             return Vec::new();
         }
 
+        inner.stats.lookups += 1;
         if let Some(cached_matches) = Self::cached_path_matches(inner, root_uid, path) {
             if cached_matches.is_empty() {
-                // Misses are not cached. Remove any stale empty marker and re-walk.
-                Self::store_path_matches(inner, root_uid, path, Vec::new());
-            } else {
-                let mut stale_uids = Vec::new();
-                let mut live_matches = Vec::with_capacity(cached_matches.len());
-                let mut live_widgets = Vec::with_capacity(cached_matches.len());
-                for cached in cached_matches {
-                    if let Some(widget) = cached.widget.upgrade() {
-                        live_widgets.push(widget.clone());
-                        live_matches.push(PathCacheMatch {
-                            uid: cached.uid,
-                            widget: widget.downgrade(),
-                        });
-                    } else {
-                        stale_uids.push(cached.uid);
-                    }
-                }
-
-                if stale_uids.is_empty() {
-                    return live_widgets;
-                }
-
-                for stale_uid in stale_uids {
-                    Self::discard_stale_cache_item(inner, stale_uid);
-                }
-                // Drop only stale cache items; re-query below to repopulate.
-                Self::store_path_matches(inner, root_uid, path, live_matches);
+                // A cached MISS. Nothing that could create a match has
+                // happened since it was stored (any such mutation removes
+                // the entry), so answering from it is exact — and it is the
+                // difference between one hash lookup and a full tree walk.
+                return Vec::new();
             }
+            let mut stale_uids = Vec::new();
+            let mut live_matches = Vec::with_capacity(cached_matches.len());
+            let mut live_widgets = Vec::with_capacity(cached_matches.len());
+            for cached in cached_matches {
+                if let Some(widget) = cached.widget.upgrade() {
+                    live_widgets.push(widget.clone());
+                    live_matches.push(PathCacheMatch {
+                        uid: cached.uid,
+                        widget: widget.downgrade(),
+                    });
+                } else {
+                    stale_uids.push(cached.uid);
+                }
+            }
+
+            if stale_uids.is_empty() {
+                return live_widgets;
+            }
+
+            for stale_uid in stale_uids {
+                Self::discard_stale_cache_item(inner, stale_uid);
+            }
+            // Drop only stale cache items; re-query below to repopulate.
+            Self::store_path_matches(inner, root_uid, path, live_matches);
         }
 
+        inner.stats.cache_misses += 1;
+        // The walk itself can teach the graph about nodes it had not seen
+        // (a dirty parent refreshed mid-walk). Those discoveries invalidate
+        // the cache; storing this result afterwards would then persist an
+        // answer derived from a graph that no longer matches the tree — for
+        // a MISS, forever. Snapshot the epoch and only store an unchallenged
+        // result.
+        let epoch = inner.path_cache_epoch;
         let mut results = Vec::new();
         Self::collect_within_graph(inner, root_uid, path, None, &mut results);
-
+        if inner.path_cache_epoch != epoch {
+            inner.stats.stores_skipped += 1;
+            return results;
+        }
         let mut matches = Vec::with_capacity(results.len());
         for widget in &results {
             let Some(uid) = widget.try_widget_uid() else {
@@ -1240,8 +1348,8 @@ impl WidgetTree {
             resolved_children.push((child_name, child_widget, child_uid));
         }
 
-        let old_children = match inner.graph.get_mut(&uid) {
-            Some(node) => std::mem::take(&mut node.children),
+        let (old_children, parent_is_placeholder) = match inner.graph.get_mut(&uid) {
+            Some(node) => (std::mem::take(&mut node.children), node.placeholder),
             None => return true,
         };
 
@@ -1277,7 +1385,16 @@ impl WidgetTree {
                         child_node.skip_search = child_skip_search;
                         child_skip_search_changed = true;
                     }
-                    if child_node.parent != Some(uid) {
+                    // A placeholder root is a lookup anchored at a WidgetRef the
+                    // tree flattens away (a FoldHeader's `header` View: its
+                    // children are reported as the FoldHeader's own). It may
+                    // LIST those children so the anchored search reaches them,
+                    // but it must never adopt them: re-parenting them here
+                    // removed them from their real parent's child list, and
+                    // every later lookup from the root missed them.
+                    let keep_real_parent = parent_is_placeholder
+                        && child_node.parent.is_some_and(|p| p != uid);
+                    if child_node.parent != Some(uid) && !keep_real_parent {
                         child_node.parent = Some(uid);
                         child_parent_changed = true;
                     }
@@ -1325,7 +1442,7 @@ impl WidgetTree {
                 }
             }
 
-            if old_parent != Some(uid) {
+            if old_parent != Some(uid) && child_parent_changed {
                 if let Some(prev_parent_uid) = old_parent {
                     if let Some(prev_parent) = inner.graph.get_mut(&prev_parent_uid) {
                         if let Some(pos) = prev_parent
@@ -1351,6 +1468,8 @@ impl WidgetTree {
         // Compare against old_children (the original list before std::mem::take),
         // NOT node.children which is empty after the take.
         let parent_children_changed = old_children != new_children;
+        if parent_children_changed {
+        }
 
         if let Some(node) = inner.graph.get_mut(&uid) {
             node.children = new_children;
@@ -1471,14 +1590,14 @@ impl WidgetTree {
         root_parent_idx: u32,
     ) {
         #[derive(Clone, Copy)]
-        struct Frame {
+        struct DenseFrame {
             uid: WidgetUid,
             dense_idx: u32,
             child_pos: u32,
             num_children: u32,
         }
 
-        let mut frames: Vec<Frame> = Vec::with_capacity(64);
+        let mut frames: Vec<DenseFrame> = Vec::with_capacity(64);
 
         // Emit root node
         if inner.uid_map.contains_key(&root_uid) {
@@ -1500,7 +1619,7 @@ impl WidgetTree {
         inner.uid_map.insert(root_uid, root_dense_idx);
 
         let root_num_children = root_node.children.len() as u32;
-        frames.push(Frame {
+        frames.push(DenseFrame {
             uid: root_uid,
             dense_idx: root_dense_idx,
             child_pos: 0,
@@ -1551,7 +1670,7 @@ impl WidgetTree {
 
             let child_num_children = child_node.children.len() as u32;
             if child_num_children > 0 {
-                frames.push(Frame {
+                frames.push(DenseFrame {
                     uid: child_uid,
                     dense_idx: child_dense_idx,
                     child_pos: 0,
@@ -1667,6 +1786,14 @@ impl WidgetTree {
             }
         }
         results
+    }
+
+    /// Path-lookup counters since process start. `walk_nodes` staying flat
+    /// across repeated lookups is the property that keeps a per-frame UI
+    /// sync cheap: a warm cache answers with a hash probe, a cold one walks
+    /// every node under the entrypoint.
+    pub fn stats(&self) -> WidgetTreeStats {
+        self.inner.borrow().stats
     }
 
     /// Look up a widget by its UID.
@@ -2960,6 +3087,104 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Self-heal after a subtree is replaced under a cached path
+    // ------------------------------------------------------------------
+
+    /// An app looks a label up BEFORE the first draw (cached match), then
+    /// the first draw replaces the panel subtree (new WidgetRefs, new uids,
+    /// same names). Every later lookup from the root must still find the
+    /// label: the tree must heal within the query, not a query later.
+    #[test]
+    fn test_root_lookup_heals_after_subtree_replaced() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let panel_uid = WidgetUid::new();
+        let panel_children = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let panel = make_dynamic_widget(panel_uid, panel_children.clone());
+        let root = make_widget(root_uid, vec![(name("panel"), panel.clone())]);
+
+        // Old subtree: panel -> header -> [fold_button, games_title]
+        let build_header = || {
+            let button = make_widget(WidgetUid::new(), vec![]);
+            let title = make_widget(WidgetUid::new(), vec![]);
+            make_widget(
+                WidgetUid::new(),
+                vec![(name("fold_button"), button), (name("games_title"), title)],
+            )
+        };
+        panel_children
+            .borrow_mut()
+            .push((name("header"), build_header()));
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.refresh_from_borrowed(root_uid, |visit| root.children(visit));
+        let found = tree.find_within(root_uid, &[name("games_title")]);
+        assert!(!found.is_empty(), "pre-draw lookup");
+        drop(found);
+
+        // First draw: the panel's header is rebuilt (new refs + uids).
+        panel_children.borrow_mut().clear();
+        panel_children
+            .borrow_mut()
+            .push((name("header"), build_header()));
+
+        // Each later lookup goes through WidgetRef::widget → refresh root
+        // from its borrowed children, then find. All of them must succeed.
+        for attempt in 0..3 {
+            tree.refresh_from_borrowed(root_uid, |visit| root.children(visit));
+            let found = tree.find_within(root_uid, &[name("games_title")]);
+            assert!(
+                !found.is_empty(),
+                "lookup {attempt} after the subtree was replaced"
+            );
+            let sibling = tree.find_within(root_uid, &[name("fold_button")]);
+            assert!(!sibling.is_empty(), "sibling lookup {attempt}");
+        }
+    }
+
+    /// A FoldHeader reports its header View's children as its OWN (the
+    /// `#[find]` flattening), and every event it does
+    /// `self.header.widget(cx, ids!(fold_button))` — a lookup anchored at a
+    /// ref the tree has no node for. That anchored lookup must not steal the
+    /// children from their real parent: root lookups come next.
+    #[test]
+    fn test_lookup_anchored_at_flattened_ref_keeps_real_parent() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let fold_uid = WidgetUid::new();
+        let header_uid = WidgetUid::new();
+        let button_uid = WidgetUid::new();
+        let title_uid = WidgetUid::new();
+
+        let button = make_widget(button_uid, vec![]);
+        let title = make_widget(title_uid, vec![]);
+        let header = make_widget(
+            header_uid,
+            vec![(name("fold_button"), button.clone()), (name("games_title"), title.clone())],
+        );
+        // The fold's children() flattens the header: same pairs, no header node.
+        let fold = make_widget(
+            fold_uid,
+            vec![(name("fold_button"), button.clone()), (name("games_title"), title.clone())],
+        );
+        let root = make_widget(root_uid, vec![(name("games_fold"), fold.clone())]);
+
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.refresh_from_borrowed(root_uid, |visit| root.children(visit));
+        assert!(!tree.find_within(root_uid, &[name("games_title")]).is_empty());
+
+        // FoldHeader::handle_event: lookup anchored at the header ref.
+        for _ in 0..3 {
+            tree.refresh_from_borrowed(header_uid, |visit| header.children(visit));
+            let found = tree.find_within(header_uid, &[name("fold_button")]);
+            assert_eq!(found.widget_uid(), button_uid, "anchored lookup finds the button");
+
+            tree.refresh_from_borrowed(root_uid, |visit| root.children(visit));
+            let found = tree.find_within(root_uid, &[name("games_title")]);
+            assert_eq!(found.widget_uid(), title_uid, "root lookup still reaches the title");
+        }
+    }
+
+    // ------------------------------------------------------------------
     // find_flood
     // ------------------------------------------------------------------
 
@@ -3685,6 +3910,89 @@ mod tests {
         assert_eq!(entry.matches[0].uid, child_uid);
     }
 
+    /// The per-frame law: repeating the SAME lookups on an unchanged tree
+    /// must not walk it again — neither the ones that find something nor
+    /// the ones that do not. A miss that re-walks is the expensive case,
+    /// because a UI's per-frame sync probes controls that live on other
+    /// pages hundreds of times a second, and each of those probes used to
+    /// cost a visit to every node under the entrypoint.
+    #[test]
+    fn repeated_lookups_on_an_unchanged_tree_walk_nothing() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let a_uid = WidgetUid::new();
+        let b_uid = WidgetUid::new();
+
+        let b = make_widget(b_uid, vec![]);
+        let a_children =
+            std::rc::Rc::new(std::cell::RefCell::new(vec![(name("b"), b.clone())]));
+        let a = make_dynamic_widget(a_uid, a_children.clone());
+        let root_children =
+            std::rc::Rc::new(std::cell::RefCell::new(vec![(name("a"), a.clone())]));
+        let root = make_dynamic_widget(root_uid, root_children.clone());
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        stabilize_graph_cache(&tree);
+
+        let hit = [name("b")];
+        let miss = [name("nowhere")];
+
+        // Every `ui.widget(cx, ids!(..))` re-reports the entrypoint's live
+        // children first (`refresh_from_borrowed`) — the shape a per-frame
+        // sync actually has. Use it, not the bare finder.
+        let look = |path: &[LiveId]| {
+            tree.find_within_from_borrowed(root_uid, path, |visit| {
+                for (child_name, child) in root_children.borrow().iter() {
+                    visit(*child_name, child.clone());
+                }
+            })
+        };
+
+        // Cold: both answers have to be derived by walking, and the graph
+        // is still learning the tree's shape as it goes (a walk that
+        // discovers nodes does not cache its own result — see the epoch
+        // guard), so give it a few rounds to settle.
+        for _ in 0..3 {
+            assert_eq!(look(&hit).widget_uid(), b_uid);
+            assert!(look(&miss).is_empty());
+        }
+        let cold = tree.stats();
+        assert!(cold.walk_nodes > 0, "a cold lookup derives its answer by walking");
+
+        // Warm: the same two lookups, frame after frame, tree unchanged.
+        for _ in 0..50 {
+            assert_eq!(look(&hit).widget_uid(), b_uid);
+            assert!(look(&miss).is_empty());
+        }
+        let warm = tree.stats();
+        assert_eq!(warm.lookups, cold.lookups + 100);
+        assert_eq!(
+            warm.walk_nodes, cold.walk_nodes,
+            "a warm lookup must not visit a single node"
+        );
+        assert_eq!(
+            warm.cache_misses, cold.cache_misses,
+            "neither the hit nor the MISS may fall out of the cache"
+        );
+
+        // A real structural change is still seen — a cached MISS must never
+        // outlive the node it was missing.
+        let c_uid = WidgetUid::new();
+        let c = make_widget(c_uid, vec![]);
+        a_children.borrow_mut().push((name("nowhere"), c.clone()));
+        tree.mark_dirty(a_uid);
+        assert_eq!(look(&miss).widget_uid(), c_uid);
+        // ...and once the graph has settled again the new answer is cached
+        // just the same, so the steady state is still walk-free.
+        for _ in 0..3 {
+            assert_eq!(look(&miss).widget_uid(), c_uid);
+        }
+        let before = tree.stats().walk_nodes;
+        for _ in 0..10 {
+            assert_eq!(look(&miss).widget_uid(), c_uid);
+        }
+        assert_eq!(tree.stats().walk_nodes, before);
+    }
+
     #[test]
     fn test_cached_path_stale_item_is_dropped_then_requeried() {
         let tree = WidgetTree::default();
@@ -3707,14 +4015,18 @@ mod tests {
         drop(first);
         drop(first_child);
 
-        // Cached weakref is stale now; query should drop only that item and re-run tree search.
+        // Cached weakref is stale now; the query drops that item, re-runs
+        // the tree search, and caches the (now empty) answer — a MISS is a
+        // real answer, and re-deriving it costs a whole-tree walk.
         let second = tree.find_within(parent_uid, &path);
         assert!(second.is_empty());
         {
             let inner = tree.inner.borrow();
+            let entry = cached_path_entry(&inner, parent_uid, &path)
+                .expect("the miss itself is cached");
             assert!(
-                cached_path_entry(&inner, parent_uid, &path).is_none(),
-                "stale cached item should be evicted entirely from the path cache"
+                entry.matches.is_empty(),
+                "the stale item must be gone from the cached match list"
             );
         }
 
