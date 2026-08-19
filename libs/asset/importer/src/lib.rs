@@ -38,6 +38,9 @@ pub mod gen_profiles;
 pub mod gen_service;
 // Splash game folders -> `AssetKind::Game` assets (the sandbox's Games list).
 pub mod games_import;
+// A music directory tree -> `AssetKind::Audio` assets, tagged by folder name
+// (the DJ's audio lane reads them straight back out of the catalog).
+pub mod music_import;
 pub mod pack_import;
 pub mod thumbs;
 pub mod videothumb;

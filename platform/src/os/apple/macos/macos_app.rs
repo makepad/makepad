@@ -1,4 +1,5 @@
-use crate::file_dialogs::FileDialog;
+use crate::cx::Cx;
+use crate::file_dialogs::{FileDialog, FileDialogAction};
 
 use {
     crate::{
@@ -1066,7 +1067,81 @@ impl MacosApp {
         println!("open save folder dialog!");
     }
 
-    pub fn open_select_folder_dialog(&mut self, _settings: FileDialog) {
-        println!("open select folder dialog!");
+    /// Native folder picker (`NSOpenPanel`, directories only).
+    ///
+    /// The panel is NOT opened inline: `runModal` spins its own run loop, and
+    /// this call runs from inside the platform-op drain, where the `Cx` is
+    /// already borrowed. Deferring onto the main queue (same trick as
+    /// [`MacosApp::defer_window_closed`]) puts the modal loop *between*
+    /// callbacks, where nothing holds the borrow. The answer comes back as a
+    /// [`FileDialogAction`], because by then the call that asked is long gone.
+    pub fn open_select_folder_dialog(&mut self, settings: FileDialog) {
+        let title = settings.title.clone().unwrap_or_default();
+        let location = settings
+            .location
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        unsafe {
+            let main_thread_block = objc_block!(move || {
+                let picked = run_select_folder_panel(&title, &location);
+                Cx::post_action(match picked {
+                    Some(path) => FileDialogAction::FolderSelected(path),
+                    None => FileDialogAction::FolderCancelled,
+                });
+            });
+            let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+            let block_operation: ObjcId =
+                msg_send![class!(NSBlockOperation), blockOperationWithBlock: &main_thread_block];
+            let () = msg_send![main_queue, addOperation: block_operation];
+        }
+    }
+}
+
+/// `NSModalResponseOK`. Cancel is 0; anything else is "not a choice".
+const NS_MODAL_RESPONSE_OK: i64 = 1;
+
+/// Run the directory-only open panel to completion on the main thread.
+/// `None` = the user cancelled (or the panel returned nothing usable).
+fn run_select_folder_panel(title: &str, location: &str) -> Option<std::path::PathBuf> {
+    unsafe {
+        let panel: ObjcId = msg_send![class!(NSOpenPanel), openPanel];
+        if panel == nil {
+            return None;
+        }
+        let () = msg_send![panel, setCanChooseFiles: NO];
+        let () = msg_send![panel, setCanChooseDirectories: YES];
+        let () = msg_send![panel, setAllowsMultipleSelection: NO];
+        let () = msg_send![panel, setCanCreateDirectories: NO];
+        if !title.is_empty() {
+            let () = msg_send![panel, setMessage: str_to_nsstring(title)];
+        }
+        if !location.is_empty() {
+            let url: ObjcId = msg_send![
+                class!(NSURL),
+                fileURLWithPath: str_to_nsstring(location)
+                isDirectory: YES
+            ];
+            if url != nil {
+                let () = msg_send![panel, setDirectoryURL: url];
+            }
+        }
+        let response: i64 = msg_send![panel, runModal];
+        if response != NS_MODAL_RESPONSE_OK {
+            return None;
+        }
+        let url: ObjcId = msg_send![panel, URL];
+        if url == nil {
+            return None;
+        }
+        let path: ObjcId = msg_send![url, path];
+        if path == nil {
+            return None;
+        }
+        let path = nsstring_to_string(path);
+        if path.is_empty() {
+            return None;
+        }
+        Some(std::path::PathBuf::from(path))
     }
 }

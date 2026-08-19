@@ -186,6 +186,7 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
+        file_dialogs::{FileDialog, FileDialogAction},
         game_input::*,
         geometry::{Geometry, GeometryId},
         gpu_info::GpuPerformance,
