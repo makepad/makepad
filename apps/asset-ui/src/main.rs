@@ -94,7 +94,8 @@ use crate::video_player::VideoPlayer;
 use makepad_micro_serde::SerJson;
 use makepad_widgets::*;
 use makepad_xr::obj::ViewSplat;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
+use makepad_asset_ai::fleet::BoxSnapshot;
 use std::path::PathBuf;
 
 app_main!(App);
@@ -339,6 +340,82 @@ script_mod! {
         width: Fill
         height: Fill
         fit: ImageFit.Smallest
+    }
+    // One fleet box: status light + host + what it is busy with. Click =
+    // per-box model list (enable/disable for routing).
+    let BoxCard = RoundedView{
+        width: 126 height: 44
+        flow: Down spacing: 1
+        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+        cursor: MouseCursor.Hand
+        draw_bg +: {
+            color: #x161619
+            border_color: #xffffff10
+            border_size: 1.0
+            border_radius: 3.0
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size,
+                    self.border_size,
+                    self.rect_size.x - self.border_size * 2.0,
+                    self.rect_size.y - self.border_size * 2.0,
+                    self.border_radius
+                )
+                sdf.fill_keep(self.color)
+                sdf.stroke(self.border_color, self.border_size)
+                return sdf.result
+            }
+        }
+        View{
+            width: Fill height: Fit flow: Right spacing: 5
+            align: Align{y: 0.5}
+            light := SolidView{
+                width: 8 height: 8
+                draw_bg +: {
+                    color: #x5a616a
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
+                        sdf.fill(self.color)
+                        return sdf.result
+                    }
+                }
+            }
+            host := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 8} } }
+        }
+        busy := HintLabel{ text: "" draw_text +: { text_style: theme.font_regular{font_size: 7.5} } }
+    }
+    // One model on a box, inside the box popup.
+    let FleetModelRow = View{
+        width: Fill height: 20 flow: Right spacing: 6
+        align: Align{y: 0.5}
+        visible: false
+        enable := CheckBox{
+            text: ""
+            active: true
+            padding: Inset{left: 2 right: 2 top: 1 bottom: 1}
+        }
+        mstate := SolidView{
+            width: 7 height: 7
+            draw_bg +: {
+                color: #x5a616a
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
+                    sdf.fill(self.color)
+                    return sdf.result
+                }
+            }
+        }
+        mname := BrightLabel{ width: 170 text: "" draw_text +: { text_style: theme.font_regular{font_size: 8.5} } }
+        mdomain := HintLabel{ width: 56 text: "" }
+        mnote := HintLabel{ width: Fill text: "" }
+        // Per-box, per-domain preference: "on THIS box use THIS model for
+        // that domain" (a 3090 gets the small image model, the 5090 the
+        // big one, same request). Routing hides the domain's other models
+        // on the box while a preference stands.
+        prefer := ChipButton{ text: "prefer" }
     }
     // One artifact of the selected run in the run tray: thumb + kind. Click
     // = open in the viewer AND pin as the next transform run's input.
@@ -1070,10 +1147,21 @@ script_mod! {
                         flow: Down
                         draw_bg +: { color: #x121215 }
 
-                        // The whole panel scrolls: on a short window nothing
-                        // (Fleet included) falls off the bottom — it scrolls
-                        // into reach instead.
-                        left_scroll := QuietScrollY{
+                        // Top: the whole authoring panel scrolls. Bottom: the
+                        // Fleet box stays put (own splitter pane) so the box
+                        // cards never scroll out of reach.
+                        left_split := Splitter{
+                            width: Fill
+                            height: Fill
+                            axis: SplitterAxis.Vertical
+                            align: SplitterAlign.FromB(150.0)
+                            size: 6.0
+                            draw_bg +: {
+                                color: #x1a1a1f
+                                color_hover: #x3d9bf0
+                                color_drag: #x3d9bf0
+                            }
+                            a: QuietScrollY{
                         width: Fill
                         height: Fill
                         flow: Down
@@ -1408,14 +1496,44 @@ script_mod! {
                             height: 170
                             stages_label := DimLabel{ text: "No pipeline yet — pick a chain above and Generate." }
                         }
-
-                        Divider{}
-                        PanelHeading{ text: "Fleet" margin: Inset{top: 0} }
-                        fleet_scroll := QuietScrollY{
-                            width: Fill
-                            height: 110
-                            fleet_label := DimLabel{ text: "Discovering fleet…" }
-                        }
+                            }
+                            // Fleet box: one card per box — status light
+                            // (idle / busy with what / down), host, the
+                            // model it is busy with. Click a card for its
+                            // model list with per-box enable toggles.
+                            b: View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: Inset{left: 14 right: 14 top: 6 bottom: 8}
+                                spacing: 4
+                                View{
+                                    width: Fill height: Fit flow: Right
+                                    align: Align{y: 0.5}
+                                    PanelHeading{ text: "Fleet" margin: Inset{top: 0} }
+                                    View{ width: Fill height: Fit }
+                                    fleet_label := HintLabel{ text: "discovering…" }
+                                }
+                                fleet_cards := QuietScrollY{
+                                    width: Fill
+                                    height: Fill
+                                    flow: Flow.Right{wrap: true}
+                                    spacing: 6
+                                    wrap_spacing: 6
+                                    fb0 := BoxCard{ visible: false }
+                                    fb1 := BoxCard{ visible: false }
+                                    fb2 := BoxCard{ visible: false }
+                                    fb3 := BoxCard{ visible: false }
+                                    fb4 := BoxCard{ visible: false }
+                                    fb5 := BoxCard{ visible: false }
+                                    fb6 := BoxCard{ visible: false }
+                                    fb7 := BoxCard{ visible: false }
+                                    fb8 := BoxCard{ visible: false }
+                                    fb9 := BoxCard{ visible: false }
+                                    fb10 := BoxCard{ visible: false }
+                                    fb11 := BoxCard{ visible: false }
+                                }
+                            }
                         }
                     }
 
@@ -2235,6 +2353,76 @@ script_mod! {
                             }
                         }
                     }
+
+                    // Per-box popup: every model the box advertises with a
+                    // per-box enable toggle (off = this app never routes that
+                    // model to that box) and its load state.
+                    fleet_box_modal := Modal{
+                        content +: {
+                            width: 520
+                            height: Fit
+                            RoundedView{
+                                width: Fill height: Fit
+                                flow: Down spacing: 6
+                                padding: 14
+                                draw_bg +: { color: #x161619 border_radius: 6.0 }
+                                View{
+                                    width: Fill height: Fit flow: Right
+                                    align: Align{y: 0.5}
+                                    fleet_box_title := BrightLabel{ text: "" draw_text +: { text_style: theme.font_bold{font_size: 10} } }
+                                    View{ width: Fill height: Fit }
+                                    fleet_box_close := GhostButton{ text: "Close" }
+                                }
+                                fleet_box_status := HintLabel{ text: "" }
+                                fleet_box_hint := HintLabel{ text: "Unchecked = never routed to this box by this app. ★ prefer = for that domain this box only ever runs that model (a small GPU can take the small image model while a big one takes the large model for the same request). The box itself is untouched." }
+                                fleet_box_rows := QuietScrollY{
+                                    width: Fill
+                                    height: 420
+                                    flow: Down spacing: 2
+                                    fm0 := FleetModelRow{}
+                                    fm1 := FleetModelRow{}
+                                    fm2 := FleetModelRow{}
+                                    fm3 := FleetModelRow{}
+                                    fm4 := FleetModelRow{}
+                                    fm5 := FleetModelRow{}
+                                    fm6 := FleetModelRow{}
+                                    fm7 := FleetModelRow{}
+                                    fm8 := FleetModelRow{}
+                                    fm9 := FleetModelRow{}
+                                    fm10 := FleetModelRow{}
+                                    fm11 := FleetModelRow{}
+                                    fm12 := FleetModelRow{}
+                                    fm13 := FleetModelRow{}
+                                    fm14 := FleetModelRow{}
+                                    fm15 := FleetModelRow{}
+                                    fm16 := FleetModelRow{}
+                                    fm17 := FleetModelRow{}
+                                    fm18 := FleetModelRow{}
+                                    fm19 := FleetModelRow{}
+                                    fm20 := FleetModelRow{}
+                                    fm21 := FleetModelRow{}
+                                    fm22 := FleetModelRow{}
+                                    fm23 := FleetModelRow{}
+                                    fm24 := FleetModelRow{}
+                                    fm25 := FleetModelRow{}
+                                    fm26 := FleetModelRow{}
+                                    fm27 := FleetModelRow{}
+                                    fm28 := FleetModelRow{}
+                                    fm29 := FleetModelRow{}
+                                    fm30 := FleetModelRow{}
+                                    fm31 := FleetModelRow{}
+                                    fm32 := FleetModelRow{}
+                                    fm33 := FleetModelRow{}
+                                    fm34 := FleetModelRow{}
+                                    fm35 := FleetModelRow{}
+                                    fm36 := FleetModelRow{}
+                                    fm37 := FleetModelRow{}
+                                    fm38 := FleetModelRow{}
+                                    fm39 := FleetModelRow{}
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2365,6 +2553,8 @@ fn repo_path(rel: &str) -> String {
 const QUEUE_ROWS: usize = 6;
 /// Chip slots in the run tray (character runs have 7 artifacts).
 const RUN_TRAY_SLOTS: usize = 8;
+/// Box cards in the Fleet box.
+const FLEET_CARD_SLOTS: usize = 12;
 
 /// The immutable input attachment of a seeded (transform) run: the exact
 /// managed payload bytes snapshotted at ENQUEUE, so deleting or evicting
@@ -2591,6 +2781,23 @@ pub struct App {
     /// (oldest first), one per chip slot.
     #[rust]
     run_tray_files: Vec<String>,
+    /// Per-box model opt-outs: (box base_url, model id) this app never
+    /// routes to. Persisted in `fleet_prefs.json`; routing sees filtered
+    /// snapshots (`routing_snapshots`), display sees the raw fleet.
+    #[rust]
+    fleet_disabled: HashSet<(String, String)>,
+    /// Per-box, per-domain preferred model: (box base_url, domain) → model.
+    /// Routing drops the domain's OTHER models on that box while it stands.
+    #[rust]
+    fleet_prefer: HashMap<(String, String), String>,
+    /// Box base_url shown in the fleet box popup + its row → model map.
+    #[rust]
+    fleet_modal_box: Option<String>,
+    #[rust]
+    fleet_modal_models: Vec<String>,
+    /// Box base_url per fleet card slot (click → popup).
+    #[rust]
+    fleet_card_boxes: Vec<String>,
     /// Preview decodes wanted by non-gallery widgets (run tray chips) —
     /// drained by `pump_gallery_previews` alongside the gallery caches.
     #[rust]
@@ -2681,6 +2888,7 @@ impl App {
     fn setup(&mut self, cx: &mut Cx) {
         let _ = std::fs::create_dir_all(artifacts_dir());
         self.artifact_io = Some(ArtifactIo::start());
+        self.load_fleet_prefs();
         self.library = Some(Library::open(repo_path("local/ai_content_library")));
         self.saved_presets = fast_presets::load(&fast_presets::store_path());
         if let Some(library) = &mut self.library {
@@ -2893,11 +3101,276 @@ impl App {
 
     // -- fleet ----------------------------------------------------------------
 
-    fn refresh_fleet_ui(&mut self, cx: &mut Cx) {
+    /// The fleet as routing sees it: every snapshot minus the models the
+    /// user switched off for that box. Display keeps the raw snapshots.
+    fn routing_snapshots(&self) -> Vec<BoxSnapshot> {
+        let Some(fleet) = &self.fleet else {
+            return Vec::new();
+        };
+        if self.fleet_disabled.is_empty() && self.fleet_prefer.is_empty() {
+            return fleet.snapshots.clone();
+        }
+        fleet
+            .snapshots
+            .iter()
+            .map(|snap| {
+                let mut snap = snap.clone();
+                let url = snap.base_url.clone();
+                snap.models
+                    .retain(|model| !self.fleet_disabled.contains(&(url.clone(), model.id.clone())));
+                // A preference only bites while the preferred model is
+                // actually advertised (and enabled) on the box; otherwise
+                // the domain keeps its full choice there.
+                let preferred: Vec<(String, String)> = self
+                    .fleet_prefer
+                    .iter()
+                    .filter(|((pref_url, _), model)| {
+                        *pref_url == url && snap.models.iter().any(|m| &m.id == *model)
+                    })
+                    .map(|((_, domain), model)| (domain.clone(), model.clone()))
+                    .collect();
+                snap.models.retain(|model| {
+                    preferred
+                        .iter()
+                        .all(|(domain, keep)| model.domain != *domain || model.id == *keep)
+                });
+                snap
+            })
+            .collect()
+    }
+
+    fn fleet_prefs_path() -> PathBuf {
+        PathBuf::from(repo_path("local/ai_content_library/fleet_prefs.json"))
+    }
+
+    fn load_fleet_prefs(&mut self) {
+        let Ok(text) = std::fs::read_to_string(Self::fleet_prefs_path()) else {
+            return;
+        };
+        // One "url\tmodel" per line inside a JSON string array, micro-serde
+        // free: the file is ours alone.
+        for line in text.lines() {
+            let line = line.trim().trim_matches(|c| c == '[' || c == ']' || c == ',' || c == '"');
+            let parts: Vec<&str> = line.split('\t').collect();
+            match parts.as_slice() {
+                ["disable", url, model] | [url, model] if !url.is_empty() && !model.is_empty() => {
+                    self.fleet_disabled.insert((url.to_string(), model.to_string()));
+                }
+                ["prefer", url, domain, model] if !url.is_empty() && !model.is_empty() => {
+                    self.fleet_prefer
+                        .insert((url.to_string(), domain.to_string()), model.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn save_fleet_prefs(&self) {
+        let mut lines: Vec<String> = self
+            .fleet_disabled
+            .iter()
+            .map(|(url, model)| format!("\"disable\t{url}\t{model}\""))
+            .chain(
+                self.fleet_prefer
+                    .iter()
+                    .map(|((url, domain), model)| format!("\"prefer\t{url}\t{domain}\t{model}\"")),
+            )
+            .collect();
+        lines.sort();
+        let text = format!("[\n{}\n]\n", lines.join(",\n"));
+        if let Err(error) = std::fs::write(Self::fleet_prefs_path(), text) {
+            log!("fleet prefs: save failed: {error}");
+        }
+    }
+
+    fn fleet_card_ids() -> [&'static [LiveId]; FLEET_CARD_SLOTS] {
+        [
+            ids!(fb0), ids!(fb1), ids!(fb2), ids!(fb3), ids!(fb4), ids!(fb5),
+            ids!(fb6), ids!(fb7), ids!(fb8), ids!(fb9), ids!(fb10), ids!(fb11),
+        ]
+    }
+
+    fn fleet_model_row_ids() -> Vec<&'static [LiveId]> {
+        vec![
+            ids!(fm0), ids!(fm1), ids!(fm2), ids!(fm3), ids!(fm4), ids!(fm5), ids!(fm6), ids!(fm7),
+            ids!(fm8), ids!(fm9), ids!(fm10), ids!(fm11), ids!(fm12), ids!(fm13), ids!(fm14), ids!(fm15),
+            ids!(fm16), ids!(fm17), ids!(fm18), ids!(fm19), ids!(fm20), ids!(fm21), ids!(fm22), ids!(fm23),
+            ids!(fm24), ids!(fm25), ids!(fm26), ids!(fm27), ids!(fm28), ids!(fm29), ids!(fm30), ids!(fm31),
+            ids!(fm32), ids!(fm33), ids!(fm34), ids!(fm35), ids!(fm36), ids!(fm37), ids!(fm38), ids!(fm39),
+        ]
+    }
+
+    /// What a box is doing right now, for its card: our own stage there
+    /// (with progress), else the service's queue depth, else idle.
+    fn box_busy_text(&self, base_url: &str, snap: &BoxSnapshot) -> (String, Vec4f) {
+        const DOWN: Vec4f = Vec4f { x: 0.35, y: 0.38, z: 0.42, w: 1.0 };
+        const IDLE: Vec4f = Vec4f { x: 0.24, y: 0.77, z: 0.43, w: 1.0 };
+        const BUSY: Vec4f = Vec4f { x: 0.94, y: 0.64, z: 0.24, w: 1.0 };
+        if !snap.is_up() {
+            return ("down".to_string(), DOWN);
+        }
+        for run in &self.runs {
+            let p = &run.pipeline;
+            if !p.is_running() || !p.active_boxes().contains(&base_url) {
+                continue;
+            }
+            if let Some(stage) = p.stages.get(p.current) {
+                let pct = (stage.progress * 100.0).round() as u32;
+                return (
+                    format!("{} {}% (ours)", stage_display_name(&stage.domain), pct),
+                    BUSY,
+                );
+            }
+        }
+        let pending = snap.jobs_pending();
+        if pending > 0 {
+            return (format!("{pending} job{} (other client)", if pending == 1 { "" } else { "s" }), BUSY);
+        }
+        let loaded = snap
+            .health
+            .as_ref()
+            .map(|h| h.models_loaded.len())
+            .unwrap_or(0);
+        (format!("idle · {loaded} loaded"), IDLE)
+    }
+
+    fn refresh_fleet_cards(&mut self, cx: &mut Cx) {
         let Some(fleet) = &self.fleet else { return };
-        self.ui
-            .label(cx, ids!(fleet_label))
-            .set_text(cx, &fleet.panel_text());
+        let mut snaps: Vec<BoxSnapshot> = fleet.snapshots.clone();
+        snaps.sort_by(|a, b| a.base_url.cmp(&b.base_url));
+        let up = snaps.iter().filter(|s| s.is_up()).count();
+        self.ui.label(cx, ids!(fleet_label)).set_text(
+            cx,
+            &format!("{up}/{} up · click a box for its models", snaps.len()),
+        );
+        self.fleet_card_boxes = snaps.iter().map(|s| s.base_url.clone()).collect();
+        for (slot, card) in Self::fleet_card_ids().iter().enumerate() {
+            let view = self.ui.view(cx, card);
+            let Some(snap) = snaps.get(slot) else {
+                view.set_visible(cx, false);
+                continue;
+            };
+            view.set_visible(cx, true);
+            let host = snap
+                .base_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string();
+            let (busy, color) = self.box_busy_text(&snap.base_url, snap);
+            let mut host_id = card.to_vec();
+            host_id.push(live_id!(host));
+            self.ui.label(cx, &host_id).set_text(cx, &host);
+            let mut busy_id = card.to_vec();
+            busy_id.push(live_id!(busy));
+            self.ui.label(cx, &busy_id).set_text(cx, &busy);
+            let mut light_id = card.to_vec();
+            light_id.push(live_id!(light));
+            let mut light = self.ui.view(cx, &light_id);
+            script_apply_eval!(cx, light, {
+                draw_bg +: { color: #(color) }
+            });
+        }
+        if self.fleet_modal_box.is_some() {
+            self.refresh_fleet_modal(cx);
+        }
+    }
+
+    /// Fill the per-box popup from the raw snapshot: every advertised model,
+    /// its load state light, and the per-box enable toggle.
+    fn refresh_fleet_modal(&mut self, cx: &mut Cx) {
+        let Some(url) = self.fleet_modal_box.clone() else { return };
+        let Some(snap) = self
+            .fleet
+            .as_ref()
+            .and_then(|fleet| fleet.snapshots.iter().find(|s| s.base_url == url).cloned())
+        else {
+            return;
+        };
+        let host = url.trim_start_matches("http://").to_string();
+        self.ui.label(cx, ids!(fleet_box_title)).set_text(cx, &host);
+        let status = match &snap.health {
+            Some(h) => {
+                let (busy, _) = self.box_busy_text(&url, &snap);
+                format!(
+                    "{} · vram {}/{} MB · {busy}",
+                    h.gpu.as_deref().unwrap_or("no gpu info"),
+                    h.vram_free_mb.unwrap_or(0),
+                    h.vram_total_mb.unwrap_or(0),
+                )
+            }
+            None => "down — last known models".to_string(),
+        };
+        self.ui.label(cx, ids!(fleet_box_status)).set_text(cx, &status);
+        let mut models: Vec<_> = snap.models.iter().filter(|m| m.available).cloned().collect();
+        models.sort_by(|a, b| a.domain.cmp(&b.domain).then(a.id.cmp(&b.id)));
+        self.fleet_modal_models = models.iter().map(|m| m.id.clone()).collect();
+        for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+            let view = self.ui.view(cx, row);
+            let Some(model) = models.get(slot) else {
+                view.set_visible(cx, false);
+                continue;
+            };
+            view.set_visible(cx, true);
+            let enabled = !self.fleet_disabled.contains(&(url.clone(), model.id.clone()));
+            let mut id = row.to_vec();
+            id.push(live_id!(enable));
+            self.ui.check_box(cx, &id).set_active(cx, enabled, Animate::No);
+            let mut id = row.to_vec();
+            id.push(live_id!(mname));
+            self.ui.label(cx, &id).set_text(cx, &model.id);
+            let mut id = row.to_vec();
+            id.push(live_id!(mdomain));
+            self.ui.label(cx, &id).set_text(cx, &model.domain);
+            let mut id = row.to_vec();
+            id.push(live_id!(mnote));
+            let note = match model.state.as_str() {
+                "loaded" => "loaded".to_string(),
+                "ready" => "ready".to_string(),
+                "downloading" => format!(
+                    "downloading {}%",
+                    model
+                        .progress_total
+                        .filter(|t| *t > 0)
+                        .map(|t| model.progress_done.unwrap_or(0) * 100 / t)
+                        .unwrap_or(0)
+                ),
+                other => other.to_string(),
+            };
+            let vram = model.vram_gb.map(|g| format!(" · {g:.0} GB")).unwrap_or_default();
+            self.ui.label(cx, &id).set_text(cx, &format!("{note}{vram}"));
+            let preferred = self
+                .fleet_prefer
+                .get(&(url.clone(), model.domain.clone()))
+                .is_some_and(|m| m == &model.id);
+            let mut id = row.to_vec();
+            id.push(live_id!(prefer));
+            self.ui
+                .button(cx, &id)
+                .set_text(cx, if preferred { "★ preferred" } else { "prefer" });
+            let color = match model.state.as_str() {
+                "loaded" => Vec4f { x: 0.24, y: 0.77, z: 0.43, w: 1.0 },
+                "ready" => Vec4f { x: 0.33, y: 0.55, z: 0.85, w: 1.0 },
+                "downloading" => Vec4f { x: 0.94, y: 0.64, z: 0.24, w: 1.0 },
+                _ => Vec4f { x: 0.35, y: 0.38, z: 0.42, w: 1.0 },
+            };
+            let mut id = row.to_vec();
+            id.push(live_id!(mstate));
+            let mut light = self.ui.view(cx, &id);
+            script_apply_eval!(cx, light, {
+                draw_bg +: { color: #(color) }
+            });
+        }
+    }
+
+    fn open_fleet_modal(&mut self, cx: &mut Cx, base_url: String) {
+        self.fleet_modal_box = Some(base_url);
+        self.refresh_fleet_modal(cx);
+        self.ui.modal(cx, ids!(fleet_box_modal)).open(cx);
+    }
+
+    fn refresh_fleet_ui(&mut self, cx: &mut Cx) {
+        self.refresh_fleet_cards(cx);
+        let Some(fleet) = &self.fleet else { return };
 
         let mut box_labels = vec!["auto (affinity)".to_string()];
         let mut boxes = Vec::new();
@@ -2927,11 +3400,11 @@ impl App {
     }
 
     fn fleet_models_for_domain(&self, domain: &str) -> Vec<String> {
-        let Some(fleet) = &self.fleet else {
+        if self.fleet.is_none() {
             return Vec::new();
-        };
+        }
         let mut ids = Vec::new();
-        for snap in &fleet.snapshots {
+        for snap in &self.routing_snapshots() {
             if !snap.is_up() {
                 continue;
             }
@@ -3372,7 +3845,9 @@ impl App {
             return;
         }
         let Some(preset_sub) = self.auto.preset.clone() else { return };
-        let Some(fleet) = &self.fleet else { return };
+        if self.fleet.is_none() {
+            return;
+        }
         let Some(preset_index) = PRESETS
             .iter()
             .position(|p| p.name.contains(preset_sub.as_str()))
@@ -3382,7 +3857,7 @@ impl App {
             return;
         };
         let first_domain = PRESETS[preset_index].domains[0];
-        if makepad_asset_ai::fleet::pick_for_domain(&fleet.snapshots, first_domain).is_none() {
+        if makepad_asset_ai::fleet::pick_for_domain(&self.routing_snapshots(), first_domain).is_none() {
             return; // wait for discovery
         }
         self.auto.fired = true;
@@ -3738,11 +4213,8 @@ impl App {
                     .map(|(_, model)| (*model).to_string())
             });
         let ours = self.our_endpoint_use();
-        let loads = self
-            .fleet
-            .as_ref()
-            .map(|fleet| fleet.snapshots.as_slice())
-            .unwrap_or(&[])
+        let routing = self.routing_snapshots();
+        let loads = routing
             .iter()
             .filter(|snapshot| {
                 run.box_override
@@ -3854,8 +4326,10 @@ impl App {
     }
 
     fn dispatch_run(&mut self, cx: &mut Cx, run: PendingRun, avoid: &[String]) {
-        let Some(fleet) = &self.fleet else { return };
-        let snapshots = fleet.snapshots.clone();
+        if self.fleet.is_none() {
+            return;
+        }
+        let snapshots = self.routing_snapshots();
         let mut pipeline = Pipeline::new(
             &run.prompt,
             run.domains(),
@@ -4313,11 +4787,7 @@ impl App {
             .active_candidate_set()
             .map(|set| set.id.clone())
             .expect("candidate set was found above");
-        let snapshots = self
-            .fleet
-            .as_ref()
-            .map(|fleet| fleet.snapshots.clone())
-            .unwrap_or_default();
+        let snapshots = self.routing_snapshots();
         let avoid = self.avoid_for_run(index);
         let run_id = self.runs[index].id;
         let result = if early {
@@ -4348,11 +4818,7 @@ impl App {
             .active_candidate_set()
             .map(|set| set.id.clone())
             .expect("candidate set was found above");
-        let snapshots = self
-            .fleet
-            .as_ref()
-            .map(|fleet| fleet.snapshots.clone())
-            .unwrap_or_default();
+        let snapshots = self.routing_snapshots();
         let avoid = self.avoid_for_run(index);
         let run_id = self.runs[index].id;
         match self.runs[index]
@@ -8794,6 +9260,74 @@ impl MatchEvent for App {
                 self.reopen_gallery(cx, &file);
             }
         }
+        // Fleet box cards → per-box model popup; toggles in the popup flip
+        // the per-box routing opt-out (persisted) and refresh routing views.
+        let mut card_hit = None;
+        for (slot, card) in Self::fleet_card_ids().iter().enumerate() {
+            if self.ui.view(cx, card).finger_down(actions).is_some() {
+                card_hit = self.fleet_card_boxes.get(slot).cloned();
+                break;
+            }
+        }
+        if let Some(url) = card_hit {
+            self.open_fleet_modal(cx, url);
+        }
+        if self.ui.button(cx, ids!(fleet_box_close)).clicked(actions)
+            || self.ui.modal(cx, ids!(fleet_box_modal)).dismissed(actions)
+        {
+            self.ui.modal(cx, ids!(fleet_box_modal)).close(cx);
+            self.fleet_modal_box = None;
+        }
+        if let Some(url) = self.fleet_modal_box.clone() {
+            let mut changed = false;
+            for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(enable));
+                if let Some(on) = self.ui.check_box(cx, &id).changed(actions) {
+                    if let Some(model) = self.fleet_modal_models.get(slot).cloned() {
+                        let key = (url.clone(), model);
+                        if on {
+                            self.fleet_disabled.remove(&key);
+                        } else {
+                            self.fleet_disabled.insert(key);
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            for (slot, row) in Self::fleet_model_row_ids().iter().enumerate() {
+                let mut id = row.to_vec();
+                id.push(live_id!(prefer));
+                if self.ui.button(cx, &id).clicked(actions) {
+                    let model = self.fleet_modal_models.get(slot).cloned();
+                    let domain = model.as_ref().and_then(|m| {
+                        self.fleet.as_ref().and_then(|fleet| {
+                            fleet
+                                .snapshots
+                                .iter()
+                                .find(|s| s.base_url == url)
+                                .and_then(|s| s.models.iter().find(|x| &x.id == m))
+                                .map(|x| x.domain.clone())
+                        })
+                    });
+                    if let (Some(model), Some(domain)) = (model, domain) {
+                        let key = (url.clone(), domain);
+                        // Click the current preference again to clear it.
+                        if self.fleet_prefer.get(&key) == Some(&model) {
+                            self.fleet_prefer.remove(&key);
+                        } else {
+                            self.fleet_prefer.insert(key, model);
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.save_fleet_prefs();
+                self.refresh_model_ui(cx, false);
+                self.refresh_fleet_cards(cx);
+            }
+        }
         // Run-queue rows: cancel / move up.
         for (k, (cancel, up)) in [
             (ids!(q1_cancel), ids!(q1_up)),
@@ -8952,11 +9486,7 @@ impl AppMain for App {
             // enough free VRAM. Snapshot once, calculate each run's occupied
             // slot exclusions before its mutable borrow, then let Pipeline
             // resume the held stage when a compatible GPU becomes admitted.
-            let snapshots = self
-                .fleet
-                .as_ref()
-                .map(|fleet| fleet.snapshots.clone())
-                .unwrap_or_default();
+            let snapshots = self.routing_snapshots();
             let mut tick_events = Vec::new();
             for index in 0..self.runs.len() {
                 let avoid = self.avoid_for_run(index);
@@ -9131,11 +9661,7 @@ impl AppMain for App {
                     continue;
                 };
                 let avoid = self.avoid_for_run(position);
-                let snapshots = self
-                    .fleet
-                    .as_ref()
-                    .map(|fleet| fleet.snapshots.clone())
-                    .unwrap_or_default();
+                let snapshots = self.routing_snapshots();
                 let run_id = self.runs[position].id;
                 let events = self.runs[position].pipeline.handle_response(
                     cx,
