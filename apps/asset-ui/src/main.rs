@@ -82,7 +82,7 @@ use crate::fast_presets::{SavedFastPreset, MAX_FAST_PRESETS};
 use crate::pipeline::{
     consumer_only_domain, format_clock, format_music_duration, seed_replaces_prefix, stage_display_name, CandidateSetState, GenParams,
     Pipeline, PipelineEvent, StageState,
-    EDIT_STRENGTHS, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
+    EDIT_STRENGTHS, VIDEO_INTERPOLATE, IMAGE_SIZES, IMAGE_STEPS, MESH_FACE_COUNTS, MESH_TEXTURE_SIZES, MUSIC_DEFAULT_SECONDS, MUSIC_LENGTHS, PRESETS,
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
@@ -1417,6 +1417,11 @@ script_mod! {
                         // H3 always denoises video+audio jointly; off just
                         // skips the service's audio VAE decode + AAC mux
                         // (silent mp4, no audio track).
+                        vid_interp_row := DropField{
+                            visible: false
+                            FieldCaption{ text: "Frame interpolation" }
+                            vid_interp_drop := FieldDrop{}
+                        }
                         vid_audio_row := DropField{
                             visible: false
                             FieldCaption{ text: "Video audio" }
@@ -3150,6 +3155,13 @@ impl App {
                 .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
                 .collect(),
         );
+        self.ui.drop_down2(cx, ids!(vid_interp_drop)).set_labels(
+            cx,
+            VIDEO_INTERPOLATE
+                .iter()
+                .map(|f| if *f <= 1 { "off (native 24 fps)".to_string() } else { format!("RIFE ×{f} ({} fps)", 24 * f) })
+                .collect(),
+        );
         self.ui.drop_down2(cx, ids!(mask_brush_drop)).set_labels(
             cx,
             MASK_BRUSH_SIZES.iter().map(|r| format!("brush {r:.0}px")).collect(),
@@ -3959,6 +3971,9 @@ impl App {
             .widget(cx, ids!(vid_audio_row))
             .set_visible(cx, active("video"));
         self.ui
+            .widget(cx, ids!(vid_interp_row))
+            .set_visible(cx, active("video"));
+        self.ui
             .widget(cx, ids!(music_params_row))
             .set_visible(cx, active("music"));
         self.sync_preset_name_box(cx);
@@ -4016,6 +4031,11 @@ impl App {
             video_frames,
             video_steps,
             video_audio: self.ui.check_box(cx, ids!(video_audio_toggle)).active(cx),
+            video_interpolate: VIDEO_INTERPOLATE[self
+                .ui
+                .drop_down2(cx, ids!(vid_interp_drop))
+                .selected_item()
+                .min(VIDEO_INTERPOLATE.len() - 1)],
             music_seconds,
         }
     }
@@ -4149,6 +4169,10 @@ impl App {
         self.ui.drop_down2(cx, ids!(edit_strength_drop)).set_selected_item(
             cx,
             fast_presets::nearest_edit_strength(saved.edit_strength.unwrap_or(1.0)),
+        );
+        self.ui.drop_down2(cx, ids!(vid_interp_drop)).set_selected_item(
+            cx,
+            fast_presets::nearest_video_interpolate(saved.video_interpolate.unwrap_or(1)),
         );
         self.ui.drop_down2(cx, ids!(music_len_drop)).set_selected_item(
             cx,
@@ -4493,6 +4517,11 @@ impl App {
                 video_frames,
                 video_steps,
                 video_audio: self.ui.check_box(cx, ids!(video_audio_toggle)).active(cx),
+                video_interpolate: VIDEO_INTERPOLATE[self
+                    .ui
+                    .drop_down2(cx, ids!(vid_interp_drop))
+                    .selected_item()
+                    .min(VIDEO_INTERPOLATE.len() - 1)],
                 music_seconds,
             },
             input,

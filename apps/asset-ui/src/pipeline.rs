@@ -43,6 +43,8 @@ pub const IMAGE_STEPS: &[u32] = &[4, 8, 12, 20, 28, 50];
 /// (reference tokens only); lower = the sampler starts from the VAE-encoded
 /// input at sigma index floor((1-strength)*steps), keeping more of it.
 pub const EDIT_STRENGTHS: &[f32] = &[1.0, 0.85, 0.7, 0.55, 0.4, 0.25];
+/// RIFE interpolation factors offered for video (1 = off).
+pub const VIDEO_INTERPOLATE: &[u32] = &[1, 2, 4];
 /// TRELLIS UV-atlas presets. 1024 preserves the current fast default; the
 /// larger atlases trade bake time and device memory for sharper materials.
 pub const MESH_TEXTURE_SIZES: &[u32] = &[1024, 2048, 4096];
@@ -123,6 +125,9 @@ pub struct GenParams {
     /// the service decodes the audio VAE and muxes an AAC track. Default on
     /// (audible clip); off = silent mp4, faster by skipping decode + mux.
     pub video_audio: bool,
+    /// RIFE frame interpolation factor for the video stage: 1 = off, 2/4 =
+    /// the service interpolates the generated frames (fps × factor).
+    pub video_interpolate: u32,
     /// Requested Music3 song ceiling in seconds. Captured in each run spec,
     /// so moving the UI picker cannot mutate already queued/running songs.
     pub music_seconds: u32,
@@ -142,6 +147,7 @@ impl Default for GenParams {
             video_frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
             video_audio: true,
+            video_interpolate: 1,
             music_seconds: MUSIC_DEFAULT_SECONDS,
         }
     }
@@ -1436,6 +1442,9 @@ impl Pipeline {
                 }
                 request.frames = Some(self.gen.video_frames);
                 request.steps = Some(self.gen.video_steps);
+                if self.gen.video_interpolate > 1 {
+                    request.interpolate = Some(self.gen.video_interpolate);
+                }
                 // H3 still denoises the audio rows jointly either way; off
                 // only skips the service's audio VAE decode + AAC mux.
                 if !self.gen.video_audio {
