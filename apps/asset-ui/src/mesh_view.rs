@@ -643,6 +643,15 @@ pub struct MeshView {
     /// Night stage: dim sun, dark ground, dark sky.
     #[rust(false)]
     dark_enabled: bool,
+    /// Studio light for the PBR lane: softbox environment (bright boxes
+    /// for metals and gloss to reflect) + a strong warm key. Off = the
+    /// procedural sky environment and the neutral rig.
+    #[rust(true)]
+    studio_enabled: bool,
+    /// The studio rig is (re)installed on the next PBR draw when this is
+    /// set — on toggle and after every model load (load clears the rig).
+    #[rust(true)]
+    studio_dirty: bool,
     /// Bytes handed in by the pipeline, loaded on the next draw (needs Cx).
     #[rust]
     pending: Option<PendingModel>,
@@ -754,6 +763,11 @@ fn walk_rig(eye: Vec3f, yaw: f32, pitch: f32) -> (Vec3f, f32) {
 }
 
 /// yaw-rotation * uniform scale, translated (the sandbox villager idiom).
+/// The studio camera every fresh statue/PBR load starts from; also the fixed
+/// camera of the PBR turntable.
+const STUDIO_YAW: f32 = 0.6;
+const STUDIO_PITCH: f32 = -0.22;
+
 fn trs_yaw(pos: Vec3f, yaw: f32, scale: f32) -> Mat4f {
     let mut m = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
     for k in [0usize, 1, 2, 4, 5, 6, 8, 9, 10] {
@@ -932,8 +946,8 @@ impl MeshView {
     /// World walk leaves `cam_distance` at 0.5 and a look-down pitch; a
     /// Kenney prop then sits off-frame (empty slab). Restore the statue rig.
     fn reset_studio_camera(&mut self) {
-        self.orbit_yaw = 0.6;
-        self.orbit_pitch = -0.22;
+        self.orbit_yaw = STUDIO_YAW;
+        self.orbit_pitch = STUDIO_PITCH;
         self.look.target = vec3f(0.0, 0.9, 0.0);
         self.look.distance = 4.2;
         self.look.fov = 45.0;
@@ -1130,6 +1144,35 @@ impl MeshView {
         self.area.redraw(cx);
     }
 
+    pub fn studio_enabled(&self) -> bool {
+        self.studio_enabled
+    }
+
+    pub fn set_studio_enabled(&mut self, cx: &mut Cx, on: bool) {
+        if self.studio_enabled == on {
+            return;
+        }
+        self.studio_enabled = on;
+        self.studio_dirty = true;
+        self.area.redraw(cx);
+    }
+
+    /// Install the studio (or neutral) environment + rig on the PBR branch.
+    /// Cheap when nothing changed; the env cube itself is rebuilt by DrawPbr
+    /// only when the equirect actually swaps.
+    fn apply_studio(&mut self) {
+        if !std::mem::take(&mut self.studio_dirty) {
+            return;
+        }
+        if self.studio_enabled {
+            self.pbr.controls = PbrDisplayControls::studio();
+            self.pbr.set_env_equirect(pbr_preview::studio_equirect_png());
+        } else {
+            self.pbr.controls = PbrDisplayControls::default();
+            self.pbr.clear_env();
+        }
+    }
+
     fn apply_shadow_mode(&mut self) {
         self.renderer.set_gpu_lightmap_mode(if self.shadows_enabled {
             GpuLightmapMode::Realtime
@@ -1207,16 +1250,25 @@ impl MeshView {
                 // the atlas as base color at authored metres.
                 self.load_statue(cx, pending)
             }
-            _ => {
-                // DrawPbr in this pass currently composites as empty sky
-                // (worlds AND small Kenney props). Renderer is what
-                // the thumbnailer already proves; use it for the hero mesh.
-                let mut pending = pending;
-                if pending.png.is_none() {
-                    pending.png = extract_base_color(&pending.glb);
+            _ => match pbr_preview::parse_material_bearing_glb(&pending.glb) {
+                // Paint output / textured Kenney: real materials (base color,
+                // metallic-roughness, normal, occlusion, emissive) through
+                // DrawPbr. Draws inside the pass's own draw list — see
+                // `pass_list` in draw_walk; before that the PBR hero landed
+                // in the host window's list and this lane looked empty.
+                Some(gltf) => {
+                    let png = pending.png.clone();
+                    self.load_pbr(cx, gltf, &pending.glb, png)
                 }
-                self.load_statue(cx, pending)
-            }
+                // Bare TRELLIS hull / factors-only: the base-color statue.
+                None => {
+                    let mut pending = pending;
+                    if pending.png.is_none() {
+                        pending.png = extract_base_color(&pending.glb);
+                    }
+                    self.load_statue(cx, pending)
+                }
+            },
         }
         self.sync_stage();
         self.area.redraw(cx);
@@ -1236,6 +1288,7 @@ impl MeshView {
     ) {
         match self.pbr.load(&mut self.draw_pbr, cx, gltf, self.generation) {
             Ok(()) => {
+                self.studio_dirty = true;
                 if self.walk_cam.is_some() {
                     self.pbr.set_fit(Mat4f::identity());
                     self.status = format!("{} · WASD walk, drag look", self.pbr.summary());
@@ -1744,8 +1797,19 @@ impl Widget for MeshView {
 
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, None);
-        self.look.yaw = self.orbit_yaw;
-        self.look.pitch = self.orbit_pitch;
+        if self.pbr.bounds().is_some() && self.walk_cam.is_none() {
+            // PBR turntable: the studio camera, key and environment stay
+            // fixed; the drag spins/tilts the model instead, so highlights
+            // travel over the surface and speculars can be judged.
+            self.look.yaw = STUDIO_YAW;
+            self.look.pitch = STUDIO_PITCH;
+            self.pbr.turntable_yaw = -(self.orbit_yaw - STUDIO_YAW);
+            self.pbr.turntable_tilt = self.orbit_pitch - STUDIO_PITCH;
+            self.pbr.tilt_axis = vec3f(STUDIO_YAW.cos(), 0.0, STUDIO_YAW.sin());
+        } else {
+            self.look.yaw = self.orbit_yaw;
+            self.look.pitch = self.orbit_pitch;
+        }
         // Orbit zoom must retighten cascade 0 around the look-at so
         // shadow texels stay ~1 screen pixel. Walk keeps the 80 m ladder.
         if self.walk_cam.is_some() {
@@ -1874,6 +1938,8 @@ impl Widget for MeshView {
             // buffer. A playable character never reaches here — the skinned
             // lane above stays the only character path.
             if self.character.is_none() {
+                self.apply_studio();
+                self.pbr.controls.night = self.dark_enabled;
                 self.pbr.draw(&mut self.draw_pbr, cx3d);
             }
             self.pass_list.end(cx3d);

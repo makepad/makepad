@@ -35,6 +35,7 @@
 //!   AI_CONTENT_AUTO="audio sfx" AI_CONTENT_PROMPT="sword clash" \
 //!   AI_CONTENT_QUEUE="speech;image" AI_CONTENT_CAPTURE=/tmp/shot.png \
 //!   AI_CONTENT_CAPTURE_AT_S=5 AI_CONTENT_SURFACE=import AI_CONTENT_EXIT=1 \
+//!   AI_CONTENT_SAMPLE=mesh AI_CONTENT_SAMPLE_MESH=x.glb AI_CONTENT_DARK=1 \
 //!   cargo run -p makepad-app-asset-ui --release
 
 pub use makepad_widgets;
@@ -1567,6 +1568,17 @@ script_mod! {
                                             dark_toggle := CheckBox{
                                                 text: "Dark"
                                                 active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            // PBR lane only: softbox environment + strong key so
+                                            // metallic/roughness maps actually read.
+                                            studio_toggle := CheckBox{
+                                                text: "Studio light"
+                                                active: true
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
                                                     color: #x828a93
@@ -8249,6 +8261,15 @@ impl MatchEvent for App {
         if let Some(on) = self.ui.check_box(cx, ids!(dark_toggle)).changed(actions) {
             self.set_mesh_dark(cx, on);
         }
+        if let Some(on) = self.ui.check_box(cx, ids!(studio_toggle)).changed(actions) {
+            if let Some(mut mesh) = self
+                .ui
+                .widget(cx, ids!(mesh_view))
+                .borrow_mut::<MeshView>()
+            {
+                mesh.set_studio_enabled(cx, on);
+            }
+        }
         if self.ui.button(cx, ids!(sample_splat_btn)).clicked(actions) {
             self.load_sample_splat(cx);
         }
@@ -8550,6 +8571,10 @@ impl AppMain for App {
             }
         }
         if self.sample_timer.is_event(event).is_some() {
+            // ASSET_UI_DARK=1: night stage for headless viewer captures.
+            if crate::asset_store_state::env_alias(&["ASSET_UI_DARK", "AI_CONTENT_DARK"]).is_some() {
+                self.set_mesh_dark(cx, true);
+            }
             let sample = self.auto.sample.clone();
             match sample.as_deref() {
                 Some("mesh") => self.load_sample_mesh(cx),
