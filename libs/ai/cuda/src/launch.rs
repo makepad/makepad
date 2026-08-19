@@ -11441,7 +11441,11 @@ mod imp {
         if start + len > x.rows {
             return Err("gpu_slice_rows out of range".to_string());
         }
-        let cols_u = gpu_copy_units(x.half, x.cols, "gpu_slice_rows")?;
+        // offset_units is in STORAGE ELEMENTS (f32 or f16), not in the u32
+        // copy units the kernels use — an f16 row is `cols` elements, not
+        // `cols/2`. Using copy units here landed every f16 row-slice at half
+        // its intended row (paint's CFG/material blocks read each other).
+        gpu_copy_units(x.half, x.cols, "gpu_slice_rows")?;
         let buf = x
             .buf
             .clone()
@@ -11451,7 +11455,7 @@ mod imp {
             rows: len,
             cols: x.cols,
             half: x.half,
-            offset_units: x.offset_units + start * cols_u,
+            offset_units: x.offset_units + start * x.cols,
         })
     }
 
@@ -11461,7 +11465,8 @@ mod imp {
         }
         let cols_u = gpu_copy_units(a.half, a.cols, "gpu_concat_rows")?;
         if a.same_storage(b) {
-            if a.offset_units + a.rows * cols_u == b.offset_units {
+            // Adjacency in storage ELEMENTS (offset_units contract).
+            if a.offset_units + a.rows * a.cols == b.offset_units {
                 return Ok(GpuTensor {
                     buf: a.buf.clone(),
                     rows: a.rows + b.rows,
@@ -11470,15 +11475,9 @@ mod imp {
                     offset_units: a.offset_units,
                 });
             }
-            if b.offset_units + b.rows * cols_u == a.offset_units {
-                return Ok(GpuTensor {
-                    buf: b.buf.clone(),
-                    rows: a.rows + b.rows,
-                    cols: a.cols,
-                    half: a.half,
-                    offset_units: b.offset_units,
-                });
-            }
+            // (b directly before a in storage is NOT [a; b] — fall through
+            // to the copy; the old view here returned the rows in the wrong
+            // order.)
         }
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
@@ -11530,7 +11529,7 @@ mod imp {
                 adjacent = false;
                 break;
             }
-            next_off += part.rows * cols_u;
+            next_off += part.rows * cols;
         }
         if adjacent {
             let rows: usize = parts.iter().map(|p| p.rows).sum();
