@@ -214,7 +214,7 @@ pub fn sort_visible(
         0.0
     };
     let proj = cam.projection;
-    let std_dev_bound = cam.splat_std_dev * 1.732051; // max axis -> sphere bound (as in the shader)
+    let std_dev_bound = cam.splat_std_dev; // longest axis bounds the projected semi-axis (as in the shader)
     let focal = cam.focal_px.max(1e-5);
     let cull_guard = cam.coarse_cull_guard.max(0.0);
     let ndc_per_px = vec2(cam.ndc_per_px.x.max(1e-6), cam.ndc_per_px.y.max(1e-6));

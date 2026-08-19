@@ -70,7 +70,7 @@ fn is_visible(scene: &SortScene, cam: &SortCamera, id: usize) -> bool {
     // Same operation order as the key pass so borderline splats agree.
     let inv_depth = 1.0 / (-v.z).max(1e-6);
     let guard = 1.0 + cam.coarse_cull_guard.max(0.0) * nx.abs().max(ny.abs());
-    let std_dev_bound = cam.splat_std_dev * 1.732051;
+    let std_dev_bound = cam.splat_std_dev;
     let rough = std_dev_bound * scene.radius_bound[id] * cam.focal_px.max(1e-5) * inv_depth * guard;
     if rough < cam.min_pixel_radius {
         return false;
