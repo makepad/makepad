@@ -48,6 +48,9 @@ pub struct RouteCtx {
     /// then refuse with 503 rather than inventing a session.
     pub chat: Option<super::chat::ChatHandle>,
     pub chat_event_waiters: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Live worker announcements of what the GPU fleet can execute NOW,
+    /// merged over `cfg.job_profiles` by `GET /v1/job-profiles`.
+    pub profiles: std::sync::Arc<super::profiles::ProfileRegistry>,
 }
 
 /// Serve one parsed request head to completion.

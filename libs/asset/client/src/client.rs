@@ -15,7 +15,8 @@
 //! cursor can never silently continue on a different server.
 
 use crate::api::{
-    AnnotationUpload, Api, ApiEndpoints, BlobHead, CatalogQuery, SourceCollectionRegistered,
+    AnnotationUpload, Api, ApiEndpoints, BatchFlow, BatchFrame, BatchItem, BlobHead, CatalogQuery,
+    SourceCollectionRegistered,
 };
 use crate::cache::{CacheBudgets, CacheStats, ContentCache};
 use crate::discovery::{content_client_caps, DiscoveredServer};
@@ -44,6 +45,11 @@ pub struct ClientConfig {
     pub http: HttpLimits,
     /// Bearer token (`mpat_<64 hex>`); validated at connect.
     pub token: Option<String>,
+    /// Reuse connections (HTTP keep-alive). On by default: against a
+    /// server on localhost a connect per request costs more than the
+    /// payload of a thumbnail. Turned off only to measure that, or to face
+    /// a middlebox that mangles persistent connections.
+    pub http_keep_alive: bool,
     /// Whole-transfer attempts per blob (first try + resumes).
     pub max_transfer_attempts: u32,
     /// Wall-clock budget for ONE blob transfer attempt.
@@ -57,6 +63,7 @@ impl ClientConfig {
             cache: CacheBudgets::default_v1(),
             http: HttpLimits::default_v1(),
             token: None,
+            http_keep_alive: true,
             max_transfer_attempts: 4,
             blob_body_deadline_ms: 600_000,
         }
@@ -250,7 +257,12 @@ impl AssetClient {
     ) -> ClientResult<AssetClient> {
         config.validate()?;
         let cache = ContentCache::open(&config.cache_root, config.cache, now_ms())?;
-        let api = Api::new(endpoints, config.http, config.token.clone())?;
+        let api = Api::with_keep_alive(
+            endpoints,
+            config.http,
+            config.token.clone(),
+            config.http_keep_alive,
+        )?;
 
         let health = api.health()?;
         if let Some(expected) = expected_server {
@@ -478,6 +490,24 @@ impl AssetClient {
         domain: Option<&str>,
     ) -> ClientResult<Vec<crate::dto::JobProfileDto>> {
         self.api.job_profiles(domain)
+    }
+
+    /// Announce/renew what this worker can execute now (see
+    /// [`crate::api::Api::announce_job_profiles`]).
+    pub fn announce_job_profiles(
+        &self,
+        worker: &str,
+        ns: &str,
+        ttl_ms: u64,
+        domains: &[String],
+        profiles: &[crate::dto::JobProfileDto],
+    ) -> ClientResult<()> {
+        self.api
+            .announce_job_profiles(worker, ns, ttl_ms, domains, profiles)
+    }
+
+    pub fn retract_job_profiles(&self, worker: &str, ns: &str) -> ClientResult<()> {
+        self.api.retract_job_profiles(worker, ns)
     }
 
     pub fn enqueue_job(
@@ -1088,6 +1118,114 @@ impl AssetClient {
             });
         }
         self.cache().commit_partial(writer, now_ms())
+    }
+
+    /// Fetch many blobs in ONE request, in the given order, committing each
+    /// one to the cache AS IT ARRIVES and reporting it through `on_item`.
+    ///
+    /// This is the thumbnail-grid path. Three properties make it worth a
+    /// separate route:
+    /// - **Order is priority.** Items are fetched in the order given, so a
+    ///   caller that puts the visible row first sees it first.
+    /// - **Per-frame commit.** Each blob is verified and committed on
+    ///   arrival, so abandoning the rest (below) never wastes what already
+    ///   landed.
+    /// - **Abandonable.** `abort` is consulted per item; when everything
+    ///   still outstanding has been cancelled the response is dropped
+    ///   mid-stream (socket closed, nothing pooled) and the caller can
+    ///   re-issue with its new priorities.
+    ///
+    /// Items already in the cache never reach the wire. Items the server
+    /// could not include (missing, over cap, budget exhausted) are reported
+    /// with a typed error so the caller can fall back to a single fetch;
+    /// `Err` from this call itself means the batch route is unusable (a 404
+    /// from an older server, a transport failure) and EVERY item should fall
+    /// back.
+    pub fn fetch_blobs_ordered(
+        &mut self,
+        items: &[(BlobId, Option<u64>)],
+        abort: &dyn Fn(&BlobId) -> bool,
+        on_item: &mut dyn FnMut(BlobId, ClientResult<PathBuf>),
+    ) -> ClientResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // Cache-first, before anything is asked of the server.
+        let mut wanted: Vec<BatchItem> = Vec::with_capacity(items.len());
+        for (blob, expected_len) in items {
+            if abort(blob) {
+                on_item(*blob, Err(ClientError::Cancelled));
+                continue;
+            }
+            if let Some(path) = self.cache().resolve(blob.as_bytes(), now_ms())? {
+                on_item(*blob, Ok(path));
+                continue;
+            }
+            wanted.push(BatchItem { blob: *blob, max_bytes: *expected_len });
+        }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let deadline = self.blob_body_deadline_ms;
+        // Collected inside the frame callback and applied after, because the
+        // callback cannot borrow `self` while the batch call does.
+        let mut landed: Vec<(BlobId, Vec<u8>)> = Vec::new();
+        let mut refused: Vec<(BlobId, ClientError)> = Vec::new();
+        let mut cancelled: Vec<BlobId> = Vec::new();
+        let mut stopped_at: Option<usize> = None;
+        {
+            let mut index = 0usize;
+            let mut on_frame = |blob: BlobId, frame: BatchFrame, bytes: &[u8]| -> BatchFlow {
+                index += 1;
+                match frame {
+                    BatchFrame::Ok => landed.push((blob, bytes.to_vec())),
+                    BatchFrame::Missing => {
+                        refused.push((blob, ClientError::NotFound { what: "blob" }))
+                    }
+                    BatchFrame::OverItemCap | BatchFrame::Skipped => refused.push((
+                        blob,
+                        ClientError::OverBudget {
+                            what: "batch item",
+                            limit: 0,
+                            found: bytes.len() as u64,
+                        },
+                    )),
+                }
+                // Stop only when NOTHING outstanding is still wanted: a
+                // half-cancelled batch keeps streaming for the items that
+                // still matter.
+                if wanted[index..].iter().all(|i| abort(&i.blob)) {
+                    for item in &wanted[index..] {
+                        cancelled.push(item.blob);
+                    }
+                    stopped_at = Some(index);
+                    return BatchFlow::Stop;
+                }
+                BatchFlow::Continue
+            };
+            self.api.fetch_blob_batch(&wanted, deadline, &mut on_frame)?;
+        }
+        // Commit per item, digest-checked by the cache itself.
+        for (blob, bytes) in landed {
+            // Two statements on purpose: the cache guard from `put_bytes`
+            // must be released before `object_path_of` takes it again — a
+            // std mutex is not reentrant, and a one-liner here deadlocks the
+            // worker against itself.
+            let committed = self.cache().put_bytes(&bytes, Some(blob.as_bytes()), now_ms());
+            let result = match committed {
+                Ok(digest) => Ok(self.cache().object_path_of(&digest)),
+                Err(e) => Err(e),
+            };
+            on_item(blob, result);
+        }
+        for (blob, error) in refused {
+            on_item(blob, Err(error));
+        }
+        for blob in cancelled {
+            on_item(blob, Err(ClientError::Cancelled));
+        }
+        let _ = stopped_at;
+        Ok(())
     }
 
     /// Fetch a blob and return its verified bytes in memory.

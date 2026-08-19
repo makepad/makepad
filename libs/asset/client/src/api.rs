@@ -25,6 +25,8 @@ use makepad_asset_data::{
     VariantSetId, VariantSetManifest, RESOLUTION_POLICY_V1,
 };
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 /// Longest refusal body this client will read for its `error` detail; larger
 /// refusal bodies are dropped unread.
@@ -38,6 +40,51 @@ pub const MAX_LIST_LIMIT: u64 = 500;
 pub struct ApiEndpoints {
     pub control: SocketAddr,
     pub data: SocketAddr,
+}
+
+/// One item of an ordered batch pull. `max_bytes` is the caller's own cap —
+/// a thumbnail batch says "nothing over 512 KB here", and the server refuses
+/// (rather than streams) anything larger, so one mis-sized item cannot eat
+/// the batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchItem {
+    pub blob: BlobId,
+    pub max_bytes: Option<u64>,
+}
+
+/// What the server did with one batch item. Every requested item gets
+/// exactly one of these, in order — silence is never an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchFrame {
+    /// Bytes follow and are digest-verified by the caller.
+    Ok,
+    /// The store does not hold it.
+    Missing,
+    /// Over the caller's per-item cap.
+    OverItemCap,
+    /// The batch byte budget ran out before this item; ask again.
+    Skipped,
+}
+
+/// Whether to keep reading a batch response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchFlow {
+    Continue,
+    /// Abandon the rest — the caller's priorities changed.
+    Stop,
+}
+
+/// Read exactly `out.len()` body bytes, refusing a short body.
+fn read_exact_body(resp: &mut Response<'_>, out: &mut [u8]) -> ClientResult<()> {
+    let mut filled = 0usize;
+    while filled < out.len() {
+        let n = resp.read_chunk(&mut out[filled..])?;
+        if n == 0 {
+            return Err(ClientError::Protocol { what: "batch body truncated" });
+        }
+        filled += n;
+    }
+    Ok(())
 }
 
 /// One blob-garbage-collection request. Every field is optional policy; the
@@ -535,23 +582,82 @@ pub struct SourceCollectionRegistered {
     pub digest: SourceCollectionId,
 }
 
-#[derive(Clone)]
 pub struct Api {
     pub endpoints: ApiEndpoints,
     pub limits: HttpLimits,
     /// Full validated bearer token (`mpat_…`), attached to every request.
     token: Option<String>,
+    /// Keep-alive sockets belonging to THIS handle. A connect per request is
+    /// pure overhead against a server on localhost — for a grid of small
+    /// thumbnails the handshake costs more than the payload. Every clone
+    /// gets its own pool (see `Clone` below), so a socket is only ever used
+    /// by one worker at a time.
+    pool: http::ConnPool,
+    /// Connection reuse switch. `false` restores one-request-per-connection
+    /// (`Connection: close`), which is what the pre-keep-alive client did.
+    keep_alive: bool,
+    /// Whether this server has the batch-fetch route: 0 unknown, 1 yes,
+    /// 2 no. Shared across clones — it is a fact about the server, learned
+    /// once, so an older server costs exactly one 404 for the whole client.
+    batch_route: Arc<AtomicU8>,
+}
+
+const BATCH_UNKNOWN: u8 = 0;
+const BATCH_PRESENT: u8 = 1;
+const BATCH_ABSENT: u8 = 2;
+
+impl Clone for Api {
+    /// A clone is another WORKER's handle: same server, same credentials,
+    /// its own keep-alive sockets. Sharing a socket across threads would
+    /// interleave two requests on one connection.
+    fn clone(&self) -> Api {
+        Api {
+            endpoints: self.endpoints,
+            limits: self.limits,
+            token: self.token.clone(),
+            pool: http::ConnPool::default(),
+            keep_alive: self.keep_alive,
+            batch_route: self.batch_route.clone(),
+        }
+    }
 }
 
 impl Api {
     pub fn new(endpoints: ApiEndpoints, limits: HttpLimits, token: Option<String>) -> ClientResult<Api> {
+        Self::with_keep_alive(endpoints, limits, token, true)
+    }
+
+    /// As [`Api::new`] with connection reuse explicitly on or off.
+    pub fn with_keep_alive(
+        endpoints: ApiEndpoints,
+        limits: HttpLimits,
+        token: Option<String>,
+        keep_alive: bool,
+    ) -> ClientResult<Api> {
         limits.validate()?;
         if let Some(t) = &token {
             if !wire::token_shape_ok(t) {
                 return Err(ClientError::InvalidInput { what: "bearer token shape" });
             }
         }
-        Ok(Api { endpoints, limits, token })
+        Ok(Api {
+            endpoints,
+            limits,
+            token,
+            pool: http::ConnPool::default(),
+            keep_alive,
+            batch_route: Arc::new(AtomicU8::new(BATCH_UNKNOWN)),
+        })
+    }
+
+    /// The pool a call should use: `None` disables reuse for this handle.
+    fn pool(&self) -> Option<&http::ConnPool> {
+        self.keep_alive.then_some(&self.pool)
+    }
+
+    /// Idle keep-alive sockets parked on this handle (diagnostics/tests).
+    pub fn idle_connections(&self) -> usize {
+        self.pool.idle_len()
     }
 
     pub fn has_token(&self) -> bool {
@@ -592,7 +698,7 @@ impl Api {
         allowed: &[u16],
         max_body: u64,
     ) -> ClientResult<(u16, Value)> {
-        let resp = http::http_call(addr, &req, &self.limits)?;
+        let resp = http::http_call_pooled(addr, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, allowed)?;
         let status = resp.head().status;
         if resp.head().content_length > max_body {
@@ -610,7 +716,7 @@ impl Api {
 
     /// Enforce an allowed status set; anything else becomes a typed refusal
     /// (with a bounded, sanitized detail when the body offers one).
-    fn accept(&self, resp: Response, allowed: &[u16]) -> ClientResult<Response> {
+    fn accept<'a>(&self, resp: Response<'a>, allowed: &[u16]) -> ClientResult<Response<'a>> {
         let status = resp.head().status;
         if allowed.contains(&status) {
             return Ok(resp);
@@ -759,6 +865,109 @@ impl Api {
         dto::parse_events_page(&v)
     }
 
+    /// Pull many blobs in ONE request, in the order given, streaming each
+    /// item to `on_frame` as it arrives.
+    ///
+    /// The order is the contract: frame *i* carries item *i*'s digest, and a
+    /// response that reorders or substitutes digests is refused as a protocol
+    /// violation. That is what lets a caller prioritise — ask for the visible
+    /// thumbnails first, and they are the first bytes on the wire.
+    ///
+    /// `on_frame` returns whether to keep reading; answering `Stop` abandons
+    /// the rest of the response (the socket is dropped, never pooled), which
+    /// is exactly how a UI re-prioritises mid-stream: everything already
+    /// handed to `on_frame` is already yours.
+    ///
+    /// A server without the route answers 404; this reports
+    /// [`ClientError::NotFound`] and remembers, so the whole client falls
+    /// back to single GETs after one refusal.
+    pub fn fetch_blob_batch(
+        &self,
+        items: &[BatchItem],
+        body_deadline_ms: u64,
+        on_frame: &mut dyn FnMut(BlobId, BatchFrame, &[u8]) -> BatchFlow,
+    ) -> ClientResult<()> {
+        if items.is_empty() {
+            return Err(ClientError::InvalidInput { what: "empty batch" });
+        }
+        if items.len() > wire::MAX_BLOB_BATCH_ITEMS {
+            return Err(ClientError::InvalidInput { what: "batch too large" });
+        }
+        if self.batch_route.load(Ordering::Relaxed) == BATCH_ABSENT {
+            return Err(ClientError::NotFound { what: "blob batch route" });
+        }
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            let mut pairs: Vec<(&str, Value)> = vec![("blob", json::s(item.blob.to_string()))];
+            if let Some(max) = item.max_bytes {
+                pairs.push(("max_bytes", Value::Int(max.min(i64::MAX as u64) as i64)));
+            }
+            entries.push(json::obj(pairs));
+        }
+        let body = json::obj(vec![("blobs", Value::Arr(entries))]).to_json().into_bytes();
+        let path = wire::path_blobs_batch();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        req.body_deadline_ms = Some(body_deadline_ms.max(1));
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
+        if resp.head().status == 404 {
+            // Older server: stop trying on every later batch.
+            self.batch_route.store(BATCH_ABSENT, Ordering::Relaxed);
+            return Err(ClientError::NotFound { what: "blob batch route" });
+        }
+        let mut resp = self.accept(resp, &[200])?;
+        if resp.head().content_type.as_deref() != Some(wire::BLOB_BATCH_CONTENT_TYPE) {
+            return Err(ClientError::Protocol { what: "batch content type" });
+        }
+        if resp.head().content_length > wire::MAX_BLOB_BATCH_BYTES {
+            return Err(ClientError::OverBudget {
+                what: "batch response body",
+                limit: wire::MAX_BLOB_BATCH_BYTES,
+                found: resp.head().content_length,
+            });
+        }
+        self.batch_route.store(BATCH_PRESENT, Ordering::Relaxed);
+
+        let mut header = [0u8; wire::BLOB_BATCH_FRAME_HEADER];
+        for item in items {
+            read_exact_body(&mut resp, &mut header)?;
+            let status = match header[0] {
+                0 => BatchFrame::Ok,
+                1 => BatchFrame::Missing,
+                2 => BatchFrame::OverItemCap,
+                3 => BatchFrame::Skipped,
+                _ => return Err(ClientError::Protocol { what: "batch frame status" }),
+            };
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(&header[1..33]);
+            // Positional identity: frame i IS item i. Anything else and the
+            // caller could attribute bytes to the wrong request.
+            if &digest != item.blob.as_bytes() {
+                return Err(ClientError::Protocol { what: "batch frame order" });
+            }
+            let len = u64::from_be_bytes(header[33..41].try_into().expect("8 bytes"));
+            if status != BatchFrame::Ok && len != 0 {
+                return Err(ClientError::Protocol { what: "batch refusal with body" });
+            }
+            if len > wire::MAX_BLOB_BATCH_ITEM_BYTES {
+                return Err(ClientError::OverBudget {
+                    what: "batch item bytes",
+                    limit: wire::MAX_BLOB_BATCH_ITEM_BYTES,
+                    found: len,
+                });
+            }
+            let mut bytes = vec![0u8; len as usize];
+            read_exact_body(&mut resp, &mut bytes)?;
+            if on_frame(item.blob, status, &bytes) == BatchFlow::Stop {
+                // Dropping `resp` with body left closes the socket instead of
+                // pooling it: framing beyond this point is not our business.
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Canonical asset-manifest bytes, digest-verified against `rev` before
     /// they are returned. The caller decodes via the content contract.
     pub fn fetch_revision_bytes(&self, rev: &AssetRevisionId) -> ClientResult<Vec<u8>> {
@@ -781,7 +990,7 @@ impl Api {
     ) -> ClientResult<Vec<u8>> {
         let mut req = Request::get(path);
         req.bearer = self.bearer();
-        let resp = http::http_call(addr, &req, &self.limits)?;
+        let resp = http::http_call_pooled(addr, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, &[200])?;
         if resp.head().content_length > wire::MAX_MANIFEST_RESPONSE_BYTES {
             return Err(ClientError::OverBudget {
@@ -809,7 +1018,8 @@ impl Api {
         let path = wire::path_blob(blob);
         let mut req = Request::head(&path);
         req.bearer = self.bearer();
-        let resp = http::http_call(self.endpoints.data, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, &[200])?;
         let head = resp.head();
         let etag_matches = head.etag.as_deref() == Some(&blob.to_string());
@@ -832,6 +1042,83 @@ impl Api {
         req.bearer = self.bearer();
         let v = self.call_json(self.endpoints.control, req)?;
         dto::parse_job_profiles(&v)
+    }
+
+    /// Announce (or renew) what this worker can execute RIGHT NOW. The
+    /// server merges the announcement over its config advertisement and
+    /// lets it expire after `ttl_ms`, so a worker that dies stops
+    /// advertising by itself — call this on a cadence well inside the ttl.
+    ///
+    /// `domains` are the capability domains this worker covers. It is
+    /// authoritative for all of them: announcing a domain with no profile
+    /// in it withdraws the deployment's static profiles there, which is
+    /// exactly what "the fleet cannot run this today" has to mean.
+    pub fn announce_job_profiles(
+        &self,
+        worker: &str,
+        ns: &str,
+        ttl_ms: u64,
+        domains: &[String],
+        profiles: &[JobProfileDto],
+    ) -> ClientResult<()> {
+        if worker.is_empty() || worker.len() > 64 || worker.chars().any(char::is_control) {
+            return Err(ClientError::InvalidInput { what: "worker id" });
+        }
+        if ns.is_empty() || ns.len() > wire::MAX_NAMESPACE_BYTES || !wire::query_value_ok(ns) {
+            return Err(ClientError::InvalidInput { what: "worker namespace" });
+        }
+        if profiles.len() > wire::MAX_JOB_PROFILES || domains.len() > 32 {
+            return Err(ClientError::InvalidInput { what: "profile announcement size" });
+        }
+        let rows: Vec<Value> = profiles
+            .iter()
+            .map(|p| {
+                json::obj(vec![
+                    ("id", json::s(p.id.clone())),
+                    ("domain", json::s(p.domain.clone())),
+                    ("label", json::s(p.label.clone())),
+                    ("kind", json::s(p.kind.clone())),
+                    ("namespace", json::s(p.namespace.clone())),
+                    ("defaults", p.defaults.clone()),
+                ])
+            })
+            .collect();
+        let body = json::obj(vec![
+            ("worker", json::s(worker.to_string())),
+            ("namespace", json::s(ns.to_string())),
+            ("ttl_ms", Value::Int(ttl_ms as i64)),
+            (
+                "domains",
+                Value::Arr(domains.iter().map(|d| json::s(d.clone())).collect()),
+            ),
+            ("profiles", Value::Arr(rows)),
+        ])
+        .to_json()
+        .into_bytes();
+        self.put_job_profiles(&body)
+    }
+
+    /// Withdraw this worker's announcement (clean shutdown).
+    pub fn retract_job_profiles(&self, worker: &str, ns: &str) -> ClientResult<()> {
+        let body = json::obj(vec![
+            ("worker", json::s(worker.to_string())),
+            ("namespace", json::s(ns.to_string())),
+            ("retract", Value::Bool(true)),
+        ])
+        .to_json()
+        .into_bytes();
+        self.put_job_profiles(&body)
+    }
+
+    fn put_job_profiles(&self, body: &[u8]) -> ClientResult<()> {
+        let path = wire::path_job_profiles(None);
+        let mut req = Request::put(&path, body);
+        req.bearer = self.bearer();
+        req.allow_no_content = true;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
+        self.accept(resp, &[200, 204])?;
+        Ok(())
     }
 
     /// Enqueue one job; the server picks the compute slot.
@@ -1493,7 +1780,8 @@ impl Api {
         let mut req = Request::put(&path, &body);
         req.bearer = self.bearer();
         req.allow_no_content = true;
-        let resp = http::http_call(self.endpoints.control, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
         self.accept(resp, &[200, 204])?;
         Ok(())
     }
@@ -1520,7 +1808,8 @@ impl Api {
             etag = blob.to_string();
             req.if_range = Some(&etag);
         }
-        let resp = http::http_call(self.endpoints.data, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.data, &req, &self.limits, self.pool())?;
         self.accept(resp, &[200, 206, 416])
     }
 
@@ -2061,7 +2350,8 @@ impl Api {
     ) -> ClientResult<Vec<u8>> {
         let mut req = Request::get(path);
         req.bearer = self.bearer();
-        let resp = http::http_call(self.endpoints.control, &req, &self.limits)?;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
         let resp = self.accept(resp, &[200])?;
         if resp.head().etag.as_deref() != Some(etag) {
             return Err(ClientError::Protocol { what: "canonical etag mismatch" });

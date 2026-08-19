@@ -31,6 +31,11 @@ use std::time::Duration;
 pub struct AssetServer {
     control_addr: SocketAddr,
     data_addr: SocketAddr,
+    /// Connections accepted per plane since start. A keep-alive client
+    /// serves many requests per connection, so this is how an operator (and
+    /// the tests) can SEE that reuse is really happening rather than assume
+    /// it: thirty thumbnails should cost one accept, not thirty.
+    accepted: [Arc<std::sync::atomic::AtomicU64>; 2],
     server_id: [u8; 16],
     recover: RecoverReport,
     stop: Arc<AtomicBool>,
@@ -100,18 +105,27 @@ impl AssetServer {
             op_event_waiters: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             chat: Some(chat_handle.clone()),
             chat_event_waiters: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            profiles: std::sync::Arc::new(super::profiles::ProfileRegistry::new()),
         };
 
         // One acceptor per plane; each connection gets its own thread up to
         // the plane's hard cap. The acceptor joins its connection threads
         // before exiting, so shutdown only has to join the acceptors.
         let mut workers = Vec::with_capacity(2);
-        for (plane, listener, max_conns) in [
+        let accepted: [Arc<std::sync::atomic::AtomicU64>; 2] = [
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ];
+        for (n, (plane, listener, max_conns)) in [
             (Plane::Control, control, cfg.control_max_conns),
             (Plane::Data, data, cfg.data_max_conns),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let rc = rc.clone();
             let stop = stop.clone();
+            let counter = accepted[n].clone();
             let name = format!(
                 "asset-server-{}-accept",
                 if plane == Plane::Control { "control" } else { "data" }
@@ -119,7 +133,7 @@ impl AssetServer {
             workers.push(
                 std::thread::Builder::new()
                     .name(name)
-                    .spawn(move || accept_loop(listener, rc, plane, max_conns, &stop))
+                    .spawn(move || accept_loop(listener, rc, plane, max_conns, &stop, counter))
                     .map_err(|e| ServerError::Io { op: "spawn plane acceptor", kind: e.kind() })?,
             );
         }
@@ -161,6 +175,7 @@ impl AssetServer {
         Ok(AssetServer {
             control_addr,
             data_addr,
+            accepted,
             server_id,
             recover,
             stop,
@@ -182,6 +197,16 @@ impl AssetServer {
 
     pub fn data_addr(&self) -> SocketAddr {
         self.data_addr
+    }
+
+    /// Connections accepted on the control plane since start.
+    pub fn control_connections_accepted(&self) -> u64 {
+        self.accepted[0].load(Ordering::Relaxed)
+    }
+
+    /// Connections accepted on the data plane since start.
+    pub fn data_connections_accepted(&self) -> u64 {
+        self.accepted[1].load(Ordering::Relaxed)
     }
 
     pub fn server_id(&self) -> [u8; 16] {
@@ -279,6 +304,7 @@ fn accept_loop(
     plane: Plane,
     max_conns: usize,
     stop: &Arc<AtomicBool>,
+    accepted: Arc<std::sync::atomic::AtomicU64>,
 ) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut joins: Vec<JoinHandle<()>> = Vec::new();
@@ -293,6 +319,7 @@ fn accept_loop(
                     continue;
                 }
                 active.fetch_add(1, Ordering::Relaxed);
+                accepted.fetch_add(1, Ordering::Relaxed);
                 let rc = rc.clone();
                 let stop = stop.clone();
                 let conn_active = active.clone();

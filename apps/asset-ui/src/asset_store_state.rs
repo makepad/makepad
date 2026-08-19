@@ -13,6 +13,12 @@
 //! - every call is non-blocking (`poll()` drains channels; requests go to
 //!   the runtime worker), so the UI thread never waits on the network.
 //!
+//! When this process HOSTS the embedded server it also runs the continuous
+//! library publisher (`makepad_asset_importer::watch`) on one background
+//! thread, so everything the generation pipelines write into
+//! `local/ai_content_library/` reaches the catalog — intermediates tagged
+//! `intermediate` so program surfaces can exclude them.
+//!
 //! Env/token conventions (`ASSET_UI_*`, with `AI_CONTENT_*` still accepted):
 //! - `ASSET_UI_ASSET_SERVER=ip:controlport:dataport` — explicit endpoints;
 //!   unset = LAN discovery on the standard beacon port.
@@ -26,14 +32,17 @@
 
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogHit, CatalogQuery,
-    CatalogSubscriptionEvent, ClientEvent, ClientOutput, ClientRequest, JobProfileDto, PageCursor,
-    RequestId, SessionConfig, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
+    CatalogSubscriptionEvent, ClientEvent, ClientOutput, ClientRequest, GcRequest, GcStatusDto,
+    JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
+    SessionHandles, SessionMsg, SessionStatus,
 };
-use makepad_asset_data::AssetId;
+use makepad_asset_data::{AssetId, AssetRevisionId};
 pub use makepad_asset_data::AssetKind;
+use makepad_widgets::log;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Committed catalog events retained for the Admin surface (newest first).
 pub const EVENT_LOG_CAP: usize = 200;
@@ -73,6 +82,7 @@ pub fn server_kind_label(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
     }
 }
 
@@ -125,6 +135,14 @@ pub struct SearchResults {
 /// happens through `start`/`poll`/`submit_search`/`select` only.
 #[derive(Default)]
 pub struct AssetStore {
+    /// Continuous ai-content-library → catalog publisher. Declared BEFORE
+    /// `embedded` so it is joined while the server it publishes into is
+    /// still alive.
+    publish: Option<PublishLoop>,
+    /// In-process job coordinator: claims generation jobs queued on the
+    /// hosted server (the VJ's GEN tab, chat) and dispatches them to the
+    /// LAN fleet. Without it those jobs sit at "waiting for agent" forever.
+    jobs: Option<JobLoop>,
     /// In-process Asset Server. Held so drop shuts it down with the app.
     embedded: Option<makepad_asset_store::AssetServer>,
     connector: Option<SessionConnector>,
@@ -157,6 +175,31 @@ pub struct AssetStore {
     /// Latest feed diagnostics (poll retry, resync) — honest, transient.
     pub event_note: Option<String>,
     refresh_after_events: bool,
+    /// In-flight `RetireAsset`/`RetireRevision` requests, tracked only to
+    /// surface a failure (or a mismatched output) honestly — success is
+    /// applied locally via [`AssetStore::on_retired`] the moment the
+    /// response lands, no separate poll needed. Several can be in flight
+    /// at once (a batch "delete shown" retiring many assets), so this is a
+    /// set rather than the single-slot pattern `search_req`/`detail_req`
+    /// use.
+    retire_reqs: Vec<RequestId>,
+    /// Latest blob-GC run status — a dry run's counts, or a collect's
+    /// progress. `Remote::Idle` before any run this session has touched.
+    pub gc: Remote<GcStatusDto>,
+    /// The current `GcBlobs` bounded step in flight, if any. A run is
+    /// driven to `done` by resubmitting the SAME request shape each time
+    /// its step completes (`gc_blobs` is one bounded unit of work per
+    /// call, never a background loop the server keeps running on its own).
+    gc_req: Option<RequestId>,
+    /// A `GcCancel` in flight — tracked separately from `gc_req` so the
+    /// cancel button stays live even while a bounded step's HTTP round
+    /// trip is outstanding.
+    gc_cancel_req: Option<RequestId>,
+    /// Set by `gc_cancel()`; checked before auto-resubmitting the next
+    /// bounded step so a cancel can never lose a race with the next step
+    /// already being in flight. Cleared when a fresh `gc_dry_run`/
+    /// `gc_collect` starts.
+    gc_cancel_requested: bool,
 }
 
 /// Transitional source-level name while the app moves from its former
@@ -172,7 +215,7 @@ impl AssetStore {
     /// the client finds it through the same discovery/health path any LAN
     /// peer would. Set the env var to skip embed and talk to a standalone
     /// server instead.
-    pub fn start(&mut self) {
+    pub fn start(&mut self, library_dir: PathBuf) {
         if self.connector.is_some() || self.server.is_some() {
             return;
         }
@@ -181,6 +224,12 @@ impl AssetStore {
             match start_embedded_asset_server() {
                 Ok((server, token)) => {
                     config.server_id = Some(server.server_id());
+                    // Only the HOSTING process publishes the library. When
+                    // we merely attached to someone else's server, that
+                    // process owns its own library and this one must not
+                    // push a second copy of the same rows.
+                    self.publish = start_publish_loop(&server, &token, library_dir);
+                    self.jobs = start_job_loop(&server, &token);
                     if config.token.is_none() {
                         config.token = Some(token);
                     }
@@ -305,6 +354,7 @@ impl AssetStore {
             kind: self.filters.kind,
             category: self.filters.category.clone(),
             tag: self.filters.tag.clone(),
+            exclude_tag: None,
             creator: None,
             live_only: false,
             page_size: SEARCH_PAGE_SIZE,
@@ -342,6 +392,103 @@ impl AssetStore {
         }
     }
 
+    /// Delete an asset from the store — every revision retired, aliases and
+    /// search rows gone. Idempotent server-side. Fire-and-forget from the
+    /// caller's perspective: success is applied to `search`/`detail`
+    /// locally the moment the response lands ([`Self::on_retired`]); the
+    /// catalog event feed (`AssetRetired`) confirms it for every OTHER
+    /// client watching too.
+    pub fn retire_asset(&mut self, id: AssetId) {
+        self.submit_retire(ClientRequest::RetireAsset { id });
+    }
+
+    /// Delete one revision (typically superseded); the asset stays live if
+    /// other revisions remain.
+    pub fn retire_revision(&mut self, id: AssetId, revision: AssetRevisionId) {
+        self.submit_retire(ClientRequest::RetireRevision { id, revision });
+    }
+
+    fn submit_retire(&mut self, request: ClientRequest) {
+        let Some(handles) = &mut self.handles else { return };
+        match handles.catalog.submit(request) {
+            Ok(id) => self.retire_reqs.push(id),
+            Err(error) => log!("asset store: retire failed to submit: {error}"),
+        }
+    }
+
+    /// Apply a completed retirement locally: drop the row from the current
+    /// search page immediately (don't wait for a re-search), and if the
+    /// retired asset is the one currently selected, reload its detail so
+    /// the panel shows the server's own `retired: true` rather than going
+    /// stale silently.
+    fn on_retired(&mut self, dto: RetireDto) {
+        if let Remote::Ready(results) = &mut self.search {
+            let before = results.hits.len();
+            results.hits.retain(|hit| hit.asset_id != dto.asset_id);
+            let dropped = before - results.hits.len();
+            results.total = results.total.saturating_sub(dropped as u64);
+        }
+        if self.selected == Some(dto.asset_id) {
+            self.select(dto.asset_id);
+        }
+    }
+
+    /// True while ANY blob-GC run (ours or another admin's) is mid-progress
+    /// — a dry run or a collect that has not yet reported `done`.
+    pub fn gc_busy(&self) -> bool {
+        self.gc_req.is_some() || matches!(&self.gc, Remote::Ready(status) if !status.done)
+    }
+
+    /// Preview: count what a collect would free without deleting anything.
+    /// Drives itself to completion (repeated bounded steps) via
+    /// [`Self::on_catalog_event`]; poll `self.gc` for progress.
+    pub fn gc_dry_run(&mut self, retain_per_asset: Option<u32>) {
+        self.gc_cancel_requested = false;
+        self.submit_gc(GcRequest { retain_per_asset, ..GcRequest::dry_run() });
+    }
+
+    /// Actually delete unreferenced blobs (and, if `retain_per_asset` is
+    /// set, retire older revisions beyond that count first). Same
+    /// self-driving step loop as `gc_dry_run`.
+    pub fn gc_collect(&mut self, retain_per_asset: Option<u32>) {
+        self.gc_cancel_requested = false;
+        self.submit_gc(GcRequest { retain_per_asset, ..GcRequest::collect() });
+    }
+
+    fn submit_gc(&mut self, request: GcRequest) {
+        let Some(handles) = &mut self.handles else { return };
+        // A step is already outstanding: let it land (and, via
+        // `on_catalog_event`, decide whether to continue) rather than
+        // racing a second bounded step in over it.
+        if self.gc_req.is_some() {
+            return;
+        }
+        match handles.catalog.submit(ClientRequest::GcBlobs { request }) {
+            Ok(id) => {
+                self.gc_req = Some(id);
+                self.gc = Remote::Loading;
+            }
+            Err(error) => self.gc = Remote::Failed(error.to_string()),
+        }
+    }
+
+    /// Abandon the active run. Tracked on its OWN request slot (not
+    /// `gc_req`) so it can be submitted even while a bounded step's HTTP
+    /// round trip is still outstanding — the step in flight is left to
+    /// land normally, but `gc_cancel_requested` stops it from being
+    /// followed by another one.
+    pub fn gc_cancel(&mut self) {
+        let Some(handles) = &mut self.handles else { return };
+        if self.gc_cancel_req.is_some() {
+            return;
+        }
+        self.gc_cancel_requested = true;
+        match handles.catalog.submit(ClientRequest::GcCancel) {
+            Ok(id) => self.gc_cancel_req = Some(id),
+            Err(error) => log!("asset store: gc cancel failed to submit: {error}"),
+        }
+    }
+
     fn submit_profiles(&mut self) {
         let Some(handles) = &mut self.handles else { return };
         match handles
@@ -358,6 +505,65 @@ impl AssetStore {
 
     fn on_catalog_event(&mut self, event: ClientEvent) -> bool {
         let id = event.id();
+        if let Some(pos) = self.retire_reqs.iter().position(|r| *r == id) {
+            self.retire_reqs.remove(pos);
+            match event {
+                ClientEvent::Started { .. } | ClientEvent::Progress { .. } => return false,
+                ClientEvent::Done { output: ClientOutput::Retired(dto), .. } => {
+                    self.on_retired(dto);
+                }
+                ClientEvent::Done { output, .. } => {
+                    log!("asset store: unexpected retire output {output:?}");
+                }
+                ClientEvent::Failed { error, .. } => {
+                    log!("asset store: retire failed: {error}");
+                }
+            }
+            return true;
+        }
+        if Some(id) == self.gc_cancel_req {
+            match event {
+                ClientEvent::Started { .. } | ClientEvent::Progress { .. } => return false,
+                ClientEvent::Done { output: ClientOutput::GcCancelled(stopped), .. } => {
+                    self.gc_cancel_req = None;
+                    log!("asset store: gc cancel — was running: {stopped}");
+                }
+                ClientEvent::Done { output, .. } => {
+                    self.gc_cancel_req = None;
+                    log!("asset store: unexpected gc-cancel output {output:?}");
+                }
+                ClientEvent::Failed { error, .. } => {
+                    self.gc_cancel_req = None;
+                    log!("asset store: gc cancel failed: {error}");
+                }
+            }
+            return true;
+        }
+        if Some(id) == self.gc_req {
+            match event {
+                ClientEvent::Started { .. } | ClientEvent::Progress { .. } => return false,
+                ClientEvent::Done { output: ClientOutput::Gc(status), .. } => {
+                    self.gc_req = None;
+                    let next = gc_continuation(&status, self.gc_cancel_requested);
+                    self.gc = Remote::Ready(status);
+                    // Drive a multi-step run to completion transparently —
+                    // the caller (`gc_dry_run`/`gc_collect`) fired once;
+                    // `self.gc` keeps reporting live progress either way.
+                    if let Some(request) = next {
+                        self.submit_gc(request);
+                    }
+                }
+                ClientEvent::Done { output, .. } => {
+                    self.gc_req = None;
+                    self.gc = Remote::Failed(format!("unexpected output {output:?}"));
+                }
+                ClientEvent::Failed { error, .. } => {
+                    self.gc_req = None;
+                    self.gc = Remote::Failed(error.to_string());
+                }
+            }
+            return true;
+        }
         let slot = if Some(id) == self.search_req {
             0
         } else if Some(id) == self.detail_req {
@@ -455,11 +661,44 @@ impl AssetStore {
     }
 
     fn append_feed_events(&mut self, events: Vec<CatalogEventDto>) {
+        for event in &events {
+            // Quarantine/retirement from ANY client (another admin, a GC
+            // collect that retired excess revisions) drops the row here
+            // immediately — `refresh_after_events`'s follow-up search
+            // would eventually agree, but there is no reason to keep
+            // showing content the server has already removed.
+            if event.kind.removes_content() {
+                if let (Remote::Ready(results), Some(asset_id)) = (&mut self.search, event.asset_id) {
+                    let before = results.hits.len();
+                    results.hits.retain(|hit| hit.asset_id != asset_id);
+                    let dropped = before - results.hits.len();
+                    results.total = results.total.saturating_sub(dropped as u64);
+                }
+            }
+        }
         for event in events {
             self.events.push_front(event);
         }
         self.events.truncate(EVENT_LOG_CAP);
     }
+}
+
+/// Pure keep-going decision for a multi-step GC run: after one bounded step
+/// reports `status`, should the caller submit another (and with what
+/// request)? `None` when the run finished or a cancel was requested — EITHER
+/// stops the drive loop, cancel winning even mid-run. `Some(request)`
+/// repeats the SAME shape (dry run stays a dry run, the retain policy
+/// carries over) so a caller only ever chooses dry-run-vs-collect once, at
+/// the start.
+fn gc_continuation(status: &GcStatusDto, cancel_requested: bool) -> Option<GcRequest> {
+    if status.done || cancel_requested {
+        return None;
+    }
+    Some(GcRequest {
+        dry_run: status.dry_run,
+        retain_per_asset: status.retain_keep.and_then(|n| u32::try_from(n).ok()),
+        ..GcRequest::default()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +808,174 @@ fn start_embedded_asset_server() -> Result<(makepad_asset_store::AssetServer, St
         return Err("admin token file empty".into());
     }
     Ok((server, token))
+}
+
+/// Stop flag for the single in-process job coordinator (see PUBLISH_STOP).
+static JOBS_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Owns the job-coordinator thread; dropping the store stops and joins it.
+struct JobLoop {
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for JobLoop {
+    fn drop(&mut self) {
+        JOBS_STOP.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Claim + dispatch generation jobs from the hosted server to the fleet the
+/// LAN announces (the same boxes the asset-ui's own pipelines use).
+///
+/// This runs the SHARED generation service, so the embedded server gets the
+/// same behaviour as a standalone worker: one claim loop per fleet box (N
+/// queued jobs of a kind drain across the N boxes that serve it), every
+/// wired kind rather than video alone, and a live advertisement on
+/// `GET /v1/job-profiles` of what those boxes can actually execute — which
+/// is what stops a client enqueueing a tier whose weights are on no box.
+fn start_job_loop(
+    server: &makepad_asset_store::AssetServer,
+    token: &str,
+) -> Option<JobLoop> {
+    let localize = |addr: SocketAddr| {
+        if addr.ip().is_unspecified() {
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+        } else {
+            addr
+        }
+    };
+    let endpoints = ApiEndpoints {
+        control: localize(server.control_addr()),
+        data: localize(server.data_addr()),
+    };
+    let server_id = server.server_id();
+    let token = token.to_string();
+    let cache = asset_ui_home().join("jobs-cache");
+    JOBS_STOP.store(false, Ordering::Release);
+    let join = std::thread::Builder::new()
+        .name("asset-ui-jobs".to_string())
+        .spawn(move || {
+            use makepad_asset_importer::gen_service::{FleetSource, GenServiceConfig};
+            log!(
+                "job loop: coordinating jobs on {}/{} → LAN fleet",
+                endpoints.control,
+                endpoints.data
+            );
+            makepad_asset_importer::gen_service::run(
+                &GenServiceConfig {
+                    servers: vec![endpoints],
+                    server_id: Some(server_id),
+                    token,
+                    cache_root: cache,
+                    namespace: "gen".to_string(),
+                    suffix: "asset-ui".to_string(),
+                    rights: makepad_asset_client::PublishRights::generated_cc0(),
+                    fleet: FleetSource::Lan,
+                    announce: true,
+                    log: true,
+                },
+                &JOBS_STOP,
+            );
+            log!("job loop: stopped");
+        });
+    match join {
+        Ok(join) => Some(JobLoop { join: Some(join) }),
+        Err(error) => {
+            log!("job loop: could not spawn: {error}");
+            None
+        }
+    }
+}
+
+/// Stop flag for the single in-process publish loop. A `static` (not an
+/// `Arc`) because `watch::run` borrows it for the thread's whole life and
+/// there is at most one loop per process.
+static PUBLISH_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Owns the publisher thread; dropping the store stops and joins it.
+struct PublishLoop {
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for PublishLoop {
+    fn drop(&mut self) {
+        PUBLISH_STOP.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Publish everything the pipelines write into the AI-content library into
+/// the server this process hosts. Connect + poll happen on the thread, so a
+/// slow or refused connection can never stall the UI, and every failure is
+/// a log line — never a panic.
+fn start_publish_loop(
+    server: &makepad_asset_store::AssetServer,
+    token: &str,
+    library_dir: PathBuf,
+) -> Option<PublishLoop> {
+    // The server binds 0.0.0.0; reach it the way its own `listen` file
+    // advertises it.
+    let localize = |addr: SocketAddr| {
+        if addr.ip().is_unspecified() {
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+        } else {
+            addr
+        }
+    };
+    let endpoints = ApiEndpoints {
+        control: localize(server.control_addr()),
+        data: localize(server.data_addr()),
+    };
+    let server_id = server.server_id();
+    let token = token.to_string();
+    let cache = asset_ui_home().join("publish-cache");
+    PUBLISH_STOP.store(false, Ordering::Release);
+    let join = std::thread::Builder::new()
+        .name("asset-ui-publish".to_string())
+        .spawn(move || {
+            let mut config = makepad_asset_client::ClientConfig::new(cache);
+            config.token = Some(token);
+            let mut client = match makepad_asset_client::AssetClient::connect(
+                config,
+                endpoints,
+                Some(server_id),
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    log!("publish loop: cannot connect to the embedded server: {error}");
+                    return;
+                }
+            };
+            log!(
+                "publish loop: watching {} → {}/{}",
+                library_dir.display(),
+                endpoints.control,
+                endpoints.data
+            );
+            makepad_asset_importer::watch::run(
+                &mut client,
+                &library_dir,
+                "gen",
+                &makepad_asset_client::PublishRights::generated_cc0(),
+                // Log publications, failures and retries; out-of-scope rows
+                // (the pack-import bulk) stay silent by design.
+                true,
+                &PUBLISH_STOP,
+            );
+            log!("publish loop: stopped");
+        });
+    match join {
+        Ok(join) => Some(PublishLoop { join: Some(join) }),
+        Err(error) => {
+            log!("publish loop: could not spawn: {error}");
+            None
+        }
+    }
 }
 
 pub fn session_config_from_env() -> SessionConfig {
@@ -906,5 +1313,446 @@ mod tests {
             &["billboards".into(), "duke3d".into()],
         ));
         assert_eq!(library_type("map", "model/gltf-binary"), "maps");
+    }
+
+    // -----------------------------------------------------------------
+    // Retire + GC — the request/response dispatch is exercised directly
+    // (fake `RequestId`s, hand-built `ClientEvent`s) rather than through a
+    // live session: `submit_retire`/`submit_gc` need `self.handles`, which
+    // only a connected `SessionConnector` provides, but the interesting
+    // logic — "drop this row locally", "keep driving a multi-step GC run,
+    // cancel wins" — lives entirely in the RECEIVING half, which needs no
+    // network at all.
+    // -----------------------------------------------------------------
+
+    fn test_hit(asset_id: AssetId, title: &str) -> CatalogHit {
+        CatalogHit {
+            asset_id,
+            namespace: "game".into(),
+            kind: None,
+            title: title.into(),
+            snippet: String::new(),
+            score: 0,
+            live: true,
+            alias: None,
+        }
+    }
+
+    #[test]
+    fn on_retired_drops_the_row_from_search_and_lowers_total() {
+        let mut store = AssetStore::default();
+        let keep = AssetId::from_bytes([1; 16]);
+        let gone = AssetId::from_bytes([2; 16]);
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![test_hit(keep, "Keep"), test_hit(gone, "Gone")],
+            total: 2,
+            more: false,
+        });
+        store.on_retired(RetireDto {
+            asset_id: gone,
+            revision: None,
+            already_retired: false,
+            revisions_retired: 1,
+            aliases_dropped: 1,
+            annotation_cleared: true,
+        });
+        let results = store.search.ready().unwrap();
+        assert_eq!(results.hits.len(), 1);
+        assert_eq!(results.hits[0].asset_id, keep);
+        assert_eq!(results.total, 1);
+    }
+
+    #[test]
+    fn on_retired_is_a_no_op_when_the_asset_is_not_in_the_current_page() {
+        let mut store = AssetStore::default();
+        let keep = AssetId::from_bytes([1; 16]);
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![test_hit(keep, "Keep")],
+            total: 1,
+            more: false,
+        });
+        store.on_retired(RetireDto {
+            asset_id: AssetId::from_bytes([9; 16]),
+            revision: None,
+            already_retired: false,
+            revisions_retired: 1,
+            aliases_dropped: 0,
+            annotation_cleared: false,
+        });
+        let results = store.search.ready().unwrap();
+        assert_eq!(results.hits.len(), 1);
+        assert_eq!(results.total, 1);
+    }
+
+    #[test]
+    fn retired_catalog_events_from_any_client_drop_the_row_too() {
+        // The subscriber feed, not just our own retire response — a GC
+        // collect's excess-revision retirement, or another admin's delete.
+        let mut store = AssetStore::default();
+        let keep = AssetId::from_bytes([1; 16]);
+        let gone = AssetId::from_bytes([2; 16]);
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![test_hit(keep, "Keep"), test_hit(gone, "Gone")],
+            total: 2,
+            more: false,
+        });
+        store.append_feed_events(vec![CatalogEventDto {
+            seq: 1,
+            kind: makepad_asset_client::CatalogEventKind::AssetRetired,
+            namespace: "game".into(),
+            asset_id: Some(gone),
+            revision: None,
+            game_id: None,
+            game_revision: None,
+            alias: None,
+            content_kind: None,
+            ts_ms: 1,
+        }]);
+        let results = store.search.ready().unwrap();
+        assert_eq!(results.hits.len(), 1);
+        assert_eq!(results.hits[0].asset_id, keep);
+        // Published events (does NOT remove_content) never touch the page.
+        let mut store2 = AssetStore::default();
+        store2.search = Remote::Ready(SearchResults {
+            hits: vec![test_hit(gone, "Gone")],
+            total: 1,
+            more: false,
+        });
+        store2.append_feed_events(vec![CatalogEventDto {
+            seq: 2,
+            kind: makepad_asset_client::CatalogEventKind::AssetPublished,
+            namespace: "game".into(),
+            asset_id: Some(gone),
+            revision: None,
+            game_id: None,
+            game_revision: None,
+            alias: None,
+            content_kind: None,
+            ts_ms: 2,
+        }]);
+        assert_eq!(store2.search.ready().unwrap().hits.len(), 1);
+    }
+
+    #[test]
+    fn retire_dispatch_clears_the_tracked_request_on_success_and_on_failure() {
+        let mut store = AssetStore::default();
+        let target = AssetId::from_bytes([3; 16]);
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![test_hit(target, "Target")],
+            total: 1,
+            more: false,
+        });
+        store.retire_reqs.push(42);
+        let handled = store.on_catalog_event(ClientEvent::Done {
+            id: 42,
+            output: ClientOutput::Retired(RetireDto {
+                asset_id: target,
+                revision: None,
+                already_retired: false,
+                revisions_retired: 1,
+                aliases_dropped: 0,
+                annotation_cleared: false,
+            }),
+        });
+        assert!(handled);
+        assert!(store.retire_reqs.is_empty());
+        assert!(store.search.ready().unwrap().hits.is_empty());
+
+        // A second, unrelated retire failing must not disturb anything else
+        // and must still clear its own slot (not get stuck forever).
+        store.retire_reqs.push(43);
+        let handled = store.on_catalog_event(ClientEvent::Failed {
+            id: 43,
+            error: makepad_asset_client::ClientError::Protocol { what: "retire" },
+        });
+        assert!(handled);
+        assert!(store.retire_reqs.is_empty());
+
+        // An id nobody is tracking (already cancelled, or someone else's)
+        // is not our event.
+        assert!(!store.on_catalog_event(ClientEvent::Done {
+            id: 99,
+            output: ClientOutput::GcCancelled(false),
+        }));
+    }
+
+    fn test_gc_status(dry_run: bool, done: bool, retain_keep: Option<u64>) -> GcStatusDto {
+        GcStatusDto {
+            run_id: Some(7),
+            phase: if done { makepad_asset_client::GcPhaseDto::Done } else { makepad_asset_client::GcPhaseDto::Sweep },
+            done,
+            dry_run,
+            started_ms: 0,
+            updated_ms: 0,
+            horizon_ms: 0,
+            retain_keep,
+            retired_revisions: 0,
+            scanned_revisions: 10,
+            marked_blobs: 5,
+            examined_blobs: 5,
+            unreferenced_blobs: 3,
+            unreferenced_bytes: 3_000_000,
+            deleted_blobs: 0,
+            deleted_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn gc_continuation_repeats_the_same_shape_until_done_and_cancel_always_wins() {
+        let running = test_gc_status(true, false, Some(3));
+        assert_eq!(
+            gc_continuation(&running, false),
+            Some(GcRequest { dry_run: true, retain_per_asset: Some(3), ..GcRequest::default() }),
+        );
+        assert_eq!(gc_continuation(&running, true), None, "cancel wins even mid-run");
+        let done = test_gc_status(true, true, Some(3));
+        assert_eq!(gc_continuation(&done, false), None);
+        let collecting = test_gc_status(false, false, None);
+        assert_eq!(
+            gc_continuation(&collecting, false),
+            Some(GcRequest { dry_run: false, retain_per_asset: None, ..GcRequest::default() }),
+        );
+    }
+
+    #[test]
+    fn gc_dispatch_updates_status_and_reports_busy_while_not_done() {
+        let mut store = AssetStore::default();
+        assert!(!store.gc_busy());
+        store.gc_req = Some(11);
+        assert!(store.gc_busy(), "a step in flight counts as busy");
+        let handled = store.on_catalog_event(ClientEvent::Done {
+            id: 11,
+            output: ClientOutput::Gc(test_gc_status(true, false, None)),
+        });
+        assert!(handled);
+        // No live handles in this test, so the auto-continue submit is a
+        // silent no-op (see `submit_gc`) — but the status itself, and the
+        // fact a not-done run still reads busy, are exactly what the UI
+        // renders and must be correct with or without a session.
+        assert!(store.gc_req.is_none());
+        assert!(store.gc_busy(), "reported status is not done yet");
+        assert_eq!(store.gc.ready().unwrap().unreferenced_blobs, 3);
+
+        store.gc_req = Some(12);
+        let handled = store.on_catalog_event(ClientEvent::Done {
+            id: 12,
+            output: ClientOutput::Gc(test_gc_status(true, true, None)),
+        });
+        assert!(handled);
+        assert!(!store.gc_busy(), "done run is idle");
+    }
+
+    #[test]
+    fn gc_cancel_request_is_tracked_on_its_own_slot_independent_of_gc_req() {
+        let mut store = AssetStore::default();
+        store.gc_req = Some(21);
+        store.gc_cancel_req = Some(22);
+        // The bounded step lands first; cancel is still outstanding.
+        let handled = store.on_catalog_event(ClientEvent::Done {
+            id: 21,
+            output: ClientOutput::Gc(test_gc_status(false, false, None)),
+        });
+        assert!(handled);
+        assert!(store.gc_req.is_none());
+        assert!(store.gc_cancel_req.is_some(), "cancel's own slot is untouched by the step landing");
+
+        let handled = store.on_catalog_event(ClientEvent::Done {
+            id: 22,
+            output: ClientOutput::GcCancelled(true),
+        });
+        assert!(handled);
+        assert!(store.gc_cancel_req.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Live: an ISOLATED in-process `AssetServer` (own temp root, ephemeral
+    // ports) driven through the REAL `AssetStore::poll()` loop — the exact
+    // "UI action" path (`retire_asset`, `gc_dry_run`/`gc_collect`), never
+    // the shared live asset-ui server this session must not touch.
+    // -----------------------------------------------------------------
+
+    use std::str::FromStr;
+
+    fn live_test_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "mp_asset_store_state_{}_{}_{}",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    /// Own ephemeral-port server + admin token, isolated data root. Mirrors
+    /// `libs/asset/store/tests/retire_gc_http.rs::start_server` (the
+    /// existing HTTP-level delete/GC contract test) but lives here because
+    /// driving it through `AssetStore::poll()` needs this module's private
+    /// `connector`/`handles` fields.
+    fn start_isolated_server(name: &str) -> (makepad_asset_store::AssetServer, String) {
+        let root = live_test_root(name);
+        let mut cfg = makepad_asset_store::ServerConfig::new(root.clone());
+        cfg.control_addr = "127.0.0.1:0".parse().unwrap();
+        cfg.data_addr = "127.0.0.1:0".parse().unwrap();
+        cfg.bootstrap_admin = true;
+        cfg.log = false;
+        // Deterministic: no background janitor stealing GC steps, no grace
+        // window holding fresh blobs back from an immediate collect.
+        cfg.gc_janitor_steps = 0;
+        cfg.gc_grace_ms = 0;
+        let server = makepad_asset_store::AssetServer::start(cfg).expect("server start");
+        let token = std::fs::read_to_string(root.join("admin-token"))
+            .expect("admin token")
+            .trim()
+            .to_string();
+        (server, token)
+    }
+
+    /// Publish one minimal real asset directly (the synchronous
+    /// `AssetClient`, not through `AssetStore` — publishing is the import
+    /// pipeline's job, already covered elsewhere; this test starts from
+    /// "an asset already exists in the catalog").
+    fn publish_test_asset(
+        server: &makepad_asset_store::AssetServer,
+        token: &str,
+        alias: &str,
+        fill: u8,
+    ) -> AssetId {
+        let mut cfg = makepad_asset_client::ClientConfig::new(live_test_root("publish-cache"));
+        cfg.token = Some(token.to_string());
+        let endpoints = ApiEndpoints { control: server.control_addr(), data: server.data_addr() };
+        let mut client = makepad_asset_client::AssetClient::connect(cfg, endpoints, Some(server.server_id()))
+            .expect("publish client connect");
+        let mut request = makepad_asset_client::PublishRequest::new(
+            "gen",
+            AssetKind::Video,
+            "store delete/gc test asset",
+            makepad_asset_client::PublishFile {
+                bytes: vec![fill; 4_096],
+                media: makepad_asset_data::MediaType::Mp4,
+                role: makepad_asset_data::FileRole::Video,
+                media_millis: 1_000,
+                dims: None,
+            },
+            makepad_asset_client::PublishThumbnail {
+                bytes: vec![fill ^ 0xFF; 1_024],
+                media: makepad_asset_data::ThumbnailMedia::Png,
+                width: 512,
+                height: 512,
+            },
+        );
+        request.alias = Some(makepad_asset_data::AssetAlias::from_str(alias).unwrap());
+        client.publish_artifact(&request).expect("publish").asset_id
+    }
+
+    /// Connect `store` to `server` through the REAL `SessionConnector` +
+    /// `AssetStore::poll()` loop (no discovery — explicit endpoints), and
+    /// wait for the initial auto-search `poll()` fires on connect to land.
+    fn connect_store_to(store: &mut AssetStore, server: &makepad_asset_store::AssetServer, token: &str) {
+        let config = SessionConfig {
+            endpoints: Some(ApiEndpoints { control: server.control_addr(), data: server.data_addr() }),
+            server_id: Some(server.server_id()),
+            token: Some(token.to_string()),
+            ..SessionConfig::new(live_test_root("session-cache"))
+        };
+        store.connector = Some(SessionConnector::start(config).expect("connector start"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            store.poll();
+            if matches!(store.search, Remote::Ready(_)) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session never connected + searched: status={:?} search={:?}",
+                store.status,
+                store.search
+            );
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
+
+    fn poll_until<F: Fn(&AssetStore) -> bool>(store: &mut AssetStore, what: &str, ready: F) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            store.poll();
+            if ready(store) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
+
+    #[test]
+    fn retire_asset_through_the_ui_action_removes_it_from_the_list() {
+        let (server, token) = start_isolated_server("retire_ui");
+        let asset_id = publish_test_asset(&server, &token, "gen/retire-ui-test", 7);
+
+        let mut store = AssetStore::default();
+        connect_store_to(&mut store, &server, &token);
+        assert!(
+            store.search.ready().unwrap().hits.iter().any(|hit| hit.asset_id == asset_id),
+            "the published asset must be visible before we retire it"
+        );
+
+        store.retire_asset(asset_id);
+        poll_until(&mut store, "retire to apply locally", |store| {
+            store
+                .search
+                .ready()
+                .is_some_and(|results| !results.hits.iter().any(|hit| hit.asset_id == asset_id))
+        });
+
+        // The server agrees too — not just our own optimistic local drop.
+        poll_until(&mut store, "server search catches up via re-search", |store| {
+            store.retire_reqs.is_empty()
+        });
+        store.submit_search();
+        poll_until(&mut store, "re-search after retire", |store| {
+            matches!(store.search, Remote::Ready(_))
+        });
+        assert!(
+            !store.search.ready().unwrap().hits.iter().any(|hit| hit.asset_id == asset_id),
+            "retirement must hold on a FRESH server search, not just the optimistic local edit"
+        );
+    }
+
+    #[test]
+    fn gc_dry_run_then_collect_against_an_in_process_store() {
+        let (server, token) = start_isolated_server("gc_ui");
+        let asset_id = publish_test_asset(&server, &token, "gen/gc-ui-test", 9);
+
+        let mut store = AssetStore::default();
+        connect_store_to(&mut store, &server, &token);
+        store.retire_asset(asset_id);
+        poll_until(&mut store, "retire before gc", |store| store.retire_reqs.is_empty());
+
+        store.gc_dry_run(None);
+        assert!(store.gc_busy());
+        poll_until(&mut store, "dry run to finish", |store| {
+            matches!(&store.gc, Remote::Ready(status) if status.done)
+        });
+        let dry = *store.gc.ready().unwrap();
+        assert!(dry.dry_run);
+        assert!(
+            dry.unreferenced_blobs >= 2,
+            "the retired asset's artifact + thumbnail blobs must show up as reclaimable: {dry:?}"
+        );
+        assert_eq!(dry.deleted_blobs, 0, "a dry run must never actually delete anything");
+
+        store.gc_collect(None);
+        poll_until(&mut store, "collect to finish", |store| {
+            matches!(&store.gc, Remote::Ready(status) if status.done)
+        });
+        let collected = *store.gc.ready().unwrap();
+        assert!(!collected.dry_run);
+        assert_eq!(
+            collected.deleted_blobs, dry.unreferenced_blobs,
+            "collect must reclaim exactly what the dry run counted"
+        );
+        assert!(collected.deleted_bytes > 0);
+        assert!(!store.gc_busy());
     }
 }

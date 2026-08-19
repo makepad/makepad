@@ -202,6 +202,8 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         ["v1", "job-profiles"] => {
             if is_read(m) {
                 job_profiles(head, rc)
+            } else if m == Method::Put {
+                job_profiles_announce(conn, head, rc)
             } else {
                 method_not_allowed()
             }
@@ -2010,9 +2012,14 @@ fn annotation_delete(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Ou
 // ---------------------------------------------------------------------------
 
 /// `GET /v1/job-profiles[?domain=…]` — the generation capabilities this
-/// deployment advertises (config data). Authenticated like every other
-/// read; clients enqueue against the returned kind/namespace and never
-/// learn a compute node address.
+/// deployment advertises. Authenticated like every other read; clients
+/// enqueue against the returned kind/namespace and never learn a compute
+/// node address.
+///
+/// The answer is the deployment's config advertisement MERGED with what
+/// live workers announced they can execute right now (see
+/// `super::profiles`), so a tier whose weights left the fleet stops being
+/// offered instead of accepting jobs that would sit pending forever.
 fn job_profiles(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let now = now_ms();
@@ -2022,8 +2029,8 @@ fn job_profiles(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     })?;
     let domain = head.query_get("domain");
     let profiles: Vec<Value> = rc
-        .cfg
-        .job_profiles
+        .profiles
+        .advertised(&rc.cfg.job_profiles, now)
         .iter()
         .filter(|p| domain.is_none_or(|d| p.domain == d))
         .map(|p| {
@@ -2041,6 +2048,95 @@ fn job_profiles(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
         200,
         &obj(vec![("profiles", Value::Arr(profiles))]),
     )))
+}
+
+/// `PUT /v1/job-profiles` — a worker announces what it can execute.
+///
+/// Body: `{"worker":"<id>", "namespace":"<ns>", "ttl_ms":<lease>,
+/// "domains":[…], "profiles":[…]}`. An empty `profiles` list with a
+/// non-empty `domains` list is the meaningful "I cover these domains and
+/// can execute nothing in them" statement; `retract: true` withdraws the
+/// announcement outright (clean worker shutdown).
+///
+/// Authorization: `job_worker` on the worker's own namespace AND on every
+/// namespace an announced profile routes jobs into — the same grant that
+/// lets the announcer claim those jobs. A principal that cannot work a
+/// namespace cannot advertise into it.
+fn job_profiles_announce(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    use super::profiles::{parse_announced_profiles, MAX_DOMAINS, MAX_PROFILES};
+    let secret = secret_of(head)?;
+    let body = json_body!(conn, head, rc);
+    let worker = body_str(&body, "worker")?.to_string();
+    if worker.is_empty() || worker.len() > 64 || worker.chars().any(char::is_control) {
+        return Err(Fail::Http(400, "worker id out of bounds"));
+    }
+    let ns = body_str(&body, "namespace")?.to_string();
+    let retract = body.get("retract").and_then(Value::as_bool).unwrap_or(false);
+    let now = now_ms();
+    if retract {
+        // A retraction proves nothing about namespaces (its profile list is
+        // gone), so it only needs an authenticated caller that holds
+        // job_worker somewhere — the same principal that announced.
+        call_state(&rc.state, move |ctx| {
+            ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+            Ok(())
+        })?;
+        rc.profiles.retract(&worker, now);
+        return Ok(Outcome::Resp(Resp::empty(204)));
+    }
+    let ttl_ms = body
+        .get("ttl_ms")
+        .and_then(Value::as_u64)
+        .ok_or(Fail::Http(400, "ttl_ms required"))?;
+    let domains: Vec<String> = match body.get("domains") {
+        None => Vec::new(),
+        Some(v) => {
+            let arr = v.as_arr().ok_or(Fail::Http(400, "domains must be an array"))?;
+            if arr.len() > MAX_DOMAINS {
+                return Err(Fail::Http(400, "too many domains"));
+            }
+            let mut out = Vec::with_capacity(arr.len());
+            for value in arr {
+                let d = value.as_str().ok_or(Fail::Http(400, "domains must be strings"))?;
+                if d.is_empty() || d.len() > 32 || d.chars().any(char::is_control) {
+                    return Err(Fail::Http(400, "domain out of bounds"));
+                }
+                out.push(d.to_string());
+            }
+            out
+        }
+    };
+    let rows: Vec<Value> = match body.get("profiles") {
+        None => Vec::new(),
+        Some(v) => {
+            let arr = v.as_arr().ok_or(Fail::Http(400, "profiles must be an array"))?;
+            if arr.len() > MAX_PROFILES {
+                return Err(Fail::Http(400, "too many profiles"));
+            }
+            arr.to_vec()
+        }
+    };
+    let profiles = parse_announced_profiles(&rows).map_err(|what| Fail::Http(400, what))?;
+    // Every namespace the announcement touches, checked once: the worker's
+    // own namespace (a domains-only announcement HIDES advertisements there,
+    // which is a privileged effect on its own) plus each profile's.
+    let mut namespaces: Vec<String> = vec![ns.clone()];
+    for profile in &profiles {
+        if !namespaces.contains(&profile.namespace) {
+            namespaces.push(profile.namespace.clone());
+        }
+    }
+    call_state(&rc.state, move |ctx| {
+        let p = ctx.core.auth().authenticate(secret.as_bytes(), now)?;
+        for ns in &namespaces {
+            require_cap(ctx, &p, Capability::JobWorker, ns)?;
+        }
+        Ok(())
+    })?;
+    rc.profiles
+        .announce(&worker, ttl_ms, domains, profiles, now)
+        .map_err(|e| Fail::Http(400, e.as_str()))?;
+    Ok(Outcome::Resp(Resp::empty(204)))
 }
 
 // ---------------------------------------------------------------------------
