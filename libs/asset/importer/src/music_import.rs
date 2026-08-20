@@ -1284,19 +1284,30 @@ pub fn import_music(
     // Decode + bake fan out; publishing stays on this thread because the
     // client is one connection and the catalog wants one writer. Workers
     // claim tracks from a shared cursor, so a six-minute track and a
-    // twelve-second sting do not wait for each other — and the bake of the
-    // long one already spreads its own columns across cores. The channel is
-    // bounded, so at most a few tracks' audio is ever resident.
+    // twelve-second sting do not wait for each other.
+    //
+    // ONE BAKER PER CORE. This used to be a quarter of them, on the theory
+    // that a bake spreads its own FFT columns across cores anyway — but the
+    // expensive half of a bake is DECODING an MP3, which is strictly serial
+    // per track, so a quarter of the cores meant a quarter of the machine
+    // and an import that ran at under one core while eleven sat idle. The
+    // FFT's own threads briefly oversubscribe now; that costs a scheduling
+    // hiccup and buys the other three quarters of the box.
+    //
+    // The channel stays tight because a baked track holds its whole audio
+    // file: a few in flight, not a library.
     let workers = std::thread::available_parallelism()
-        .map(|n| (n.get() / 4).max(2))
+        .map(|n| n.get())
         .unwrap_or(2)
+        .clamp(2, 12)
         .min(tracks.len());
     let next = std::sync::atomic::AtomicUsize::new(0);
     // The cancel flag crosses into the bakers as a plain bool: the caller's
     // closure is not `Sync`, and a baker only needs to know "stop", which
     // the publishing thread already asks on every track.
     let stop = std::sync::atomic::AtomicBool::new(false);
-    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Result<BakedTrack, String>)>(workers * 2);
+    let (tx, rx) =
+        std::sync::mpsc::sync_channel::<(usize, Result<BakedTrack, String>)>(workers + 2);
     let mut audio_secs = 0.0f64;
     std::thread::scope(|scope| {
         for _ in 0..workers {

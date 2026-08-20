@@ -252,6 +252,7 @@ mod tests {
                 media: ThumbnailMedia::Png,
                 width: 512,
                 height: 512,
+                views: Vec::new(),
             },
         );
         request.alias = Some(makepad_asset_data::AssetAlias::from_str(alias).unwrap());

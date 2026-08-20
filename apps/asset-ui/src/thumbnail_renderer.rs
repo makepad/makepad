@@ -87,6 +87,22 @@ pub(crate) struct ThumbnailJob {
     pub(crate) spawn: Option<([f32; 3], f32, f32)>,
 }
 
+/// Pack the captured views into ONE picture that declares itself: a 4x4
+/// sheet of 256² cells, stamped with the cell layout and the rate, so the
+/// grid and the preview well rotate the card with no code that knows what a
+/// turntable is. The first cell is the canonical front, which is what a
+/// still context draws.
+fn pack_turntable(tiles: &[Vec<u8>]) -> Option<Vec<u8>> {
+    use makepad_asset_importer::anim_icon;
+    if tiles.is_empty() {
+        return None;
+    }
+    let sheet = anim_icon::pack_grid(tiles, THUMBNAIL_SIZE, TURNTABLE_COLS)
+        .map_err(|error| log!("turntable: pack failed: {error}"))
+        .ok()?;
+    Some(anim_icon::stamp_layout(&sheet.png, sheet.cells(), TURNTABLE_FPS))
+}
+
 /// A completed model-only PNG. The app commits it through `Library`, which
 /// revalidates the stable payload id so deleted resources stay deleted.
 pub struct RenderedThumbnail {
@@ -300,13 +316,49 @@ pub(crate) fn thumbnail_frame_from_spawn(spawn: ([f32; 3], f32, f32)) -> Thumbna
     }
 }
 
+/// Views a model icon carries: a full turn in sixteen steps of 22.5°, so a
+/// card in the library ROTATES instead of showing one frozen three-quarter
+/// angle. The first is the canonical front, which is what a still context —
+/// an old reader, a card that is not animating — draws.
+pub const TURNTABLE_STEPS: usize = 16;
+/// Packed 4x4 at the icon size: a 1024² sheet, inside every budget.
+pub const TURNTABLE_COLS: usize = 4;
+/// A slow turn. Fast enough to read as motion, slow enough to look at.
+pub const TURNTABLE_FPS: f32 = 9.0;
+
+/// The sixteen views of a turntable, framed IDENTICALLY.
+///
+/// Each step is the same model at a different yaw, so each would fit the
+/// square at its own distance — and a card whose subject grew and shrank as
+/// it turned would look broken. Every step therefore uses the widest
+/// distance any step needs, and the model turns inside a fixed frame.
+pub(crate) fn turntable_frames(min: Vec3f, max: Vec3f) -> Vec<ThumbnailFrame> {
+    let step = std::f32::consts::TAU / TURNTABLE_STEPS as f32;
+    let mut frames: Vec<ThumbnailFrame> = (0..TURNTABLE_STEPS)
+        .map(|i| thumbnail_frame_at(min, max, step * i as f32))
+        .collect();
+    let widest = frames
+        .iter()
+        .map(|f| f.cam_distance)
+        .fold(0.0f32, f32::max);
+    for frame in &mut frames {
+        frame.cam_distance = widest;
+    }
+    frames
+}
+
 pub(crate) fn thumbnail_frame_from_bounds(min: Vec3f, max: Vec3f) -> ThumbnailFrame {
+    thumbnail_frame_at(min, max, 0.0)
+}
+
+/// The canonical framing, with the model turned `extra_yaw` further.
+fn thumbnail_frame_at(min: Vec3f, max: Vec3f, extra_yaw: f32) -> ThumbnailFrame {
     let (min, max) = sanitize_bounds(min, max);
     let size = max - min;
     let extent = size.x.max(size.y).max(size.z).max(THUMBNAIL_MIN_AXIS);
     let scale = THUMBNAIL_SUBJECT_EXTENT / extent;
     let center = (min + max) * 0.5;
-    let transform = thumbnail_center_then_yaw(center, THUMBNAIL_MODEL_YAW, scale);
+    let transform = thumbnail_center_then_yaw(center, THUMBNAIL_MODEL_YAW + extra_yaw, scale);
     let mut world = [Vec3f::default(); 8];
     for (src, dst) in aabb_corners(min, max).iter().zip(world.iter_mut()) {
         let p = transform.transform_vec4(vec4(src.x, src.y, src.z, 1.0));
@@ -418,6 +470,12 @@ struct ThumbnailActive {
     rendered: bool,
     readback_attempts: u8,
     gpu_waits: u8,
+    /// Remaining views of a turntable, and the ones already captured. Empty
+    /// for a one-picture icon (a world's first-person view, which the walker
+    /// preview animates instead).
+    turntable: Vec<ThumbnailFrame>,
+    step: usize,
+    tiles: Vec<Vec<u8>>,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -623,6 +681,13 @@ impl ThumbnailRenderer {
                 job.ao_png.is_some()
             );
 
+            // A world is shown by walking it, not by turning it; everything
+            // else that is a mesh gets a full turn.
+            let turntable = match job.spawn {
+                Some(_) => Vec::new(),
+                None => turntable_frames(min, max),
+            };
+            let frame = turntable.first().cloned().unwrap_or(frame);
             self.active = Some(ThumbnailActive {
                 file: job.file,
                 subject,
@@ -632,6 +697,9 @@ impl ThumbnailRenderer {
                 rendered: false,
                 readback_attempts: 0,
                 gpu_waits: 0,
+                turntable,
+                step: 0,
+                tiles: Vec::new(),
             });
         }
     }
@@ -805,7 +873,11 @@ impl ThumbnailRenderer {
         // Clear-color readback = the GPU has not delivered the mesh yet.
         // Same camera, more frames. Never treat the asset as blank.
         if let Some(rgba) = &rgba {
-            if capture_is_clear_only(rgba, THUMBNAIL_CLEAR)
+            // Only the FIRST view waits: by the time the model has turned
+            // once the GPU has plainly delivered it, and a legitimately
+            // empty angle (an edge-on plane) must not restart the turn.
+            if active.step == 0
+                && capture_is_clear_only(rgba, THUMBNAIL_CLEAR)
                 && active.gpu_waits < THUMBNAIL_MAX_GPU_WAITS
             {
                 active.gpu_waits = active.gpu_waits.saturating_add(1);
@@ -822,6 +894,43 @@ impl ThumbnailRenderer {
             }
         }
 
+        // A turntable captures this view and turns to the next one. Only
+        // when every step is in hand is there a picture to encode.
+        if !active.turntable.is_empty() {
+            match rgba {
+                Some(rgba) => active.tiles.push(rgba),
+                None => {
+                    let file = active.file.clone();
+                    self.rejected_thumbnails.push(file);
+                    self.finish_active(cx);
+                    return;
+                }
+            }
+            active.step += 1;
+            if let Some(next) = active.turntable.get(active.step).cloned() {
+                // The model turns; the camera does not. Both the frame and
+                // the placed instance carry the step's transform, or the
+                // picture would be of the previous angle.
+                if let ThumbnailSubject::Statue(instance) = &mut active.subject {
+                    instance.transform = next.transform;
+                }
+                active.frame = next;
+                active.rendered = false;
+                active.frames_drawn = 0;
+                active.warmup_target = THUMBNAIL_WARMUP_FRAMES;
+                self.area.redraw(cx);
+                return;
+            }
+            let tiles = std::mem::take(&mut active.tiles);
+            let file = active.file.clone();
+            match pack_turntable(&tiles) {
+                Some(png) => self.rendered_thumbnails.push(RenderedThumbnail { file, png }),
+                None => self.rejected_thumbnails.push(file),
+            }
+            self.finish_active(cx);
+            return;
+        }
+
         let encoded = rgba.and_then(|rgba| {
             makepad_asset_ai::testpattern::encode_png_rgba(&rgba, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
                 .map_err(|error| log!("thumbnail {file}: PNG encode failed: {error}"))
@@ -832,6 +941,10 @@ impl ThumbnailRenderer {
         } else {
             self.rejected_thumbnails.push(file);
         }
+        self.finish_active(cx);
+    }
+
+    fn finish_active(&mut self, cx: &mut Cx) {
         self.active = None;
         self.queue.finish_active();
         self.renderer = Renderer::default();
