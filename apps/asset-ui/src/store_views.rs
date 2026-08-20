@@ -1041,7 +1041,10 @@ pub const GRID_CARD_SPACING: f64 = 6.0;
 /// Height of the title zone: exactly two lines at the card's text size,
 /// reserved whether a title needs them or not. Cards in a row are then the
 /// same height, and no card's second line straddles its own bottom edge.
-pub const GRID_TITLE_H: f64 = 26.0;
+/// 34: two lines of the card's 8pt text. font_size is POINTS — 8pt is
+/// ~10.7px, and a line box is ~1.6x that — so 26 was one line and a half,
+/// which is exactly what a clipped second line looks like.
+pub const GRID_TITLE_H: f64 = 34.0;
 /// Picture aspect inside a card (the shape a rendered icon and a spectrogram
 /// tile both read well at).
 pub const GRID_THUMB_ASPECT: f64 = 0.62;
@@ -1335,18 +1338,26 @@ impl CatalogGrid {
 
 impl Widget for CatalogGrid {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // The widget's area rect is one frame behind, which is fine: a
-        // resize re-chunks the rows on the next frame.
-        let width = self.view.area().rect(cx).size.x;
+        // The width the grid is being GIVEN this frame, from the turtle it
+        // is about to walk — not from its own area rect, which is a frame
+        // behind and, once the cards below are sized from it, would feed
+        // their width back into itself and collapse.
+        let width = {
+            let turtle = cx.turtle().rect().size.x;
+            if turtle > 1.0 { turtle } else { self.view.area().rect(cx).size.x }
+        };
         // Room the cards actually get, once the scrollbar has its gutter.
         let inner = (width - 14.0).max(0.0);
-        if width > GRID_CARD_W {
+        let sized = width > GRID_CARD_W;
+        if sized {
             self.last_cols = grid_columns(inner);
         }
         let cols = self.columns();
         // The cards then STRETCH to divide that room exactly, so a row spans
         // the panel at every window width instead of leaving a gutter that
-        // grows with the window.
+        // grows with the window. Before the layout has given the grid a
+        // credible width, the template's own size stands — a card sized from
+        // a width of nothing is a card nobody can read.
         let (card_w, card_h) = grid_card_size(inner, cols);
         let thumb_h = card_h - GRID_CARD_PAD * 2.0 - GRID_CARD_SPACING - GRID_TITLE_H;
         // One clock for the whole grid, so a wall of sprites animates in
@@ -1418,15 +1429,17 @@ impl Widget for CatalogGrid {
                     }
                     // Stretch this card to its share of the row, and give
                     // its picture the height that keeps the aspect.
-                    let mut cell = item.view(cx, slots[slot]);
-                    script_apply_eval!(cx, cell, {
-                        width: #(card_w)
-                        height: #(card_h)
-                    });
-                    let mut picture = item.view(cx, thumb_boxes[slot]);
-                    script_apply_eval!(cx, picture, {
-                        height: #(thumb_h)
-                    });
+                    if sized {
+                        let mut cell = item.view(cx, slots[slot]);
+                        script_apply_eval!(cx, cell, {
+                            width: #(card_w)
+                            height: #(card_h)
+                        });
+                        let mut picture = item.view(cx, thumb_boxes[slot]);
+                        script_apply_eval!(cx, picture, {
+                            height: #(thumb_h)
+                        });
+                    }
                     match self.tiles.get(index) {
                         Some(tile) => {
                             item.label(cx, titles[slot]).set_text(cx, &tile.title);

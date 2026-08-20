@@ -896,7 +896,7 @@ script_mod! {
             scroll_bar: ScrollBar{}
             Row := View{
                 width: Fill height: Fit
-                flow: Right spacing: 8
+                flow: Right spacing: 10
                 c1 := CandidateCell{} c2 := CandidateCell{}
                 c3 := CandidateCell{} c4 := CandidateCell{}
             }
@@ -930,7 +930,7 @@ script_mod! {
         // rather than a half-drawn third line.
         grid_title := Label{
             width: Fill
-            height: 26
+            height: 34
             max_lines: 2
             text_overflow: TextOverflow.Ellipsis
             draw_text +: {
