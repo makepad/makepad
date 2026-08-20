@@ -176,7 +176,7 @@ fn world_source_tools_roundtrip_and_bound() {
 fn sandbox_definitions_are_consistent_and_disjoint_from_the_base() {
     let base = definitions();
     let extra = sandbox_definitions();
-    assert_eq!(extra.len(), 8);
+    assert_eq!(extra.len(), 9);
     for def in &extra {
         assert_eq!(
             canonical_from_api_name(def.api_name),
