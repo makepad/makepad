@@ -309,6 +309,12 @@ struct Live {
     /// times the wait out with a Failed outcome after
     /// [`CLIENT_TOOL_TIMEOUT`].
     client_wait: Option<Instant>,
+    /// Call ids of client tools already resolved (by the app or by the
+    /// timeout). A LATE or duplicate tool-result post for one of these is
+    /// acknowledged idempotently instead of 409ing — the turn has already
+    /// moved on, and punishing the app for a slow answer turned a hiccup
+    /// into a user-visible dead turn (play-session-1 entry 13). Bounded.
+    resolved_tool_calls: Vec<String>,
 }
 
 impl Actor {
@@ -408,6 +414,7 @@ impl Actor {
             consult_depth: 0,
             profile,
             client_wait: None,
+            resolved_tool_calls: Vec::new(),
         };
         let view = view_from(&live);
         self.sessions.insert(id, live);
@@ -490,9 +497,16 @@ impl Actor {
         match result {
             Ok(()) => {
                 live.client_wait = None;
+                remember_resolved(live, call_id);
                 drain_into_logged(live, cap, self.log_enabled);
                 Ok(())
             }
+            // A result for a call that already resolved (the app answered
+            // twice, or answered after the timeout fed a Failed outcome) is
+            // acknowledged idempotently: the turn moved on and the late
+            // bytes change nothing. Only a call this session never parked
+            // on is a real protocol error.
+            Err(_) if live.resolved_tool_calls.iter().any(|c| c == call_id) => Ok(()),
             Err(what) => Err(ChatFail::NoClientTool { what }),
         }
     }
@@ -592,6 +606,7 @@ impl Actor {
                 &mut tools,
             );
             live.client_wait = None;
+            remember_resolved(live, &call_id);
             drain_into_logged(live, cap, self.log_enabled);
             return;
         }
@@ -634,6 +649,18 @@ fn drain_into(live: &mut Live, cap: usize) {
 /// followable from stdout — tool calls with bounded args, bounded results,
 /// the finished text, errors. The primary iteration instrument; grabs of
 /// the UI are only for judging visuals.
+/// Remember a resolved client-tool call id for the idempotent late-post
+/// acknowledgement, keeping only the most recent few.
+fn remember_resolved(live: &mut Live, call_id: &str) {
+    if live.resolved_tool_calls.iter().any(|c| c == call_id) {
+        return;
+    }
+    live.resolved_tool_calls.push(call_id.to_string());
+    if live.resolved_tool_calls.len() > 8 {
+        live.resolved_tool_calls.remove(0);
+    }
+}
+
 fn drain_into_logged(live: &mut Live, cap: usize, log_enabled: bool) {
     use makepad_asset_chat::wire::ChatEventBody as B;
     for ev in live.session.drain_events() {
