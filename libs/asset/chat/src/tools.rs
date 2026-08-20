@@ -458,6 +458,209 @@ pub fn definitions() -> Vec<ToolDef> {
     ]
 }
 
+/// Most bytes of SQL text `assets.query` accepts. The executor's own
+/// row/step/deadline budgets bound what that SQL may then cost.
+pub const MAX_QUERY_SQL_BYTES: usize = 4096;
+/// Most placements one `world.place` call may carry (a fence is one call,
+/// not one call per segment — tool rounds are budgeted).
+pub const MAX_WORLD_PLACEMENTS: usize = 64;
+
+/// The GAME session's tool vocabulary. Phase 1 is EXISTING assets only:
+/// catalog lookups plus the game extension — no generation tools and no
+/// llm.consult (both are later phases; generation will additionally need a
+/// user-facing cost confirmation before any enqueue). Keeping them out of
+/// the taught surface also keeps the context small.
+pub fn game_definitions() -> Vec<ToolDef> {
+    const KEEP: &[&str] = &["asset.search", "asset.inspect"];
+    definitions()
+        .into_iter()
+        .filter(|d| KEEP.contains(&d.name))
+        .chain(sandbox_definitions())
+        .collect()
+}
+
+/// The game-session tool extension: read-only SQL over the live asset
+/// catalog (executed by the broker, next to its own catalog file) and the
+/// world tools (executed by the connected GAME CLIENT via the parked-turn
+/// round trip). NOT part of [`definitions`] — only sessions created with
+/// the game profile advertise these.
+pub fn sandbox_definitions() -> Vec<ToolDef> {
+    vec![
+        ToolDef {
+            name: "assets.query",
+            api_name: "query_assets",
+            description: "Run ONE read-only SQL SELECT against the live asset catalog \
+                          (SQLite). Explore with assets.schema first. Filter live=1. \
+                          Results are capped (~200 rows) — narrow with WHERE/LIMIT. \
+                          Writes, PRAGMA, ATTACH and multi-statement SQL are refused.",
+            args_doc: r#"{"sql": "SELECT canon_alias, kind FROM search_annotations WHERE live=1 AND kind='prop' AND canon_alias LIKE '%fence%' LIMIT 20"}"#,
+            parameters: schema_object(
+                vec![(
+                    "sql",
+                    schema_string_len(
+                        "a single SELECT statement",
+                        1,
+                        MAX_QUERY_SQL_BYTES as i64,
+                    ),
+                )],
+                &["sql"],
+                Some(false),
+            ),
+        },
+        ToolDef {
+            name: "assets.schema",
+            api_name: "assets_schema",
+            description: "The asset catalog's tables, columns and indexes, with usage \
+                          notes. Call this before writing SQL for assets.query.",
+            args_doc: r#"{}"#,
+            parameters: schema_object(vec![], &[], Some(false)),
+        },
+        ToolDef {
+            name: "world.place",
+            api_name: "world_place",
+            description: "Place catalog models into the running game world. Each item \
+                          names a model by its canon_alias (from assets.query or \
+                          asset.search) plus a position in metres (y up; y=0 is the \
+                          ground). Place a whole group (a fence line, a furniture set) \
+                          in ONE call. Returns the placement ids and the world's \
+                          evaluation result.",
+            args_doc: r#"{"items": [{"model": "kenney/props/fence", "pos": [4, 0, 2], "yaw_deg": 90, "scale": 1.0, "tag": "fence"}]}"#,
+            parameters: schema_object(
+                vec![(
+                    "items",
+                    schema_array_bounded(
+                        "1..=64 placements: required model + pos; optional yaw_deg, scale, tag",
+                        1,
+                        MAX_WORLD_PLACEMENTS as i64,
+                        schema_world_place_item(),
+                    ),
+                )],
+                &["items"],
+                Some(false),
+            ),
+        },
+        ToolDef {
+            name: "world.remove",
+            api_name: "world_remove",
+            description: "Remove earlier world.place placements: by placement ids, or \
+                          every placement carrying a tag. Exactly one of ids/tag.",
+            args_doc: r#"{"ids": [3, 4]} or {"tag": "fence"}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "ids",
+                        schema_array_bounded(
+                            "placement ids from world.place/world.list",
+                            1,
+                            MAX_WORLD_PLACEMENTS as i64,
+                            schema_integer_range("placement id", 1, 1_000_000_000),
+                        ),
+                    ),
+                    ("tag", schema_ident("remove every placement with this tag")),
+                ],
+                &[],
+                Some(false),
+            ),
+        },
+        ToolDef {
+            name: "world.move",
+            api_name: "world_move",
+            description: "Change one existing placement's position, rotation, or scale. \
+                          At least one of pos/yaw_deg/scale.",
+            args_doc: r#"{"id": 3, "pos": [6, 0, 2], "yaw_deg": 45}"#,
+            parameters: schema_object(
+                vec![
+                    ("id", schema_integer_range("placement id", 1, 1_000_000_000)),
+                    ("pos", schema_pos()),
+                    ("yaw_deg", schema_number("rotation about y, degrees")),
+                    ("scale", schema_number("uniform scale, 0.001..=1000")),
+                ],
+                &["id"],
+                Some(false),
+            ),
+        },
+        ToolDef {
+            name: "world.list",
+            api_name: "world_list",
+            description: "List the current AI placements in the world (id, model, pos, \
+                          yaw_deg, scale, tag).",
+            args_doc: r#"{}"#,
+            parameters: schema_object(vec![], &[], Some(false)),
+        },
+        ToolDef {
+            name: "world.get_source",
+            api_name: "world_get_source",
+            description: "Read the running game's current splash source. Call this before \
+                          world.set_source so an edit starts from what is actually running.",
+            args_doc: r#"{}"#,
+            parameters: schema_object(vec![], &[], Some(false)),
+        },
+        ToolDef {
+            name: "world.set_source",
+            api_name: "world_set_source",
+            description: "Replace the running game's splash source with a COMPLETE new \
+                          version (level authoring). The game evaluates it and hot-reloads; \
+                          on an eval error the previous world keeps running and the error \
+                          comes back so you can fix the source and retry. Reference store \
+                          content by alias via game.model(\"<canon_alias>\", ...). Keep the \
+                          source under 12000 bytes.",
+            args_doc: r#"{"source": "game.sky({})\ngame.terrain({size: 120, cells: 65, smooth: true})\n...", "note": "village level v1"}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "source",
+                        schema_string_len(
+                            "the complete splash source",
+                            1,
+                            MAX_WORLD_SOURCE_BYTES as i64,
+                        ),
+                    ),
+                    ("note", schema_string_len("short change description", 1, 200)),
+                ],
+                &["source"],
+                Some(false),
+            ),
+        },
+    ]
+}
+
+/// Most bytes of splash source `world.set_source` accepts (the tool wire
+/// caps whole argument objects at 16 KiB; escaping needs headroom).
+pub const MAX_WORLD_SOURCE_BYTES: usize = 12_000;
+
+fn schema_world_place_item() -> Value {
+    schema_object(
+        vec![
+            (
+                "model",
+                schema_string_len("catalog canon_alias or library model id", 1, MAX_MODEL_REF_CHARS as i64),
+            ),
+            ("pos", schema_pos()),
+            ("yaw_deg", schema_number("rotation about y, degrees; default 0")),
+            ("scale", schema_number("uniform scale 0.001..=1000; default 1")),
+            ("tag", schema_ident("optional group tag for world.remove")),
+        ],
+        &["model", "pos"],
+        Some(false),
+    )
+}
+
+fn schema_pos() -> Value {
+    schema_array_bounded(
+        "world position [x, y, z] in metres (y up)",
+        3,
+        3,
+        schema_number("coordinate in metres"),
+    )
+}
+
+fn schema_number(description: &str) -> Value {
+    json::obj(vec![
+        ("type", json::s("number")),
+        ("description", json::s(description)),
+    ])
+}
+
 /// Map a native underscore API name onto the dotted canonical tool.
 /// Unknown names (including dotted names sent to a native provider) fail
 /// closed.
@@ -483,6 +686,14 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "operation_cancel" => Some("operation.cancel"),
         "operation_retry" => Some("operation.retry"),
         "llm_consult" => Some("llm.consult"),
+        "query_assets" => Some("assets.query"),
+        "assets_schema" => Some("assets.schema"),
+        "world_place" => Some("world.place"),
+        "world_remove" => Some("world.remove"),
+        "world_move" => Some("world.move"),
+        "world_list" => Some("world.list"),
+        "world_get_source" => Some("world.get_source"),
+        "world_set_source" => Some("world.set_source"),
         _ => None,
     }
 }
@@ -843,6 +1054,43 @@ pub enum ContentToolCall {
     OperationRetry { operation: OperationId },
     /// Local session delegates a text-only generation to OpenAI or Grok.
     LlmConsult { task: ConsultTask, prompt: String, provider: Option<ProviderKind> },
+    /// One read-only SELECT over the live catalog (sandbox sessions only;
+    /// the executor's SQL engine enforces read-only at the AST level).
+    AssetsQuery { sql: String },
+    /// Catalog table/column summary (sandbox sessions only).
+    AssetsSchema,
+    /// Place models into the running game world (sandbox sessions only).
+    WorldPlace { items: Vec<WorldPlaceItem> },
+    /// Remove placements by id or by tag (exactly one of the two).
+    WorldRemove { ids: Vec<u64>, tag: Option<String> },
+    /// Re-pose one placement.
+    WorldMove { id: u64, pos: Option<[f64; 3]>, yaw_deg: Option<f64>, scale: Option<f64> },
+    /// List current placements.
+    WorldList,
+    /// Read the running game's splash source (sandbox sessions only).
+    WorldGetSource,
+    /// Replace the running game's splash source — the level-authoring
+    /// primary path (sandbox sessions only; evaluated with last-good
+    /// rollback on the client).
+    WorldSetSource { source: String, note: Option<String> },
+}
+
+/// Longest model reference `world.place` accepts (canon aliases run long:
+/// `doom/doom/worlds/doom1/e1m1`).
+pub const MAX_MODEL_REF_CHARS: usize = 160;
+
+/// One placement of `world.place`, bounds-checked at parse: the model
+/// reference is plain printable text WITHOUT quotes/backslashes (it is
+/// spliced into game source as a string literal — refusing the characters
+/// beats escaping them), positions are finite and within the world's
+/// numeric range, scale is sane.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldPlaceItem {
+    pub model: String,
+    pub pos: [f64; 3],
+    pub yaw_deg: Option<f64>,
+    pub scale: Option<f64>,
+    pub tag: Option<String>,
 }
 
 /// What `llm.consult` is asked to generate. Text only — never a nested
@@ -896,6 +1144,14 @@ impl ContentToolCall {
             ContentToolCall::OperationCancel { .. } => "operation.cancel",
             ContentToolCall::OperationRetry { .. } => "operation.retry",
             ContentToolCall::LlmConsult { .. } => "llm.consult",
+            ContentToolCall::AssetsQuery { .. } => "assets.query",
+            ContentToolCall::AssetsSchema => "assets.schema",
+            ContentToolCall::WorldPlace { .. } => "world.place",
+            ContentToolCall::WorldRemove { .. } => "world.remove",
+            ContentToolCall::WorldMove { .. } => "world.move",
+            ContentToolCall::WorldList => "world.list",
+            ContentToolCall::WorldGetSource => "world.get_source",
+            ContentToolCall::WorldSetSource { .. } => "world.set_source",
         }
     }
 
@@ -1095,8 +1351,204 @@ impl ContentToolCall {
                 };
                 Ok(ContentToolCall::LlmConsult { task, prompt, provider })
             }
+            "assets.query" => {
+                check_known(args, &["sql"], "assets.query argument")?;
+                let sql = need_str(args, "sql", MAX_QUERY_SQL_BYTES)?;
+                Ok(ContentToolCall::AssetsQuery { sql })
+            }
+            "assets.schema" => {
+                check_known(args, &[], "assets.schema argument")?;
+                Ok(ContentToolCall::AssetsSchema)
+            }
+            "world.place" => {
+                check_known(args, &["items"], "world.place argument")?;
+                let items_v = match args.get("items") {
+                    Some(Value::Arr(a)) => a,
+                    Some(_) => return Err("'items' must be an array".to_string()),
+                    None => return Err("world.place requires items".to_string()),
+                };
+                if items_v.is_empty() || items_v.len() > MAX_WORLD_PLACEMENTS {
+                    return Err(format!("world.place takes 1..={MAX_WORLD_PLACEMENTS} items"));
+                }
+                let mut items = Vec::with_capacity(items_v.len());
+                for iv in items_v {
+                    if !matches!(iv, Value::Obj(_)) {
+                        return Err("placement item must be an object".to_string());
+                    }
+                    check_known(
+                        iv,
+                        &["model", "pos", "yaw_deg", "scale", "tag"],
+                        "placement field",
+                    )?;
+                    let model = need_str(iv, "model", MAX_MODEL_REF_CHARS)?;
+                    check_model_ref(&model)?;
+                    let pos = need_pos(iv)?;
+                    let yaw_deg = optional_angle(iv, "yaw_deg")?;
+                    let scale = optional_scale(iv)?;
+                    let tag = match optional_str(iv, "tag")? {
+                        None => None,
+                        Some(t) if ident_ok(t) => Some(t.to_string()),
+                        Some(_) => {
+                            return Err(
+                                "placement tag must be a short lowercase identifier".to_string()
+                            )
+                        }
+                    };
+                    items.push(WorldPlaceItem { model, pos, yaw_deg, scale, tag });
+                }
+                Ok(ContentToolCall::WorldPlace { items })
+            }
+            "world.remove" => {
+                check_known(args, &["ids", "tag"], "world.remove argument")?;
+                let tag = match optional_str(args, "tag")? {
+                    None => None,
+                    Some(t) if ident_ok(t) => Some(t.to_string()),
+                    Some(_) => {
+                        return Err("tag must be a short lowercase identifier".to_string())
+                    }
+                };
+                let ids = match args.get("ids") {
+                    None => Vec::new(),
+                    Some(Value::Arr(a)) => {
+                        if a.is_empty() || a.len() > MAX_WORLD_PLACEMENTS {
+                            return Err(format!(
+                                "world.remove takes 1..={MAX_WORLD_PLACEMENTS} ids"
+                            ));
+                        }
+                        let mut out = Vec::with_capacity(a.len());
+                        for v in a {
+                            out.push(placement_id(v)?);
+                        }
+                        out
+                    }
+                    Some(_) => return Err("'ids' must be an array of integers".to_string()),
+                };
+                if ids.is_empty() == tag.is_none() {
+                    return Err("world.remove takes exactly one of ids/tag".to_string());
+                }
+                Ok(ContentToolCall::WorldRemove { ids, tag })
+            }
+            "world.move" => {
+                check_known(args, &["id", "pos", "yaw_deg", "scale"], "world.move argument")?;
+                let id = placement_id(
+                    args.get("id").ok_or_else(|| "world.move requires id".to_string())?,
+                )?;
+                let pos = match args.get("pos") {
+                    None => None,
+                    Some(_) => Some(need_pos(args)?),
+                };
+                let yaw_deg = optional_angle(args, "yaw_deg")?;
+                let scale = optional_scale(args)?;
+                if pos.is_none() && yaw_deg.is_none() && scale.is_none() {
+                    return Err("world.move needs at least one of pos/yaw_deg/scale".to_string());
+                }
+                Ok(ContentToolCall::WorldMove { id, pos, yaw_deg, scale })
+            }
+            "world.list" => {
+                check_known(args, &[], "world.list argument")?;
+                Ok(ContentToolCall::WorldList)
+            }
+            "world.get_source" => {
+                check_known(args, &[], "world.get_source argument")?;
+                Ok(ContentToolCall::WorldGetSource)
+            }
+            "world.set_source" => {
+                check_known(args, &["source", "note"], "world.set_source argument")?;
+                let source = need_str(args, "source", MAX_WORLD_SOURCE_BYTES)?;
+                if source.contains('\u{0}') {
+                    return Err("source must not contain NUL".to_string());
+                }
+                let note = optional_str(args, "note")?
+                    .map(|n| {
+                        if n.len() > 200 {
+                            Err("note too long".to_string())
+                        } else {
+                            Ok(n.to_string())
+                        }
+                    })
+                    .transpose()?;
+                Ok(ContentToolCall::WorldSetSource { source, note })
+            }
             other => Err(format!("unknown tool '{}'", bounded(other, 32))),
         }
+    }
+}
+
+/// A model reference is spliced into game source as a quoted literal, so
+/// the characters that would need escaping there are refused instead.
+fn check_model_ref(model: &str) -> Result<(), String> {
+    if model
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | ' ' | ':'))
+    {
+        Ok(())
+    } else {
+        Err("model must be a plain alias (letters, digits, /_-.: and spaces)".to_string())
+    }
+}
+
+fn json_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::F64(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// World coordinates: finite, |v| <= 100 km. Everything a game means fits;
+/// NaN/inf (which would poison the world transform) cannot.
+const MAX_WORLD_COORD: f64 = 100_000.0;
+
+fn need_pos(v: &Value) -> Result<[f64; 3], String> {
+    let arr = match v.get("pos") {
+        Some(Value::Arr(a)) => a,
+        Some(_) => return Err("'pos' must be an array [x, y, z]".to_string()),
+        None => return Err("missing 'pos'".to_string()),
+    };
+    if arr.len() != 3 {
+        return Err("'pos' must have exactly 3 numbers".to_string());
+    }
+    let mut out = [0.0f64; 3];
+    for (i, item) in arr.iter().enumerate() {
+        let n = json_num(item).ok_or_else(|| "'pos' values must be numbers".to_string())?;
+        if !n.is_finite() || n.abs() > MAX_WORLD_COORD {
+            return Err("'pos' value out of range".to_string());
+        }
+        out[i] = n;
+    }
+    Ok(out)
+}
+
+fn optional_angle(v: &Value, key: &'static str) -> Result<Option<f64>, String> {
+    match v.get(key) {
+        None => Ok(None),
+        Some(n) => {
+            let n = json_num(n).ok_or_else(|| format!("'{key}' must be a number"))?;
+            if !n.is_finite() || n.abs() > 100_000.0 {
+                return Err(format!("'{key}' out of range"));
+            }
+            Ok(Some(n))
+        }
+    }
+}
+
+fn optional_scale(v: &Value) -> Result<Option<f64>, String> {
+    match v.get("scale") {
+        None => Ok(None),
+        Some(n) => {
+            let n = json_num(n).ok_or_else(|| "'scale' must be a number".to_string())?;
+            if !n.is_finite() || !(0.001..=1000.0).contains(&n) {
+                return Err("'scale' must be 0.001..=1000".to_string());
+            }
+            Ok(Some(n))
+        }
+    }
+}
+
+fn placement_id(v: &Value) -> Result<u64, String> {
+    match v {
+        Value::Int(i) if *i >= 1 && *i <= 1_000_000_000 => Ok(*i as u64),
+        _ => Err("placement id must be an integer 1..=1000000000".to_string()),
     }
 }
 
@@ -1557,5 +2009,70 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             json::obj(pairs)
         }
+        ContentToolCall::AssetsQuery { sql } => json::obj(vec![("sql", json::s(sql.clone()))]),
+        ContentToolCall::AssetsSchema => Value::Obj(Vec::new()),
+        ContentToolCall::WorldPlace { items } => json::obj(vec![(
+            "items",
+            Value::Arr(
+                items
+                    .iter()
+                    .map(|i| {
+                        let mut pairs = vec![
+                            ("model", json::s(i.model.clone())),
+                            ("pos", encode_pos(&i.pos)),
+                        ];
+                        if let Some(y) = i.yaw_deg {
+                            pairs.push(("yaw_deg", Value::F64(y)));
+                        }
+                        if let Some(s) = i.scale {
+                            pairs.push(("scale", Value::F64(s)));
+                        }
+                        if let Some(t) = &i.tag {
+                            pairs.push(("tag", json::s(t.clone())));
+                        }
+                        json::obj(pairs)
+                    })
+                    .collect(),
+            ),
+        )]),
+        ContentToolCall::WorldRemove { ids, tag } => {
+            let mut pairs = Vec::new();
+            if !ids.is_empty() {
+                pairs.push((
+                    "ids",
+                    Value::Arr(ids.iter().map(|i| Value::Int(*i as i64)).collect()),
+                ));
+            }
+            if let Some(t) = tag {
+                pairs.push(("tag", json::s(t.clone())));
+            }
+            json::obj(pairs)
+        }
+        ContentToolCall::WorldMove { id, pos, yaw_deg, scale } => {
+            let mut pairs = vec![("id", Value::Int(*id as i64))];
+            if let Some(p) = pos {
+                pairs.push(("pos", encode_pos(p)));
+            }
+            if let Some(y) = yaw_deg {
+                pairs.push(("yaw_deg", Value::F64(*y)));
+            }
+            if let Some(s) = scale {
+                pairs.push(("scale", Value::F64(*s)));
+            }
+            json::obj(pairs)
+        }
+        ContentToolCall::WorldList => Value::Obj(Vec::new()),
+        ContentToolCall::WorldGetSource => Value::Obj(Vec::new()),
+        ContentToolCall::WorldSetSource { source, note } => {
+            let mut pairs = vec![("source", json::s(source.clone()))];
+            if let Some(n) = note {
+                pairs.push(("note", json::s(n.clone())));
+            }
+            json::obj(pairs)
+        }
     }
+}
+
+fn encode_pos(pos: &[f64; 3]) -> Value {
+    Value::Arr(pos.iter().map(|v| Value::F64(*v)).collect())
 }

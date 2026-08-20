@@ -652,6 +652,16 @@ impl AssetClient {
         self.api.chat_retire(id)
     }
 
+    /// Answer a client-executed tool call (see `Api::chat_tool_result`).
+    pub fn chat_tool_result(
+        &self,
+        id: &crate::dto::ChatSessionId,
+        call_id: &str,
+        outcome: &crate::json::Value,
+    ) -> ClientResult<()> {
+        self.api.chat_tool_result(id, call_id, outcome)
+    }
+
     // ---- import + immutable derived variants -------------------------------
 
     /// Register an approved source collection from canonical bytes.

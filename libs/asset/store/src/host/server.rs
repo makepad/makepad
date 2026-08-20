@@ -96,6 +96,9 @@ impl AssetServer {
         let (chat_handle, chat_join) = super::chat::spawn_broker(
             endpoints,
             cfg.chat.clone(),
+            // The broker's `assets.query` reads this server's OWN catalog
+            // file (read-only WAL snapshots) — same process, same root.
+            Some(cfg.root.join("catalog.sqlite3")),
             cfg.log,
             stop.clone(),
         )?;

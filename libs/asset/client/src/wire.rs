@@ -326,6 +326,10 @@ pub fn path_chat_cancel(id: &str) -> String {
     format!("/v1/chat/sessions/{id}/cancel")
 }
 
+pub fn path_chat_tool_result(id: &str) -> String {
+    format!("/v1/chat/sessions/{id}/tool-result")
+}
+
 pub const MAX_CHAT_WAIT_MS: u64 = 30_000;
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 16 * 1024;
 pub const MAX_CHAT_ATTACHMENTS: usize = 8;
