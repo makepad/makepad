@@ -433,7 +433,7 @@ impl Actor {
         };
         match result {
             Ok(turn) => {
-                drain_into(live, cap);
+                drain_into_logged(live, cap, self.log_enabled);
                 Ok(turn)
             }
             Err(e) => Err(map_send(e)),
@@ -470,7 +470,7 @@ impl Actor {
         match result {
             Ok(()) => {
                 live.client_wait = None;
-                drain_into(live, cap);
+                drain_into_logged(live, cap, self.log_enabled);
                 Ok(())
             }
             Err(what) => Err(ChatFail::NoClientTool { what }),
@@ -572,7 +572,7 @@ impl Actor {
                 &mut tools,
             );
             live.client_wait = None;
-            drain_into(live, cap);
+            drain_into_logged(live, cap, self.log_enabled);
             return;
         }
         live.client_wait = None;
@@ -592,7 +592,7 @@ impl Actor {
                 live.session.pump(&mut tools);
             }
         }
-        drain_into(live, cap);
+        drain_into_logged(live, cap, self.log_enabled);
     }
 
     fn shutdown_all(&mut self) {
@@ -607,13 +607,47 @@ impl Actor {
 }
 
 fn drain_into(live: &mut Live, cap: usize) {
+    drain_into_logged(live, cap, false)
+}
+
+/// The broker's chat observability: with server logging on, every turn is
+/// followable from stdout — tool calls with bounded args, bounded results,
+/// the finished text, errors. The primary iteration instrument; grabs of
+/// the UI are only for judging visuals.
+fn drain_into_logged(live: &mut Live, cap: usize, log_enabled: bool) {
+    use makepad_asset_chat::wire::ChatEventBody as B;
     for ev in live.session.drain_events() {
+        if log_enabled {
+            let sid = live.session.id().as_str();
+            match &ev.body {
+                B::ToolCall { name, args, .. } => {
+                    log(true, &format!("chat[{sid}] call {name} {}", clip(&args.to_json(), 400)));
+                }
+                B::ToolResult { outcome, .. } => {
+                    log(true, &format!("chat[{sid}] result {}", clip(&outcome.encode().to_json(), 400)));
+                }
+                B::Done => log(true, &format!("chat[{sid}] done")),
+                B::Cancelled => log(true, &format!("chat[{sid}] cancelled")),
+                B::Error { code, message } => {
+                    log(true, &format!("chat[{sid}] ERROR {code}: {message}"));
+                }
+                B::Delta { .. } | B::ToolProgress { .. } => {}
+            }
+        }
         live.events.push(ev);
     }
     if live.events.len() > cap {
         let drop_n = live.events.len() - cap;
         live.events.drain(..drop_n);
     }
+}
+
+fn clip(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 fn view_from(live: &Live) -> SessionView {
@@ -722,6 +756,15 @@ impl SessionTools<'_> {
                     out.push('\n');
                 }
                 Err(e) => out.push_str(&format!("Catalog SQL currently unavailable: {e}\n")),
+            }
+            if self.profile == ClientProfile::Game {
+                // The kit inventory up front: without it the model spends
+                // its whole tool budget paging the catalog to learn what
+                // exists (iteration 5).
+                match catalog.kit_summary() {
+                    Ok(kits) => out.push_str(&kits),
+                    Err(e) => out.push_str(&format!("(kit summary unavailable: {e})\n")),
+                }
             }
         } else {
             out.push_str("Catalog SQL is not configured on this server.\n");
@@ -852,6 +895,22 @@ const MAX_TABLE_BYTES: usize = 6_000;
 
 fn run_catalog_query(catalog: &mut CatalogReader, sql: &str) -> ToolOutcome {
     match catalog.query(sql) {
+        Ok(out) if out.rows.is_empty() => ToolOutcome::Ok {
+            // A bare "0 rows" teaches nothing and invites retry loops;
+            // carry the vocabulary hint in the result itself.
+            value: json_obj(vec![
+                ("rows", JsonValue::Int(0)),
+                (
+                    "text",
+                    json_s(
+                        "(0 rows) Check the vocabulary: SELECT kind, COUNT(*) FROM \
+                         search_annotations WHERE live=1 GROUP BY kind — models are \
+                         kind 'mesh'; browse one kit with canon_alias LIKE \
+                         'kenney/<kit>/%'.",
+                    ),
+                ),
+            ]),
+        },
         Ok(out) => {
             let mut shown = out.rows.len();
             let text = loop {

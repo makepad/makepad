@@ -54,7 +54,12 @@ pub const MAX_TURN_TEXT_BYTES: usize = 64 * 1024;
 /// Tool progress note (mirrors the Asset Server heartbeat bound).
 pub const MAX_NOTE_BYTES: usize = 200;
 /// Tool rounds within one user turn.
-pub const MAX_TOOL_ROUNDS: u32 = 8;
+/// Tool rounds per user turn. A level-building turn legitimately spends
+/// schema + a few narrowing queries + get_source + set_source + a
+/// correction pass — 8 was hit by real (non-looping) exploration the day
+/// the catalog grew to ~3k models. Fail-closed as before; the session's
+/// history/token budgets remain the real backstop.
+pub const MAX_TOOL_ROUNDS: u32 = 16;
 /// Native function `call_id` / session tool id.
 pub const MAX_TOOL_CALL_ID: usize = 64;
 /// Progress callbacks retained from one tool execution.

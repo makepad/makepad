@@ -180,13 +180,10 @@ fn session_tool_result(
         return Err(Fail::Http(400, "malformed tool call id"));
     }
     let call_id = call_id.to_string();
-    // The host's own JSON value and the chat wire's value are distinct
-    // types; re-encode through text (the same bridge event_value uses).
     let outcome = {
         let raw = body.get("outcome").ok_or(Fail::Http(400, "missing outcome"))?;
-        let parsed = makepad_asset_client::json::parse(raw.to_json().as_bytes())
-            .map_err(|_| Fail::Http(400, "malformed tool outcome"))?;
-        ToolOutcome::decode(&parsed).map_err(|_| Fail::Http(400, "malformed tool outcome"))?
+        ToolOutcome::decode(&to_wire_value(raw))
+            .map_err(|_| Fail::Http(400, "malformed tool outcome"))?
     };
     let (owner, _) = auth_owner(head, rc, None)?;
     let view = match chat_of(rc)?.get(owner, id.clone()) {
@@ -381,17 +378,44 @@ fn session_value(view: &SessionView) -> Value {
     ])
 }
 
-fn event_value(ev: &ChatEvent) -> Value {
-    let encoded = ev.encode().to_json();
-    match super::json::parse(encoded.as_bytes()) {
-        Ok(v) => v,
-        Err(_) => obj(vec![
-            ("seq", Value::Int(ev.seq.min(i64::MAX as u64) as i64)),
-            ("type", s("error")),
-            ("code", s("encode")),
-            ("message", s("event encode failed")),
-        ]),
+/// STRUCTURAL conversion between the chat wire's value and the host's —
+/// never through text. The host parser is stricter than the wire (it
+/// refuses floats, duplicate keys and deep nesting), so a text roundtrip
+/// turned legitimate events — a tool call with a float argument — into
+/// "event encode failed" fallbacks on the wire (observed live in the
+/// village loop).
+fn to_host_value(v: &makepad_asset_client::json::Value) -> Value {
+    use makepad_asset_client::json::Value as C;
+    match v {
+        C::Null => Value::Null,
+        C::Bool(b) => Value::Bool(*b),
+        C::Int(i) => Value::Int(*i),
+        C::F64(f) => Value::F64(*f),
+        C::Str(text) => Value::Str(text.clone()),
+        C::Arr(items) => Value::Arr(items.iter().map(to_host_value).collect()),
+        C::Obj(pairs) => Value::Obj(
+            pairs.iter().map(|(k, v)| (k.clone(), to_host_value(v))).collect(),
+        ),
     }
+}
+
+fn to_wire_value(v: &Value) -> makepad_asset_client::json::Value {
+    use makepad_asset_client::json::Value as C;
+    match v {
+        Value::Null => C::Null,
+        Value::Bool(b) => C::Bool(*b),
+        Value::Int(i) => C::Int(*i),
+        Value::F64(f) => C::F64(*f),
+        Value::Str(text) => C::Str(text.clone()),
+        Value::Arr(items) => C::Arr(items.iter().map(to_wire_value).collect()),
+        Value::Obj(pairs) => C::Obj(
+            pairs.iter().map(|(k, v)| (k.clone(), to_wire_value(v))).collect(),
+        ),
+    }
+}
+
+fn event_value(ev: &ChatEvent) -> Value {
+    to_host_value(&ev.encode())
 }
 
 fn chat_outcome(e: ChatFail) -> Outcome {

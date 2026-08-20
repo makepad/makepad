@@ -76,7 +76,16 @@ struct ActiveJob {
     delivered: usize,
     finished: bool,
     last_note: String,
+    /// Consecutive failed polls. A single dropped TCP connect must not
+    /// kill a long generation turn; the job keeps running server-side.
+    poll_fails: u8,
 }
+
+/// Consecutive poll failures tolerated before the turn is declared dead.
+/// Connect timeouts run ~3 s each, so this rides out a ~1 minute node
+/// stall (a busy box mid-import evicts and reloads the LLM; the job
+/// itself survives server-side).
+const MAX_POLL_FAILS: u8 = 20;
 
 struct CachedPick {
     base: String,
@@ -100,7 +109,10 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         FleetQwenChatProvider {
             transport,
             bases,
-            max_tokens: 2048,
+            // A LEVEL-BUILDING turn carries reasoning plus a complete splash
+            // source; 2048 was observed cutting the build mid-thought. The
+            // serving tier's total context still bounds the sum.
+            max_tokens: 3072,
             active: None,
             cached: None,
             dead_until: Vec::new(),
@@ -174,8 +186,18 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         })
     }
 
+    /// One immediate retry on idempotent GETs: the LAN path to a busy GPU
+    /// box drops the odd connect, and a single lost packet must not mark
+    /// the node dead for [`DEAD_TTL`].
+    fn get_json_retry(&mut self, url: &str) -> Result<Value, String> {
+        match self.transport.get_json(url) {
+            Ok(v) => Ok(v),
+            Err(_) => self.transport.get_json(url),
+        }
+    }
+
     fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>) -> Option<(String, bool)> {
-        let health = match self.transport.get_json(&format!("{base}/health")) {
+        let health = match self.get_json_retry(&format!("{base}/health")) {
             Ok(v) => v,
             Err(e) => {
                 self.mark_dead(base);
@@ -188,7 +210,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             .and_then(Value::as_arr)
             .map(|caps| caps.iter().any(|c| c.as_str() == Some("chat")))
             .unwrap_or(false);
-        let models = match self.transport.get_json(&format!("{base}/models")) {
+        let models = match self.get_json_retry(&format!("{base}/models")) {
             Ok(v) => v,
             Err(e) => {
                 self.mark_dead(base);
@@ -286,15 +308,30 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         if self.active.is_some() {
             return Err("a turn is already in flight".to_string());
         }
+        tap_turn_input(input);
         let (base, model, text_fallback) = self.probe()?;
+        // Render history in the model's TRAINED shape (harness law):
+        // - The service opens `<think>\n` on every assistant turn it
+        //   renders; our stored assistant text has thinking stripped, so
+        //   close the block immediately or the whole historical turn reads
+        //   as unfinished reasoning (observed to teach the model to end
+        //   turns on a planning sentence).
+        // - Tool outcomes travel as user-role turns wrapped in the trained
+        //   `<tool_response>` tags.
         let messages: Vec<Value> = input
             .messages
             .iter()
             .map(|m| {
-                json::obj(vec![
-                    ("role", json::s(m.role.slug())),
-                    ("text", json::s(m.text.clone())),
-                ])
+                let (role, text) = match m.role {
+                    ChatRole::Assistant => {
+                        ("assistant", format!("\n</think>\n\n{}", m.text))
+                    }
+                    ChatRole::Tool => {
+                        ("user", format!("<tool_response>\n{}\n</tool_response>", m.text))
+                    }
+                    _ => (m.role.slug(), m.text.clone()),
+                };
+                json::obj(vec![("role", json::s(role)), ("text", json::s(text))])
             })
             .collect();
         let last_user = input
@@ -318,7 +355,26 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             ("chat_messages", Value::Arr(messages)),
             ("max_tokens", Value::Int(self.max_tokens as i64)),
         ]);
-        let resp = self.transport.post_json(&format!("{base}/generate"), &body)?;
+        // Connect-refused/timeout means the TCP session never opened, so no
+        // job exists server-side — the ONE retriable POST failure class on
+        // this flaky LAN (anything after connect could have created the job
+        // and must not be replayed).
+        let url = format!("{base}/generate");
+        let resp = match self.transport.post_json(&url, &body) {
+            Ok(v) => v,
+            Err(e) if e.contains("connect ") => {
+                std::thread::sleep(Duration::from_millis(500));
+                match self.transport.post_json(&url, &body) {
+                    Ok(v) => v,
+                    Err(e2) if e2.contains("connect ") => {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        self.transport.post_json(&url, &body)?
+                    }
+                    Err(e2) => return Err(e2),
+                }
+            }
+            Err(e) => return Err(e),
+        };
         let job = resp
             .get("job_id")
             .and_then(Value::as_str)
@@ -330,6 +386,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             delivered: 0,
             finished: false,
             last_note: String::new(),
+            poll_fails: 0,
         });
         Ok(())
     }
@@ -344,8 +401,16 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         }
         let url = format!("{}/job/{}", active.base, active.job);
         let status = match self.transport.get_json(&url) {
-            Ok(v) => v,
+            Ok(v) => {
+                active.poll_fails = 0;
+                v
+            }
             Err(e) => {
+                active.poll_fails += 1;
+                if active.poll_fails < MAX_POLL_FAILS {
+                    // Transient: the job is still running on the node.
+                    return Vec::new();
+                }
                 self.active = None;
                 return vec![ProviderEvent::Error(format!("fleet job poll failed: {e}"))];
             }
@@ -364,6 +429,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         }
         match status.get("state").and_then(Value::as_str) {
             Some("done") => {
+                tap_completion(partial);
                 events.push(ProviderEvent::Done { text: partial.to_string() });
                 self.active = None;
             }
@@ -430,6 +496,45 @@ fn is_active_load(stage: &str, permille: u16) -> bool {
         || stage.contains("load llm")
         || stage.contains("load weights");
     loading && permille < 1000
+}
+
+/// Iteration tap: `MAKEPAD_CHAT_TAP=/path/file.log` appends EXACTLY what
+/// goes into the model (system + full history) before every provider turn
+/// and the raw completion after it. The autonomous-iteration instrument —
+/// reading this file replaces screengrab-based transcript archaeology.
+fn tap_file() -> Option<std::path::PathBuf> {
+    std::env::var("MAKEPAD_CHAT_TAP").ok().filter(|p| !p.is_empty()).map(Into::into)
+}
+
+fn tap_write(text: &str) {
+    let Some(path) = tap_file() else { return };
+    use std::io::Write;
+    if let Ok(mut f) =
+        std::fs::OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = f.write_all(text.as_bytes());
+    }
+}
+
+fn tap_turn_input(input: &TurnInput) {
+    if tap_file().is_none() {
+        return;
+    }
+    let mut out = String::from("\n==== TURN INPUT ====\n---- system ----\n");
+    out.push_str(&input.system);
+    for m in &input.messages {
+        out.push_str(&format!("\n---- {} ----\n", m.role.slug()));
+        out.push_str(&m.text);
+    }
+    out.push('\n');
+    tap_write(&out);
+}
+
+fn tap_completion(text: &str) {
+    if tap_file().is_none() {
+        return;
+    }
+    tap_write(&format!("\n==== COMPLETION ====\n{text}\n"));
 }
 
 fn flatten_text_prompt(system: &str, messages: &[ChatMessage]) -> String {

@@ -661,6 +661,35 @@ fn schema_number(description: &str) -> Value {
     ])
 }
 
+/// Normalize a tool name the model spelled in ANY of its observed ways
+/// onto the dotted canonical: the declared api_name (`query_assets`), a
+/// mechanical underscoring of the dotted name (`assets_query`,
+/// `world_set_source`), or the canonical itself. Unknown names return
+/// unchanged and fail closed in the typed parser.
+pub fn canonicalize_tool_name(raw: &str) -> String {
+    if let Some(canonical) = canonical_from_api_name(raw) {
+        return canonical.to_string();
+    }
+    if raw.contains('_') {
+        for def in definitions().into_iter().chain(sandbox_definitions()) {
+            if def.name.replace('.', "_") == raw {
+                return def.name.to_string();
+            }
+        }
+    }
+    raw.to_string()
+}
+
+/// Inverse of [`canonical_from_api_name`]: the underscore API (trained
+/// template) spelling of a dotted canonical name.
+pub fn api_from_canonical(name: &str) -> Option<String> {
+    definitions()
+        .into_iter()
+        .chain(sandbox_definitions())
+        .find(|d| d.name == name)
+        .map(|d| d.api_name.to_string())
+}
+
 /// Map a native underscore API name onto the dotted canonical tool.
 /// Unknown names (including dotted names sent to a native provider) fail
 /// closed.

@@ -270,6 +270,57 @@ impl ToolExecutor for DefaultExec {
     }
 }
 
+// ---------------------------------------------- native trained-format calls
+
+use makepad_asset_chat::toolcall::{self, Extract};
+
+#[test]
+fn the_trained_qwen_tool_template_is_heard() {
+    // Verbatim from a live village run: the model reverted to its trained
+    // template and the turn silently died. Never again.
+    let text = "Let me find cars.\n</think>\n\nSearching now.\n<tool_call>\n<function=asset_search>\n<parameter=query>\ncar vehicle driveable\n</parameter>\n<parameter=limit>\n15\n</parameter>\n</function>\n</tool_call>";
+    let Extract::Call { clean, name, args } = toolcall::extract(text) else {
+        panic!("native template not heard: {:?}", toolcall::extract(text));
+    };
+    assert_eq!(clean, "Searching now.");
+    assert_eq!(name, "asset.search");
+    assert_eq!(args.get("query").and_then(Value::as_str), Some("car vehicle driveable"));
+    assert_eq!(args.get("limit").and_then(Value::as_i64), Some(15));
+    // And the typed parser accepts the coerced arguments.
+    ContentToolCall::parse(&name, &args).expect("typed parse of native-call args");
+    // The UI strip hides the block.
+    assert_eq!(toolcall::strip_marker(text), "Searching now.");
+}
+
+#[test]
+fn native_template_carries_multiline_splash_source_intact() {
+    let source = "game.sky({})\ngame.terrain({size: 120, cells: 65, smooth: true})\nlet hero = game.character({pos: vec3(0, 2, 8), player: true})";
+    let text = format!(
+        "</think>\n<tool_call>\n<function=world_set_source>\n<parameter=source>\n{source}\n</parameter>\n<parameter=note>\nvillage v1\n</parameter>\n</function>\n</tool_call>"
+    );
+    let Extract::Call { name, args, .. } = toolcall::extract(&text) else {
+        panic!("not heard");
+    };
+    assert_eq!(name, "world.set_source");
+    assert_eq!(args.get("source").and_then(Value::as_str), Some(source));
+    let call = ContentToolCall::parse(&name, &args).unwrap();
+    let ContentToolCall::WorldSetSource { source: parsed, note } = call else {
+        panic!("wrong variant");
+    };
+    assert_eq!(parsed, source);
+    assert_eq!(note.as_deref(), Some("village v1"));
+}
+
+#[test]
+fn unknown_native_function_names_fail_closed_as_readable_refusals() {
+    let text = "</think>\n<tool_call>\n<function=rm_rf>\n<parameter=path>\n/\n</parameter>\n</function>\n</tool_call>";
+    let Extract::Call { name, args, .. } = toolcall::extract(text) else {
+        panic!("expected a call shape");
+    };
+    assert_eq!(name, "rm_rf");
+    assert!(ContentToolCall::parse(&name, &args).is_err(), "unknown tools refuse");
+}
+
 // -------------------------------------------- client-executed tool round trip
 
 use makepad_asset_chat::tools::game_definitions;

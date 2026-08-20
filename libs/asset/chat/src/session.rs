@@ -199,6 +199,14 @@ pub struct Session {
     /// Visible assistant text preceding a PARKED client tool call, kept for
     /// the tool round once the client's outcome arrives.
     pending_clean: String,
+    /// The tool-round budget was reached: the model got one FINAL
+    /// completion round ("answer with what you have") and any further tool
+    /// line it emits is not executed — the turn ends with its text.
+    budget_final: bool,
+    /// The current round's call rendered in the model's trained template,
+    /// recorded into the assistant history entry by `tool_round` (textual
+    /// lane only).
+    last_call_trained: Option<String>,
 }
 
 impl Session {
@@ -225,6 +233,8 @@ impl Session {
             tool_executed_this_turn: false,
             executed_mutation: false,
             pending_clean: String::new(),
+            budget_final: false,
+            last_call_trained: None,
         }
     }
 
@@ -324,6 +334,7 @@ impl Session {
         self.tool_rounds = 0;
         self.tool_executed_this_turn = false;
         self.executed_mutation = false;
+        self.budget_final = false;
         self.cancel.reset();
         if let Err(message) = self.begin_provider_turn() {
             self.history.pop();
@@ -348,6 +359,7 @@ impl Session {
             self.seal("cancelled after a tool executed");
         }
         self.pending_clean.clear();
+        self.last_call_trained = None;
         self.phase = Phase::Idle;
         self.emit(ChatEventBody::Cancelled);
     }
@@ -452,6 +464,22 @@ impl Session {
             self.emit(ChatEventBody::Done);
             return;
         }
+        // The post-budget completion round: whatever the model says IS the
+        // answer; a tool line in it is cut off, not executed.
+        if self.budget_final {
+            let visible = match toolcall::extract(&full) {
+                Extract::None => toolcall::split_thinking(&full).visible,
+                Extract::Call { clean, .. } | Extract::Malformed { clean, .. } => clean,
+            };
+            if let Err(body) = self.finish_assistant_text(visible) {
+                self.phase = Phase::Idle;
+                self.emit(body);
+                return;
+            }
+            self.phase = Phase::Idle;
+            self.emit(ChatEventBody::Done);
+            return;
+        }
         match toolcall::extract(&full) {
             Extract::None => {
                 let visible = toolcall::split_thinking(&full).visible;
@@ -480,6 +508,7 @@ impl Session {
                     name: name.clone(),
                     args: emit_args,
                 });
+                self.last_call_trained = Some(render_trained_call(&name, &args));
                 let outcome = match ContentToolCall::parse(&name, &args) {
                     Err(reason) => ToolOutcome::Refused { what: reason },
                     Ok(call) => {
@@ -665,7 +694,29 @@ impl Session {
             self.fail_closed_tool_round("history_full", "session history budget exhausted");
             return;
         }
-        let assistant = nonempty(clean_text);
+        // The textual lane records the CALL in the assistant turn, in the
+        // model's TRAINED spelling. Without it the in-context history shows
+        // assistant turns that never call tools (only paired results), and
+        // the model imitates that — observed live as turns ending on prose
+        // like "Now the car-kit models." mid-build. In-context examples
+        // beat instructions; make the history look exactly like what we
+        // want more of.
+        let assistant = if self.provider.kind() == ProviderKind::FleetQwen {
+            match &self.last_call_trained {
+                Some(call) if clean_text.len() + call.len() + 1 < MAX_MESSAGE_BYTES => {
+                    let mut text = clean_text;
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(call);
+                    text
+                }
+                _ => nonempty(clean_text),
+            }
+        } else {
+            nonempty(clean_text)
+        };
+        self.last_call_trained = None;
         if self.push_history(ChatRole::Assistant, assistant).is_err() {
             self.fail_closed_tool_round(
                 "turn_too_large",
@@ -688,12 +739,27 @@ impl Session {
             return;
         }
         self.tool_rounds += 1;
-        if self.tool_rounds >= MAX_TOOL_ROUNDS {
-            self.fail_closed_tool_round(
-                "tool_budget",
-                &format!("tool round budget ({MAX_TOOL_ROUNDS}) exhausted"),
-            );
-            return;
+        if self.tool_rounds >= MAX_TOOL_ROUNDS && !self.budget_final {
+            // Native-tool providers keep the fail-closed shape (their
+            // sessions seal after tools anyway). The textual lane degrades
+            // GRACEFULLY: a turn that spent its budget exploring still
+            // ends in an answer or a build, never a dead session — the
+            // model gets ONE final completion round with a nudge, and any
+            // further tool line it emits is not executed.
+            if self.provider.kind().uses_native_tools() {
+                self.fail_closed_tool_round(
+                    "tool_budget",
+                    &format!("tool round budget ({MAX_TOOL_ROUNDS}) exhausted"),
+                );
+                return;
+            }
+            self.budget_final = true;
+            let nudge = "{\"note\":\"tool budget reached — no more tool calls this \
+                         turn; answer or build with what you already have\"}";
+            if self.push_history(ChatRole::Tool, nudge.to_string()).is_err() {
+                self.fail_closed_tool_round("history_full", "session history budget exhausted");
+                return;
+            }
         }
         if self.provider.kind().uses_native_tools() {
             let Some(id) = call_id else {
@@ -803,6 +869,30 @@ impl Session {
         }
         self.events.push_back(ev);
     }
+}
+
+/// One call in Qwen's trained tool template, for the assistant history of
+/// the textual lane. String parameter values go in raw; everything else is
+/// JSON — the symmetric inverse of `toolcall`'s native extractor.
+fn render_trained_call(name: &str, args: &Value) -> String {
+    let api = tools::api_from_canonical(name).unwrap_or_else(|| name.replace('.', "_"));
+    let mut out = String::from("<tool_call>\n<function=");
+    out.push_str(&api);
+    out.push_str(">\n");
+    if let Value::Obj(pairs) = args {
+        for (key, value) in pairs {
+            out.push_str("<parameter=");
+            out.push_str(key);
+            out.push_str(">\n");
+            match value {
+                Value::Str(s) => out.push_str(s),
+                other => out.push_str(&other.to_json()),
+            }
+            out.push_str("\n</parameter>\n");
+        }
+    }
+    out.push_str("</function>\n</tool_call>");
+    out
 }
 
 /// History entries must be non-empty for the wire bound; a tool-only reply

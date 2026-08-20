@@ -87,12 +87,130 @@ pub fn split_thinking(text: &str) -> SplitText {
 /// Mid-line mentions (backticks, prose) are skipped. A closed think block
 /// is stripped first so a draft `<<tool>>` inside reasoning cannot hide or
 /// preempt the real call after `</think>`.
+///
+/// Two formats are heard: the taught `<<tool>>{json}` line AND Qwen's own
+/// TRAINED tool template (`<tool_call><function=name><parameter=k>v…`) —
+/// under pressure the model reverts to what it was trained on (observed
+/// live: a village-building turn silently died because its `asset_search`
+/// came out in the native template). The harness law from the LocalAgent
+/// port applies: meet the model's trained format, don't fight it.
 pub fn extract(text: &str) -> Extract {
     let split = split_thinking(text);
     match extract_line_start(&split.visible) {
-        Extract::None if !split.think_closed => extract_last_line_start(text),
+        Extract::None => match extract_native(&split.visible) {
+            Extract::None if !split.think_closed => extract_last_line_start(text),
+            other => other,
+        },
         other => other,
     }
+}
+
+/// Parse Qwen's native tool-call template:
+///
+/// ```text
+/// <tool_call>
+/// <function=asset_search>
+/// <parameter=query>
+/// car vehicle driveable
+/// </parameter>
+/// </function>
+/// </tool_call>
+/// ```
+///
+/// Parameter values are raw text lines: they coerce to JSON when they
+/// parse as JSON (numbers, arrays, objects, booleans) and stay strings
+/// otherwise — multi-line values (a splash source) stay intact. Function
+/// names map through the same underscore→dotted table native providers
+/// use; dotted names are accepted as-is.
+fn extract_native(text: &str) -> Extract {
+    const OPEN: &str = "<tool_call>";
+    let Some(at) = text.find(OPEN) else {
+        return Extract::None;
+    };
+    let clean = text[..at].trim_end().to_string();
+    let body = &text[at + OPEN.len()..];
+    let Some(fn_at) = body.find("<function=") else {
+        // The model also emits a JSON body inside the tags (observed live):
+        // `<tool_call>\n{"function": "x", "arguments": {...}}\n</tool_call>`.
+        let inner = match body.find("</tool_call>") {
+            Some(end) => body[..end].trim(),
+            None => body.trim(),
+        };
+        let Ok(v) = json::parse(inner.as_bytes()) else {
+            return Extract::Malformed {
+                clean,
+                reason: "tool_call is neither <function=> nor JSON".to_string(),
+            };
+        };
+        let Some(raw_name) = v
+            .get("function")
+            .and_then(Value::as_str)
+            .or_else(|| v.get("name").and_then(Value::as_str))
+        else {
+            return Extract::Malformed { clean, reason: "tool_call missing function name".to_string() };
+        };
+        let name = crate::tools::canonicalize_tool_name(raw_name);
+        let args = v
+            .get("arguments")
+            .or_else(|| v.get("args"))
+            .cloned()
+            .unwrap_or(Value::Obj(Vec::new()));
+        return Extract::Call { clean, name, args };
+    };
+    let after_fn = &body[fn_at + "<function=".len()..];
+    let Some(name_end) = after_fn.find('>') else {
+        return Extract::Malformed { clean, reason: "unterminated function name".to_string() };
+    };
+    let raw_name = after_fn[..name_end].trim();
+    // Any observed spelling normalizes; unknown names fail closed in the
+    // typed parser (a readable refusal beats a silent drop).
+    let name = crate::tools::canonicalize_tool_name(raw_name);
+    // Yet another observed spelling: `<function=name>` with a BARE JSON
+    // args object as the body (no <parameter=> wrappers).
+    let body_after_name = &after_fn[name_end + 1..];
+    if !body_after_name.contains("<parameter=") {
+        let inner = match body_after_name.find("</function>") {
+            Some(end) => body_after_name[..end].trim(),
+            None => body_after_name.trim(),
+        };
+        if inner.starts_with('{') {
+            if let Ok(v @ Value::Obj(_)) = json::parse(inner.as_bytes()) {
+                return Extract::Call { clean, name, args: v };
+            }
+        }
+    }
+    let mut pairs: Vec<(String, Value)> = Vec::new();
+    let mut rest = body_after_name;
+    while let Some(p_at) = rest.find("<parameter=") {
+        let after_p = &rest[p_at + "<parameter=".len()..];
+        let Some(key_end) = after_p.find('>') else {
+            return Extract::Malformed { clean, reason: "unterminated parameter name".to_string() };
+        };
+        let key = after_p[..key_end].trim().to_string();
+        let value_body = &after_p[key_end + 1..];
+        let Some(v_end) = value_body.find("</parameter>") else {
+            return Extract::Malformed { clean, reason: "unterminated parameter value".to_string() };
+        };
+        let raw = value_body[..v_end]
+            .strip_prefix('\n')
+            .unwrap_or(&value_body[..v_end]);
+        let raw = raw.strip_suffix('\n').unwrap_or(raw).to_string();
+        let value = match json::parse(raw.as_bytes()) {
+            Ok(v) => v,
+            Err(_) => json::s(raw),
+        };
+        // The model sometimes repeats a parameter to sneak two calls into
+        // one block; first wins, deterministically (one call per block is
+        // the contract, and the result teaches one-at-a-time).
+        if !pairs.iter().any(|(k, _)| k == &key) {
+            pairs.push((key, value));
+        }
+        rest = &value_body[v_end + "</parameter>".len()..];
+    }
+    if pairs.len() > 32 {
+        return Extract::Malformed { clean, reason: "too many parameters".to_string() };
+    }
+    Extract::Call { clean, name, args: Value::Obj(pairs) }
 }
 
 fn extract_line_start(text: &str) -> Extract {
@@ -138,24 +256,28 @@ fn parse_tool_line(clean: String, line: &str) -> Extract {
     let Some(name) = v.get("name").and_then(Value::as_str) else {
         return Extract::Malformed { clean, reason: "tool call missing 'name'".to_string() };
     };
-    let args = match v.get("args") {
+    let args = match v.get("args").or_else(|| v.get("arguments")) {
         Some(a @ Value::Obj(_)) => a.clone(),
         None => Value::Obj(Vec::new()),
         Some(_) => {
             return Extract::Malformed { clean, reason: "'args' must be an object".to_string() }
         }
     };
-    Extract::Call { clean, name: name.to_string(), args }
+    Extract::Call { clean, name: crate::tools::canonicalize_tool_name(name), args }
 }
 
-/// Visible assistant text: thinking stripped, first line-start `<<tool>>`
-/// and everything after it removed. Used by the UI so streamed tokens never
-/// leak the raw call or the think dump into the answer bubble.
+/// Visible assistant text: thinking stripped, the first `<<tool>>` line OR
+/// native `<tool_call>` block and everything after it removed. Used by the
+/// UI so streamed tokens never leak the raw call or the think dump into
+/// the answer bubble.
 pub fn strip_marker(text: &str) -> String {
     let visible = split_thinking(text).visible;
     match extract_line_start(&visible) {
         Extract::Call { clean, .. } | Extract::Malformed { clean, .. } => clean,
-        Extract::None => visible,
+        Extract::None => match visible.find("<tool_call>") {
+            Some(at) => visible[..at].trim_end().to_string(),
+            None => visible,
+        },
     }
 }
 
@@ -201,66 +323,19 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
          You do work ONLY by emitting a tool call. Never claim an image, video, \
          mesh, or other artifact exists unless a tool result said ok.\n\
          If you reason, put ALL reasoning inside <think>...</think>. \
-         After </think>, emit exactly ONE tool line and STOP. \
-         Never put a tool line, backticks, or JSON examples inside thinking.\n\
-         To call a tool, end your reply with ONE line of the exact form:\n",
+         After </think>, emit exactly ONE tool call and STOP. \
+         Never put a tool call, backticks, or JSON examples inside thinking.\n",
     );
-    out.push_str(TOOL_MARKER);
-    out.push_str("{\"name\": \"<tool>\", \"args\": {...}}\n");
-    out.push_str("Then STOP. You will receive a tool result and can continue.\n");
-    // Guidance and examples follow the ADVERTISED surface: teaching a
-    // generation-tool routing table to a session that has no generation
-    // tools both misleads the model and wastes its (local, small) context.
+    // Format + guidance follow the ADVERTISED surface. Generation sessions
+    // (asset UI) keep the original `<<tool>>` JSON line unchanged; agentic
+    // (game) sessions are taught the model's TRAINED tool template — the
+    // format it reverts to under pressure anyway (harness law). The
+    // extractor hears both either way.
     let generation = defs.iter().any(|d| d.name == "image.generate");
     if generation {
-        out.push_str(
-            "Extract a complete prompt from casual speech \
-             (\"hey make me an image of a rusty trawler at dawn\" → \
-             prompt \"rusty fishing trawler at dawn, misty harbor, cinematic lighting\").\n\
-             Pick the tool that matches the content type:\n\
-             image → image.generate; video/clip/movie → video.generate; \
-             sfx/sound effect → audio.generate; spoken words → speech.generate; \
-             song/music → music.generate; 3D model/GLB → mesh.generate; \
-             splat/environment/world → world.generate; \
-             playable character/avatar → character.generate.\n\
-             Image follow-ons use image.generate then=mesh|video|world|character|matte|depth.\n\
-             Generation defaults (model, width, height, steps, then) persist on this session.\n\
-             When the user says change the default model/resolution/steps, call defaults.set.\n\
-             When they ask what the defaults are, call defaults.get.\n\
-             When they ask what models, sizes, or backends exist, call fleet.introspect.\n\
-             Never invent asset or revision ids: use only ids from bound inputs, \
-             tool results, or catalog search.\n\n\
-             Examples:\n",
-        );
-        out.push_str(TOOL_MARKER);
-        out.push_str(
-            "{\"name\":\"image.generate\",\"args\":{\"prompt\":\"rusty fishing trawler at dawn, misty harbor\"}}\n",
-        );
-        out.push_str(TOOL_MARKER);
-        out.push_str(
-            "{\"name\":\"video.generate\",\"args\":{\"prompt\":\"trawler cutting through fog at dawn\"}}\n",
-        );
-        out.push_str(TOOL_MARKER);
-        out.push_str(
-            "{\"name\":\"audio.generate\",\"args\":{\"prompt\":\"heavy steel hatch slam\"}}\n",
-        );
-        out.push_str(TOOL_MARKER);
-        out.push_str(
-            "{\"name\":\"mesh.generate\",\"args\":{\"prompt\":\"low-poly sci-fi crate, studio lighting\"}}\n\n",
-        );
+        render_generation_guidance(&mut out);
     } else {
-        out.push_str(
-            "Never invent asset or revision ids: use only ids from tool results \
-             or catalog queries.\n\nExamples:\n",
-        );
-        out.push_str(TOOL_MARKER);
-        out.push_str(
-            "{\"name\":\"assets.query\",\"args\":{\"sql\":\"SELECT canon_alias, kind FROM search_annotations WHERE live=1 AND kind='mesh' LIMIT 20\"}}\n",
-        );
-        out.push_str(TOOL_MARKER);
-        out.push_str(
-            "{\"name\":\"world.set_source\",\"args\":{\"source\":\"game.sky({})\\n...complete level...\"}}\n\n",
-        );
+        render_agentic_guidance(&mut out);
     }
     out.push_str("Tools:\n");
     for d in defs {
@@ -275,6 +350,89 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
     out.push('\n');
     out.push_str(capabilities);
     out
+}
+
+fn render_generation_guidance(out: &mut String) {
+    out.push_str("To call a tool, end your reply with ONE line of the exact form:\n");
+    out.push_str(TOOL_MARKER);
+    out.push_str("{\"name\": \"<tool>\", \"args\": {...}}\n");
+    out.push_str("Then STOP. You will receive a tool result and can continue.\n");
+    out.push_str(
+        "Extract a complete prompt from casual speech \
+         (\"hey make me an image of a rusty trawler at dawn\" → \
+         prompt \"rusty fishing trawler at dawn, misty harbor, cinematic lighting\").\n\
+         Pick the tool that matches the content type:\n\
+         image → image.generate; video/clip/movie → video.generate; \
+         sfx/sound effect → audio.generate; spoken words → speech.generate; \
+         song/music → music.generate; 3D model/GLB → mesh.generate; \
+         splat/environment/world → world.generate; \
+         playable character/avatar → character.generate.\n\
+         Image follow-ons use image.generate then=mesh|video|world|character|matte|depth.\n\
+         Generation defaults (model, width, height, steps, then) persist on this session.\n\
+         When the user says change the default model/resolution/steps, call defaults.set.\n\
+         When they ask what the defaults are, call defaults.get.\n\
+         When they ask what models, sizes, or backends exist, call fleet.introspect.\n\
+         Never invent asset or revision ids: use only ids from bound inputs, \
+         tool results, or catalog search.\n\nExamples:\n",
+    );
+    out.push_str(TOOL_MARKER);
+    out.push_str(
+        "{\"name\":\"image.generate\",\"args\":{\"prompt\":\"rusty fishing trawler at dawn, misty harbor\"}}\n",
+    );
+    out.push_str(TOOL_MARKER);
+    out.push_str(
+        "{\"name\":\"video.generate\",\"args\":{\"prompt\":\"trawler cutting through fog at dawn\"}}\n",
+    );
+    out.push_str(TOOL_MARKER);
+    out.push_str(
+        "{\"name\":\"audio.generate\",\"args\":{\"prompt\":\"heavy steel hatch slam\"}}\n",
+    );
+    out.push_str(TOOL_MARKER);
+    out.push_str(
+        "{\"name\":\"mesh.generate\",\"args\":{\"prompt\":\"low-poly sci-fi crate, studio lighting\"}}\n\n",
+    );
+}
+
+fn render_agentic_guidance(out: &mut String) {
+    out.push_str(
+        "To call a tool, emit EXACTLY this block (one call per reply), with one \
+         <parameter=...> per argument, then STOP:\n\
+         <tool_call>\n\
+         <function=TOOL_NAME>\n\
+         <parameter=ARG_NAME>\n\
+         the value\n\
+         </parameter>\n\
+         </function>\n\
+         </tool_call>\n\
+         Every argument the tool needs MUST appear as its own <parameter=> block — \
+         a call without its required parameters is refused.\n\
+         You will receive the tool result and can continue.\n\
+         Never invent asset or revision ids: use only ids from tool results or \
+         catalog queries.\n\
+         A reply WITHOUT a tool call ENDS your whole turn. Never end on a plan \
+         ('Let me…', 'I'll now…') — emit the call that does it instead. End with \
+         prose only when the work is done and you are reporting the result.\n\n\
+         Example — a catalog query:\n\
+         <tool_call>\n\
+         <function=assets.query>\n\
+         <parameter=sql>\n\
+         SELECT canon_alias FROM search_annotations WHERE live=1 AND kind='mesh' LIMIT 20\n\
+         </parameter>\n\
+         </function>\n\
+         </tool_call>\n\
+         Example — replacing the level (the source spans many lines):\n\
+         <tool_call>\n\
+         <function=world.set_source>\n\
+         <parameter=source>\n\
+         game.sky({})\n\
+         game.terrain({size: 120, cells: 65, smooth: true})\n\
+         </parameter>\n\
+         <parameter=note>\n\
+         village v1\n\
+         </parameter>\n\
+         </function>\n\
+         </tool_call>\n\n",
+    );
 }
 
 /// The per-turn fragment naming the typed inputs the user bound (attachment
