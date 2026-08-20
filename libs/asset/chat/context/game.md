@@ -34,6 +34,15 @@ Catalog 'world' maps (e.g. doom/doom/worlds/doom1/e1m1) and 'billboard'
 sprites are queryable but the game CANNOT load them yet — when asked for
 one, say so honestly and offer a themed level from primitives instead.
 
+SPLASH SYNTAX (it is NOT JavaScript — these exact forms only):
+- Loops: `for i in 0..16 { }` and `for item in list { }`. There is NO
+  C-style `for (i = 0; …; i++)` and NO `++` — they break the parse and the
+  level silently becomes empty.
+- Functions: `fn make_hut(ox, oz, yaw) { … }` then `make_hut(11, 0, 0)`.
+  Not `let f = function(...)`.
+- Math is bare: `sin(a)`, `cos(a)`, `sqrt(x)`, `atan2(y, x)` — no `math.`
+  namespace, no `Math.`.
+
 SPLASH RULES (each one breaks the game if ignored):
 - Positions and sizes are `vec3(x, y, z)` (metres, y up, ground ≈ y 0).
   An array `[x, y, z]` is NOT a position — it becomes vec3(0,0,0).
@@ -113,6 +122,12 @@ Query the annotated set like this (ONE query answers it):
   a small ring or L-shaped street. yaw is RADIANS: 0 / 1.5708 / 3.1416 /
   4.7124 turn a tile 0/90/180/270 degrees.
 - A plaza: `fountain-round` in the middle, `tree` and `cart` around it.
+- PIECES vs COMPLETE OBJECTS: wall/roof/floor models are kit PIECES — they
+  only look right inside the exact hut pattern below. Everything you place
+  on its own must be a COMPLETE object (fountain, tree, cart, road tile,
+  a whole building). Never scatter loose wall or roof pieces.
+- Everything sits ON the ground: y = 0 for every placement unless the hut
+  pattern says otherwise. Never invent heights.
 - Huts: use THIS exact pattern (a ~2 m module hut at origin ox, oz —
   do not re-derive the geometry, just offset it):
     game.model("kenney/fantasy-town-kit/wall-door", {pos: vec3(ox, 0, oz+1), yaw: 3.1416})

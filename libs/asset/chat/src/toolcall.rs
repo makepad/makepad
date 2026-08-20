@@ -180,7 +180,15 @@ fn extract_native(text: &str) -> Extract {
         }
     }
     let mut pairs: Vec<(String, Value)> = Vec::new();
-    let mut rest = body_after_name;
+    // Bound the parameter scan to THIS call's block: the model often emits
+    // several <tool_call> blocks back to back, and an unbounded scan walked
+    // into the second block's parameters (observed live: the second query's
+    // sql rode along as a duplicate key).
+    let block_end = body_after_name
+        .find("</function>")
+        .or_else(|| body_after_name.find("</tool_call>"))
+        .unwrap_or(body_after_name.len());
+    let mut rest = &body_after_name[..block_end];
     while let Some(p_at) = rest.find("<parameter=") {
         let after_p = &rest[p_at + "<parameter=".len()..];
         let Some(key_end) = after_p.find('>') else {
