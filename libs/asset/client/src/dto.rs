@@ -144,6 +144,11 @@ pub fn role_name(role: makepad_asset_data::FileRole) -> &'static str {
         R::Depth => "depth",
         R::Splat => "splat",
         R::AoTexture => "ao_texture",
+        R::StemDrums => "stem_drums",
+        R::StemBass => "stem_bass",
+        R::StemVocals => "stem_vocals",
+        R::StemOther => "stem_other",
+        R::Lyrics => "lyrics",
     }
 }
 
@@ -170,6 +175,11 @@ pub fn role_parse(s: &str) -> Option<FileRole> {
         "depth" => R::Depth,
         "splat" => R::Splat,
         "ao_texture" => R::AoTexture,
+        "stem_drums" => R::StemDrums,
+        "stem_bass" => R::StemBass,
+        "stem_vocals" => R::StemVocals,
+        "stem_other" => R::StemOther,
+        "lyrics" => R::Lyrics,
         _ => return None,
     })
 }
@@ -214,6 +224,7 @@ pub fn media_name(media: makepad_asset_data::MediaType) -> &'static str {
         M::Text => "text",
         M::Ply => "ply",
         M::Mp3 => "mp3",
+        M::Json => "json",
     }
 }
 

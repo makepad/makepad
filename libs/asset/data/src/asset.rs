@@ -102,6 +102,19 @@ pub enum FileRole {
     /// `AoMesh` role's `ao_uv` lane samples. Published beside the render
     /// GLB so a game streams the bake with the model instead of re-baking.
     AoTexture,
+    /// Separated drum stem of an `Audio` asset (Ogg Vorbis). Stems are a
+    /// precomputed side-channel: either all four stem roles are present on
+    /// a revision or none are, so a client never mixes a partial set.
+    StemDrums,
+    /// Separated bass stem (Ogg Vorbis).
+    StemBass,
+    /// Separated vocal stem (Ogg Vorbis).
+    StemVocals,
+    /// Separated residual "other" stem (Ogg Vorbis).
+    StemOther,
+    /// Word-aligned lyrics for an `Audio` asset (JSON, the karaoke line/
+    /// word/confidence shape documented in `makepad-audio-lyrics`).
+    Lyrics,
 }
 
 canon_enum!(FileRole {
@@ -124,6 +137,11 @@ canon_enum!(FileRole {
     Depth = 16,
     Splat = 17,
     AoTexture = 18,
+    StemDrums = 19,
+    StemBass = 20,
+    StemVocals = 21,
+    StemOther = 22,
+    Lyrics = 23,
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,6 +160,8 @@ pub enum MediaType {
     Ply,
     /// MPEG-1/2/2.5 Layer III audio (the music library's native container).
     Mp3,
+    /// Validated UTF-8 JSON (structured side-channel documents).
+    Json,
 }
 
 canon_enum!(MediaType {
@@ -155,6 +175,7 @@ canon_enum!(MediaType {
     Text = 7,
     Ply = 8,
     Mp3 = 9,
+    Json = 10,
 });
 
 impl FileRole {
@@ -174,7 +195,27 @@ impl FileRole {
             Depth => matches!(media, Png),
             Splat => matches!(media, Ply),
             AoTexture => matches!(media, Png),
+            StemDrums | StemBass | StemVocals | StemOther => matches!(media, Ogg),
+            Lyrics => matches!(media, Json),
         }
+    }
+
+    /// The four stem side-channel roles, in the deck lane order
+    /// (drums, bass, vocals, other is the storage order here; consumers
+    /// reorder for display).
+    pub const STEMS: [FileRole; 4] = [
+        FileRole::StemDrums,
+        FileRole::StemBass,
+        FileRole::StemVocals,
+        FileRole::StemOther,
+    ];
+
+    /// Whether this role is one of the four stem side-channels.
+    pub fn is_stem(self) -> bool {
+        matches!(
+            self,
+            FileRole::StemDrums | FileRole::StemBass | FileRole::StemVocals | FileRole::StemOther
+        )
     }
 }
 
@@ -1316,6 +1357,25 @@ impl AssetManifest {
             if self.metrics.media_millis == 0 {
                 return Err(AssetDataError::Malformed { what: "audio metrics" });
             }
+        }
+        // Stem and lyric side-channels belong to audio assets only, and the
+        // four stems travel together: all or none, so a client never has to
+        // mix a partial stem set against the original.
+        let has_stem_or_lyrics =
+            self.files.iter().any(|f| f.role.is_stem() || f.role == FileRole::Lyrics);
+        if has_stem_or_lyrics && self.kind != AssetKind::Audio {
+            return Err(AssetDataError::Malformed {
+                what: "stem/lyrics side-channel on a non-audio asset",
+            });
+        }
+        let stems_present = FileRole::STEMS
+            .iter()
+            .filter(|role| self.files.iter().any(|f| f.role == **role))
+            .count();
+        if stems_present != 0 && stems_present != 4 {
+            return Err(AssetDataError::Missing {
+                what: "stem side-channels must be all four or none",
+            });
         }
         if self.kind == AssetKind::Video && !self.files.iter().any(|f| f.role == FileRole::Video) {
             return Err(AssetDataError::Missing { what: "video role" });
