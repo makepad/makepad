@@ -9774,12 +9774,18 @@ impl App {
         // navigation off the frame thread, then tour it, opening doors on
         // approach. A map turned on a turntable tells you nothing about
         // what it is like to be inside it.
-        let kind = self
+        let hit = self
             .store
             .search
             .ready()
-            .and_then(|results| results.hits.iter().find(|hit| hit.asset_id == asset))
-            .and_then(|hit| hit.kind);
+            .and_then(|results| results.hits.iter().find(|hit| hit.asset_id == asset));
+        let kind = hit.and_then(|hit| hit.kind);
+        // Which GAME a map came from, in the only form the walker wants: a
+        // string of what this app knows about its origin. It picks a walking
+        // STYLE (eye height, step rule, gravity, bob, speed) and nothing
+        // else — every classic importer emits the same map contract, so one
+        // walker walks them all.
+        let world_source = hit.map(world_source_text).unwrap_or_default();
         let is_world = kind == Some(makepad_asset_data::AssetKind::World);
         if is_world {
             if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
@@ -9789,7 +9795,11 @@ impl App {
                             self.library_preview_file = Some(file.clone());
                             self.show_preview(
                                 cx,
-                                PreviewContent::World { glb, texture_png: None },
+                                PreviewContent::World {
+                                    glb,
+                                    texture_png: None,
+                                    source: world_source,
+                                },
                             );
                             return;
                         }
@@ -13186,6 +13196,24 @@ fn library_view_signature(filters: &LibraryFilters) -> String {
     )
 }
 
+/// Everything this app knows about where a map came from, run together for
+/// the walker's style pick: the namespace the importer published under, its
+/// canonical alias path, and its title.
+///
+/// The namespace is the strong signal (`doom`, `quake`, `duke`); the alias
+/// carries the pack and episode (`duke/duke3d/worlds/e1l1`), and the title
+/// is the last resort for an asset published without either. It is a STYLE
+/// hint and only a style hint — the map itself is read from the declared
+/// contract every classic importer emits, never from which game this says.
+fn world_source_text(hit: &makepad_asset_client::CatalogHit) -> String {
+    let alias = hit
+        .alias
+        .as_ref()
+        .map(|alias| alias.to_string())
+        .unwrap_or_default();
+    format!("{} {} {}", hit.namespace, alias, hit.title)
+}
+
 /// ONE tag, as the UI sees it.
 ///
 /// The store keeps two label kinds on the wire — `category` and `tag` — and
@@ -13831,6 +13859,61 @@ mod rail_tests {
         assert!(!rail_shows(&row(Some("import:kenney"), &["kenney"])), "a pack row");
         assert!(!rail_shows(&row(Some("import:doom"), &["maps"])), "a classic map");
         assert!(!rail_shows(&row(None, &[])), "an unlabelled orphan");
+    }
+}
+
+#[cfg(test)]
+mod world_style_tests {
+    use super::*;
+    use makepad_asset_client::CatalogHit;
+    use makepad_asset_data::{AssetAlias, AssetId};
+    use makepad_render::level::BobStyle;
+    use std::str::FromStr;
+
+    fn hit(namespace: &str, alias: &str, title: &str) -> CatalogHit {
+        CatalogHit {
+            asset_id: AssetId::from_bytes([7; 16]),
+            namespace: namespace.to_string(),
+            kind: Some(makepad_asset_data::AssetKind::World),
+            title: title.to_string(),
+            snippet: String::new(),
+            score: 0,
+            live: true,
+            alias: AssetAlias::from_str(alias).ok(),
+            updated_ms: 0,
+        }
+    }
+
+    /// ONE walker walks every classic game; the only per-game input is the
+    /// STYLE it walks in. This is where that style comes from, so a Quake
+    /// map must not be toured with Doom's eye height and step rule just
+    /// because Doom is the fallback.
+    #[test]
+    fn a_maps_own_facts_pick_the_walking_style() {
+        let doom = hit("doom", "doom/doom/worlds/doom1/e1m1", "e1m1");
+        assert_eq!(BobStyle::from_source(&world_source_text(&doom)), BobStyle::Doom);
+
+        let quake = hit("quake", "quake/lq/worlds/e1m1", "the slipgate complex");
+        assert_eq!(BobStyle::from_source(&world_source_text(&quake)), BobStyle::Quake);
+        // Quake II and III walk as Quake: same locomotion family.
+        let q2 = hit("quake2", "quake2/q2/worlds/base1", "outer base");
+        assert_eq!(BobStyle::from_source(&world_source_text(&q2)), BobStyle::Quake);
+        let q3 = hit("quake3", "quake3/q3/worlds/q3dm1", "arena gate");
+        assert_eq!(BobStyle::from_source(&world_source_text(&q3)), BobStyle::Quake);
+
+        let duke = hit("duke", "duke/duke3d/worlds/e1l1", "hollywood holocaust");
+        assert_eq!(BobStyle::from_source(&world_source_text(&duke)), BobStyle::Duke);
+
+        // The alias alone is enough when the namespace is generic — an
+        // importer that publishes under `import` still says which game in
+        // the path it wrote.
+        let aliased = hit("import", "import/build/worlds/duke3d/e2l1", "spaceport");
+        assert_eq!(BobStyle::from_source(&world_source_text(&aliased)), BobStyle::Duke);
+
+        // And a generated world names no game at all, which is the existing
+        // default rather than a special case.
+        let splat = hit("gen", "gen/worlds/coastal", "coastal");
+        assert_eq!(BobStyle::from_source(&world_source_text(&splat)), BobStyle::Doom);
     }
 }
 

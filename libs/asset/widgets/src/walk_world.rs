@@ -13,6 +13,34 @@
 //! It lives here now. A well hands over GLB bytes; this builds a tour and
 //! ticks it.
 //!
+//! # ONE walker walks every game
+//!
+//! *"Since we have to layer a game engine on it, the maps must have enough
+//! similarity that a single map-walker can do all of them."*
+//!
+//! That is the law, and the unified map contract is what makes it hold:
+//! every classic importer emits the SAME structure — one GLB with
+//! `door_N` / `lift_N` / `hazard_N` / `sky` nodes and declared clips, a
+//! `.spawn` anchor superset (player_start, keys, exit, teleports), a prelit
+//! `COLOR_0` marker, metres, Y-up, −Z-forward. So `LevelCollision`,
+//! `NavGrid` and `player_nav` run Doom, Quake, Quake II/III and Duke without
+//! knowing which one they are looking at.
+//!
+//! Per-game difference may enter in exactly TWO places:
+//!
+//! 1. **The style** — [`WalkerConfig::for_style`]: eye height, step rule,
+//!    gravity, bob cadence, walk speed. One enum, picked from what the host
+//!    knows about where the map came from.
+//! 2. **Declared map facts** — a Quake door's axis and `offset`, a liquid
+//!    volume's `solid: false`, a Duke door baked open. These are read from
+//!    the DATA, per the contract.
+//!
+//! Anything else — an `if game == quake` in the walker, the preview, or the
+//! nav planner — is a CONTRACT GAP, not a feature. It means an importer did
+//! not declare something it knows, and the fix belongs there: the same
+//! contract is what the game engine will layer on, so a special case here
+//! is a special case in the engine later.
+//!
 //! Behind the `renderer` feature, because it needs `makepad-render` — see
 //! the crate's dependency note for why that is not the default.
 
