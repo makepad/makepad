@@ -767,6 +767,14 @@ pub struct ScriptParser {
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
     pub had_error: bool,
+    /// The formatted messages behind `had_error`, bounded. A host that
+    /// installs a captured-error sink gets these routed into it after each
+    /// streaming parse (vm::eval_with_append_source), so a structural parse
+    /// error FAILS a game eval instead of logging into the void while the
+    /// recovered parse runs something else entirely — `let loop = [...]`
+    /// recovered into an infinite empty loop and burned the whole
+    /// instruction budget before this existed.
+    pub parse_errors: Vec<String>,
 
     state: Vec<State>,
     pub file: String,
@@ -810,6 +818,7 @@ impl Default for ScriptParser {
             opcodes: Default::default(),
             source_map: Default::default(),
             had_error: false,
+            parse_errors: Default::default(),
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -850,6 +859,15 @@ impl ScriptParser {
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
+        if self.parse_errors.len() < 16 {
+            self.parse_errors.push(format!(
+                "{}:{}:{}: {}",
+                self.file,
+                line as usize + self.line_offset + 1,
+                col as usize + self.col_offset + 1,
+                msg
+            ));
+        }
         log_with_level(
             &self.file,
             line as u32 + self.line_offset as u32,

@@ -1429,6 +1429,7 @@ impl<'a> ScriptVm<'a> {
             let unfinished = body.tokenizer.intern_unfinished_string(&mut self.bx.heap);
 
             // Incremental parse: continue from checkpoint, auto-close for execution
+            let errors_before = body.parser.parse_errors.len();
             let cp = body.parser.parse_streaming(
                 &body.tokenizer,
                 &existing_mod.file,
@@ -1439,7 +1440,20 @@ impl<'a> ScriptVm<'a> {
 
             body.checkpoint = Some(cp);
 
+            // A host that installed a captured-error sink is running a GAME
+            // eval and needs structural parse errors to FAIL it — the
+            // tolerant recovery otherwise runs something else entirely
+            // (`let loop` recovered into an infinite empty loop and burned
+            // the instruction budget). Live-typing paths install no sink and
+            // keep the log-only tolerance.
+            let new_parse_errors: Vec<String> =
+                body.parser.parse_errors[errors_before.min(body.parser.parse_errors.len())..]
+                    .to_vec();
+
             drop(bodies);
+            if let Some(sink) = &mut self.bx.captured_errors {
+                sink.extend(new_parse_errors);
+            }
             // Silence runtime errors during incremental eval — incomplete code
             // will inevitably produce errors that are meaningless until the
             // source is fully received.
