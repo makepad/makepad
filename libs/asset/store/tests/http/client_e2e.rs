@@ -95,6 +95,7 @@ fn real_client_full_stack_roundtrip() {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.alias = Some(AssetAlias::from_str("gen/e2e-neon").unwrap());
@@ -171,6 +172,7 @@ fn real_client_full_stack_roundtrip() {
             width: 512,
             height: 512,
             byte_len: game_thumb.len() as u64,
+            views: Vec::new(),
         },
         catalog_snapshot: None,
         search_algorithm_version: 1,
@@ -325,6 +327,7 @@ fn publish_retry_recovers_a_published_revision_missing_its_alias() {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.asset_id = Some(asset_id);

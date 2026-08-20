@@ -540,7 +540,7 @@ impl ImportManifest {
             kind: asset.kind,
             files: asset.files.iter().map(|f| f.file).collect(),
             dependencies: Vec::new(),
-            thumbnail: asset.thumbnail.as_ref().map(|t| t.meta),
+            thumbnail: asset.thumbnail.as_ref().map(|t| t.meta.clone()),
             metrics: asset.metrics,
             coordinate_system: asset.coordinate_system,
             bounds: asset.bounds,

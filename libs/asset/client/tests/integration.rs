@@ -878,6 +878,7 @@ fn publish_artifact_roundtrips_manifest_blobs_alias_and_annotation() {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         },
     );
     request.alias = Some(AssetAlias::from_str("gen/neon-drift").unwrap());
@@ -1857,6 +1858,7 @@ fn fixture_import() -> ImportManifest {
                     width: 512,
                     height: 512,
                     byte_len: preview.len() as u64,
+                    views: Vec::new(),
                 },
             }),
             metrics: Metrics {
@@ -1923,6 +1925,7 @@ fn fixture_thumb_variant(base: AssetRevisionRef) -> DerivedVariantManifest {
             width: 512,
             height: 512,
             byte_len: 450,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: 450,

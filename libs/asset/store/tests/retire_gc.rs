@@ -566,6 +566,7 @@ fn game_revisions_keep_their_own_bytes_alive() {
             width: 512,
             height: 512,
             byte_len: thumb.len() as u64,
+            views: Vec::new(),
         },
         catalog_snapshot: None,
         search_algorithm_version: 1,
