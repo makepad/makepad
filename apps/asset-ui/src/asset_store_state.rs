@@ -77,6 +77,75 @@ pub const SERVER_KINDS: [AssetKind; 13] = [
     AssetKind::Billboard,
 ];
 
+/// The structural labels an audio asset carries: what every importer writes
+/// as its CATEGORY for a track (`music`) or a one-shot (`sfx`). They are the
+/// reason the Kind picker can offer the split at all, and the reason the tag
+/// list must not repeat them — see [`KindChoice`].
+pub const AUDIO_SHELVES: [&str; 2] = ["music", "sfx"];
+
+/// One row of the Library's Kind picker.
+///
+/// Kinds come from the content contract, with ONE refinement: audio splits
+/// into music and sfx. A six-minute track and a door slam are different
+/// things to go looking for, every importer already writes which of the two
+/// it published, and the user asked for them separated *here* — in the
+/// structural picker — rather than as two rows in the free tag list, where
+/// they sat next to `bicep` and `unknownalbum` as if they were the same sort
+/// of fact. `Audio` itself stays as the parent row: an audio asset labelled
+/// neither would otherwise be unreachable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KindChoice {
+    /// No kind filter at all.
+    Any,
+    Kind(AssetKind),
+    /// [`AssetKind::Audio`] narrowed to one of [`AUDIO_SHELVES`].
+    AudioShelf(&'static str),
+}
+
+impl Default for KindChoice {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
+impl KindChoice {
+    /// Every row the picker offers, in order. Row 0 is "all kinds".
+    pub fn rows() -> Vec<KindChoice> {
+        let mut rows = vec![KindChoice::Any];
+        for kind in SERVER_KINDS {
+            rows.push(KindChoice::Kind(kind));
+            if kind == AssetKind::Audio {
+                rows.extend(AUDIO_SHELVES.map(KindChoice::AudioShelf));
+            }
+        }
+        rows
+    }
+
+    /// What the row reads as. The refinements are shown under their parent
+    /// so the picker still teaches the kind vocabulary.
+    pub fn row_text(&self) -> String {
+        match self {
+            KindChoice::Any => "all kinds".to_string(),
+            KindChoice::Kind(kind) => server_kind_label(*kind).to_string(),
+            KindChoice::AudioShelf(shelf) => format!("audio · {shelf}"),
+        }
+    }
+
+    /// The catalog query this row means: a kind, and the structural category
+    /// that narrows it.
+    pub fn query(&self) -> (Option<AssetKind>, Option<&'static str>) {
+        match self {
+            KindChoice::Any => (None, None),
+            KindChoice::Kind(kind) => (Some(*kind), None),
+            KindChoice::AudioShelf(shelf) => (Some(AssetKind::Audio), Some(shelf)),
+        }
+    }
+
+    pub fn is_any(&self) -> bool {
+        matches!(self, KindChoice::Any)
+    }
+}
+
 pub fn server_kind_label(kind: AssetKind) -> &'static str {
     match kind {
         AssetKind::Mesh => "mesh",
@@ -1167,11 +1236,14 @@ pub struct LibraryFilters {
     /// covers titles, categories and tags, so this reaches a label even
     /// before the facet row offers it.
     pub query: String,
-    /// Selected `AssetKind` label, or None for "all kinds".
-    pub kind: Option<String>,
-    /// Picked facet: which vocabulary it came from (the server filters
-    /// `category` and `tag` separately) and the label itself.
-    pub label: Option<(FacetKind, String)>,
+    /// Picked row of the Kind picker — a content-contract kind, or audio
+    /// narrowed to music/sfx.
+    pub kind: KindChoice,
+    /// Picked tag. ONE vocabulary as far as this app is concerned: the store
+    /// keeps two label kinds on the wire and the UI never mentions that
+    /// again, so this is a NAME. Which wire kind carries it is worked out
+    /// when the query is built, from the counted facets.
+    pub label: Option<String>,
 }
 
 /// One Library shelf name. Worlds (old `world` domain and new `map`) show
