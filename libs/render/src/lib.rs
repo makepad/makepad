@@ -9,6 +9,7 @@
 //! still draws a full world through [`Renderer::draw_scene_full`].
 
 pub mod ao;
+pub mod level;
 pub mod ao_atlas;
 pub mod ao_lightmapper;
 pub mod aobaker_port;
@@ -21,6 +22,7 @@ pub mod hud;
 pub mod light_grid;
 pub mod lightmap;
 pub mod model;
+pub mod player_nav;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;

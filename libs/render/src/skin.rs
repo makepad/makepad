@@ -48,6 +48,14 @@ impl Val {
             _ => &[],
         }
     }
+    /// An object's fields in file order — for `extras`, whose keys are
+    /// whatever the exporter chose to write.
+    pub(crate) fn obj(&self) -> &[(String, Val)] {
+        match self {
+            Val::Obj(fields) => fields,
+            _ => &[],
+        }
+    }
     pub(crate) fn f64(&self) -> Option<f64> {
         match self {
             Val::Num(n) => Some(*n),

@@ -61,6 +61,19 @@ pub struct StaticModel {
     /// Vertex COLOR_0 is a baked lightmap (Q3 worlds). The walk shader
     /// must not multiply the analytic sun on top or inward vaults go black.
     pub prelit: bool,
+    /// Rigid sub-meshes the game can drive between named states — doors,
+    /// lifts, gates. Empty for every model that carries no `extras.states`
+    /// node, which is every model that existed before this lane, so the
+    /// static stream and every derived product are byte-identical for them.
+    pub anim_parts: Vec<AnimPart>,
+    /// The map's sky surfaces, out of the static stream and drawn
+    /// direction-mapped. `None` for anything with no `extras.kind == "sky"`
+    /// node — again, every model that existed before this lane.
+    pub sky: Option<SkyPart>,
+    /// The metallic-roughness half of the material the merged single-layer
+    /// stream draws with — the counterpart of `texture_png`, read from the
+    /// same primitive. Split models carry theirs per [`StaticDrawLayer`].
+    pub pbr: PbrMaterial,
 }
 
 /// One textured subset of a [`StaticModel`]. Positions live in the packed
@@ -74,6 +87,406 @@ pub struct StaticDrawLayer {
     pub texture_png: Option<Vec<u8>>,
     pub detail_png: Option<Vec<u8>>,
     pub detail_scale: [f32; 2],
+    /// This layer's metallic-roughness half. The base-colour half is already
+    /// baked into the vertex tint (see the `baseColorFactor` read above).
+    pub pbr: PbrMaterial,
+}
+
+/// The metallic-roughness half of a glTF material, as the render lane reads
+/// it. The base-colour half never reaches here: `baseColorFactor` is folded
+/// into the vertex tint at parse time and `baseColorTexture` becomes the
+/// layer's atlas.
+///
+/// Defaults are the glTF ones — **1.0 metallic, 1.0 roughness** — which is
+/// deliberately NOT a sensible-looking material. A file that says nothing
+/// about its surface says "fully rough metal" per spec, and pretending
+/// otherwise here would silently disagree with every other glTF reader. What
+/// keeps that from wrecking the picture is [`PbrMaterial::is_shiny`], which
+/// is what actually routes a model onto the specular shader.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PbrMaterial {
+    /// glTF `pbrMetallicRoughness.metallicFactor`.
+    pub metallic: f32,
+    /// glTF `pbrMetallicRoughness.roughnessFactor`.
+    pub roughness: f32,
+    /// `pbrMetallicRoughness.metallicRoughnessTexture`, embedded in the BIN
+    /// chunk. glTF packs occlusion/roughness/metallic as R/G/B — the "ORM"
+    /// convention — and the factors multiply the sampled channels.
+    pub orm_png: Option<Vec<u8>>,
+}
+
+impl Default for PbrMaterial {
+    fn default() -> Self {
+        Self { metallic: 1.0, roughness: 1.0, orm_png: None }
+    }
+}
+
+impl PbrMaterial {
+    /// Does this material carry any SHININESS information?
+    ///
+    /// This is the routing question, not a physics one. Two facts about real
+    /// files decide it:
+    ///
+    /// * Almost every exporter writes the glTF defaults verbatim, so
+    ///   `metallic 1 / roughness 1` is overwhelmingly "the author said
+    ///   nothing", not "this is a rough steel ball". 4607 of the GLBs in this
+    ///   checkout say exactly that. Shading them as metal would delete their
+    ///   diffuse colour and, with no environment map to reflect, leave them
+    ///   near black — a far worse lie than the matte look they have today.
+    /// * A roughness BELOW 1, or a metallic-roughness texture, is something
+    ///   an author had to type. That is the signal.
+    ///
+    /// So: a map, or a roughness the file actually narrowed. Everything else
+    /// keeps the existing diffuse shader, unchanged.
+    pub fn is_shiny(&self) -> bool {
+        self.orm_png.is_some() || self.roughness < 0.99
+    }
+}
+
+/// Sampled rigid keyframes for one animated node: the node's ABSOLUTE local
+/// TRS at each key time, in the node's own parent space.
+///
+/// glTF stores one sampler per animated channel, each with its own time grid.
+/// Merging them into a single list of absolute poses is what lets the runtime
+/// ask "where is this part at t" without carrying a channel evaluator: the
+/// merge samples every channel at the UNION of their key times, so a LINEAR
+/// clip is reproduced exactly at every authored key and interpolates linearly
+/// between them, which is what the sampled form does too.
+#[derive(Clone, Default)]
+pub struct RigidClip {
+    /// Key times in seconds, ascending. Empty = no clip (part never moves).
+    pub times: Vec<f32>,
+    /// One absolute local TRS per entry in `times`.
+    pub keys: Vec<NodeTrs>,
+}
+
+impl RigidClip {
+    /// The clip's end time. 0 for an empty clip.
+    pub fn duration(&self) -> f32 {
+        self.times.last().copied().unwrap_or(0.0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The pose at `t`, clamped to the clip's ends. Translation and scale
+    /// lerp; rotation nlerps on the shorter arc — the same interpolation the
+    /// skinned lane uses, so a rigid part and a bone agree.
+    pub fn sample(&self, t: f32) -> NodeTrs {
+        if self.keys.is_empty() {
+            return NodeTrs::default();
+        }
+        let (k0, k1, f) = match self.times.iter().position(|kt| *kt > t) {
+            Some(0) => (0, 0, 0.0),
+            None => (self.times.len() - 1, self.times.len() - 1, 0.0),
+            Some(k) => {
+                let (t0, t1) = (self.times[k - 1], self.times[k]);
+                let span = t1 - t0;
+                (k - 1, k, if span > 0.0 { (t - t0) / span } else { 0.0 })
+            }
+        };
+        let (a, b) = (self.keys[k0], self.keys[k1]);
+        let lerp3 = |x: Vec3f, y: Vec3f| Vec3f {
+            x: x.x + (y.x - x.x) * f,
+            y: x.y + (y.y - x.y) * f,
+            z: x.z + (y.z - x.z) * f,
+        };
+        NodeTrs {
+            t: lerp3(a.t, b.t),
+            s: lerp3(a.s, b.s),
+            r: quat_nlerp(a.r, b.r, f),
+        }
+    }
+}
+
+/// Normalised lerp on the shorter arc. Local copy of the skinned lane's
+/// `nlerp` (private there) so the rigid path does not depend on it.
+fn quat_nlerp(a: Quat, mut b: Quat, f: f32) -> Quat {
+    if a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0 {
+        b = Quat { x: -b.x, y: -b.y, z: -b.z, w: -b.w };
+    }
+    let q = Quat {
+        x: a.x + (b.x - a.x) * f,
+        y: a.y + (b.y - a.y) * f,
+        z: a.z + (b.z - a.z) * f,
+        w: a.w + (b.w - a.w) * f,
+    };
+    let len = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
+    if len > 1.0e-8 {
+        Quat { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len }
+    } else {
+        a
+    }
+}
+
+/// One rigid, game-triggerable sub-mesh of a [`StaticModel`] — a door, a
+/// lift, a gate.
+///
+/// # The GLB contract
+///
+/// A node becomes an anim part when BOTH hold:
+/// * its `extras` carry a `states` array of names (`["closed","open"]`), and
+/// * one glTF animation named EXACTLY like the node drives that node with a
+///   `translation`, `rotation` or `scale` channel.
+///
+/// Everything else in the file flattens into the static stream as before, so
+/// a file with no such node parses byte-identically to one parsed before this
+/// existed. The node's own rest transform in the file is the pose the model
+/// shows when nothing has been triggered; `extras.default` names which state
+/// that is. State *i* maps to key time `times[i]` when the clip has one key
+/// per state (the importer's shape: t=0 closed, t=end open), else to an even
+/// spread over the clip.
+///
+/// # Spaces
+///
+/// `vertices` are in the ANIMATED NODE's own local space, so the part's model
+/// -space matrix at clip time `t` is [`AnimPart::transform_at`] — the node's
+/// parent chain times the sampled TRS. A placed instance draws it at
+/// `instance.transform * transform_at(t)`.
+pub struct AnimPart {
+    /// The glTF node name — the handle the game triggers by (`door_1`).
+    pub name: String,
+    /// State names in clip order, from `extras.states`.
+    pub states: Vec<String>,
+    /// Index into `states` of `extras.default`; 0 when unnamed.
+    pub default: usize,
+    /// `extras.kind` verbatim (`door`), for a game that groups by behaviour.
+    pub kind: Option<String>,
+    /// Every other NUMERIC field of the node's `extras`, verbatim.
+    pub numbers: BTreeMap<String, f32>,
+    /// Every other STRING field of the node's `extras`, verbatim (`axis`).
+    pub strings: BTreeMap<String, String>,
+    /// Model-space matrix of everything ABOVE the animated node.
+    pub parent: Mat4f,
+    /// The node's authored rest TRS — the default pose, used when the clip
+    /// is missing or a state cannot be resolved.
+    pub rest: NodeTrs,
+    pub clip: RigidClip,
+    /// Packed `MODEL_VERTEX_FLOATS` vertices in node-local space. Same layout
+    /// as [`StaticModel::vertices`]; the AO lanes are neutral (parts move, so
+    /// nothing bakes them).
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+    /// One entry per distinct texture, always at least one — the part draws
+    /// through exactly the same layer machinery as the static stream.
+    pub layers: Vec<StaticDrawLayer>,
+    /// Node-local bounds of `vertices`.
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+impl AnimPart {
+    pub fn duration(&self) -> f32 {
+        self.clip.duration()
+    }
+
+    pub fn state_index(&self, name: &str) -> Option<usize> {
+        self.states.iter().position(|s| s == name)
+    }
+
+    /// Clip time of state `i`. One key per state maps 1:1 (the importer's
+    /// shape); anything else spreads the states evenly over the clip.
+    pub fn state_time(&self, state: usize) -> f32 {
+        let last = self.states.len().saturating_sub(1);
+        let i = state.min(last);
+        if self.clip.times.len() == self.states.len() {
+            return self.clip.times[i];
+        }
+        if last == 0 {
+            return 0.0;
+        }
+        self.duration() * (i as f32 / last as f32)
+    }
+
+    /// The part's model-space matrix at clip time `t`.
+    pub fn transform_at(&self, t: f32) -> Mat4f {
+        let trs = if self.clip.is_empty() {
+            self.rest
+        } else {
+            self.clip.sample(t)
+        };
+        Mat4f::mul(&self.parent, &trs_to_mat4(&trs))
+    }
+
+    /// The authored rest pose's model-space matrix.
+    pub fn rest_transform(&self) -> Mat4f {
+        Mat4f::mul(&self.parent, &trs_to_mat4(&self.rest))
+    }
+
+    /// Node-local collider boxes. A door is a slab, so the voxel pass usually
+    /// answers with one or two boxes; a degenerate part falls back to its own
+    /// AABB, which is never worse than nothing to collide with.
+    pub fn collider_boxes(&self) -> Vec<(Vec3f, Vec3f)> {
+        let boxes = voxel_boxes(&self.vertices, &self.indices, self.min, self.max);
+        if boxes.is_empty() {
+            vec![(self.min, self.max)]
+        } else {
+            boxes
+        }
+    }
+}
+
+/// How a sky surface's texture is addressed from a view ray.
+///
+/// The projection is the ENGINE the map came from, not a style knob: Doom
+/// wraps a 256x128 strip four times around the compass, Quake counter-scrolls
+/// two flattened-dome layers, Q3 authored a full environment. Each needs its
+/// own direction-to-uv map, and getting it wrong reads instantly as a wrong
+/// sky rather than as a subtle difference.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SkyProjection {
+    /// `cylinder` — Doom/Duke: yaw wraps `repeat` times, pitch maps over the
+    /// visible band and clamps at both ends.
+    Cylinder,
+    /// `quake_scroll` — two layers over Quake's 3x-stretched dome, scrolling
+    /// at their own speeds; the front layer's alpha keys the back one through.
+    QuakeScroll,
+    /// `cube` — Q3-style full environment, sampled as its EQUIRECT twin (see
+    /// [`SkyPart::images`]).
+    Cube,
+}
+
+impl SkyProjection {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "cylinder" => Some(Self::Cylinder),
+            "quake_scroll" => Some(Self::QuakeScroll),
+            "cube" => Some(Self::Cube),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cylinder => "cylinder",
+            Self::QuakeScroll => "quake_scroll",
+            Self::Cube => "cube",
+        }
+    }
+
+    /// The value the shader branches on (`sky_p.x`).
+    pub fn code(&self) -> f32 {
+        match self {
+            Self::Cylinder => 1.0,
+            Self::QuakeScroll => 2.0,
+            Self::Cube => 3.0,
+        }
+    }
+}
+
+/// Doom's sky covers a fixed band of pitch rather than the whole hemisphere;
+/// this is how much of a half-turn the texture's height spans. 0.5 puts the
+/// top of the image at +45 degrees and the bottom at -45, which is the classic
+/// look — a sky that fills the hemisphere reads as a flat ceiling.
+pub const SKY_DEFAULT_V_SPAN: f32 = 0.5;
+
+/// The map's sky surfaces: the faces the engine drew as "look through here",
+/// kept out of the static stream and drawn direction-mapped instead.
+///
+/// # The GLB contract
+///
+/// A node counts as sky when its `extras.kind == "sky"`, or when it is NAMED
+/// `sky` and carries an `extras.projection`. Its extras are:
+///
+/// * `projection`: `"cylinder"` | `"quake_scroll"` | `"cube"` (required — an
+///   unknown value is ignored and the faces stay ordinary geometry, so a
+///   newer importer never paints a wrong sky on an older engine).
+/// * `repeat`: how many times the image wraps per 360 degrees (Doom: 4).
+/// * `texture`: the source lump name (`SKY1`), carried for reporting only.
+/// * `speeds`: scroll speed per layer, texture units per second
+///   (`quake_scroll`: back then front, Quake's own 8 and 16).
+/// * `v_span`: optional override of [`SKY_DEFAULT_V_SPAN`].
+///
+/// Every sky node in the file merges into ONE part (a map has many sky
+/// brushes but one sky); the first node carrying a valid projection sets the
+/// parameters.
+pub struct SkyPart {
+    pub projection: SkyProjection,
+    /// Layer images as embedded PNG bytes, in layer order: `[cylinder]` and
+    /// `[cube]` use image 0 alone, `quake_scroll` uses 0 as the back layer
+    /// and 1 as the keyed front layer.
+    ///
+    /// Order comes from `extras.layers` (glTF TEXTURE indices) when present,
+    /// else from the node's primitives' materials in primitive order. Six
+    /// cube FACES are not sampled as a cubemap — the importer's equirect
+    /// twin is what `Cube` reads, because the shader language here has no
+    /// cube sampler and six bindings would cost every sky fragment.
+    pub images: Vec<Vec<u8>>,
+    pub repeat: f32,
+    pub speeds: Vec<f32>,
+    /// Static horizontal phase, texture units. The compass angle a map calls
+    /// north is the engine's business, not this renderer's — without a knob
+    /// the whole sky would be rotated and only the importer could tell.
+    pub offset: f32,
+    pub texture: Option<String>,
+    pub v_span: f32,
+    /// Packed `MODEL_VERTEX_FLOATS` vertices in MODEL space (the node
+    /// transforms are baked in — sky faces never move).
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+impl SkyPart {
+    /// Horizontal offset of layer `i` at `time` seconds, in texture units:
+    /// the map's static phase plus however far that layer has scrolled.
+    pub fn scroll(&self, layer: usize, time: f32) -> f32 {
+        self.offset + self.speeds.get(layer).copied().unwrap_or(0.0) * time
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// Where a view ray lands in layer `layer`'s image — the CPU twin of
+    /// `DrawSceneSkyMap`'s pixel stage, expression for expression.
+    ///
+    /// The shader is the one that runs; this exists because the mapping is
+    /// the part that can be silently WRONG (a repeat count, a stretch, a
+    /// hemisphere flip all still render a sky), and a GPU cannot be asked
+    /// about it in a unit test. It also gives a CPU preview the same sky.
+    ///
+    /// `dir` need not be normalised. Returns uv in texture space, before
+    /// wrapping — the sampler repeats.
+    pub fn direction_uv(&self, dir: Vec3f, layer: usize, time: f32) -> [f32; 2] {
+        let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+        let d = if len > 1.0e-8 {
+            Vec3f { x: dir.x / len, y: dir.y / len, z: dir.z / len }
+        } else {
+            Vec3f { x: 0.0, y: 0.0, z: 1.0 }
+        };
+        const INV_TAU: f32 = 0.159_154_94;
+        const INV_PI: f32 = 0.318_309_89;
+        match self.projection {
+            SkyProjection::Cylinder => {
+                let u = d.x.atan2(d.z) * INV_TAU * self.repeat + self.scroll(layer, time);
+                let pitch = d.y.clamp(-1.0, 1.0).asin();
+                let v = (0.5 - pitch * INV_PI / self.v_span.max(0.001)).clamp(0.0, 1.0);
+                [u, v]
+            }
+            SkyProjection::QuakeScroll => {
+                let stretched = Vec3f { x: d.x, y: d.y * 3.0, z: d.z };
+                let l = 378.0
+                    / (stretched.x * stretched.x
+                        + stretched.y * stretched.y
+                        + stretched.z * stretched.z)
+                        .sqrt()
+                        .max(0.0001);
+                let scroll = self.scroll(layer, time);
+                [
+                    (scroll + stretched.x * l) * 0.007_812_5,
+                    (scroll + stretched.z * l) * 0.007_812_5,
+                ]
+            }
+            SkyProjection::Cube => {
+                let u = d.x.atan2(d.z) * INV_TAU + 0.5 + self.scroll(layer, time);
+                let v = (d.y.clamp(-1.0, 1.0).acos() * INV_PI).clamp(0.001, 0.999);
+                [u, v]
+            }
+        }
+    }
 }
 
 /// Boxes below this fraction of the model's largest dimension are decoration
@@ -158,9 +571,24 @@ impl StaticModel {
     /// greedily merges filled cells into boxes: legs, decks, walls and
     /// openings all come out where the art put them.
     pub fn voxel_collider_boxes(&self) -> Vec<(Vec3f, Vec3f)> {
-        let size = self.max - self.min;
+        voxel_boxes(&self.vertices, &self.indices, self.min, self.max)
+    }
+}
+
+/// [`StaticModel::voxel_collider_boxes`] over any packed stream — the model's
+/// own, or one [`AnimPart`]'s. Free-standing because a door is collided with
+/// exactly like a wall, and duplicating the voxelizer for it would let the
+/// two drift.
+pub(crate) fn voxel_boxes(
+    vertices: &[f32],
+    indices: &[u32],
+    min: Vec3f,
+    max: Vec3f,
+) -> Vec<(Vec3f, Vec3f)> {
+    {
+        let size = max - min;
         let span = size.x.max(size.y).max(size.z);
-        if span <= 0.0 || self.indices.len() < 3 {
+        if span <= 0.0 || indices.len() < 3 {
             return Vec::new();
         }
         // ~24 cells across the longest side resolves a stair step and keeps a
@@ -187,12 +615,12 @@ impl StaticModel {
         let vp = |i: u32| {
             let o = i as usize * MODEL_VERTEX_FLOATS;
             Vec3f {
-                x: self.vertices[o],
-                y: self.vertices[o + 1],
-                z: self.vertices[o + 2],
+                x: vertices[o],
+                y: vertices[o + 1],
+                z: vertices[o + 2],
             }
         };
-        for tri in self.indices.chunks_exact(3) {
+        for tri in indices.chunks_exact(3) {
             let (a, b, c) = (vp(tri[0]), vp(tri[1]), vp(tri[2]));
             let tlo = vec3f(
                 a.x.min(b.x).min(c.x),
@@ -209,16 +637,16 @@ impl StaticModel {
                 let e = (((hi - min) / cw).ceil() as isize).clamp(1, n as isize) as usize;
                 (s, e)
             };
-            let (x0, x1) = cell_range(tlo.x, thi.x, self.min.x, cs[0], dims[0]);
-            let (y0, y1) = cell_range(tlo.y, thi.y, self.min.y, cs[1], dims[1]);
-            let (z0, z1) = cell_range(tlo.z, thi.z, self.min.z, cs[2], dims[2]);
+            let (x0, x1) = cell_range(tlo.x, thi.x, min.x, cs[0], dims[0]);
+            let (y0, y1) = cell_range(tlo.y, thi.y, min.y, cs[1], dims[1]);
+            let (z0, z1) = cell_range(tlo.z, thi.z, min.z, cs[2], dims[2]);
             for zi in z0..z1 {
                 for yi in y0..y1 {
                     for xi in x0..x1 {
                         let centre = vec3f(
-                            self.min.x + (xi as f32 + 0.5) * cs[0],
-                            self.min.y + (yi as f32 + 0.5) * cs[1],
-                            self.min.z + (zi as f32 + 0.5) * cs[2],
+                            min.x + (xi as f32 + 0.5) * cs[0],
+                            min.y + (yi as f32 + 0.5) * cs[1],
+                            min.z + (zi as f32 + 0.5) * cs[2],
                         );
                         let half = vec3f(cs[0] * 0.5, cs[1] * 0.5, cs[2] * 0.5);
                         if !tri_box_overlap(centre, half, a, b, c) {
@@ -334,7 +762,9 @@ impl StaticModel {
         }
         out
     }
+}
 
+impl StaticModel {
     pub fn collider_parts(&self) -> Vec<(Vec3f, Vec3f)> {
         let span = (self.max.x - self.min.x)
             .max(self.max.y - self.min.y)
@@ -518,6 +948,53 @@ impl StaticModel {
             m
         };
 
+        // Animatable nodes (see [`AnimPart`]): their geometry leaves the
+        // static stream and becomes a rigid part the game drives. An ordinary
+        // file has none, and then every line below behaves as it always did.
+        let anim_defs = collect_anim_nodes(&json, &acc, node_vals, &rests)?;
+        // Nearest animated ancestor-or-self per node, so a door authored as a
+        // group with child meshes moves whole.
+        let anim_owner: Vec<Option<usize>> = if anim_defs.is_empty() {
+            Vec::new()
+        } else {
+            (0..node_vals.len())
+                .map(|n| {
+                    let mut at = Some(n);
+                    while let Some(i) = at {
+                        if let Some(k) = anim_defs.iter().position(|d| d.node == i) {
+                            return Some(k);
+                        }
+                        at = parents[i];
+                    }
+                    None
+                })
+                .collect()
+        };
+
+        // Sky surfaces (see [`SkyPart`]) leave the static stream the same
+        // way, and for the same reason: they are shaded by view direction,
+        // not by the world's light. A node under a sky node inherits it.
+        let sky_marked: Vec<bool> = node_vals
+            .iter()
+            .map(|n| sky_projection_of(n).is_some())
+            .collect();
+        let sky_owner: Vec<bool> = if sky_marked.iter().any(|m| *m) {
+            (0..node_vals.len())
+                .map(|n| {
+                    let mut at = Some(n);
+                    while let Some(i) = at {
+                        if sky_marked[i] {
+                            return true;
+                        }
+                        at = parents[i];
+                    }
+                    false
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let mut vertices: Vec<f32> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
         let mut min = Vec3f {
@@ -546,6 +1023,13 @@ impl StaticModel {
             let Some(mesh_index) = n.get("mesh").and_then(Val::usize) else {
                 continue;
             };
+            // Geometry under an animated node is that part's, not the level's,
+            // and geometry under a sky node is the sky's.
+            if anim_owner.get(node_index).copied().flatten().is_some()
+                || sky_owner.get(node_index).copied().unwrap_or(false)
+            {
+                continue;
+            }
             let world = world_of(node_index);
             let mesh = json
                 .get("meshes")
@@ -607,6 +1091,7 @@ impl StaticModel {
                 let count = pos.len() / 3;
                 let prim_image = gltf_prim_image_index(&json, prim);
                 let (detail_image, detail_scale) = gltf_prim_detail(&json, prim);
+                let prim_pbr = gltf_prim_pbr(&json, prim);
                 let prim_v0 = vert_total;
                 let prim_i0 = indices.len();
                 // Mirrored node (negative determinant): a plain direction
@@ -722,6 +1207,9 @@ impl StaticModel {
                         image: prim_image,
                         detail_image,
                         detail_scale,
+                        metallic: prim_pbr.0,
+                        roughness: prim_pbr.1,
+                        orm_image: prim_pbr.2,
                         v0: prim_v0,
                         v1: vert_total,
                         i0: prim_i0,
@@ -730,7 +1218,55 @@ impl StaticModel {
                 }
             }
         }
-        if vertices.is_empty() {
+        let anim_parts = if anim_defs.is_empty() {
+            Vec::new()
+        } else {
+            build_anim_parts(
+                &json, &acc, bin_chunk, node_vals, &rests, &parents, anim_defs, &anim_owner,
+            )?
+        };
+        let sky = if sky_owner.is_empty() {
+            None
+        } else {
+            build_sky_part(&json, &acc, bin_chunk, node_vals, &rests, &parents, &sky_owner)?
+        };
+        // The parts belong to the model's silhouette even though they are not
+        // in its stream: bounds drive frustum culling and ground placement,
+        // and a door culled with the room behind it pops. EVERY pose of the
+        // clip counts, not just the rest one — the bounds have to hold while
+        // the part is moving, which is the only time anyone is looking.
+        for part in &anim_parts {
+            let poses: Vec<Mat4f> = std::iter::once(part.rest_transform())
+                .chain(part.clip.times.iter().map(|t| part.transform_at(*t)))
+                .collect();
+            for m in &poses {
+                for cx in [part.min.x, part.max.x] {
+                    for cy in [part.min.y, part.max.y] {
+                        for cz in [part.min.z, part.max.z] {
+                            let p = mat4_mul_point(m, Vec3f { x: cx, y: cy, z: cz });
+                            min.x = min.x.min(p.x);
+                            min.y = min.y.min(p.y);
+                            min.z = min.z.min(p.z);
+                            max.x = max.x.max(p.x);
+                            max.y = max.y.max(p.y);
+                            max.z = max.z.max(p.z);
+                        }
+                    }
+                }
+            }
+        }
+        // Sky faces are part of the model's silhouette too — they are the
+        // furthest thing in the level, so culling them with wrong bounds
+        // punches a hole straight through to the clear colour.
+        if let Some(s) = &sky {
+            min.x = min.x.min(s.min.x);
+            min.y = min.y.min(s.min.y);
+            min.z = min.z.min(s.min.z);
+            max.x = max.x.max(s.max.x);
+            max.y = max.y.max(s.max.y);
+            max.z = max.z.max(s.max.z);
+        }
+        if vertices.is_empty() && anim_parts.is_empty() && sky.is_none() {
             return Err("no mesh primitives found".into());
         }
 
@@ -841,6 +1377,7 @@ impl StaticModel {
         };
         let (detail_png, detail_scale) = first_detail_layer(&draw_layers, &prim_spans, &json, bin_chunk);
         let prelit = materials_have_lightmap(&json);
+        let pbr = model_level_pbr(&prim_spans, &json, bin_chunk);
 
         Ok(StaticModel {
             vertices,
@@ -855,6 +1392,9 @@ impl StaticModel {
             detail_png,
             detail_scale,
             prelit,
+            anim_parts,
+            sky,
+            pbr,
         })
     }
 }
@@ -864,10 +1404,771 @@ struct PrimSpan {
     image: usize,
     detail_image: Option<usize>,
     detail_scale: [f32; 2],
+    /// This primitive's metallic/roughness factors and ORM image index. The
+    /// index rather than the bytes: spans are cloned per primitive and a
+    /// 2048² ORM PNG copied per span would dwarf the geometry.
+    metallic: f32,
+    roughness: f32,
+    orm_image: Option<usize>,
     v0: usize,
     v1: usize,
     i0: usize,
     i1: usize,
+}
+
+impl PrimSpan {
+    /// Resolve this span's material, pulling the ORM bytes out of the BIN
+    /// chunk once (see [`PbrMaterial`]).
+    fn pbr(&self, json: &Val, bin: &[u8]) -> PbrMaterial {
+        PbrMaterial {
+            metallic: self.metallic,
+            roughness: self.roughness,
+            orm_png: self.orm_image.and_then(|i| gltf_embedded_png(json, bin, i)),
+        }
+    }
+
+    /// Is this span shiny WITHOUT decoding the ORM bytes? Same rule as
+    /// [`PbrMaterial::is_shiny`]; used by the layer key, which runs per span.
+    fn is_shiny(&self) -> bool {
+        self.orm_image.is_some() || self.roughness < 0.99
+    }
+}
+
+/// A primitive's metallic/roughness factors and ORM image index.
+///
+/// glTF says both factors default to 1.0 when `pbrMetallicRoughness` is
+/// present but the field is not, and the whole block defaults to the same
+/// when the material omits it. Both cases land on 1.0/1.0 here.
+fn gltf_prim_pbr(json: &Val, prim: &Val) -> (f32, f32, Option<usize>) {
+    let pbr = prim
+        .get("material")
+        .and_then(Val::usize)
+        .and_then(|mi| json.get("materials").and_then(|m| m.idx(mi)))
+        .and_then(|m| m.get("pbrMetallicRoughness"));
+    let Some(pbr) = pbr else {
+        return (1.0, 1.0, None);
+    };
+    let metallic = pbr
+        .get("metallicFactor")
+        .and_then(Val::f64)
+        .unwrap_or(1.0) as f32;
+    let roughness = pbr
+        .get("roughnessFactor")
+        .and_then(Val::f64)
+        .unwrap_or(1.0) as f32;
+    let orm = pbr
+        .get("metallicRoughnessTexture")
+        .and_then(|t| t.get("index"))
+        .and_then(Val::usize)
+        .and_then(|ti| {
+            json.get("textures")
+                .and_then(|t| t.idx(ti))
+                .and_then(|t| t.get("source"))
+                .and_then(Val::usize)
+        });
+    (metallic.clamp(0.0, 1.0), roughness.clamp(0.0, 1.0), orm)
+}
+
+/// The material of the merged single-layer stream: the first primitive's,
+/// falling back to `materials[0]` for a model with no spans at all. This is
+/// the same choice `texture_png` makes for the base-colour image, so the two
+/// halves of one material never come from two different materials.
+fn model_level_pbr(spans: &[PrimSpan], json: &Val, bin: &[u8]) -> PbrMaterial {
+    if let Some(span) = spans.first() {
+        return span.pbr(json, bin);
+    }
+    let fake = json.get("materials").and_then(|m| m.idx(0));
+    let Some(mat) = fake else {
+        return PbrMaterial::default();
+    };
+    // No primitive to ask, so read materials[0] directly through the same
+    // shape gltf_prim_pbr uses.
+    let Some(pbr) = mat.get("pbrMetallicRoughness") else {
+        return PbrMaterial::default();
+    };
+    PbrMaterial {
+        metallic: (pbr.get("metallicFactor").and_then(Val::f64).unwrap_or(1.0) as f32)
+            .clamp(0.0, 1.0),
+        roughness: (pbr.get("roughnessFactor").and_then(Val::f64).unwrap_or(1.0) as f32)
+            .clamp(0.0, 1.0),
+        orm_png: pbr
+            .get("metallicRoughnessTexture")
+            .and_then(|t| t.get("index"))
+            .and_then(Val::usize)
+            .and_then(|ti| {
+                json.get("textures")
+                    .and_then(|t| t.idx(ti))
+                    .and_then(|t| t.get("source"))
+                    .and_then(Val::usize)
+            })
+            .and_then(|i| gltf_embedded_png(json, bin, i)),
+    }
+}
+
+// ------------------------------------------------------- animated nodes
+
+/// One node the file marks as animatable, with its clip already sampled.
+struct AnimNodeDef {
+    node: usize,
+    name: String,
+    states: Vec<String>,
+    default: usize,
+    kind: Option<String>,
+    numbers: BTreeMap<String, f32>,
+    strings: BTreeMap<String, String>,
+    clip: RigidClip,
+}
+
+/// A node's model-space matrix from the rest transforms alone.
+fn node_world(mut node: usize, parents: &[Option<usize>], rests: &[NodeTrs]) -> Mat4f {
+    let mut chain = vec![node];
+    while let Some(p) = parents[node] {
+        chain.push(p);
+        node = p;
+    }
+    let mut m = Mat4f::identity();
+    for idx in chain.iter().rev() {
+        m = Mat4f::mul(&m, &trs_to_mat4(&rests[*idx]));
+    }
+    m
+}
+
+/// `node`'s transform RELATIVE to `owner` (identity when they are the same),
+/// i.e. everything strictly below the animated node — the part carries it
+/// baked into its vertices, because only the animated node itself moves.
+fn node_local_under(
+    node: usize,
+    owner: usize,
+    parents: &[Option<usize>],
+    rests: &[NodeTrs],
+) -> Mat4f {
+    let mut chain = Vec::new();
+    let mut at = node;
+    while at != owner {
+        chain.push(at);
+        match parents[at] {
+            Some(p) => at = p,
+            None => break,
+        }
+    }
+    let mut m = Mat4f::identity();
+    for idx in chain.iter().rev() {
+        m = Mat4f::mul(&m, &trs_to_mat4(&rests[*idx]));
+    }
+    m
+}
+
+/// One glTF sampler channel, sampled onto `trs` at time `t`. Same key-pair
+/// straddle and interpolation as the skinned lane's `Channel::apply_at`.
+fn apply_rigid_channel(path: u8, times: &[f32], values: &[f32], t: f32, trs: &mut NodeTrs) {
+    if times.is_empty() {
+        return;
+    }
+    let (k0, k1, f) = match times.iter().position(|kt| *kt > t) {
+        Some(0) => (0, 0, 0.0),
+        None => (times.len() - 1, times.len() - 1, 0.0),
+        Some(k) => {
+            let (t0, t1) = (times[k - 1], times[k]);
+            let span = t1 - t0;
+            (k - 1, k, if span > 0.0 { (t - t0) / span } else { 0.0 })
+        }
+    };
+    let lanes = if path == 1 { 4 } else { 3 };
+    let get = |k: usize, lane: usize| values.get(k * lanes + lane).copied().unwrap_or(0.0);
+    match path {
+        1 => {
+            let q = |k: usize| Quat {
+                x: get(k, 0),
+                y: get(k, 1),
+                z: get(k, 2),
+                w: values.get(k * 4 + 3).copied().unwrap_or(1.0),
+            };
+            trs.r = quat_nlerp(q(k0), q(k1), f);
+        }
+        _ => {
+            let v = Vec3f {
+                x: get(k0, 0) + (get(k1, 0) - get(k0, 0)) * f,
+                y: get(k0, 1) + (get(k1, 1) - get(k0, 1)) * f,
+                z: get(k0, 2) + (get(k1, 2) - get(k0, 2)) * f,
+            };
+            if path == 0 {
+                trs.t = v;
+            } else {
+                trs.s = v;
+            }
+        }
+    }
+}
+
+/// The clip named exactly like `name` that drives `node`, sampled at the
+/// union of its channels' key times.
+///
+/// The same-name rule is the whole recognition test on the animation side:
+/// an unrelated clip (a spinning fan, an idle) never captures a node, so a
+/// file the importer did not author for this lane behaves as it always did.
+fn sampled_node_clip(
+    json: &Val,
+    acc: &Accessors,
+    name: &str,
+    node: usize,
+    rest: NodeTrs,
+) -> Result<Option<RigidClip>, String> {
+    for a in json.get("animations").map(|a| a.arr()).unwrap_or(&[]) {
+        if a.get("name").and_then(Val::str) != Some(name) {
+            continue;
+        }
+        let samplers = a.get("samplers").map(|s| s.arr()).unwrap_or(&[]);
+        let mut chans: Vec<(u8, Vec<f32>, Vec<f32>)> = Vec::new();
+        for ch in a.get("channels").map(|c| c.arr()).unwrap_or(&[]) {
+            let Some(target) = ch.get("target") else {
+                continue;
+            };
+            if target.get("node").and_then(Val::usize) != Some(node) {
+                continue;
+            }
+            let path = match target.get("path").and_then(Val::str) {
+                Some("translation") => 0u8,
+                Some("rotation") => 1,
+                Some("scale") => 2,
+                // Morph weights are not a rigid motion; nothing to drive.
+                _ => continue,
+            };
+            let Some(si) = ch.get("sampler").and_then(Val::usize) else {
+                continue;
+            };
+            let Some(s) = samplers.get(si) else { continue };
+            let Some(input) = s.get("input").and_then(Val::usize) else {
+                continue;
+            };
+            let Some(output) = s.get("output").and_then(Val::usize) else {
+                continue;
+            };
+            let (times, _) = acc.read_f32(input)?;
+            let (values, _) = acc.read_f32(output)?;
+            if times.is_empty() {
+                continue;
+            }
+            chans.push((path, times, values));
+        }
+        if chans.is_empty() {
+            continue;
+        }
+        let mut times: Vec<f32> = chans.iter().flat_map(|c| c.1.iter().copied()).collect();
+        times.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        times.dedup();
+        let keys = times
+            .iter()
+            .map(|t| {
+                let mut trs = rest;
+                for (path, ts, vs) in &chans {
+                    apply_rigid_channel(*path, ts, vs, *t, &mut trs);
+                }
+                trs
+            })
+            .collect();
+        return Ok(Some(RigidClip { times, keys }));
+    }
+    Ok(None)
+}
+
+/// Nodes carrying `extras.states` AND a same-named clip. Anything else —
+/// unknown extras, unnamed clips, a single state — is not an anim node and
+/// flattens into the static stream exactly as before.
+fn collect_anim_nodes(
+    json: &Val,
+    acc: &Accessors,
+    node_vals: &[Val],
+    rests: &[NodeTrs],
+) -> Result<Vec<AnimNodeDef>, String> {
+    let mut out = Vec::new();
+    for (ni, n) in node_vals.iter().enumerate() {
+        let Some(extras) = n.get("extras") else {
+            continue;
+        };
+        let Some(states_val) = extras.get("states") else {
+            continue;
+        };
+        let states: Vec<String> = states_val
+            .arr()
+            .iter()
+            .filter_map(|v| v.str().map(str::to_string))
+            .collect();
+        // One state is a pose, not an animation.
+        if states.len() < 2 {
+            continue;
+        }
+        let Some(name) = n.get("name").and_then(Val::str) else {
+            continue;
+        };
+        let name = name.to_string();
+        let Some(clip) = sampled_node_clip(json, acc, &name, ni, rests[ni])? else {
+            continue;
+        };
+        let default = extras
+            .get("default")
+            .and_then(Val::str)
+            .and_then(|d| states.iter().position(|s| s == d))
+            .unwrap_or(0);
+        let kind = extras.get("kind").and_then(Val::str).map(str::to_string);
+        let mut numbers = BTreeMap::new();
+        let mut strings = BTreeMap::new();
+        for (key, value) in extras.obj() {
+            if matches!(key.as_str(), "states" | "default" | "kind") {
+                continue;
+            }
+            match value {
+                Val::Num(v) => {
+                    numbers.insert(key.clone(), *v as f32);
+                }
+                Val::Str(v) => {
+                    strings.insert(key.clone(), v.clone());
+                }
+                _ => {}
+            }
+        }
+        out.push(AnimNodeDef {
+            node: ni,
+            name,
+            states,
+            default,
+            kind,
+            numbers,
+            strings,
+            clip,
+        });
+    }
+    Ok(out)
+}
+
+/// One sub-mesh under construction: the packed stream plus the per-primitive
+/// spans a texture split needs. Shared by the anim-part and sky lanes, which
+/// pack geometry the same way and differ only in what they do with it.
+struct PartStream {
+    vertices: Vec<f32>,
+    indices: Vec<u32>,
+    uvs: Vec<[f32; 2]>,
+    spans: Vec<PrimSpan>,
+    vert_total: usize,
+    min: Vec3f,
+    max: Vec3f,
+}
+
+impl PartStream {
+    fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            uvs: Vec::new(),
+            spans: Vec::new(),
+            vert_total: 0,
+            min: Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX },
+            max: Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN },
+        }
+    }
+
+    fn is_drawable(&self) -> bool {
+        !self.vertices.is_empty() && self.indices.len() >= 3
+    }
+
+    /// The stream's draw layers, guaranteed non-empty for a drawable stream:
+    /// a one-image part still needs a layer to upload and draw through.
+    fn layers(&self, json: &Val, bin: &[u8]) -> Vec<StaticDrawLayer> {
+        let mut layers =
+            split_draw_layers(&self.vertices, &self.indices, &self.uvs, &self.spans, json, bin);
+        if layers.is_empty() {
+            let span = self.spans.first();
+            layers.push(StaticDrawLayer {
+                vertices: self.vertices.clone(),
+                indices: self.indices.clone(),
+                uvs: self.uvs.clone(),
+                texture_png: span.and_then(|s| gltf_embedded_png(json, bin, s.image)),
+                detail_png: span
+                    .and_then(|s| s.detail_image)
+                    .and_then(|i| gltf_embedded_png(json, bin, i)),
+                detail_scale: span.map(|s| s.detail_scale).unwrap_or([0.0, 0.0]),
+                pbr: span.map(|s| s.pbr(json, bin)).unwrap_or_default(),
+            });
+        }
+        layers
+    }
+}
+
+/// Pack one mesh node's primitives into `out`, placed by `place`.
+///
+/// The same packing the static stream does, minus the AO lanes: geometry that
+/// leaves the level stream (a door, a sky surface) is either moving or unlit,
+/// and in both cases a baked occlusion term would be a lie. `place` is the
+/// matrix baked into the vertices — the node's transform relative to whatever
+/// will carry it at draw time.
+fn pack_node_stream(
+    json: &Val,
+    acc: &Accessors,
+    node: &Val,
+    place: &Mat4f,
+    mirrored: bool,
+    out: &mut PartStream,
+) -> Result<(), String> {
+    let Some(mesh_index) = node.get("mesh").and_then(Val::usize) else {
+        return Ok(());
+    };
+    let mesh = json
+        .get("meshes")
+        .and_then(|m| m.idx(mesh_index))
+        .ok_or("bad mesh index")?;
+    for prim in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]) {
+        let attrs = prim
+            .get("attributes")
+            .ok_or("primitive without attributes")?;
+        let tint = prim
+            .get("material")
+            .and_then(Val::usize)
+            .and_then(|mi| json.get("materials").and_then(|m| m.idx(mi)))
+            .and_then(|m| m.get("pbrMetallicRoughness"))
+            .and_then(|p| p.get("baseColorFactor"))
+            .map(|f| {
+                [
+                    f.idx(0).and_then(Val::f64).unwrap_or(1.0) as f32,
+                    f.idx(1).and_then(Val::f64).unwrap_or(1.0) as f32,
+                    f.idx(2).and_then(Val::f64).unwrap_or(1.0) as f32,
+                ]
+            })
+            .unwrap_or([1.0, 1.0, 1.0]);
+        let pos_acc = attrs
+            .get("POSITION")
+            .and_then(Val::usize)
+            .ok_or("primitive without POSITION")?;
+        let (pos, _) = acc.read_f32(pos_acc)?;
+        let normal = attrs
+            .get("NORMAL")
+            .and_then(Val::usize)
+            .map(|a| acc.read_f32(a))
+            .transpose()?
+            .map(|(v, _)| v);
+        let uv = attrs
+            .get("TEXCOORD_0")
+            .and_then(Val::usize)
+            .map(|a| acc.read_f32(a))
+            .transpose()?
+            .map(|(v, _)| v);
+        let vcolor = attrs
+            .get("COLOR_0")
+            .and_then(Val::usize)
+            .map(|a| acc.read_f32(a))
+            .transpose()?;
+        let base = out.vert_total as u32;
+        let count = pos.len() / 3;
+        let prim_v0 = out.vert_total;
+        let prim_i0 = out.indices.len();
+        for i in 0..count {
+            let g = |src: &Option<Vec<f32>>, lanes: usize, lane: usize, dflt: f32| {
+                src.as_ref()
+                    .and_then(|v| v.get(i * lanes + lane).copied())
+                    .unwrap_or(dflt)
+            };
+            let p = mat4_mul_point(
+                place,
+                Vec3f {
+                    x: pos[i * 3],
+                    y: pos[i * 3 + 1],
+                    z: pos[i * 3 + 2],
+                },
+            );
+            let mut nrm = mat4_mul_dir(
+                place,
+                Vec3f {
+                    x: g(&normal, 3, 0, 0.0),
+                    y: g(&normal, 3, 1, 1.0),
+                    z: g(&normal, 3, 2, 0.0),
+                },
+            );
+            let len = (nrm.x * nrm.x + nrm.y * nrm.y + nrm.z * nrm.z).sqrt();
+            if len > 1.0e-8 {
+                nrm.x /= len;
+                nrm.y /= len;
+                nrm.z /= len;
+            }
+            if mirrored {
+                nrm = Vec3f { x: -nrm.x, y: -nrm.y, z: -nrm.z };
+            }
+            out.min.x = out.min.x.min(p.x);
+            out.min.y = out.min.y.min(p.y);
+            out.min.z = out.min.z.min(p.z);
+            out.max.x = out.max.x.max(p.x);
+            out.max.y = out.max.y.max(p.y);
+            out.max.z = out.max.z.max(p.z);
+            let (ox, oy) = oct_encode(nrm);
+            let vt = match &vcolor {
+                Some((values, lanes)) => [
+                    tint[0] * values.get(i * lanes).copied().unwrap_or(1.0),
+                    tint[1] * values.get(i * lanes + 1).copied().unwrap_or(1.0),
+                    tint[2] * values.get(i * lanes + 2).copied().unwrap_or(1.0),
+                ],
+                None => tint,
+            };
+            let tex_uv = [g(&uv, 2, 0, 0.0), g(&uv, 2, 1, 0.0)];
+            out.uvs.push(tex_uv);
+            out.vertices.extend_from_slice(&[
+                p.x,
+                p.y,
+                p.z,
+                makepad_draw::pack_pair_f16(ox, oy),
+                makepad_draw::pack_pair_f16(tex_uv[0], tex_uv[1]),
+                // AO lane neutral: this geometry moves or is unlit, so a
+                // baked occlusion term could never stay true.
+                makepad_draw::pack_unorm8x4(vt[0], vt[1], vt[2], 1.0),
+                pack_ao_uv(0.0, 0.0),
+            ]);
+        }
+        if let Some(idx_acc) = prim.get("indices").and_then(Val::usize) {
+            let (idx, _) = acc.read_f32(idx_acc)?;
+            if mirrored {
+                for tri in idx.chunks_exact(3) {
+                    out.indices.extend_from_slice(&[
+                        base + tri[0] as u32,
+                        base + tri[2] as u32,
+                        base + tri[1] as u32,
+                    ]);
+                }
+            } else {
+                out.indices.extend(idx.iter().map(|v| base + *v as u32));
+            }
+        } else if mirrored {
+            for t in (0..count as u32).step_by(3) {
+                out.indices
+                    .extend_from_slice(&[base + t, base + t + 2, base + t + 1]);
+            }
+        } else {
+            out.indices.extend((0..count as u32).map(|i| base + i));
+        }
+        out.vert_total += count;
+        if count > 0 {
+            let (detail_image, detail_scale) = gltf_prim_detail(json, prim);
+            let (metallic, roughness, orm_image) = gltf_prim_pbr(json, prim);
+            out.spans.push(PrimSpan {
+                image: gltf_prim_image_index(json, prim),
+                detail_image,
+                detail_scale,
+                metallic,
+                roughness,
+                orm_image,
+                v0: prim_v0,
+                v1: out.vert_total,
+                i0: prim_i0,
+                i1: out.indices.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Is this node's handedness mirrored in its rest pose? Winding and normal
+/// direction are properties of the WHOLE chain, so both are read from the
+/// node's world matrix, exactly as the static path reads them.
+fn node_is_mirrored(node: usize, parents: &[Option<usize>], rests: &[NodeTrs]) -> bool {
+    let m = node_world(node, parents, rests).v;
+    let det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9])
+        + m[8] * (m[1] * m[6] - m[2] * m[5]);
+    det < 0.0
+}
+
+// ---------------------------------------------------------------- sky
+
+/// Is this node a sky surface? See [`SkyPart`] for the contract.
+fn sky_projection_of(node: &Val) -> Option<SkyProjection> {
+    let extras = node.get("extras")?;
+    let marked = extras.get("kind").and_then(Val::str) == Some("sky")
+        || node.get("name").and_then(Val::str) == Some("sky");
+    if !marked {
+        return None;
+    }
+    // An unknown projection is NOT a sky: a newer importer must degrade to
+    // ordinary geometry rather than have this engine invent a mapping.
+    SkyProjection::from_name(extras.get("projection").and_then(Val::str)?)
+}
+
+/// The layer images for a sky node: `extras.layers` (glTF texture indices)
+/// when the importer is explicit, else the node's primitives' materials in
+/// primitive order, deduped by image.
+fn sky_layer_images(json: &Val, bin: &[u8], node: &Val, extras: &Val) -> Vec<Vec<u8>> {
+    let resolve = |ti: usize| -> usize {
+        json.get("textures")
+            .and_then(|t| t.idx(ti))
+            .and_then(|t| t.get("source"))
+            .and_then(Val::usize)
+            // A file that names images directly still works.
+            .unwrap_or(ti)
+    };
+    let mut sources: Vec<usize> = Vec::new();
+    if let Some(layers) = extras.get("layers") {
+        for l in layers.arr() {
+            if let Some(ti) = l.usize() {
+                sources.push(resolve(ti));
+            }
+        }
+    }
+    if sources.is_empty() {
+        if let Some(mesh) = node
+            .get("mesh")
+            .and_then(Val::usize)
+            .and_then(|mi| json.get("meshes").and_then(|m| m.idx(mi)))
+        {
+            for prim in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]) {
+                let image = gltf_prim_image_index(json, prim);
+                if !sources.contains(&image) {
+                    sources.push(image);
+                }
+            }
+        }
+    }
+    sources
+        .into_iter()
+        .filter_map(|i| gltf_embedded_png(json, bin, i))
+        .collect()
+}
+
+/// Merge every sky node in the file into one part. Sky faces are baked into
+/// MODEL space like the static stream (they never move); what makes them
+/// different is only how they are SHADED.
+fn build_sky_part(
+    json: &Val,
+    acc: &Accessors,
+    bin: &[u8],
+    node_vals: &[Val],
+    rests: &[NodeTrs],
+    parents: &[Option<usize>],
+    owner_of: &[bool],
+) -> Result<Option<SkyPart>, String> {
+    let mut stream = PartStream::new();
+    // (projection, repeat, speeds, offset, texture, v_span)
+    let mut params: Option<(SkyProjection, f32, Vec<f32>, f32, Option<String>, f32)> = None;
+    let mut images: Vec<Vec<u8>> = Vec::new();
+    for (node_index, n) in node_vals.iter().enumerate() {
+        if !owner_of.get(node_index).copied().unwrap_or(false) {
+            continue;
+        }
+        let place = node_world(node_index, parents, rests);
+        let mirrored = node_is_mirrored(node_index, parents, rests);
+        pack_node_stream(json, acc, n, &place, mirrored, &mut stream)?;
+        // The first node that carries a projection sets the sky; the rest
+        // contribute geometry. A map has many sky brushes but one sky.
+        if params.is_some() {
+            continue;
+        }
+        let Some(projection) = sky_projection_of(n) else {
+            continue;
+        };
+        let Some(extras) = n.get("extras") else {
+            continue;
+        };
+        let repeat = extras
+            .get("repeat")
+            .and_then(Val::f64)
+            .map(|v| v as f32)
+            .filter(|v| *v > 0.0)
+            .unwrap_or(1.0);
+        let speeds: Vec<f32> = extras
+            .get("speeds")
+            .map(|s| {
+                s.arr()
+                    .iter()
+                    .filter_map(|v| v.f64().map(|f| f as f32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let offset = extras
+            .get("offset")
+            .and_then(Val::f64)
+            .map(|v| v as f32)
+            .unwrap_or(0.0);
+        let texture = extras.get("texture").and_then(Val::str).map(str::to_string);
+        let v_span = extras
+            .get("v_span")
+            .and_then(Val::f64)
+            .map(|v| v as f32)
+            .filter(|v| *v > 0.0)
+            .unwrap_or(SKY_DEFAULT_V_SPAN);
+        images = sky_layer_images(json, bin, n, extras);
+        params = Some((projection, repeat, speeds, offset, texture, v_span));
+    }
+    let Some((projection, repeat, speeds, offset, texture, v_span)) = params else {
+        return Ok(None);
+    };
+    if !stream.is_drawable() {
+        return Ok(None);
+    }
+    Ok(Some(SkyPart {
+        projection,
+        images,
+        repeat,
+        speeds,
+        offset,
+        texture,
+        v_span,
+        vertices: stream.vertices,
+        indices: stream.indices,
+        min: stream.min,
+        max: stream.max,
+    }))
+}
+
+/// Pack every mesh node owned by an animated node into that part's own
+/// stream, in the animated node's local space.
+///
+/// Deliberately a second pass rather than a branch inside the static loop:
+/// the static path bakes world transforms, rebuilds normals and lays out AO
+/// charts, and none of that applies to geometry that moves. Keeping the two
+/// apart is also what makes the parity guarantee cheap to see — with no
+/// animated nodes this function is never entered.
+#[allow(clippy::too_many_arguments)]
+fn build_anim_parts(
+    json: &Val,
+    acc: &Accessors,
+    bin: &[u8],
+    node_vals: &[Val],
+    rests: &[NodeTrs],
+    parents: &[Option<usize>],
+    defs: Vec<AnimNodeDef>,
+    owner_of: &[Option<usize>],
+) -> Result<Vec<AnimPart>, String> {
+    let mut out = Vec::with_capacity(defs.len());
+    for (part_index, def) in defs.into_iter().enumerate() {
+        let mut stream = PartStream::new();
+        for (node_index, n) in node_vals.iter().enumerate() {
+            if owner_of.get(node_index).copied().flatten() != Some(part_index) {
+                continue;
+            }
+            // Everything strictly BELOW the animated node is baked in; the
+            // node's own transform is what the clip replaces per frame.
+            let local = node_local_under(node_index, def.node, parents, rests);
+            let mirrored = node_is_mirrored(node_index, parents, rests);
+            pack_node_stream(json, acc, n, &local, mirrored, &mut stream)?;
+        }
+        // A marked node with no geometry under it is a trigger volume, not a
+        // moving part — nothing to draw and nothing to collide with.
+        if !stream.is_drawable() {
+            continue;
+        }
+        let layers = stream.layers(json, bin);
+        out.push(AnimPart {
+            name: def.name,
+            states: def.states,
+            default: def.default,
+            kind: def.kind,
+            numbers: def.numbers,
+            strings: def.strings,
+            parent: parents[def.node]
+                .map(|p| node_world(p, parents, rests))
+                .unwrap_or_else(Mat4f::identity),
+            rest: rests[def.node],
+            clip: def.clip,
+            vertices: stream.vertices,
+            indices: stream.indices,
+            layers,
+            min: stream.min,
+            max: stream.max,
+        });
+    }
+    Ok(out)
 }
 
 fn materials_have_lightmap(json: &Val) -> bool {
@@ -952,6 +2253,47 @@ fn gltf_prim_image_index(json: &Val, prim: &Val) -> usize {
         .unwrap_or(0)
 }
 
+/// The PNG a GLB embeds as its base colour: the first material's
+/// `baseColorTexture` image, else image 0. For callers that bind the
+/// texture themselves (the skinned lane ignores glTF materials by design) and
+/// receive only bytes — a model streamed from an asset store has no pack
+/// `colormap.png` beside it; its atlas is inside the GLB.
+pub fn embedded_base_color_png(glb: &[u8]) -> Option<Vec<u8>> {
+    if glb.len() < 12 || &glb[0..4] != b"glTF" {
+        return None;
+    }
+    let mut json_chunk: Option<&[u8]> = None;
+    let mut bin_chunk: &[u8] = &[];
+    let mut at = 12;
+    while at + 8 <= glb.len() {
+        let len = u32::from_le_bytes(glb[at..at + 4].try_into().ok()?) as usize;
+        let kind = &glb[at + 4..at + 8];
+        let data = glb.get(at + 8..at + 8 + len)?;
+        match kind {
+            b"JSON" => json_chunk = Some(data),
+            b"BIN\0" => bin_chunk = data,
+            _ => {}
+        }
+        at += 8 + len + (4 - len % 4) % 4;
+    }
+    let json = JsonParser::parse(json_chunk?).ok()?;
+    let image = json
+        .get("materials")
+        .and_then(|m| m.idx(0))
+        .and_then(|m| m.get("pbrMetallicRoughness"))
+        .and_then(|p| p.get("baseColorTexture"))
+        .and_then(|t| t.get("index"))
+        .and_then(Val::usize)
+        .and_then(|ti| {
+            json.get("textures")
+                .and_then(|t| t.idx(ti))
+                .and_then(|t| t.get("source"))
+                .and_then(Val::usize)
+        })
+        .unwrap_or(0);
+    gltf_embedded_png(&json, bin_chunk, image)
+}
+
 fn gltf_embedded_png(json: &Val, bin: &[u8], image_index: usize) -> Option<Vec<u8>> {
     let image = json.get("images").and_then(|i| i.idx(image_index))?;
     let bv = image.get("bufferView").and_then(Val::usize)?;
@@ -975,12 +2317,26 @@ fn split_draw_layers(
         detail: i32,
         sx: u32,
         sy: u32,
+        /// Material split for SHINY spans only: (metallic, roughness, ORM
+        /// image). A matte span hashes to `None` no matter what its factors
+        /// say, so every model that existed before the PBR lane produces
+        /// byte-identical layers — the split can only ever be caused by a
+        /// material an author deliberately made specular, where merging a
+        /// chrome bumper with a rubber tyre would be the actual bug.
+        pbr: Option<(u32, u32, usize)>,
     }
     let key_of = |s: &PrimSpan| LayerKey {
         image: s.image,
         detail: s.detail_image.map(|i| i as i32).unwrap_or(-1),
         sx: s.detail_scale[0].to_bits(),
         sy: s.detail_scale[1].to_bits(),
+        pbr: s.is_shiny().then(|| {
+            (
+                s.metallic.to_bits(),
+                s.roughness.to_bits(),
+                s.orm_image.map(|i| i + 1).unwrap_or(0),
+            )
+        }),
     };
     let mut by_img: BTreeMap<LayerKey, (Vec<f32>, Vec<u32>, Vec<[f32; 2]>, PrimSpan)> =
         BTreeMap::new();
@@ -1022,6 +2378,7 @@ fn split_draw_layers(
                 .detail_image
                 .and_then(|i| gltf_embedded_png(json, bin, i)),
             detail_scale: span.detail_scale,
+            pbr: span.pbr(json, bin),
         });
     }
     if layers.len() <= 1 {
@@ -1353,7 +2710,10 @@ impl StaticModel {
             indices,
             texture_uri,
             // Sidecars carry their pack atlas by URI; embedded textures are
-            // a generated-GLB concern and are not serialized.
+            // a generated-GLB concern and are not serialized. The same goes
+            // for the material: an .aomesh is a Kenney-pack bake product, and
+            // the default (1/1, no map) is not shiny, so a sidecar-loaded prop
+            // keeps the diffuse shader exactly as it always has.
             texture_png: None,
             min,
             max,
@@ -1363,6 +2723,13 @@ impl StaticModel {
             detail_png: None,
             detail_scale: [0.0, 0.0],
             prelit: false,
+            // The sidecar is an AO-bake product for stock props; a model with
+            // moving parts is a level, which never goes through that tool.
+            // Carrying them would mean versioning the format for a lane that
+            // does not use it.
+            anim_parts: Vec::new(),
+            sky: None,
+            pbr: PbrMaterial::default(),
         })
     }
 }
@@ -1373,6 +2740,8 @@ mod sidecar_tests {
 
     fn sample() -> StaticModel {
         StaticModel {
+            anim_parts: Vec::new(),
+            sky: None,
             vertices: (0..MODEL_VERTEX_FLOATS as u32 * 3).map(|i| i as f32 * 0.25).collect(),
             indices: vec![0, 1, 2],
             texture_uri: Some("Textures/colormap.png".into()),
@@ -1397,6 +2766,7 @@ mod sidecar_tests {
                 h: 2,
                 pixels: vec![200, 150, 255, 255, 130, 255],
             }),
+            pbr: PbrMaterial::default(),
         }
     }
 
@@ -1447,7 +2817,7 @@ mod sidecar_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A single-triangle GLB built in code, so the parser is covered without
@@ -1493,6 +2863,418 @@ mod tests {
         out.extend_from_slice(b"BIN\0");
         out.extend_from_slice(&bin);
         out
+    }
+
+    /// How the door node of [`rooms_and_door_glb`] is marked up.
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Door {
+        /// A plain node: geometry flattens into the level like any wall.
+        Plain,
+        /// The importer's contract: `extras.states` + a same-named clip.
+        Animated,
+        /// Extras and an animation the parser has no contract for. The
+        /// parity case — this must behave exactly like `Plain`.
+        Unknown,
+        /// HALF the contract: states, but no clip named like the node. An
+        /// importer mismatch, and it must fall back to plain geometry
+        /// rather than to a part that cannot move.
+        StatesNoClip,
+    }
+
+    fn glb_from(json: String, bin: Vec<u8>) -> Vec<u8> {
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// Two rooms and a door, the shape the classic-map importer exports:
+    /// the door node's REST transform is the open pose (lifted 3 up) and the
+    /// clip runs closed (t=0, on the floor) to open (t=1, lifted).
+    pub(crate) fn rooms_and_door_glb(door: Door) -> Vec<u8> {
+        // Room A, room B, door — one triangle each, so the streams are easy
+        // to count.
+        let room_a: [f32; 9] = [0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0, 0.0];
+        let room_b: [f32; 9] = [8.0, 0.0, 0.0, 12.0, 0.0, 0.0, 8.0, 4.0, 0.0];
+        let door_tri: [f32; 9] = [5.0, 0.0, 0.0, 7.0, 0.0, 0.0, 5.0, 3.0, 0.0];
+        let times: [f32; 2] = [0.0, 1.0];
+        let moves: [f32; 6] = [0.0, 0.0, 0.0, 0.0, 3.0, 0.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in room_a.iter().chain(&room_b).chain(&door_tri).chain(&times).chain(&moves) {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let door_node = match door {
+            Door::Plain => r#"{"name":"door_1","mesh":2,"translation":[0.0,3.0,0.0]}"#.to_string(),
+            Door::Animated => concat!(
+                r#"{"name":"door_1","mesh":2,"translation":[0.0,3.0,0.0],"#,
+                r#""extras":{"states":["closed","open"],"default":"open","#,
+                r#""kind":"door","axis":"y","travel":3.0}}"#
+            )
+            .to_string(),
+            Door::Unknown => concat!(
+                r#"{"name":"door_1","mesh":2,"translation":[0.0,3.0,0.0],"#,
+                r#""extras":{"tag":"scenery","weight":2.0}}"#
+            )
+            .to_string(),
+            Door::StatesNoClip => concat!(
+                r#"{"name":"door_1","mesh":2,"translation":[0.0,3.0,0.0],"#,
+                r#""extras":{"states":["closed","open"],"default":"open"}}"#
+            )
+            .to_string(),
+        };
+        let animations = match door {
+            Door::Plain => String::new(),
+            // The decoy clip drives the SAME node with the same channel but
+            // under a different name, which is the whole recognition test.
+            Door::Animated | Door::Unknown | Door::StatesNoClip => format!(
+                r#""animations":[{{"name":"{}","samplers":[{{"input":3,"output":4,"interpolation":"LINEAR"}}],"channels":[{{"sampler":0,"target":{{"node":2,"path":"translation"}}}}]}}],"#,
+                if door == Door::Animated { "door_1" } else { "spin" }
+            ),
+        };
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"name":"room_a","mesh":0}},{{"name":"room_b","mesh":1}},{door_node}],
+            "meshes":[
+              {{"primitives":[{{"attributes":{{"POSITION":0}}}}]}},
+              {{"primitives":[{{"attributes":{{"POSITION":1}}}}]}},
+              {{"primitives":[{{"attributes":{{"POSITION":2}}}}]}}],
+            {animations}
+            "accessors":[
+              {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":2,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":3,"componentType":5126,"count":2,"type":"SCALAR"}},
+              {{"bufferView":4,"componentType":5126,"count":2,"type":"VEC3"}}],
+            "bufferViews":[
+              {{"buffer":0,"byteOffset":0,"byteLength":36}},
+              {{"buffer":0,"byteOffset":36,"byteLength":36}},
+              {{"buffer":0,"byteOffset":72,"byteLength":36}},
+              {{"buffer":0,"byteOffset":108,"byteLength":8}},
+              {{"buffer":0,"byteOffset":116,"byteLength":24}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            bin.len()
+        );
+        glb_from(json, bin)
+    }
+
+    /// The importer's door contract, end to end: the door leaves the level's
+    /// static stream and comes back as a part the game can drive.
+    #[test]
+    fn a_marked_door_node_becomes_an_anim_part() {
+        let m = StaticModel::parse_glb(&rooms_and_door_glb(Door::Animated)).unwrap();
+        assert_eq!(m.anim_parts.len(), 1, "one door");
+        // The two rooms only — the door's triangle is NOT in the level.
+        assert_eq!(m.vertex_count(), 6);
+        assert_eq!(m.triangle_count(), 2);
+
+        let part = &m.anim_parts[0];
+        assert_eq!(part.name, "door_1");
+        assert_eq!(part.states, vec!["closed".to_string(), "open".to_string()]);
+        assert_eq!(part.default, 1, "extras.default names the open state");
+        assert_eq!(part.kind.as_deref(), Some("door"));
+        assert_eq!(part.strings.get("axis").map(String::as_str), Some("y"));
+        assert_eq!(part.numbers.get("travel").copied(), Some(3.0));
+        assert_eq!(part.vertices.len(), 3 * MODEL_VERTEX_FLOATS);
+        assert_eq!(part.indices.len(), 3);
+        assert_eq!(part.layers.len(), 1, "a part always has a layer to draw");
+        assert_eq!(part.layers[0].indices.len(), 3);
+
+        // The clip: t=0 is closed (on the floor), t=end is open (lifted 3).
+        assert!((part.duration() - 1.0).abs() < 1.0e-6);
+        assert!((part.state_time(0) - 0.0).abs() < 1.0e-6);
+        assert!((part.state_time(1) - 1.0).abs() < 1.0e-6);
+        let closed = part.transform_at(part.state_time(0));
+        let open = part.transform_at(part.state_time(1));
+        assert!(closed.v[13].abs() < 1.0e-6, "closed sits at y=0");
+        assert!((open.v[13] - 3.0).abs() < 1.0e-6, "open is lifted 3");
+        // Half way is half way: the state machine's whole premise.
+        assert!((part.transform_at(0.5).v[13] - 1.5).abs() < 1.0e-6);
+        // The file's rest pose IS the default (open) pose.
+        assert!((part.rest_transform().v[13] - 3.0).abs() < 1.0e-6);
+        // Local bounds are the door's own, unmoved by the rest transform.
+        assert!((part.min.y - 0.0).abs() < 1.0e-6 && (part.max.y - 3.0).abs() < 1.0e-6);
+        // The model's bounds still cover the door where it rests.
+        assert!(m.max.y >= 5.99, "door bounds fold in: {}", m.max.y);
+        // One slab is one collider.
+        let boxes = part.collider_boxes();
+        assert!(!boxes.is_empty());
+        assert!(boxes.iter().all(|(lo, hi)| hi.x > lo.x && hi.y > lo.y));
+    }
+
+    /// PARITY. Extras the parser has no contract for, and an animation whose
+    /// name matches no node, must leave a model bit-for-bit as it was.
+    #[test]
+    fn unknown_extras_and_clips_leave_the_stream_untouched() {
+        let plain = StaticModel::parse_glb(&rooms_and_door_glb(Door::Plain)).unwrap();
+        let decoy = StaticModel::parse_glb(&rooms_and_door_glb(Door::Unknown)).unwrap();
+        assert!(plain.anim_parts.is_empty());
+        assert!(decoy.anim_parts.is_empty(), "an unnamed clip owns nothing");
+        assert_eq!(plain.vertex_count(), 9, "the door flattens in as geometry");
+        let bits = |m: &StaticModel| -> Vec<u32> {
+            m.vertices.iter().map(|f| f.to_bits()).collect()
+        };
+        assert_eq!(bits(&plain), bits(&decoy), "vertex streams differ");
+        assert_eq!(plain.indices, decoy.indices, "index streams differ");
+        assert_eq!(plain.parts.len(), decoy.parts.len());
+        assert_eq!(plain.min.y.to_bits(), decoy.min.y.to_bits());
+        assert_eq!(plain.max.y.to_bits(), decoy.max.y.to_bits());
+        // And the collider derivations that read those streams agree too.
+        assert_eq!(
+            plain.voxel_collider_boxes().len(),
+            decoy.voxel_collider_boxes().len()
+        );
+    }
+
+    /// Half a contract is not a contract: states with no clip to move along
+    /// stay ordinary level geometry, so a mismatched importer under-delivers
+    /// a door rather than producing one that can never open.
+    #[test]
+    fn states_without_a_matching_clip_stay_static() {
+        let plain = StaticModel::parse_glb(&rooms_and_door_glb(Door::Plain)).unwrap();
+        let half = StaticModel::parse_glb(&rooms_and_door_glb(Door::StatesNoClip)).unwrap();
+        assert!(half.anim_parts.is_empty());
+        assert_eq!(half.vertex_count(), 9);
+        let bits = |m: &StaticModel| -> Vec<u32> {
+            m.vertices.iter().map(|f| f.to_bits()).collect()
+        };
+        assert_eq!(bits(&plain), bits(&half));
+        assert_eq!(plain.indices, half.indices);
+    }
+
+    /// A room plus a `sky` node, the shape the classic-map importer exports.
+    /// `projection` of `None` marks the node with no projection at all;
+    /// `layers` picks one or two textured primitives on the sky mesh.
+    pub(crate) fn room_and_sky_glb(projection: Option<&str>, layers: usize) -> Vec<u8> {
+        let room: [f32; 9] = [0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 4.0, 0.0];
+        let sky_a: [f32; 9] = [0.0, 8.0, 0.0, 4.0, 8.0, 0.0, 0.0, 12.0, 0.0];
+        let sky_b: [f32; 9] = [4.0, 8.0, 0.0, 8.0, 8.0, 0.0, 4.0, 12.0, 0.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in room.iter().chain(&sky_a).chain(&sky_b) {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        // Stand-in PNGs: the parser carries image bytes through verbatim and
+        // only the GPU upload decodes them, so a marker string proves which
+        // image landed in which layer far more legibly than a real PNG.
+        let (png_a, png_b) = (b"sky-image-a".as_slice(), b"sky-image-b".as_slice());
+        let a_at = bin.len();
+        bin.extend_from_slice(png_a);
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let b_at = bin.len();
+        bin.extend_from_slice(png_b);
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let extras = match projection {
+            Some(p) => format!(
+                r#","extras":{{"kind":"sky","projection":"{p}","repeat":4,"texture":"SKY1","speeds":[8.0,16.0],"offset":0.25}}"#
+            ),
+            None => String::new(),
+        };
+        let sky_prims = if layers > 1 {
+            r#"{"attributes":{"POSITION":1},"material":0},{"attributes":{"POSITION":2},"material":1}"#
+        } else {
+            r#"{"attributes":{"POSITION":1},"material":0}"#
+        };
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"name":"room","mesh":0}},{{"name":"sky","mesh":1{extras}}}],
+            "meshes":[
+              {{"primitives":[{{"attributes":{{"POSITION":0}}}}]}},
+              {{"primitives":[{sky_prims}]}}],
+            "materials":[
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}}}},
+              {{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":1}}}}}}],
+            "textures":[{{"source":0}},{{"source":1}}],
+            "images":[
+              {{"bufferView":3,"mimeType":"image/png"}},
+              {{"bufferView":4,"mimeType":"image/png"}}],
+            "accessors":[
+              {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}},
+              {{"bufferView":2,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[
+              {{"buffer":0,"byteOffset":0,"byteLength":36}},
+              {{"buffer":0,"byteOffset":36,"byteLength":36}},
+              {{"buffer":0,"byteOffset":72,"byteLength":36}},
+              {{"buffer":0,"byteOffset":{a_at},"byteLength":{}}},
+              {{"buffer":0,"byteOffset":{b_at},"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            png_a.len(),
+            png_b.len(),
+            bin.len()
+        );
+        glb_from(json, bin)
+    }
+
+    /// The importer's sky contract: the faces leave the level's stream and
+    /// come back as a part the sky shader draws by view direction.
+    #[test]
+    fn a_sky_node_leaves_the_static_stream() {
+        let m = StaticModel::parse_glb(&room_and_sky_glb(Some("cylinder"), 1)).unwrap();
+        let sky = m.sky.as_ref().expect("sky part");
+        assert_eq!(sky.projection, SkyProjection::Cylinder);
+        assert_eq!(sky.repeat, 4.0);
+        assert_eq!(sky.texture.as_deref(), Some("SKY1"));
+        assert_eq!(sky.speeds, vec![8.0, 16.0]);
+        assert_eq!(sky.offset, 0.25, "the map's static sky phase");
+        assert_eq!(sky.v_span, SKY_DEFAULT_V_SPAN);
+        assert_eq!(sky.images.len(), 1);
+        assert_eq!(sky.images[0], b"sky-image-a");
+        // The room alone is the level; the sky face is not walked on, lit or
+        // shadowed with it.
+        assert_eq!(m.vertex_count(), 3);
+        assert_eq!(sky.vertices.len(), 3 * MODEL_VERTEX_FLOATS);
+        assert_eq!(sky.triangle_count(), 1);
+        // Its bounds still count toward the model's, or it culls with a hole.
+        assert!(m.max.y >= 11.99, "sky bounds fold in: {}", m.max.y);
+        assert!((sky.max.y - 12.0).abs() < 1.0e-5);
+    }
+
+    /// Quake's sky is two layers, and which is which is the whole effect:
+    /// layer order is primitive order.
+    #[test]
+    fn a_quake_sky_keeps_both_layers_in_primitive_order() {
+        let m = StaticModel::parse_glb(&room_and_sky_glb(Some("quake_scroll"), 2)).unwrap();
+        let sky = m.sky.as_ref().expect("sky part");
+        assert_eq!(sky.projection, SkyProjection::QuakeScroll);
+        assert_eq!(sky.images.len(), 2);
+        assert_eq!(sky.images[0], b"sky-image-a");
+        assert_eq!(sky.images[1], b"sky-image-b");
+        assert_eq!(sky.vertices.len(), 6 * MODEL_VERTEX_FLOATS);
+        // The layers counter-scroll from the map's phase: back 8 units a
+        // second, front 16.
+        assert_eq!(sky.scroll(0, 2.0), 0.25 + 16.0);
+        assert_eq!(sky.scroll(1, 2.0), 0.25 + 32.0);
+        assert_eq!(sky.scroll(2, 2.0), 0.25, "a missing layer only ever sits at the phase");
+    }
+
+    /// PARITY. A projection this engine has no mapping for must leave the
+    /// faces as ordinary geometry — a newer importer degrades, it never gets
+    /// a sky painted with the wrong maths.
+    #[test]
+    fn an_unknown_or_absent_projection_stays_static() {
+        let plain = StaticModel::parse_glb(&room_and_sky_glb(None, 1)).unwrap();
+        assert!(plain.sky.is_none());
+        assert_eq!(plain.vertex_count(), 6, "sky faces flatten in");
+
+        let future = StaticModel::parse_glb(&room_and_sky_glb(Some("octahedral"), 1)).unwrap();
+        assert!(future.sky.is_none(), "unknown projection is not a sky");
+        let bits = |m: &StaticModel| -> Vec<u32> {
+            m.vertices.iter().map(|f| f.to_bits()).collect()
+        };
+        assert_eq!(bits(&plain), bits(&future));
+        assert_eq!(plain.indices, future.indices);
+    }
+
+    /// The direction mapping itself — the half a GPU cannot be asked about
+    /// in a test, and the half that renders a plausible-looking WRONG sky
+    /// when it drifts.
+    #[test]
+    fn a_doom_sky_wraps_four_times_and_stretches_over_the_band() {
+        let m = StaticModel::parse_glb(&room_and_sky_glb(Some("cylinder"), 1)).unwrap();
+        let sky = m.sky.as_ref().unwrap();
+        let dir = |x: f32, y: f32, z: f32| Vec3f { x, y, z };
+
+        // A quarter turn of the compass is a QUARTER of the image at
+        // repeat 1, and a whole image at repeat 4 — which is exactly why
+        // Doom's 256-wide strip reads as detailed rather than smeared.
+        let ahead = sky.direction_uv(dir(0.0, 0.0, 1.0), 0, 0.0);
+        let right = sky.direction_uv(dir(1.0, 0.0, 0.0), 0, 0.0);
+        // Both carry the map's static phase; what matters is the SPAN
+        // between them — a quarter turn is a whole image at repeat 4.
+        assert!((ahead[0] - 0.25).abs() < 1.0e-5, "{ahead:?}");
+        assert!((right[0] - 1.25).abs() < 1.0e-5, "repeat 4: {right:?}");
+        // The horizon is the middle row wherever you face.
+        assert!((ahead[1] - 0.5).abs() < 1.0e-5 && (right[1] - 0.5).abs() < 1.0e-5);
+
+        // Vertically the image spans a BAND: v_span 0.5 puts the top of the
+        // image at +45 degrees, and everything above it clamps there rather
+        // than repeating the sky upside down over the player.
+        let up45 = sky.direction_uv(dir(0.0, 1.0, 1.0), 0, 0.0);
+        assert!(up45[1].abs() < 1.0e-5, "45 up is the top row: {up45:?}");
+        let zenith = sky.direction_uv(dir(0.0, 1.0, 0.0), 0, 0.0);
+        assert_eq!(zenith[1], 0.0, "straight up clamps");
+        let nadir = sky.direction_uv(dir(0.0, -1.0, 0.0), 0, 0.0);
+        assert_eq!(nadir[1], 1.0, "below the horizon clamps");
+    }
+
+    #[test]
+    fn a_quake_sky_counter_scrolls_its_two_layers() {
+        let m = StaticModel::parse_glb(&room_and_sky_glb(Some("quake_scroll"), 2)).unwrap();
+        let sky = m.sky.as_ref().unwrap();
+        let dir = Vec3f { x: 0.3, y: 0.6, z: 1.0 };
+        // Same ray, same moment, different layers: the offset between them
+        // is the whole effect — two identical clouds sliding apart.
+        let back = sky.direction_uv(dir, 0, 1.0);
+        let front = sky.direction_uv(dir, 1, 1.0);
+        let delta = front[0] - back[0];
+        assert!((delta - (16.0 - 8.0) * 0.0078125).abs() < 1.0e-6, "{delta}");
+        // And a still clock is a still sky.
+        let a = sky.direction_uv(dir, 1, 0.0);
+        let b = sky.direction_uv(dir, 1, 0.0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn an_equirect_sky_covers_the_whole_sphere() {
+        let m = StaticModel::parse_glb(&room_and_sky_glb(Some("cube"), 1)).unwrap();
+        let sky = m.sky.as_ref().unwrap();
+        let dir = |x: f32, y: f32, z: f32| Vec3f { x, y, z };
+        // Longitude round the middle of the image, latitude top to bottom.
+        assert!((sky.direction_uv(dir(0.0, 0.0, 1.0), 0, 0.0)[0] - 0.75).abs() < 1.0e-5);
+        assert!((sky.direction_uv(dir(1.0, 0.0, 0.0), 0, 0.0)[0] - 1.0).abs() < 1.0e-5);
+        assert!((sky.direction_uv(dir(0.0, 0.0, 1.0), 0, 0.0)[1] - 0.5).abs() < 1.0e-5);
+        // Poles stop a hair short so the wrap sampler cannot fetch the
+        // opposite pole's row.
+        assert!(sky.direction_uv(dir(0.0, 1.0, 0.0), 0, 0.0)[1] > 0.0);
+        assert!(sky.direction_uv(dir(0.0, -1.0, 0.0), 0, 0.0)[1] < 1.0);
+    }
+
+    #[test]
+    fn sky_projection_names_round_trip() {
+        for name in ["cylinder", "quake_scroll", "cube"] {
+            let p = SkyProjection::from_name(name).expect(name);
+            assert_eq!(p.as_str(), name);
+        }
+        assert!(SkyProjection::from_name("cylindrical").is_none());
+        // The shader branches on these codes; they must stay distinct and in
+        // the order its comparisons assume.
+        assert!(SkyProjection::Cylinder.code() < SkyProjection::QuakeScroll.code());
+        assert!(SkyProjection::QuakeScroll.code() < SkyProjection::Cube.code());
+    }
+
+    /// A model with no sky node keeps `None` — and so does every fixture the
+    /// older tests pin.
+    #[test]
+    fn plain_models_gain_no_sky() {
+        for glb in [tiny_glb(false), rooms_and_door_glb(Door::Animated)] {
+            assert!(StaticModel::parse_glb(&glb).unwrap().sky.is_none());
+        }
+    }
+
+    /// The pre-existing fixtures must parse exactly as before: no anim parts,
+    /// and the streams the older tests pin.
+    #[test]
+    fn plain_models_gain_no_anim_parts() {
+        for glb in [tiny_glb(false), tiny_glb(true)] {
+            let m = StaticModel::parse_glb(&glb).unwrap();
+            assert!(m.anim_parts.is_empty());
+            assert_eq!(m.vertex_count(), 3);
+        }
     }
 
     #[test]
@@ -1666,6 +3448,8 @@ mod tests {
     #[test]
     fn collider_parts_keep_structure_and_drop_trim() {
         let model = StaticModel {
+            anim_parts: Vec::new(),
+            sky: None,
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -1684,6 +3468,7 @@ mod tests {
             detail_scale: [0.0, 0.0],
             prelit: false,
             ground_ao: None,
+            pbr: PbrMaterial::default(),
         };
         let parts = model.collider_parts();
         assert_eq!(parts.len(), 2, "expected two walls, got {parts:?}");
@@ -1700,6 +3485,8 @@ mod tests {
     #[test]
     fn collider_parts_keep_posts_and_drop_hanging_trim() {
         let model = StaticModel {
+            anim_parts: Vec::new(),
+            sky: None,
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -1717,6 +3504,7 @@ mod tests {
             detail_scale: [0.0, 0.0],
             prelit: false,
             ground_ao: None,
+            pbr: PbrMaterial::default(),
         };
         let parts = model.collider_parts();
         assert_eq!(parts.len(), 1, "the leg survives, the rod does not: {parts:?}");
@@ -1736,6 +3524,8 @@ mod tests {
             ));
         }
         let model = StaticModel {
+            anim_parts: Vec::new(),
+            sky: None,
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -1748,6 +3538,7 @@ mod tests {
             detail_scale: [0.0, 0.0],
             prelit: false,
             ground_ao: None,
+            pbr: PbrMaterial::default(),
         };
         assert!(model.collider_parts().len() <= 8);
     }

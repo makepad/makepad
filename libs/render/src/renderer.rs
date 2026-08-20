@@ -16,7 +16,9 @@ use crate::light_grid::{
 };
 use crate::shaders::{
     DrawSceneAlpha, DrawSceneCube, DrawSceneFlare, DrawSceneScreen, DrawSceneShadow,
-    DrawSceneShadowSdf, DrawSceneSkinned, DrawSceneSkinnedGpu, DrawSceneSky, DrawSceneSkyAnalytic,
+    DrawScenePbr, DrawSceneShadowSdf, DrawSceneSkinned, DrawSceneSkinnedGpu, DrawSceneSky,
+    DrawSceneSkyAnalytic,
+    DrawSceneSkyMap,
     DrawSceneTerrain, DrawSceneViewModel, DrawSceneWater,
 };
 use crate::shadow_mesh::{
@@ -202,6 +204,26 @@ pub struct Renderer {
     /// vertices never change, so its per-frame cost is one instance. See
     /// model.rs.
     static_models: Vec<(String, LoadedModel)>,
+    /// The map-sky shader, built lazily from its script type default (the
+    /// baker owns its passes the same way). Owned rather than lent through
+    /// [`SceneDraws`] because a map's sky has nothing for a host to theme,
+    /// and every host would have had to adopt a new field to get one.
+    sky_draw: Option<Box<DrawSceneSkyMap>>,
+    /// Seconds of sky time — what the scrolling layers of a Quake sky ride.
+    /// Advanced by [`Renderer::tick_sky`]; deliberately not wall-clock, so a
+    /// paused game has a still sky and a capture is reproducible.
+    sky_time: f32,
+    /// Per model id: does this model cast into the GPU bake's sun-depth
+    /// passes when it has no AO layout of its own? Absent = decided by size
+    /// ([`casts_as_caster_only`]). The explicit answer exists because only
+    /// the host knows a "model" is really a whole imported LEVEL, which must
+    /// never shadow its own interior.
+    model_casts_shadow: std::collections::BTreeMap<String, bool>,
+    /// Where every triggered anim part currently is, keyed by what the host
+    /// addressed ([`ModelTarget`]) and the part's node name. Absent = the
+    /// part sits in its model's default state, so an untouched scene costs
+    /// nothing and behaves exactly as it did before doors existed.
+    model_anim_state: ModelStates,
     /// Stock props placed for this frame, set by the host before drawing.
     placed_models: Vec<ModelInstance>,
     /// Actor-attached presentation meshes in world space. They use the
@@ -261,6 +283,15 @@ pub struct Renderer {
     lm_fallback: Option<Texture>,
     /// 1x1 mean-127 gray for props with no Q3/Unreal detail overlay.
     detail_fallback: Option<Texture>,
+    /// 1x1 white for materials whose metallic/roughness are factors only.
+    orm_fallback: Option<Texture>,
+    /// The specular lane's shader, created on first use like `sky_draw`: a
+    /// host that never places a shiny model never builds it, and the two
+    /// hosts that do (VJ, sandbox) get it without adding a field to their
+    /// `SceneDraws`. Boxed for the same reason `sky_draw` is — it is taken
+    /// out of `self` for the duration of the draw so the loop can still
+    /// borrow the model tables.
+    pbr_draw: Option<Box<DrawScenePbr>>,
     /// Per placed-model uv remap into the atlas, parallel to placed_models
     /// (zero = unmapped, the shader's disable signal). Rebuilt per delivery.
     lm_remaps: Vec<Vec4f>,
@@ -343,6 +374,9 @@ pub struct Renderer {
     /// `None` payload = no loadable sidecar for this model under the
     /// current sun; its instances keep the blob tier.
     model_sdf_tex: std::collections::HashMap<String, Option<(Texture, SdfMeta)>>,
+    /// `.shadowsdf` bytes handed in WITH a model (streamed from an asset
+    /// store beside its GLB); consulted before the `models_root` sidecar.
+    model_sdf_bytes: std::collections::HashMap<String, Vec<u8>>,
     /// The sun elevation (`SunLight::shadow_len_per_unit`) the loaded SDF
     /// atlases are valid for. An explicit sun change drops the caches and
     /// re-tries the sidecars — there is NO runtime silhouette baking:
@@ -698,6 +732,63 @@ fn sdf_quad_ground(anchor: Vec3f, receiver: &Receiver, gx: f32, gz: f32, len: f3
     y
 }
 
+/// One draw layer's metallic-roughness material, resident.
+///
+/// Neutral (`metallic 0, roughness 1, orm_on false`) is exactly the shading
+/// the diffuse lane gives, which is what a layer gets when its own material
+/// carries no shininess — including inside a model that IS on the PBR lane
+/// because some OTHER layer is shiny. That matters: the glTF default is
+/// `metallic 1`, and a layer taken literally at that would lose its whole
+/// diffuse lobe and render black.
+#[derive(Clone)]
+struct LayerMaterial {
+    metallic: f32,
+    roughness: f32,
+    /// The metallicRoughness map, or a white 1x1 when the material is
+    /// factors-only (`orm_on` false folds it out of both products anyway).
+    orm: Texture,
+    orm_on: bool,
+}
+
+/// Which shader a model pass drives.
+///
+/// The two lanes share every line of [`Renderer::draw_models_inner`]:
+/// [`DrawScenePbr`] derefs [`DrawSceneSkinned`], so all the per-instance
+/// state — transform, lightmap window, dynamic-light gate, AO binding — is
+/// written through one type, and the lanes differ only in the material the
+/// PBR shader additionally reads. A model picks its lane at LOAD time
+/// (`LoadedModel::wants_pbr`), so a frame is at most two passes over the
+/// instance list regardless of how the scene is mixed.
+enum ModelDraw<'a> {
+    Diffuse(&'a mut DrawSceneSkinned),
+    Pbr(&'a mut DrawScenePbr),
+}
+
+impl ModelDraw<'_> {
+    fn base(&mut self) -> &mut DrawSceneSkinned {
+        match self {
+            ModelDraw::Diffuse(d) => d,
+            ModelDraw::Pbr(d) => &mut d.skinned,
+        }
+    }
+
+    fn is_pbr(&self) -> bool {
+        matches!(self, ModelDraw::Pbr(_))
+    }
+
+    /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
+    /// which has no such lanes to bind — that is the whole reason the two
+    /// shaders are siblings.
+    fn set_material(&mut self, m: &LayerMaterial) {
+        if let ModelDraw::Pbr(d) = self {
+            d.metallic = m.metallic;
+            d.roughness = m.roughness;
+            d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
+            d.skinned.draw_vars.set_texture(6, &m.orm);
+        }
+    }
+}
+
 /// A stock prop resident on the GPU: geometry uploaded once, plus the pack
 /// atlas it samples. Thousands of models share a few dozen atlases, which is
 /// what keeps a whole pack's worth of props cheap to draw.
@@ -706,9 +797,20 @@ struct LoadedModel {
     texture: Texture,
     detail: Texture,
     detail_scale: [f32; 2],
-    /// Extra (geometry, albedo, detail, scale) draws for world GLBs that
-    /// embed one PNG per tile. The first layer is `geometry`/`texture`.
-    extra_draws: Vec<(Geometry, Texture, Texture, [f32; 2])>,
+    /// Extra (geometry, albedo, detail, scale, material) draws for world GLBs
+    /// that embed one PNG per tile. The first layer is `geometry`/`texture`.
+    extra_draws: Vec<(Geometry, Texture, Texture, [f32; 2], LayerMaterial)>,
+    /// Layer 0's material (the merged stream's, for a single-layer model).
+    material: LayerMaterial,
+    /// Draw this model through [`DrawScenePbr`] instead of
+    /// [`DrawSceneSkinned`]. Decided ONCE here, at load, from the glTF
+    /// material: true when the model is not prelit and some layer's material
+    /// carries real shininess ([`crate::model::PbrMaterial::is_shiny`]).
+    ///
+    /// Per model rather than per layer because the shader is a property of
+    /// the draw item, and splitting one prop across two shaders would double
+    /// its draw calls to give a matte layer a lobe it cannot show anyway.
+    wants_pbr: bool,
     /// COLOR_0 is a baked lightmap — skip the analytic sun multiply.
     prelit: bool,
     triangles: usize,
@@ -729,6 +831,22 @@ struct LoadedModel {
     /// present only when the model has its OWN AO layout (the layout is what
     /// gives every placed copy a lightmap parameterisation for free).
     lm_source: Option<std::sync::Arc<crate::lightmap::LmMeshSource>>,
+    /// Rigid parts the game drives between named states (doors, lifts). Not
+    /// in `geometry`: they move, so they are neither baked into the static
+    /// lightmap nor part of the model's collider.
+    anim_parts: Vec<LoadedAnimPart>,
+    /// The map's sky surfaces, drawn by view direction instead of lit. Also
+    /// out of `geometry`: the bake must never see them (they would shadow
+    /// the whole level from above) and the sun must never shade them.
+    sky: Option<LoadedSky>,
+    /// The model's own triangles in MODEL space, kept after the GPU upload
+    /// consumed the packed stream. This is the level-collision source
+    /// (`level.rs` builds its BVH from it) — 16 bytes a vertex-and-index
+    /// against re-parsing a 100 MB GLB to answer "what did the player walk
+    /// into". Anim parts are deliberately absent: they move, and a BVH built
+    /// over them would be wrong the moment a door opened.
+    mesh_positions: Vec<Vec3f>,
+    mesh_indices: Vec<u32>,
     /// The GPU light bake's variant of `geometry`: identical positions and
     /// chart uvs, but the normal lane holds the FLAT WINDING face normal.
     /// The CPU bake's `sun_bit` classified every texel against the winding
@@ -737,6 +855,222 @@ struct LoadedModel {
     /// winding — the crypt's paver-floor sheets), so the gather must see the
     /// winding, not the shading normal. Present iff `lm_source` is.
     bake_geometry: Option<Geometry>,
+}
+
+/// One resident [`crate::model::AnimPart`]: its definition (states, clip,
+/// bounds) plus the uploaded geometry it draws through.
+struct LoadedAnimPart {
+    def: crate::model::AnimPart,
+    /// (geometry, albedo, detail, detail scale) per texture, mirroring the
+    /// static model's own layer list so a part draws through the same code.
+    draws: Vec<(Geometry, Texture, Texture, [f32; 2])>,
+    /// Node-local collider boxes, derived once at load.
+    collider: Vec<(Vec3f, Vec3f)>,
+}
+
+/// A resident [`crate::model::SkyPart`]: the faces plus their layer images.
+struct LoadedSky {
+    part: crate::model::SkyPart,
+    geometry: Geometry,
+    /// Layer 0 and layer 1 textures. Layer 1 is a 1x1 transparent stand-in
+    /// unless the map is a two-layer Quake sky, so the shader samples
+    /// unconditionally and every projection stays one draw.
+    tex0: Texture,
+    tex1: Texture,
+    /// Model-space triangles, kept for the same reason `mesh_positions` is:
+    /// a sky face is still a WALL to a walker (Doom's sky brushes are
+    /// solid), even though it is never lit or shadowed.
+    positions: Vec<Vec3f>,
+    indices: Vec<u32>,
+}
+
+/// Which placed geometry a model-state command addresses.
+///
+/// An imported level is ONE placed instance, so naming the model id is the
+/// natural handle for its doors; a prop placed many times needs the slot.
+/// `Instance` wins over `Model` when both are set for the same part.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ModelTarget {
+    /// Every placed copy of this model id.
+    Model(String),
+    /// One slot in the [`Renderer::set_models`] list.
+    Instance(usize),
+}
+
+impl From<&str> for ModelTarget {
+    fn from(id: &str) -> Self {
+        ModelTarget::Model(id.to_string())
+    }
+}
+impl From<&String> for ModelTarget {
+    fn from(id: &String) -> Self {
+        ModelTarget::Model(id.clone())
+    }
+}
+impl From<String> for ModelTarget {
+    fn from(id: String) -> Self {
+        ModelTarget::Model(id)
+    }
+}
+impl From<usize> for ModelTarget {
+    fn from(slot: usize) -> Self {
+        ModelTarget::Instance(slot)
+    }
+}
+
+/// One triggered part's clock. `time` is where the part IS, `target` where it
+/// is heading; `speed` is clip-seconds per real second, fixed when the
+/// command landed so a mid-move reversal takes the same wall-clock time as
+/// the move it interrupts.
+#[derive(Clone, Copy)]
+struct AnimPartRuntime {
+    state: usize,
+    time: f32,
+    target: f32,
+    speed: f32,
+}
+
+/// Where every triggered part of every addressed model currently is.
+///
+/// Deliberately free of GPU state: a door's motion is a clock over a clip,
+/// and keeping it separable is what lets the whole reversible state machine
+/// be tested without a device.
+#[derive(Default)]
+struct ModelStates {
+    map: std::collections::BTreeMap<(ModelTarget, String), AnimPartRuntime>,
+}
+
+impl ModelStates {
+    /// Aim `def` at `state`. False (and no change) when the part has no such
+    /// state. `blend_secs` times THIS move: the speed is fixed here, from the
+    /// distance still to cover, so an interrupted move reverses at a
+    /// comparable pace instead of snapping or crawling.
+    fn set(
+        &mut self,
+        target: ModelTarget,
+        def: &crate::model::AnimPart,
+        state: &str,
+        blend_secs: f32,
+    ) -> bool {
+        let Some(index) = def.state_index(state) else {
+            return false;
+        };
+        let goal = def.state_time(index);
+        let key = (target, def.name.clone());
+        let now = self
+            .map
+            .get(&key)
+            .map(|r| r.time)
+            .unwrap_or_else(|| def.state_time(def.default));
+        let speed = if blend_secs > 0.0 {
+            ((goal - now).abs() / blend_secs).max(1.0e-6)
+        } else {
+            f32::INFINITY
+        };
+        let time = if speed.is_finite() { now } else { goal };
+        self.map
+            .insert(key, AnimPartRuntime { state: index, time, target: goal, speed });
+        true
+    }
+
+    /// Advance every clock by `dt` seconds, linearly, stopping on target.
+    fn tick(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        for run in self.map.values_mut() {
+            if !run.speed.is_finite() {
+                run.time = run.target;
+                continue;
+            }
+            let step = run.speed * dt;
+            if (run.target - run.time).abs() <= step {
+                run.time = run.target;
+            } else if run.target > run.time {
+                run.time += step;
+            } else {
+                run.time -= step;
+            }
+        }
+    }
+
+    /// Drop every clock addressed at `id`, plus the listed placed slots —
+    /// what a model going away means for its doors.
+    fn forget_model(&mut self, id: &str, slots: &[usize]) {
+        self.map.retain(|(target, _), _| match target {
+            ModelTarget::Model(m) => m != id,
+            ModelTarget::Instance(i) => !slots.contains(i),
+        });
+    }
+
+    /// Drop every per-slot clock. Slot numbers only mean anything against one
+    /// placed list, so a scene whose identity changed takes its per-slot
+    /// commands with it; per-MODEL commands (how an imported level addresses
+    /// its own doors) survive.
+    fn forget_slots(&mut self) {
+        self.map
+            .retain(|(target, _), _| matches!(target, ModelTarget::Model(_)));
+    }
+
+    /// (state index, clip time, target time) for one part. A per-slot command
+    /// wins over a per-model one; with neither, the part sits in the pose the
+    /// file authored as its default.
+    fn clock(
+        &self,
+        target: &ModelTarget,
+        model_id: &str,
+        def: &crate::model::AnimPart,
+    ) -> (usize, f32, f32) {
+        let by_slot = matches!(target, ModelTarget::Instance(_))
+            .then(|| self.map.get(&(target.clone(), def.name.clone())))
+            .flatten();
+        let run = by_slot.or_else(|| {
+            self.map
+                .get(&(ModelTarget::Model(model_id.to_string()), def.name.clone()))
+        });
+        match run {
+            Some(r) => (r.state, r.time, r.target),
+            None => {
+                let t = def.state_time(def.default);
+                (def.default, t, t)
+            }
+        }
+    }
+}
+
+/// A part's current state, as reported by [`Renderer::model_states`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPartState {
+    /// The glTF node name — the handle `set_model_state` takes.
+    pub part: String,
+    /// Index into the part's `states`, and its name.
+    pub state: usize,
+    pub state_name: String,
+    /// Where the part is on its clip, and where it is heading.
+    pub time: f32,
+    pub target_time: f32,
+    /// The move has finished: the part sits exactly on `state`.
+    pub settled: bool,
+}
+
+/// One placed instance's anim part, resolved into WORLD space for this
+/// moment — what a walker collides with. Returned by
+/// [`Renderer::anim_part_boxes`].
+#[derive(Clone, Debug)]
+pub struct AnimPartBox {
+    /// Slot in the placed-model list, and the model id in it.
+    pub instance: usize,
+    pub model: String,
+    pub part: String,
+    /// `extras.kind` (`door`), for a caller that treats kinds differently.
+    pub kind: Option<String>,
+    pub state: usize,
+    pub state_name: String,
+    /// World-space collider boxes, already moved to where the part is now.
+    pub boxes: Vec<(Vec3f, Vec3f)>,
+    /// World AABB over `boxes` — a cheap broad-phase reject.
+    pub min: Vec3f,
+    pub max: Vec3f,
 }
 
 /// One placed stock prop. `model` is the asset id it was loaded under, e.g.
@@ -760,6 +1094,76 @@ pub struct ModelInstance {
 /// Stable FNV-1a signature for the subset of a placed-model frame that can
 /// invalidate static derived state. `DefaultHasher` is intentionally not
 /// used: its algorithm is not a persistence/identity contract.
+/// Longest world-space side, in metres, at which a static that owns no AO
+/// layout stops being treated as a shadow caster in the bake.
+///
+/// A prop casts onto the world around it; a whole IMPORTED LEVEL is the world
+/// around it, so feeding one into the sun-depth passes shadows its own
+/// interior and every room goes black. 40 m is comfortably above any prop
+/// (the biggest kit building measures ~20) and far below a map.
+const CASTER_ONLY_MAX_SPAN: f32 = 40.0;
+
+/// Does a static WITHOUT its own AO layout join the bake's sun-depth passes?
+///
+/// `explicit` is the caller's own answer for this model id
+/// ([`Renderer::set_model_casts_shadow`]) and always wins — a host that knows
+/// it is loading a world says so, and no heuristic overrules it. Otherwise a
+/// prelit model (its light is already in COLOR_0, so the sun does not reach
+/// it) and anything level-sized stay out.
+fn casts_as_caster_only(explicit: Option<bool>, prelit: bool, min: Vec3f, max: Vec3f) -> bool {
+    if let Some(answer) = explicit {
+        return answer;
+    }
+    if prelit {
+        return false;
+    }
+    let size = max - min;
+    size.x.max(size.y).max(size.z) <= CASTER_ONLY_MAX_SPAN
+}
+
+/// Local collider boxes through a world matrix, plus the AABB over them.
+///
+/// Each box is re-fitted around its eight transformed corners rather than
+/// rotated as a box: a level's parts are axis-aligned, where this is exact,
+/// and a rotated one still gets a collider that fully contains it — a door
+/// swinging on a hinge is never LESS solid than it looks.
+fn world_boxes(m: &Mat4f, boxes: &[(Vec3f, Vec3f)]) -> (Vec<(Vec3f, Vec3f)>, Vec3f, Vec3f) {
+    let mut out = Vec::with_capacity(boxes.len());
+    let mut lo = vec3f(f32::MAX, f32::MAX, f32::MAX);
+    let mut hi = vec3f(f32::MIN, f32::MIN, f32::MIN);
+    for (bmin, bmax) in boxes {
+        let mut blo = vec3f(f32::MAX, f32::MAX, f32::MAX);
+        let mut bhi = vec3f(f32::MIN, f32::MIN, f32::MIN);
+        for x in [bmin.x, bmax.x] {
+            for y in [bmin.y, bmax.y] {
+                for z in [bmin.z, bmax.z] {
+                    let p = m
+                        .transform_vec4(Vec4f { x, y, z, w: 1.0 })
+                        .to_vec3f();
+                    blo.x = blo.x.min(p.x);
+                    blo.y = blo.y.min(p.y);
+                    blo.z = blo.z.min(p.z);
+                    bhi.x = bhi.x.max(p.x);
+                    bhi.y = bhi.y.max(p.y);
+                    bhi.z = bhi.z.max(p.z);
+                }
+            }
+        }
+        lo.x = lo.x.min(blo.x);
+        lo.y = lo.y.min(blo.y);
+        lo.z = lo.z.min(blo.z);
+        hi.x = hi.x.max(bhi.x);
+        hi.y = hi.y.max(bhi.y);
+        hi.z = hi.z.max(bhi.z);
+        out.push((blo, bhi));
+    }
+    if out.is_empty() {
+        (out, Vec3f::default(), Vec3f::default())
+    } else {
+        (out, lo, hi)
+    }
+}
+
 fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1543,6 +1947,10 @@ impl Default for Renderer {
             skin_palette_texels: 0,
             skin_joint_bases: Vec::new(),
             static_models: Vec::new(),
+            sky_draw: None,
+            sky_time: 0.0,
+            model_casts_shadow: std::collections::BTreeMap::new(),
+            model_anim_state: ModelStates::default(),
             placed_models: Vec::new(),
             world_attachments: Vec::new(),
             view_models: Vec::new(),
@@ -1563,6 +1971,8 @@ impl Default for Renderer {
             lightmap: None,
             lm_fallback: None,
             detail_fallback: None,
+            orm_fallback: None,
+            pbr_draw: None,
             lm_remaps: Vec::new(),
             lm_ground: None,
             lm_top: None,
@@ -1601,6 +2011,7 @@ impl Default for Renderer {
             sdf_instances: Vec::new(),
             sdf_atlas_tex: Vec::new(),
             model_sdf_tex: std::collections::HashMap::new(),
+            model_sdf_bytes: std::collections::HashMap::new(),
             sdf_baked_sun_len: 0.0,
             lm_kick_key: None,
             shadow_geometry: None,
@@ -1928,6 +2339,10 @@ impl Renderer {
             // models_rev bump re-kicks the bake once the world settles.
             self.lm_remaps.clear();
             self.placed_scene_signature = Some(signature);
+            // Per-slot door commands are indexed the same way and go stale
+            // the same way. Per-model ones do not — an imported level keeps
+            // its doors open across a harmless list rebuild.
+            self.model_anim_state.forget_slots();
         }
         self.placed_models = instances;
     }
@@ -2462,6 +2877,28 @@ impl Renderer {
         self.load_model_with_ao(cx, id, glb, png, None, None)
     }
 
+    /// [`load_model_with_ao`] plus the offline `.shadowsdf` bytes, for a
+    /// model whose whole bake travelled with it (an asset-store manifest:
+    /// render GLB + AoMesh + AoTexture + ShadowSdf roles). The SDF is kept
+    /// per model id and resolved against the sun like the disk sidecar.
+    pub fn load_model_with_bake(
+        &mut self,
+        cx: &mut Cx,
+        id: &str,
+        glb: &[u8],
+        png: Option<&[u8]>,
+        aomesh: Option<&[u8]>,
+        ao_png: Option<&[u8]>,
+        shadow_sdf: Option<&[u8]>,
+    ) -> Result<usize, String> {
+        if let Some(sdf) = shadow_sdf {
+            if !self.model_sdf_bytes.contains_key(id) {
+                self.model_sdf_bytes.insert(id.to_string(), sdf.to_vec());
+            }
+        }
+        self.load_model_with_ao(cx, id, glb, png, aomesh, ao_png)
+    }
+
     /// Same as [`load_model`], but the caller may hand the offline AO pair
     /// (`.aomesh` + `.ao.png` bytes) instead of relying on `models_root`.
     /// Import thumbnails use this so a Kenney kit looks like the baked game
@@ -2478,6 +2915,18 @@ impl Renderer {
         if let Some(at) = self.static_models.iter().position(|(k, _)| k == id) {
             return Ok(self.static_models[at].1.triangles);
         }
+        // An `.aomesh` sidecar carries the bake's mesh but never the atlas
+        // ("by URI" — the pack's colormap beside a checkout GLB). A GLB with
+        // its atlas EMBEDDED (every pack import, every generated model) has
+        // no such file: without this the sidecar lane drew the model white
+        // under its AO. The embedded base colour is the atlas, exactly as
+        // parse_glb would have read it.
+        let embedded_png = if png.is_none() && aomesh.is_some() {
+            crate::model::embedded_base_color_png(glb)
+        } else {
+            None
+        };
+        let png = png.or(embedded_png.as_deref());
         // NO BAKE AT LOAD. AO is an offline product (tools/ao_bake); the game
         // loads it or goes without. Baking here cost every launch for an
         // answer that never changes.
@@ -2487,10 +2936,15 @@ impl Renderer {
         // way to reconstruct — so loading it is what makes the AO texture mean
         // anything. Absent or stale, the plain glb still renders, just unlit by
         // AO, which is the correct outcome for an unbaked library.
-        let model = aomesh
+        let mut model = aomesh
             .and_then(StaticModel::from_aomesh)
             .or_else(|| Self::load_aomesh(id))
             .map_or_else(|| StaticModel::parse_glb(glb), Ok)?;
+        // Taken out first: the parts are uploaded on their own below, and
+        // everything after this point sees the model exactly as it did
+        // before doors and skies existed.
+        let anim_defs = std::mem::take(&mut model.anim_parts);
+        let sky_def = model.sky.take();
         let triangles = model.triangle_count();
         let (min, max) = (model.min, model.max);
         // Triangle-derived voxel boxes are the collider truth: measured
@@ -2616,12 +3070,20 @@ impl Renderer {
                 ))
             }
         };
+        // Which shader this model draws with, decided here and never again.
+        // A prelit map keeps the diffuse lane unconditionally: its COLOR_0 IS
+        // the light, and laying a sun-driven highlight over a baked Quake
+        // lightmap would put a moving specular on a wall the file already
+        // finished lighting.
+        let wants_pbr = !model.prelit
+            && (model.pbr.is_shiny() || model.draw_layers.iter().any(|l| l.pbr.is_shiny()));
         let extra_draws = if multi {
             let mut extra = Vec::with_capacity(model.draw_layers.len() - 1);
             for (i, layer) in model.draw_layers.iter().enumerate().skip(1) {
                 if layer.indices.len() < 3 {
                     continue;
                 }
+                let mat = self.upload_material(cx, &layer.pbr);
                 let tex = match layer.texture_png.as_deref() {
                     Some(bytes) => ImageBuffer::from_png(bytes)
                         .map_err(|e| format!("{id}: layer {i} atlas decode failed: {e:?}"))?
@@ -2641,7 +3103,7 @@ impl Renderer {
                 );
                 let g = Geometry::new(cx);
                 g.update(cx, layer.indices.clone(), layer.vertices.clone());
-                extra.push((g, tex, det, dscale));
+                extra.push((g, tex, det, dscale, mat));
             }
             extra
         } else {
@@ -2652,6 +3114,117 @@ impl Renderer {
             self.upload_detail(cx, layer0.detail_png.as_deref(), layer0.detail_scale)
         } else {
             self.upload_detail(cx, model.detail_png.as_deref(), model.detail_scale)
+        };
+        let main_material = if multi {
+            self.upload_material(cx, &model.draw_layers[0].pbr)
+        } else {
+            self.upload_material(cx, &model.pbr)
+        };
+        // Anim parts (doors, lifts). Their layers go through the same upload
+        // as the model's own, but a part usually re-uses a texture the level
+        // already has — a door is skinned with one of the level's tiles — so
+        // an identical PNG binds the SAME texture rather than a second copy.
+        // That keeps a part in its parent's batch instead of splitting it.
+        let anim_parts: Vec<LoadedAnimPart> = {
+            let mut out = Vec::with_capacity(anim_defs.len());
+            for def in anim_defs {
+                let mut draws = Vec::with_capacity(def.layers.len());
+                for (li, layer) in def.layers.iter().enumerate() {
+                    if layer.indices.len() < 3 {
+                        continue;
+                    }
+                    let resident = if multi {
+                        model
+                            .draw_layers
+                            .iter()
+                            .position(|l| l.texture_png == layer.texture_png)
+                            .and_then(|k| match k {
+                                0 => Some(texture.clone()),
+                                k => extra_draws.get(k - 1).map(|(_, t, _, _, _)| t.clone()),
+                            })
+                    } else if main_png.is_some() && main_png == layer.texture_png.as_deref() {
+                        Some(texture.clone())
+                    } else {
+                        None
+                    };
+                    let tex = match resident {
+                        Some(t) => t,
+                        None => match layer.texture_png.as_deref() {
+                            Some(bytes) => ImageBuffer::from_png(bytes)
+                                .map_err(|e| {
+                                    format!(
+                                        "{id}: part {} layer {li} atlas decode failed: {e:?}",
+                                        def.name
+                                    )
+                                })?
+                                .into_new_mip_repeat_texture(cx),
+                            None => {
+                                let mut white = ImageBuffer::default();
+                                white.width = 1;
+                                white.height = 1;
+                                white.data = vec![0xFFFF_FFFF];
+                                white.into_new_texture(cx)
+                            }
+                        },
+                    };
+                    let (det, dscale) =
+                        self.upload_detail(cx, layer.detail_png.as_deref(), layer.detail_scale);
+                    let g = Geometry::new(cx);
+                    g.update(cx, layer.indices.clone(), layer.vertices.clone());
+                    draws.push((g, tex, det, dscale));
+                }
+                if draws.is_empty() {
+                    continue;
+                }
+                let collider = def.collider_boxes();
+                out.push(LoadedAnimPart { def, draws, collider });
+            }
+            out
+        };
+        // The map's sky faces: one geometry, up to two layer images. A
+        // missing or undecodable layer falls back to a 1x1 rather than
+        // failing the whole map — a wrong sky is a wrong sky, but no map is
+        // better than a wrong sky only in a unit test.
+        let sky = match sky_def {
+            Some(part) => {
+                let stride = crate::model::MODEL_VERTEX_FLOATS;
+                let positions: Vec<Vec3f> = (0..part.vertices.len() / stride)
+                    .map(|i| {
+                        vec3f(
+                            part.vertices[i * stride],
+                            part.vertices[i * stride + 1],
+                            part.vertices[i * stride + 2],
+                        )
+                    })
+                    .collect();
+                let indices = part.indices.clone();
+                let g = Geometry::new(cx);
+                g.update(cx, part.indices.clone(), part.vertices.clone());
+                let mut layer = |i: usize, fallback: u32| -> Texture {
+                    part.images
+                        .get(i)
+                        .and_then(|png| ImageBuffer::from_png(png).ok())
+                        .map(|img| img.into_new_mip_repeat_texture(cx))
+                        .unwrap_or_else(|| {
+                            let mut flat = ImageBuffer::default();
+                            flat.width = 1;
+                            flat.height = 1;
+                            flat.data = vec![fallback];
+                            flat.into_new_texture(cx)
+                        })
+                };
+                Some(LoadedSky {
+                    tex0: layer(0, 0xFFFF_FFFF),
+                    // Transparent: the front layer keys the back one through
+                    // its alpha, so an absent second layer must add nothing.
+                    tex1: layer(1, 0x0000_0000),
+                    geometry: g,
+                    part,
+                    positions,
+                    indices,
+                })
+            }
+            None => None,
         };
         // The pack's prebaked atlas, if tools/ao_bake has produced one. No
         // atlas simply means no AO for that pack, not an error: a game must
@@ -2696,7 +3269,12 @@ impl Renderer {
         // the whole pack atlas, mostly empty.
         let lm_source = model_ao_dims.map(|(ao_w, ao_h)| {
             std::sync::Arc::new(crate::lightmap::LmMeshSource {
-                caster: crate::ao::MeshRaycaster::new(lm_positions, lm_indices, min, max),
+                caster: crate::ao::MeshRaycaster::new(
+                    lm_positions.clone(),
+                    lm_indices.clone(),
+                    min,
+                    max,
+                ),
                 ao_uv: lm_ao_uv,
                 albedo: lm_albedo,
                 ao_w,
@@ -2720,17 +3298,76 @@ impl Renderer {
                 detail: main_detail,
                 detail_scale: main_detail_scale,
                 extra_draws,
+                material: main_material,
+                wants_pbr,
                 prelit: model.prelit,
                 triangles,
                 min,
                 max,
                 collider_parts,
                 occluder_parts,
+                anim_parts,
+                sky,
+                mesh_positions: lm_positions,
+                mesh_indices: lm_indices,
                 lm_source,
                 bake_geometry,
             },
         ));
         Ok(triangles)
+    }
+
+    /// Drop a resident model's caches so the NEXT `load_model*` call for
+    /// `id` re-parses its GLB and re-reads its bake sidecars instead of
+    /// hitting the early-return at the top of `load_model_with_ao`. For a
+    /// republished asset-store revision: the caller drops its own RAM byte
+    /// memo FIRST (so the reload streams fresh bytes rather than reusing
+    /// the stale ones), then this drops the GPU-resident geometry/AO/SDF —
+    /// mirroring every per-id side table `load_model_with_ao` writes.
+    ///
+    /// `placed_models` is untouched: a still-placed instance of `id` simply
+    /// stops drawing (its geometry lookup fails) until the caller's next
+    /// `load_model*` call for the same id lands, typically the same frame.
+    ///
+    /// A per-model AO texture (`ao_textures` keyed by `id` itself) is
+    /// dropped too; a PACK-shared atlas (keyed by the pack prefix) is left
+    /// alone — other resident models from the same pack still bind it.
+    ///
+    /// Returns whether `id` was actually resident.
+    pub fn unload_model(&mut self, id: &str) -> bool {
+        let had = if let Some(at) = self.static_models.iter().position(|(k, _)| k == id) {
+            self.static_models.remove(at);
+            true
+        } else {
+            false
+        };
+        // Its doors go with it: a reload re-parses the GLB, and a clock aimed
+        // at a state index of the OLD parse has no meaning against the new
+        // one.
+        let slots: Vec<usize> = self
+            .placed_models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.model == id)
+            .map(|(i, _)| i)
+            .collect();
+        self.model_anim_state.forget_model(id, &slots);
+        self.model_pack.retain(|(k, _)| k != id);
+        self.ao_textures.retain(|(k, _)| k != id);
+        self.model_sdf_bytes.remove(id);
+        self.model_sdf_tex.remove(id);
+        if had {
+            // Any placed instance of this id now points at a stale
+            // lightmap chart region (a re-baked AO mesh may lay its
+            // ao_uv out differently) — force the next scene-identity
+            // check to re-kick the bake rather than trusting the old
+            // remap, the same way `set_models` treats any other
+            // placed-scene-relevant change.
+            self.lm_remaps.clear();
+            self.placed_scene_signature = None;
+            self.models_rev = self.models_rev.wrapping_add(1);
+        }
+        had
     }
 
     /// Last frame's dynamic shadow-mesh triangles (entity hull drapes +
@@ -2837,6 +3474,7 @@ impl Renderer {
         let mut meshes = Vec::new();
         let mut mesh_map = Vec::new();
         let mut mesh_geometry = Vec::new();
+        let mut casters_only = Vec::new();
         for (pi, inst) in self.placed_models.iter().enumerate() {
             if inst.dynamic {
                 continue;
@@ -2846,6 +3484,23 @@ impl Renderer {
                 continue;
             };
             let Some(src) = &self.static_models[at].1.lm_source else {
+                // No AO layout, no region — but it still casts: sun-depth
+                // passes take its render geometry at its transform.
+                let m = &self.static_models[at].1;
+                let (lo, hi) = crate::lightmap::world_bounds(&inst.transform, (m.min, m.max));
+                if casts_as_caster_only(
+                    self.model_casts_shadow.get(&inst.model).copied(),
+                    m.prelit,
+                    lo,
+                    hi,
+                ) {
+                    casters_only.push(crate::gpu_lightmap::GpuBakeMesh {
+                        geometry: m.geometry.geometry_id(),
+                        transform: inst.transform,
+                        min: lo,
+                        max: hi,
+                    });
+                }
                 continue;
             };
             meshes.push(crate::lightmap::LmMeshInstance {
@@ -2979,6 +3634,7 @@ impl Renderer {
             scene,
             mesh_geometry,
             mesh_map,
+            casters_only,
             terrain_world,
         });
     }
@@ -3115,15 +3771,33 @@ impl Renderer {
         skinned_items: Option<&[SkinnedDraw]>,
     ) -> Vec<crate::gpu_lightmap::GpuLmMover> {
         let mut out = Vec::new();
-        for inst in self.placed_models.iter() {
-            if !inst.dynamic {
-                continue;
-            }
+        for (slot, inst) in self.placed_models.iter().enumerate() {
             let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model)
             else {
                 continue;
             };
             let m = &self.static_models[at].1;
+            // Anim parts cast as MOVERS even when their level is static: the
+            // static atlas was baked without them (they are not in its
+            // stream), so a door's shadow can only come from the cascades —
+            // and it has to follow the door, which is what a mover is.
+            for part in &m.anim_parts {
+                let (_, time, _) =
+                    self.model_anim_state.clock(&ModelTarget::Instance(slot), &inst.model, &part.def);
+                let pose = Mat4f::mul(&inst.transform, &part.def.transform_at(time));
+                for (g, _, _, _) in &part.draws {
+                    out.push(crate::gpu_lightmap::GpuLmMover {
+                        geometry: g.geometry_id(),
+                        transform: pose,
+                        min: part.def.min,
+                        max: part.def.max,
+                        skin: None,
+                    });
+                }
+            }
+            if !inst.dynamic {
+                continue;
+            }
             out.push(crate::gpu_lightmap::GpuLmMover {
                 geometry: m.geometry.geometry_id(),
                 transform: inst.transform,
@@ -3344,6 +4018,67 @@ impl Renderer {
         }
     }
 
+    /// Make one draw layer's material resident.
+    ///
+    /// A material with no shininess is flattened to the neutral one on the
+    /// way in, so nothing downstream has to remember that glTF's default
+    /// `metallicFactor` is 1 — see [`LayerMaterial`]. A metallicRoughness
+    /// image that fails to decode (a GLB embedding JPEG rather than PNG)
+    /// degrades to the factors instead of failing the model: a prop that
+    /// loses its roughness MAP still looks like the prop, and a prop that
+    /// fails to load does not.
+    ///
+    /// The decoded pixels are consumed by the upload — `ImageBuffer` is moved
+    /// into the texture — so the only host copy that outlives this call is
+    /// the encoded PNG inside the `StaticModel`, which the caller drops.
+    fn upload_material(&mut self, cx: &mut Cx, pbr: &crate::model::PbrMaterial) -> LayerMaterial {
+        if !pbr.is_shiny() {
+            return LayerMaterial {
+                metallic: 0.0,
+                roughness: 1.0,
+                orm: self.orm_neutral(cx),
+                orm_on: false,
+            };
+        }
+        let orm = pbr
+            .orm_png
+            .as_deref()
+            .and_then(|bytes| ImageBuffer::from_png(bytes).ok())
+            .map(|buf| buf.into_new_mip_repeat_texture(cx));
+        match orm {
+            Some(tex) => LayerMaterial {
+                metallic: pbr.metallic,
+                roughness: pbr.roughness,
+                orm: tex,
+                orm_on: true,
+            },
+            None => LayerMaterial {
+                metallic: pbr.metallic,
+                roughness: pbr.roughness,
+                orm: self.orm_neutral(cx),
+                orm_on: false,
+            },
+        }
+    }
+
+    /// White 1x1: sampled as an ORM it multiplies both factors by 1, so a
+    /// material that binds it reads exactly as its factors even if `orm_on`
+    /// were ever set by mistake.
+    fn orm_neutral(&mut self, cx: &mut Cx) -> Texture {
+        if self.orm_fallback.is_none() {
+            self.orm_fallback = Some(Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    width: 1,
+                    height: 1,
+                    data: Some(vec![0xFFFF_FFFF]),
+                    updated: TextureUpdated::Full,
+                },
+            ));
+        }
+        self.orm_fallback.clone().unwrap()
+    }
+
     fn detail_neutral(&mut self, cx: &mut Cx) -> Texture {
         if self.detail_fallback.is_none() {
             self.detail_fallback = Some(Texture::new_with_format(
@@ -3452,6 +4187,247 @@ impl Renderer {
             .map(|(_, m)| (m.min, m.max))
     }
 
+    /// Advance the sky clock — what the scrolling layers of a Quake sky
+    /// ride. The host ticks it beside its other presentation clocks; a
+    /// paused game keeps a still sky, and a capture that sets the time
+    /// explicitly ([`Self::set_sky_time`]) is reproducible.
+    pub fn tick_sky(&mut self, dt: f32) {
+        if dt.is_finite() {
+            // Wrapped well beyond any layer's period so a long session never
+            // loses precision in the scroll offset.
+            self.sky_time = (self.sky_time + dt) % 4096.0;
+        }
+    }
+
+    pub fn set_sky_time(&mut self, time: f32) {
+        self.sky_time = time;
+    }
+
+    pub fn sky_time(&self) -> f32 {
+        self.sky_time
+    }
+
+    /// The map's sky definition (projection, layer count, repeat, speeds),
+    /// for a host that wants to report or drive it.
+    pub fn model_sky(&self, id: &str) -> Option<&crate::model::SkyPart> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .and_then(|(_, m)| m.sky.as_ref())
+            .map(|s| &s.part)
+    }
+
+    /// The sky faces' triangles in MODEL space.
+    ///
+    /// Kept separate from [`Self::model_mesh`] because the two answers differ
+    /// by consumer: the RENDERER must not shade sky faces like walls, but a
+    /// WALKER usually must collide with them — a Doom sky brush is solid, and
+    /// dropping it from collision lets the player walk out of the map.
+    pub fn model_sky_mesh(&self, id: &str) -> Option<(&[Vec3f], &[u32])> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .and_then(|(_, m)| m.sky.as_ref())
+            .map(|s| (s.positions.as_slice(), s.indices.as_slice()))
+    }
+
+    /// Say whether a model casts into the baked sun shadows.
+    ///
+    /// Only matters for a static that owns no AO layout of its own, which is
+    /// the lane that otherwise falls back to a size heuristic
+    /// ([`CASTER_ONLY_MAX_SPAN`]). A host loading an imported LEVEL — one
+    /// enormous GLB that IS the world — should pass `false`: a level that
+    /// casts into the bake shadows its own interior and every room goes
+    /// dark. Props default to casting, so a fence still throws a shadow.
+    ///
+    /// Takes effect on the next bake; the pending one is re-kicked.
+    pub fn set_model_casts_shadow(&mut self, id: &str, casts: bool) {
+        if self.model_casts_shadow.insert(id.to_string(), casts) != Some(casts) {
+            self.placed_scene_signature = None;
+            self.models_rev = self.models_rev.wrapping_add(1);
+        }
+    }
+
+    /// The loaded model's own triangles in MODEL space — positions and
+    /// indices, the pair a collision structure is built from.
+    ///
+    /// Kept from the load so a walker never re-parses the GLB (`level.rs`
+    /// builds its BVH straight off this). ANIM PARTS ARE NOT IN IT: a door
+    /// moves, so it belongs to [`Self::anim_part_boxes`], not to a static
+    /// acceleration structure that would go stale the moment it opened.
+    pub fn model_mesh(&self, id: &str) -> Option<(&[Vec3f], &[u32])> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| (m.mesh_positions.as_slice(), m.mesh_indices.as_slice()))
+    }
+
+    /// One named part's definition (states, clip, local bounds). The
+    /// definitions are interleaved with their GPU handles, so a model's parts
+    /// are enumerated by name ([`Self::model_anim_part_names`]) and fetched
+    /// one at a time rather than handed out as a slice.
+    pub fn model_anim_part(&self, id: &str, part: &str) -> Option<&crate::model::AnimPart> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .and_then(|(_, m)| m.anim_parts.iter().find(|p| p.def.name == part))
+            .map(|p| &p.def)
+    }
+
+    /// Every part name a loaded model exposes, in file order.
+    pub fn model_anim_part_names(&self, id: &str) -> Vec<String> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| m.anim_parts.iter().map(|p| p.def.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Drive one part toward a named state — the game's whole handle on a
+    /// door.
+    ///
+    /// `target` is a model id (every placed copy; an imported level is one
+    /// copy, so this is the usual form) or a placed slot index. `blend_secs`
+    /// is how long THIS move takes: 0 snaps, and a command that lands
+    /// mid-move retargets from where the part currently is, so a door caught
+    /// half open reverses smoothly instead of jumping.
+    ///
+    /// Returns false — and changes nothing — when the model is not resident,
+    /// has no such part, or the part has no such state; the caller has asked
+    /// for something that does not exist, and silently doing nothing would
+    /// hide an importer/contract mismatch.
+    pub fn set_model_state(
+        &mut self,
+        target: impl Into<ModelTarget>,
+        part: &str,
+        state: &str,
+        blend_secs: f32,
+    ) -> bool {
+        let target = target.into();
+        let Some(model_id) = self.target_model_id(&target) else {
+            return false;
+        };
+        // Fields, not accessors: the definition borrows `static_models` while
+        // the clock map is written, and those are disjoint.
+        let Some(def) = self
+            .static_models
+            .iter()
+            .find(|(k, _)| *k == model_id)
+            .and_then(|(_, m)| m.anim_parts.iter().find(|p| p.def.name == part))
+            .map(|p| &p.def)
+        else {
+            return false;
+        };
+        self.model_anim_state.set(target, def, state, blend_secs)
+    }
+
+    /// Advance every triggered part by `dt` seconds of wall clock. Motion is
+    /// LINEAR in time along the clip — the host ticks this once a frame,
+    /// exactly where it ticks the rest of its presentation.
+    pub fn tick_model_states(&mut self, dt: f32) {
+        self.model_anim_state.tick(dt);
+    }
+
+    /// What every part of `target` is doing right now. Parts nobody has
+    /// triggered report their model's default state.
+    pub fn model_states(&self, target: impl Into<ModelTarget>) -> Vec<ModelPartState> {
+        let target = target.into();
+        let Some(model_id) = self.target_model_id(&target) else {
+            return Vec::new();
+        };
+        let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| *k == model_id) else {
+            return Vec::new();
+        };
+        loaded
+            .anim_parts
+            .iter()
+            .map(|p| {
+                let (state, time, goal) = self.model_anim_state.clock(&target, &model_id, &p.def);
+                ModelPartState {
+                    part: p.def.name.clone(),
+                    state,
+                    state_name: p.def.states.get(state).cloned().unwrap_or_default(),
+                    time,
+                    target_time: goal,
+                    settled: (time - goal).abs() <= 1.0e-6,
+                }
+            })
+            .collect()
+    }
+
+    /// One part's state, or `None` when the model or part is unknown.
+    pub fn model_part_state(
+        &self,
+        target: impl Into<ModelTarget>,
+        part: &str,
+    ) -> Option<ModelPartState> {
+        let target = target.into();
+        self.model_states(target).into_iter().find(|s| s.part == part)
+    }
+
+    /// The model id a target resolves to: itself, or the model in that slot.
+    fn target_model_id(&self, target: &ModelTarget) -> Option<String> {
+        match target {
+            ModelTarget::Model(id) => Some(id.clone()),
+            ModelTarget::Instance(i) => self.placed_models.get(*i).map(|m| m.model.clone()),
+        }
+    }
+
+
+    /// Every placed instance's anim parts as WORLD-space collider boxes for
+    /// this moment — a closed door is a wall, an open one is a hole, and a
+    /// door caught halfway is exactly where it looks.
+    ///
+    /// This is the mover/walker query: it is not a broad-phase structure, so
+    /// a caller with many doors should reject on `min`/`max` first.
+    pub fn anim_part_boxes(&self) -> Vec<AnimPartBox> {
+        let mut out = Vec::new();
+        for (slot, inst) in self.placed_models.iter().enumerate() {
+            let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| *k == inst.model)
+            else {
+                continue;
+            };
+            for part in &loaded.anim_parts {
+                let (state, time, _) =
+                    self.model_anim_state.clock(&ModelTarget::Instance(slot), &inst.model, &part.def);
+                let m = Mat4f::mul(&inst.transform, &part.def.transform_at(time));
+                let (boxes, min, max) = world_boxes(&m, &part.collider);
+                out.push(AnimPartBox {
+                    instance: slot,
+                    model: inst.model.clone(),
+                    part: part.def.name.clone(),
+                    kind: part.def.kind.clone(),
+                    state,
+                    state_name: part.def.states.get(state).cloned().unwrap_or_default(),
+                    boxes,
+                    min,
+                    max,
+                });
+            }
+        }
+        out
+    }
+
+    /// One part's world-space collider boxes. `Model` targets answer for the
+    /// FIRST placed copy of that id (an imported level has exactly one).
+    pub fn anim_part_collider(
+        &self,
+        target: impl Into<ModelTarget>,
+        part: &str,
+    ) -> Option<Vec<(Vec3f, Vec3f)>> {
+        let target = target.into();
+        let slot = match &target {
+            ModelTarget::Instance(i) => *i,
+            ModelTarget::Model(id) => self.placed_models.iter().position(|m| m.model == *id)?,
+        };
+        let inst = self.placed_models.get(slot)?;
+        let (_, loaded) = self.static_models.iter().find(|(k, _)| *k == inst.model)?;
+        let found = loaded.anim_parts.iter().find(|p| p.def.name == part)?;
+        let (_, time, _) = self.model_anim_state.clock(&target, &inst.model, &found.def);
+        let m = Mat4f::mul(&inst.transform, &found.def.transform_at(time));
+        Some(world_boxes(&m, &found.collider).0)
+    }
+
     /// Triangle count of a loaded prop, so a caller can budget a scene before
     /// drawing it. Counted from the index buffer rather than stored, because
     /// this is a reporting path, not a hot one.
@@ -3465,10 +4441,12 @@ impl Renderer {
     /// Draw one world-model lane. Instances are grouped by model, so N
     /// copies of one prop cost ONE draw item with N instances rather than N
     /// draws — which is what makes a scene full of stock trees affordable.
+    #[allow(clippy::too_many_arguments)]
     fn draw_models_inner(
         &mut self,
         cx: &mut Cx3d,
-        draw: &mut DrawSceneSkinned,
+        mut draw: ModelDraw<'_>,
+        eye: Vec3f,
         instances: &[ModelInstance],
         lane: WorldModelLane,
         fog: (Vec3f, f32),
@@ -3479,23 +4457,33 @@ impl Renderer {
         if instances.is_empty() {
             return;
         }
-        sun.write_into(
-            &mut draw.light_dir,
-            &mut draw.sun_color,
-            &mut draw.sun_sky,
-            &mut draw.sun_ground,
-        );
-        draw.fog_color = fog.0;
-        draw.fog_density = fog.1;
-        draw.depth_clip = 1.0;
-        draw.lm_debug = self.lm_debug;
+        let pbr_lane = draw.is_pbr();
+        {
+            let draw = draw.base();
+            sun.write_into(
+                &mut draw.light_dir,
+                &mut draw.sun_color,
+                &mut draw.sun_sky,
+                &mut draw.sun_ground,
+            );
+            draw.fog_color = fog.0;
+            draw.fog_density = fog.1;
+            draw.depth_clip = 1.0;
+            draw.lm_debug = self.lm_debug;
+        }
+        // The specular lobe is the one term in this renderer that needs the
+        // camera. TRUE world position, matching v_csm.xyz / v_csm_n.
+        if pbr_lane {
+            let vars = &mut draw.base().draw_vars;
+            vars.set_uniform(cx.cx, live_id!(eye), &[eye.x, eye.y, eye.z, 0.0]);
+        }
         // One atlas for the whole static scene, so binding it here costs
         // nothing per instance and never breaks batching.
         let lm_tex = self.lightmap_texture(cx.cx);
-        draw.draw_vars.set_texture(2, &lm_tex);
+        draw.base().draw_vars.set_texture(2, &lm_tex);
         {
             let csm = self.gpu_baker.csm_binding();
-            Self::write_csm_uniforms(cx.cx, &mut draw.draw_vars, &csm, &lm_tex, 4);
+            Self::write_csm_uniforms(cx.cx, &mut draw.base().draw_vars, &csm, &lm_tex, 4);
         }
         // The ground region, for DYNAMIC instances' baked sun shadow (a
         // driven car crossing a house's shadow darkens). A channel only —
@@ -3503,19 +4491,19 @@ impl Renderer {
         // a dynamic lifted above the blocker rejects the ground's shadow.
         {
             let (top_tex, top_base, top_range) = self.lm_top_binding(cx.cx);
-            draw.draw_vars.set_texture(3, &top_tex);
-            draw.draw_vars.set_uniform(
+            draw.base().draw_vars.set_texture(3, &top_tex);
+            draw.base().draw_vars.set_uniform(
                 cx.cx,
                 live_id!(lm_top_decode),
                 &[top_base, top_range, 0.0, 0.0],
             );
             let (g_rect, g_world) = self.lm_ground.unwrap_or_default();
-            draw.draw_vars.set_uniform(
+            draw.base().draw_vars.set_uniform(
                 cx.cx,
                 live_id!(lm_ground_rect),
                 &[g_rect.x, g_rect.y, g_rect.z, g_rect.w],
             );
-            draw.draw_vars.set_uniform(
+            draw.base().draw_vars.set_uniform(
                 cx.cx,
                 live_id!(lm_ground_world),
                 &[g_world.x, g_world.y, g_world.z, g_world.w],
@@ -3567,6 +4555,13 @@ impl Renderer {
                 continue;
             };
             let loaded = &self.static_models[at];
+            // Lane filter. Both passes walk the same instance list — indices
+            // address `lm_remaps` / `model_ground` / the light-cell key, so
+            // they must not be renumbered — and each takes only the models
+            // its shader owns.
+            if loaded.1.wants_pbr != pbr_lane {
+                continue;
+            }
             // Hoisted: `loaded` borrows self, and the per-instance light
             // block below needs `&mut self` (cell hysteresis).
             let tri_count = loaded.1.triangles;
@@ -3586,17 +4581,25 @@ impl Renderer {
             let (layer_draws, prelit) = {
                 let m = &loaded.1;
                 let mut layers = Vec::with_capacity(1 + m.extra_draws.len());
-                layers.push((
-                    m.geometry.geometry_id(),
-                    m.texture.clone(),
-                    m.detail.clone(),
-                    m.detail_scale,
-                ));
-                for (g, t, d, s) in &m.extra_draws {
-                    layers.push((g.geometry_id(), t.clone(), d.clone(), *s));
+                // A model that is ALL anim parts (a lone door asset) has an
+                // empty static stream and nothing to draw for layer 0.
+                if m.triangles > 0 {
+                    layers.push((
+                        m.geometry.geometry_id(),
+                        m.texture.clone(),
+                        m.detail.clone(),
+                        m.detail_scale,
+                        m.material.clone(),
+                    ));
+                }
+                for (g, t, d, s, mat) in &m.extra_draws {
+                    layers.push((g.geometry_id(), t.clone(), d.clone(), *s, mat.clone()));
                 }
                 (layers, m.prelit)
             };
+            // Rigid parts ride the PARENT's material: a door is cut from the
+            // level tile it sits in, so its metal/roughness is the model's.
+            let part_material = loaded.1.material.clone();
             // The pack's baked occlusion, on slot 1. Packs share atlases, so
             // this changes only when the pack does — the sort above keeps
             // models of a pack adjacent, so it does not break batching.
@@ -3607,17 +4610,17 @@ impl Renderer {
                 .and_then(|(_, pack)| self.ao_textures.iter().find(|(k, _)| k == pack))
                 .map(|(_, t)| t);
             if let Some(t) = ao_tex {
-                draw.draw_vars.set_texture(1, t);
-                draw.ao_enabled = 1.0;
+                draw.base().draw_vars.set_texture(1, t);
+                draw.base().ao_enabled = 1.0;
                 stats.ao_bound += 1;
             } else {
-                draw.ao_enabled = 0.0;
+                draw.base().ao_enabled = 0.0;
                 stats.ao_missing += 1;
             }
-            draw.transform = inst.transform;
+            draw.base().transform = inst.transform;
             // This copy's window into the light atlas; zero disables — a
             // dynamic prop or an unbaked model lights analytically as before.
-            draw.lm_rect = if dynamic {
+            draw.base().lm_rect = if dynamic {
                 Vec4f::default()
             } else {
                 self.lm_remaps.get(i).copied().unwrap_or_default()
@@ -3625,8 +4628,8 @@ impl Renderer {
             // Dynamic-light gate: dynamics sum every uniform slot (lamps
             // included), statics only the transient prefix — their lamp
             // light is already in the atlas RGB.
-            draw.dl_apply = if dynamic { 1.0 } else { 0.0 };
-            draw.depth_bias = inst.depth_order * 1.0e-3;
+            draw.base().dl_apply = if dynamic { 1.0 } else { 0.0 };
+            draw.base().depth_bias = inst.depth_order * 1.0e-3;
             if dynamic {
                 // This instance's OWN cell block + transients, and its
                 // ground plane for the sun-ray-projected shadow sample.
@@ -3644,8 +4647,8 @@ impl Renderer {
                     &mut self.light_rank,
                     &mut self.light_block_scratch,
                 );
-                write_light_block(cx.cx, &mut draw.draw_vars, &self.light_block_scratch, split);
-                draw.ground_y = match lane {
+                write_light_block(cx.cx, &mut draw.base().draw_vars, &self.light_block_scratch, split);
+                draw.base().ground_y = match lane {
                     WorldModelLane::Placed => self.model_ground.get(i),
                     WorldModelLane::Attachment => self.world_attachment_ground.get(i),
                 }
@@ -3653,8 +4656,8 @@ impl Renderer {
                 .unwrap_or(0.0);
                 dynamic_block_active = true;
             } else if dynamic_block_active {
-                write_light_block(cx.cx, &mut draw.draw_vars, &static_block, static_split);
-                draw.ground_y = 0.0;
+                write_light_block(cx.cx, &mut draw.base().draw_vars, &static_block, static_split);
+                draw.base().ground_y = 0.0;
                 dynamic_block_active = false;
             }
             if last.as_deref() != Some(inst.model.as_str()) {
@@ -3674,18 +4677,214 @@ impl Renderer {
                     stats.world_attachment_triangles += tri_count;
                 }
             }
-            for (geometry_id, texture, detail, dscale) in &layer_draws {
-                draw.draw_vars.geometry_id = Some(*geometry_id);
-                draw.draw_vars.set_texture(0, texture);
-                draw.draw_vars.set_texture(5, detail);
-                draw.detail_st = vec2f(dscale[0], dscale[1]);
-                draw.prelit = if prelit { 1.0 } else { 0.0 };
-                if draw.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&draw.draw_vars);
-                    draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
+            for (geometry_id, texture, detail, dscale, material) in &layer_draws {
+                draw.base().draw_vars.geometry_id = Some(*geometry_id);
+                draw.base().draw_vars.set_texture(0, texture);
+                draw.base().draw_vars.set_texture(5, detail);
+                draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                draw.base().prelit = if prelit { 1.0 } else { 0.0 };
+                draw.set_material(material);
+                if draw.base().draw_vars.can_instance() {
+                    let new_area = cx.add_instance(&draw.base().draw_vars);
+                    draw.base().draw_vars.area = cx.update_area_refs(draw.base().draw_vars.area, new_area);
                 }
             }
+            // Rigid parts (doors, lifts). Each is one extra draw on the
+            // PARENT's material — same shader, same textures, usually the
+            // level tile it was cut from — placed at the instance transform
+            // times where the part's state machine has it right now.
+            //
+            // A part carries no baked chart (lm_rect zeroed): it moves, so
+            // the static atlas never had a window for it. Its shadow comes
+            // from the realtime cascades, which see it as a mover.
+            let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2])>)> = {
+                let m = &self.static_models[at].1;
+                if m.anim_parts.is_empty() {
+                    Vec::new()
+                } else {
+                    let key = match lane {
+                        WorldModelLane::Placed => ModelTarget::Instance(i),
+                        // Attachments are not placed slots — a slot index
+                        // would address someone else's instance — so their
+                        // parts follow the per-MODEL command only.
+                        WorldModelLane::Attachment => ModelTarget::Model(inst.model.clone()),
+                    };
+                    m.anim_parts
+                        .iter()
+                        .map(|p| {
+                            let (_, time, _) =
+                                self.model_anim_state.clock(&key, &inst.model, &p.def);
+                            (
+                                p.def.transform_at(time),
+                                p.def.indices.len() / 3,
+                                p.draws
+                                    .iter()
+                                    .map(|(g, t, d, s)| {
+                                        (g.geometry_id(), t.clone(), d.clone(), *s)
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect()
+                }
+            };
+            for (pose, part_tris, part_draws) in &parts {
+                draw.base().transform = Mat4f::mul(&inst.transform, pose);
+                draw.base().lm_rect = Vec4f::default();
+                for (geometry_id, texture, detail, dscale) in part_draws {
+                    draw.base().draw_vars.geometry_id = Some(*geometry_id);
+                    draw.base().draw_vars.set_texture(0, texture);
+                    draw.base().draw_vars.set_texture(5, detail);
+                    draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                    draw.base().prelit = if prelit { 1.0 } else { 0.0 };
+                    draw.set_material(&part_material);
+                    if draw.base().draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&draw.base().draw_vars);
+                        draw.base().draw_vars.area = cx.update_area_refs(draw.base().draw_vars.area, new_area);
+                    }
+                }
+                match lane {
+                    WorldModelLane::Placed => stats.model_triangles += part_tris,
+                    WorldModelLane::Attachment => {
+                        stats.world_attachment_triangles += part_tris
+                    }
+                }
+            }
+            // A part opened its own draw item; the next instance of the same
+            // model must re-bind its own transform rather than accumulate
+            // into the part's.
+            if !parts.is_empty() {
+                last = None;
+            }
         }
+    }
+
+    /// The specular half of the model pass: the same instance list, walked
+    /// again for the models whose material carries shininess.
+    ///
+    /// The shader is the renderer's own, built on first use rather than lent
+    /// through `SceneDraws` (the `sky_draw` pattern). That is deliberate: a
+    /// host does not opt into PBR, a MODEL does, and every existing host —
+    /// VJ, sandbox, the thumbnailer — gets the lane the moment it loads a
+    /// shiny GLB without touching its widget or its script.
+    ///
+    /// Costs nothing when the scene has no shiny models: `wants_pbr` is a
+    /// bool on an already-resident struct, so the early-out below is one
+    /// linear scan of the instance list and no GPU work at all.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pbr_models(
+        &mut self,
+        cx: &mut Cx3d,
+        eye: Vec3f,
+        instances: &[ModelInstance],
+        lane: WorldModelLane,
+        fog: (Vec3f, f32),
+        sun: &SunLight,
+        frustum: Option<&Frustum>,
+        stats: &mut RenderStats,
+    ) {
+        let any = instances.iter().any(|inst| {
+            self.static_models
+                .iter()
+                .any(|(k, m)| *k == inst.model && m.wants_pbr)
+        });
+        if !any {
+            return;
+        }
+        if self.pbr_draw.is_none() {
+            // Held VM (a script-driven draw is mid-apply): try again next
+            // frame rather than drawing with no shader.
+            self.pbr_draw = cx
+                .cx
+                .try_with_vm(|vm| Box::new(DrawScenePbr::script_new_with_default(vm)));
+        }
+        let Some(mut draw) = self.pbr_draw.take() else {
+            return;
+        };
+        self.draw_models_inner(
+            cx,
+            ModelDraw::Pbr(&mut draw),
+            eye,
+            instances,
+            lane,
+            fog,
+            sun,
+            frustum,
+            stats,
+        );
+        self.pbr_draw = Some(draw);
+    }
+
+    /// Draw every placed map's sky surfaces.
+    ///
+    /// One draw item per map: the faces are already one geometry, and the
+    /// whole point of the lane is that a sky costs the same whether it is
+    /// two brushes or two hundred. Depth is written normally — the faces sit
+    /// where the level put them — but nothing else about the world reaches
+    /// them: no lightmap window, no cascades, no fog, no sun.
+    fn draw_sky_faces(
+        &mut self,
+        cx: &mut Cx3d,
+        eye: Vec3f,
+        frustum: Option<&Frustum>,
+        stats: &mut RenderStats,
+    ) {
+        if !self
+            .placed_models
+            .iter()
+            .any(|inst| self.model_sky(&inst.model).is_some())
+        {
+            return;
+        }
+        if self.sky_draw.is_none() {
+            // Held VM (a script-driven draw is mid-apply): try again next
+            // frame rather than drawing a sky with no shader.
+            self.sky_draw = cx
+                .cx
+                .try_with_vm(|vm| Box::new(DrawSceneSkyMap::script_new_with_default(vm)));
+        }
+        let Some(mut draw) = self.sky_draw.take() else {
+            return;
+        };
+        let time = self.sky_time;
+        let instances = std::mem::take(&mut self.placed_models);
+        for inst in &instances {
+            let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| *k == inst.model)
+            else {
+                continue;
+            };
+            let Some(sky) = &loaded.sky else { continue };
+            // A map whose sky is entirely behind the camera pays nothing.
+            // Per-FACE culling is deliberately not attempted: the faces are
+            // one geometry precisely so a sky costs one draw.
+            if let Some(frustum) = frustum {
+                if !frustum.intersects_obb(sky.part.min, sky.part.max, &inst.transform) {
+                    stats.model_culled += 1;
+                    continue;
+                }
+            }
+            draw.transform = inst.transform;
+            draw.depth_clip = 1.0;
+            draw.eye = vec4(eye.x, eye.y, eye.z, 0.0);
+            draw.sky_p = vec4(
+                sky.part.projection.code(),
+                sky.part.repeat,
+                sky.part.scroll(0, time),
+                sky.part.scroll(1, time),
+            );
+            draw.sky_q = vec4(sky.part.v_span, 1.0, 0.0, 0.0);
+            draw.draw_vars.geometry_id = Some(sky.geometry.geometry_id());
+            draw.draw_vars.set_texture(0, &sky.tex0);
+            draw.draw_vars.set_texture(1, &sky.tex1);
+            if draw.draw_vars.can_instance() {
+                let new_area = cx.add_instance(&draw.draw_vars);
+                draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
+            }
+            stats.model_draws += 1;
+            stats.model_triangles += sky.part.triangle_count();
+        }
+        self.placed_models = instances;
+        self.sky_draw = Some(draw);
     }
 
     /// Draw the private FPS presentation list. This path deliberately does
@@ -3717,7 +4916,7 @@ impl Renderer {
             let layer_draws = {
                 let mut layers = Vec::with_capacity(1 + loaded.extra_draws.len());
                 layers.push((loaded.geometry.geometry_id(), loaded.texture.clone()));
-                for (g, t, _, _) in &loaded.extra_draws {
+                for (g, t, _, _, _) in &loaded.extra_draws {
                     layers.push((g.geometry_id(), t.clone()));
                 }
                 layers
@@ -3879,9 +5078,15 @@ impl Renderer {
         if self.model_sdf_tex.contains_key(key) {
             return;
         }
+        // Bytes that arrived with the model (asset store) outrank the
+        // checkout sidecar; they carry no mtime, only the sun gate applies.
+        let streamed = self.model_sdf_bytes.get(key).and_then(|bytes| {
+            let (atlas, _hash) = crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes)?;
+            ((atlas.len_per_unit - sun.shadow_len_per_unit()).abs() <= 1.0e-3).then_some(atlas)
+        });
         let glb = Self::models_root().join(format!("{key}.glb"));
         let sidecar = Self::models_root().join(format!("{key}.shadowsdf"));
-        let payload = match Self::load_shadow_sdf_sidecar(&sidecar, &glb, None, sun) {
+        let payload = match streamed.or_else(|| Self::load_shadow_sdf_sidecar(&sidecar, &glb, None, sun)) {
             Some(atlas) => {
                 log!(
                     "shadow sdf: model {} atlas from sidecar ({}x{} R8, {} rows, {} bytes)",
@@ -5149,7 +6354,18 @@ impl Renderer {
             let instances = std::mem::take(&mut self.placed_models);
             self.draw_models_inner(
                 cx,
-                draw,
+                ModelDraw::Diffuse(draw),
+                camera_pos,
+                &instances,
+                WorldModelLane::Placed,
+                (fog_color, fog_density),
+                &sun,
+                frustum,
+                &mut stats,
+            );
+            self.draw_pbr_models(
+                cx,
+                camera_pos,
                 &instances,
                 WorldModelLane::Placed,
                 (fog_color, fog_density),
@@ -5184,7 +6400,18 @@ impl Renderer {
             let attachments = std::mem::take(&mut self.world_attachments);
             self.draw_models_inner(
                 cx,
-                draw,
+                ModelDraw::Diffuse(draw),
+                camera_pos,
+                &attachments,
+                WorldModelLane::Attachment,
+                (fog_color, fog_density),
+                &sun,
+                frustum,
+                &mut stats,
+            );
+            self.draw_pbr_models(
+                cx,
+                camera_pos,
                 &attachments,
                 WorldModelLane::Attachment,
                 (fog_color, fog_density),
@@ -5194,6 +6421,11 @@ impl Renderer {
             );
             self.world_attachments = attachments;
         }
+
+        // 3s. The map's own sky surfaces, after the opaque world so they are
+        // depth-rejected behind it rather than shading over it. Drawn even
+        // when a host lends no models_draw: the sky lane owns its shader.
+        self.draw_sky_faces(cx, camera_pos, frustum, &mut stats);
 
         // 3w. Water sheets (mix.md W1): one displaced grid per `game.water`
         // volume, drawn after every opaque pass (blending sees depth: a hull
@@ -6740,5 +7972,320 @@ mod shadow_sdf_sidecar_tests {
         )
         .is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The rigid-part state machine: a door's whole behaviour, tested without a
+/// device. The GPU side is one extra draw with the matrix these produce.
+#[cfg(test)]
+mod anim_part_tests {
+    use super::*;
+    use crate::model::tests::{rooms_and_door_glb, Door};
+
+    /// The importer-shaped fixture's door: closed at t=0 (on the floor),
+    /// open at t=1 (lifted 3), authored open.
+    fn door() -> crate::model::AnimPart {
+        let mut m = StaticModel::parse_glb(&rooms_and_door_glb(Door::Animated)).unwrap();
+        assert_eq!(m.anim_parts.len(), 1);
+        m.anim_parts.pop().unwrap()
+    }
+
+    fn lift(part: &crate::model::AnimPart, time: f32) -> f32 {
+        part.transform_at(time).v[13]
+    }
+
+    #[test]
+    fn an_untriggered_part_sits_in_the_authored_default() {
+        let part = door();
+        let states = ModelStates::default();
+        let (state, time, target) =
+            states.clock(&ModelTarget::Model("map".into()), "map", &part);
+        assert_eq!(state, 1, "extras.default = open");
+        assert!((time - 1.0).abs() < 1.0e-6);
+        assert!((target - 1.0).abs() < 1.0e-6);
+        assert!((lift(&part, time) - 3.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn closing_travels_the_clip_in_the_blend_time() {
+        let part = door();
+        let mut states = ModelStates::default();
+        let key = ModelTarget::Model("map".into());
+        assert!(states.set(key.clone(), &part, "closed", 1.0));
+
+        // Half the blend, half the travel — linear in time, by contract.
+        states.tick(0.5);
+        let (_, time, _) = states.clock(&key, "map", &part);
+        assert!((time - 0.5).abs() < 1.0e-5, "time {time}");
+        assert!((lift(&part, time) - 1.5).abs() < 1.0e-4);
+
+        // The rest of it, and then it stops dead rather than overshooting.
+        states.tick(0.5);
+        let (state, time, _) = states.clock(&key, "map", &part);
+        assert_eq!(state, 0);
+        assert!(time.abs() < 1.0e-6, "time {time}");
+        states.tick(5.0);
+        let (_, time, target) = states.clock(&key, "map", &part);
+        assert!(time.abs() < 1.0e-6 && (time - target).abs() < 1.0e-6);
+        assert!(lift(&part, time).abs() < 1.0e-6, "closed sits on the floor");
+    }
+
+    #[test]
+    fn a_command_mid_move_reverses_from_where_the_part_is() {
+        let part = door();
+        let mut states = ModelStates::default();
+        let key = ModelTarget::Model("map".into());
+        states.set(key.clone(), &part, "closed", 1.0);
+        states.tick(0.5);
+        let (_, half, _) = states.clock(&key, "map", &part);
+
+        // Re-aimed at open from exactly half way: no jump, and the reversal
+        // takes its own blend rather than resuming the old one.
+        states.set(key.clone(), &part, "open", 1.0);
+        let (state, time, target) = states.clock(&key, "map", &part);
+        assert_eq!(state, 1);
+        assert!((time - half).abs() < 1.0e-6, "the door jumped: {time} vs {half}");
+        assert!((target - 1.0).abs() < 1.0e-6);
+
+        states.tick(0.5);
+        let (_, time, _) = states.clock(&key, "map", &part);
+        assert!((time - 0.75).abs() < 1.0e-5, "time {time}");
+        states.tick(0.5);
+        let (_, time, _) = states.clock(&key, "map", &part);
+        assert!((time - 1.0).abs() < 1.0e-6, "time {time}");
+        assert!((lift(&part, time) - 3.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn a_zero_blend_snaps_and_an_unknown_state_changes_nothing() {
+        let part = door();
+        let mut states = ModelStates::default();
+        let key = ModelTarget::Model("map".into());
+        assert!(states.set(key.clone(), &part, "closed", 0.0));
+        let (_, time, _) = states.clock(&key, "map", &part);
+        assert!(time.abs() < 1.0e-6, "zero blend is instant");
+
+        assert!(!states.set(key.clone(), &part, "ajar", 1.0), "no such state");
+        let (state, time, _) = states.clock(&key, "map", &part);
+        assert_eq!(state, 0);
+        assert!(time.abs() < 1.0e-6);
+    }
+
+    /// The collision half: a closed door is a wall in the doorway, an open
+    /// one is not. Same boxes, moved by the same matrix the draw uses.
+    #[test]
+    fn collider_boxes_move_with_the_part() {
+        let part = door();
+        let local = part.collider_boxes();
+        assert!(!local.is_empty());
+        let mut instance = Mat4f::identity();
+        instance.v[13] = 10.0; // the level itself is placed 10 up
+
+        let world_at = |time: f32| {
+            let m = Mat4f::mul(&instance, &part.transform_at(time));
+            world_boxes(&m, &local)
+        };
+        let (closed, cmin, cmax) = world_at(part.state_time(0));
+        let (open, omin, omax) = world_at(part.state_time(1));
+        assert_eq!(closed.len(), local.len());
+        // Closed: the slab fills the opening at the level's own height.
+        assert!((cmin.y - 10.0).abs() < 1.0e-4, "{cmin:?}");
+        assert!((cmax.y - 13.0).abs() < 1.0e-4, "{cmax:?}");
+        // Open: the same slab has risen out of the way by the clip's travel.
+        assert!((omin.y - 13.0).abs() < 1.0e-4, "{omin:?}");
+        assert!((omax.y - 16.0).abs() < 1.0e-4, "{omax:?}");
+        assert!(open.iter().zip(&closed).all(|(o, c)| {
+            (o.0.y - c.0.y - 3.0).abs() < 1.0e-3 && (o.0.x - c.0.x).abs() < 1.0e-4
+        }));
+        // Half way is half way here too — a door caught moving is where it
+        // looks, not snapped to an end state.
+        let (_, hmin, _) = world_at(0.5);
+        assert!((hmin.y - 11.5).abs() < 1.0e-3, "{hmin:?}");
+    }
+
+    #[test]
+    fn a_slot_command_wins_over_a_model_command() {
+        let part = door();
+        let mut states = ModelStates::default();
+        states.set(ModelTarget::Model("map".into()), &part, "closed", 0.0);
+        states.set(ModelTarget::Instance(2), &part, "open", 0.0);
+
+        // Slot 2 asked for open; every other copy follows the model command.
+        let (state, _, _) = states.clock(&ModelTarget::Instance(2), "map", &part);
+        assert_eq!(state, 1);
+        let (state, _, _) = states.clock(&ModelTarget::Instance(3), "map", &part);
+        assert_eq!(state, 0, "an unaddressed slot follows the model command");
+    }
+
+    /// Slot numbers only mean anything against one placed list.
+    #[test]
+    fn a_changed_placed_scene_drops_slot_commands_but_keeps_model_ones() {
+        let part = door();
+        let mut renderer = Renderer::default();
+        renderer.model_anim_state.set(ModelTarget::Model("map".into()), &part, "closed", 0.0);
+        renderer.model_anim_state.set(ModelTarget::Instance(0), &part, "closed", 0.0);
+
+        let mut transform = Mat4f::identity();
+        transform.v[12] = 7.0;
+        renderer.set_models(vec![ModelInstance {
+            model: "map".to_string(),
+            transform,
+            dynamic: false,
+            depth_order: 0.0,
+        }]);
+        assert!(renderer
+            .model_anim_state
+            .map
+            .keys()
+            .all(|(t, _)| matches!(t, ModelTarget::Model(_))));
+        assert_eq!(renderer.model_anim_state.map.len(), 1);
+    }
+
+    #[test]
+    fn model_targets_come_from_ids_and_slots() {
+        assert_eq!(
+            ModelTarget::from("maps/e1m1"),
+            ModelTarget::Model("maps/e1m1".to_string())
+        );
+        assert_eq!(ModelTarget::from(4usize), ModelTarget::Instance(4));
+    }
+
+    /// An ordinary prop has no parts, and every query says so without
+    /// pretending the model is missing.
+    #[test]
+    fn a_model_without_parts_answers_empty() {
+        let renderer = Renderer::default();
+        assert!(renderer.model_anim_part_names("kit/lamp").is_empty());
+        assert!(renderer.model_anim_part("kit/lamp", "door_1").is_none());
+        assert!(renderer.anim_part_boxes().is_empty());
+        assert!(renderer.model_states("kit/lamp").is_empty());
+    }
+}
+
+/// Which statics may cast into the baked sun shadows. A prop casts onto the
+/// world; a whole imported level IS the world, and casting it shadows its own
+/// rooms.
+#[cfg(test)]
+mod caster_only_tests {
+    use super::*;
+
+    fn bounds(span: f32) -> (Vec3f, Vec3f) {
+        (vec3f(0.0, 0.0, 0.0), vec3f(span, span * 0.5, span))
+    }
+
+    #[test]
+    fn a_prop_casts_and_a_level_does_not() {
+        // A fence, a shed, a kit building: all well under the span.
+        for span in [1.0, 4.0, 20.0, 39.9] {
+            let (lo, hi) = bounds(span);
+            assert!(
+                casts_as_caster_only(None, false, lo, hi),
+                "a {span} m prop must still cast"
+            );
+        }
+        // A Doom/Duke map arrives as one static hundreds of metres across.
+        for span in [40.1, 200.0, 4000.0] {
+            let (lo, hi) = bounds(span);
+            assert!(
+                !casts_as_caster_only(None, false, lo, hi),
+                "a {span} m level must not shadow its own interior"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prelit_model_never_casts() {
+        let (lo, hi) = bounds(3.0);
+        assert!(!casts_as_caster_only(None, true, lo, hi));
+    }
+
+    /// The host's answer beats the heuristic in both directions.
+    #[test]
+    fn an_explicit_answer_wins() {
+        let (big_lo, big_hi) = bounds(500.0);
+        let (small_lo, small_hi) = bounds(2.0);
+        assert!(casts_as_caster_only(Some(true), false, big_lo, big_hi));
+        assert!(casts_as_caster_only(Some(true), true, big_lo, big_hi));
+        assert!(!casts_as_caster_only(Some(false), false, small_lo, small_hi));
+    }
+
+    /// Setting it re-kicks the bake, and setting the same answer twice does
+    /// not — the bake is expensive and the signature is what gates it.
+    #[test]
+    fn changing_the_answer_re_kicks_the_bake() {
+        let mut renderer = Renderer::default();
+        renderer.placed_scene_signature = Some(7);
+        let rev = renderer.models_rev;
+        renderer.set_model_casts_shadow("maps/e1m1", false);
+        assert_eq!(renderer.placed_scene_signature, None);
+        assert_eq!(renderer.models_rev, rev.wrapping_add(1));
+
+        renderer.placed_scene_signature = Some(9);
+        renderer.set_model_casts_shadow("maps/e1m1", false);
+        assert_eq!(renderer.placed_scene_signature, Some(9), "no needless re-kick");
+        assert_eq!(renderer.models_rev, rev.wrapping_add(1));
+    }
+}
+
+/// The map-sky lane's device-free half: the clock the scrolling layers ride
+/// and the queries a host asks before it has loaded anything.
+#[cfg(test)]
+mod sky_lane_tests {
+    use super::*;
+    use crate::model::tests::room_and_sky_glb;
+
+    #[test]
+    fn the_sky_clock_advances_and_can_be_pinned() {
+        let mut renderer = Renderer::default();
+        assert_eq!(renderer.sky_time(), 0.0);
+        renderer.tick_sky(0.25);
+        renderer.tick_sky(0.25);
+        assert!((renderer.sky_time() - 0.5).abs() < 1.0e-6);
+
+        // A capture pins the clock so the same frame renders the same sky.
+        renderer.set_sky_time(3.0);
+        assert_eq!(renderer.sky_time(), 3.0);
+
+        // Long sessions wrap rather than losing precision in the offset.
+        renderer.set_sky_time(4095.5);
+        renderer.tick_sky(1.0);
+        assert!(renderer.sky_time() < 1.0, "{}", renderer.sky_time());
+
+        // Garbage dt is ignored rather than poisoning the clock.
+        renderer.set_sky_time(2.0);
+        renderer.tick_sky(f32::NAN);
+        assert_eq!(renderer.sky_time(), 2.0);
+    }
+
+    #[test]
+    fn a_model_without_a_sky_answers_none() {
+        let renderer = Renderer::default();
+        assert!(renderer.model_sky("maps/e1m1").is_none());
+        assert!(renderer.model_sky_mesh("maps/e1m1").is_none());
+    }
+
+    /// What the shader is handed for a Doom sky, computed the way
+    /// `draw_sky_faces` computes it — the parse and the draw agreeing on
+    /// projection code, repeat and scroll is the contract the GPU cannot
+    /// check for us.
+    #[test]
+    fn the_shader_parameters_follow_the_parsed_sky() {
+        let m = StaticModel::parse_glb(&room_and_sky_glb(Some("quake_scroll"), 2)).unwrap();
+        let sky = m.sky.as_ref().unwrap();
+        let time = 1.5;
+        let sky_p = vec4(
+            sky.projection.code(),
+            sky.repeat,
+            sky.scroll(0, time),
+            sky.scroll(1, time),
+        );
+        // 2.0 is the branch the shader's `sky_p.x < 2.5` arm takes.
+        assert_eq!(sky_p.x, 2.0);
+        assert_eq!(sky_p.y, 4.0);
+        // The map's static phase (0.25) plus 1.5 s at 8 and 16 units.
+        assert_eq!(sky_p.z, 0.25 + 12.0);
+        assert_eq!(sky_p.w, 0.25 + 24.0);
+        let sky_q = vec4(sky.v_span, 1.0, 0.0, 0.0);
+        assert_eq!(sky_q.x, crate::model::SKY_DEFAULT_V_SPAN);
     }
 }
