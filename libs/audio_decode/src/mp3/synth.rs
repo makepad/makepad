@@ -20,22 +20,51 @@ fn matrix() -> [[f32; 32]; 64] {
     n
 }
 
+/// `matrix()` transposed: `matrix_t[k][i] == matrix()[i][k]`.
+///
+/// The matrixing sums over `k` for each of 64 outputs. Written as it reads in
+/// the standard — output `i` outermost — every output is one 32-long serial
+/// dependency chain of FMAs and nothing vectorises. Written with `k` outermost
+/// over an array of 64 accumulators, each accumulator still sees exactly the
+/// same operands in exactly the same order (so the result is bit-identical),
+/// but the 64 lanes are independent and contiguous, which is a shape LLVM
+/// turns into 16 vector FMAs per `k`. That needs the coefficients laid out
+/// with `i` contiguous, hence the transpose.
+fn matrix_transposed() -> [[f32; 64]; 32] {
+    let n = matrix();
+    let mut t = [[0.0f32; 64]; 32];
+    for (i, row) in n.iter().enumerate() {
+        for (k, &v) in row.iter().enumerate() {
+            t[k][i] = v;
+        }
+    }
+    t
+}
+
+/// Backing store for the 1024-sample FIFO. The FIFO shifts down by 64 every
+/// slot, which as a literal `copy_within` is a 3840-byte move per slot; here
+/// the window slides through a buffer twice its length instead and only the
+/// wrap costs a copy, once every 16 slots.
+const FIFO_CAP: usize = 2048;
+const FIFO_TOP: usize = FIFO_CAP - 1024;
+
 pub struct Synthesis {
-    /// Boxed: 1024 + 512 + 8192 floats is more than belongs on the stack, and
-    /// a deck holds one of these per channel per deck.
-    v: Box<[f32; 1024]>,
-    u: Box<[f32; 512]>,
+    /// Boxed: this is more than belongs on the stack, and a deck holds one of
+    /// these per channel per deck.
+    v: Box<[f32; FIFO_CAP]>,
+    /// Physical index of logical `V[0]`; steps down by 64 per slot.
+    off: usize,
     window: Box<[f32; 512]>,
-    matrix: Box<[[f32; 32]; 64]>,
+    matrix_t: Box<[[f32; 64]; 32]>,
 }
 
 impl Synthesis {
     pub fn new() -> Self {
         Self {
-            v: Box::new([0.0; 1024]),
-            u: Box::new([0.0; 512]),
+            v: Box::new([0.0; FIFO_CAP]),
+            off: FIFO_TOP,
             window: Box::new(synth_window()),
-            matrix: Box::new(matrix()),
+            matrix_t: Box::new(matrix_transposed()),
         }
     }
 
@@ -43,36 +72,46 @@ impl Synthesis {
     /// tail into the new one.
     pub fn reset(&mut self) {
         self.v.fill(0.0);
+        self.off = FIFO_TOP;
     }
 
     /// One time slot: 32 subband samples in, 32 PCM samples appended to `out`.
     pub fn slot(&mut self, subband: &[f32; 32], out: &mut [f32; 32]) {
-        // Shift the FIFO down by one slot and matrix the new samples in.
-        self.v.copy_within(0..1024 - 64, 64);
-        for i in 0..64 {
-            let row = &self.matrix[i];
-            let mut acc = 0.0f32;
-            for k in 0..32 {
-                acc += row[k] * subband[k];
-            }
-            self.v[i] = acc;
+        // Shift the FIFO down by one slot. Sliding the window down by 64 is
+        // the shift: logical `V[64 + x]` after the step is the same memory as
+        // logical `V[x]` before it. Only when the window reaches the bottom of
+        // the buffer does anything move.
+        if self.off < 64 {
+            self.v.copy_within(self.off..self.off + 1024 - 64, FIFO_TOP + 64);
+            self.off = FIFO_TOP + 64;
         }
-        // Build U by taking alternating half-slots out of the FIFO.
-        for i in 0..8 {
-            for j in 0..32 {
-                self.u[i * 64 + j] = self.v[i * 128 + j];
-                self.u[i * 64 + 32 + j] = self.v[i * 128 + 96 + j];
+        self.off -= 64;
+        let off = self.off;
+        // Matrix the new samples in: `V[i] = sum_k N[i][k] * S[k]`, summed in
+        // ascending `k` exactly as the row-at-a-time form does.
+        let mut head = [0.0f32; 64];
+        for (k, row) in self.matrix_t.iter().enumerate() {
+            let s = subband[k];
+            for (acc, &c) in head.iter_mut().zip(row.iter()) {
+                *acc += c * s;
             }
         }
-        // Window and fold the 512 taps down to 32 samples.
-        for (j, slot) in out.iter_mut().enumerate() {
-            let mut acc = 0.0f32;
-            for i in 0..16 {
-                let at = j + 32 * i;
-                acc += self.u[at] * self.window[at];
+        self.v[off..off + 64].copy_from_slice(&head);
+        // Window and fold the 512 taps down to 32 samples. The intermediate
+        // `U` vector the standard names is not built: its 512 entries are
+        // exactly two contiguous 32-runs of `V` per half-slot, so the window
+        // pass reads them straight out of the FIFO. Again the accumulation for
+        // each output `j` runs over ascending `i`, as before.
+        let mut acc = [0.0f32; 32];
+        for i in 0..16 {
+            let at = off + (i / 2) * 128 + if i & 1 == 1 { 96 } else { 0 };
+            let taps = &self.v[at..at + 32];
+            let w = &self.window[i * 32..i * 32 + 32];
+            for ((a, &t), &wv) in acc.iter_mut().zip(taps.iter()).zip(w.iter()) {
+                *a += t * wv;
             }
-            *slot = acc;
         }
+        *out = acc;
     }
 }
 

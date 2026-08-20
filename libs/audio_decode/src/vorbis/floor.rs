@@ -341,9 +341,20 @@ fn render_line(x0: usize, y0: i32, x1: usize, y1: i32, out: &mut [f32]) {
 /// Each step is 7/256 of a decade, which reproduces the published endpoints
 /// (1.0649863e-07 at 0, 1.0 at 255) to seven digits — the table in the spec is
 /// this exponential rounded to `f32`, so generating it costs no accuracy.
+///
+/// There are only 256 answers and the floor curve asks for one per spectral
+/// bin, so the exponential runs 256 times per process rather than a million
+/// times per second. Same expression, same 256 values, so the memo is exact.
 pub fn inverse_db(x: i32) -> f32 {
-    let i = x.clamp(0, 255) as f64;
-    (10f64).powf((i - 255.0) * (7.0 / 256.0)) as f32
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0.0f32; 256];
+        for (i, slot) in t.iter_mut().enumerate() {
+            *slot = (10f64).powf((i as f64 - 255.0) * (7.0 / 256.0)) as f32;
+        }
+        t
+    });
+    table[x.clamp(0, 255) as usize]
 }
 
 #[cfg(test)]
