@@ -92,10 +92,11 @@ use crate::pipeline::{
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 use crate::store_views::{
-    admin_rows, candidate_cards, catalog_rows, catalog_tiles, format_bytes, runs_rows,
+    admin_rows, candidate_cards, catalog_tiles, format_bytes, format_when,
+    runs_rows,
     short_digest, truncate,
     should_start_file_drag, upstream_preview_allowed, CandidateSheet, GalleryEntry, InputAsset,
-    CatalogGrid, CatalogTile, InputTray, LibraryGallery, PreviewWork, RowAction, RunTray,
+    CatalogGrid, InputTray, LibraryGallery, PreviewWork, RowAction, RunTray,
     RunTrayMember,
     StoreListPanel, StoreRow,
     TileDelete,
@@ -205,6 +206,24 @@ script_mod! {
             border_color_focus: #xffffff1e
         }
     }
+    // View toggle: the two glyphs an asset browser uses, and the ACTIVE one
+    // is lit. `focus` is the button's own instance, and this app never
+    // keyboard-focuses these, so it carries "this is the current view".
+    let ViewChip = ChipButton{
+        width: 30
+        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+        draw_text +: {
+            color: #x6f7883
+            color_focus: #x7db8f0
+            color_hover: #xe6ebf0
+            text_style: theme.font_regular{font_size: 11}
+        }
+        draw_bg +: {
+            color_focus: #x14283c
+            border_color_focus: #x3d9bf066
+        }
+    }
+
     // Quiet control: queue reorder, transport, sample loaders.
     let GhostButton = ChipButton{
         padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
@@ -771,12 +790,59 @@ script_mod! {
                 c1 := CatalogCell{} c2 := CatalogCell{} c3 := CatalogCell{} c4 := CatalogCell{}
                 c5 := CatalogCell{} c6 := CatalogCell{} c7 := CatalogCell{} c8 := CatalogCell{}
             }
+            // One asset per row: its picture, then everything the catalog
+            // knows about it, reading left to right.
+            ListRow := View{
+                width: Fill height: Fit
+                lr_card := GalleryCard{
+                    width: Fill height: 76
+                    flow: Right spacing: 10
+                    padding: 6
+                    align: Align{y: 0.5}
+                    View{
+                        width: 96 height: 64
+                        align: Align{x: 0.5 y: 0.5}
+                        lr_thumb := ThumbFitImage{}
+                    }
+                    View{
+                        width: Fill height: Fit flow: Down spacing: 2
+                        lr_title := Label{
+                            width: Fill
+                            draw_text +: {
+                                color: #xdfe6ec
+                                text_style: theme.font_bold{font_size: 9}
+                            }
+                        }
+                        lr_meta := Label{
+                            width: Fill
+                            draw_text +: {
+                                color: #x9ec4ea
+                                text_style: theme.font_regular{font_size: 8}
+                            }
+                        }
+                        lr_alias := Label{
+                            width: Fill
+                            draw_text +: {
+                                color: #x8a939d
+                                text_style: theme.font_regular{font_size: 7.5}
+                            }
+                        }
+                    }
+                    lr_when := Label{
+                        width: 190
+                        draw_text +: {
+                            color: #x707a85
+                            text_style: theme.font_regular{font_size: 7.5}
+                        }
+                    }
+                }
+            }
             Empty := View{
-                width: Fill height: 140
+                width: Fill height: 160
                 flow: Down spacing: 4
                 align: Align{x: 0.5 y: 0.5}
-                HintLabel{ text: "Nothing in the catalog matches." }
-                HintLabel{ text: "Clear the filters, or import a pack from LOAD." }
+                padding: 20
+                empty_note := HintLabel{ width: Fill text: "" }
             }
         }
     }
@@ -2195,8 +2261,10 @@ script_mod! {
                                     FieldCaption{ text: "Label" }
                                     lib_label_drop := FieldDrop{ width: 220 }
                                     lib_clear_btn := GhostButton{ text: "Clear" }
-                                    lib_grid_btn := ChipButton{ text: "● Tiles" }
-                                    lib_list_btn := ChipButton{ text: "List" }
+                                    // The two glyphs every asset browser uses:
+                                    // a grid of squares, and stacked lines.
+                                    lib_grid_btn := ViewChip{ text: "▦" }
+                                    lib_list_btn := ViewChip{ text: "☰" }
                                     lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
                                 View{
@@ -2213,19 +2281,7 @@ script_mod! {
                                             gc_cancel_btn := GhostButton{ text: "Cancel GC" visible: false }
                                             gc_collect_btn := DangerButton{ text: "Collect garbage" }
                                         }
-                                        lib_views := PageFlip{
-                                            width: Fill
-                                            height: Fill
-                                            active_page: @lib_grid_page
-                                            lib_grid_page := View{
-                                                width: Fill height: Fill
-                                                lib_grid := mod.widgets.CatalogGrid{}
-                                            }
-                                            lib_list_page := View{
-                                                width: Fill height: Fill
-                                                lib_server_list := mod.widgets.StoreListPanel{}
-                                            }
-                                        }
+                                        lib_grid := mod.widgets.CatalogGrid{}
                                     }
                                     // Selected-item rail: prompt + provenance +
                                     // revision/publish detail and the actions.
@@ -2275,6 +2331,51 @@ script_mod! {
                                             detail_rev := MonoLabel{ text: "—" }
                                             PanelHeading{ text: "Publish" }
                                             detail_publish := MonoLabel{ text: "—" }
+                                            // Look at the thing without leaving the
+                                            // Library: a mesh orbits here, a picture
+                                            // shows itself, audio shows its waveform.
+                                            PanelHeading{ text: "Preview" }
+                                            detail_preview := SolidView{
+                                                width: Fill height: 260
+                                                flow: Overlay
+                                                draw_bg +: { color: #x0d0d10 }
+                                                detail_preview_pages := PageFlip{
+                                                    width: Fill height: Fill
+                                                    active_page: @detail_preview_none
+                                                    detail_preview_none := View{
+                                                        width: Fill height: Fill
+                                                        align: Align{x: 0.5 y: 0.5}
+                                                        detail_preview_note := HintLabel{
+                                                            text: "Click an asset to preview it."
+                                                        }
+                                                    }
+                                                    detail_preview_image := View{
+                                                        width: Fill height: Fill
+                                                        align: Align{x: 0.5 y: 0.5}
+                                                        detail_preview_img := ThumbFitImage{}
+                                                    }
+                                                    detail_preview_mesh := View{
+                                                        width: Fill height: Fill
+                                                        detail_mesh_view := MeshView{}
+                                                    }
+                                                }
+                                            }
+                                            // Audio: play it here, and scrub
+                                            // across its own spectrogram.
+                                            detail_audio_bar := View{
+                                                visible: false
+                                                width: Fill height: Fit
+                                                flow: Right spacing: 6
+                                                margin: Inset{top: 4}
+                                                align: Align{y: 0.5}
+                                                detail_play_btn := ChipButton{ width: 34 text: "▶" }
+                                                detail_seek := Slider{
+                                                    width: Fill
+                                                    min: 0.0
+                                                    max: 1.0
+                                                }
+                                                detail_audio_time := HintLabel{ width: 62 text: "" }
+                                            }
                                             detail_server_actions := View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 margin: Inset{top: 10}
@@ -3280,6 +3381,18 @@ pub struct App {
     /// Library body: tiles (default) or the row list.
     #[rust]
     lib_tiles: LibViewMode,
+    /// Which asset the rail's mini mesh viewer is currently holding, so a
+    /// redraw does not re-upload the same model every frame.
+    #[rust]
+    library_preview_file: Option<String>,
+    /// Cut sheet cells for the rail's preview well, keyed by asset id: the
+    /// same frames the card cycles, so a billboard animates there too.
+    #[rust]
+    catalog_preview_frames: HashMap<String, (Vec<Texture>, f32)>,
+    /// Which asset the rail's audio transport currently holds, so selecting
+    /// the same track twice does not restart it.
+    #[rust]
+    library_audio_file: Option<String>,
     /// Materialised thumbnail objects for catalog tiles, keyed by asset id.
     /// The path is a digest-named cache object, so a tile can never show a
     /// picture that belongs to another revision.
@@ -7888,6 +8001,9 @@ impl App {
                                 self.sync_input_tray(cx);
                             }
                             self.refresh_gallery(cx, false);
+                            // The rail is waiting for exactly this to draw
+                            // the model.
+                            self.refresh_library_preview(cx);
                         }
                         Ok(path) => {
                             if let Some(asset) = file.strip_prefix("store:") {
@@ -8104,8 +8220,20 @@ impl App {
                         if let Some(mut grid) =
                             self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>()
                         {
-                            grid.install_thumb(cx, asset, texture.clone());
+                            // A billboard's thumbnail IS its animation sheet:
+                            // the cells cycle on the card. Anything else is a
+                            // still.
+                            if frames.len() > 1 {
+                                grid.install_anim(cx, asset.clone(), frames.clone());
+                            } else {
+                                grid.install_thumb(cx, asset.clone(), texture.clone());
+                            }
                         }
+                        if frames.len() > 1 {
+                            self.catalog_preview_frames
+                                .insert(asset, (frames.clone(), fps.max(1.0)));
+                        }
+                        self.refresh_library_preview(cx);
                     }
                     if let Some(mut tray) = self
                         .ui
@@ -8203,7 +8331,17 @@ impl App {
                 continue;
             }
             let (path, purpose) = match work {
-                PreviewWork::Encoded(path) => (path, IoPurpose::GalleryPreviewEncoded),
+                PreviewWork::Encoded(path) => {
+                    // A picture the app made may be an animation sheet; a
+                    // payload never is. A `.thumb` sidecar says so by its
+                    // name, a catalog tile by its identity — its object is
+                    // the revision's thumbnail, digest-named and extensionless.
+                    let thumbnail = file.starts_with("store:")
+                        || path
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("thumb"));
+                    (path, IoPurpose::GalleryPreviewEncoded { thumbnail })
+                }
                 PreviewWork::WavPayload(path) => (path, IoPurpose::GalleryPreviewWav),
                 PreviewWork::StatefulBillboard(path) => {
                     (path, IoPurpose::GalleryPreviewBillboard)
@@ -9024,13 +9162,6 @@ impl App {
         let signature = library_view_signature(&self.lib_filters);
         if self.lib_view_signature != signature {
             self.lib_view_signature = signature;
-            if let Some(mut list) = self
-                .ui
-                .widget(cx, ids!(lib_server_list))
-                .borrow_mut::<StoreListPanel>()
-            {
-                list.scroll_to_top(cx);
-            }
             if let Some(mut grid) = self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>()
             {
                 grid.scroll_to_top(cx);
@@ -9072,13 +9203,6 @@ impl App {
         self.ui
             .label(cx, ids!(lib_server_note))
             .set_text(cx, &server_note);
-        if let Some(mut list) = self
-            .ui
-            .widget(cx, ids!(lib_server_list))
-            .borrow_mut::<StoreListPanel>()
-        {
-            list.set_rows(cx, catalog_rows(&self.store));
-        }
         // Tiles: one card per catalog asset, sized to the SERVER's match
         // count so the scrollbar covers the whole result set while the walk
         // fills it in.
@@ -9089,28 +9213,42 @@ impl App {
             .ready()
             .map(|results| (results.total as usize).min(MAX_CATALOG_ROWS))
             .unwrap_or(0);
+        let empty_note = crate::store_views::catalog_empty_note(&self.store);
         if let Some(mut grid) = self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>() {
-            grid.set_tiles(cx, tiles, total);
+            grid.set_empty_note(cx, empty_note);
+            grid.set_tiles(
+                cx,
+                tiles,
+                total,
+                match self.lib_tiles {
+                    LibViewMode::Tiles => crate::store_views::CatalogLayout::Tiles,
+                    LibViewMode::List => crate::store_views::CatalogLayout::Rows,
+                },
+            );
         }
-        let (grid_on, list_on) = match self.lib_tiles {
-            LibViewMode::Tiles => ("● Tiles", "List"),
-            LibViewMode::List => ("Tiles", "● List"),
-        };
-        self.ui.button(cx, ids!(lib_grid_btn)).set_text(cx, grid_on);
-        self.ui.button(cx, ids!(lib_list_btn)).set_text(cx, list_on);
-        self.ui.page_flip(cx, ids!(lib_views)).set_active_page(
-            cx,
-            match self.lib_tiles {
-                LibViewMode::Tiles => id!(lib_grid_page).into(),
-                LibViewMode::List => id!(lib_list_page).into(),
-            },
-        );
+        // The active view is the lit glyph; neither glyph ever changes. The
+        // button's own `focus` state carries "this is the current view" —
+        // nothing in this app keyboard-focuses these two.
+        for (id, active) in [
+            (ids!(lib_grid_btn), self.lib_tiles == LibViewMode::Tiles),
+            (ids!(lib_list_btn), self.lib_tiles == LibViewMode::List),
+        ] {
+            self.ui.widget(cx, id).as_view().toggle_state(
+                cx,
+                active,
+                Animate::No,
+                ids!(focus.on),
+                ids!(focus.off),
+            );
+        }
+
         self.ui
             .label(cx, ids!(remote_connection))
             .set_text(cx, &self.store.status_label());
 
         self.refresh_gc_ui(cx);
         self.refresh_library_detail(cx);
+        self.refresh_library_preview(cx);
         self.ui.redraw(cx);
     }
 
@@ -9211,6 +9349,9 @@ impl App {
                             None,
                         ),
                         Remote::Ready(detail) if detail.asset_id == selected => {
+                            // One clock reading for the whole rail, so two lines
+                            // of the same panel cannot disagree about one instant.
+                            let now = crate::store_views::now_ms();
                             let revisions = if detail.candidates.is_empty() {
                                 "no candidates returned".to_string()
                             } else {
@@ -9224,10 +9365,10 @@ impl App {
                                             .or(candidate.quarantined_ms)
                                             .unwrap_or(candidate.staged_ms);
                                         format!(
-                                            "{} · {} · {} ms",
+                                            "{} · {} · {}",
                                             short_digest(&revision),
                                             candidate.state.as_str(),
-                                            when
+                                            format_when(when, now)
                                         )
                                     })
                                     .collect::<Vec<_>>()
@@ -9237,11 +9378,17 @@ impl App {
                                 .latest_published()
                                 .map(|candidate| {
                                     let revision = candidate.revision.to_string();
-                                    format!(
-                                        "latest published: {} · {} ms",
-                                        short_digest(&revision),
-                                        candidate.published_ms.unwrap_or_default()
-                                    )
+                                    match candidate.published_ms {
+                                        Some(ms) => format!(
+                                            "latest published: {} · {}",
+                                            short_digest(&revision),
+                                            format_when(ms, now)
+                                        ),
+                                        None => format!(
+                                            "latest published: {} · time not recorded",
+                                            short_digest(&revision)
+                                        ),
+                                    }
                                 })
                                 .unwrap_or_else(|| "no published revision".to_string());
                             (
@@ -9306,6 +9453,147 @@ impl App {
         self.ui
             .button(cx, ids!(detail_retire_version_btn))
             .set_visible(cx, matches!(detail.server_delete, Some((_, Some(_)))));
+    }
+
+    /// The rail's preview well: what the selected catalog asset actually
+    /// LOOKS like, without leaving the Library.
+    ///
+    /// A mesh gets a real orbitable view of the payload the store handed
+    /// over; a picture (or a waveform, which is what an audio asset's
+    /// thumbnail is) shows itself. Everything comes from the same
+    /// materialised, digest-named objects the tiles and the Create surface
+    /// use — the preview cannot show one revision while the detail lines
+    /// above it describe another.
+    fn refresh_library_preview(&mut self, cx: &mut Cx) {
+        let Some(asset) = self.store.selected else {
+            self.set_library_preview(cx, id!(detail_preview_none));
+            self.ui
+                .label(cx, ids!(detail_preview_note))
+                .set_text(cx, "Click an asset to preview it.");
+            return;
+        };
+        let file = store_file_id(&asset);
+        let item = self.catalog_work.get(&file).cloned();
+        let asset_key = asset.to_string();
+        // A mesh: hand the viewer the payload once it is on disk.
+        if let Some(item) = &item {
+            let is_mesh = item.meta.content_type.contains("gltf");
+            if is_mesh {
+                if let Some(path) = &item.payload {
+                    if self.library_preview_file.as_deref() != Some(file.as_str()) {
+                        match std::fs::read(path) {
+                            Ok(bytes) => {
+                                let rig = self.rig_cache_of(&file);
+                                if let Some(mut mesh) = self
+                                    .ui
+                                    .widget(cx, ids!(detail_mesh_view))
+                                    .borrow_mut::<MeshView>()
+                                {
+                                    mesh.set_model_bytes_ao_rig(cx, bytes, None, None, None, rig);
+                                }
+                                self.library_preview_file = Some(file.clone());
+                            }
+                            Err(error) => {
+                                log!("library preview: {file} unreadable: {error}");
+                            }
+                        }
+                    }
+                    self.set_library_preview(cx, id!(detail_preview_mesh));
+                    return;
+                }
+                self.set_library_preview(cx, id!(detail_preview_none));
+                self.ui
+                    .label(cx, ids!(detail_preview_note))
+                    .set_text(cx, "Loading the model…");
+                return;
+            }
+        }
+        // A billboard's picture is its animation sheet: the well cycles the
+        // same cells the card does, on the same clock.
+        if let Some((frames, fps)) = self.catalog_preview_frames.get(&asset_key) {
+            if frames.len() > 1 {
+                // Wall time: the well and the card advance together, and a
+                // preview cycle does not need frame-accurate phase.
+                let secs = crate::store_views::now_ms() as f64 / 1000.0;
+                let index = ((secs * *fps as f64) as usize) % frames.len();
+                self.ui
+                    .image(cx, ids!(detail_preview_img))
+                    .set_texture(cx, Some(frames[index].clone()));
+                self.set_library_preview(cx, id!(detail_preview_image));
+                cx.new_next_frame();
+                return;
+            }
+        }
+        // Audio: the spectrogram IS the picture, and the transport under it
+        // plays the payload the store handed over. Loading happens once per
+        // asset, when its object lands.
+        let is_audio = item
+            .as_ref()
+            .map(|item| item.meta.content_type.starts_with("audio/"))
+            .unwrap_or(false);
+        self.ui
+            .widget(cx, ids!(detail_audio_bar))
+            .set_visible(cx, is_audio);
+        if is_audio {
+            if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                if self.library_audio_file.as_deref() != Some(file.as_str()) {
+                    let loaded = std::fs::read(&path)
+                        .ok()
+                        .and_then(|bytes| crate::audio::parse_wav(&bytes).ok())
+                        .map(crate::audio::load)
+                        .unwrap_or(false);
+                    if loaded {
+                        self.library_audio_file = Some(file.clone());
+                    }
+                }
+            }
+            self.refresh_library_audio(cx);
+        }
+        // Everything else: the asset's own picture, at the size the rail
+        // has room for. It is already decoded for the tile.
+        let texture = self
+            .ui
+            .widget(cx, ids!(lib_grid))
+            .borrow::<CatalogGrid>()
+            .and_then(|grid| grid.thumb_of(&asset_key));
+        match texture {
+            Some(texture) => {
+                self.ui
+                    .image(cx, ids!(detail_preview_img))
+                    .set_texture(cx, Some(texture));
+                self.set_library_preview(cx, id!(detail_preview_image));
+            }
+            None => {
+                self.set_library_preview(cx, id!(detail_preview_none));
+                self.ui
+                    .label(cx, ids!(detail_preview_note))
+                    .set_text(cx, "Fetching the preview…");
+            }
+        }
+    }
+
+    /// The rail's transport line: what the play button says, where the
+    /// scrubber sits, and how far in the clip we are. Reads the mixer, never
+    /// its own idea of time.
+    fn refresh_library_audio(&mut self, cx: &mut Cx) {
+        let playing = crate::audio::is_playing();
+        self.ui
+            .button(cx, ids!(detail_play_btn))
+            .set_text(cx, if playing { "■" } else { "▶" });
+        let fraction = crate::audio::playhead_fraction();
+        self.ui
+            .slider(cx, ids!(detail_seek))
+            .set_value(cx, fraction);
+        self.ui.label(cx, ids!(detail_audio_time)).set_text(
+            cx,
+            &crate::audio::format_time(crate::audio::playhead_secs()),
+        );
+    }
+
+    fn set_library_preview(&mut self, cx: &mut Cx, page: LiveId) {
+        self.ui
+            .page_flip(cx, ids!(detail_preview_pages))
+            .set_active_page(cx, page.into());
     }
 
     fn open_store_delete_modal(&mut self, cx: &mut Cx, action: PendingStoreDelete) {
@@ -11072,21 +11360,26 @@ impl MatchEvent for App {
         let grid_widget = self.ui.widget(cx, ids!(lib_grid));
         let grid_cols = grid_widget
             .borrow::<CatalogGrid>()
-            .map_or(1, |grid| grid.last_cols.max(1));
+            .map_or(1, |grid| grid.columns());
         let grid_list = grid_widget.portal_list(cx, ids!(list));
         let mut picked_tile = None;
+        let mut picked_twice = false;
+        // Tiles put up to eight cards on a row; a metadata row is one card
+        // wide. Both map back to the same row-major index.
         let slots = [
             ids!(c1), ids!(c2), ids!(c3), ids!(c4),
             ids!(c5), ids!(c6), ids!(c7), ids!(c8),
+            ids!(lr_card),
         ];
         'grid_rows: for (row_id, item) in grid_list.items_with_actions(actions) {
             for (slot, path) in slots.iter().enumerate() {
-                if item.view(cx, *path).finger_down(actions).is_some() {
-                    let index = row_id * grid_cols + slot;
+                if let Some(fe) = item.view(cx, *path).finger_down(actions) {
+                    let index = row_id * grid_cols + slot.min(grid_cols - 1);
                     picked_tile = grid_widget
                         .borrow::<CatalogGrid>()
                         .and_then(|grid| grid.tile_at(index))
                         .map(|tile| tile.asset);
+                    picked_twice = fe.tap_count >= 2;
                     break 'grid_rows;
                 }
             }
@@ -11098,9 +11391,28 @@ impl MatchEvent for App {
                     self.open_store_asset(cx, asset_id);
                     self.adopt_catalog_asset(cx, asset_id, true);
                     self.refresh_library_ui(cx);
+                    // Single click inspects it right here in the rail; a
+                    // double click is "show me properly" and goes to Create.
+                    if picked_twice {
+                        self.show_surface(cx, Surface::Create);
+                    }
                 }
                 Err(error) => log!("asset store: invalid tile id {asset}: {error}"),
             }
+        }
+        // The rail's own transport: play/stop the selected track, and scrub
+        // across its spectrogram.
+        if self.ui.button(cx, ids!(detail_play_btn)).clicked(actions) {
+            if crate::audio::is_playing() {
+                crate::audio::pause();
+            } else {
+                crate::audio::play();
+            }
+            self.refresh_library_audio(cx);
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(detail_seek)).slided(actions) {
+            crate::audio::seek_fraction(value);
+            self.refresh_library_audio(cx);
         }
         if self.ui.button(cx, ids!(lib_retire_shown_btn)).clicked(actions) {
             self.open_retire_shown_modal(cx);
@@ -11981,6 +12293,10 @@ impl AppMain for App {
         self.scrub_audio(cx, event);
         if self.audio_timer.is_event(event).is_some() && audio::is_ready() {
             self.sync_audio_ui(cx);
+            // The Library rail has its own transport over the same mixer.
+            if self.surface == Surface::Library && self.library_audio_file.is_some() {
+                self.refresh_library_audio(cx);
+            }
         }
         if self.audio_timer.is_event(event).is_some() && self.webcam.capturing {
             self.pump_webcam(cx);
