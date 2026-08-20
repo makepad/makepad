@@ -217,9 +217,15 @@ pub fn media_name(media: makepad_asset_data::MediaType) -> &'static str {
     }
 }
 
-/// Bounded, sanitized `error` string out of a refusal body; `None` when the
-/// body is not a well-formed error object. Never fails: refusal rendering
-/// must not depend on the refusal body being honest.
+/// Bounded, sanitized refusal text out of an error body; `None` when the body
+/// is not a well-formed error object. Never fails: refusal rendering must not
+/// depend on the refusal body being honest.
+///
+/// Both halves, when the server sent both. `error` is the CATEGORY — "content
+/// contract violation" — and `detail` is the reason, which is the half that
+/// tells anyone what to do about it. Reporting only the category turned every
+/// refusal into "422 content contract violation", which is a sentence with no
+/// information in it.
 pub fn parse_error_detail(bytes: &[u8]) -> Option<String> {
     if bytes.len() as u64 > crate::wire::MAX_JSON_RESPONSE_BYTES {
         return None;
@@ -228,10 +234,17 @@ pub fn parse_error_detail(bytes: &[u8]) -> Option<String> {
     let msg = v.get("error")?.as_str()?;
     let clean = sanitize_text(msg, MAX_ERROR_DETAIL_BYTES);
     if clean.is_empty() {
-        None
-    } else {
-        Some(clean)
+        return None;
     }
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .map(|d| sanitize_text(d, MAX_ERROR_DETAIL_BYTES))
+        .filter(|d| !d.is_empty() && *d != clean);
+    Some(match detail {
+        Some(detail) => sanitize_text(&format!("{clean}: {detail}"), MAX_ERROR_DETAIL_BYTES),
+        None => clean,
+    })
 }
 
 // ---- health ---------------------------------------------------------------
@@ -2821,6 +2834,24 @@ mod tests {
         );
         assert_eq!(parse_error_detail(b"garbage"), None);
         assert_eq!(parse_error_detail(br#"{"error":""}"#), None);
+        // The server sends the category AND the reason; a client that
+        // reports only the category says nothing at all.
+        assert_eq!(
+            parse_error_detail(
+                br#"{"error":"content contract violation","detail":"unsupported schema version 3"}"#
+            )
+            .as_deref(),
+            Some("content contract violation: unsupported schema version 3")
+        );
+        // A detail that merely repeats the category is not printed twice.
+        assert_eq!(
+            parse_error_detail(br#"{"error":"not found","detail":"not found"}"#).as_deref(),
+            Some("not found")
+        );
+        assert_eq!(
+            parse_error_detail(br#"{"error":"not found","detail":""}"#).as_deref(),
+            Some("not found")
+        );
         let long = format!(r#"{{"error":"{}"}}"#, "x".repeat(4096));
         assert_eq!(
             parse_error_detail(long.as_bytes()).unwrap().len(),
