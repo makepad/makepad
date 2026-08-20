@@ -1753,6 +1753,23 @@ impl AutoFade {
     }
 }
 
+/// The fade the cue engine still holds slots for, when the mixer has moved
+/// on to a different transition (or never took this one at all) and can
+/// therefore never report it `Completed`.
+///
+/// The engine reserves BOTH slots for a running fade — the outgoing one is
+/// "still fading", the incoming one is live — so a fade that can never land
+/// wedges every later click into `WaitingSlot` and the program freezes.
+/// The mixer's phase mailbox is a single slot, so this is the host's only
+/// way back: as soon as the published identity is not the engine's, that
+/// fade is over as far as the device clock is concerned.
+fn stale_fade_to_land(
+    active: Option<CueScheduleId>,
+    published: mixer::VideoTransitionId,
+) -> Option<CueScheduleId> {
+    active.filter(|schedule| *schedule != published)
+}
+
 /// The three top-level modes. Everything else is a filter or a drawer.
 const MODE_BUTTONS: [(&[LiveId], ApcSurface); 3] = [
     (ids!(mode_vj), ApcSurface::Video),
@@ -3156,6 +3173,12 @@ pub struct App {
     /// A tile clicked before its manifest resolved; fires on arrival.
     #[rust]
     pending_click: Option<AssetId>,
+    /// The one tile the clip grid marks: the last one clicked (pointer or
+    /// APC pad). The grid used to paint LIVE / CUE / held markers on top of
+    /// each other, which read as noise; a single green ring on the last
+    /// click is the whole of the grid's state now.
+    #[rust]
+    last_clicked: Option<AssetId>,
     // player_nav: manifest anchors of World assets seen this session
     // (player_start, key_*, exit, door_N…), kept so the walker slot can be
     // handed them when that world is cued. Classic maps published before
@@ -4610,9 +4633,20 @@ impl App {
                 self.slot_media[to.index()],
                 SlotMedia::Still | SlotMedia::Mesh | SlotMedia::Billboard
             ) {
+                if self.trace_cue {
+                    log!("cue: mixer refused schedule {schedule} ({error:?}); host cut to {to:?}");
+                }
                 let cmds = self.cue.start_armed(gen, schedule);
                 self.program_mix = if to == SlotId::B { 1.0 } else { 0.0 };
                 self.run_cue_cmds(cx, cmds);
+                // The mixer never took this schedule, so no device clock
+                // will ever report it Completed. Land it here or the cue
+                // engine keeps both slots reserved for a fade that cannot
+                // finish, and every later click parks in `WaitingSlot` —
+                // clicking a tile silently stops cueing anything.
+                let cmds = self.cue.fade_complete_for(schedule);
+                self.run_cue_cmds(cx, cmds);
+                self.sync_xfader_ui(cx, self.program_mix);
                 self.video_pump = cx.new_next_frame();
                 return;
             }
@@ -4654,6 +4688,15 @@ impl App {
     /// identity-checked, so repeated polling is idempotent.
     fn pump_transitions(&mut self, cx: &mut Cx) {
         let Some(snapshot) = self.mixer.video_transition_snapshot() else { return };
+        // The mixer publishes phases into ONE slot, so a `Completed` the UI
+        // thread never polled is overwritten by the next arm — and a fade
+        // the mixer refused outright is never published at all. Either way
+        // the engine would hold both slots for a transition that can no
+        // longer finish. Once the mixer has moved on, land it here.
+        if let Some(stale) = stale_fade_to_land(self.cue.active_fade(), snapshot.id) {
+            let cmds = self.cue.fade_complete_for(stale);
+            self.run_cue_cmds(cx, cmds);
+        }
         match snapshot.phase {
             VideoTransitionPhase::Started => {
                 if let Some((gen, schedule, _slot)) = self.cue.armed() {
@@ -7000,7 +7043,6 @@ impl App {
                         frames: Vec::new(),
                         fps: 0.0,
                         active: false,
-                        secondary: false,
                         placeholder: true,
                     };
                 };
@@ -7031,15 +7073,14 @@ impl App {
                     }
                 };
                 let active = match surface {
-                    Surface::Video => self.cue.live().map(|i| i.asset) == Some(tile.asset),
+                    // ONE mark on the clip grid: the tile last clicked. The
+                    // live / next / held distinctions still drive the cue
+                    // engine and the APC LEDs — they just are not painted
+                    // on top of each other on screen any more.
+                    Surface::Video => self.last_clicked == Some(tile.asset),
                     Surface::Sfx => self.pads.playing_voices(&tile.asset) > 0,
                     _ => false,
                 };
-                // The cue being prepared / parked gets a dim mark, never the
-                // full LIVE ring.
-                let secondary = surface == Surface::Video
-                    && (self.cue.next().map(|i| i.asset) == Some(tile.asset)
-                        || self.cue.held().map(|(_, i)| i.asset) == Some(tile.asset));
                 let sub = match (&tile.alias, tile.live) {
                     (Some(alias), _) => alias.clone(),
                     (None, true) => String::new(),
@@ -7059,7 +7100,6 @@ impl App {
                     frames,
                     fps,
                     active,
-                    secondary,
                     placeholder: false,
                 }
             }));
@@ -8293,6 +8333,9 @@ impl App {
 
     fn video_tile_clicked(&mut self, cx: &mut Cx, asset: AssetId) {
         let Some(tile) = self.video_model.tile(&asset) else { return };
+        // The ring follows the hand, not the cue: it marks the tile the
+        // operator last touched even while its manifest is still resolving.
+        self.last_clicked = Some(asset);
         let Some(item) = CueItem::from_tile(tile) else {
             // Manifest not resolved yet: the click is not lost — it fires
             // the moment the manifest lands (otherwise a fresh tile needs a
@@ -9668,6 +9711,28 @@ mod autofade_tests {
         let (mix, secs) = run(&mut fade, 0.75);
         assert!(mix.abs() < 1e-3, "landed on A: {mix}");
         assert!((secs - 1.5).abs() < 0.1, "three quarters of the way took {secs} s");
+    }
+
+    /// The recovery half of the wedge pinned by
+    /// `cue::tests::a_started_fade_that_is_never_landed_wedges_every_later_click`:
+    /// the mixer publishes transition phases into ONE mailbox, so a
+    /// `Completed` the UI thread did not poll before the next arm is gone
+    /// for good, and a fade the mixer refused is never published at all.
+    /// The host has to notice that the device clock has moved on and land
+    /// the engine's fade itself, or every later click parks forever.
+    #[test]
+    fn a_fade_the_mixer_no_longer_owns_is_landed_by_the_host() {
+        // Nothing running: nothing to land.
+        assert_eq!(stale_fade_to_land(None, 0), None);
+        assert_eq!(stale_fade_to_land(None, 7), None);
+        // The engine's fade IS the published one: the device clock owns it
+        // and the host must keep its hands off.
+        assert_eq!(stale_fade_to_land(Some(7), 7), None);
+        // The mixer has moved on to a newer transition (or never took this
+        // one, so the mailbox still names an older one): schedule 7 can no
+        // longer complete, so the host lands it.
+        assert_eq!(stale_fade_to_land(Some(7), 8), Some(7));
+        assert_eq!(stale_fade_to_land(Some(7), 6), Some(7));
     }
 }
 
