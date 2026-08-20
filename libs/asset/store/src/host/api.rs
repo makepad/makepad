@@ -198,10 +198,15 @@ pub fn role_str(r: FileRole) -> &'static str {
         FileRole::Depth => "depth",
         FileRole::Splat => "splat",
         FileRole::AoTexture => "ao_texture",
+        FileRole::StemDrums => "stem_drums",
+        FileRole::StemBass => "stem_bass",
+        FileRole::StemVocals => "stem_vocals",
+        FileRole::StemOther => "stem_other",
+        FileRole::Lyrics => "lyrics",
     }
 }
 
-pub const ALL_ROLES: [FileRole; 19] = [
+pub const ALL_ROLES: [FileRole; 24] = [
     FileRole::RenderGlb,
     FileRole::Lod1Glb,
     FileRole::Lod2Glb,
@@ -221,6 +226,11 @@ pub const ALL_ROLES: [FileRole; 19] = [
     FileRole::Depth,
     FileRole::Splat,
     FileRole::AoTexture,
+    FileRole::StemDrums,
+    FileRole::StemBass,
+    FileRole::StemVocals,
+    FileRole::StemOther,
+    FileRole::Lyrics,
 ];
 
 pub fn parse_role(name: &str) -> Option<FileRole> {
@@ -259,14 +269,27 @@ pub fn media_str(m: makepad_asset_data::MediaType) -> &'static str {
         M::Text => "text",
         M::Ply => "ply",
         M::Mp3 => "mp3",
+        M::Json => "json",
     }
 }
 
 pub fn parse_media(name: &str) -> Option<makepad_asset_data::MediaType> {
     use makepad_asset_data::MediaType as M;
-    [M::Png, M::Jpeg, M::Glb, M::Wav, M::Ogg, M::Mp4, M::Bin, M::Text, M::Ply, M::Mp3]
-        .into_iter()
-        .find(|m| media_str(*m) == name)
+    [
+        M::Png,
+        M::Jpeg,
+        M::Glb,
+        M::Wav,
+        M::Ogg,
+        M::Mp4,
+        M::Bin,
+        M::Text,
+        M::Ply,
+        M::Mp3,
+        M::Json,
+    ]
+    .into_iter()
+    .find(|m| media_str(*m) == name)
 }
 
 /// HTTP Content-Type for a media type. `Text` is validated UTF-8 at
@@ -285,6 +308,7 @@ pub fn media_content_type(m: makepad_asset_data::MediaType) -> &'static str {
         M::Text => "text/plain; charset=utf-8",
         M::Ply => "application/x-ply",
         M::Mp3 => "audio/mpeg",
+        M::Json => "application/json",
     }
 }
 
