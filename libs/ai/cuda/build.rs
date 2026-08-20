@@ -63,6 +63,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         manifest_dir.join("kernels/ops.cu"),
         manifest_dir.join("kernels/paint_extras.cu"),
         manifest_dir.join("kernels/rife.cu"),
+        manifest_dir.join("kernels/roformer.cu"),
         manifest_dir.join("kernels/splat.cu"),
         manifest_dir.join("kernels/ssm_conv.cu"),
     ];

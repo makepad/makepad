@@ -29,6 +29,8 @@ pub(super) enum Arena {}
 
 pub(super) enum Compiled {}
 
+pub(super) enum RawSession {}
+
 impl Runtime {
     pub(super) fn new() -> Result<Self> {
         Err(LlamaError::unsupported(unavailable_reason()))
@@ -108,6 +110,35 @@ impl Runtime {
         _wanted: &[crate::TensorId],
     ) -> Result<std::collections::BTreeMap<crate::TensorId, Vec<u8>>> {
         Err(LlamaError::unsupported(unavailable_reason()))
+    }
+
+    pub(super) fn create_raw_session(
+        &self,
+        _ctx: &Context,
+        _graph: &crate::Graph,
+        _pinned: &[crate::TensorId],
+        _progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<RawSession> {
+        Err(LlamaError::unsupported(unavailable_reason()))
+    }
+}
+
+impl RawSession {
+    pub(super) fn execute(
+        &self,
+        _ctx: &Context,
+        _writes: &[(crate::TensorId, &[u8])],
+        _wanted: &[crate::TensorId],
+    ) -> Result<std::collections::BTreeMap<crate::TensorId, Vec<u8>>> {
+        match *self {}
+    }
+
+    pub(super) fn device_bytes(&self) -> usize {
+        match *self {}
+    }
+
+    pub(super) fn node_count(&self) -> usize {
+        match *self {}
     }
 }
 

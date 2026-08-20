@@ -64,6 +64,40 @@ pub struct CompiledHybridDecodeCuda {
     imp: imp::Compiled,
 }
 
+/// A plain ggml `Graph` compiled once and executed many times on CUDA.
+///
+/// The CUDA sibling of `MetalGraphSession`: the caller owns the `Context`,
+/// hands in one graph, and then writes inputs / reads outputs by `TensorId`
+/// per execution. Weights are mirrored to the device once at construction and
+/// activations are planned into a device buffer sized from the plan.
+pub struct CudaRawGraphSession {
+    imp: imp::RawSession,
+}
+
+impl CudaRawGraphSession {
+    /// Execute the compiled graph. `writes` are uploaded (staged through
+    /// pinned host memory), then every node is dispatched on the runtime's
+    /// stream, then `wanted` is read back.
+    pub fn execute(
+        &self,
+        ctx: &Context,
+        writes: &[(crate::TensorId, &[u8])],
+        wanted: &[crate::TensorId],
+    ) -> Result<std::collections::BTreeMap<crate::TensorId, Vec<u8>>> {
+        self.imp.execute(ctx, writes, wanted)
+    }
+
+    /// Total device bytes this session holds (weights + planned activations).
+    pub fn device_bytes(&self) -> usize {
+        self.imp.device_bytes()
+    }
+
+    /// Dispatches per execution, after fusion.
+    pub fn node_count(&self) -> usize {
+        self.imp.node_count()
+    }
+}
+
 impl CudaExecRuntime {
     pub fn new() -> Result<Self> {
         Ok(Self {
@@ -155,6 +189,33 @@ impl CudaExecRuntime {
         ranges: &[(usize, usize)],
     ) -> Result<()> {
         self.imp.clear_arena_ranges(&arena.imp, ranges)
+    }
+
+    /// Compile an arbitrary graph over `ctx` into a reusable session.
+    ///
+    /// `pinned` tensors stay alive to graph end (graph outputs, anything the
+    /// caller intends to read back); everything else is free to have its
+    /// storage recycled by the activation planner. Mirroring the context to
+    /// the device happens here, once.
+    pub fn create_raw_graph_session(
+        &self,
+        ctx: &Context,
+        graph: &crate::Graph,
+        pinned: &[crate::TensorId],
+    ) -> Result<CudaRawGraphSession> {
+        self.create_raw_graph_session_with_progress(ctx, graph, pinned, &mut |_, _| {})
+    }
+
+    pub fn create_raw_graph_session_with_progress(
+        &self,
+        ctx: &Context,
+        graph: &crate::Graph,
+        pinned: &[crate::TensorId],
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<CudaRawGraphSession> {
+        Ok(CudaRawGraphSession {
+            imp: self.imp.create_raw_session(ctx, graph, pinned, progress)?,
+        })
     }
 
     /// Validation entry: execute an arbitrary graph over `ctx` through the

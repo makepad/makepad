@@ -26,6 +26,7 @@ pub mod weights;
 
 pub use cuda_exec::{
     CompiledHybridDecodeCuda, CudaContextArena, CudaDeviceFeatures, CudaExecRuntime,
+    CudaRawGraphSession,
 };
 pub use error::{LlamaError, Result};
 pub use exec::{
