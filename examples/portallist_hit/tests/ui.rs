@@ -43,6 +43,29 @@ fn assert_rows_inside_list(app: &TestApp) {
     }
 }
 
+/// Click the bottom-most row the tree reports, at the centre of its reported
+/// rect, and check that row is the one that fired. This is the half of the
+/// symptom where nothing happens at all: a row straddling the bottom edge is
+/// drawn full height, so its *unclipped* rect has its centre below the list —
+/// on `outside_button` or on nothing.
+fn click_bottom_reported_row(app: &TestApp) {
+    let widgets = app.widget_snapshot();
+    let bottom = widgets
+        .iter()
+        .filter(|w| w.id == "play_button" && w.visible && w.width > 0 && w.height > 0)
+        .max_by_key(|w| w.y)
+        .cloned()
+        .expect("a row is reported");
+    let label = bottom.text.clone().expect("row button carries its text");
+    let index = label
+        .strip_prefix("Play ")
+        .expect("row button reads 'Play N'")
+        .to_string();
+    app.locator(Selector::all().text_exact(label.as_str())).click();
+    app.locator(Selector::id("last_played"))
+        .wait_text(format!("Row {index}"));
+}
+
 #[makepad_test]
 fn portallist_hides_rows_clipped_past_the_viewport(app: TestApp) {
     app.locator(Selector::all().text_exact("Play 0")).wait_visible();
@@ -88,6 +111,25 @@ fn portallist_rows_stay_addressable_after_scrolling(app: TestApp) {
     app.locator(Selector::id("last_played")).wait_text("Row 6");
 
     assert_rows_inside_list(&app);
+
+    app.locator(Selector::id("outside_button")).click();
+    app.locator(Selector::id("last_played")).wait_text("outside");
+}
+
+#[makepad_test]
+fn portallist_partially_clipped_row_is_still_clickable(app: TestApp) {
+    app.locator(Selector::all().text_exact("Play 0")).wait_visible();
+
+    // Half a row, so the top and bottom rows straddle the viewport edges
+    // instead of landing on them. The bottom one (row 5) is drawn full height
+    // in the band `outside_button` occupies, with only a sliver on screen: its
+    // unclipped rect's centre is outside the list, its clipped rect's centre
+    // is on the sliver.
+    app.locator(Selector::id("list")).scroll(0.0, 20.0);
+    app.locator(Selector::all().text_exact("Play 5")).wait_visible();
+
+    assert_rows_inside_list(&app);
+    click_bottom_reported_row(&app);
 
     app.locator(Selector::id("outside_button")).click();
     app.locator(Selector::id("last_played")).wait_text("outside");
