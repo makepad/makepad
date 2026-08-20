@@ -46,7 +46,7 @@ SPLASH SYNTAX (it is NOT JavaScript — these exact forms only):
 - Loops: `for i in 0..16 { }` and `for item in list { }`. There is NO
   C-style `for (i = 0; …; i++)` and NO `++` — they break the parse and the
   level silently becomes empty.
-- Functions: `fn make_hut(ox, oz, yaw) { … }` then `make_hut(11, 0, 0)`.
+- Functions: `fn place_row(ox, oz, yaw) { … }` then `place_row(11, 0, 0)`.
   Not `let f = function(...)`.
 - Math is bare: `sin(a)`, `cos(a)`, `sqrt(x)`, `atan2(y, x)` — no `math.`
   namespace, no `Math.`.
@@ -98,9 +98,9 @@ game.terrain({size: 160, cells: 65, smooth: true, seed: 3, amp: 6})
 let hero = game.player_character({pos: vec3(0, 6, 8)})
 game.label(hero, "You")
 
-// A hut from store models (aliases came from a catalog query):
-game.model("kenney/space-kit/hangar_smalla", {pos: vec3(6, 0, -4), yaw: 1.57})
-game.model("kenney/space-kit/rocks_smallb", {pos: vec3(2, 0, -7), scale: 1.4})
+// Store models are miniatures — scale them up next to people:
+game.model("kenney/space-kit/hangar_smalla", {pos: vec3(6, 0, -4), yaw: 1.57, scale: 3})
+game.model("kenney/space-kit/rocks_smallb", {pos: vec3(2, 0, -7), scale: 2})
 
 let pig = game.mover({pos: vec3(6, 6, 4), size: vec3(0.9, 0.7, 1.4), color: #ffb3c1, tag: "animal"})
 game.wander(pig, {home: vec3(6, 0, 4), range: 12, speed: 2.5})
@@ -127,24 +127,24 @@ Query the annotated set like this (ONE query answers it):
   WHERE live=1 AND canon_alias LIKE 'kenney/fantasy-town-kit/%'
   AND description NOT LIKE 'Kenney %' LIMIT 30
 - Ground: flat (amp 0-2), grass green.
-- Roads: `road` (straight) and `road-corner` tiles on a ~2 m grid at y=0;
-  a small ring or L-shaped street. yaw is RADIANS: 0 / 1.5708 / 3.1416 /
-  4.7124 turn a tile 0/90/180/270 degrees.
-- A plaza: `fountain-round` in the middle, `tree` and `cart` around it.
-- PIECES vs COMPLETE OBJECTS: wall/roof/floor models are kit PIECES — they
-  only look right inside the exact hut pattern below. Everything you place
-  on its own must be a COMPLETE object (fountain, tree, cart, road tile,
-  a whole building). Never scatter loose wall or roof pieces.
-- Everything sits ON the ground: y = 0 for every placement unless the hut
-  pattern says otherwise. Never invent heights.
-- Huts: use THIS exact pattern (a ~2 m module hut at origin ox, oz —
-  do not re-derive the geometry, just offset it):
-    game.model("kenney/fantasy-town-kit/wall-door", {pos: vec3(ox, 0, oz+1), yaw: 3.1416})
-    game.model("kenney/fantasy-town-kit/wall", {pos: vec3(ox, 0, oz-1)})
-    game.model("kenney/fantasy-town-kit/wall-window-glass", {pos: vec3(ox-1, 0, oz), yaw: 1.5708})
-    game.model("kenney/fantasy-town-kit/wall", {pos: vec3(ox+1, 0, oz), yaw: 4.7124})
-    game.model("kenney/fantasy-town-kit/roof", {pos: vec3(ox, 2, oz)})
-  Two or three huts (door side toward the road) make the village.
+- SCALE FACTS (measured, trust these): kenney kit pieces are MINIATURES.
+  A fantasy-town wall/road tile is 1 m; a whole suburban building model
+  is ~1.3 m. People and cars render person/car sized. So SCALE placed
+  kit models UP: fantasy-town props and roads `scale: 2`, whole
+  buildings `scale: 4`. Never place kit pieces unscaled next to people.
+- Roads: `road` tiles with scale: 2 are 2 m — place them every 2 m at
+  y=0 (grid step = 2). `road-corner` turns; yaw is RADIANS: 0 / 1.5708 /
+  3.1416 / 4.7124.
+- A plaza: `fountain-round` (scale: 2) in the middle, `tree` and `cart`
+  (scale: 2) around it.
+- BUILDINGS ARE COMPLETE MODELS, never assembled from wall/roof pieces
+  (pieces come out misplaced — a pile of loose walls, not a house).
+  kenney/city-kit-suburban/building-type-a … building-type-v are whole
+  houses: game.model("kenney/city-kit-suburban/building-type-a",
+  {pos: vec3(x, 0, z), yaw, scale: 4}) — 3 or 4 different types along
+  the street, doors toward the road.
+- Everything sits ON the ground: y = 0 for every placement. Never invent
+  heights.
 - KEEP THINKING SHORT (a few sentences, never geometry derivations); the
   level goes in the world.set_source call, not in your reasoning.
 - Driveable cars: game.car({pos: vec3(x, 1.2, z), model:
