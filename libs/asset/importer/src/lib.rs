@@ -42,5 +42,6 @@ pub mod games_import;
 // (the DJ's audio lane reads them straight back out of the catalog).
 pub mod music_import;
 pub mod pack_import;
+pub mod spectrogram;
 pub mod thumbs;
 pub mod videothumb;
