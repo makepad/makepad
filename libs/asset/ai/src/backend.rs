@@ -1089,6 +1089,23 @@ pub trait ContentBackend: Send {
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError>;
 
+    /// As [`generate`](Self::generate), with a live text sink: backends
+    /// that produce text incrementally (the LLM chat lane) call `on_text`
+    /// with the FULL text so far — prefix-stable snapshots, never deltas —
+    /// which the server publishes as the job's `partial_text` so chat
+    /// clients stream instead of receiving one burst at completion.
+    /// Default: text does not stream; identical to `generate`.
+    fn generate_streamed(
+        &mut self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        let _ = on_text;
+        self.generate(params, progress, cancel)
+    }
+
     /// Live-session capability (see [`LiveConfig`] / `crate::realtime`).
     /// Default: not supported — `POST /realtime` refuses such models with
     /// 400 before ever constructing a session.

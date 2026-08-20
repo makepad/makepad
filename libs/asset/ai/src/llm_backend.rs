@@ -38,6 +38,20 @@ const PROMPT_AUDIO: &str = include_str!("../prompts/expand_audio.txt");
 const PROMPT_MUSIC: &str = include_str!("../prompts/expand_music.txt");
 const PROMPT_GENERIC: &str = include_str!("../prompts/expand_generic.txt");
 
+/// The next publishable streaming snapshot, or None to hold this round.
+/// Streaming receivers (partial_text pollers, the chat broker's delta
+/// slicer) rely on snapshots being PREFIX-STABLE: each publish only
+/// appends. A chunk edge can split one character across byte-level BPE
+/// tokens, so a full-sequence re-decode may end in U+FFFD this round and
+/// re-decode as the real character next round — the unfinished tail is
+/// trimmed BEFORE publishing (never published, so it can never wedge the
+/// prefix check), and a decode that still diverges from what was already
+/// published is held back until it heals.
+fn next_stream_snapshot(prev: &str, decoded: &str) -> Option<String> {
+    let trimmed = decoded.trim_end_matches('\u{fffd}');
+    (trimmed.len() > prev.len() && trimmed.starts_with(prev)).then(|| trimmed.to_string())
+}
+
 fn parse_prefill_counts(stage: &str) -> Option<(f64, f64)> {
     // "prefill 32/256 tok" or "kv reuse 8/8 tok"
     let mut nums = stage
@@ -241,19 +255,21 @@ impl LlmBackend {
         }
     }
 
-    /// Runs one expansion; `on_token(k, max)` fires per generated token
-    /// (real path only) and `cancel` is checked between tokens.
+    /// Runs one expansion; `on_token(k, max)` fires per decode chunk,
+    /// `on_text` receives prefix-stable full-text snapshots (real path
+    /// only) and `cancel` is checked between chunks.
     fn expand(
         &mut self,
         job: &ExpandJob,
         cancel: &CancelToken,
         on_token: &mut dyn FnMut(u32, u32),
         on_stage: &mut dyn FnMut(&str),
+        on_text: &mut dyn FnMut(&str),
     ) -> Result<String, AssetAiError> {
         match &mut self.generator {
             Generator::Stub(generate) => {
                 cancel.check()?;
-                let _ = (&on_token, &on_stage);
+                let _ = (&on_token, &on_stage, &on_text);
                 generate(job)
             }
             #[cfg(feature = "llm")]
@@ -262,7 +278,7 @@ impl LlmBackend {
                     AssetAiError::Backend("llm backend used before ensure_loaded".to_string())
                 })?;
                 worker
-                    .expand(job.clone(), cancel.clone(), on_token, on_stage)
+                    .expand(job.clone(), cancel.clone(), on_token, on_stage, on_text)
                     .map_err(|e| {
                         if e == "cancelled" {
                             AssetAiError::Cancelled
@@ -342,6 +358,16 @@ impl ContentBackend for LlmBackend {
         &mut self,
         params: &GenerateParams,
         progress: ProgressSink,
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        self.generate_streamed(params, progress, &mut |_| {}, cancel)
+    }
+
+    fn generate_streamed(
+        &mut self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
         let is_chat = params.target_domain == "chat";
@@ -470,7 +496,16 @@ impl ContentBackend for LlmBackend {
                 };
                 (sink.borrow_mut())(stage, frac);
             };
-            let raw = self.expand(&job, cancel, &mut on_token, &mut on_stage)?;
+            // Text snapshots stream only for single-variant runs (the chat
+            // lane is always one) — interleaved variants would fight over
+            // one partial_text slot.
+            let mut on_text_variant = |text: &str| {
+                if variants == 1 {
+                    on_text(text);
+                }
+            };
+            let raw =
+                self.expand(&job, cancel, &mut on_token, &mut on_stage, &mut on_text_variant)?;
             let text = if is_chat {
                 raw
             } else {
@@ -526,7 +561,9 @@ impl ContentBackend for LlmBackend {
 mod llama_worker {
     use super::ExpandJob;
     use crate::backend::CancelToken;
-    use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
+    use makepad_ai_llm::{
+        LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
+    };
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -545,6 +582,10 @@ mod llama_worker {
     enum WorkerEvent {
         Stage(String),
         Token(u32, u32),
+        /// Full assistant text so far — a monotonically growing,
+        /// prefix-stable snapshot (never a delta), emitted once per decode
+        /// chunk. Receivers replace, not append.
+        Text(String),
         Done(Result<String, String>),
     }
 
@@ -644,6 +685,7 @@ mod llama_worker {
             cancel: CancelToken,
             on_token: &mut dyn FnMut(u32, u32),
             on_stage: &mut dyn FnMut(&str),
+            on_text: &mut dyn FnMut(&str),
         ) -> Result<String, String> {
             let (event_tx, event_rx) = mpsc::channel();
             self.tx
@@ -653,6 +695,7 @@ mod llama_worker {
                 match event_rx.recv() {
                     Ok(WorkerEvent::Stage(name)) => on_stage(&name),
                     Ok(WorkerEvent::Token(k, max)) => on_token(k, max),
+                    Ok(WorkerEvent::Text(text)) => on_text(&text),
                     Ok(WorkerEvent::Done(result)) => return result,
                     Err(_) => return Err("llm worker dropped the reply".to_string()),
                 }
@@ -739,44 +782,59 @@ mod llama_worker {
             return Err(cancelled());
         }
 
-        // One decode loop for both modes: greedy uses the session's own
-        // per-token step (same stop conditions as continue_greedy), sampled
-        // mode picks from raw logits — either way the loop yields per-token
-        // progress events and a cancel boundary between tokens.
-        let max = job.max_tokens.max(1);
-        let sampled = job.temperature > 0.0;
-        let eos = session.vocab().eos_token_id();
-        let pad = session.vocab().padding_token_id();
-        let mut rng = Xorshift64::new(job.seed);
+        // Chunked decode through the session's OWN generation loop.
+        // `continue_sampled` dispatches to greedy at temperature 0 and runs
+        // MTP speculative decoding (exact Leviathan/Chen rejection sampling)
+        // whenever the model carries a draft head. The per-token
+        // sample-from-raw-logits loop that used to live here silently
+        // BYPASSED speculation: spec_draft_max was configured, the draft
+        // head loaded, and the chat lane still decoded one token at a time
+        // (measured 52.5 tok/s on the 27B — the non-speculative rate).
+        // Chunks give the job protocol its three boundaries — cancel check,
+        // progress event, partial-text snapshot — every ~4 speculative
+        // rounds.
+        let max = job.max_tokens.max(1) as usize;
+        let sampling = LlamaSamplingParams {
+            temperature: job.temperature.max(0.0),
+            top_p: 0.95,
+            top_k: 0,
+            seed: job.seed,
+        };
+        const CHUNK: usize = 24;
         let mut token_ids: Vec<i32> = Vec::new();
-        for k in 0..max {
+        let mut streamed = String::new();
+        loop {
             if cancel.is_cancelled() {
                 return Err(cancelled());
             }
-            if sampled {
-                let next = {
-                    let logits = session
-                        .last_logits()
-                        .ok_or_else(|| "no logits after prefill".to_string())?;
-                    sample_top_p(logits, job.temperature, 0.95, &mut rng)
-                };
-                if Some(next) == eos || Some(next) == pad {
-                    break;
-                }
-                session
-                    .append_token(next)
-                    .map_err(|e| format!("decode: {e:?}"))?;
-                token_ids.push(next);
-            } else {
-                match session
-                    .next_greedy_token()
-                    .map_err(|e| format!("decode: {e:?}"))?
-                {
-                    Some(next) => token_ids.push(next),
-                    None => break,
+            let want = (max - token_ids.len()).min(CHUNK);
+            if want == 0 {
+                break;
+            }
+            let generated = session
+                .continue_sampled(want, sampling)
+                .map_err(|e| format!("decode: {e:?}"))?;
+            token_ids.extend_from_slice(&generated.token_ids);
+            let _ = events.send(WorkerEvent::Token(token_ids.len() as u32, max as u32));
+            // Partial-text snapshots: decode the FULL sequence each chunk —
+            // byte-level BPE can split one character across a chunk edge,
+            // so per-chunk decodes do not concatenate cleanly — and only
+            // publish while the previous snapshot is still a prefix; a
+            // trailing incomplete character heals on the next chunk.
+            if let Ok(decoded) = session.vocab().decode_tokens(&token_ids) {
+                if let Some(snapshot) = super::next_stream_snapshot(&streamed, &decoded) {
+                    streamed = snapshot.clone();
+                    let _ = events.send(WorkerEvent::Text(snapshot));
                 }
             }
-            let _ = events.send(WorkerEvent::Token(k + 1, max));
+            if generated.stop_reason != LlamaStopReason::MaxNewTokens {
+                break;
+            }
+            if generated.token_ids.len() < want {
+                // Short without a stop reason: the session cannot make
+                // progress (context full); looping again would spin.
+                break;
+            }
         }
         let text = session
             .vocab()
@@ -796,68 +854,6 @@ mod llama_worker {
         Ok(text)
     }
 
-    struct Xorshift64 {
-        state: u64,
-    }
-
-    impl Xorshift64 {
-        fn new(seed: u64) -> Self {
-            Self {
-                // splitmix-style scramble; never zero.
-                state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
-            }
-        }
-
-        fn next_f64(&mut self) -> f64 {
-            let mut x = self.state;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.state = x;
-            (x >> 11) as f64 / (1u64 << 53) as f64
-        }
-    }
-
-    /// Temperature + top-p (nucleus) sampling over raw logits.
-    fn sample_top_p(logits: &[f32], temperature: f32, top_p: f64, rng: &mut Xorshift64) -> i32 {
-        let inv_temp = 1.0 / temperature.max(1e-4);
-        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let mut candidates: Vec<(i32, f64)> = logits
-            .iter()
-            .enumerate()
-            .map(|(id, &logit)| {
-                (
-                    id as i32,
-                    (((logit - max_logit) * inv_temp) as f64).exp(),
-                )
-            })
-            .collect();
-        candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let total: f64 = candidates.iter().map(|(_, w)| w).sum();
-        if total <= 0.0 {
-            return candidates.first().map(|(id, _)| *id).unwrap_or(0);
-        }
-        // Nucleus: keep the smallest prefix with cumulative mass >= top_p.
-        let mut kept = 0;
-        let mut mass = 0.0;
-        for (index, (_, weight)) in candidates.iter().enumerate() {
-            mass += weight / total;
-            kept = index + 1;
-            if mass >= top_p {
-                break;
-            }
-        }
-        candidates.truncate(kept.max(1));
-        let kept_total: f64 = candidates.iter().map(|(_, w)| w).sum();
-        let mut pick = rng.next_f64() * kept_total;
-        for (id, weight) in &candidates {
-            pick -= weight;
-            if pick <= 0.0 {
-                return *id;
-            }
-        }
-        candidates.last().map(|(id, _)| *id).unwrap_or(0)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,5 +1213,62 @@ mod tests {
             Err(error) => error,
         };
         assert!(format!("{error}").contains("must occur in the terse prompt"));
+    }
+
+    #[test]
+    fn stream_snapshots_are_prefix_stable() {
+        // Plain growth publishes the whole decode.
+        assert_eq!(next_stream_snapshot("", "Hel").as_deref(), Some("Hel"));
+        assert_eq!(
+            next_stream_snapshot("Hel", "Hello wor").as_deref(),
+            Some("Hello wor")
+        );
+        // No growth: hold.
+        assert_eq!(next_stream_snapshot("Hello", "Hello"), None);
+        // A chunk edge split a character: the decode ends in U+FFFD this
+        // round. The unfinished tail is trimmed off the publish, so the
+        // bad character can never enter the published stream...
+        assert_eq!(
+            next_stream_snapshot("", "caf\u{fffd}").as_deref(),
+            Some("caf")
+        );
+        // ...trimming down to no growth holds the round entirely...
+        assert_eq!(next_stream_snapshot("caf", "caf\u{fffd}"), None);
+        // ...and the healed re-decode appends cleanly next round.
+        assert_eq!(
+            next_stream_snapshot("caf", "caf\u{e9} au lait").as_deref(),
+            Some("caf\u{e9} au lait")
+        );
+        // A decode whose tail rewrote what was already published is held
+        // back rather than corrupting receivers' byte offsets.
+        assert_eq!(next_stream_snapshot("cafX", "caf\u{e9} au lait"), None);
+    }
+
+    #[test]
+    fn generate_streamed_defaults_to_generate_without_text() {
+        // The stub generator produces no incremental text; the streamed
+        // entry point must still generate and must not touch the sink.
+        let mut backend = LlmBackend::with_stub(
+            "qwen-test",
+            Box::new(|_: &ExpandJob| Ok("a quiet reply".to_string())),
+        );
+        let mut streamed: Vec<String> = Vec::new();
+        let artifacts = backend
+            .generate_streamed(
+                &params("hello", "chat"),
+                &mut |_, _| {},
+                &mut |text| streamed.push(text.to_string()),
+                &CancelToken::new(),
+            )
+            .expect("stub chat generates");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            String::from_utf8(artifacts[0].bytes.clone()).unwrap(),
+            "a quiet reply"
+        );
+        assert!(
+            streamed.is_empty(),
+            "stub path streams nothing; only the llama worker emits snapshots"
+        );
     }
 }

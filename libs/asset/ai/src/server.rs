@@ -1147,7 +1147,17 @@ fn execute_job(
                     .jobs
                     .with(|store| store.set_progress(&gen_job, stage, progress));
             };
-            backend.generate(&params, &mut progress_sink, &cancel)
+            // Streaming text lands as partial_text while the job runs, so
+            // chat pollers see the reply grow instead of one burst at done.
+            let text_shared = shared.clone();
+            let text_job = job_id.to_string();
+            let mut text_sink = move |text: &str| {
+                let text = text.to_string();
+                text_shared
+                    .jobs
+                    .with(|store| store.set_partial_text(&text_job, text));
+            };
+            backend.generate_streamed(&params, &mut progress_sink, &mut text_sink, &cancel)
         };
         match gen_result {
             Ok(artifacts) => {
