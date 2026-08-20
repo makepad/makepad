@@ -44,6 +44,10 @@ const SURF_NODRAW_MASK: i32 = SURF_SKY | SURF_NODRAW | SURF_HINT | SURF_SKIP;
 const ATLAS_GUTTER: u32 = 2;
 const ATLAS_MAX: u32 = 4096;
 const VIEW_HEIGHT: f32 = 22.0;
+/// A spawn entity's origin sits this far above the floor (player bbox mins z).
+const ORIGIN_ABOVE_FLOOR: f32 = 24.0;
+/// Quake 2 `STEPSIZE`.
+const STEP_HEIGHT: f32 = 18.0;
 
 #[derive(Clone, Debug, Default)]
 pub struct WalBank {
@@ -213,11 +217,12 @@ fn write_world(
     }
     std::fs::write(&dest, glb).map_err(|e| e.to_string())?;
     if let Some(s) = spawn {
-        let text = format!(
-            "world-spawn 1\n{:.4} {:.4} {:.4}\n{:.5} {:.5}\n",
-            s[0], s[1], s[2], s[3], s[4]
-        );
-        let _ = std::fs::write(dest.with_extension("spawn"), text);
+        // Quake 2 player: origin 24 units above the floor, eye +22 from
+        // there, STEPSIZE 18 — all at this converter's 1/64 map scale.
+        let eye = (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) * SCALE;
+        let nav = crate::world_nav::WorldNav::single([s[0], s[1], s[2]], s[3], s[4])
+            .with_heights(s[1] - eye, eye, STEP_HEIGHT * SCALE);
+        let _ = std::fs::write(dest.with_extension("spawn"), nav.to_text());
     }
     let icon_rel = crate::world_preview::write_spawn_preview(&dest)
         .ok()
