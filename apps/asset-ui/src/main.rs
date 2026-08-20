@@ -3208,6 +3208,9 @@ pub struct App {
     /// WITHOUT the leading "all kinds" row — index `n` of this list is row
     /// `n + 1` of the dropdown. Every entry is a real `AssetKind` the
     /// server filters on.
+    /// Catalog assets pulled into the Create surface (see [`CatalogWork`]).
+    #[rust]
+    catalog_work: CatalogWork,
     #[rust]
     lib_kind_options: Vec<String>,
     /// Facets behind the label dropdown, same row offset: the catalog's own
@@ -6318,11 +6321,10 @@ impl App {
         // Only a stateful manifest goes to BillboardView.
         let is_billboard = ct.contains("billboard") || ct.contains("x-stateful-billboard");
         if is_billboard {
-            let path = self.selected_file.as_ref().and_then(|file| {
-                self.library
-                    .as_ref()
-                    .and_then(|library| library.payload_path(file).ok())
-            });
+            let path = self
+                .selected_file
+                .clone()
+                .and_then(|file| self.payload_path_of(&file));
             if let Some(path) = path {
                 if let Some(mut view) = self
                     .ui
@@ -6459,15 +6461,14 @@ impl App {
                 let (aomesh, ao_png) = self
                     .selected_file
                     .as_ref()
-                    .and_then(|file| self.library.as_ref().map(|lib| lib.ao_sidecar_bytes(file)))
+                    .and_then(|file| self.ao_sidecars_of(file))
                     .unwrap_or((None, None));
                 // A playable rig's baked rest bundle caches beside the payload
                 // (`<stem>.skinao`), like the sandbox's cast does.
                 let rig_cache = self
                     .selected_file
                     .as_ref()
-                    .and_then(|file| self.library.as_ref().map(|lib| lib.rig_cache_path(file)))
-                    .flatten();
+                    .and_then(|file| self.rig_cache_of(file));
                 mesh.set_model_bytes_ao_rig(cx, bytes.to_vec(), None, aomesh, ao_png, rig_cache);
                 if let Some(spawn) = spawn {
                     mesh.enable_walk(cx, spawn);
@@ -6592,7 +6593,21 @@ impl App {
     }
 
     fn refresh_gallery(&mut self, cx: &mut Cx, clear_thumbnails: bool) {
-        let (entries, count) = match &self.library {
+        // Catalog assets the user pulled in sit at the FRONT of the rail:
+        // they are what this surface is working on right now, and they are
+        // backed by verified cache objects rather than library files.
+        let mut entries: Vec<GalleryEntry> = self
+            .catalog_work
+            .rows()
+            .map(|item| GalleryEntry {
+                meta: item.meta.clone(),
+                path: item.payload.clone().unwrap_or_default(),
+                preview_path: item.thumbnail.clone(),
+                selected: self.selected_file.as_deref() == Some(item.meta.file.as_str()),
+            })
+            .collect();
+        let adopted = entries.len();
+        let (local, count) = match &self.library {
             Some(library) => {
                 let entries = library
                     .newest_items()
@@ -6631,6 +6646,8 @@ impl App {
             }
             None => (Vec::new(), 0),
         };
+        entries.extend(local);
+        let count = count + adopted;
         if let Some(mut gallery) = self
             .ui
             .widget(cx, ids!(library_gallery))
@@ -7745,10 +7762,7 @@ impl App {
 
     /// Hand one preview-source read to the worker (bounded to one in flight).
     fn request_thumb_read(&mut self, file: &str, purpose: IoPurpose) {
-        let path = self
-            .library
-            .as_ref()
-            .and_then(|library| library.payload_path(file).ok());
+        let path = self.payload_path_of(file);
         let (Some(path), Some(io)) = (path, &self.artifact_io) else {
             return;
         };
@@ -7771,6 +7785,42 @@ impl App {
             .unwrap_or_default();
         for done in completed {
             match done {
+                IoDone::CatalogFile {
+                    file,
+                    payload,
+                    role,
+                    revision,
+                    path,
+                } => {
+                    self.catalog_work.pending.remove(&file);
+                    match path {
+                        Ok(path) if payload => {
+                            // A catalog asset now has bytes on disk that the
+                            // local tools can open. Its kind comes from the
+                            // ROLE the manifest gave it, never from guessing
+                            // at the file name.
+                            if let Some(item) = self.catalog_work.items.get_mut(&file) {
+                                if let Some(role) = role {
+                                    let (domain, content_type) = role_media(role);
+                                    item.meta.domain = domain.to_string();
+                                    item.meta.content_type = content_type.to_string();
+                                }
+                            }
+                            self.catalog_work.set_payload(&file, path, revision);
+                            if self.selected_file.as_deref() == Some(file.as_str()) {
+                                self.sync_input_tray(cx);
+                            }
+                            self.refresh_gallery(cx, false);
+                        }
+                        Ok(path) => {
+                            self.catalog_work.set_thumbnail(&file, path);
+                            self.refresh_gallery(cx, false);
+                        }
+                        Err(error) => {
+                            log!("catalog: {file} could not be materialised: {error}");
+                        }
+                    }
+                }
                 IoDone::ViewerOpen {
                     file,
                     generation,
@@ -8100,13 +8150,123 @@ impl App {
         }
     }
 
+    /// What this identity IS — a local library row, or a catalog asset the
+    /// Create surface is working with. Every tool that needs a label, a
+    /// domain or a content type asks here, so both kinds of item answer the
+    /// same question the same way.
+    fn meta_of(&self, file: &str) -> Option<crate::library::LibraryMeta> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return Some(item.meta.clone());
+        }
+        self.library.as_ref().and_then(|library| library.get(file).cloned())
+    }
+
+    /// WHERE this identity's bytes are. For a catalog asset that is the
+    /// client's verified cache object — digest-named and re-hashed before
+    /// the path was handed out, so it cannot be a stale copy of a revision
+    /// that has moved on. `None` means "not materialised yet", never "use
+    /// something older".
+    fn payload_path_of(&self, file: &str) -> Option<PathBuf> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return item.payload.clone();
+        }
+        self.library
+            .as_ref()
+            .and_then(|library| library.payload_path(file).ok())
+    }
+
+    /// The AO bake beside this identity's payload. A catalog asset's bake
+    /// is published INSIDE its revision (roles `AoMesh` + `AoTexture`), so
+    /// the store-backed path is a future materialisation rather than a
+    /// sidecar hunt — until then a catalog asset simply has no local bake,
+    /// which is the honest answer.
+    fn ao_sidecars_of(&self, file: &str) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+        if self.catalog_work.get(file).is_some() {
+            return None;
+        }
+        self.library.as_ref().map(|library| library.ao_sidecar_bytes(file))
+    }
+
+    /// Where a playable rig's baked rest bundle caches for this identity.
+    /// Catalog content caches beside its verified object, so a rig baked
+    /// once is not re-baked on every open.
+    fn rig_cache_of(&self, file: &str) -> Option<PathBuf> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return item.payload.as_ref().map(|p| p.with_extension("skinao"));
+        }
+        self.library
+            .as_ref()
+            .and_then(|library| library.rig_cache_path(file))
+    }
+
+    /// The picture for this identity: a catalog asset's own thumbnail from
+    /// the verified cache, or the library's rendered sidecar.
+    fn thumbnail_path_of(&self, file: &str) -> Option<PathBuf> {
+        if let Some(item) = self.catalog_work.get(file) {
+            return item.thumbnail.clone();
+        }
+        self.library
+            .as_ref()
+            .and_then(|library| library.thumbnail_path(file).ok().flatten())
+    }
+
+    /// Pull a catalog asset into the Create surface: it joins the rail, and
+    /// its payload and thumbnail are materialised into the verified cache
+    /// off-thread. Selecting it is what makes the local tools — AO bake,
+    /// rig, transform inputs, drag-out — able to work on catalog content at
+    /// all; before this they could only ever open a library file.
+    fn adopt_catalog_asset(
+        &mut self,
+        cx: &mut Cx,
+        asset: makepad_asset_data::AssetId,
+        select: bool,
+    ) {
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        let file = store_file_id(&asset);
+        let title = self.store_asset_title(&asset.to_string());
+        let meta = crate::library::LibraryMeta {
+            file: file.clone(),
+            label: title,
+            // Filled in from the manifest's file ROLE the moment the
+            // payload lands; until then the card shows an honest neutral
+            // badge rather than a guess.
+            domain: "asset".into(),
+            content_type: "application/octet-stream".into(),
+            prompt: String::new(),
+            group_id: None,
+            group_label: Some("catalog".into()),
+            tags: Some(vec!["catalog".into()]),
+            enhanced_tags: None,
+            product: Some(true),
+        };
+        self.catalog_work.track(&file, meta);
+        if self.catalog_work.pending.insert(file.clone()) {
+            if let Some(io) = &self.artifact_io {
+                for purpose in [IoPurpose::CatalogPayload, IoPurpose::CatalogThumb] {
+                    io.request(IoRequest {
+                        file: file.clone(),
+                        path: PathBuf::new(),
+                        purpose,
+                        store: Some(crate::artifact_io::StoreSource {
+                            asset,
+                            prefer: crate::store_content::default_viewable_roles(),
+                            session: session.clone(),
+                        }),
+                    });
+                }
+            }
+        }
+        if select {
+            self.selected_file = Some(file);
+        }
+        self.refresh_gallery(cx, false);
+    }
+
     /// Select a library card without opening the viewer.
     fn select_gallery(&mut self, cx: &mut Cx, file: &str) {
-        let Some(item) = self
-            .library
-            .as_ref()
-            .and_then(|library| library.get(file).cloned())
-        else {
+        let Some(item) = self.meta_of(file) else {
             return;
         };
         self.selected_file = Some(item.file.clone());
@@ -8128,11 +8288,7 @@ impl App {
     }
 
     fn open_gallery_impl(&mut self, cx: &mut Cx, file: &str, pin_input: bool) {
-        let Some(item) = self
-            .library
-            .as_ref()
-            .and_then(|library| library.get(file).cloned())
-        else {
+        let Some(item) = self.meta_of(file) else {
             log!("library: {file} is not in the index");
             return;
         };
@@ -8145,18 +8301,12 @@ impl App {
         // run's input (exact payload path + stored content type; the chip
         // thumbnail is display-only).
         if pin_input {
-            if let Some(path) = self
-                .library
-                .as_ref()
-                .and_then(|library| library.payload_path(&item.file).ok())
-            {
+            if let Some(path) = self.payload_path_of(&item.file) {
                 let preview_path = if item.content_type.to_ascii_lowercase().starts_with("image/")
                 {
                     Some(path.clone())
                 } else {
-                    self.library
-                        .as_ref()
-                        .and_then(|library| library.thumbnail_path(&item.file).ok().flatten())
+                    self.thumbnail_path_of(&item.file)
                 };
                 self.input_tray.select(InputAsset {
                     file: item.file.clone(),
@@ -8171,11 +8321,7 @@ impl App {
         }
         self.enter_viewer_loading(cx, &item.file, &item.label);
         self.refresh_gallery(cx, false);
-        let Some(path) = self
-            .library
-            .as_ref()
-            .and_then(|library| library.payload_path(file).ok())
-        else {
+        let Some(path) = self.payload_path_of(file) else {
             return;
         };
         let ct = item.content_type.to_ascii_lowercase();
@@ -8258,6 +8404,20 @@ impl App {
     }
 
     fn delete_gallery(&mut self, cx: &mut Cx, file: &str) {
+        // A catalog asset's card is a working-set entry, not a copy: the
+        // `×` puts it away. Deleting the ASSET is a different, explicit act
+        // with its own confirmation on the Library surface — a rail tile
+        // must never quietly retire published content.
+        if self.catalog_work.items.remove(file).is_some() {
+            self.catalog_work.order.retain(|have| have != file);
+            self.catalog_work.pending.remove(file);
+            if self.selected_file.as_deref() == Some(file) {
+                self.selected_file = None;
+            }
+            self.reset_viewer_if_gone(cx);
+            self.refresh_gallery(cx, false);
+            return;
+        }
         let result = self
             .library
             .as_mut()
@@ -9987,11 +10147,11 @@ impl App {
     /// The shown/loading item no longer exists (single or group delete):
     /// empty the viewer instead of pointing it at a ghost.
     fn reset_viewer_if_gone(&mut self, cx: &mut Cx) {
-        let gone = self.viewer.file().is_some_and(|file| {
-            self.library
-                .as_ref()
-                .is_none_or(|library| library.get(file).is_none())
-        });
+        let gone = self
+            .viewer
+            .file()
+            .map(|file| file.to_string())
+            .is_some_and(|file| self.meta_of(&file).is_none());
         if gone {
             self.viewer = ViewerContent::Empty;
             self.set_viewer_text(cx, "Deleted.");
@@ -10298,6 +10458,23 @@ const MAX_FINISHED_RUNS_SHOWN: usize = 3;
 
 /// What the catalog just handed us, from the bytes themselves: the store is
 /// the source of truth for CONTENT, so the viewer asks the content.
+/// What a manifest file role means to the Create surface: the domain and
+/// content type its tools switch on. The role is authoritative — it is what
+/// the publisher measured — where a file extension is a guess.
+fn role_media(role: makepad_asset_data::FileRole) -> (&'static str, &'static str) {
+    use makepad_asset_data::FileRole;
+    match role {
+        FileRole::RenderGlb | FileRole::Lod1Glb | FileRole::Lod2Glb | FileRole::AoMesh => {
+            ("mesh", "model/gltf-binary")
+        }
+        FileRole::Splat => ("splat", "application/x-ply"),
+        FileRole::Audio => ("sfx", "audio/wav"),
+        FileRole::Video => ("video", "video/mp4"),
+        FileRole::Source => ("billboard", "application/x-stateful-billboard"),
+        _ => ("image", "image/png"),
+    }
+}
+
 fn store_media_of(bytes: &[u8]) -> (&'static str, &'static str) {
     if bytes.starts_with(b"glTF") {
         ("map", "model/gltf-binary")
@@ -10797,6 +10974,10 @@ impl MatchEvent for App {
                     // drawable file straight from the server, never a local
                     // copy that can be older than what was published.
                     self.open_store_asset(cx, asset_id);
+                    // …and the asset joins the Create surface's working set,
+                    // materialised into the verified cache, so the tools
+                    // that take a file can work on catalog content.
+                    self.adopt_catalog_asset(cx, asset_id, true);
                     self.refresh_library_ui(cx);
                     // Single click inspects (detail rail); a double click
                     // is "show it to me" — the viewer lives on Create.
@@ -11466,6 +11647,17 @@ impl AppMain for App {
                     log!("asset store: {asset} changed — reopening from the catalog");
                     self.open_store_asset(cx, asset);
                 }
+                // A card in the Create surface's working set points at the
+                // object of the revision it was materialised from. A new
+                // revision means new digests, so the card re-materialises
+                // rather than keeping a path to yesterday's bytes.
+                let file = store_file_id(&asset);
+                if self.catalog_work.get(&file).is_some() {
+                    self.catalog_work.pending.remove(&file);
+                    // Re-materialise WITHOUT stealing the selection: a
+                    // background revision is not a user pick.
+                    self.adopt_catalog_asset(cx, asset, false);
+                }
             }
             self.maybe_open_gc_confirm(cx);
             let kenney_poll = self.import_page.poll();
@@ -11904,6 +12096,92 @@ fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> 
     })
 }
 
+/// Catalog assets the Create surface is working with.
+///
+/// The surface asks two things of whatever it is holding: WHAT is this
+/// (label, domain, content type) and WHERE are its bytes. A local library
+/// row answers with an index entry and a file under `local/ai_content_...`;
+/// a catalog asset answers with a synthesized row and the client's verified
+/// cache object. Both answers arrive through the same two accessors, so the
+/// tools — AO bake, rig, transforms, the viewer, drag-out — do not care
+/// which they are looking at.
+///
+/// The cache path is NOT an app-owned copy: it is digest-named and re-hashed
+/// before the client hands it out, so it cannot drift from the revision it
+/// came from the way `lib-13501.glb` drifted from the map that replaced it.
+#[derive(Default)]
+struct CatalogWork {
+    /// Keyed by the `store:<asset_id>` identity the viewer gate already uses.
+    items: std::collections::HashMap<String, CatalogItem>,
+    /// Identities with a materialisation in flight, so a second click does
+    /// not queue a second fetch of the same object.
+    pending: std::collections::HashSet<String>,
+    /// Newest first — the order the rail shows them in.
+    order: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CatalogItem {
+    meta: crate::library::LibraryMeta,
+    /// Verified cache path of the payload, once materialised.
+    payload: Option<PathBuf>,
+    /// Verified cache path of the asset's thumbnail, once materialised.
+    thumbnail: Option<PathBuf>,
+    /// Revision the payload belongs to — what makes staleness impossible.
+    revision: Option<String>,
+}
+
+/// The identity of a catalog asset on the Create surface. One spelling,
+/// used by the viewer gate, the rail, the input tray and the resolver.
+fn store_file_id(asset: &makepad_asset_data::AssetId) -> String {
+    format!("store:{asset}")
+}
+
+/// The asset id inside a `store:` identity, if that is what this is.
+fn store_asset_of(file: &str) -> Option<makepad_asset_data::AssetId> {
+    file.strip_prefix("store:")?.parse().ok()
+}
+
+impl CatalogWork {
+    /// Announce an asset the user picked. Returns true when it is new here
+    /// and its files still have to be materialised.
+    fn track(&mut self, file: &str, meta: crate::library::LibraryMeta) -> bool {
+        if let Some(existing) = self.items.get_mut(file) {
+            existing.meta = meta;
+            return false;
+        }
+        self.items.insert(
+            file.to_string(),
+            CatalogItem { meta, payload: None, thumbnail: None, revision: None },
+        );
+        self.order.retain(|have| have != file);
+        self.order.insert(0, file.to_string());
+        true
+    }
+
+    fn set_payload(&mut self, file: &str, path: PathBuf, revision: Option<String>) {
+        if let Some(item) = self.items.get_mut(file) {
+            item.payload = Some(path);
+            item.revision = revision;
+        }
+    }
+
+    fn set_thumbnail(&mut self, file: &str, path: PathBuf) {
+        if let Some(item) = self.items.get_mut(file) {
+            item.thumbnail = Some(path);
+        }
+    }
+
+    fn get(&self, file: &str) -> Option<&CatalogItem> {
+        self.items.get(file)
+    }
+
+    /// Rail rows, newest pick first.
+    fn rows(&self) -> impl Iterator<Item = &CatalogItem> {
+        self.order.iter().filter_map(|file| self.items.get(file))
+    }
+}
+
 /// Does the Create surface's History strip show this row? It is the
 /// GENERATOR's own output rail: what this app made, plus what the user
 /// handed it directly (drops, webcam snaps). Imported packs are catalog
@@ -11960,6 +12238,87 @@ fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
         facet.label,
         facet.count
     )
+}
+
+#[cfg(test)]
+mod catalog_work_tests {
+    use super::*;
+    use makepad_asset_data::{AssetId, FileRole};
+
+    fn meta(file: &str) -> crate::library::LibraryMeta {
+        crate::library::LibraryMeta {
+            file: file.into(),
+            label: "Rocket".into(),
+            domain: "asset".into(),
+            content_type: "application/octet-stream".into(),
+            prompt: String::new(),
+            group_id: None,
+            group_label: Some("catalog".into()),
+            tags: Some(vec!["catalog".into()]),
+            enhanced_tags: None,
+            product: Some(true),
+        }
+    }
+
+    /// The Create surface identifies a catalog asset by one spelling, the
+    /// same one the viewer gate uses. Anything else is a library file name.
+    #[test]
+    fn a_catalog_identity_round_trips_and_never_shadows_a_library_file() {
+        let asset = AssetId::from_bytes([3; 16]);
+        let file = store_file_id(&asset);
+        assert!(file.starts_with("store:"));
+        assert_eq!(store_asset_of(&file), Some(asset));
+        assert_eq!(store_asset_of("lib-42.glb"), None);
+        assert_eq!(store_asset_of("store:not-an-id"), None);
+    }
+
+    /// Tracking is idempotent (a second click does not duplicate a card),
+    /// newest pick first, and materialisation fills in the two paths the
+    /// surface needs without ever inventing one.
+    #[test]
+    fn the_working_set_holds_one_card_per_asset_newest_first() {
+        let mut work = CatalogWork::default();
+        let a = store_file_id(&AssetId::from_bytes([1; 16]));
+        let b = store_file_id(&AssetId::from_bytes([2; 16]));
+
+        assert!(work.track(&a, meta(&a)), "first sight of an asset is new");
+        assert!(!work.track(&a, meta(&a)), "a second click is the same card");
+        assert!(work.track(&b, meta(&b)));
+        let order: Vec<String> = work.rows().map(|item| item.meta.file.clone()).collect();
+        assert_eq!(order, vec![b.clone(), a.clone()], "newest pick leads");
+
+        // Nothing has a path until the client materialised one.
+        assert!(work.get(&a).unwrap().payload.is_none());
+        assert!(work.get(&a).unwrap().thumbnail.is_none());
+        work.set_payload(&a, PathBuf::from("/cache/objects/ab/cd"), Some("rev-1".into()));
+        work.set_thumbnail(&a, PathBuf::from("/cache/objects/ef/01"));
+        let item = work.get(&a).unwrap();
+        assert_eq!(item.payload.as_deref(), Some(Path::new("/cache/objects/ab/cd")));
+        assert_eq!(item.thumbnail.as_deref(), Some(Path::new("/cache/objects/ef/01")));
+        assert_eq!(item.revision.as_deref(), Some("rev-1"), "which revision the bytes are");
+
+        // Re-tracking keeps what was materialised: the card must not lose
+        // its object because the user clicked it again.
+        assert!(!work.track(&a, meta(&a)));
+        assert!(work.get(&a).unwrap().payload.is_some());
+    }
+
+    /// The kind of a catalog asset comes from the manifest's file ROLE —
+    /// what the publisher measured — not from a digest-named path that has
+    /// no extension to guess from.
+    #[test]
+    fn a_file_role_decides_what_the_tools_see() {
+        assert_eq!(role_media(FileRole::RenderGlb), ("mesh", "model/gltf-binary"));
+        assert_eq!(role_media(FileRole::Lod1Glb), ("mesh", "model/gltf-binary"));
+        assert_eq!(role_media(FileRole::Splat), ("splat", "application/x-ply"));
+        assert_eq!(role_media(FileRole::Audio), ("sfx", "audio/wav"));
+        assert_eq!(role_media(FileRole::Video), ("video", "video/mp4"));
+        assert_eq!(
+            role_media(FileRole::Source),
+            ("billboard", "application/x-stateful-billboard")
+        );
+        assert_eq!(role_media(FileRole::Albedo), ("image", "image/png"));
+    }
 }
 
 #[cfg(test)]
