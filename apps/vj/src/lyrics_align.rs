@@ -603,7 +603,13 @@ const ABSORBED_HOLD_SECS: f64 = 2.5;
 /// Attention mass below which a long hold is absorption, not melisma. A real
 /// held note keeps the model's attention; a token parked over an
 /// instrumental intro does not.
-const ABSORBED_SCORE: f32 = 0.45;
+const ABSORBED_SCORE: f32 = 0.30;
+/// Pass-1 and the teacher-forced pass disagreeing by this much on one word
+/// is the other absorption signature: two independent decodes could not
+/// agree where it was sung. A genuinely held note has BOTH passes agreeing
+/// (measured: "the lights are low…" holds agree within 160 ms; the intro-
+/// absorbed "Oh," disagreed by 8.3 s).
+const ABSORBED_DISAGREE_SECS: f64 = 0.5;
 
 /// A word whose interval is seconds long with the attention looking
 /// elsewhere did not take that long to sing — it absorbed non-vocal audio
@@ -629,7 +635,13 @@ pub fn rescue_absorbed_words(segments: &mut [SegmentWords], analysis: &VocalAnal
                 .unwrap_or_else(|| segment_end.max(segment.words[index].start));
             let word = &segment.words[index];
             let hold = next - word.start;
-            if hold < ABSORBED_HOLD_SECS || word.score >= ABSORBED_SCORE {
+            if hold < ABSORBED_HOLD_SECS {
+                continue;
+            }
+            let disagreed = word
+                .pass_delta
+                .is_some_and(|delta| delta > ABSORBED_DISAGREE_SECS);
+            if word.score >= ABSORBED_SCORE && !disagreed {
                 continue;
             }
             let to = next - MIN_WORD_SECS;
@@ -831,18 +843,21 @@ pub fn assemble_lines(segments: &[SegmentWords], duration_secs: f64) -> Vec<Time
             out.push(TimedLine { start, end, text, words: starts, confident });
             line.clear();
         };
-        for (index, word) in words.iter().enumerate() {
+        for word in words.iter() {
             if !line.is_empty() {
                 let gap = word.start - line.last().unwrap().end;
                 let clause = line.len() >= MIN_CLAUSE_WORDS
                     && ends_a_clause(&line.last().unwrap().text)
                     && gap >= 0.15;
-                if line.len() >= MAX_LINE_WORDS || gap >= LINE_GAP_SECS || clause {
+                // Whisper capitalizes sentence starts even mid-segment
+                // ("…after midnight Won't somebody…"): a capitalized word is
+                // the next lyric line's first word, not this one's last.
+                let sentence = line.len() >= MIN_CLAUSE_WORDS && starts_a_sentence(&word.text);
+                if line.len() >= MAX_LINE_WORDS || gap >= LINE_GAP_SECS || clause || sentence {
                     flush(&mut line, &mut out);
                 }
             }
             line.push(word);
-            let _ = index;
         }
         flush(&mut line, &mut out);
     }
@@ -865,6 +880,16 @@ pub fn assemble_lines(segments: &[SegmentWords], duration_secs: f64) -> Vec<Time
 
 fn ends_a_clause(word: &str) -> bool {
     word.ends_with([',', '.', '!', '?', ';', ':', '—'])
+}
+
+/// A capitalized word that is not the pronoun "I" (or "I'm", "I'll", …).
+fn starts_a_sentence(word: &str) -> bool {
+    let mut chars = word.chars();
+    let Some(first) = chars.next() else { return false };
+    if !first.is_uppercase() {
+        return false;
+    }
+    !(first == 'I' && matches!(chars.next(), None | Some('\'')))
 }
 
 /// The sanity layer's per-line verdict. Every check earns its place in the
