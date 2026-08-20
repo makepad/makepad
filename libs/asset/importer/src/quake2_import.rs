@@ -3520,8 +3520,9 @@ mod tests {
         // quarter turn or a mirror still renders a sky — so leave it on disk
         // for a human to look at rather than only counting its pixels.
         if let Some((_, _, _, png)) = &equirect {
-            let _ = std::fs::write(staged.join("worlds/demo1-sky.png"), png);
-            eprintln!("demo1 sky: {}", staged.join("worlds/demo1-sky.png").display());
+            let out = std::env::temp_dir().join("makepad-q2-demo1-sky.png");
+            let _ = std::fs::write(&out, png);
+            eprintln!("demo1 sky: {}", out.display());
         }
 
         // Anchors and the walker facts.
@@ -3564,6 +3565,7 @@ mod tests {
             "demo1 T-junctions rose to {left} (ratchet {Q2_DEMO1_T_JUNCTIONS})"
         );
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staged);
     }
 
     /// demo1 has neither a `func_plat` nor a key, so the rest of the contract
