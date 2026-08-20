@@ -97,9 +97,14 @@ script_mod! {
             if self.lod_blend <= 0.0 {
                 if self.lo_scale <= 1.0 {
                     // Zoomed past one column per pixel: interpolate along
-                    // the finest level so the envelope stays smooth.
-                    let base = floor(column)
-                    let f = column - base
+                    // the finest level so the envelope stays smooth. A
+                    // column MEASURES a hop, so its value belongs at the
+                    // hop's centre — sampling on column boundaries instead
+                    // slides the whole waveform half a column (5 ms) left of
+                    // the beat grid and of the stem colours, which are drawn
+                    // by the un-interpolated path just below.
+                    let base = floor(column - 0.5)
+                    let f = column - 0.5 - base
                     let a = self.level_at(base, self.lo_row, self.lo_cols, 1.0)
                     let b = self.level_at(base + 1.0, self.lo_row, self.lo_cols, 1.0)
                     return a * (1.0 - f) + b * f
