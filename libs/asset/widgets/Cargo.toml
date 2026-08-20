@@ -10,9 +10,9 @@
 # `set_type_default()` base, so a host restyles by overriding draw props in
 # its own script_mod rather than forking the code.
 #
-# Dependency policy: the WIDGET LAYER depends on the widget library and
-# nothing else. Not the asset-server client, not the content contract, not
-# the renderer — a preview is HANDED content, it does not go and get it.
+# Dependency policy: the WIDGET LAYER depends on the widget library plus
+# ZERO-DEPENDENCY leaf crates only. Not the asset-server client, not the
+# renderer — a preview is HANDED content, it does not go and get it.
 #
 # That is a hard constraint, not tidiness: apps/sandbox is a nested cargo
 # workspace that cannot depend on makepad-asset-client at all (the
@@ -20,6 +20,12 @@
 # with its own blob supply. Client-wired convenience (resolve an asset id,
 # stream a blob, decode it) belongs in the host or in a later optional
 # feature the sandbox does not enable.
+#
+# makepad-asset-data IS admitted (the sandbox already depends on it): it is
+# the zero-dependency contract crate, and the thumbnail widget's whole job
+# is to obey the ThumbnailView declarations written in it. Mirroring those
+# types here to dodge the dependency would be a second copy of the contract
+# — exactly the drift the shared crate exists to end.
 
 [package]
 name = "makepad-asset-widgets"
@@ -35,6 +41,9 @@ makepad-widgets = { path = "../../../widgets" }
 # instead of only ever showing a picture somebody else made.
 makepad-audio-decode = { path = "../../audio_decode" }
 makepad-audio-picture = { path = "../../audio_picture" }
+# The content contract's data types — zero dependencies, see the policy
+# note above. AssetThumb interprets ThumbnailView declarations from here.
+makepad-asset-data = { path = "../data" }
 
 [features]
 # Renderer-backed faces: the mesh turntable and the autonomous world

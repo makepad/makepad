@@ -78,20 +78,18 @@ script_mod! {
                     draw_text +: {
                         color: #x8a939d
                         text_style: theme.font_regular{font_size: 8.5}
-                        wrap: TextWrap.Word
+                        // No `wrap:` property exists in the new system — a
+                        // Label wraps because its own flow is right_wrap.
                     }
                 }
             }
             still_face := View{
                 width: Fill height: Fill
                 align: Align{x: 0.5 y: 0.5}
-                // FITTED, never stretched: a wide picture in a tall panel
-                // is letterboxed.
-                still := Image{
-                    width: Fill
-                    height: Fill
-                    fit: ImageFit.Smallest
-                }
+                // THE thumbnail widget — fitted, never stretched; a wide
+                // picture in a tall panel is letterboxed, and a declared
+                // animation cycles at its declared rate.
+                still := mod.widgets.AssetThumb{}
             }
             audio_face := View{
                 width: Fill height: Fill
@@ -110,39 +108,51 @@ script_mod! {
 pub struct ContentPreview {
     #[deref]
     view: View,
-    /// Cells of the sheet currently cycling, and how fast.
+    /// Set while the still face holds a cycling animation: the well keeps
+    /// the frame pump running. The `AssetThumb` picks the frames.
     #[rust]
-    frames: Vec<Texture>,
-    #[rust]
-    fps: f32,
+    animating: bool,
 }
 
 impl ContentPreview {
+    /// Bind the still face's thumbnail widget — the ONE thumbnail path.
+    fn set_still(&mut self, cx: &mut Cx, media: Option<crate::thumb::ThumbMedia>) {
+        self.animating = media
+            .as_ref()
+            .is_some_and(crate::thumb::ThumbMedia::is_animated);
+        if let Some(mut thumb) = self
+            .view
+            .widget(cx, ids!(still))
+            .borrow_mut::<crate::thumb::AssetThumb>()
+        {
+            thumb.set_media(cx, media);
+        }
+        if self.animating {
+            cx.new_next_frame();
+        }
+    }
+
     pub fn show(&mut self, cx: &mut Cx, content: PreviewContent) {
         match content {
             PreviewContent::Empty(note) => {
-                self.frames.clear();
+                self.set_still(cx, None);
                 self.view.label(cx, ids!(empty_note)).set_text(cx, &note);
                 self.face(cx, id!(empty_face));
             }
             PreviewContent::Still(texture) => {
-                self.frames.clear();
-                self.view.image(cx, ids!(still)).set_texture(cx, Some(texture));
+                self.set_still(cx, Some(crate::thumb::ThumbMedia::still(texture)));
                 self.face(cx, id!(still_face));
             }
             PreviewContent::Animation { frames, fps } => {
-                if let Some(first) = frames.first() {
-                    self.view.image(cx, ids!(still)).set_texture(cx, Some(first.clone()));
+                if frames.is_empty() {
+                    self.set_still(cx, None);
+                } else {
+                    self.set_still(cx, Some(crate::thumb::ThumbMedia::anim(frames, fps)));
                 }
-                self.frames = frames;
-                self.fps = fps.max(1.0);
                 self.face(cx, id!(still_face));
-                if self.frames.len() > 1 {
-                    cx.new_next_frame();
-                }
             }
             PreviewContent::Audio { picture, clip, fraction, playing, position } => {
-                self.frames.clear();
+                self.set_still(cx, None);
                 if let Some(mut audio) =
                     self.view.widget(cx, ids!(audio)).borrow_mut::<AudioView>()
                 {
@@ -158,11 +168,11 @@ impl ContentPreview {
                 self.face(cx, id!(audio_face));
             }
             PreviewContent::Mesh { glb, texture_png } => {
-                self.frames.clear();
+                self.set_still(cx, None);
                 self.show_scene(cx, glb, texture_png, false);
             }
             PreviewContent::World { glb, texture_png } => {
-                self.frames.clear();
+                self.set_still(cx, None);
                 self.show_scene(cx, glb, texture_png, true);
             }
         }
@@ -227,15 +237,10 @@ impl ContentPreview {
 
 impl Widget for ContentPreview {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        // A cycling sheet picks its cell by the clock, so several wells (and
-        // the grid behind them) stay in step.
-        if self.frames.len() > 1 {
-            let index = ((cx.time() * self.fps as f64) as usize) % self.frames.len();
-            let texture = self.frames[index].clone();
-            self.view.image(cx, ids!(still)).set_texture(cx, Some(texture));
-        }
+        // The AssetThumb picks its cell by the shared clock; the well only
+        // keeps the frame pump alive while an animation is on this face.
         while self.view.draw_walk(cx, scope, walk).is_step() {}
-        if self.frames.len() > 1 {
+        if self.animating {
             cx.new_next_frame();
         }
         DrawStep::done()
@@ -243,7 +248,7 @@ impl Widget for ContentPreview {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
-        if matches!(event, Event::NextFrame(_)) && self.frames.len() > 1 {
+        if matches!(event, Event::NextFrame(_)) && self.animating {
             self.view.redraw(cx);
         }
     }

@@ -22,12 +22,15 @@
 //!
 //! # Two faces
 //!
-//! - **The widget layer — this crate.** Depends on the widget library and
-//!   NOTHING else: no asset-server client, no content contract, no
+//! - **The widget layer — this crate.** Depends on the widget library plus
+//!   zero-dependency leaf crates only: no asset-server client, no
 //!   renderer. `apps/sandbox` is a nested cargo workspace that cannot
 //!   depend on `makepad-asset-client` at all, and it must be able to adopt
 //!   these widgets with its own blob supply, so that dependency can never
-//!   appear here.
+//!   appear here. `makepad-asset-data` (the zero-dep contract crate, which
+//!   the sandbox already takes) is admitted: [`thumb`] obeys the
+//!   `ThumbnailView` declarations written in it, and mirroring those types
+//!   would be a second copy of the contract.
 //! - **The client-wired face — the host.** Resolving an asset id to its
 //!   head revision, streaming a blob, decoding it into a texture: that is
 //!   the asset UI's `store_content` / IO worker today, the VJ's media lane,
@@ -47,12 +50,17 @@ pub mod clip;
 pub mod preview;
 #[cfg(feature = "renderer")]
 pub mod scene_view;
+pub mod thumb;
 #[cfg(feature = "renderer")]
 pub mod walk_world;
 
 pub use audio_view::{AudioAction, AudioView};
 pub use clip::{ClipFace, ClipFormat};
 pub use preview::{ContentPreview, PreviewContent};
+pub use thumb::{
+    cut_plan_bgra, plan_views, thumb_pixels_from_bgra, AssetThumb, ThumbMedia, ThumbPixels,
+    ThumbPlan, THUMB_FALLBACK_FPS,
+};
 #[cfg(feature = "renderer")]
 pub use scene_view::{SceneMode, SceneView};
 #[cfg(feature = "renderer")]
@@ -61,6 +69,7 @@ pub use walk_world::{build_level, WalkMoment, WalkPrep, WalkWorld};
 /// Register every shared preview widget. A host calls this once, after
 /// `makepad_widgets::script_mod`, before its own UI module.
 pub fn script_mod(vm: &mut ScriptVm) {
+    crate::thumb::script_mod(vm);
     crate::audio_view::script_mod(vm);
     #[cfg(feature = "renderer")]
     crate::scene_view::script_mod(vm);
