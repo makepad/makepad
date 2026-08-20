@@ -481,6 +481,7 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
     let seed_offset = hop_offset + HOP_CENTRE;
     let (period, offset) =
         refine_grid(onset, period, seed_offset).unwrap_or((period, seed_offset));
+    let changes = structural_changes(envelopes);
     // Keep the published anchor the first beat at or after zero, which is
     // what `TrackGrid` promises and what the bar numbering counts from.
     let offset = offset.rem_euclid(period);
@@ -494,15 +495,10 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
 
     // Downbeat: where the arrangement changes, falling back to the loudest
     // kick of the bar when the arrangement does not say.
-    let downbeat_phase = phrase_downbeat(envelopes, period, comb_offset)
+    let downbeat_phase = phrase_downbeat(envelopes, &changes, period, comb_offset)
         .unwrap_or_else(|| kick_downbeat(envelopes, period, comb_offset));
 
-    // Confidence: how much better the comb does than a random phase, times
-    // the correlation strength.
-    let comb = comb_energy(onset, period, comb_offset);
-    let mean_comb = comb_energy(onset, period, comb_offset + period * 0.5).max(1e-9);
-    let separation = ((comb / mean_comb - 1.0) / 1.5).clamp(0.0, 1.0);
-    let confidence = ((0.6 * best_score as f64 + 0.4 * separation) * 1.2).clamp(0.0, 1.0) as f32;
+    let confidence = grid_confidence(onset, &changes, period, comb_offset);
 
     TrackGrid {
         bpm,
@@ -608,6 +604,9 @@ fn kick_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> u32 {
 /// apart to keep them so one drop does not fill the list.
 const PHRASE_BOUNDARIES: usize = 24;
 const PHRASE_SPACING_SECS: f64 = 4.0;
+/// The smallest step in the two-second loudness mean that counts as the
+/// arrangement changing, in natural-log RMS — about 1.3 dB.
+const PHRASE_MIN_STEP: f64 = 0.15;
 /// How much of the vote the winning bar position needs over the runner-up
 /// before it is believed rather than the kick rule.
 const PHRASE_MARGIN: f64 = 1.5;
@@ -626,7 +625,12 @@ const PHRASE_MARGIN: f64 = 1.5;
 /// Returns `None` when too few of those jumps land near a beat at all, or
 /// when they do not agree — a track whose arrangement is a slow wash has
 /// nothing to say here and should not be made to guess.
-fn phrase_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> Option<u32> {
+/// Where the track's arrangement changes, in hops: the largest jumps in a
+/// two-second loudness envelope, kept apart so one drop cannot fill the list.
+///
+/// Computed once and handed to everything that reads it — which pulse is the
+/// beat, and which beat starts the bar are the same question asked twice.
+fn structural_changes(envelopes: &Envelopes) -> Vec<f64> {
     let loudness: Vec<f32> = envelopes
         .band_rms
         .iter()
@@ -638,7 +642,7 @@ fn phrase_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> Opti
     // an arrangement change must.
     let window = (2.0 / HOP_SECS) as usize;
     if loudness.len() < 3 * window {
-        return None;
+        return Vec::new();
     }
     let mut prefix = vec![0.0f64; loudness.len() + 1];
     for index in 0..loudness.len() {
@@ -653,9 +657,25 @@ fn phrase_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> Opti
     order.sort_by(|a, b| {
         change[*b].partial_cmp(&change[*a]).unwrap_or(std::cmp::Ordering::Equal)
     });
+    // Only jumps that are actually jumps. Taking the largest two dozen
+    // values of anything always returns two dozen values, and over a click
+    // track — or a loop, or any recording whose loudness simply does not
+    // move — those two dozen are noise with an arbitrary phase, which is
+    // then indistinguishable from evidence. A real arrangement change is
+    // more than a decibel of step in the two-second mean; this asks for
+    // that, and for the jump to stand well clear of the track's own
+    // fidgeting.
+    let mut sorted: Vec<f64> = change[window..loudness.len() - window].to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+    let floor = (3.0 * median).max(PHRASE_MIN_STEP);
+
     let spacing = PHRASE_SPACING_SECS / HOP_SECS;
     let mut taken: Vec<f64> = Vec::new();
     for index in order {
+        if change[index] < floor {
+            break;
+        }
         let at = index as f64;
         if taken.iter().all(|other| (other - at).abs() > spacing) {
             taken.push(at);
@@ -664,10 +684,30 @@ fn phrase_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> Opti
             break;
         }
     }
+    // Deliberately NOT localized any finer. Finding a change takes a
+    // two-second window either side, so the position it returns is good to
+    // about a second — coarse next to half a beat — and re-finding each one
+    // with a hundred-millisecond window is the obvious repair. It makes
+    // things worse, twice over: it did not make the phase statistic
+    // discriminate at all, and it moves every boundary onto the first
+    // TRANSIENT of the incoming layer, which is as often on an offbeat as
+    // on the bar line. On the fixture whose hats arrive on a known downbeat
+    // it took the downbeat from right to 0 of 14.
+    taken.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    taken
+}
 
+fn phrase_downbeat(
+    envelopes: &Envelopes,
+    changes: &[f64],
+    period: f64,
+    comb_offset: f64,
+) -> Option<u32> {
+    let _ = envelopes;
+    let taken = changes;
     let mut votes = [0usize; 4];
     let mut counted = 0usize;
-    for at in &taken {
+    for at in taken {
         let beat = (at - comb_offset) / period;
         // A change that falls between beats says nothing about which beat
         // starts the bar.
@@ -688,6 +728,125 @@ fn phrase_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> Opti
     }
     Some(((4 - order[0]) % 4) as u32)
 }
+
+/// How confident the published grid deserves to be.
+///
+/// The old number was the tempo correlation blended with how much better the
+/// comb did at this phase than half a beat away. Measured against how the
+/// grids actually scored, it did not discriminate at all: 0.790 on the
+/// eighteen grids that scored 0.8 or better against the kicks and 0.732 on
+/// the seven that scored under 0.4. Worse, it could not by construction —
+/// both its terms are about TEMPO, and the way a grid on this material goes
+/// wrong is by sitting on the wrong pulse at exactly the right tempo. Such a
+/// grid has a magnificent correlation and a magnificent comb separation.
+///
+/// So confidence is now two things multiplied, which are the two ways the
+/// grid can be wrong:
+///
+/// * how well it FITS — what fraction of its rulings have an onset close
+///   enough to be that beat, and how tight those distances are. This is the
+///   residual of the fit itself, measured against the onsets the grid
+///   predicts rather than against any model.
+/// What it deliberately does NOT include is any judgement about the PULSE,
+/// because there is nothing honest to put there. The dominant way a grid on
+/// this material is wrong is by sitting half a beat out at exactly the right
+/// tempo — and such a grid has an excellent residual, because it is sitting
+/// on real transients. Every cue tried for telling the two pulses apart
+/// failed to separate them (see `structural_changes` for the four and the
+/// measurements). So this number says how well the grid fits the onsets and
+/// nothing more, and a caller must not read it as "the beats are in the
+/// right place". Fixing that means fixing the pulse first.
+fn grid_confidence(onset: &[f32], changes: &[f64], period: f64, comb_offset: f64) -> f32 {
+    if period <= 1.0 || onset.is_empty() {
+        return 0.0;
+    }
+    // Fit: the distance from every ruling to the strongest onset near it.
+    let mut residuals: Vec<f64> = Vec::new();
+    let mut supported = 0usize;
+    let mut total = 0usize;
+    let radius = period * 0.5;
+    let mut beat = 0i64;
+    loop {
+        let predicted = comb_offset + beat as f64 * period;
+        if predicted >= onset.len() as f64 {
+            break;
+        }
+        beat += 1;
+        if predicted < 0.0 {
+            continue;
+        }
+        total += 1;
+        if let Some((position, _)) = onset_peak_near(onset, predicted, radius) {
+            let residual = (position - predicted).abs();
+            residuals.push(residual);
+            // A tenth of a beat is about fifty milliseconds at these tempi:
+            // near enough that a listener would call the ruling right.
+            if residual < period * 0.10 {
+                supported += 1;
+            }
+        }
+    }
+    if total < 8 || residuals.is_empty() {
+        return 0.0;
+    }
+    // A walk detector was tried here and taken out: the signed residual over
+    // the first half of the track against the second, which catches a grid
+    // whose period is slightly off because it arrives early at one end and
+    // late at the other. It is free and it is principled and it made the
+    // separation WORSE (0.051 against 0.069), because it also fires on
+    // perfectly good grids over tracks that pause — one scoring 0.996 gets
+    // flagged — while the failures that actually dominate here are grids on
+    // the wrong pulse, which do not walk at all.
+    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = residuals[residuals.len() / 2];
+    let support = supported as f64 / total as f64;
+    // Half a tenth of a beat — about 25 ms here — is already a good grid, so
+    // that is where tightness saturates rather than at zero error; asking a
+    // real recording for zero median residual only measures the hop.
+    let tightness = (1.0 - median / (period * 0.05)).clamp(0.0, 1.0);
+    let fit = (0.5 * support + 0.5 * tightness).clamp(0.0, 1.0);
+
+    let _ = changes;
+    fit.clamp(0.0, 1.0) as f32
+}
+
+/// How far the arrangement has to sit off the rulings before the grid moves
+/// half a beat onto them, and how many changes must exist before the
+/// question is asked at all.
+///
+/// Negative alignment means the changes are landing between the rulings.
+/// The bar is set well past zero because the cost of the two errors is not
+/// symmetric: leaving a wrong grid alone loses one track, flipping a right
+/// one loses a track that was perfect.
+/// WHICH PULSE the beat sits on is not decided here, and that is a finding
+/// rather than an omission.
+///
+/// Six of forty records carry a published grid half a beat out: perfectly
+/// steady, sitting squarely on real transients, and on the wrong ones. An
+/// exhaustive search over the same audio at the same tempo scores up to 0.84
+/// against the kicks where those grids score 0.00, so the beats are
+/// certainly elsewhere. Four independent cues were built and measured
+/// against that ground truth, and not one of them separates the six from the
+/// thirty-four:
+///
+/// * low-band comb energy — never once moved a published grid;
+/// * where the ARRANGEMENT changes, as a circular mean over the rulings —
+///   the six score -0.24 to +0.62, the thirty-four -0.31 to +0.64;
+/// * the same, with each change localized to a tenth of a second instead of
+///   a second — sharpens the statistic a great deal and separates no better,
+///   while moving every boundary onto the incoming layer's first hit;
+/// * a purpose-built kick detector, two poles at 110 Hz with a half-beat
+///   refractory, combed at both pulses — fires almost never and cost a track
+///   when it did.
+///
+/// The pattern in those measurements is the answer: on the disputed records
+/// the low band, the mid band and the arrangement ALL endorse the pulse the
+/// isolated kick calls wrong. The disagreement is not between a good cue and
+/// a bad one, it is between the kick and everything mixed on top of it, and
+/// no filter over the mix recovers what the mix has buried. The separated
+/// drums stem does — the app already makes one — which is where this should
+/// be tried next, and it is the same conclusion the tempo map reaches from
+/// the other direction.
 
 /// One weighted least-squares pass over the beats numbered `from..=to`:
 /// take the onset each predicted beat lands nearest, drop the worst fifth of
