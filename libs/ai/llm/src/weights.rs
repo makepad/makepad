@@ -142,6 +142,34 @@ impl GgufWeightLayout {
             }
         };
 
+        // Lazy page-in makes the load look instant and hands the bill to
+        // whoever touches the weights first — the first forward pass —
+        // where it is paid at demand-fault speed. Measured on an M3 Max:
+        // faulting a cold mapping runs ~0.8 GB/s, while prefaulting the
+        // same file runs ~6.3 GB/s, so the bytes cost ~7.7x more when they
+        // arrive one fault at a time. `prefault` pulls that work forward
+        // into the load, where it is both faster and visible.
+        //
+        // Opt-in until it has been A/B'd against a real generate run:
+        // `MAKEPAD_LLAMA_PREFAULT=1`.
+        if matches!(
+            std::env::var("MAKEPAD_LLAMA_PREFAULT").as_deref(),
+            Ok("1") | Ok("on")
+        ) {
+            let started = std::time::Instant::now();
+            region.prefault();
+            let seconds = started.elapsed().as_secs_f64();
+            let gb = region.len() as f64 / (1u64 << 30) as f64;
+            let (resident, pages) = region.residency();
+            eprintln!(
+                "llama: prefaulted {:.2} GB in {:.2} s ({:.2} GB/s, {:.1}% resident)",
+                gb,
+                seconds,
+                gb / seconds,
+                100.0 * resident as f64 / pages.max(1) as f64
+            );
+        }
+
         // Same padding rule as allocate_context_with_extra: page-multiple
         // dirty arena so the Metal no-copy buffer wraps it directly.
         let dirty_size = ggml_pad(extra_bytes, GGML_MEM_ALIGN).next_multiple_of(16384);
