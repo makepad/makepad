@@ -933,6 +933,7 @@ fn is_mutating(call: &ContentToolCall) -> bool {
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldSetSource { .. }
             | ContentToolCall::WorldSetPlayerModel { .. }
+            | ContentToolCall::WorldSpawn { .. }
     )
 }
 

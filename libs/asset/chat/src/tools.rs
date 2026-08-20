@@ -588,6 +588,45 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             parameters: schema_object(vec![], &[], Some(false)),
         },
         ToolDef {
+            name: "world.spawn",
+            api_name: "world_spawn",
+            description: "ADD one thing to the running world, placed on the ground near \
+                          the player — THE way to do 'give me / add an X'. No source \
+                          read, no rewrite, nothing else in the world changes. The game \
+                          picks the right form automatically: vehicles spawn DRIVEABLE, \
+                          rigged characters spawn as wandering NPCs, everything else is \
+                          a grounded prop at a sane scale. Query the catalog for the \
+                          canon_alias first. Use world.set_source only for NEW levels or \
+                          GAME-LOGIC changes (rules, scoring, objectives) — never for \
+                          adding content.",
+            args_doc: r#"{"model": "kenney/car-kit/ambulance"}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "model",
+                        schema_string_len(
+                            "catalog canon_alias of the thing to add",
+                            1,
+                            MAX_MODEL_REF_CHARS as i64,
+                        ),
+                    ),
+                    ("pos", schema_pos()),
+                    (
+                        "form",
+                        schema_string_len(
+                            "optional override: car | character | prop (default: derived \
+                             from the asset)",
+                            1,
+                            16,
+                        ),
+                    ),
+                    ("tag", schema_ident("optional group tag")),
+                ],
+                &["model"],
+                Some(false),
+            ),
+        },
+        ToolDef {
             name: "world.get_source",
             api_name: "world_get_source",
             description: "Read the running game's current splash source. Call this before \
@@ -745,6 +784,7 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_get_source" => Some("world.get_source"),
         "world_set_source" => Some("world.set_source"),
         "world_set_player_model" => Some("world.set_player_model"),
+        "world_spawn" => Some("world.spawn"),
         _ => None,
     }
 }
@@ -1128,6 +1168,39 @@ pub enum ContentToolCall {
     /// structurally incapable of resetting the world (the cheap §4.5-style
     /// verb; sandbox sessions only).
     WorldSetPlayerModel { model: String },
+    /// ADD one catalog thing to the running world near the player — the
+    /// content-add verb (§4.5 addon slice; sandbox sessions only). The
+    /// GAME picks position (ground-snapped near the player unless `pos`
+    /// overrides), scale and the right form (vehicle/character/prop, or
+    /// `form` overrides); no source round-trip, structurally incapable of
+    /// resetting the world.
+    WorldSpawn {
+        model: String,
+        pos: Option<[f64; 3]>,
+        form: Option<SpawnForm>,
+        tag: Option<String>,
+    },
+}
+
+/// The spawn form override of [`ContentToolCall::WorldSpawn`]. Absent, the
+/// game derives it from the asset (rigged → character, vehicle kit → car,
+/// else prop).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnForm {
+    Car,
+    Character,
+    Prop,
+}
+
+impl SpawnForm {
+    pub fn from_slug(s: &str) -> Option<Self> {
+        match s {
+            "car" | "vehicle" => Some(SpawnForm::Car),
+            "character" | "npc" => Some(SpawnForm::Character),
+            "prop" | "model" => Some(SpawnForm::Prop),
+            _ => None,
+        }
+    }
 }
 
 /// Longest model reference `world.place` accepts (canon aliases run long:
@@ -1208,6 +1281,7 @@ impl ContentToolCall {
             ContentToolCall::WorldGetSource => "world.get_source",
             ContentToolCall::WorldSetSource { .. } => "world.set_source",
             ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
+            ContentToolCall::WorldSpawn { .. } => "world.spawn",
         }
     }
 
@@ -1530,6 +1604,29 @@ impl ContentToolCall {
                 let model = need_str(args, "model", MAX_MODEL_REF_CHARS)?;
                 check_model_ref(&model)?;
                 Ok(ContentToolCall::WorldSetPlayerModel { model })
+            }
+            "world.spawn" => {
+                check_known(args, &["model", "pos", "form", "tag"], "world.spawn argument")?;
+                let model = need_str(args, "model", MAX_MODEL_REF_CHARS)?;
+                check_model_ref(&model)?;
+                let pos = match args.get("pos") {
+                    None => None,
+                    Some(_) => Some(need_pos(args)?),
+                };
+                let form = match optional_str(args, "form")? {
+                    None => None,
+                    Some(s) => Some(SpawnForm::from_slug(s).ok_or_else(|| {
+                        "form must be car, character, or prop".to_string()
+                    })?),
+                };
+                let tag = match optional_str(args, "tag")? {
+                    None => None,
+                    Some(t) if ident_ok(t) => Some(t.to_string()),
+                    Some(_) => {
+                        return Err("tag must be a short lowercase identifier".to_string())
+                    }
+                };
+                Ok(ContentToolCall::WorldSpawn { model, pos, form, tag })
             }
             other => Err(format!("unknown tool '{}'", bounded(other, 32))),
         }
@@ -2134,6 +2231,24 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         }
         ContentToolCall::WorldSetPlayerModel { model } => {
             json::obj(vec![("model", json::s(model.clone()))])
+        }
+        ContentToolCall::WorldSpawn { model, pos, form, tag } => {
+            let mut pairs = vec![("model", json::s(model.clone()))];
+            if let Some(p) = pos {
+                pairs.push(("pos", encode_pos(p)));
+            }
+            if let Some(f) = form {
+                let slug = match f {
+                    SpawnForm::Car => "car",
+                    SpawnForm::Character => "character",
+                    SpawnForm::Prop => "prop",
+                };
+                pairs.push(("form", json::s(slug)));
+            }
+            if let Some(t) = tag {
+                pairs.push(("tag", json::s(t.clone())));
+            }
+            json::obj(pairs)
         }
     }
 }
