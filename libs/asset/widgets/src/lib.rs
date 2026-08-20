@@ -43,14 +43,47 @@
 use makepad_widgets::*;
 
 pub mod audio_view;
+pub mod clip;
 pub mod preview;
+#[cfg(feature = "renderer")]
+pub mod scene_view;
+#[cfg(feature = "renderer")]
+pub mod walk_world;
 
 pub use audio_view::{AudioAction, AudioView};
+pub use clip::{ClipFace, ClipFormat};
 pub use preview::{ContentPreview, PreviewContent};
+#[cfg(feature = "renderer")]
+pub use scene_view::{SceneMode, SceneView};
+#[cfg(feature = "renderer")]
+pub use walk_world::{build_level, WalkMoment, WalkPrep, WalkWorld};
 
 /// Register every shared preview widget. A host calls this once, after
 /// `makepad_widgets::script_mod`, before its own UI module.
 pub fn script_mod(vm: &mut ScriptVm) {
     crate::audio_view::script_mod(vm);
+    #[cfg(feature = "renderer")]
+    crate::scene_view::script_mod(vm);
+    #[cfg(not(feature = "renderer"))]
+    crate::scene_stub::script_mod(vm);
     crate::preview::script_mod(vm);
+}
+
+/// Without the renderer there is no 3D face, but the well's own DSL still
+/// names one. Registering an empty panel under that name keeps the well
+/// resolvable in a host that never wanted 3D — the sandbox — and the
+/// `show` path already says out loud why the panel is empty.
+#[cfg(not(feature = "renderer"))]
+mod scene_stub {
+    use makepad_widgets::*;
+
+    script_mod! {
+        use mod.prelude.widgets_internal.*
+        use mod.widgets.*
+
+        mod.widgets.SceneView = mod.widgets.View{
+            width: Fill
+            height: Fill
+        }
+    }
 }

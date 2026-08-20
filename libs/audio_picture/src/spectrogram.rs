@@ -19,12 +19,19 @@
 
 use std::f32::consts::PI;
 
-/// High-definition picture size. Wide enough that a bar of music is tens of
-/// pixels and a hi-hat is its own tick; 2048 is also exactly the VJ's
-/// `MAX_THUMB_DIM`, and both sides sit inside the content contract's
-/// 256..=4096 thumbnail bounds.
-pub const HD_W: usize = 2048;
-pub const HD_H: usize = 512;
+/// High-definition picture size, COMPOSED FOR A CARD.
+///
+/// Square, because that is the shape a catalog tile is. A 2048x512 strip is
+/// more pixels but it letterboxes into a card with dead bands above and
+/// below, and the arrangement you can read off it at full width is exactly
+/// what a tile throws away. 1024 columns still gives tens of pixels per bar
+/// and its own tick per hi-hat; the height that a strip spent on nothing now
+/// goes into log-frequency rows, so the picture is dense edge to edge.
+///
+/// Both sides sit inside the content contract's 256..=4096 thumbnail bounds
+/// and under the VJ's `MAX_THUMB_DIM`.
+pub const HD_W: usize = 1024;
+pub const HD_H: usize = 1024;
 
 /// Transform size: 4096 samples is ~93 ms at 44.1 kHz, which resolves a
 /// bass note's pitch instead of smearing it into a band.
@@ -34,13 +41,14 @@ const N_FFT: usize = 4096;
 const HOP: usize = N_FFT / 4;
 /// Frames one column peak-holds at most.
 ///
-/// ONE, for a picture you can read. At 2048 columns a 4096-sample window
-/// already overlaps its neighbour by ~90% on any track under three minutes,
-/// so the transform sees everything; peak-holding several frames into one
-/// column instead pushes every column toward the maximum and the
-/// arrangement washes out. Only a very long track strides past a window,
-/// and there the extra frames buy coverage rather than wash.
-const MAX_FRAMES_PER_COLUMN: usize = 2;
+/// Few, for a picture you can read: peak-holding many frames into one column
+/// pushes every column toward the maximum and the arrangement washes out. But
+/// too few and a long track is simply not looked at — at 1024 columns a
+/// six-minute song strides ~15 000 samples per column while two windows see
+/// 5 000 of them, so a third of the music never enters the picture and the
+/// gaps read as dead bands. Four covers a six-minute track end to end, and
+/// the cap keeps a two-hour recording from washing flat.
+const MAX_FRAMES_PER_COLUMN: usize = 4;
 
 /// The band a picture spans. Below 35 Hz is rumble no speaker shows; above
 /// 11 kHz is air that costs rows and says little.
@@ -143,22 +151,42 @@ pub fn spectrogram_rgba(
     Some(rgba)
 }
 
-/// Which FFT bins each output row peak-holds, low frequency first: a plain
-/// log scale across the band, so an octave takes the same space wherever it
-/// sits — which is how people hear.
-fn bin_rows(sample_rate: u32, h: usize) -> Vec<(usize, usize)> {
+/// What one output row reads out of the spectrum, low frequency first.
+#[derive(Clone, Copy)]
+struct Row {
+    /// Bins this row covers, when it covers more than one.
+    lo: usize,
+    hi: usize,
+    /// Fractional bin position of the row's centre, for rows NARROWER than a
+    /// bin. Those are the bottom of the picture, where a 10.8 Hz bin spans
+    /// many rows: peak-holding the same bin into all of them draws visible
+    /// stripes — the "dead bands" a tall picture makes obvious — while
+    /// interpolating between neighbours draws the smooth ramp that is
+    /// actually there.
+    centre: f32,
+}
+
+/// A plain log scale across the band, so an octave takes the same space
+/// wherever it sits — which is how people hear.
+fn bin_rows(sample_rate: u32, h: usize) -> Vec<Row> {
     let nyquist = sample_rate as f32 / 2.0;
     let top = F_MAX.min(nyquist);
     let bottom = F_MIN.min(top / 2.0);
     let bin_hz = sample_rate as f32 / N_FFT as f32;
     let ratio = (top / bottom).ln();
+    let last = (N_FFT / 2 - 1) as f32;
     (0..h)
         .map(|row| {
             let lo_f = bottom * ((row as f32 / h as f32) * ratio).exp();
             let hi_f = bottom * (((row + 1) as f32 / h as f32) * ratio).exp();
+            let mid_f = bottom * (((row as f32 + 0.5) / h as f32) * ratio).exp();
             let lo = (lo_f / bin_hz) as usize;
             let hi = ((hi_f / bin_hz).ceil() as usize).clamp(lo + 1, N_FFT / 2);
-            (lo.min(N_FFT / 2 - 1), hi)
+            Row {
+                lo: lo.min(N_FFT / 2 - 1),
+                hi,
+                centre: (mid_f / bin_hz).clamp(0.0, last),
+            }
         })
         .collect()
 }
@@ -203,11 +231,17 @@ struct Fft {
     re: Vec<f32>,
     im: Vec<f32>,
     band: Vec<f32>,
+    mag: Vec<f32>,
 }
 
 impl Fft {
     fn new() -> Self {
-        Self { re: vec![0.0; N_FFT], im: vec![0.0; N_FFT], band: Vec::new() }
+        Self {
+            re: vec![0.0; N_FFT],
+            im: vec![0.0; N_FFT],
+            band: Vec::new(),
+            mag: vec![0.0; N_FFT / 2],
+        }
     }
 
     /// One column: `frames` overlapping transforms starting at `start`,
@@ -219,7 +253,7 @@ impl Fft {
         start: usize,
         frames: usize,
         window: &[f32],
-        bins: &[(usize, usize)],
+        bins: &[Row],
     ) -> Vec<f32> {
         self.band.clear();
         self.band.resize(bins.len(), 0.0);
@@ -234,17 +268,29 @@ impl Fft {
                 self.im[i] = 0.0;
             }
             self.transform();
-            for (row, (lo, hi)) in bins.iter().enumerate() {
-                let mut peak = 0.0f32;
-                for bin in *lo..*hi {
-                    let (re, im) = (self.re[bin], self.im[bin]);
+            for bin in 0..N_FFT / 2 {
+                let (re, im) = (self.re[bin], self.im[bin]);
+                self.mag[bin] = (re * re + im * im).sqrt();
+            }
+            for (row, spec) in bins.iter().enumerate() {
+                let value = if spec.hi > spec.lo + 1 {
                     // The loudest bin in the band, not the average: one
                     // strong partial must not be averaged away by the
                     // silence around it.
-                    peak = peak.max((re * re + im * im).sqrt());
-                }
-                if peak > self.band[row] {
-                    self.band[row] = peak;
+                    self.mag[spec.lo..spec.hi].iter().copied().fold(0.0f32, f32::max)
+                } else {
+                    // Narrower than a bin: read BETWEEN neighbours rather
+                    // than repeating one, so the bottom of the picture is a
+                    // ramp instead of a stack of identical stripes.
+                    let at = spec.centre;
+                    let i = at.floor() as usize;
+                    let f = at - i as f32;
+                    let a = self.mag[i.min(N_FFT / 2 - 1)];
+                    let b = self.mag[(i + 1).min(N_FFT / 2 - 1)];
+                    a + (b - a) * f
+                };
+                if value > self.band[row] {
+                    self.band[row] = value;
                 }
             }
         }
@@ -337,9 +383,9 @@ mod tests {
         let bin_hz = rate as f32 / N_FFT as f32;
         let row_of = |freq: f32| {
             rows.iter()
-                .position(|(lo, hi)| {
+                .position(|row| {
                     let bin = (freq / bin_hz) as usize;
-                    bin >= *lo && bin < *hi
+                    bin >= row.lo && bin < row.hi
                 })
                 .unwrap_or(h - 1)
         };
@@ -408,6 +454,42 @@ mod tests {
             bright_row(&a),
             bright_row(&b),
             "and its tone lands in the same row"
+        );
+    }
+
+    /// A picture composed for a card fills it: at 1024 rows the bottom of
+    /// the band is far narrower than one FFT bin, and peak-holding the same
+    /// bin into every row there draws a stack of identical stripes — the
+    /// dead bands a tall picture makes obvious. Reading between neighbours
+    /// draws the ramp that is actually there.
+    #[test]
+    fn a_tall_picture_has_no_dead_bands_at_the_bottom() {
+        let rate = 44_100;
+        let (w, h) = (16, HD_H);
+        // A low sweep, so the bottom of the picture genuinely varies.
+        let n = rate as usize * 4;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                (2.0 * PI * (60.0 + 40.0 * t) * t).sin() * 0.8
+            })
+            .collect();
+        let rgba = spectrogram_rgba(&samples, rate, w, h).expect("picture");
+        // The bottom eighth: how many adjacent row pairs are byte-identical
+        // across the whole width? A repeated bin makes almost all of them so.
+        let band = h / 8;
+        let row_bytes = |y: usize| -> Vec<u8> {
+            (0..w).flat_map(|x| pixel(&rgba, w, x, y)).collect()
+        };
+        let mut repeats = 0;
+        for y in h - band..h - 1 {
+            if row_bytes(y) == row_bytes(y + 1) {
+                repeats += 1;
+            }
+        }
+        assert!(
+            repeats * 2 < band,
+            "{repeats}/{band} bottom rows are exact duplicates of their neighbour"
         );
     }
 
