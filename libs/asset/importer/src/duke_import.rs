@@ -1245,6 +1245,38 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
             // a corner up where the world does not.
             parts.push(&sky.positions[..]);
         }
+        // First close the corners the splitter refuses to cut: a pair a
+        // couple of BUILD units apart on the same seam poisons each other's
+        // chords, so the split pass reverts and the crack stays. Merging
+        // moves a vertex, which the splitter never does — under four
+        // millimetres, in rooms three metres tall.
+        let merge = crate::classic_import::merge_near_corners(&parts);
+        if !merge.is_empty() {
+            for bucket in sink.all_mut().flat_map(|m| m.values_mut()) {
+                merge.apply(crate::classic_import::WeldSoup {
+                    positions: &mut bucket.positions,
+                    uvs: &mut bucket.uvs,
+                    normals: None,
+                    colors: None,
+                    indices: &mut bucket.indices,
+                });
+            }
+            if let Some(sky) = sky.as_mut() {
+                merge.apply(crate::classic_import::WeldSoup {
+                    positions: &mut sky.positions,
+                    uvs: &mut sky.uvs,
+                    normals: Some(&mut sky.normals),
+                    colors: None,
+                    indices: &mut sky.indices,
+                });
+            }
+        }
+        let parts: Vec<&[[f32; 3]]> = sink
+            .all()
+            .flat_map(|m| m.values())
+            .map(|b| &b.positions[..])
+            .chain(sky.as_ref().map(|s| &s.positions[..]))
+            .collect();
         let weld = crate::classic_import::weld_parts(&parts);
         for bucket in sink.all_mut().flat_map(|m| m.values_mut()) {
             weld.split(crate::classic_import::WeldSoup {
@@ -5347,15 +5379,17 @@ enda
             parts.len(),
             soup.iter().map(|(_, i)| i.len() / 3).sum::<usize>()
         );
-        // Three defects survive, counted from both sides of a shared edge:
-        // each is a pair of corners one to three BUILD units apart (a unit
-        // is 1/512 m) where cutting one edge puts the cut inside the chord
-        // the other needs, so the pass declines rather than grow the mesh
-        // forever. Closing them means MOVING a vertex, which this pass never
-        // does. The number may only fall.
-        assert!(
-            left <= 5,
-            "Duke E1L1 T-junctions rose to {left} (ratchet 5) — surfaces crack where they meet"
+        // Zero, and it stays zero. The three defects that used to survive
+        // were pairs of corners one to three BUILD units apart (a unit is
+        // 1/512 m) where cutting one edge put the cut inside the chord the
+        // other needed, so the split pass declined rather than grow the mesh
+        // forever. Closing them meant MOVING a vertex, which the splitter
+        // never does — so a corner MERGE runs first, snapping pairs within
+        // three source units onto one position (six millimetres, in rooms
+        // three metres tall) and dropping the slivers that collapse.
+        assert_eq!(
+            left, 0,
+            "Duke E1L1 T-junctions came back — surfaces crack where they meet"
         );
         let dest = tmp.join("e1l1.glb");
         std::fs::write(&dest, &glb).unwrap();

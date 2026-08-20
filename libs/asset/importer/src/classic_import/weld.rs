@@ -172,6 +172,148 @@ pub(crate) fn split_t_junctions(soup: Soup<'_>) -> usize {
     weld.split(soup)
 }
 
+// ---------------------------------------------------------------------------
+// Merging the corners the splitter declines
+// ---------------------------------------------------------------------------
+
+/// The defect [`Weld::split`] cannot close, and the only thing that can.
+///
+/// A cut is refused when it would land inside the chord another cut needs,
+/// which happens when two corners sit a hair apart on the same seam: each
+/// keeps poisoning the other and the mesh grows without the count falling,
+/// so the pass reverts. Duke's E1L1 ends with five of these — pairs of
+/// corners one to three BUILD units apart, where a unit is 1/512 m.
+///
+/// Closing them means MOVING a vertex, which the splitter never does, on
+/// purpose: it only ever inserts a position the mesh already had, so it
+/// cannot change the surface. This pass is the deliberate exception, and it
+/// is why the tolerance is the interesting number rather than an
+/// implementation detail. At [`MERGE_TOLERANCE`] the furthest a corner
+/// travels is six millimetres in a world whose rooms are three metres tall
+/// — invisible, and smaller than the crack it closes, which is the whole
+/// justification. E1L1 goes from five residual T-junctions to none; two
+/// units leaves two, so three is the number the data asked for and not a
+/// round one someone liked.
+///
+/// Every part merges against ONE table, because the cracks that show up are
+/// the ones BETWEEN parts: a doorway's floor against the wall standing on
+/// it, a nukage pool against its bank.
+pub(crate) struct Merge {
+    /// Position bits -> the position it becomes. Only entries that actually
+    /// move are stored, so an untouched level costs one empty map.
+    moved: std::collections::HashMap<(u32, u32, u32), [f32; 3]>,
+}
+
+/// Three source units — the measured number, not a chosen one. One unit is
+/// already what [`MIN_FROM_END`] calls indistinguishable; the residual
+/// defects are pairs of corners ONE TO THREE units apart, so anything less
+/// leaves the widest of them open (two units leaves two of E1L1's five).
+pub(crate) const MERGE_TOLERANCE: f32 = 3.0 / 512.0;
+
+impl Merge {
+    /// Build the table from every part's positions.
+    ///
+    /// Deterministic by construction: the unique positions are sorted by
+    /// their bit patterns and each is snapped to the first EARLIER canonical
+    /// position within tolerance. Rerunning over identical input therefore
+    /// produces an identical table, which the byte-identical-rerun rule
+    /// needs. Snapping only to earlier canonicals also means a canonical
+    /// never moves, so no chain of merges can drag a vertex further than the
+    /// tolerance.
+    pub(crate) fn from_parts(parts: &[&[[f32; 3]]], tolerance: f32) -> Self {
+        let mut seen: std::collections::HashSet<(u32, u32, u32)> =
+            std::collections::HashSet::new();
+        let mut unique: Vec<[f32; 3]> = Vec::new();
+        for p in parts.iter().flat_map(|part| part.iter()) {
+            if seen.insert((p[0].to_bits(), p[1].to_bits(), p[2].to_bits())) {
+                unique.push(*p);
+            }
+        }
+        unique.sort_by(|a, b| {
+            (a[0].to_bits(), a[1].to_bits(), a[2].to_bits()).cmp(&(
+                b[0].to_bits(),
+                b[1].to_bits(),
+                b[2].to_bits(),
+            ))
+        });
+        // Canonicals, bucketed by cell so the search stays local.
+        let mut cells: std::collections::HashMap<(i32, i32, i32), Vec<[f32; 3]>> =
+            std::collections::HashMap::new();
+        let mut moved = std::collections::HashMap::new();
+        let tol2 = tolerance * tolerance;
+        for p in unique {
+            let c = cell_of(p);
+            let mut best: Option<[f32; 3]> = None;
+            'search: for cx in c.0 - 1..=c.0 + 1 {
+                for cy in c.1 - 1..=c.1 + 1 {
+                    for cz in c.2 - 1..=c.2 + 1 {
+                        let Some(bucket) = cells.get(&(cx, cy, cz)) else {
+                            continue;
+                        };
+                        for q in bucket {
+                            let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+                            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= tol2 {
+                                best = Some(*q);
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+            match best {
+                Some(q) => {
+                    moved.insert((p[0].to_bits(), p[1].to_bits(), p[2].to_bits()), q);
+                }
+                None => cells.entry(c).or_default().push(p),
+            }
+        }
+        Self { moved }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.moved.is_empty()
+    }
+
+    /// Move one part's vertices onto their canonicals and drop the triangles
+    /// that collapse. Returns how many triangles were dropped: a triangle
+    /// that vanishes here was under the tolerance across, so it drew nothing
+    /// a viewer could see and was itself half of the crack.
+    pub(crate) fn apply(&self, soup: Soup<'_>) -> usize {
+        if self.moved.is_empty() {
+            return 0;
+        }
+        let Soup { positions, uvs, normals, colors, indices } = soup;
+        let n = positions.len();
+        if uvs.len() != n {
+            return 0;
+        }
+        for p in positions.iter_mut() {
+            if let Some(q) = self
+                .moved
+                .get(&(p[0].to_bits(), p[1].to_bits(), p[2].to_bits()))
+            {
+                *p = *q;
+            }
+        }
+        let before = indices.len() / 3;
+        let mut kept = Vec::with_capacity(indices.len());
+        for tri in indices.chunks_exact(3) {
+            let idx = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if idx.iter().any(|i| *i >= n) {
+                continue;
+            }
+            let p = [positions[idx[0]], positions[idx[1]], positions[idx[2]]];
+            if area2(p[0], p[1], p[2]) <= f32::EPSILON {
+                continue;
+            }
+            kept.extend_from_slice(tri);
+        }
+        *indices = kept;
+        let _ = (normals, colors);
+        before - indices.len() / 3
+    }
+}
+
 fn one_pass(
     lookup: &VertexGrid,
     positions: &mut Vec<[f32; 3]>,
@@ -638,5 +780,123 @@ mod tests {
         });
         assert_eq!(split, 1);
         assert_eq!(t_junction_count(&pos, &idx), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // The corner merge
+    // -----------------------------------------------------------------
+
+    /// A crack the splitter cannot close: two corners a hair apart on the
+    /// same seam. The merge snaps one onto the other, and the seam shuts.
+    #[test]
+    fn two_corners_a_hair_apart_become_one() {
+        // Corner B is 2/512 m from corner A along z — inside the tolerance,
+        // outside `MIN_FROM_END`, which is exactly the residual shape.
+        let a = [1.0f32, 0.0, 0.0];
+        let b = [1.0f32, 0.0, 2.0 / 512.0];
+        let mut left = vec![[0.0, 0.0, 0.0], a, [0.0, 0.0, 1.0]];
+        let mut right = vec![b, [2.0, 0.0, 0.0], [2.0, 0.0, 1.0]];
+        let merge = Merge::from_parts(&[&left[..], &right[..]], MERGE_TOLERANCE);
+        assert!(!merge.is_empty(), "a pair this close must merge");
+        let mut lu = vec![[0.0; 2]; left.len()];
+        let mut ru = vec![[0.0; 2]; right.len()];
+        let mut li: Vec<u32> = (0..3).collect();
+        let mut ri: Vec<u32> = (0..3).collect();
+        merge.apply(Soup {
+            positions: &mut left,
+            uvs: &mut lu,
+            normals: None,
+            colors: None,
+            indices: &mut li,
+        });
+        merge.apply(Soup {
+            positions: &mut right,
+            uvs: &mut ru,
+            normals: None,
+            colors: None,
+            indices: &mut ri,
+        });
+        // Both parts now name ONE position where they had two.
+        let shared: Vec<[f32; 3]> = left
+            .iter()
+            .filter(|p| right.contains(p))
+            .copied()
+            .collect();
+        assert_eq!(shared.len(), 1, "left {left:?} right {right:?}");
+        // The seam is now one position, and it is one of the two the map
+        // authored — a merge never invents a coordinate between them.
+        assert!(shared[0] == a || shared[0] == b, "{shared:?}");
+    }
+
+    /// Corners further apart than the tolerance are the map, not a defect,
+    /// and must be left exactly where the author put them.
+    #[test]
+    fn honest_geometry_is_never_moved() {
+        let pos = vec![
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            // A whole source unit past the tolerance.
+            [1.0 + 4.0 / 512.0, 0.0, 0.0],
+        ];
+        let merge = Merge::from_parts(&[&pos[..]], MERGE_TOLERANCE);
+        assert!(merge.is_empty(), "nothing here is within the tolerance");
+        let mut p2 = pos.clone();
+        let mut uv = vec![[0.0; 2]; p2.len()];
+        let mut idx: Vec<u32> = vec![0, 1, 2];
+        assert_eq!(
+            merge.apply(Soup {
+                positions: &mut p2,
+                uvs: &mut uv,
+                normals: None,
+                colors: None,
+                indices: &mut idx,
+            }),
+            0
+        );
+        assert_eq!(p2, pos);
+    }
+
+    /// A triangle that collapses IS the crack: it was under the tolerance
+    /// across, so it drew nothing, and leaving a degenerate behind would
+    /// hand the renderer a NaN normal.
+    #[test]
+    fn a_sliver_that_collapses_is_dropped() {
+        let mut pos = vec![
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0 / 512.0],
+            [1.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, 0.0, 1.0],
+        ];
+        let merge = Merge::from_parts(&[&pos[..]], MERGE_TOLERANCE);
+        let mut uv = vec![[0.0; 2]; pos.len()];
+        let mut idx: Vec<u32> = (0..6).collect();
+        let dropped = merge.apply(Soup {
+            positions: &mut pos,
+            uvs: &mut uv,
+            normals: None,
+            colors: None,
+            indices: &mut idx,
+        });
+        assert_eq!(dropped, 1, "the sliver went, the real triangle stayed");
+        assert_eq!(idx.len(), 3);
+    }
+
+    /// Reruns must be byte-identical, so the table cannot depend on the
+    /// order the parts arrive in.
+    #[test]
+    fn the_merge_table_does_not_depend_on_part_order() {
+        let a = vec![[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let b = vec![[1.0f32, 0.0, 2.0 / 512.0], [5.0, 0.0, 0.0]];
+        let one = Merge::from_parts(&[&a[..], &b[..]], MERGE_TOLERANCE);
+        let two = Merge::from_parts(&[&b[..], &a[..]], MERGE_TOLERANCE);
+        let mut ka: Vec<_> = one.moved.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut kb: Vec<_> = two.moved.iter().map(|(k, v)| (*k, *v)).collect();
+        ka.sort_by_key(|(k, _)| *k);
+        kb.sort_by_key(|(k, _)| *k);
+        assert_eq!(ka, kb);
+        assert_eq!(ka.len(), 1);
     }
 }
