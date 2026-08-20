@@ -147,6 +147,19 @@ pub enum StemsMsg {
     Status { deck: DeckId, gen: u64, text: String, working: bool },
     Chunk(Box<StemChunk>),
     Done { deck: DeckId, gen: u64 },
+    /// How much of this track the span cache holds, reported when a run opens
+    /// the cache and again when it finishes. `complete` means every span is
+    /// on disk — the point at which the whole VOCALS stem exists and the
+    /// karaoke bake can read it (see `lyrics.rs`). The digest and frame count
+    /// travel with it because they are what re-opens the same cache entry,
+    /// and hashing a track's PCM is not something to redo on the UI thread.
+    Coverage {
+        deck: DeckId,
+        gen: u64,
+        digest: String,
+        model_frames: u64,
+        complete: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +248,7 @@ impl ResampleKernel {
 /// Resample, used only when a track is not already at the model's 44.1 kHz.
 /// Runs on the worker; each span is transformed exactly once and the result
 /// is what playback reads.
-fn resample(input: &[f32], from_rate: f64, to_rate: f64) -> Vec<f32> {
+pub fn resample(input: &[f32], from_rate: f64, to_rate: f64) -> Vec<f32> {
     if (from_rate - to_rate).abs() < 0.5 || input.is_empty() {
         return input.to_vec();
     }
@@ -480,7 +493,7 @@ fn run_sidecar(job: &StemsJob, lanes: [TrackPcm; 4], out: &Sender<StemsMsg>) {
 /// Frames the model works in for this track — the length `to_stereo_buf`
 /// will produce. The cache is addressed in exactly these coordinates, so the
 /// two must agree to the sample or the entry looks like a different track.
-fn model_frames(pcm: &TrackPcm) -> usize {
+pub fn model_frames(pcm: &TrackPcm) -> usize {
     let rate = pcm.sample_rate.max(1) as f64;
     let target = STEMS_RATE as f64;
     if (rate - target).abs() < 0.5 {
@@ -492,13 +505,14 @@ fn model_frames(pcm: &TrackPcm) -> usize {
 
 /// The cache entry for a track, or `None` when there is nowhere to keep one.
 /// A cache that will not open is never a reason to refuse to separate.
-fn open_cache(pcm: &TrackPcm) -> Option<StemCache> {
+/// The digest is passed in because the worker needs it anyway — hashing a
+/// track's decoded PCM is tens of megabytes of work and is done once.
+fn open_cache(pcm: &TrackPcm, digest: &str) -> Option<StemCache> {
     let frames = model_frames(pcm);
     if frames == 0 {
         return None;
     }
-    let digest = track_digest(pcm);
-    StemCache::open(cache_dir(), &digest, CacheHeader::for_track(frames as u64)).ok()
+    StemCache::open(cache_dir(), digest, CacheHeader::for_track(frames as u64)).ok()
 }
 
 /// Everything one span needs to reach the deck: resample to the track's rate
@@ -684,7 +698,25 @@ impl StemsPool {
                     // first, from the playhead forward: the knobs go live on
                     // a track that has been on a deck before without the
                     // model being loaded at all.
-                    let mut cache = open_cache(&job.pcm);
+                    let digest = track_digest(&job.pcm);
+                    let frames = model_frames(&job.pcm) as u64;
+                    let mut cache = open_cache(&job.pcm, &digest);
+                    // Report coverage the moment the cache is open: a track
+                    // separated in an earlier session is already complete
+                    // here, and the karaoke bake can start on its own worker
+                    // without waiting for playback to reach the end.
+                    let coverage = |cache: &Option<StemCache>, out: &Sender<StemsMsg>| {
+                        if let Some(cache) = cache.as_ref() {
+                            let _ = out.send(StemsMsg::Coverage {
+                                deck: job.deck,
+                                gen: job.gen,
+                                digest: digest.clone(),
+                                model_frames: frames,
+                                complete: cache.is_complete(),
+                            });
+                        }
+                    };
+                    coverage(&cache, &out);
                     let track_rate = job.pcm.sample_rate.max(1);
                     let mut writer = ChunkWriter::new(
                         chunk_frames(track_rate),
@@ -702,6 +734,7 @@ impl StemsPool {
                     };
                     let Some(resume) = resume else {
                         let _ = out.send(StemsMsg::Done { deck: job.deck, gen: job.gen });
+                        coverage(&cache, &out);
                         continue;
                     };
                     if model_failed {
@@ -756,6 +789,10 @@ impl StemsPool {
                             working: false,
                         });
                     }
+                    // The separation is as complete as this run made it. A
+                    // track covered end to end now has a whole VOCALS stem on
+                    // disk, which is the karaoke bake's cue to run.
+                    coverage(&cache, &out);
                 }
             });
         StemsPool { tx, rx }
