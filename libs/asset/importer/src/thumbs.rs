@@ -526,12 +526,15 @@ mod tests {
         assert_eq!(pixels.len(), hw * hh);
         // ONE composite: the spectrogram, with a wave strip along the bottom
         // edge, and both regions declared.
-        assert_eq!(regions.fft, (0, 0, hw as u32, 448));
-        assert_eq!(regions.wave, (0, 448, hw as u32, 64));
+        // Composed for a CARD: square, with the strip along the bottom
+        // eighth, so a tile has no dead bands.
+        assert_eq!((hw, hh), (1024, 1024));
+        assert_eq!(regions.fft, (0, 0, hw as u32, 896));
+        assert_eq!(regions.wave, (0, 896, hw as u32, 128));
         let hd = audio_thumbnail_jpeg(&track).unwrap();
         let (jw, jh) = (hd.width, hd.height);
         let hd_jpeg = hd.bytes;
-        assert_eq!((jw, jh), (2048, 512), "published at high definition");
+        assert_eq!((jw, jh), (1024, 1024), "published at high definition, card-shaped");
         assert_eq!(jpeg_dims(&hd_jpeg), Some((jw, jh)));
         assert_eq!(
             hd.views.iter().map(|v| v.kind).collect::<Vec<_>>(),

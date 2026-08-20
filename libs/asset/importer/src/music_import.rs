@@ -1457,17 +1457,23 @@ pub fn publish_baked(
     let thumbnail_blob = BlobId::hash_of(&thumbnail_bytes);
     let existing = match client.resolve_alias(&alias) {
         Ok(head) => {
-            let manifest = client
-                .fetch_asset_manifest(&head.head_revision)
+            // A head this build cannot read (an older schema) counts as
+            // nothing to compare against: the track is re-published under
+            // the same asset id rather than the import stopping dead. See
+            // `crate::readable_head`.
+            let manifest = crate::readable_head(client, &head.head_revision)
                 .map_err(|e| format!("head manifest: {e}"))?;
-            let same_audio = manifest
-                .files
-                .iter()
-                .any(|f| f.role == FileRole::Audio && f.blob == audio_blob);
-            let same_picture = manifest
-                .thumbnail
-                .is_some_and(|thumb| thumb.blob == thumbnail_blob);
-            if same_audio && same_picture {
+            let unchanged = manifest.is_some_and(|manifest| {
+                let same_audio = manifest
+                    .files
+                    .iter()
+                    .any(|f| f.role == FileRole::Audio && f.blob == audio_blob);
+                let same_picture = manifest
+                    .thumbnail
+                    .is_some_and(|thumb| thumb.blob == thumbnail_blob);
+                same_audio && same_picture
+            });
+            if unchanged {
                 return Ok(TrackOutcome::Unchanged);
             }
             // The audio blob is content-addressed, so a picture-only change

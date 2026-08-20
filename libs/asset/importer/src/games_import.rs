@@ -200,13 +200,16 @@ pub fn publish_game(
     let source_blob = BlobId::hash_of(&game.splash);
     let existing = match client.resolve_alias(&alias) {
         Ok(head) => {
-            let manifest = client
-                .fetch_asset_manifest(&head.head_revision)
+            // Unreadable head (older schema) = nothing to compare against;
+            // re-publish rather than stop. See `crate::readable_head`.
+            let manifest = crate::readable_head(client, &head.head_revision)
                 .map_err(|e| format!("head manifest: {e}"))?;
-            let same = manifest
-                .files
-                .iter()
-                .any(|f| f.role == FileRole::Source && f.blob == source_blob);
+            let same = manifest.is_some_and(|manifest| {
+                manifest
+                    .files
+                    .iter()
+                    .any(|f| f.role == FileRole::Source && f.blob == source_blob)
+            });
             if same {
                 return Ok(GameOutcome::Unchanged);
             }
