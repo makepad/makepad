@@ -37,7 +37,10 @@ pub mod weights;
 pub use config::{
     Stem, AUDIO_CHANNELS, CHUNK_SAMPLES, CHUNK_STEP, NUM_STEMS, SAMPLE_RATE, STEM_NAMES,
 };
-pub use cache::{CacheHeader, CacheError, StemCache};
+pub use cache::{
+    prune as prune_cache, CacheError, CacheHeader, PruneReport, StemCache,
+    DEFAULT_BUDGET_BYTES as CACHE_BUDGET_BYTES,
+};
 pub use demix::{chunk_count, demix_all, Demixer, StemSpan};
 pub use model::{StemSet, StemsModel, StereoBuf};
 pub use weights::StemsWeights;

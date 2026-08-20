@@ -3657,6 +3657,18 @@ pub struct App {
     /// What the deck should say about its separation.
     #[rust]
     deck_stem_status: [String; 2],
+    /// Whether the separator is still WORKING on this deck (`Some(true)`), has
+    /// FAILED on it (`Some(false)`), or has settled (`None`).
+    ///
+    /// It decides who owns the deck's one status line. A separation that is
+    /// running, or one that broke, is a fact with nowhere else to appear, so
+    /// it outranks the karaoke bake — which arrives from its own cache within
+    /// a second of loading a track that has been transcribed before, and used
+    /// to take that line for the rest of the session. Separation going quiet
+    /// with the line reading "lyrics: 32 lines in 17s" is exactly what "the
+    /// splitting stopped working" looks like from the operator's chair.
+    #[rust]
+    deck_stem_busy: [Option<bool>; 2],
     /// Karaoke: whisper over the separated vocals, off-thread, once per track.
     #[rust(LyricsPool::new())]
     lyrics: LyricsPool,
@@ -8118,6 +8130,36 @@ impl App {
         }
     }
 
+    /// What a deck's one status line reads, given where separation stands.
+    ///
+    /// `busy` is `Some(true)` while the separator is working, `Some(false)`
+    /// once it has failed and `None` once it has settled. Working and failed
+    /// both KEEP the line: the separator's own words are the only report the
+    /// operator gets, and a track whose lyrics were baked in an earlier
+    /// session answers from its cache within a second of loading — early
+    /// enough to bury "stems: separating…", "stems: model not installed" and
+    /// every device error under a line about words.
+    fn deck_stem_line(
+        busy: Option<bool>,
+        stems: &str,
+        lyrics: &str,
+        stems_ready: bool,
+    ) -> String {
+        if busy.is_some() && !stems.is_empty() {
+            return stems.to_string();
+        }
+        if !lyrics.is_empty() {
+            return lyrics.to_string();
+        }
+        if !stems.is_empty() {
+            return stems.to_string();
+        }
+        if stems_ready {
+            return "stems: live".to_string();
+        }
+        "stems: full mix".to_string()
+    }
+
     /// Ask the separator for this deck's stems, starting where the
     /// playhead is so the knobs go live where they are needed first.
     fn submit_separation(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
@@ -8126,6 +8168,7 @@ impl App {
         let source = self.local_by_asset.get(&item.asset).cloned();
         let (position, _duration, _playing) = self.mixer.deck_position(deck);
         self.deck_stem_status[deck.index()] = "stems: queued".to_string();
+        self.deck_stem_busy[deck.index()] = Some(true);
         self.stems.submit(StemsJob {
             deck,
             gen: state.load_gen,
@@ -8147,13 +8190,18 @@ impl App {
                         continue;
                     }
                     self.deck_stem_status[deck.index()] = text;
-                    let _ = working;
+                    // `working: false` is the worker's word for "this is as
+                    // far as it got" — the checkpoint is missing, the device
+                    // had no room. Latching it here is what keeps the reason
+                    // on screen instead of behind the next karaoke line.
+                    self.deck_stem_busy[deck.index()] = Some(working);
                 }
                 StemsMsg::Done { deck, gen } => {
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
                     self.deck_stem_status[deck.index()] = "stems: live".to_string();
+                    self.deck_stem_busy[deck.index()] = None;
                 }
                 StemsMsg::Coverage { deck, gen, digest, model_frames, complete } => {
                     // The separation worker is the only place the track's
@@ -8560,18 +8608,18 @@ impl App {
                 _ => String::new(),
             };
             self.set_label(cx, base + 6, &refs.grid_state, &grid_text);
-            // The karaoke bake runs behind the separation and finishes long
-            // after it; while it has something to say it owns this line,
-            // because "stems: live" is old news by then.
-            let stem_text = if !self.deck_lyrics_status[index].is_empty() {
-                self.deck_lyrics_status[index].clone()
-            } else if !self.deck_stem_status[index].is_empty() {
-                self.deck_stem_status[index].clone()
-            } else if stems_ready {
-                "stems: live".to_string()
-            } else {
-                "stems: full mix".to_string()
-            };
+            // One line, and an order of precedence rather than a race. The
+            // separation owns it while it is running or while it is broken —
+            // those are the two things an operator has to be able to see, and
+            // this is the only place either appears. Once separation settles,
+            // the karaoke bake takes over, because "stems: live" is old news
+            // by the time whisper has anything to say.
+            let stem_text = Self::deck_stem_line(
+                self.deck_stem_busy[index],
+                &self.deck_stem_status[index],
+                &self.deck_lyrics_status[index],
+                stems_ready,
+            );
             self.set_label(cx, base + 7, &refs.stem_state, &stem_text);
             if self.label_cache.get(&(base + 8)).map(String::as_str) != Some(range_label) {
                 self.label_cache.insert(base + 8, range_label.to_string());
@@ -10612,6 +10660,38 @@ mod latch_tests {
 #[cfg(test)]
 mod sync_tests {
     use super::*;
+
+    /// The regression that made separation LOOK dead: the karaoke bake
+    /// answers from its own cache within a second of loading a track that was
+    /// transcribed before, and it used to take the deck's only status line
+    /// with it — so "stems: separating…" was never seen again, and neither
+    /// was "stems: model not installed" or any device error. Whoever is still
+    /// working, or has failed, keeps the line.
+    #[test]
+    fn a_working_or_broken_separation_keeps_the_deck_line() {
+        let line = App::deck_stem_line;
+        // Working, with a cached transcript already sitting there: the
+        // separator's progress is what the operator needs to see.
+        assert_eq!(
+            line(Some(true), "stems: separating…", "lyrics: 32 lines in 17s", false),
+            "stems: separating…"
+        );
+        // Failed is the case that matters most — it is the only report there
+        // is that this track will not be split.
+        assert_eq!(
+            line(Some(false), "stems: model not installed", "lyrics: 32 lines in 17s", false),
+            "stems: model not installed"
+        );
+        // Settled: the bake is the newer news and takes over.
+        assert_eq!(
+            line(None, "stems: live", "lyrics: transcribing…", true),
+            "lyrics: transcribing…"
+        );
+        // Settled with nothing from the bake yet.
+        assert_eq!(line(None, "stems: live", "", true), "stems: live");
+        assert_eq!(line(None, "", "", true), "stems: live");
+        assert_eq!(line(None, "", "", false), "stems: full mix");
+    }
 
     #[test]
     fn session_loss_is_only_connection_class() {

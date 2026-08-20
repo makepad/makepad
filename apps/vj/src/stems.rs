@@ -23,8 +23,11 @@
 //! The cache is four stems of stereo i16 at the model's rate, so it costs
 //! about 700 KB per second of track — a quarter of a gigabyte for a
 //! six-minute one. That is the trade the engine's cache makes deliberately
-//! (i16 is what the mixer consumes and it is a quarter of f32); nothing here
-//! prunes it, so `local/vj/stem-cache` is a directory to keep an eye on.
+//! (i16 is what the mixer consumes and it is a quarter of f32), and it is why
+//! the root is BOUNDED: every job prunes `local/vj/stem-cache` back inside
+//! [`CACHE_BUDGET_BYTES`], dropping whole tracks least-recently-used first and
+//! never the ones on the decks. Six hours of separated music stays; the track
+//! played once last week goes.
 //!
 //! Either way the worker publishes fixed one-second chunks in TRACK frames,
 //! so the mixer can index them arithmetically and a chunk that has not
@@ -76,6 +79,15 @@ pub fn cache_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/stem-cache")
+}
+
+/// How much disk the span cache may hold. `VJ_STEMS_CACHE_BUDGET` (bytes)
+/// overrides the crate's default, which is about six hours of separated music.
+pub fn cache_budget_bytes() -> u64 {
+    std::env::var("VJ_STEMS_CACHE_BUDGET")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(makepad_ai_stems::CACHE_BUDGET_BYTES)
 }
 
 /// Cache key for a track: the digest of the DECODED audio, so the same track
@@ -507,12 +519,12 @@ pub fn model_frames(pcm: &TrackPcm) -> usize {
 /// A cache that will not open is never a reason to refuse to separate.
 /// The digest is passed in because the worker needs it anyway — hashing a
 /// track's decoded PCM is tens of megabytes of work and is done once.
-fn open_cache(pcm: &TrackPcm, digest: &str) -> Option<StemCache> {
+fn open_cache(root: &Path, pcm: &TrackPcm, digest: &str) -> Option<StemCache> {
     let frames = model_frames(pcm);
     if frames == 0 {
         return None;
     }
-    StemCache::open(cache_dir(), digest, CacheHeader::for_track(frames as u64)).ok()
+    StemCache::open(root, digest, CacheHeader::for_track(frames as u64)).ok()
 }
 
 /// Everything one span needs to reach the deck: resample to the track's rate
@@ -660,6 +672,26 @@ fn run_demixer(
     Ok(())
 }
 
+/// Keep the cache root inside its budget, pinning whatever is on a deck.
+/// Runs on the worker, once per job, before any span is written: the moment a
+/// track arrives is the moment we know what may go.
+fn prune_cache(root: &Path, budget_bytes: u64, pinned: &[Option<String>; 2]) {
+    let keep: Vec<&str> = pinned.iter().filter_map(|d| d.as_deref()).collect();
+    match makepad_ai_stems::prune_cache(root, budget_bytes, &keep) {
+        Ok(report) if !report.removed.is_empty() => println!(
+            "stems cache: {} MB over budget, dropped {} least-recently-used track(s) \
+             ({} MB freed, now {} MB of {} MB)",
+            (report.before.saturating_sub(budget_bytes)) / (1024 * 1024),
+            report.removed.len(),
+            report.freed() / (1024 * 1024),
+            report.after / (1024 * 1024),
+            budget_bytes / (1024 * 1024),
+        ),
+        Ok(_) => {}
+        Err(error) => println!("stems cache: prune failed: {error}"),
+    }
+}
+
 /// One separation thread. The model is thread-affine and expensive to load,
 /// so it lives here and nowhere else.
 pub struct StemsPool {
@@ -675,13 +707,28 @@ impl Default for StemsPool {
 
 impl StemsPool {
     pub fn new() -> StemsPool {
+        StemsPool::with_paths(cache_dir(), checkpoint_path(), cache_budget_bytes())
+    }
+
+    /// The pool with its two paths and its budget named, which is what the
+    /// tests drive: a warm cache must serve a track with no checkpoint in
+    /// sight, and that is only provable if the checkpoint can be pointed
+    /// somewhere it certainly is not.
+    pub fn with_paths(root: PathBuf, checkpoint: PathBuf, budget_bytes: u64) -> StemsPool {
         let (tx, jobs) = channel::<StemsJob>();
         let (out, rx) = channel::<StemsMsg>();
         let _ = std::thread::Builder::new()
             .name("vj-stems".into())
             .spawn(move || {
                 let mut model: Option<StemsModel> = None;
-                let mut model_failed = false;
+                // The checkpoint is not on this machine — a standing fact, so
+                // it is answered from here rather than by probing every job.
+                // A load FAILURE is a different animal (see below).
+                let mut no_checkpoint = false;
+                // The track most recently opened per deck: whatever is on a
+                // deck is pinned against the budget, so a set in progress is
+                // never evicted out from under the needle.
+                let mut pinned: [Option<String>; 2] = [None, None];
                 while let Ok(job) = jobs.recv() {
                     // Latest-wins: only the newest request per deck matters.
                     let mut job = job;
@@ -700,7 +747,11 @@ impl StemsPool {
                     // model being loaded at all.
                     let digest = track_digest(&job.pcm);
                     let frames = model_frames(&job.pcm) as u64;
-                    let mut cache = open_cache(&job.pcm, &digest);
+                    let mut cache = open_cache(&root, &job.pcm, &digest);
+                    if cache.is_some() {
+                        pinned[job.deck.index()] = Some(digest.clone());
+                        prune_cache(&root, budget_bytes, &pinned);
+                    }
                     // Report coverage the moment the cache is open: a track
                     // separated in an earlier session is already complete
                     // here, and the karaoke bake can start on its own worker
@@ -737,19 +788,18 @@ impl StemsPool {
                         coverage(&cache, &out);
                         continue;
                     };
-                    if model_failed {
+                    if no_checkpoint {
                         let _ = out.send(StemsMsg::Status {
                             deck: job.deck,
                             gen: job.gen,
-                            text: "stems: model unavailable".to_string(),
+                            text: "stems: model not installed".to_string(),
                             working: false,
                         });
                         continue;
                     }
                     if model.is_none() {
-                        let path = checkpoint_path();
-                        if !path.is_file() {
-                            model_failed = true;
+                        if !checkpoint.is_file() {
+                            no_checkpoint = true;
                             let _ = out.send(StemsMsg::Status {
                                 deck: job.deck,
                                 gen: job.gen,
@@ -764,10 +814,17 @@ impl StemsPool {
                             text: "stems: loading model…".to_string(),
                             working: true,
                         });
-                        match StemsModel::load(&path) {
+                        match StemsModel::load(&checkpoint) {
                             Ok(loaded) => model = Some(loaded),
                             Err(error) => {
-                                model_failed = true;
+                                // NOT latched. The usual reason a load of a
+                                // checkpoint that IS on disk fails is that the
+                                // device had no room for it just then — the
+                                // other models this app runs, or the game on
+                                // the same GPU. Latching turned one bad moment
+                                // into a session with no separation at all and
+                                // no way back short of a restart; the next
+                                // track simply tries again.
                                 let _ = out.send(StemsMsg::Status {
                                     deck: job.deck,
                                     gen: job.gen,
@@ -1064,6 +1121,107 @@ mod tests {
             chunks.iter().map(|c| c.index).collect::<Vec<_>>(),
             vec![6, 7, 8, 9, 10]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Everything the pool says about one job, up to and including `Done`.
+    fn run_to_done(pool: &StemsPool, timeout: std::time::Duration) -> Vec<StemsMsg> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut out = Vec::new();
+        loop {
+            let batch = pool.poll();
+            let done = batch
+                .iter()
+                .any(|m| matches!(m, StemsMsg::Done { .. }) || matches!(m, StemsMsg::Status { working: false, .. }));
+            out.extend(batch);
+            if done || std::time::Instant::now() >= deadline {
+                return out;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn write_entry(root: &Path, digest: &str, spans: usize) {
+        let header = CacheHeader::for_track((spans * CHUNK_STEP) as u64);
+        let mut cache = StemCache::open(root, digest, header).unwrap();
+        for span in 0..spans {
+            cache
+                .write_span(span * CHUNK_STEP, &flat_stems(CHUNK_STEP))
+                .unwrap();
+        }
+        assert!(cache.is_complete());
+    }
+
+    /// The whole reason the cache exists, asserted rather than assumed: a
+    /// track that was separated in an earlier session is served WITHOUT the
+    /// model. The checkpoint is pointed somewhere it certainly is not, so a
+    /// worker that so much as reached for it would have to say "model not
+    /// installed" — and this test would see it.
+    #[test]
+    fn a_warm_track_is_served_with_no_model_at_all() {
+        let root = temp_cache_root("warm-no-model");
+        let pcm = silent_pcm(2 * CHUNK_STEP, 44_100);
+        let digest = track_digest(&pcm);
+        write_entry(&root, &digest, 2);
+
+        let pool = StemsPool::with_paths(
+            root.clone(),
+            root.join("no-such-checkpoint.ckpt"),
+            u64::MAX,
+        );
+        pool.submit(cache_job(pcm.clone(), 0.0));
+        let messages = run_to_done(&pool, std::time::Duration::from_secs(30));
+
+        let mut chunks = 0usize;
+        let mut done = false;
+        let mut complete = false;
+        for message in &messages {
+            match message {
+                StemsMsg::Chunk(_) => chunks += 1,
+                StemsMsg::Done { .. } => done = true,
+                StemsMsg::Coverage { complete: c, .. } => complete |= *c,
+                StemsMsg::Status { text, .. } => assert!(
+                    !text.contains("model"),
+                    "a cached track must not reach for the model: {text:?}"
+                ),
+            }
+        }
+        assert!(done, "the run has to finish: {} messages", messages.len());
+        assert!(complete, "a fully written entry reports complete coverage");
+        // Eleven whole seconds of track per span, and the last part-second is
+        // left to the mixed file.
+        assert_eq!(chunks, 11, "every cached span has to reach the deck");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cache is bounded, and the boundary knows what is playing: a budget
+    /// of nothing evicts every track EXCEPT the one on the deck.
+    #[test]
+    fn the_budget_evicts_everything_but_the_track_on_the_deck() {
+        let root = temp_cache_root("budget-pinned");
+        let idle_a = "1".repeat(64);
+        let idle_b = "2".repeat(64);
+        write_entry(&root, &idle_a, 1);
+        write_entry(&root, &idle_b, 1);
+        let pcm = silent_pcm(CHUNK_STEP, 44_100);
+        let digest = track_digest(&pcm);
+        write_entry(&root, &digest, 1);
+
+        let pool = StemsPool::with_paths(root.clone(), root.join("no-such.ckpt"), 0);
+        pool.submit(cache_job(pcm.clone(), 0.0));
+        let messages = run_to_done(&pool, std::time::Duration::from_secs(30));
+        assert!(
+            messages.iter().any(|m| matches!(m, StemsMsg::Done { .. })),
+            "the deck's own track is served from the cache it was not evicted from"
+        );
+        assert!(root.join(&digest).is_dir(), "the deck's track survives a zero budget");
+        assert!(!root.join(&idle_a).exists(), "an idle track goes");
+        assert!(!root.join(&idle_b).exists(), "…and so does the other one");
+        // What survived is still readable audio, not a shell.
+        let mut cache = StemCache::open(&root, &digest, CacheHeader::for_track(CHUNK_STEP as u64))
+            .unwrap();
+        assert!(cache.is_complete());
+        assert!(cache.read_span(0).unwrap().is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
