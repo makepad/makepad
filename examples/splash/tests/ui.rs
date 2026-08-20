@@ -41,9 +41,13 @@ fn splash_media_scroll_smoke(app: TestApp) {
     app.locator(Selector::widget_type("DockTab").text_exact("Media"))
         .wait_visible()
         .click();
-    app.locator(Selector::id("test_image"))
-        .wait_visible()
-        .scroll(0.0, -1200.0);
+    // The media page is taller than the dock body, so `test_image` and the
+    // spinner start below the fold with no on-screen rect to aim at. Scroll
+    // the page from the dock itself — a point that is always on screen — and
+    // let each `wait_visible` prove the content actually arrived.
+    app.locator(Selector::id("dock")).wait_visible().scroll(0.0, 800.0);
+    app.locator(Selector::id("test_image")).wait_visible();
+    app.locator(Selector::id("dock")).scroll(0.0, 1400.0);
     app.locator(Selector::all().text_exact("Loading Spinner"))
         .wait_visible();
 }
