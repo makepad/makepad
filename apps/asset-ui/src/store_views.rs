@@ -60,7 +60,10 @@ impl GalleryEntry {
     /// audio card's `.thumb` is a waveform PNG and a video's preview is not
     /// the playable attachment.
     pub fn file_drag_payload_path(&self) -> Option<PathBuf> {
-        Some(self.path.clone())
+        // A catalog card whose object has not been materialised yet has no
+        // path at all; offering an empty one would hand the OS a drag of
+        // nothing.
+        (!self.path.as_os_str().is_empty()).then(|| self.path.clone())
     }
 }
 
@@ -114,14 +117,20 @@ pub fn preview_work(entry: &GalleryEntry) -> Option<PreviewWork> {
         .unwrap_or("");
     // Only real manifests go through the frame decoder. Duke tile PNGs are
     // domain=billboard but the payload is the icon itself.
+    // A catalog card can exist before its object has been materialised;
+    // every branch that reads the PAYLOAD needs one to read.
+    let has_payload = !entry.path.as_os_str().is_empty();
     let manifest = ext.eq_ignore_ascii_case("billboard")
         || ct.contains("stateful-billboard")
         || ct == "text/x-stateful-billboard";
-    if manifest {
+    if manifest && has_payload {
         return Some(PreviewWork::StatefulBillboard(entry.path.clone()));
     }
     if let Some(path) = &entry.preview_path {
         return Some(PreviewWork::Encoded(path.clone()));
+    }
+    if !has_payload {
+        return None;
     }
     if entry.meta.domain.eq_ignore_ascii_case("billboard")
         && (ext.eq_ignore_ascii_case("png") || ct.starts_with("image/"))

@@ -1278,6 +1278,42 @@ impl AssetClient {
         Ok(bytes)
     }
 
+    /// Fetch a blob into the verified disk cache and return the PATH of the
+    /// object.
+    ///
+    /// This is the bridge for tools that take a file rather than bytes — an
+    /// AO bake, a rig pass, a decoder, an OS drag-and-drop. It stays
+    /// thin-client-legal because the file is named by its digest and the
+    /// cache re-hashes it before handing the path out: the path is a
+    /// materialisation of catalog content, never a second source of truth
+    /// that could drift from the revision it came from. A corrupt object is
+    /// removed and re-fetched rather than returned.
+    ///
+    /// Bytes are NOT kept in the RAM cache: a caller who wants a path is
+    /// about to hand the file to something that reads it from disk, and the
+    /// budget is better spent on what the viewer is drawing.
+    pub fn blob_path(
+        &mut self,
+        blob: &BlobId,
+        expected_len: Option<u64>,
+    ) -> ClientResult<PathBuf> {
+        let digest = *blob.as_bytes();
+        if let Some(path) = self.cache().resolve(&digest, now_ms())? {
+            return Ok(path);
+        }
+        // A blob already in RAM still has to reach disk; hashing it again on
+        // the way in is what makes the path trustworthy.
+        let bytes = match self.ram.lock().expect("ram cache").get(&digest).cloned() {
+            Some(bytes) => bytes,
+            None => self.stream_blob_memory(blob, expected_len)?,
+        };
+        let now = now_ms();
+        self.cache().put_bytes(&bytes, Some(&digest), now)?;
+        self.cache()
+            .resolve(&digest, now)?
+            .ok_or(ClientError::Protocol { what: "cached blob vanished" })
+    }
+
     fn stream_blob_memory(
         &self,
         blob: &BlobId,
