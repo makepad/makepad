@@ -2200,6 +2200,8 @@ pub struct LyricRow {
     /// One start time per word, so the reader's green fill hops exactly as
     /// the program's subtitle does. Empty on an older cache entry.
     pub words: Vec<f64>,
+    /// Whether those times are trusted enough to hop on; false sweeps.
+    pub confident: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2483,6 +2485,7 @@ impl Widget for VjLyricReader {
                         end_secs: line.end_secs,
                         text: line.text.clone(),
                         words: line.words.clone(),
+                        confident: line.confident,
                     },
                     self.position,
                 ) as f64
