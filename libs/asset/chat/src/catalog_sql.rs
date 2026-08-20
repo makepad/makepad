@@ -166,7 +166,21 @@ impl CatalogReader {
 
     /// Run one SELECT under the limits. Refusals and failures are bounded,
     /// model-facing strings.
+    ///
+    /// A snapshot checkpointed away mid-statement now surfaces as a Busy
+    /// error from the engine (instead of the silent wrong-page reads the
+    /// stale-reader campaign fixed); one clean re-open + retry answers it.
     pub fn query(&mut self, sql: &str) -> Result<QueryOutput, String> {
+        match self.query_once(sql) {
+            Err(e) if e.contains("write-ahead log was reset") => {
+                self.db = None;
+                self.query_once(sql)
+            }
+            other => other,
+        }
+    }
+
+    fn query_once(&mut self, sql: &str) -> Result<QueryOutput, String> {
         let sql = sql.trim();
         if sql.is_empty() {
             return Err("empty SQL".to_string());
