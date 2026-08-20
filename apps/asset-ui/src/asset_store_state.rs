@@ -1339,6 +1339,7 @@ mod tests {
             score: 0,
             live: true,
             alias: None,
+            updated_ms: 1_787_000_000_000,
         }
     }
 
@@ -1685,7 +1686,19 @@ mod tests {
     }
 
     fn poll_until<F: Fn(&AssetStore) -> bool>(store: &mut AssetStore, what: &str, ready: F) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        poll_until_within(store, what, 15, ready)
+    }
+
+    /// Same, with the patience spelled out: a test that publishes a hundred
+    /// assets and walks them back is doing real work, and it shares the
+    /// machine with the rest of the suite.
+    fn poll_until_within<F: Fn(&AssetStore) -> bool>(
+        store: &mut AssetStore,
+        what: &str,
+        secs: u64,
+        ready: F,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         loop {
             store.poll();
             if ready(store) {
@@ -1747,7 +1760,7 @@ mod tests {
         let mut store = AssetStore::default();
         connect_store_to(&mut store, &server, &token);
         // The first page landed during connect; the rest walk in.
-        poll_until(&mut store, "the walk to finish", |store| {
+        poll_until_within(&mut store, "the walk to finish", 90, |store| {
             let (loaded, walking) = store.catalog_loaded();
             !walking && loaded > 0
         });

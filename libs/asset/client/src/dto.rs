@@ -270,6 +270,10 @@ pub struct CatalogHit {
     /// Canonical alias head pointing at this asset, when one exists.
     /// Optional on the wire for compatibility with older servers.
     pub alias: Option<AssetAlias>,
+    /// When the asset's search row last changed, epoch ms. Absent from a
+    /// server too old to send it, which reads as 0 — "not recorded" — and
+    /// never as a date in 1970 on screen.
+    pub updated_ms: u64,
 }
 
 /// Which vocabulary a facet label came from — the two label filters a
@@ -340,7 +344,21 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
                 )
             }
         };
-        hits.push(CatalogHit { asset_id, namespace, kind, title, snippet, score, live, alias });
+        let updated_ms = match h.get("updated_ms") {
+            None | Some(Value::Null) => 0,
+            Some(_) => need_u64(h, "updated_ms", "hit updated_ms")?,
+        };
+        hits.push(CatalogHit {
+            asset_id,
+            namespace,
+            kind,
+            title,
+            snippet,
+            score,
+            live,
+            alias,
+            updated_ms,
+        });
     }
     let total = need_u64(v, "total", "catalog total")?;
     let cursor = parse_cursor_field(v)?;

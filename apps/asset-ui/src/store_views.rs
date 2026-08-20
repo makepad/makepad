@@ -1036,6 +1036,10 @@ pub const GRID_GAP: f64 = 8.0;
 /// wide windows becomes margin instead of a ninth column.
 pub const GRID_MAX_COLS: usize = 8;
 
+/// Cadence of a cycling card. Slow enough to read a sprite, fast enough to
+/// show what the animation IS.
+pub const SHEET_FPS: f32 = 7.0;
+
 pub fn grid_columns(width: f64) -> usize {
     (((width + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as usize).clamp(1, GRID_MAX_COLS)
 }
@@ -1048,8 +1052,22 @@ pub struct CatalogTile {
     /// are keyed by.
     pub asset: String,
     pub title: String,
+    /// Kind and lifecycle: the short line a tile has room for.
     pub meta: String,
+    /// Where it lives — alias and namespace. Rows have room for it.
+    pub alias: String,
+    /// When the catalog last touched this asset, already readable.
+    pub when: String,
     pub selected: bool,
+}
+
+/// Which body the grid draws. Same tiles, same textures, same clicks — a
+/// wall of pictures, or one row per asset with its metadata beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CatalogLayout {
+    #[default]
+    Tiles,
+    Rows,
 }
 
 /// Wrapping thumbnail grid over a catalog result set.
@@ -1074,7 +1092,23 @@ pub struct CatalogGrid {
     #[rust]
     total: usize,
     #[rust]
+    layout: CatalogLayout,
+    /// What the empty state SAYS. Disconnected, searching, failed and
+    /// "nothing matches" are four different facts, and the card tells the
+    /// truth about which one it is.
+    #[rust]
+    empty_note: String,
+    #[rust]
     textures: HashMap<String, Texture>,
+    /// Sprite sheets that were cut into cells: a billboard's card CYCLES
+    /// them. The frames are uploaded once, at decode; drawing picks one by
+    /// the clock, so an animating wall costs a texture bind, not an upload.
+    #[rust]
+    anims: HashMap<String, Vec<Texture>>,
+    /// Set while the last draw actually had a cycling card ON SCREEN — an
+    /// off-screen sprite must not keep the app awake.
+    #[rust]
+    animating: bool,
     /// Assets whose thumbnail the last draw wanted and did not have.
     #[rust]
     wanted: Vec<String>,
@@ -1092,12 +1126,34 @@ pub struct CatalogGrid {
 impl CatalogGrid {
     /// `total` is the server's match count for the current filter; the grid
     /// reserves space for it while the pages walk in.
-    pub fn set_tiles(&mut self, cx: &mut Cx, tiles: Vec<CatalogTile>, total: usize) {
+    pub fn set_tiles(
+        &mut self,
+        cx: &mut Cx,
+        tiles: Vec<CatalogTile>,
+        total: usize,
+        layout: CatalogLayout,
+    ) {
         let total = total.max(tiles.len());
-        if self.tiles != tiles || self.total != total {
+        if self.tiles != tiles || self.total != total || self.layout != layout {
             self.tiles = tiles;
             self.total = total;
+            self.layout = layout;
             self.view.redraw(cx);
+        }
+    }
+
+    pub fn set_empty_note(&mut self, cx: &mut Cx, note: String) {
+        if self.empty_note != note {
+            self.empty_note = note;
+            self.view.redraw(cx);
+        }
+    }
+
+    /// Cards per row for the layout in force: a row body is one asset wide.
+    pub fn columns(&self) -> usize {
+        match self.layout {
+            CatalogLayout::Tiles => self.last_cols.max(1),
+            CatalogLayout::Rows => 1,
         }
     }
 
@@ -1124,8 +1180,36 @@ impl CatalogGrid {
         self.view.redraw(cx);
     }
 
+    /// A sheet-backed thumbnail: every cell, in order. The first frame is
+    /// the still picture for anything that does not cycle.
+    pub fn install_anim(&mut self, cx: &mut Cx, asset: String, frames: Vec<Texture>) {
+        if let Some(first) = frames.first() {
+            self.textures.insert(asset.clone(), first.clone());
+        }
+        if frames.len() > 1 {
+            self.anims.insert(asset, frames);
+        }
+        self.view.redraw(cx);
+        cx.new_next_frame();
+    }
+
+    /// Which frame a cycling card shows right now. One clock for the whole
+    /// grid, so a wall of sprites animates in step instead of shimmering.
+    fn frame_at(&self, asset: &str, now: f64) -> Option<Texture> {
+        let frames = self.anims.get(asset)?;
+        let index = ((now * SHEET_FPS as f64) as usize) % frames.len();
+        frames.get(index).cloned()
+    }
+
     pub fn has_thumb(&self, asset: &str) -> bool {
         self.textures.contains_key(asset)
+    }
+
+    /// The decoded picture for an asset, if the grid has it — the detail
+    /// rail shows the same one at a size you can look at, rather than
+    /// decoding a second copy of the same object.
+    pub fn thumb_of(&self, asset: &str) -> Option<Texture> {
+        self.textures.get(asset).cloned()
     }
 
     pub fn tile_at(&self, index: usize) -> Option<CatalogTile> {
@@ -1151,6 +1235,67 @@ pub fn record_want(wanted: &mut Vec<String>, asset: &str) {
     }
 }
 
+impl CatalogGrid {
+    /// One asset per row: its picture on the left, everything the catalog
+    /// knows about it to the right. Same tiles and same textures as the
+    /// tile wall — only the shape differs.
+    fn draw_rows(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
+        let now = cx.time();
+        let mut animating = false;
+        if self.reset_scroll {
+            self.reset_scroll = false;
+            list.set_first_id_and_scroll(0, 0.0);
+        } else if list.first_id() >= self.total {
+            list.set_first_id_and_scroll(self.total.saturating_sub(1), 0.0);
+        }
+        list.set_item_range(cx, 0, self.total);
+        while let Some(index) = list.next_visible_item(cx) {
+            if index >= self.total {
+                continue;
+            }
+            let item = list.item(cx, index, id!(ListRow));
+            match self.tiles.get(index) {
+                Some(tile) => {
+                    item.label(cx, ids!(lr_card.lr_title)).set_text(cx, &tile.title);
+                    item.label(cx, ids!(lr_card.lr_meta)).set_text(cx, &tile.meta);
+                    item.label(cx, ids!(lr_card.lr_alias)).set_text(cx, &tile.alias);
+                    item.label(cx, ids!(lr_card.lr_when)).set_text(cx, &tile.when);
+                    item.view(cx, ids!(lr_card)).toggle_state(
+                        cx,
+                        tile.selected,
+                        Animate::No,
+                        ids!(select.on),
+                        ids!(select.off),
+                    );
+                    match self
+                        .frame_at(&tile.asset, now)
+                        .inspect(|_| animating = true)
+                        .or_else(|| self.textures.get(&tile.asset).cloned())
+                    {
+                        Some(texture) => {
+                            item.image(cx, ids!(lr_card.lr_thumb))
+                                .set_texture(cx, Some(texture));
+                        }
+                        None => {
+                            item.image(cx, ids!(lr_card.lr_thumb)).set_texture(cx, None);
+                            record_want(&mut self.wanted, &tile.asset);
+                        }
+                    }
+                }
+                None => {
+                    item.label(cx, ids!(lr_card.lr_title)).set_text(cx, "…");
+                    item.label(cx, ids!(lr_card.lr_meta)).set_text(cx, "");
+                    item.label(cx, ids!(lr_card.lr_alias)).set_text(cx, "");
+                    item.label(cx, ids!(lr_card.lr_when)).set_text(cx, "");
+                    item.image(cx, ids!(lr_card.lr_thumb)).set_texture(cx, None);
+                }
+            }
+            item.draw_all_unscoped(cx);
+        }
+        self.animating = animating;
+    }
+}
+
 impl Widget for CatalogGrid {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The widget's area rect is one frame behind, which is fine: a
@@ -1159,7 +1304,12 @@ impl Widget for CatalogGrid {
         if width > GRID_CARD_W {
             self.last_cols = grid_columns(width - 14.0); // scrollbar gutter
         }
-        let cols = self.last_cols.max(1);
+        let cols = self.columns();
+        // One clock for the whole grid, so a wall of sprites animates in
+        // step; `animating` records whether a CYCLING card was actually on
+        // screen this pass.
+        let now = cx.time();
+        let mut animating = false;
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             let list_ref = step.as_portal_list();
             let Some(mut list) = list_ref.borrow_mut() else {
@@ -1171,9 +1321,16 @@ impl Widget for CatalogGrid {
                 list.set_item_range(cx, 0, 1);
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if item_id == 0 {
-                        list.item(cx, item_id, id!(Empty)).draw_all_unscoped(cx);
+                        let item = list.item(cx, item_id, id!(Empty));
+                        item.label(cx, ids!(empty_note))
+                            .set_text(cx, &self.empty_note);
+                        item.draw_all_unscoped(cx);
                     }
                 }
+                continue;
+            }
+            if self.layout == CatalogLayout::Rows {
+                self.draw_rows(cx, &mut list);
                 continue;
             }
             let rows = self.rows(cols);
@@ -1220,10 +1377,16 @@ impl Widget for CatalogGrid {
                                 ids!(select.on),
                                 ids!(select.off),
                             );
-                            match self.textures.get(&tile.asset) {
+                            // A sheet-backed card cycles its cells; a still
+                            // one binds its single texture. Either way the
+                            // pixels were uploaded once, at decode.
+                            match self
+                                .frame_at(&tile.asset, now)
+                                .inspect(|_| animating = true)
+                                .or_else(|| self.textures.get(&tile.asset).cloned())
+                            {
                                 Some(texture) => {
-                                    item.image(cx, thumbs[slot])
-                                        .set_texture(cx, Some(texture.clone()));
+                                    item.image(cx, thumbs[slot]).set_texture(cx, Some(texture));
                                 }
                                 None => {
                                     item.image(cx, thumbs[slot]).set_texture(cx, None);
@@ -1250,11 +1413,21 @@ impl Widget for CatalogGrid {
                 item.draw_all_unscoped(cx);
             }
         }
+        if self.layout == CatalogLayout::Tiles {
+            self.animating = animating;
+        }
+        // Only a visible cycling card asks for another frame.
+        if self.animating {
+            cx.new_next_frame();
+        }
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+        if matches!(event, Event::NextFrame(_)) && self.animating {
+            self.view.redraw(cx);
+        }
     }
 }
 
@@ -1769,6 +1942,9 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
             "Catalog event feed is starting…".into()
         }));
     }
+    // One clock reading for the whole block: fifty rows of one feed must
+    // not disagree about how long ago "now" was.
+    let now = now_ms();
     for event in store.events.iter().take(50) {
         let subject = event
             .alias
@@ -1778,7 +1954,12 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
             .unwrap_or_else(|| event.namespace.clone());
         rows.push(StoreRow::Record {
             title: format!("#{} · {}", event.seq, event.kind.as_str()),
-            meta: format!("{} · {} · {} ms", event.namespace, subject, event.ts_ms),
+            meta: format!(
+                "{} · {} · {}",
+                event.namespace,
+                subject,
+                format_when(event.ts_ms, now)
+            ),
         });
     }
     rows
@@ -1791,80 +1972,124 @@ pub fn catalog_tiles(store: &AssetStore) -> Vec<CatalogTile> {
     let Some(results) = store.search.ready() else {
         return Vec::new();
     };
+    // One clock reading for the whole page of rows.
+    let now = now_ms();
     results
         .hits
         .iter()
         .map(|hit| {
             let kind = hit.kind.map(server_kind_label).unwrap_or("asset");
-            let live = if hit.live { "" } else { " · not live" };
+            let live = if hit.live { "live" } else { "not live" };
+            let alias = hit
+                .alias
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("{} · no alias", hit.namespace));
             CatalogTile {
                 asset: hit.asset_id.to_string(),
                 title: hit.title.clone(),
-                meta: format!("{kind}{live}"),
+                meta: format!("{kind} · {live}"),
+                alias,
+                // A server too old to send the stamp says nothing rather
+                // than claiming 1970.
+                when: if hit.updated_ms == 0 {
+                    String::new()
+                } else {
+                    format_when(hit.updated_ms, now)
+                },
                 selected: store.selected == Some(hit.asset_id),
             }
         })
         .collect()
 }
 
-/// Library catalog rows over the real typed search response.
-pub fn catalog_rows(store: &AssetStore) -> Vec<StoreRow> {
+/// What the Library says when it has no tiles to show. Disconnected,
+/// searching, failed and "nothing matches" are four different facts, and
+/// none of them is an invitation to a local library that no longer exists.
+pub fn catalog_empty_note(store: &AssetStore) -> String {
     if !store.connected() {
-        return vec![
-            StoreRow::Disconnected {
-                title: "No server catalog".into(),
-                detail: store.status_label(),
-            },
-            StoreRow::Note(
-                "The Library is the catalog: with no session there is nothing to show. Imports and generated artifacts appear here once they are published.".into(),
-            ),
-        ];
+        return format!(
+            "No catalog: {}. Imports and generated artifacts appear here once they are published.",
+            store.status_label()
+        );
     }
     match &store.search {
-        Remote::Idle => vec![StoreRow::Note("Catalog browse has not started yet.".into())],
-        Remote::Loading => vec![StoreRow::Note("Searching the server catalog…".into())],
-        Remote::Failed(error) => vec![StoreRow::Disconnected {
-            title: "Catalog request failed".into(),
-            detail: error.clone(),
-        }],
-        Remote::Ready(results) if results.hits.is_empty() => vec![StoreRow::Note(
-            "No catalog assets match the current filters.".into(),
-        )],
-        Remote::Ready(results) => {
-            let mut rows = results
-                .hits
-                .iter()
-                .map(|hit| {
-                    let kind = hit
-                        .kind
-                        .map(server_kind_label)
-                        .unwrap_or("kind unknown");
-                    let alias = hit
-                        .alias
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "no alias".into());
-                    let lifecycle = if hit.live { "published" } else { "not live" };
-                    StoreRow::Asset {
-                        title: format!("{} · {kind}", hit.title),
-                        meta: format!(
-                            "{alias} · {} · {lifecycle} · {}",
-                            hit.namespace, hit.snippet
-                        ),
-                        selected: store.selected == Some(hit.asset_id),
-                        action: RowAction::SelectAsset(hit.asset_id.to_string()),
-                    }
-                })
-                .collect::<Vec<_>>();
-            if results.more {
-                rows.push(StoreRow::Note(format!(
-                    "Showing {} of {} matches · more available on the server.",
-                    results.hits.len(), results.total
-                )));
-            }
-            rows
+        Remote::Idle => "Catalog browse has not started yet.".into(),
+        Remote::Loading => "Searching the catalog…".into(),
+        Remote::Failed(error) => format!("Catalog request failed: {error}"),
+        Remote::Ready(results) if results.hits.is_empty() => {
+            "Nothing in the catalog matches the current filters.".into()
         }
+        Remote::Ready(_) => String::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Times a person can read
+// ---------------------------------------------------------------------------
+
+/// Epoch milliseconds as a date and time.
+///
+/// The server stamps everything in epoch ms, and `1787176179804 ms` on a
+/// detail rail tells a reader nothing. Rendered UTC and LABELLED as such
+/// unless the host has told the platform what the local offset is
+/// (`set_script_local_utc_offset_secs`, unset by default) — a timestamp
+/// that silently claims to be local while it is not is worse than one that
+/// says which zone it is in.
+pub fn format_epoch_ms(ms: u64) -> String {
+    let offset = makepad_platform::script::timer::script_local_utc_offset_secs();
+    let secs = (ms / 1000) as i64 + offset;
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    let zone = if offset == 0 { "Z" } else { "" };
+    format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}{zone}")
+}
+
+/// How long ago, in the coarsest unit that still says something: "just
+/// now", "9 min ago", "2 h ago", "3 d ago". A stamp in the future (clock
+/// skew between this app and a server) says so rather than printing a
+/// negative age.
+pub fn format_age(ms: u64, now_ms: u64) -> String {
+    if ms > now_ms {
+        return "in the future".to_string();
+    }
+    let secs = (now_ms - ms) / 1000;
+    match secs {
+        0..=44 => "just now".to_string(),
+        45..=5_399 => format!("{} min ago", (secs + 30) / 60),
+        5_400..=86_399 => format!("{} h ago", (secs + 1_800) / 3_600),
+        _ => format!("{} d ago", (secs + 43_200) / 86_400),
+    }
+}
+
+/// Both, as UI text: when it happened and how long ago that was.
+pub fn format_when(ms: u64, now_ms: u64) -> String {
+    format!("{} · {}", format_epoch_ms(ms), format_age(ms, now_ms))
+}
+
+/// Wall clock now, in epoch milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+/// Days since the epoch to (year, month, day) — Howard Hinnant's
+/// `civil_from_days`, the same one the platform's script clock uses.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 pub fn short_digest(digest: &str) -> &str {
@@ -1955,40 +2180,50 @@ mod tests {
         )));
     }
 
+    /// The Library says which of the four empty states it is in. None of
+    /// them points at a local library, and a connected catalog with rows
+    /// says nothing at all — the tiles are the answer.
     #[test]
-    fn catalog_rows_are_disconnected_without_session_and_real_with_search_page() {
+    fn the_empty_state_names_the_fact_it_is_reporting() {
         let mut store = AssetStore::default();
-        assert!(matches!(
-            catalog_rows(&store)[0],
-            StoreRow::Disconnected { .. }
-        ));
+        let disconnected = catalog_empty_note(&store);
+        assert!(disconnected.starts_with("No catalog:"), "{disconnected}");
 
-        let asset_id = AssetId::from_bytes([7; 16]);
         store.server = Some(ServerInfo {
             label: "asset.example:443".into(),
             server_id: [9; 16],
         });
+        store.search = Remote::Idle;
+        assert!(catalog_empty_note(&store).contains("has not started"));
+        store.search = Remote::Loading;
+        assert!(catalog_empty_note(&store).contains("Searching"));
+        store.search = Remote::Failed("boom".into());
+        assert!(catalog_empty_note(&store).contains("boom"));
         store.search = Remote::Ready(SearchResults {
-            hits: vec![CatalogHit {
-                asset_id,
-                namespace: "game".into(),
-                kind: Some(AssetKind::Vehicle),
-                title: "Fishing Trawler".into(),
-                snippet: "weathered coast vehicle".into(),
-                score: 42,
-                live: true,
-                alias: Some("game/trawler".parse().unwrap()),
-            }],
+            hits: Vec::new(),
+            total: 0,
+            more: false,
+            facets: Vec::new(),
+        });
+        assert!(catalog_empty_note(&store).contains("Nothing in the catalog"));
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![hit_named(1, "Crate", true)],
             total: 1,
             more: false,
             facets: Vec::new(),
         });
-        let rows = catalog_rows(&store);
-        assert!(matches!(
-            &rows[0],
-            StoreRow::Asset { title, action: RowAction::SelectAsset(id), .. }
-                if title.contains("Fishing Trawler") && id == &asset_id.to_string()
-        ));
+        assert!(catalog_empty_note(&store).is_empty(), "rows speak for themselves");
+
+        for note in [
+            catalog_empty_note(&AssetStore::default()),
+            disconnected,
+        ] {
+            let lower = note.to_ascii_lowercase();
+            assert!(
+                !lower.contains("local tab") && !lower.contains("local history"),
+                "an empty catalog still must not advertise a local library: {note}"
+            );
+        }
     }
 
     fn hit_named(n: u8, title: &str, live: bool) -> CatalogHit {
@@ -2001,6 +2236,7 @@ mod tests {
             score: 10,
             live,
             alias: None,
+            updated_ms: 1_787_000_000_000,
         }
     }
 
@@ -2027,10 +2263,22 @@ mod tests {
         assert_eq!(tiles.len(), 2);
         assert_eq!(tiles[0].asset, AssetId::from_bytes([1; 16]).to_string());
         assert_eq!(tiles[0].title, "Crate");
-        assert_eq!(tiles[0].meta, "prop", "kind rides the meta line");
+        assert_eq!(tiles[0].meta, "prop · live", "kind and lifecycle");
         assert!(!tiles[0].selected);
         assert_eq!(tiles[1].meta, "prop · not live", "lifecycle is honest");
         assert!(tiles[1].selected, "the selected hit is the selected tile");
+        // A row has room for where it lives and when it last changed.
+        assert!(tiles[0].alias.contains("gen"), "{}", tiles[0].alias);
+        assert!(
+            tiles[0].when.starts_with("2026-"),
+            "a readable date, not epoch ms: {}",
+            tiles[0].when
+        );
+        // A server too old to stamp the row says nothing rather than 1970.
+        let mut old_server = store.search.ready().unwrap().clone();
+        old_server.hits[0].updated_ms = 0;
+        store.search = Remote::Ready(old_server);
+        assert!(catalog_tiles(&store)[0].when.is_empty());
     }
 
     /// The grid reserves space for the SERVER's match count, not for the
@@ -2069,46 +2317,6 @@ mod tests {
         let asked = std::mem::take(&mut wanted);
         assert_eq!(asked, vec![a, b]);
         assert!(wanted.is_empty(), "a miss is handed over once");
-    }
-
-    /// The Library surface IS the catalog. Every state it can be in must
-    /// say so on its own terms — a row that points the user at a local
-    /// History tab describes a surface that no longer exists.
-    #[test]
-    fn catalog_rows_never_offer_a_local_library() {
-        let mut store = AssetStore::default();
-        let mut seen = Vec::new();
-        seen.extend(catalog_rows(&store));
-        store.server = Some(ServerInfo {
-            label: "asset.example:443".into(),
-            server_id: [9; 16],
-        });
-        for state in [
-            Remote::Idle,
-            Remote::Loading,
-            Remote::Failed("boom".into()),
-            Remote::Ready(SearchResults {
-                hits: Vec::new(),
-                total: 0,
-                more: false,
-                facets: Vec::new(),
-            }),
-        ] {
-            store.search = state;
-            seen.extend(catalog_rows(&store));
-        }
-        for row in seen {
-            let text = match row {
-                StoreRow::Note(text) | StoreRow::Section(text) => text,
-                StoreRow::Disconnected { title, detail } => format!("{title} {detail}"),
-                other => format!("{other:?}"),
-            };
-            let lower = text.to_ascii_lowercase();
-            assert!(
-                !lower.contains("local tab") && !lower.contains("local history"),
-                "catalog row still advertises a local library: {text}"
-            );
-        }
     }
 
     fn entry(file: &str, group_id: Option<&str>, group_label: Option<&str>) -> GalleryEntry {
@@ -2521,6 +2729,50 @@ mod tests {
         assert!(cards[1].failed);
         assert!(cards[1].status.contains("GPU disconnected"));
         assert!(!cards[1].selected);
+    }
+
+    /// `1787176179804 ms` on a detail rail tells a reader nothing. Times are
+    /// rendered as a date and a time, labelled with the zone they are in.
+    #[test]
+    fn epoch_milliseconds_become_a_date_and_a_time() {
+        // The stamp from the reported screenshot.
+        assert_eq!(format_epoch_ms(1_787_176_179_804), "2026-08-19 21:49:39Z");
+        assert_eq!(format_epoch_ms(0), "1970-01-01 00:00:00Z");
+        // Leap day, and the last second of a year.
+        assert_eq!(format_epoch_ms(1_709_164_800_000), "2024-02-29 00:00:00Z");
+        assert_eq!(format_epoch_ms(1_735_689_599_000), "2024-12-31 23:59:59Z");
+        // Sub-second precision is dropped, never rounded up into the next
+        // second.
+        assert_eq!(format_epoch_ms(1_787_176_179_999), "2026-08-19 21:49:39Z");
+    }
+
+    /// The age is the part people actually read, in the coarsest unit that
+    /// still says something.
+    #[test]
+    fn ages_read_as_a_person_would_say_them() {
+        let now = 1_787_176_179_804u64;
+        let ago = |secs: u64| format_age(now - secs * 1000, now);
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(44), "just now");
+        assert_eq!(ago(45), "1 min ago");
+        assert_eq!(ago(540), "9 min ago");
+        assert_eq!(ago(5_399), "90 min ago");
+        assert_eq!(ago(5_400), "2 h ago");
+        assert_eq!(ago(7_200), "2 h ago");
+        assert_eq!(ago(86_399), "24 h ago");
+        assert_eq!(ago(172_800), "2 d ago");
+        // A server clock ahead of this app says so instead of printing a
+        // negative age.
+        assert_eq!(format_age(now + 60_000, now), "in the future");
+    }
+
+    #[test]
+    fn a_stamp_carries_both_halves() {
+        let now = 1_787_176_179_804u64;
+        assert_eq!(
+            format_when(now - 7_200_000, now),
+            "2026-08-19 19:49:39Z · 2 h ago"
+        );
     }
 
     #[test]

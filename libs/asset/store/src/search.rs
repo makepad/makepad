@@ -363,6 +363,11 @@ pub struct SearchHit {
     /// pointing at this asset; `None` when no alias does. Second key of the
     /// result order, after score and before asset id.
     pub alias: Option<String>,
+    /// When this asset's search row last changed, epoch ms — the annotation
+    /// is rewritten on every publish, so this is "last touched" as the
+    /// catalog knows it. A list that shows a date needs one per row, and a
+    /// per-row detail request to find it would be a request per row.
+    pub updated_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1264,6 +1269,7 @@ impl<'a> Search<'a> {
                 let score = s.column_u64(5);
                 let kind = read_kind_column(&s, 6)?;
                 let canon = s.column_text(7);
+                let updated_ms = s.column_u64(8);
                 let snippet = build_snippet(
                     &title,
                     &description,
@@ -1280,6 +1286,7 @@ impl<'a> Search<'a> {
                     score,
                     live,
                     alias,
+                    updated_ms,
                 });
             }
             let cursor = if more {
@@ -1560,7 +1567,7 @@ fn build_candidate_sql(
     if browse {
         sql.push_str(
             "SELECT a.asset_id, a.namespace, a.title, a.description, a.live, 0 AS score, a.kind,
-                    a.canon_alias
+                    a.canon_alias, a.updated_ms
              FROM search_annotations a WHERE 1=1",
         );
     } else {
@@ -1571,7 +1578,7 @@ fn build_candidate_sql(
         // alias terms are public, so they carry the same weight for both
         // columns of the union.
         sql.push_str(
-            ") AS score, a.kind, a.canon_alias FROM (
+            ") AS score, a.kind, a.canon_alias, a.updated_ms FROM (
                 SELECT term, asset_id, weight_public, weight_owner FROM search_postings
                 UNION ALL
                 SELECT term, asset_id, weight, weight FROM search_alias_postings
