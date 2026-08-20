@@ -170,13 +170,47 @@ fn world_source_tools_roundtrip_and_bound() {
         ContentToolCall::WorldGetSource
     );
     assert!(parse("world.get_source", obj(r#"{"x": 1}"#)).is_err());
+
+    // world.spawn: the content-add verb (§4.5 addon slice).
+    let call = parse(
+        "world.spawn",
+        obj(r#"{"model": "kenney/car-kit/ambulance"}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        call,
+        ContentToolCall::WorldSpawn {
+            model: "kenney/car-kit/ambulance".into(),
+            pos: None,
+            form: None,
+            tag: None,
+        }
+    );
+    let re = ContentToolCall::parse("world.spawn", &encode_args(&call)).unwrap();
+    assert_eq!(re, call);
+    let call = parse(
+        "world.spawn",
+        obj(r#"{"model": "kenney/nature-kit/tree_oak", "pos": [4, 0, 2], "form": "prop", "tag": "forest"}"#),
+    )
+    .unwrap();
+    let re = ContentToolCall::parse("world.spawn", &encode_args(&call)).unwrap();
+    assert_eq!(re, call);
+    assert!(parse("world.spawn", obj(r#"{}"#)).is_err(), "model required");
+    assert!(
+        parse("world.spawn", obj(r#"{"model": "x", "form": "banana"}"#)).is_err(),
+        "unknown form refuses"
+    );
+    assert!(
+        parse("world.spawn", obj(r#"{"model": "x", "near": "player"}"#)).is_err(),
+        "unknown keys refuse"
+    );
 }
 
 #[test]
 fn sandbox_definitions_are_consistent_and_disjoint_from_the_base() {
     let base = definitions();
     let extra = sandbox_definitions();
-    assert_eq!(extra.len(), 9);
+    assert_eq!(extra.len(), 10);
     for def in &extra {
         assert_eq!(
             canonical_from_api_name(def.api_name),

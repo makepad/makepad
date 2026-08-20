@@ -890,6 +890,7 @@ impl ToolExecutor for SessionTools<'_> {
                     | ContentToolCall::WorldGetSource
                     | ContentToolCall::WorldSetSource { .. }
                     | ContentToolCall::WorldSetPlayerModel { .. }
+                    | ContentToolCall::WorldSpawn { .. }
             )
     }
 

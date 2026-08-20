@@ -622,7 +622,8 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::WorldList
             | ContentToolCall::WorldGetSource
             | ContentToolCall::WorldSetSource { .. }
-            | ContentToolCall::WorldSetPlayerModel { .. } => ToolOutcome::Unavailable {
+            | ContentToolCall::WorldSetPlayerModel { .. }
+            | ContentToolCall::WorldSpawn { .. } => ToolOutcome::Unavailable {
                 reason: "catalog SQL and world tools run in a game chat session".to_string(),
             },
         }
