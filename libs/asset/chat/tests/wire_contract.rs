@@ -172,6 +172,50 @@ fn tool_outcomes_are_typed_including_unavailable() {
 }
 
 #[test]
+fn clamped_outcomes_always_decode() {
+    // The entry-22 regression: a long honest refusal must arrive truncated,
+    // never be refused wholesale as malformed by the receiving parser.
+    let long = "refused: buildings are CRAMMED — ".repeat(40);
+    assert!(long.len() > 512);
+    for o in [
+        ToolOutcome::Failed { message: long.clone() },
+        ToolOutcome::Refused { what: long.clone() },
+        ToolOutcome::Denied { what: long.clone() },
+        ToolOutcome::Unavailable { reason: long.clone() },
+    ] {
+        // Unclamped, the receiver refuses it.
+        assert!(ToolOutcome::decode(&o.encode()).is_err());
+        let clamped = o.clamped();
+        let back = ToolOutcome::decode(&clamped.encode()).expect("clamped must decode");
+        assert_eq!(back, clamped);
+        // The guidance survives (truncated, ellipsis-terminated).
+        let msg = match &back {
+            ToolOutcome::Failed { message } => message,
+            ToolOutcome::Refused { what } | ToolOutcome::Denied { what } => what,
+            ToolOutcome::Unavailable { reason } => reason,
+            ToolOutcome::Ok { .. } => unreachable!(),
+        };
+        assert!(msg.starts_with("refused: buildings"));
+        assert!(msg.ends_with('…'));
+    }
+    // Multi-byte boundary: a wall of em-dashes truncates on a char boundary.
+    let dashes = "—".repeat(400);
+    let c = ToolOutcome::Failed { message: dashes }.clamped();
+    assert!(ToolOutcome::decode(&c.encode()).is_ok());
+    // Short outcomes pass through untouched.
+    let short = ToolOutcome::Failed { message: "timeout".into() };
+    assert_eq!(short.clone().clamped(), short);
+    // An oversized Ok value downgrades to the broker's own honest bound.
+    let big = ToolOutcome::Ok {
+        value: json::obj(vec![("text", json::s("x".repeat(17 * 1024)))]),
+    };
+    assert_eq!(
+        big.clamped(),
+        ToolOutcome::Failed { message: "tool result too large".to_string() }
+    );
+}
+
+#[test]
 fn permille_range_is_enforced_on_decode() {
     let mut v = ChatEvent {
         seq: 9,

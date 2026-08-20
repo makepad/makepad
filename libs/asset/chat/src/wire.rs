@@ -364,6 +364,45 @@ impl ToolOutcome {
         Ok(())
     }
 
+    /// A copy that FITS the wire: message fields truncated to [`validate`]'s
+    /// 512-byte cap (char-boundary safe, ellipsis appended), an oversized
+    /// `Ok` value downgraded to the same honest `Failed` the broker's own
+    /// bounding uses. Senders call this before posting — `encode` does not
+    /// validate, so an unclamped long refusal reaches the receiving parser
+    /// and is refused wholesale as malformed (play-session-1 entry 22: a
+    /// 517-byte cramming refusal 400'd and the model was told the app
+    /// never answered). Truncated guidance beats undeliverable guidance.
+    pub fn clamped(self) -> Self {
+        fn cap(s: String) -> String {
+            const MAX: usize = 512;
+            if s.len() <= MAX {
+                return s;
+            }
+            let mut end = MAX - '…'.len_utf8();
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut out = s[..end].to_string();
+            out.push('…');
+            out
+        }
+        let out = match self {
+            ToolOutcome::Ok { value } => ToolOutcome::Ok { value },
+            ToolOutcome::Unavailable { reason } => {
+                ToolOutcome::Unavailable { reason: cap(reason) }
+            }
+            ToolOutcome::Denied { what } => ToolOutcome::Denied { what: cap(what) },
+            ToolOutcome::Refused { what } => ToolOutcome::Refused { what: cap(what) },
+            ToolOutcome::Failed { message } => ToolOutcome::Failed { message: cap(message) },
+        };
+        if out.validate().is_err() {
+            // Only the whole-outcome size cap can still fail here (an
+            // oversized Ok value); mirror the broker's own bounding.
+            return ToolOutcome::Failed { message: "tool result too large".to_string() };
+        }
+        out
+    }
+
     pub fn decode(v: &Value) -> Result<Self, &'static str> {
         if v.to_json().len() > MAX_TOOL_JSON_BYTES {
             return Err("outcome too large");
