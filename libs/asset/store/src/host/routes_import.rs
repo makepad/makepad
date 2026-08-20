@@ -603,6 +603,7 @@ fn parse_media(name: &str) -> Option<MediaType> {
         MediaType::Bin,
         MediaType::Text,
         MediaType::Ply,
+        MediaType::Mp3,
     ]
     .into_iter()
     .find(|m| media_str(*m) == name)
