@@ -691,6 +691,7 @@ fn derived_result_of(body: &Value) -> RouteResult<DerivedResult> {
             width: body_u64(t, "width").ok_or(Fail::Http(400, "malformed thumbnail"))? as u32,
             height: body_u64(t, "height").ok_or(Fail::Http(400, "malformed thumbnail"))? as u32,
             byte_len: body_u64(t, "byte_len").ok_or(Fail::Http(400, "malformed thumbnail"))?,
+            views: Vec::new(),
         }),
     };
     let metrics = metrics_of(body)?;

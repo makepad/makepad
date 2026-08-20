@@ -14,14 +14,14 @@ use makepad_asset_data::*;
 /// source collection, import revision, watchtower asset id, watchtower
 /// revision, LOD recipe, LOD variant, variant set, resolved map.
 const GOLDENS: [&str; 8] = [
-    "scol_a77b204d8de1db015c1731287410d15e36313e16faf89f49ad927cee869f708b",
-    "irev_ee1869877b15fa2c43cf8c01b8471f692fae75b403a06ce2f9e1c6d02b9c006c",
+    "scol_44582f1165340930de7e2fae219368cfe76881a4e3450add375635d588eb2572",
+    "irev_c1ca2284ec180d5b1a9d4baded72c3a0dfdc0029416f5b65967b05359b6f643c",
     "ast_chopwwsh6hze3ik23elgiamm24",
-    "arev_1aed69c2a72fb9333d9a180cf620d920ae798e390d3277f2c1bfaf7fd7abd3bb",
-    "recp_72893a0892e117ea112126008df4c7fe9f48aa152d07ba2be532f1370b428048",
-    "dvar_0b854a77affbfb1952b2c464cc93011589ca516c016a6de038fb1a5bb380bbca",
-    "vset_3e45ea19e0ac6411cd4d15b89f638cace99a5e8ad54f04291ccd052c5e4e1660",
-    "rmap_b2dd5ea4adeb74f54cc2acadf28a6c1daa1168c411208f59655e500aac228684",
+    "arev_d42a8fda380a647b1370dc9f9aebc0230a7647eca69ec3f8ec6112c66ae0a11a",
+    "recp_0bab90f146b206a3cfa0a924d524684a39b2384ceeca25ad5a3fb8da6571c2f4",
+    "dvar_eea6fdb11518c5816706698bcecc83f084744e61baabfe7f40ce2b26399b8a65",
+    "vset_aa441791256de2141ec46e8dc1996fe743a74830c1747badb80f7627943757b5",
+    "rmap_198e11276e6ada7dc33ac303135b2d2dd384b6008ef8b8440fc1f126c756359d",
 ];
 
 #[test]

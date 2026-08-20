@@ -2937,6 +2937,7 @@ fn billboard_asset(
                     width: d.width,
                     height: d.height,
                     byte_len: t.byte_len,
+                    views: Vec::new(),
                 },
             })
         }
@@ -3313,6 +3314,7 @@ fn mesh_asset(
                 width: dims.width,
                 height: dims.height,
                 byte_len: thumb.byte_len,
+                views: Vec::new(),
             },
         }),
         metrics: Metrics {

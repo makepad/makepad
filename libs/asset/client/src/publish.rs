@@ -35,7 +35,7 @@ use makepad_asset_data::{
     Anchor, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
     AssetRevisionRef, Axis, BlobId, Bounds, Capabilities, CoordinateSystem, DerivativePolicy,
     DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, Provenance, Redistribution,
-    Rights, ThumbnailMedia, ThumbnailMeta, Vec3,
+    Rights, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
 };
 
 /// The playable media file being published.
@@ -78,12 +78,32 @@ pub struct PublishProvenance {
 }
 
 /// The mandatory preview image (PNG or JPEG, 256–4096 px per side).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// One picture. [`views`](Self::views) declares what its regions ARE — the
+/// spectrogram and wave halves of an audio composite, the packed cell layout
+/// of a sprite sheet — so consumers read the layout off the manifest instead
+/// of measuring pixels. A producer that has nothing to declare leaves it
+/// empty, which is what every publication meant before the field existed.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PublishThumbnail {
     pub bytes: Vec<u8>,
     pub media: ThumbnailMedia,
     pub width: u32,
     pub height: u32,
+    pub views: Vec<ThumbnailView>,
+}
+
+impl PublishThumbnail {
+    /// A picture with nothing declared about its regions.
+    pub fn plain(bytes: Vec<u8>, media: ThumbnailMedia, width: u32, height: u32) -> Self {
+        Self { bytes, media, width, height, views: Vec::new() }
+    }
+
+    /// The same picture, declaring what its regions are.
+    pub fn with_views(mut self, views: Vec<ThumbnailView>) -> Self {
+        self.views = views;
+        self
+    }
 }
 
 /// The explicit typed rights declaration of a publication — the COMPLETE
@@ -238,7 +258,7 @@ impl PublishRights {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PublishRequest {
     pub namespace: String,
     pub kind: AssetKind,
@@ -366,6 +386,7 @@ impl PublishRequest {
                 width: self.thumbnail.width,
                 height: self.thumbnail.height,
                 byte_len: self.thumbnail.bytes.len() as u64,
+                views: self.thumbnail.views.clone(),
             }),
             metrics: Metrics {
                 total_bytes: self.artifact.bytes.len() as u64
@@ -710,6 +731,7 @@ impl PublishBundle {
                 width: self.thumbnail.width,
                 height: self.thumbnail.height,
                 byte_len: self.thumbnail.bytes.len() as u64,
+                views: self.thumbnail.views.clone(),
             }),
             metrics: Metrics {
                 total_bytes,
@@ -1073,6 +1095,7 @@ mod tests {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         }
     }
 
