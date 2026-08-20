@@ -1025,6 +1025,240 @@ impl Widget for RunTray {
 }
 
 // ---------------------------------------------------------------------------
+// Catalog grid (the Library's tile view)
+// ---------------------------------------------------------------------------
+
+/// Grid card layout constants; `grid_columns` derives the per-row card count
+/// from the width the grid actually received.
+pub const GRID_CARD_W: f64 = 150.0;
+pub const GRID_GAP: f64 = 8.0;
+/// Card slots available in the Row template (c1..c8); extra width on very
+/// wide windows becomes margin instead of a ninth column.
+pub const GRID_MAX_COLS: usize = 8;
+
+pub fn grid_columns(width: f64) -> usize {
+    (((width + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as usize).clamp(1, GRID_MAX_COLS)
+}
+
+/// One catalog asset as the grid draws it. Everything here came from the
+/// server: there is no local row behind a tile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogTile {
+    /// Asset id, canonical string form — the identity textures and clicks
+    /// are keyed by.
+    pub asset: String,
+    pub title: String,
+    pub meta: String,
+    pub selected: bool,
+}
+
+/// Wrapping thumbnail grid over a catalog result set.
+///
+/// The range is the SERVER's total, not the number of rows that happen to
+/// have arrived: the scrollbar covers the whole result set from the first
+/// paint, and rows still in flight draw as placeholders that fill in as the
+/// walk lands them. A grid that only ever showed its first page is exactly
+/// what "not even a complete list" meant.
+///
+/// Thumbnails are digest-named store objects, decoded once and held as
+/// textures keyed by asset id; a tile without one records a miss and shows
+/// the neutral card until the app installs it.
+#[derive(Script, ScriptHook, Widget)]
+pub struct CatalogGrid {
+    #[deref]
+    view: View,
+    #[rust]
+    tiles: Vec<CatalogTile>,
+    /// Rows the result set has server-side, capped by what the app will
+    /// hold. Never below `tiles.len()`.
+    #[rust]
+    total: usize,
+    #[rust]
+    textures: HashMap<String, Texture>,
+    /// Assets whose thumbnail the last draw wanted and did not have.
+    #[rust]
+    wanted: Vec<String>,
+    /// Columns used on the last draw — the click handler needs the same
+    /// row-major mapping that layout used.
+    #[rust(4usize)]
+    pub last_cols: usize,
+    /// Set when the RESULT SET changed rather than its contents: the next
+    /// draw pins the viewport back to the top, so a narrowed filter never
+    /// leaves the user staring past the end of the new results.
+    #[rust]
+    reset_scroll: bool,
+}
+
+impl CatalogGrid {
+    /// `total` is the server's match count for the current filter; the grid
+    /// reserves space for it while the pages walk in.
+    pub fn set_tiles(&mut self, cx: &mut Cx, tiles: Vec<CatalogTile>, total: usize) {
+        let total = total.max(tiles.len());
+        if self.tiles != tiles || self.total != total {
+            self.tiles = tiles;
+            self.total = total;
+            self.view.redraw(cx);
+        }
+    }
+
+    /// Drop every decoded thumbnail (a wipe, or a reconnect to another
+    /// server): the digests behind them no longer describe this catalog.
+    pub fn clear_thumbnails(&mut self, cx: &mut Cx) {
+        self.textures.clear();
+        self.wanted.clear();
+        self.view.redraw(cx);
+    }
+
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        self.reset_scroll = true;
+        self.view.redraw(cx);
+    }
+
+    /// Assets the last draw wanted a picture for, newest request last.
+    pub fn take_wanted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.wanted)
+    }
+
+    pub fn install_thumb(&mut self, cx: &mut Cx, asset: String, texture: Texture) {
+        self.textures.insert(asset, texture);
+        self.view.redraw(cx);
+    }
+
+    pub fn has_thumb(&self, asset: &str) -> bool {
+        self.textures.contains_key(asset)
+    }
+
+    pub fn tile_at(&self, index: usize) -> Option<CatalogTile> {
+        self.tiles.get(index).cloned()
+    }
+
+    pub fn rows(&self, cols: usize) -> usize {
+        grid_rows(self.total, cols)
+    }
+}
+
+/// Rows a result set of `total` tiles needs at `cols` per row. Always at
+/// least one, so an empty catalog still has a row to draw its empty card in.
+pub fn grid_rows(total: usize, cols: usize) -> usize {
+    total.div_ceil(cols.max(1)).max(1)
+}
+
+/// Record a tile's missing thumbnail exactly once per pass: a card drawn on
+/// every frame must not queue the same fetch on every frame.
+pub fn record_want(wanted: &mut Vec<String>, asset: &str) {
+    if !wanted.iter().any(|have| have == asset) {
+        wanted.push(asset.to_string());
+    }
+}
+
+impl Widget for CatalogGrid {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // The widget's area rect is one frame behind, which is fine: a
+        // resize re-chunks the rows on the next frame.
+        let width = self.view.area().rect(cx).size.x;
+        if width > GRID_CARD_W {
+            self.last_cols = grid_columns(width - 14.0); // scrollbar gutter
+        }
+        let cols = self.last_cols.max(1);
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            let list_ref = step.as_portal_list();
+            let Some(mut list) = list_ref.borrow_mut() else {
+                continue;
+            };
+            if self.total == 0 {
+                // Draw the empty card once; skipping later yielded ids ends
+                // the viewport-fill walk.
+                list.set_item_range(cx, 0, 1);
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if item_id == 0 {
+                        list.item(cx, item_id, id!(Empty)).draw_all_unscoped(cx);
+                    }
+                }
+                continue;
+            }
+            let rows = self.rows(cols);
+            if self.reset_scroll {
+                self.reset_scroll = false;
+                list.set_first_id_and_scroll(0, 0.0);
+            } else if list.first_id() >= rows {
+                list.set_first_id_and_scroll(rows - 1, 0.0);
+            }
+            list.set_item_range(cx, 0, rows);
+            let slots = [
+                ids!(c1), ids!(c2), ids!(c3), ids!(c4),
+                ids!(c5), ids!(c6), ids!(c7), ids!(c8),
+            ];
+            let titles = [
+                ids!(c1.grid_title), ids!(c2.grid_title), ids!(c3.grid_title),
+                ids!(c4.grid_title), ids!(c5.grid_title), ids!(c6.grid_title),
+                ids!(c7.grid_title), ids!(c8.grid_title),
+            ];
+            let thumbs = [
+                ids!(c1.grid_thumb), ids!(c2.grid_thumb), ids!(c3.grid_thumb),
+                ids!(c4.grid_thumb), ids!(c5.grid_thumb), ids!(c6.grid_thumb),
+                ids!(c7.grid_thumb), ids!(c8.grid_thumb),
+            ];
+            while let Some(row_id) = list.next_visible_item(cx) {
+                if row_id >= rows {
+                    continue;
+                }
+                let item = list.item(cx, row_id, id!(Row));
+                for slot in 0..GRID_MAX_COLS {
+                    let index = row_id * cols + slot;
+                    let visible = slot < cols && index < self.total;
+                    item.view(cx, slots[slot]).set_visible(cx, visible);
+                    if !visible {
+                        continue;
+                    }
+                    match self.tiles.get(index) {
+                        Some(tile) => {
+                            item.label(cx, titles[slot]).set_text(cx, &tile.title);
+                            item.view(cx, slots[slot]).toggle_state(
+                                cx,
+                                tile.selected,
+                                Animate::No,
+                                ids!(select.on),
+                                ids!(select.off),
+                            );
+                            match self.textures.get(&tile.asset) {
+                                Some(texture) => {
+                                    item.image(cx, thumbs[slot])
+                                        .set_texture(cx, Some(texture.clone()));
+                                }
+                                None => {
+                                    item.image(cx, thumbs[slot]).set_texture(cx, None);
+                                    record_want(&mut self.wanted, &tile.asset);
+                                }
+                            }
+                        }
+                        // Reserved space for a row the walk has not reached
+                        // yet: an honest empty card, never a stand-in for
+                        // some other asset.
+                        None => {
+                            item.label(cx, titles[slot]).set_text(cx, "…");
+                            item.image(cx, thumbs[slot]).set_texture(cx, None);
+                            item.view(cx, slots[slot]).toggle_state(
+                                cx,
+                                false,
+                                Animate::No,
+                                ids!(select.on),
+                                ids!(select.off),
+                            );
+                        }
+                    }
+                }
+                item.draw_all_unscoped(cx);
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Flattened rows for Runs+Workers / Admin / server catalog lists
 // ---------------------------------------------------------------------------
 
@@ -1550,6 +1784,29 @@ pub fn admin_rows(store: &AssetStore) -> Vec<StoreRow> {
     rows
 }
 
+/// Library TILES over the real typed search response: one card per hit,
+/// in the order the server ranked them. Kind and lifecycle ride the meta
+/// line — a picture plus a name is what a person scans a catalog with.
+pub fn catalog_tiles(store: &AssetStore) -> Vec<CatalogTile> {
+    let Some(results) = store.search.ready() else {
+        return Vec::new();
+    };
+    results
+        .hits
+        .iter()
+        .map(|hit| {
+            let kind = hit.kind.map(server_kind_label).unwrap_or("asset");
+            let live = if hit.live { "" } else { " · not live" };
+            CatalogTile {
+                asset: hit.asset_id.to_string(),
+                title: hit.title.clone(),
+                meta: format!("{kind}{live}"),
+                selected: store.selected == Some(hit.asset_id),
+            }
+        })
+        .collect()
+}
+
 /// Library catalog rows over the real typed search response.
 pub fn catalog_rows(store: &AssetStore) -> Vec<StoreRow> {
     if !store.connected() {
@@ -1732,6 +1989,86 @@ mod tests {
             StoreRow::Asset { title, action: RowAction::SelectAsset(id), .. }
                 if title.contains("Fishing Trawler") && id == &asset_id.to_string()
         ));
+    }
+
+    fn hit_named(n: u8, title: &str, live: bool) -> CatalogHit {
+        CatalogHit {
+            asset_id: AssetId::from_bytes([n; 16]),
+            namespace: "gen".into(),
+            kind: Some(AssetKind::Prop),
+            title: title.into(),
+            snippet: "a thing".into(),
+            score: 10,
+            live,
+            alias: None,
+        }
+    }
+
+    /// A tile is one catalog hit: its identity is the asset id (which is
+    /// what the thumbnail and the click are keyed by), and nothing on it
+    /// comes from a local row.
+    #[test]
+    fn tiles_are_catalog_hits_keyed_by_asset_id() {
+        let mut store = AssetStore::default();
+        assert!(catalog_tiles(&store).is_empty(), "no session, no tiles");
+        store.server = Some(ServerInfo {
+            label: "asset.example:443".into(),
+            server_id: [9; 16],
+        });
+        let selected = AssetId::from_bytes([2; 16]);
+        store.search = Remote::Ready(SearchResults {
+            hits: vec![hit_named(1, "Crate", true), hit_named(2, "Barrel", false)],
+            total: 2,
+            more: false,
+            facets: Vec::new(),
+        });
+        store.selected = Some(selected);
+        let tiles = catalog_tiles(&store);
+        assert_eq!(tiles.len(), 2);
+        assert_eq!(tiles[0].asset, AssetId::from_bytes([1; 16]).to_string());
+        assert_eq!(tiles[0].title, "Crate");
+        assert_eq!(tiles[0].meta, "prop", "kind rides the meta line");
+        assert!(!tiles[0].selected);
+        assert_eq!(tiles[1].meta, "prop · not live", "lifecycle is honest");
+        assert!(tiles[1].selected, "the selected hit is the selected tile");
+    }
+
+    /// The grid reserves space for the SERVER's match count, not for the
+    /// rows that happen to have arrived: the scrollbar covers the whole
+    /// result set from the first paint, which is what "not even a complete
+    /// list" was about.
+    #[test]
+    fn the_grid_row_range_covers_the_whole_result_set() {
+        assert_eq!(grid_rows(0, 4), 1, "an empty catalog still draws one row");
+        assert_eq!(grid_rows(1000, 4), 250);
+        assert_eq!(grid_rows(1000, 8), 125);
+        assert_eq!(grid_rows(1000, 3), 334, "a partial last row still counts");
+        assert_eq!(grid_rows(1000, 0), 1000, "a zero column count cannot divide by zero");
+        // Columns follow the width the grid was given, bounded by the card
+        // slots the row template has.
+        assert_eq!(grid_columns(0.0), 1);
+        assert_eq!(grid_columns(GRID_CARD_W), 1);
+        assert_eq!(grid_columns(2.0 * GRID_CARD_W + GRID_GAP), 2);
+        assert_eq!(grid_columns(10_000.0), GRID_MAX_COLS);
+    }
+
+    /// Thumbnails are bound by asset id — the identity of the digest-named
+    /// store object behind the tile — so a picture can never land on the
+    /// wrong card, and a tile without one asks for it exactly once.
+    #[test]
+    fn thumbnails_bind_by_asset_and_are_asked_for_once() {
+        let a = AssetId::from_bytes([1; 16]).to_string();
+        let b = AssetId::from_bytes([2; 16]).to_string();
+        let mut wanted = Vec::new();
+        // Every frame redraws the same cards; the fetch is queued once.
+        for _ in 0..5 {
+            record_want(&mut wanted, &a);
+            record_want(&mut wanted, &b);
+        }
+        assert_eq!(wanted, vec![a.clone(), b.clone()]);
+        let asked = std::mem::take(&mut wanted);
+        assert_eq!(asked, vec![a, b]);
+        assert!(wanted.is_empty(), "a miss is handed over once");
     }
 
     /// The Library surface IS the catalog. Every state it can be in must

@@ -49,11 +49,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const EVENT_LOG_CAP: usize = 200;
 /// One search page. The server caps at MAX_SEARCH_LIMIT (100); more rows
 /// exist server-side when `SearchResults::more` is set.
-pub const SEARCH_PAGE_SIZE: u32 = 60;
+pub const SEARCH_PAGE_SIZE: u32 = 100;
 
 /// Facet rows the Library asks for. The dropdown shows the most-used labels
 /// first and a long tail helps nobody find anything.
 pub const SEARCH_FACETS: u32 = 24;
+
+/// How many rows of one result set the Library holds. A catalog can be far
+/// larger than anything a person scrolls; past this the count label says so
+/// rather than the app quietly pretending the rest does not exist.
+pub const MAX_CATALOG_ROWS: usize = 4096;
 
 /// The full content-contract kind vocabulary, for the server kind filter.
 pub const SERVER_KINDS: [AssetKind; 13] = [
@@ -169,6 +174,10 @@ pub struct AssetStore {
     pub filters: ServerFilters,
     pub search: Remote<SearchResults>,
     search_req: Option<RequestId>,
+    /// The in-flight search is a CONTINUATION of the result set already on
+    /// screen, not a new one: its page appends instead of replacing, and
+    /// the view never blanks while the walk runs.
+    search_continuation: bool,
     next_cursor: Option<PageCursor>,
     pub selected: Option<AssetId>,
     pub detail: Remote<AssetDetailDto>,
@@ -355,16 +364,26 @@ impl AssetStore {
             self.refresh_after_events = false;
             self.submit_search();
         }
+        // Belt for the walk: a page whose request was cancelled (a filter
+        // changed mid-flight) leaves a cursor with nothing in flight, and
+        // the result set would sit half-loaded forever.
+        if self.search_req.is_none() && self.next_cursor.is_some() {
+            let loaded = self.search.ready().map_or(0, |results| results.hits.len());
+            if loaded < MAX_CATALOG_ROWS {
+                self.submit_next_page();
+                changed = true;
+            }
+        }
         changed
     }
 
-    /// (Re)run the catalog search for the current filters; empty text is
-    /// browse mode. The previous in-flight request is cancelled.
-    pub fn submit_search(&mut self) {
-        let query = CatalogQuery {
-            // The Library's facet row is the catalog's own label counts, so
-            // every search asks for them; nothing else in the app does.
-            facets: SEARCH_FACETS,
+    /// The catalog query for the current filters. Facets are counted only
+    /// for the FIRST page: they describe the whole result set already, and
+    /// re-counting them for every continuation would pay for the same
+    /// answer over and over.
+    fn catalog_query(&self, first: bool) -> CatalogQuery {
+        CatalogQuery {
+            facets: if first { SEARCH_FACETS } else { 0 },
             text: self.filters.text.trim().to_string(),
             namespace: None,
             kind: self.filters.kind,
@@ -373,13 +392,23 @@ impl AssetStore {
             exclude_tag: None,
             creator: None,
             live_only: false,
+            // The SAME page size for every page of a walk: a cursor is
+            // bound to the exact query shape that minted it, page size
+            // included, so a "bigger continuation page" is a refused cursor.
             page_size: SEARCH_PAGE_SIZE,
-        };
+        }
+    }
+
+    /// (Re)run the catalog search for the current filters; empty text is
+    /// browse mode. The previous in-flight request is cancelled.
+    pub fn submit_search(&mut self) {
+        let query = self.catalog_query(true);
         let Some(handles) = &mut self.handles else { return };
         if let Some(previous) = self.search_req.take() {
             handles.catalog.cancel(previous);
         }
         self.next_cursor = None;
+        self.search_continuation = false;
         match handles.catalog.submit(ClientRequest::CatalogSearch {
             query,
             cursor: None,
@@ -390,6 +419,41 @@ impl AssetStore {
             }
             Err(error) => self.search = Remote::Failed(error.to_string()),
         }
+    }
+
+    /// Ask for the next page of the SAME result set. The rows already on
+    /// screen stay exactly where they are; this is what lets the Library
+    /// show the whole catalog instead of a first page with a wall at the
+    /// bottom of it.
+    fn submit_next_page(&mut self) {
+        let Some(cursor) = self.next_cursor.take() else {
+            return;
+        };
+        let query = self.catalog_query(false);
+        let Some(handles) = &mut self.handles else { return };
+        match handles.catalog.submit(ClientRequest::CatalogSearch {
+            query,
+            cursor: Some(cursor),
+        }) {
+            Ok(id) => {
+                self.search_req = Some(id);
+                self.search_continuation = true;
+            }
+            // A refused continuation leaves the rows that DID arrive alone
+            // and simply stops the walk; the count line still says how many
+            // of the total are shown.
+            Err(error) => {
+                log!("asset store: catalog walk stopped: {error}");
+                self.search_continuation = false;
+            }
+        }
+    }
+
+    /// Rows held for the current filter, and whether the walk is still
+    /// running. Render inputs for the grid's range and its count line.
+    pub fn catalog_loaded(&self) -> (usize, bool) {
+        let loaded = self.search.ready().map_or(0, |results| results.hits.len());
+        (loaded, self.next_cursor.is_some() || self.search_continuation)
     }
 
     /// Take the assets catalog events touched since the last call.
@@ -601,12 +665,35 @@ impl AssetStore {
                     (0, ClientOutput::CatalogPage(page)) => {
                         self.search_req = None;
                         self.next_cursor = page.next.clone();
-                        self.search = Remote::Ready(SearchResults {
-                            more: page.next.is_some(),
-                            hits: page.hits,
-                            total: page.total,
-                            facets: page.facets,
-                        });
+                        let more = page.next.is_some();
+                        let continuation = std::mem::take(&mut self.search_continuation);
+                        match (&mut self.search, continuation) {
+                            // A continuation appends: the rows on screen are
+                            // the same result set, one page longer.
+                            (Remote::Ready(existing), true) => {
+                                existing.hits.extend(page.hits);
+                                existing.total = page.total;
+                                existing.more = more;
+                            }
+                            _ => {
+                                self.search = Remote::Ready(SearchResults {
+                                    more,
+                                    hits: page.hits,
+                                    total: page.total,
+                                    facets: page.facets,
+                                });
+                            }
+                        }
+                        // Keep walking immediately rather than on the next
+                        // UI tick: the whole result set is what the grid's
+                        // scrollbar is sized for, and at a fifth of a second
+                        // per page a real catalog would take a minute to
+                        // arrive.
+                        let loaded =
+                            self.search.ready().map_or(0, |results| results.hits.len());
+                        if self.next_cursor.is_some() && loaded < MAX_CATALOG_ROWS {
+                            self.submit_next_page();
+                        }
                         // A vanished selection stays selected but its detail
                         // panel reloads honestly on the next click.
                     }
@@ -622,6 +709,8 @@ impl AssetStore {
                     // protocol-level surprise — surface it, don't guess.
                     (0, other) => {
                         self.search_req = None;
+                        self.search_continuation = false;
+                        self.next_cursor = None;
                         self.search = Remote::Failed(format!("unexpected output {other:?}"));
                     }
                     (1, other) => {
@@ -639,6 +728,11 @@ impl AssetStore {
                 match slot {
                     0 => {
                         self.search_req = None;
+                        // Whatever went wrong, the walk is over: leaving the
+                        // continuation flag set would tell the Library it is
+                        // still loading, forever.
+                        self.search_continuation = false;
+                        self.next_cursor = None;
                         self.search = Remote::Failed(error.to_string());
                     }
                     1 => {
@@ -1558,6 +1652,8 @@ mod tests {
             },
         );
         request.alias = Some(makepad_asset_data::AssetAlias::from_str(alias).unwrap());
+        // One label, so tests can see the facet the catalog counts.
+        request.categories = vec!["test".to_string()];
         client.publish_artifact(&request).expect("publish").asset_id
     }
 
@@ -1632,6 +1728,69 @@ mod tests {
             !store.search.ready().unwrap().hits.iter().any(|hit| hit.asset_id == asset_id),
             "retirement must hold on a FRESH server search, not just the optimistic local edit"
         );
+    }
+
+    /// The Library shows the WHOLE result set, not its first page. The walk
+    /// pages through the catalog on its own until every match is held (or
+    /// the app's cap is reached), so the grid's scrollbar covers everything
+    /// and scrolling never hits a "load more" wall. It must also terminate:
+    /// one page in flight at a time, and the cursor runs out.
+    #[test]
+    fn the_catalog_walk_covers_the_whole_result_set_and_stops() {
+        let (server, token) = start_isolated_server("walk_ui");
+        // More assets than one page holds, so the walk has to run.
+        let published = SEARCH_PAGE_SIZE as usize + 7;
+        for i in 0..published {
+            publish_test_asset(&server, &token, &format!("gen/walk-{i:03}"), i as u8);
+        }
+
+        let mut store = AssetStore::default();
+        connect_store_to(&mut store, &server, &token);
+        // The first page landed during connect; the rest walk in.
+        poll_until(&mut store, "the walk to finish", |store| {
+            let (loaded, walking) = store.catalog_loaded();
+            !walking && loaded > 0
+        });
+
+        let results = store.search.ready().expect("a result set");
+        assert_eq!(
+            results.total as usize, published,
+            "the server's own count of the matches"
+        );
+        assert_eq!(
+            results.hits.len(),
+            published,
+            "every match is held, not just the first page"
+        );
+        assert!(!results.more, "no page is left behind");
+        let unique: std::collections::HashSet<AssetId> =
+            results.hits.iter().map(|hit| hit.asset_id).collect();
+        assert_eq!(unique.len(), published, "the walk never repeats a row");
+        let facet = results
+            .facets
+            .iter()
+            .find(|facet| facet.label == "test")
+            .expect("facets counted once, on the first page, and kept through the walk");
+        assert_eq!(
+            facet.count as usize, published,
+            "a facet counts the whole result set, not the page it rode in on"
+        );
+
+        // Settled: polling again neither grows the set nor starts a request.
+        for _ in 0..5 {
+            store.poll();
+        }
+        assert_eq!(store.search.ready().unwrap().hits.len(), published);
+        assert_eq!(store.catalog_loaded(), (published, false));
+
+        // A new filter starts a new result set from the first page rather
+        // than appending to the old one.
+        store.filters.text = "nothing-matches-this".into();
+        store.submit_search();
+        poll_until(&mut store, "the narrowed search", |store| {
+            matches!(&store.search, Remote::Ready(r) if r.total == 0)
+        });
+        assert!(store.search.ready().unwrap().hits.is_empty(), "no stale rows survive");
     }
 
     #[test]
