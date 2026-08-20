@@ -1388,6 +1388,18 @@ pub fn asset_ui_home() -> PathBuf {
     checkout_root().join("local/asset-ui")
 }
 
+/// Where THIS instance's client-side blob caches live: the
+/// `ASSET_UI_ASSET_CACHE` parent when set, else the app home. Every cache an
+/// instance opens must be under this root — a cache at a fixed repo path is
+/// owned by whichever process got there first, and a second instance (an
+/// isolated-store test run beside the operator's live one) then fails every
+/// store fetch with "cache root is owned by another process".
+pub fn instance_cache_parent() -> PathBuf {
+    env_alias(&["ASSET_UI_ASSET_CACHE", "AI_CONTENT_ASSET_CACHE"])
+        .map(PathBuf::from)
+        .unwrap_or_else(asset_ui_home)
+}
+
 pub(crate) fn default_asset_server_root() -> PathBuf {
     if let Ok(root) = std::env::var("AI_CONTENT_ASSET_ROOT") {
         return PathBuf::from(root);
