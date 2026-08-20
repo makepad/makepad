@@ -1874,6 +1874,47 @@ fn collect_tensor_bindings(
     // ignored packed latents and decoded to gray mush.
     let last_use = tensor_last_use_plan(ctx, graph, plan);
     let mut planner = GraphBindingPlanner::new(ctx.used_mem(), reuse_cooldown());
+
+    // Tensors that no node writes carry bytes that arrive BEFORE the graph
+    // runs: host inputs are copied straight into the buffer at their planned
+    // offset by execute(). Resolved lazily at first use, such a tensor can be
+    // handed a range an earlier node already owns — Qwen3.5's
+    // `hybrid_decode.inp_out_ids` was allocated at plan index 140 over a slot
+    // released at index 81, so the layer-2 delta-net activation overwrote the
+    // host-written row index; the final GET_ROWS then gathered out of range,
+    // hidden state and logits came back all-zero, and argmax fell on the last
+    // vocab id (a [PAD] token) for every generated token. Give them their
+    // slots at index 0, before anything can be released into.
+    let mut written: BTreeSet<TensorId> = BTreeSet::new();
+    for node in &plan.nodes {
+        written.insert(node.node_id);
+        written.insert(node.output_id);
+    }
+    let storage_root = |mut id: TensorId| {
+        for _ in 0..8 {
+            match tensors.get(id).and_then(|tensor| tensor.view_src) {
+                Some(src) => id = src,
+                None => break,
+            }
+        }
+        id
+    };
+    planner.set_now(0);
+    for node in &plan.nodes {
+        let node_srcs: Vec<TensorId> = tensors
+            .get(node.node_id)
+            .map(|tensor| tensor.src.iter().flatten().copied().collect())
+            .unwrap_or_default();
+        for src in node_srcs
+            .into_iter()
+            .chain(node.fuse_src_ids.iter().copied())
+        {
+            if !written.contains(&src) && !written.contains(&storage_root(src)) {
+                planner.resolve_tensor_offset(tensors, src)?;
+            }
+        }
+    }
+
     for (index, node) in plan.nodes.iter().enumerate() {
         planner.set_now(index);
         if let Some(tensor) = tensors.get(node.node_id) {
@@ -4263,7 +4304,7 @@ fn dispatch_mul_mat(
             .descriptor
             .constants
             .iter()
-            .find(|constant| constant.idx == 602)
+            .find(|constant| constant.idx == 601)
             .and_then(|constant| match constant.value {
                 FunctionConstantValue::Int16(value) => Some(i32::from(value)),
                 _ => None,
@@ -5182,16 +5223,7 @@ fn dispatch_flash_attn_ext(
         .find(|stage| stage.descriptor.base_name == "kernel_flash_attn_ext_pad");
 
     if use_vec {
-        let stage_main = node
-            .stages
-            .iter()
-            .find(|stage| {
-                stage
-                    .descriptor
-                    .base_name
-                    .starts_with("kernel_flash_attn_ext_vec_")
-            })
-            .ok_or_else(|| "flash_attn_ext is missing vec main stage".to_string())?;
+        let stage_main = main_stage(node, tensor.op)?;
         let stage_reduce = node
             .stages
             .iter()
@@ -5353,20 +5385,14 @@ fn dispatch_flash_attn_ext(
         );
     }
 
-    let stage_main = node
-        .stages
-        .iter()
-        .find(|stage| {
-            stage
-                .descriptor
-                .base_name
-                .starts_with("kernel_flash_attn_ext_")
-                && !stage
-                    .descriptor
-                    .base_name
-                    .starts_with("kernel_flash_attn_ext_vec_")
-        })
-        .ok_or_else(|| "flash_attn_ext is missing main stage".to_string())?;
+    // Pick the attention kernel by stage KIND. Matching on the name prefix
+    // also matched the aux `kernel_flash_attn_ext_pad` / `..._blk` stages,
+    // which the selector pushes FIRST: the "main" dispatch then re-ran the
+    // block-mask kernel with the attention kernel's arguments, so the
+    // attention output was never written and the layer consumed whatever
+    // stale bytes sat in its slot (prefill batches >= 20 take this path —
+    // the model stayed fluent but answered from corrupted attention).
+    let stage_main = main_stage(node, tensor.op)?;
     let stage_blk = node
         .stages
         .iter()
@@ -6113,8 +6139,8 @@ mod tests {
     use super::*;
     use crate::context::Context;
     use crate::core::{InitParams, ScaleMode, SortOrder};
-    use crate::f16_to_f32;
-    use crate::f32_to_f16;
+    use makepad_ai_cuda::quant::f16_to_f32;
+    use makepad_ai_cuda::quant::f32_to_f16;
     use crate::graph::Graph;
     use crate::op::{GluOp, Op, UnaryOp};
     use crate::tensor::{ggml_row_size_for_type, BufferUsage, TensorType};
