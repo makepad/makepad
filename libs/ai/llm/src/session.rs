@@ -1275,22 +1275,41 @@ fn sampling_probabilities(logits: &[f32], params: LlamaSamplingParams) -> Result
         *value /= sum;
     }
 
-    // Rank once, then apply top-k and top-p on the same ordering.
+    // Rank once, then apply top-k and top-p on the same ordering. Sorting the
+    // whole vocabulary is not affordable here: it is 248320 entries on
+    // Qwen3.8 and the speculative path ranks `n_draft + n_verify` rows per
+    // round, which costs more than the forward passes themselves. A nucleus
+    // wide enough to matter is tiny, so partition to a candidate cap first
+    // (O(V)) and sort only that; if the nucleus genuinely needs more than the
+    // cap, fall back to the exact full ranking.
+    const CANDIDATE_CAP: usize = 1024;
     let mut order: Vec<u32> = (0..probs.len() as u32).collect();
-    let keep = if params.top_k > 0 {
+    let by_prob = |probs: &[f32], a: &u32, b: &u32| probs[*b as usize].total_cmp(&probs[*a as usize]);
+    let mut keep = if params.top_k > 0 {
         params.top_k.min(probs.len())
     } else {
         probs.len()
     };
+    let top_p = params.top_p.clamp(0.0, 1.0);
+    let mut capped = false;
+    if top_p < 1.0 {
+        let cap = keep.min(CANDIDATE_CAP);
+        if cap < keep {
+            capped = true;
+            keep = cap;
+        }
+    }
     if keep < probs.len() {
-        order.select_nth_unstable_by(keep - 1, |a, b| {
-            probs[*b as usize].total_cmp(&probs[*a as usize])
-        });
+        order.select_nth_unstable_by(keep - 1, |a, b| by_prob(&probs, a, b));
         order.truncate(keep);
     }
-    order.sort_unstable_by(|a, b| probs[*b as usize].total_cmp(&probs[*a as usize]));
+    order.sort_unstable_by(|a, b| by_prob(&probs, a, b));
+    if capped && order.iter().map(|token| probs[*token as usize]).sum::<f32>() < top_p {
+        // The nucleus is wider than the cap — redo exactly.
+        order = (0..probs.len() as u32).collect();
+        order.sort_unstable_by(|a, b| by_prob(&probs, a, b));
+    }
 
-    let top_p = params.top_p.clamp(0.0, 1.0);
     let mut cumulative = 0.0f32;
     let mut cut = order.len();
     if top_p < 1.0 {
@@ -2420,5 +2439,47 @@ mod argmax_tests {
         let mut logits = vec![f32::NEG_INFINITY; 8];
         logits[5] = 0.0;
         assert_eq!(argmax_token_id(&logits).unwrap(), 5);
+    }
+}
+
+#[cfg(test)]
+mod nucleus_tests {
+    use super::{sampling_probabilities, LlamaSamplingParams};
+
+    fn params(top_p: f32) -> LlamaSamplingParams {
+        LlamaSamplingParams {
+            temperature: 1.0,
+            top_p,
+            top_k: 0,
+            seed: 7,
+        }
+    }
+
+    /// The candidate cap must not change the answer: a nucleus wider than the
+    /// cap has to fall back to the exact ranking. A near-uniform vocabulary
+    /// larger than CANDIDATE_CAP with top_p 0.99 is exactly that case.
+    #[test]
+    fn wide_nucleus_falls_back_to_the_exact_ranking() {
+        let vocab = 4096;
+        let logits: Vec<f32> = (0..vocab).map(|i| (i % 7) as f32 * 1e-3).collect();
+        let probs = sampling_probabilities(&logits, params(0.99)).unwrap();
+        let kept = probs.iter().filter(|p| **p > 0.0).count();
+        assert!(kept > 1024, "kept {kept}, expected the full nucleus");
+        assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn narrow_nucleus_matches_the_full_sort() {
+        let mut logits = vec![0.0f32; 4096];
+        logits[10] = 24.0;
+        logits[20] = 23.0;
+        logits[30] = 22.0;
+        let probs = sampling_probabilities(&logits, params(0.9)).unwrap();
+        // The three peaks carry all the mass, so the nucleus is just them and
+        // it fits well inside the candidate cap.
+        assert!(probs[10] > 0.0 && probs[20] > 0.0);
+        assert_eq!(probs[0], 0.0);
+        assert_eq!(probs.iter().filter(|p| **p > 0.0).count(), 2);
+        assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-5);
     }
 }

@@ -3764,10 +3764,15 @@ extern "C" cudaError_t mkllm_gated_delta_net(
         size_t q_h_elems, size_t q_t_elems, size_t q_s_elems,
         size_t k_h_elems, size_t k_t_elems, size_t k_s_elems,
         size_t v_h_elems, size_t v_t_elems, size_t v_s_elems,
+        int state_checkpoints,
         cudaStream_t stream) {
     if (sv % 32 != 0 || sv > 256) {
         return cudaErrorInvalidValue;
     }
+    // Non-zero => write one state per token, `sv*sv*h*n_seqs` floats apart.
+    const int64_t state_ckpt_stride = state_checkpoints
+        ? (int64_t) sv * sv * h * n_seqs
+        : 0;
     const bool official_sv = sv == 16 || sv == 32 || sv == 64 || sv == 128;
     const bool official_ok = official_sv && q_heads == k_heads
         && q_h_elems == k_h_elems && q_t_elems == k_t_elems
@@ -3786,7 +3791,7 @@ extern "C" cudaError_t mkllm_gated_delta_net(
                 (float *) dst, sv, h, n_tokens, n_seqs,
                 (int64_t) q_h_elems, (int64_t) q_t_elems, (int64_t) q_s_elems,
                 (int64_t) v_h_elems, (int64_t) v_t_elems, (int64_t) v_s_elems,
-                sb1, sb2, sb3, q_heads, rq3, scale, stream);
+                sb1, sb2, sb3, q_heads, rq3, scale, state_ckpt_stride, stream);
         } else {
             launch_gated_delta_net<false>(
                 (const float *) q, (const float *) k, (const float *) v,
@@ -3794,9 +3799,14 @@ extern "C" cudaError_t mkllm_gated_delta_net(
                 (float *) dst, sv, h, n_tokens, n_seqs,
                 (int64_t) q_h_elems, (int64_t) q_t_elems, (int64_t) q_s_elems,
                 (int64_t) v_h_elems, (int64_t) v_t_elems, (int64_t) v_s_elems,
-                sb1, sb2, sb3, q_heads, rq3, scale, stream);
+                sb1, sb2, sb3, q_heads, rq3, scale, state_ckpt_stride, stream);
         }
         return cudaGetLastError();
+    }
+    if (state_checkpoints) {
+        // Only the official kernel emits per-token states; fail closed rather
+        // than silently leaving the checkpoint rows unwritten.
+        return cudaErrorInvalidValue;
     }
     const int cols_per_block = 4;
     dim3 block(32, cols_per_block);
