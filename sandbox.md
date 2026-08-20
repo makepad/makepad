@@ -90,6 +90,16 @@ enterable, villagers wandering, tokens + wallclock. "Great" = both
 prompts, cold, produce something you'd actually play — and survive the
 iteration benchmark's follow-up edits (§4.5).
 
+**The mundane-asks harness** (checked in, `apps/sandbox/tools/
+mundane-suite`) is the mechanized form of this scoring: `cargo test -p
+makepad-mundane-suite` = the deterministic tier (canned tool sequences
+against the headless world-tools executor — routing, continuity,
+refusal shapes); `mundane_suite --offline` prints the whole ask table;
+`MUNDANE_BROKER=… mundane_suite --live` runs the asks through a real
+broker + fleet, one session at a time. The ask list is DATA
+(`asks.toml`, user-extendable); recurring live-sweep failure shapes get
+promoted into it. See the crate README for scoring columns.
+
 ## 4. The iteration doctrine — fix at the cheapest layer
 
 Every failure is a diagnosis of WHICH layer to improve. All layers are in
@@ -135,6 +145,44 @@ invariants on every benchmark run, creation and iteration alike.
 The iteration log (`local/agent_state/sandbox-llm/loop.md`) records, per
 iteration: prompt, what Qwen did, screenshot, verdict, which layer was
 fixed. That log is the map of what a local 27B needs to be a level designer.
+
+## 4.4 The lego architecture — how the AI knows what is what
+
+What the village convergence settled into is a layered vocabulary of
+PREBUILT WHOLES, each layer teaching the one above it:
+
+1. **Import = normalize to declared facts.** Every set arrives on the
+   shared contract: complete-model roles, footprints + per-set scale
+   (canonical meters, round 2), spawn anchors, actor placements
+   (.place), turntable views. Vendor quirks die here — the catalog
+   only ever speaks the contract.
+2. **Vision annotation = semantics.** The turntable sheets pass through
+   the VLM into dense construction lines + role/category/connectivity
+   tags — versioned, idempotent, hard-replaceable. This is literally
+   "the AI knows what each asset IS".
+3. **Catalog SQL = retrieval.** The facts from 1+2 are queryable; the
+   taught query patterns surface complete-object rows first.
+4. **Context = the recipe.** The big-lego law: compose PREBUILT wholes
+   by tier — streamed WORLDS (game.map) ≻ complete BUILDINGS ≻ props ≻
+   vehicles ≻ characters. Named known-good assets with measured scales,
+   spacing laws, the two verbs (create base / emit addon). Piece-level
+   assembly is absent by default and swaps in only on explicit user
+   intent — and returns properly as an ENGINE-owned assembly construct,
+   never freehand.
+5. **Engine = wrong things inexpressible.** Ground-snap by construction,
+   shell-piece refusal (with the intent escape), kill-plane, missing
+   model renders nothing, generic mode verbs. The best validator is an
+   API where the mistake has no syntax.
+6. **Judge = the rubric as regression tests.** Integrity assertions +
+   the human rubric ("would a person call this a village?") + rendered
+   screenshot checks, run per cycle like unit tests; a teaching change
+   that regresses them is reverted like bad code.
+
+Failures route DOWN the stack to the cheapest layer that owns them —
+retrieval failures fix the query patterns, semantics failures re-prompt
+the annotator, geometry failures move into the engine. The same six
+layers serve every domain: villages today, doom/quake/duke worlds
+through game.map, mixups through the shared actor vocabulary.
 
 ## 4.5 Iterating a live world — base + addon scripts
 
