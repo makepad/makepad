@@ -48,6 +48,19 @@ pub fn f16_weights_enabled() -> bool {
     )
 }
 
+/// Did the operator ASK for f16, as opposed to just not saying anything?
+///
+/// The default above is a Metal-shaped default. A store where f16 weights are
+/// a pessimisation (CUDA — no f16-weight x f32-activation GEMM in cuBLAS)
+/// wants "off unless explicitly requested" rather than "on unless explicitly
+/// refused", without losing the operator's ability to force the comparison.
+pub fn f16_weights_requested() -> bool {
+    matches!(
+        std::env::var("MAKEPAD_STEMS_F16").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// The loaded model: one ggml arena holding every weight, plus the name index.
 pub struct StemsWeights {
     pub ctx: Context,
@@ -62,11 +75,20 @@ impl StemsWeights {
     }
 
     pub fn load_with_extra(path: impl AsRef<Path>, extra_bytes: usize) -> Result<Self> {
+        Self::load_with_options(path, extra_bytes, f16_weights_enabled())
+    }
+
+    /// As [`Self::load_with_extra`], with the matmul-weight precision decided
+    /// by the caller (which knows which device store it is loading for).
+    pub fn load_with_options(
+        path: impl AsRef<Path>,
+        extra_bytes: usize,
+        f16: bool,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut state = PthStateDict::load(&path)
             .map_err(|e| DiffusionError::model(format!("stems checkpoint {}: {e}", path.display())))?;
         let plan = weight_plan();
-        let f16 = f16_weights_enabled();
         let total = plan_total_bytes(&plan, f16, extra_bytes)?;
         let mut ctx = Context::new(InitParams {
             mem_size: total,

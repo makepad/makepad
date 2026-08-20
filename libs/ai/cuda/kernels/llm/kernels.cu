@@ -3705,24 +3705,32 @@ static __global__ void mkllm_binary_kernel(
         size_t d_nb0, size_t d_nb1, size_t d_nb2, size_t d_nb3) {
     const int i0 = blockIdx.x * blockDim.x + threadIdx.x;
     if (i0 >= ne0) return;
-    const int i1 = blockIdx.y % ne1;
-    const int i23 = blockIdx.y / ne1;
-    const int i2 = i23 % ne2;
-    const int i3 = i23 / ne2;
-    const float av = *(const float *) (a + (size_t) i3 * a_nb3 + (size_t) i2 * a_nb2
-        + (size_t) i1 * a_nb1 + (size_t) i0 * a_nb0);
-    const float bv = *(const float *) (b + (size_t) (i3 % b_ne3) * b_nb3
-        + (size_t) (i2 % b_ne2) * b_nb2 + (size_t) (i1 % b_ne1) * b_nb1
-        + (size_t) (i0 % b_ne0) * b_nb0);
-    float r;
-    switch (op) {
-        case MKLLM_BIN_ADD: r = av + bv; break;
-        case MKLLM_BIN_SUB: r = av - bv; break;
-        case MKLLM_BIN_MUL: r = av * bv; break;
-        default: r = av / bv; break;
+    // Rows on y, higher dims on z, each grid-strided: ne1 * ne2 * ne3 packed
+    // into one grid dimension overflows the 65535 limit on y/z at shapes this
+    // runtime really produces (BS-RoFormer's trunk is [384, 1101, 62], so the
+    // packed form asks for 68262 blocks and the launch fails outright with
+    // "invalid argument"). Striding keeps every shape launchable.
+    const int n23 = ne2 * ne3;
+    for (int i23 = blockIdx.z; i23 < n23; i23 += gridDim.z) {
+        const int i2 = i23 % ne2;
+        const int i3 = i23 / ne2;
+        for (int i1 = blockIdx.y; i1 < ne1; i1 += gridDim.y) {
+            const float av = *(const float *) (a + (size_t) i3 * a_nb3 + (size_t) i2 * a_nb2
+                + (size_t) i1 * a_nb1 + (size_t) i0 * a_nb0);
+            const float bv = *(const float *) (b + (size_t) (i3 % b_ne3) * b_nb3
+                + (size_t) (i2 % b_ne2) * b_nb2 + (size_t) (i1 % b_ne1) * b_nb1
+                + (size_t) (i0 % b_ne0) * b_nb0);
+            float r;
+            switch (op) {
+                case MKLLM_BIN_ADD: r = av + bv; break;
+                case MKLLM_BIN_SUB: r = av - bv; break;
+                case MKLLM_BIN_MUL: r = av * bv; break;
+                default: r = av / bv; break;
+            }
+            *(float *) (dst + (size_t) i3 * d_nb3 + (size_t) i2 * d_nb2 + (size_t) i1 * d_nb1
+                + (size_t) i0 * d_nb0) = r;
+        }
     }
-    *(float *) (dst + (size_t) i3 * d_nb3 + (size_t) i2 * d_nb2 + (size_t) i1 * d_nb1
-        + (size_t) i0 * d_nb0) = r;
 }
 
 extern "C" cudaError_t mkllm_binary(
@@ -3734,7 +3742,11 @@ extern "C" cudaError_t mkllm_binary(
         size_t d_nb0, size_t d_nb1, size_t d_nb2, size_t d_nb3,
         cudaStream_t stream) {
     dim3 block(256);
-    dim3 grid((ne0 + 255) / 256, ne1 * ne2 * ne3);
+    const unsigned max_dim = 65535;
+    dim3 grid(
+        (unsigned) ((ne0 + 255) / 256),
+        (unsigned) (ne1 > 0 ? (ne1 < (int) max_dim ? ne1 : (int) max_dim) : 1),
+        (unsigned) (ne2 * ne3 > 0 ? (ne2 * ne3 < (int) max_dim ? ne2 * ne3 : (int) max_dim) : 1));
     mkllm_binary_kernel<<<grid, block, 0, stream>>>(
         (const uint8_t *) a, (const uint8_t *) b, (uint8_t *) dst, op,
         ne0, ne1, ne2, ne3, b_ne0, b_ne1, b_ne2, b_ne3,
