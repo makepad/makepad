@@ -9,7 +9,7 @@ cat: character
 role: standalone
 conn: none
 size: tall
-age: one word from: child young adult old
+age: one word from: child young adult old — grey or white hair, a grey/white beard, baldness or wrinkles read as old
 build: one word from: slim average heavy broad
 hair: 1 to 3 words: bald, or the hair's length/shape (short long ponytail bun braid curly) and its colour
 face: 1 to 3 words for facial features and headwear from: beard moustache stubble glasses sunglasses mask hat helmet cap hood crown clean
