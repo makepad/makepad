@@ -92,7 +92,27 @@ use crate::pipeline::{
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 // The shared preview widgets: the same set the VJ and DJ surfaces adopt.
-use makepad_asset_widgets::{AudioAction, ContentPreview, PreviewContent};
+use makepad_asset_widgets::{AudioAction, ClipFormat, ContentPreview, PreviewContent};
+
+/// Which container a track's bytes are in. The well does not sniff — the
+/// host is the one that knows what it fetched, from the catalog's own
+/// content type, with the file name as a second opinion.
+fn clip_format(path: &std::path::Path, content_type: &str) -> Option<ClipFormat> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match (content_type, ext.as_str()) {
+        (t, _) if t.contains("mpeg") || t.contains("mp3") => Some(ClipFormat::Mp3),
+        (t, _) if t.contains("ogg") || t.contains("vorbis") => Some(ClipFormat::Ogg),
+        (t, _) if t.contains("wav") => Some(ClipFormat::Wav),
+        (_, "mp3") => Some(ClipFormat::Mp3),
+        (_, "ogg") => Some(ClipFormat::Ogg),
+        (_, "wav") => Some(ClipFormat::Wav),
+        _ => None,
+    }
+}
 use crate::store_views::{
     admin_rows, candidate_cards, catalog_tiles, format_bytes, format_when,
     runs_rows,
@@ -223,6 +243,85 @@ script_mod! {
         draw_bg +: {
             color_focus: #x14283c
             border_color_focus: #x3d9bf066
+        }
+    }
+    // The two view glyphs are DRAWN, not typed. Borrowed box-drawing
+    // characters gave the app a lopsided single rectangle for "tiles"
+    // against three clean lines for "list" — not a pair. Both are SDF now:
+    // the chip is a fixed 30x24 box, and each glyph is a 12x12 block laid
+    // out from the RECT CENTRE, so neither can drift and the active style
+    // (which only moves colours) cannot move them either.
+    let ViewGlyphChip = ViewChip{
+        text: ""
+        width: 30
+        height: 24
+        padding: 0
+        draw_bg +: {
+            color_glyph: uniform(#x6f7883)
+            color_glyph_hover: uniform(#xe6ebf0)
+            color_glyph_focus: uniform(#x7db8f0)
+        }
+    }
+    // Tiles: a classic 2x2 grid — four 5px rounded squares, 2px gutters.
+    let ViewGridChip = ViewGlyphChip{
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let edge = self.border_size
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_down, self.down)
+                let ink = self.color_glyph
+                    .mix(self.color_glyph_focus, self.focus)
+                    .mix(self.color_glyph_hover, self.hover)
+                sdf.box(edge, edge, self.rect_size.x - edge * 2.0, self.rect_size.y - edge * 2.0, self.border_radius)
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, edge)
+                // The glyph block is 12x12 laid out from the rect centre.
+                let gx = self.rect_size.x * 0.5 - 6.0
+                let gy = self.rect_size.y * 0.5 - 6.0
+                sdf.box(gx, gy, 5.0, 5.0, 0.75)
+                sdf.box(gx + 7.0, gy, 5.0, 5.0, 0.75)
+                sdf.box(gx, gy + 7.0, 5.0, 5.0, 0.75)
+                sdf.box(gx + 7.0, gy + 7.0, 5.0, 5.0, 0.75)
+                sdf.fill(ink)
+                return sdf.result
+            }
+        }
+    }
+    // List: three 2px rounded bars across the same 12x12 block.
+    let ViewRowsChip = ViewGlyphChip{
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let edge = self.border_size
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                let stroke = self.border_color
+                    .mix(self.border_color_focus, self.focus)
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_down, self.down)
+                let ink = self.color_glyph
+                    .mix(self.color_glyph_focus, self.focus)
+                    .mix(self.color_glyph_hover, self.hover)
+                sdf.box(edge, edge, self.rect_size.x - edge * 2.0, self.rect_size.y - edge * 2.0, self.border_radius)
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, edge)
+                let gx = self.rect_size.x * 0.5 - 6.0
+                let gy = self.rect_size.y * 0.5 - 6.0
+                sdf.box(gx, gy, 12.0, 2.0, 0.5)
+                sdf.box(gx, gy + 5.0, 12.0, 2.0, 0.5)
+                sdf.box(gx, gy + 10.0, 12.0, 2.0, 0.5)
+                sdf.fill(ink)
+                return sdf.result
+            }
         }
     }
 
@@ -756,20 +855,32 @@ script_mod! {
     // Library tile: one catalog asset, its thumbnail streamed from the
     // store by digest. No file drag handle — a catalog asset is not a file
     // on this machine until something asks for it.
+    // Sized by the Rust side every draw: the row divides the panel width
+    // among its columns so a wall of cards spans the whole panel instead of
+    // leaving a growing gutter down the right. The numbers here are the
+    // shape, not the size.
     let CatalogCell = GalleryCard{
-        width: 150 height: 126
-        flow: Down spacing: 4
-        padding: 5
-        View{
-            width: 140 height: 88
+        width: 150 height: 150
+        flow: Down spacing: 6
+        padding: 9
+        grid_thumb_box := View{
+            width: Fill height: 88
             align: Align{x: 0.5 y: 0.5}
             grid_thumb := ThumbFitImage{}
         }
+        // Exactly two lines, reserved whether the title needs them or not,
+        // so no card's text straddles its own bottom edge and every card in
+        // a row is the same height. A longer title ends in an ellipsis
+        // rather than a half-drawn third line.
         grid_title := Label{
             width: Fill
+            height: 26
+            max_lines: 2
+            text_overflow: TextOverflow.Ellipsis
             draw_text +: {
                 color: #xc6cfd8
                 text_style: theme.font_regular{font_size: 8}
+                wrap: TextWrap.Word
             }
         }
     }
@@ -810,6 +921,8 @@ script_mod! {
                         width: Fill height: Fit flow: Down spacing: 2
                         lr_title := Label{
                             width: Fill
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
                             draw_text +: {
                                 color: #xdfe6ec
                                 text_style: theme.font_bold{font_size: 9}
@@ -1825,10 +1938,13 @@ script_mod! {
                             nav_runs := SurfaceTab{ text: "RUNS + WORKERS" }
                             nav_admin := SurfaceTab{ text: "ADMIN + AUDIT" }
                             View{ width: Fill height: Fit }
+                            // The ONE place the store address is written.
+                            // Quiet grey, not alarm red: which host answered
+                            // is reference, not news.
                             remote_connection := Label{
                                 text: "SERVER · DISCONNECTED"
                                 draw_text +: {
-                                    color: #xc47d74
+                                    color: #x6a7178
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
@@ -2257,33 +2373,57 @@ script_mod! {
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 6
                                     align: Align{y: 0.5}
-                                    lib_search := FilterInput{ width: 250 empty_text: "Search the catalog: title, alias, category, tag…" }
+                                    lib_search := FilterInput{ width: 250 empty_text: "Search the catalog: title, alias, #tag…" }
                                     FieldCaption{ text: "Kind" }
                                     lib_kind_drop := FieldDrop{ width: 150 }
-                                    FieldCaption{ text: "Label" }
+                                    FieldCaption{ text: "Tags" }
                                     lib_label_drop := FieldDrop{ width: 220 }
                                     lib_clear_btn := GhostButton{ text: "Clear" }
                                     // The two glyphs every asset browser uses:
                                     // a grid of squares, and stacked lines.
-                                    lib_grid_btn := ViewChip{ text: "▦" }
-                                    lib_list_btn := ViewChip{ text: "☰" }
+                                    lib_grid_btn := ViewGridChip{}
+                                    lib_list_btn := ViewRowsChip{}
                                     lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
                                 View{
                                     width: Fill height: Fill flow: Right spacing: 8
                                     lib_catalog_page := View{
                                         width: Fill height: Fill flow: Down spacing: 6
-                                        lib_server_note := HintLabel{ width: Fill text: "" }
-                                        View{
-                                            width: Fill height: Fit flow: Right spacing: 6
+                                        // The catalog starts straight under the
+                                        // filters: nothing stands between what
+                                        // the user typed and what it found.
+                                        lib_grid := mod.widgets.CatalogGrid{}
+                                        // Maintenance: ONE box at the foot of
+                                        // the panel holding every control that
+                                        // trims the store — the retention
+                                        // switch, the run status, the cancel
+                                        // and the collect. Destructive, rare,
+                                        // and no longer floating in the
+                                        // catalog's prime real estate.
+                                        gc_group := RoundedView{
+                                            width: Fill height: Fit flow: Right spacing: 8
                                             align: Align{y: 0.5}
-                                            gc_retain_check := CheckBox{ text: "keep newest 3 per asset" }
+                                            padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
+                                            draw_bg +: {
+                                                color: #x121215
+                                                border_color: #xffffff10
+                                                border_size: 1.0
+                                                border_radius: 3.0
+                                            }
+                                            FieldCaption{ width: Fit text: "Maintenance" }
+                                            gc_retain_check := CheckBox{
+                                                text: "trim history: keep newest 3 revisions"
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
                                             View{ width: Fill height: Fit }
                                             gc_status := HintLabel{ width: Fit text: "" }
                                             gc_cancel_btn := GhostButton{ text: "Cancel GC" visible: false }
                                             gc_collect_btn := DangerButton{ text: "Collect garbage" }
                                         }
-                                        lib_grid := mod.widgets.CatalogGrid{}
                                     }
                                     // Selected-item rail: prompt + provenance +
                                     // revision/publish detail and the actions.
@@ -8208,7 +8348,7 @@ impl App {
                             // the cells cycle on the card. Anything else is a
                             // still.
                             if frames.len() > 1 {
-                                grid.install_anim(cx, asset.clone(), frames.clone());
+                                grid.install_anim(cx, asset.clone(), frames.clone(), fps);
                             } else {
                                 grid.install_thumb(cx, asset.clone(), texture.clone());
                             }
@@ -8730,8 +8870,14 @@ impl App {
         if let Some(kind) = &self.lib_filters.kind {
             parts.push(format!("kind {kind}"));
         }
-        if let Some((_, label)) = &self.lib_filters.label {
-            parts.push(format!("label {label}"));
+        // Name the vocabulary the pick came from: a category and a tag can
+        // carry the same word, and a delete confirmation must say which one
+        // it is about.
+        if let Some((kind, label)) = &self.lib_filters.label {
+            parts.push(match kind {
+                makepad_asset_client::FacetKind::Category => format!("category {label}"),
+                makepad_asset_client::FacetKind::Tag => format!("tag #{label}"),
+            });
         }
         if parts.is_empty() {
             "the current filter".to_string()
@@ -9073,23 +9219,22 @@ impl App {
                 .into_iter()
                 .find(|candidate| server_kind_label(*candidate) == label)
         });
-        // A picked facet is the filter its own vocabulary uses: the server
-        // matches categories and tags through separate label rows.
-        let (category, tag) = match &self.lib_filters.label {
-            Some((makepad_asset_client::FacetKind::Category, label)) => {
-                (Some(label.clone()), None)
-            }
-            Some((makepad_asset_client::FacetKind::Tag, label)) => (None, Some(label.clone())),
-            None => (None, None),
-        };
-        let server_changed = self.store.filters.text != query
+        // The search box speaks both vocabularies: `#word` is a tag filter,
+        // everything else is free text. A picked facet is the filter its own
+        // vocabulary uses — the server matches categories and tags through
+        // separate label rows.
+        let terms = catalog_filter_terms(&query, self.lib_filters.label.as_ref());
+        let CatalogFilterTerms { category, tag, text } = terms;
+        let server_changed = self.store.filters.text != text
             || self.store.filters.kind != server_kind
             || self.store.filters.category != category
             || self.store.filters.tag != tag;
-        self.store.filters.text = query.clone();
+        self.store.filters.text = text;
         self.store.filters.kind = server_kind;
         self.store.filters.category = category;
         self.store.filters.tag = tag;
+        // `lib_filters.query` stays what the user TYPED: it is what the
+        // confirm popups quote back and what the view signature watches.
         self.lib_filters.query = query;
         if server_changed {
             self.store.submit_search();
@@ -9131,7 +9276,7 @@ impl App {
             .ready()
             .map(|results| results.facets.clone())
             .unwrap_or_default();
-        let mut label_rows = vec!["all labels".to_string()];
+        let mut label_rows = vec!["all tags".to_string()];
         label_rows.extend(facets.iter().map(facet_row_text));
         let label_row = facet_row(&facets, self.lib_filters.label.as_ref());
         let label_drop = self.ui.drop_down2(cx, ids!(lib_label_drop));
@@ -9181,12 +9326,9 @@ impl App {
         retire_btn.set_text(cx, &format!("× Retire {shown} shown"));
         retire_btn.set_enabled(cx, filter_active && shown > 0);
 
-        // Server pane: the actual discovery/auth/session state and typed
-        // catalog rows. Empty/loading/failure are intentionally distinct.
-        let server_note = self.store.status_label();
-        self.ui
-            .label(cx, ids!(lib_server_note))
-            .set_text(cx, &server_note);
+        // The session/server state is written ONCE, in the nav bar's
+        // `remote_connection`. The Library used to repeat it inside the
+        // panel; two copies of one address is one too many.
         // Tiles: one card per catalog asset, sized to the SERVER's match
         // count so the scrollbar covers the whole result set while the walk
         // fills it in.
@@ -9489,23 +9631,31 @@ impl App {
             }
         }
 
-        // Audio: the spectrogram IS the picture, and the transport under it
+        // Audio: the DJ player. The catalog thumbnail goes up instantly and
+        // the well then draws the REAL file — its own waveform to scrub, its
+        // own spectrogram behind the toggle — while the transport under it
         // plays the payload the store handed over.
         let is_audio = item
             .as_ref()
             .map(|item| item.meta.content_type.starts_with("audio/"))
             .unwrap_or(false);
         if is_audio {
+            let mut clip = None;
             if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
                 if self.library_audio_file.as_deref() != Some(file.as_str()) {
-                    let loaded = std::fs::read(&path)
-                        .ok()
-                        .and_then(|bytes| crate::audio::parse_wav(&bytes).ok())
+                    let bytes = std::fs::read(&path).ok();
+                    let loaded = bytes
+                        .as_deref()
+                        .and_then(|bytes| crate::audio::parse_wav(bytes).ok())
                         .map(crate::audio::load)
                         .unwrap_or(false);
                     if loaded {
                         self.library_audio_file = Some(file.clone());
                     }
+                    // The same bytes the mixer got, handed to the well to
+                    // draw. Only on a CHANGE of track: re-sending them every
+                    // playhead tick would restart the decode worker forever.
+                    clip = bytes.zip(clip_format(&path, &item.as_ref().unwrap().meta.content_type));
                 }
             }
             let picture = self.preview_texture(cx, &asset_key);
@@ -9514,6 +9664,7 @@ impl App {
                 cx,
                 PreviewContent::Audio {
                     picture,
+                    clip,
                     fraction: crate::audio::playhead_fraction(),
                     playing,
                     position: crate::audio::format_time(crate::audio::playhead_secs()),
@@ -11309,7 +11460,7 @@ impl MatchEvent for App {
             }
         }
         if let Some(index) = self.ui.drop_down2(cx, ids!(lib_label_drop)).changed(actions) {
-            // Row 0 is "all labels"; every other row is one counted facet.
+            // Row 0 is "all tags"; every other row is one counted facet.
             let picked = facet_at(&self.lib_label_options, index);
             if picked != self.lib_filters.label {
                 self.lib_filters.label = picked;
@@ -12772,7 +12923,7 @@ fn library_view_signature(filters: &LibraryFilters) -> String {
     )
 }
 
-/// The Library's label dropdown: row 0 is "all labels", row `n + 1` is
+/// The Library's tag dropdown: row 0 is "all tags", row `n + 1` is
 /// facet `n`. Reading and writing that offset lives here so the render and
 /// the click can never disagree about it.
 fn facet_at(
@@ -12785,7 +12936,7 @@ fn facet_at(
 }
 
 /// Which row shows a picked facet, or 0 when the pick is not in this result
-/// set (a filter can narrow it away) — the dropdown then reads "all labels"
+/// set (a filter can narrow it away) — the dropdown then reads "all tags"
 /// rather than pointing at some other label.
 fn facet_row(
     facets: &[makepad_asset_client::CatalogFacet],
@@ -12801,7 +12952,9 @@ fn facet_row(
 }
 
 /// One dropdown row: a `#` marks the tag vocabulary (categories carry no
-/// prefix) and the server's count follows the label.
+/// prefix) and the server's count follows the label. The prefix is the same
+/// notation the search box accepts — see [`parse_search_box`] — so reading
+/// the dropdown teaches typing the filter.
 fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
     format!(
         "{}{}   {}",
@@ -12812,6 +12965,224 @@ fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
         facet.label,
         facet.count
     )
+}
+
+/// What one Library search box means: the `#tag` filters it names, and the
+/// free text left over.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SearchBox {
+    /// Every `#word` typed, `#` stripped and case-folded, in typed order and
+    /// without repeats. All of them are REQUIRED — `#music #ambient` is an
+    /// AND, never an OR.
+    tags: Vec<String>,
+    /// Everything that was not a `#word`, whitespace-normalised.
+    text: String,
+}
+
+/// Split a Library search box into `#tag` filters and free text.
+///
+/// A bare `#` names no tag, so it stays text rather than silently doing
+/// nothing. Tags are case-folded because the catalog's tag vocabulary is
+/// lower-case; free text is left as typed and the server folds it.
+fn parse_search_box(input: &str) -> SearchBox {
+    let mut tags: Vec<String> = Vec::new();
+    let mut words: Vec<&str> = Vec::new();
+    for word in input.split_whitespace() {
+        match word.strip_prefix('#') {
+            Some(tag) if !tag.is_empty() => {
+                let tag = tag.to_lowercase();
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            _ => words.push(word),
+        }
+    }
+    SearchBox { tags, text: words.join(" ") }
+}
+
+/// The catalog query a search box and a picked facet add up to.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CatalogFilterTerms {
+    /// Structured category filter — only the dropdown can set this. `#` is
+    /// tag notation, so a typed `#doom` never lands here even when a
+    /// category `doom` exists.
+    category: Option<String>,
+    /// Structured tag filter: the one exact tag the catalog query holds.
+    tag: Option<String>,
+    /// Lexical query text the server AND-s term by term.
+    text: String,
+}
+
+/// Fold the search box and the picked facet into one catalog query.
+///
+/// The catalog query holds exactly ONE structured tag, so the first typed
+/// tag with no other home takes it and the rest ride the lexical index —
+/// the server indexes every tag word as a public term and requires ALL
+/// query terms, so a second `#tag` still narrows. Nothing typed is dropped:
+/// a discarded tag would silently WIDEN the result set.
+fn catalog_filter_terms(
+    input: &str,
+    picked: Option<&(makepad_asset_client::FacetKind, String)>,
+) -> CatalogFilterTerms {
+    let parsed = parse_search_box(input);
+    let (category, picked_tag) = match picked {
+        Some((makepad_asset_client::FacetKind::Category, label)) => (Some(label.clone()), None),
+        Some((makepad_asset_client::FacetKind::Tag, label)) => (None, Some(label.clone())),
+        None => (None, None),
+    };
+    let mut typed = parsed.tags.iter();
+    let tag = match picked_tag {
+        Some(picked) => Some(picked),
+        None => typed.next().cloned(),
+    };
+    let mut text = parsed.text;
+    for extra in typed {
+        // The one already carried by the structured filter adds nothing.
+        if Some(extra) == tag.as_ref() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(extra);
+    }
+    // The server builds its lexical index from ASCII-alphanumeric runs and
+    // REFUSES a non-empty query that yields no term at all — a bare `#` came
+    // back as "server refused: 400 invalid input". `#` is the notation this
+    // box teaches, so the half-typed prefix on the way to `#music` must not
+    // flash an error: text with nothing searchable in it is not a search.
+    if !text.chars().any(|c| c.is_ascii_alphanumeric()) {
+        text.clear();
+    }
+    CatalogFilterTerms { category, tag, text }
+}
+
+#[cfg(test)]
+mod search_box_tests {
+    use super::*;
+    use makepad_asset_client::FacetKind;
+
+    fn terms(input: &str) -> CatalogFilterTerms {
+        catalog_filter_terms(input, None)
+    }
+
+    #[test]
+    fn an_empty_box_filters_nothing() {
+        assert_eq!(parse_search_box(""), SearchBox::default());
+        assert_eq!(parse_search_box("   "), SearchBox::default());
+        assert_eq!(terms(""), CatalogFilterTerms::default());
+    }
+
+    #[test]
+    fn a_bare_word_stays_free_text() {
+        let parsed = parse_search_box("german");
+        assert!(parsed.tags.is_empty(), "no `#`, no tag filter");
+        assert_eq!(parsed.text, "german");
+        assert_eq!(terms("german").tag, None);
+        assert_eq!(terms("german").text, "german");
+    }
+
+    #[test]
+    fn one_hash_word_becomes_the_tag_filter() {
+        let parsed = parse_search_box("#music");
+        assert_eq!(parsed.tags, vec!["music".to_string()]);
+        assert_eq!(parsed.text, "", "the tag left no text behind");
+        let query = terms("#music");
+        assert_eq!(query.tag.as_deref(), Some("music"));
+        assert_eq!(query.text, "");
+        assert_eq!(query.category, None);
+    }
+
+    #[test]
+    fn a_tag_and_free_text_are_both_kept() {
+        let parsed = parse_search_box("#music german");
+        assert_eq!(parsed.tags, vec!["music".to_string()]);
+        assert_eq!(parsed.text, "german");
+        // Order is irrelevant: the `#` marks the tag, not the position.
+        assert_eq!(parse_search_box("german #music"), parsed);
+        let query = terms("#music german");
+        assert_eq!(query.tag.as_deref(), Some("music"), "tag:music");
+        assert_eq!(query.text, "german", "and the free text survives");
+    }
+
+    #[test]
+    fn every_hash_word_is_required() {
+        let parsed = parse_search_box("#music #ambient");
+        assert_eq!(parsed.tags, vec!["music".to_string(), "ambient".to_string()]);
+        // The catalog query holds one structured tag; the rest go to the
+        // lexical index, which the server AND-s. Neither is dropped.
+        let query = terms("#music #ambient");
+        assert_eq!(query.tag.as_deref(), Some("music"));
+        assert_eq!(query.text, "ambient");
+        let with_text = terms("#music #ambient german");
+        assert_eq!(with_text.tag.as_deref(), Some("music"));
+        assert_eq!(with_text.text, "german ambient");
+    }
+
+    #[test]
+    fn a_repeated_tag_is_named_once() {
+        assert_eq!(parse_search_box("#music #music").tags, vec!["music".to_string()]);
+        assert_eq!(terms("#music #music").text, "", "no duplicate rides the text");
+    }
+
+    #[test]
+    fn a_lone_hash_is_text_not_a_tag() {
+        let parsed = parse_search_box("#");
+        assert!(parsed.tags.is_empty(), "`#` names no tag");
+        assert_eq!(parsed.text, "#", "so it stays exactly what was typed");
+        assert_eq!(terms("# music").tag, None);
+        assert_eq!(terms("# music").text, "# music");
+    }
+
+    /// Live regression: typing `#` on the way to `#music` used to reach the
+    /// server as the text query "#", which it refuses (400 invalid input)
+    /// because the query names no lexical term. Half-typed notation is not
+    /// an error.
+    #[test]
+    fn text_with_nothing_searchable_in_it_is_not_sent_as_a_query() {
+        assert_eq!(terms("#").text, "", "a bare `#` filters nothing");
+        assert_eq!(terms("#").tag, None);
+        assert_eq!(terms("  #  ").text, "");
+        assert_eq!(terms("!!!").text, "", "no term, no query");
+        // A term ANYWHERE keeps the whole text: the server tokenizes it.
+        assert_eq!(terms("# music").text, "# music");
+        assert_eq!(terms("rocket!").text, "rocket!");
+    }
+
+    #[test]
+    fn tag_filters_are_case_insensitive() {
+        assert_eq!(parse_search_box("#Music").tags, vec!["music".to_string()]);
+        assert_eq!(parse_search_box("#MUSIC").tags, vec!["music".to_string()]);
+        assert_eq!(
+            parse_search_box("#Music #music").tags,
+            vec!["music".to_string()],
+            "one tag, typed twice in two cases"
+        );
+        assert_eq!(terms("#AMBIENT").tag.as_deref(), Some("ambient"));
+    }
+
+    #[test]
+    fn a_hash_picks_the_tag_when_a_category_shares_the_name() {
+        // `doom` exists in BOTH vocabularies. Typing `#doom` is the tag one.
+        let query = terms("#doom");
+        assert_eq!(query.tag.as_deref(), Some("doom"));
+        assert_eq!(query.category, None, "`#` is never a category filter");
+        // The dropdown is how a category is picked, and the two compose.
+        let picked = (FacetKind::Category, "doom".to_string());
+        let both = catalog_filter_terms("#prop", Some(&picked));
+        assert_eq!(both.category.as_deref(), Some("doom"));
+        assert_eq!(both.tag.as_deref(), Some("prop"));
+    }
+
+    #[test]
+    fn a_picked_tag_keeps_the_structured_slot_and_typed_tags_still_narrow() {
+        let picked = (FacetKind::Tag, "music".to_string());
+        let query = catalog_filter_terms("#ambient german", Some(&picked));
+        assert_eq!(query.tag.as_deref(), Some("music"), "the pick owns the slot");
+        assert_eq!(query.text, "german ambient", "the typed tag still applies");
+        assert_eq!(query.category, None);
+    }
 }
 
 #[cfg(test)]
@@ -12998,7 +13369,7 @@ mod facet_tests {
         CatalogFacet { kind, label: label.to_string(), count }
     }
 
-    /// The dropdown's first row is "all labels", so every facet sits one row
+    /// The dropdown's first row is "all tags", so every facet sits one row
     /// down. Reading a row and showing a pick have to agree about that, or
     /// picking "doom" silently filters by "kenney".
     #[test]
