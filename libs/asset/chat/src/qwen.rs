@@ -179,6 +179,19 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 None => {}
             }
         }
+        // STALE-OK: the LAN to a busy GPU box drops the odd connect, and a
+        // probe window can catch two drops in a row. A node that served
+        // this session seconds ago is better evidence than one failed
+        // probe — fall back to the stale pick and let the actual generate
+        // POST decide (it has its own connect handling). Without this the
+        // FINAL round of a long successful turn died at the re-probe and
+        // the user saw an error after their level had already built.
+        if let Some(cached) = self.cached.take() {
+            let (base, model, text_fallback) =
+                (cached.base.clone(), cached.model.clone(), cached.text_fallback);
+            self.remember(base.clone(), model.clone(), text_fallback);
+            return Ok((base, model, text_fallback));
+        }
         Err(if reasons.is_empty() {
             "no fleet node advertises a chat or Qwen text model".to_string()
         } else {
