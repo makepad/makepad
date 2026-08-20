@@ -5,12 +5,15 @@
 //! track's picture with a transport, or an honest note about why there is
 //! nothing to draw.
 //!
-//! Faces that need the renderer (mesh orbit, world walker) are staged: they
-//! live in the hosts today and move here next, behind the same
-//! [`PreviewContent`] door, so adopting them later is a `show` call and a
-//! deleted copy rather than a re-plumb.
+//! The faces that need the renderer — a mesh on a turntable, a world that
+//! walks itself — are behind the `renderer` feature, because
+//! `makepad-render` is a real dependency and `apps/sandbox` (a nested cargo
+//! workspace) must be able to take the 2D faces without it. Without the
+//! feature a host that asks for one gets an honest note saying so, not a
+//! blank panel.
 
 use crate::audio_view::{AudioAction, AudioView};
+use crate::clip::ClipFormat;
 use makepad_widgets::*;
 
 /// What a host is asking the well to show. Everything is already decoded or
@@ -25,12 +28,29 @@ pub enum PreviewContent {
     /// A cycling sprite sheet's cells (a billboard), at `fps`.
     Animation { frames: Vec<Texture>, fps: f32 },
     /// A track: its picture, where the playhead is, and what to print.
+    ///
+    /// `picture` is the catalog thumbnail — instant, already in the grid, and
+    /// only ever a placeholder. `clip` is the real file; when it is present
+    /// the well decodes it and draws the spectrogram and waveform of THIS
+    /// track, with a toggle between them.
     Audio {
         picture: Option<Texture>,
+        clip: Option<(Vec<u8>, ClipFormat)>,
         fraction: f64,
         playing: bool,
         position: String,
     },
+    /// A mesh, turning on a turntable. Bytes in, never an asset id: the host
+    /// resolved the catalog, this draws what it was handed.
+    ///
+    /// Needs the `renderer` feature.
+    Mesh { glb: Vec<u8>, texture_png: Option<Vec<u8>> },
+    /// A world, walked. The same autonomous walkthrough the VJ runs: build
+    /// the level's collision and navigation off the frame thread, then let a
+    /// walker tour it, opening doors as it goes.
+    ///
+    /// Needs the `renderer` feature.
+    World { glb: Vec<u8>, texture_png: Option<Vec<u8>> },
 }
 
 script_mod! {
@@ -77,6 +97,10 @@ script_mod! {
                 width: Fill height: Fill
                 audio := mod.widgets.AudioView{}
             }
+            scene_face := View{
+                width: Fill height: Fill
+                scene := mod.widgets.SceneView{}
+            }
         }
     }
 }
@@ -117,15 +141,29 @@ impl ContentPreview {
                     cx.new_next_frame();
                 }
             }
-            PreviewContent::Audio { picture, fraction, playing, position } => {
+            PreviewContent::Audio { picture, clip, fraction, playing, position } => {
                 self.frames.clear();
                 if let Some(mut audio) =
                     self.view.widget(cx, ids!(audio)).borrow_mut::<AudioView>()
                 {
+                    // The thumbnail goes up first and instantly; the real
+                    // file replaces it the moment the worker has drawn it.
                     audio.set_picture(cx, picture);
+                    match clip {
+                        Some((bytes, format)) => audio.set_clip(cx, bytes, format),
+                        None => audio.clear_clip(cx),
+                    }
                     audio.set_transport(cx, fraction, playing, &position);
                 }
                 self.face(cx, id!(audio_face));
+            }
+            PreviewContent::Mesh { glb, texture_png } => {
+                self.frames.clear();
+                self.show_scene(cx, glb, texture_png, false);
+            }
+            PreviewContent::World { glb, texture_png } => {
+                self.frames.clear();
+                self.show_scene(cx, glb, texture_png, true);
             }
         }
         self.view.redraw(cx);
@@ -155,6 +193,29 @@ impl ContentPreview {
             Some(action) => action.cast(),
             None => AudioAction::None,
         }
+    }
+
+    /// Hand a GLB to the 3D face. Without the `renderer` feature there is
+    /// no such face, and the well says so rather than showing nothing.
+    #[cfg(feature = "renderer")]
+    fn show_scene(&mut self, cx: &mut Cx, glb: Vec<u8>, texture_png: Option<Vec<u8>>, world: bool) {
+        use crate::scene_view::SceneView;
+        if let Some(mut scene) = self.view.widget(cx, ids!(scene)).borrow_mut::<SceneView>() {
+            match world {
+                true => scene.show_world(cx, glb, texture_png, "", Vec::new()),
+                false => scene.show_mesh(cx, glb, texture_png),
+            }
+        }
+        self.face(cx, id!(scene_face));
+    }
+
+    #[cfg(not(feature = "renderer"))]
+    fn show_scene(&mut self, cx: &mut Cx, _glb: Vec<u8>, _png: Option<Vec<u8>>, _world: bool) {
+        self.view.label(cx, ids!(empty_note)).set_text(
+            cx,
+            "3D preview needs the renderer feature of makepad-asset-widgets",
+        );
+        self.face(cx, id!(empty_face));
     }
 
     fn face(&mut self, cx: &mut Cx, page: LiveId) {
