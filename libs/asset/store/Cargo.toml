@@ -16,7 +16,14 @@ path = "src/lib.rs"
 name = "makepad-asset-store"
 path = "src/bin/makepad-asset-store.rs"
 
+[features]
+# Run the catalog on Makepad's own SQLite-format engine instead of linking
+# libsqlite3. Off by default: the C library stays the shipping path until this
+# has soaked. Same file format either way.
+own-db = ["dep:makepad-sqlite"]
+
 [dependencies]
+makepad-sqlite = { path = "../../sqlite_query", optional = true }
 makepad-asset-data = { path = "../data" }
 makepad-asset-chat = { path = "../chat" }
 makepad-asset-client = { path = "../client" }
@@ -24,3 +31,42 @@ makepad-asset-client = { path = "../client" }
 [dev-dependencies]
 makepad-asset-client = { path = "../client" }
 
+# The HTTP/e2e suite lives in tests/http/ and shares tests/http/common/mod.rs.
+# Each file is its own test binary, which is what makes its `mod common;`
+# resolve; without these entries cargo never compiles them.
+#
+# tests/http/chat_http.rs and tests/http/chat_client_e2e.rs are left out: they
+# import ChatScript / ScriptedLane / ScriptedTurn from the crate root, which
+# only `host` re-exports. Adding those three names to the `pub use host::{…}`
+# list in src/lib.rs is all they need.
+[[test]]
+name = "http_client_e2e"
+path = "tests/http/client_e2e.rs"
+
+[[test]]
+name = "http_events_http"
+path = "tests/http/events_http.rs"
+
+[[test]]
+name = "http_import_client_e2e"
+path = "tests/http/import_client_e2e.rs"
+
+[[test]]
+name = "http_import_derive_http"
+path = "tests/http/import_derive_http.rs"
+
+[[test]]
+name = "http_jobs_http"
+path = "tests/http/jobs_http.rs"
+
+[[test]]
+name = "http_operations_http"
+path = "tests/http/operations_http.rs"
+
+[[test]]
+name = "http_security"
+path = "tests/http/security.rs"
+
+[[test]]
+name = "http_service_http"
+path = "tests/http/service_http.rs"

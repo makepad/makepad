@@ -178,6 +178,7 @@ pub fn media_type_name(media: MediaType) -> &'static str {
         MediaType::Bin => "bin",
         MediaType::Text => "text",
         MediaType::Ply => "ply",
+        MediaType::Mp3 => "mp3",
     }
 }
 
@@ -192,6 +193,7 @@ pub fn media_type_parse(s: &str) -> Option<MediaType> {
         MediaType::Bin,
         MediaType::Text,
         MediaType::Ply,
+        MediaType::Mp3,
     ]
     .into_iter()
     .find(|m| media_type_name(*m) == s)
