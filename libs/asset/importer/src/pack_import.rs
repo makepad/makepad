@@ -5191,6 +5191,17 @@ fn validate_wav(bytes: &[u8], pack_path: &str) -> Result<u32, PackImportError> {
         }
         at = end + (size & 1);
         if at > bytes.len() {
+            // RIFF pads an odd-sized chunk to even, but the pad byte after
+            // the LAST chunk is routinely left off — the file simply ends
+            // where the data ends. Nothing is missing: `end` already proved
+            // the chunk body is entirely present, and there is no following
+            // chunk that the missing byte could misalign. Every practical
+            // reader accepts this; refusing it cost the whole Quake 3
+            // import for one sound (`sound/world/drone6.wav`, an 18329-byte
+            // data chunk ending exactly at EOF).
+            if end == bytes.len() {
+                break;
+            }
             return Err(PackImportError::new(
                 PackImportErrorKind::Malformed,
                 format!("{pack_path}: wav pad extends past EOF"),
@@ -7896,6 +7907,50 @@ mod tests {
                 .unwrap();
         let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, ["good-a", "good-b"], "the skipped model is not published");
+    }
+
+    /// Quake 3's `sound/world/drone6.wav` is a complete, ordinary WAV whose
+    /// odd-sized `data` chunk ends exactly at EOF with no trailing pad
+    /// byte — the shape every practical reader accepts and real encoders
+    /// routinely write. Refusing it cost the ENTIRE Quake 3 import
+    /// ("wav pad extends past EOF"), one sound against a whole game.
+    ///
+    /// A pad that is genuinely missing BETWEEN chunks still refuses: there
+    /// the absent byte misaligns everything after it.
+    #[test]
+    fn a_final_odd_chunk_may_omit_its_riff_pad_byte() {
+        // 8-bit mono, an ODD number of frames so `data` is odd and last.
+        let mut wav = Vec::new();
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // pcm
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&8u16.to_le_bytes()); // 8-bit
+        let data: Vec<u8> = vec![0x80; 801];
+        let body = 4 + (8 + fmt.len()) + (8 + data.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(body as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        // No pad byte: the file ends exactly where the data ends.
+        assert_eq!(wav.len() % 2, 1, "odd total, as the real file is");
+
+        validate_wav(&wav, "sound/world/drone6.wav")
+            .expect("a final odd chunk without its pad byte is a valid wav");
+
+        // But an odd chunk followed by another chunk still needs its pad.
+        let mut bad = wav.clone();
+        bad.extend_from_slice(b"LIST");
+        bad.extend_from_slice(&0u32.to_le_bytes());
+        let err = validate_wav(&bad, "bad.wav").unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Malformed);
     }
 
     /// A world's `.place` placements must REACH the catalog. Every other
