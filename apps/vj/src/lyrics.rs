@@ -33,27 +33,19 @@
 use crate::decks::DeckId;
 use crate::wave_analysis::TrackGrid;
 use makepad_ai_stems::{CacheHeader, StemCache, Stem};
-use makepad_asset_client::json::{self, Value};
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
 /// Sample rate whisper's mel front end expects.
-pub const WHISPER_RATE: f64 = 16_000.0;
+pub use makepad_audio_lyrics::align::WHISPER_RATE;
 
-/// Cache format tag + version. Bumping the version re-bakes every track:
-/// version 1 was whole whisper segments (thirty-second paragraphs, useless to
-/// sing from), version 2 cut them into phrases on the vocals stem's own
-/// silences, and version 3 adds a start time per WORD so the karaoke fill
-/// hops word by word instead of crawling.
-const CACHE_FORMAT: &str = "vj-lyrics";
-/// …and version 4 replaces the envelope-guessed word times with measured
-/// ones on the whisper backend: cross-attention DTW during transcription,
-/// a teacher-forced second pass per segment, onset snapping and a sanity
-/// layer (`lyrics_align`), with per-line confidence populated from what the
-/// audit can actually defend.
-pub const CACHE_VERSION: u32 = 4;
+/// Cache format tag + version, canonical in `makepad-audio-lyrics` now that
+/// the same document is also the server-side `Lyrics` side-channel payload.
+const CACHE_FORMAT: &str = makepad_audio_lyrics::LYRICS_FORMAT;
+pub const CACHE_VERSION: u32 = makepad_audio_lyrics::LYRICS_VERSION;
 
 /// The whisper checkpoint this bake wants. MIT weights, so no license gate.
 const WHISPER_MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
@@ -62,46 +54,10 @@ const WHISPER_MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
 // the data
 // ---------------------------------------------------------------------------
 
-/// One timed lyric line in TRACK time. Deck tempo/keylock changes need no
-/// conversion: the deck's playhead is already reported in track seconds.
-///
-/// `words` holds one start time per whitespace-separated word, which is what
-/// makes the karaoke fill HOP from word to word instead of crawling across
-/// letters at a constant rate. It may be empty (a cache from before word
-/// timing, or a line the stem gave nothing to align against), in which case
-/// the fill falls back to linear across the line.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LyricLine {
-    pub start_secs: f64,
-    pub end_secs: f64,
-    pub text: String,
-    pub words: Vec<f64>,
-    /// Whether those word times are good enough to HOP through.
-    ///
-    /// Word times and the right to use them are separate on purpose. A
-    /// producer of times may be sure of a line and unsure of the next one,
-    /// and the display must be told which is which: a fill that hops crisply
-    /// onto the wrong word is worse than one that sweeps and never claimed to
-    /// know. False (or no times at all) renders as the linear sweep.
-    pub confident: bool,
-}
-
-impl LyricLine {
-    pub fn new(start_secs: f64, end_secs: f64, text: impl Into<String>) -> LyricLine {
-        LyricLine {
-            start_secs,
-            end_secs,
-            text: text.into(),
-            words: Vec::new(),
-            confident: false,
-        }
-    }
-
-    /// True when the display should hop word by word rather than sweep.
-    pub fn hops(&self) -> bool {
-        self.confident && self.words.len() >= 2
-    }
-}
+/// One timed lyric line in TRACK time (canonical in `makepad-audio-lyrics`;
+/// deck tempo/keylock changes need no conversion because a deck's playhead
+/// is already reported in track seconds).
+pub use makepad_audio_lyrics::{LyricLine, OnsetStats, TrackLyrics};
 
 /// Seconds added to the deck playhead before the karaoke display reads it.
 ///
@@ -123,6 +79,7 @@ pub fn display_offset_secs() -> f64 {
             .unwrap_or(0.0)
     })
 }
+
 
 /// How long a word takes to fill green once its moment arrives. Long enough
 /// to read as a hop rather than a pop, short enough that the fill is never
@@ -234,133 +191,6 @@ fn word_span(text: &str, index: usize) -> (usize, usize, usize) {
     (before, width, at)
 }
 
-/// What the onset refinement actually moved, kept so the cache can be audited
-/// without re-running the model.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct OnsetStats {
-    pub snapped: usize,
-    pub mean_ms: f64,
-    pub max_ms: f64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrackLyrics {
-    pub backend: String,
-    pub model: String,
-    pub language: String,
-    pub duration_secs: f64,
-    pub onset: OnsetStats,
-    pub lines: Vec<LyricLine>,
-}
-
-impl TrackLyrics {
-    pub fn to_json(&self, digest: &str) -> String {
-        let lines: Vec<Value> = self
-            .lines
-            .iter()
-            .map(|line| {
-                json::obj(vec![
-                    ("t0", Value::F64(round_ms(line.start_secs))),
-                    ("t1", Value::F64(round_ms(line.end_secs))),
-                    ("text", json::s(line.text.clone())),
-                    (
-                        "w",
-                        Value::Arr(
-                            line.words
-                                .iter()
-                                .map(|at| Value::F64(round_ms(*at)))
-                                .collect(),
-                        ),
-                    ),
-                    ("c", Value::Bool(line.confident)),
-                ])
-            })
-            .collect();
-        json::obj(vec![
-            ("format", json::s(CACHE_FORMAT)),
-            ("version", Value::Int(CACHE_VERSION as i64)),
-            ("digest", json::s(digest)),
-            ("backend", json::s(self.backend.clone())),
-            ("model", json::s(self.model.clone())),
-            ("language", json::s(self.language.clone())),
-            ("duration_secs", Value::F64(round_ms(self.duration_secs))),
-            ("onset_snapped", Value::Int(self.onset.snapped as i64)),
-            ("onset_mean_ms", Value::F64(round_ms(self.onset.mean_ms))),
-            ("onset_max_ms", Value::F64(round_ms(self.onset.max_ms))),
-            ("lines", Value::Arr(lines)),
-        ])
-        .to_json()
-    }
-
-    /// Parse a cache file. A file from another version, another format or
-    /// another digest is not an error — it simply is not this track's cache,
-    /// and the caller re-bakes.
-    pub fn from_json(bytes: &[u8], digest: &str) -> Option<TrackLyrics> {
-        let value = json::parse(bytes).ok()?;
-        if value.get("format")?.as_str()? != CACHE_FORMAT {
-            return None;
-        }
-        if value.get("version")?.as_i64()? != CACHE_VERSION as i64 {
-            return None;
-        }
-        if value.get("digest")?.as_str()? != digest {
-            return None;
-        }
-        let mut lines = Vec::new();
-        for item in value.get("lines")?.as_arr()? {
-            let start = number(item.get("t0")?)?;
-            let end = number(item.get("t1")?)?;
-            let text = item.get("text")?.as_str()?.to_string();
-            if !start.is_finite() || !end.is_finite() || end < start {
-                return None;
-            }
-            let mut words = Vec::new();
-            if let Some(list) = item.get("w").and_then(|v| v.as_arr()) {
-                for at in list {
-                    words.push(number(at)?);
-                }
-            }
-            let confident = item.get("c").and_then(|v| v.as_bool()).unwrap_or(false);
-            lines.push(LyricLine {
-                start_secs: start,
-                end_secs: end,
-                text,
-                words,
-                confident,
-            });
-        }
-        Some(TrackLyrics {
-            backend: value.get("backend")?.as_str()?.to_string(),
-            model: value.get("model")?.as_str()?.to_string(),
-            language: value.get("language")?.as_str()?.to_string(),
-            duration_secs: value.get("duration_secs").and_then(number).unwrap_or(0.0),
-            onset: OnsetStats {
-                snapped: value
-                    .get("onset_snapped")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-                    .max(0) as usize,
-                mean_ms: value.get("onset_mean_ms").and_then(number).unwrap_or(0.0),
-                max_ms: value.get("onset_max_ms").and_then(number).unwrap_or(0.0),
-            },
-            lines,
-        })
-    }
-}
-
-fn number(value: &Value) -> Option<f64> {
-    match value {
-        Value::F64(v) => Some(*v),
-        Value::Int(v) => Some(*v as f64),
-        _ => None,
-    }
-}
-
-/// Milliseconds are the resolution whisper actually carries; writing full f64
-/// noise into the cache makes it unreadable for no gain.
-fn round_ms(secs: f64) -> f64 {
-    (secs * 1000.0).round() / 1000.0
-}
 
 // ---------------------------------------------------------------------------
 // where the cache lives
@@ -1190,17 +1020,30 @@ pub fn time_words(lines: &mut [LyricLine], envelope: &VocalEnvelope) -> usize {
     time_words_with(lines, envelope, word_hops_enabled())
 }
 
-/// Whether this build hops. OFF by default: the stem-driven word alignment
-/// in this module is approximate, and an approximate hop lies about its own
-/// precision in a way the smooth sweep does not. `VJ_KARAOKE_WORD_HOPS=1`
-/// turns it on for the work of making it exact.
+/// Whether the display hops word-by-word (the aligned best-effort word
+/// mapper) or sweeps each line smoothly. A live UI toggle — ON by default
+/// now that the alignment lane landed; per-line confidence still downgrades
+/// doubtful lines to the sweep, so a hop never claims precision the data
+/// lacks. `VJ_KARAOKE_WORD_HOPS=0` forces the old line-sweep-only start.
+static WORD_HOPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static WORD_HOPS_ENV: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 pub fn word_hops_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("VJ_KARAOKE_WORD_HOPS")
-            .map(|value| matches!(value.trim(), "1" | "on" | "true" | "yes"))
-            .unwrap_or(false)
-    })
+    WORD_HOPS_ENV.get_or_init(|| {
+        if let Ok(value) = std::env::var("VJ_KARAOKE_WORD_HOPS") {
+            let on = matches!(value.trim(), "1" | "on" | "true" | "yes");
+            WORD_HOPS.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    WORD_HOPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The UI checkbox's write half: flips hop mode live; the caller rebuilds
+/// the karaoke schedules so already-loaded decks re-time immediately.
+pub fn set_word_hops(on: bool) {
+    // Make sure a late env read cannot overwrite an explicit UI choice.
+    WORD_HOPS_ENV.get_or_init(|| ());
+    WORD_HOPS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The same, told explicitly whether to hop — the form tests and the audit

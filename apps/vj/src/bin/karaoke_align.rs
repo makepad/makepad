@@ -25,8 +25,7 @@
 //! Flags: `--no-force`, `--no-snap` skip stages; `--table N` rows of
 //! evidence (default 40, 0 = all).
 
-#[path = "../lyrics_align.rs"]
-mod lyrics_align;
+use makepad_audio_lyrics::align as lyrics_align;
 
 use lyrics_align::{OnsetPreset, SegmentWords, TimedLine, VocalAnalysis};
 use makepad_voice::{WhisperModel, WhisperParams, WhisperState};

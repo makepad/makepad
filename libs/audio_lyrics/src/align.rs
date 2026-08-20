@@ -1,9 +1,12 @@
 //! Word-level karaoke timing from the model that heard the words.
 //!
-//! `lyrics.rs` guessed word times from the vocal stem's RMS envelope —
-//! honest, but a guess: proportional estimates pulled to energy rises. This
-//! module replaces the guessing with measurement, in three stages, each of
-//! which the audit harness (`src/bin/karaoke_align.rs`) can score separately:
+//! Factored out of `apps/vj/src/lyrics_align.rs` so the asset-ui bake and
+//! the VJ decks run the one implementation (and the VJ's audit harness,
+//! `apps/vj/src/bin/karaoke_align.rs`, keeps scoring the exact shipped
+//! code). The VJ's older path guessed word times from the vocal stem's RMS
+//! envelope — honest, but a guess: proportional estimates pulled to energy
+//! rises. This module replaces the guessing with measurement, in three
+//! stages, each of which the audit harness can score separately:
 //!
 //! 1. **Cross-attention DTW** (`makepad_voice::transcribe_aligned`): the
 //!    decoder's alignment heads attend to the audio being sung as each token
@@ -27,7 +30,7 @@
 //! wrongly — confidently wrong is worse than a smooth line.
 //!
 //! Everything here is track-time SECONDS and self-contained (makepad_voice +
-//! std only), so the audit harness can drive the exact code the app ships.
+//! std only), so the audit harness can drive the exact code the apps ship.
 
 use makepad_voice::{AlignedSegment, WhisperModel, WhisperState};
 

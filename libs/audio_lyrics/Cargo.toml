@@ -1,0 +1,12 @@
+[package]
+name = "makepad-audio-lyrics"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Word-aligned lyrics: the karaoke alignment core and the lyrics JSON schema shared by the VJ decks and the asset-ui bake"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-voice = { path = "../voice" }
+makepad-asset-client = { path = "../asset/client" }
+makepad-asset-data = { path = "../asset/data" }
