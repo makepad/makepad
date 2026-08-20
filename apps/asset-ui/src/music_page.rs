@@ -35,6 +35,15 @@ pub struct MusicImportPage {
     /// The finished run, kept so the card can name skips and failures rather
     /// than only a happy count.
     pub last_report: Option<MusicReport>,
+    /// "split audio layers" as it stood when the run was QUEUED. Read at
+    /// queue time, not at finish time, so a toggle flipped while 200 tracks
+    /// import cannot retroactively change what the run promised.
+    pub split_layers: bool,
+    /// "+ lyrics", only meaningful with `split_layers`.
+    pub bake_lyrics: bool,
+    /// Aliases the finished run landed, waiting to be handed to the
+    /// analysis queue. Non-empty only when `split_layers` was on.
+    pending_analysis: Vec<String>,
 }
 
 /// What the worker sends back: live progress, then exactly one verdict.
@@ -53,6 +62,9 @@ impl Default for MusicImportPage {
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
             last_report: None,
+            split_layers: false,
+            bake_lyrics: false,
+            pending_analysis: Vec::new(),
         }
     }
 }
@@ -250,10 +262,35 @@ impl MusicImportPage {
         changed
     }
 
+    /// Tracks this run landed that the caller asked to have analysed, once.
+    /// Aliases, not ids — the importer reports aliases and the bake lane
+    /// resolves them; the UI thread never blocks on a lookup.
+    pub fn take_pending_analysis(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_analysis)
+    }
+
+    /// Every track the run left in the catalog under this folder: newly
+    /// published, re-published, and the ones already there byte-for-byte.
+    /// The bake is idempotent (a track that already carries stems is
+    /// skipped without touching the GPU), so including the unchanged ones is
+    /// what makes "import again with the switch on" analyse the library.
+    fn analysis_batch(report: &MusicReport) -> Vec<String> {
+        let mut aliases = Vec::with_capacity(report.landed());
+        aliases.extend(report.published.iter().cloned());
+        aliases.extend(report.updated.iter().cloned());
+        aliases.extend(report.unchanged.iter().cloned());
+        aliases
+    }
+
     fn ingest(&mut self, msg: MusicMsg) {
         let phase = match msg {
             MusicMsg::Phase(phase) => phase,
             MusicMsg::Done(phase, report) => {
+                // Only a run that was QUEUED with the switch on hands its
+                // tracks to the bake, and only when it actually landed some.
+                if self.split_layers {
+                    self.pending_analysis = Self::analysis_batch(&report);
+                }
                 // The verdict line names every outcome, so a run that
                 // published nothing cannot read as a clean one.
                 self.summary = match &phase {
@@ -474,6 +511,52 @@ mod tests {
         assert!(page.poll());
         assert!(matches!(page.phase, ImportPhase::Failed { .. }));
         assert!(page.summary.contains("without a result"));
+    }
+
+    /// "split audio layers" hands the finished run's tracks to the bake —
+    /// and a run queued WITHOUT it hands over nothing, ever.
+    #[test]
+    fn only_a_run_queued_with_the_switch_on_feeds_the_bake() {
+        let report = MusicReport {
+            published: vec!["music/a/one".into()],
+            updated: vec!["music/a/two".into()],
+            unchanged: vec!["music/a/three".into()],
+            failed: vec![("music/a/four".into(), "boom".into())],
+            skipped: vec![("music/a/five".into(), "flac".into())],
+            cancelled: false,
+        };
+
+        let mut off = MusicImportPage::default();
+        off.ingest(MusicMsg::Done(
+            ImportPhase::Idle,
+            Box::new(report.clone()),
+        ));
+        assert!(
+            off.take_pending_analysis().is_empty(),
+            "the switch is off: the import publishes and stops there"
+        );
+
+        let mut on = MusicImportPage::default();
+        on.split_layers = true;
+        on.bake_lyrics = true;
+        on.ingest(MusicMsg::Done(ImportPhase::Idle, Box::new(report)));
+        let batch = on.take_pending_analysis();
+        // Everything that LANDED, including the byte-identical re-imports:
+        // the bake skips a track that already carries stems without
+        // touching the GPU, so re-importing is how a library gets analysed.
+        assert_eq!(
+            batch,
+            vec![
+                "music/a/one".to_string(),
+                "music/a/two".to_string(),
+                "music/a/three".to_string()
+            ]
+        );
+        // Failed and skipped files are not in the catalog; they cannot be.
+        assert!(!batch.iter().any(|alias| alias.ends_with("four")));
+        assert!(!batch.iter().any(|alias| alias.ends_with("five")));
+        // Handed over exactly once.
+        assert!(on.take_pending_analysis().is_empty());
     }
 
     #[test]
