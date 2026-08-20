@@ -13,7 +13,7 @@ use super::util::log;
 use makepad_asset_chat::catalog_sql::CatalogReader;
 use makepad_asset_chat::context::{self, ClientProfile};
 use makepad_asset_chat::dispatch::AssetServerTools;
-use makepad_asset_chat::provider::{ChatProvider, ProviderEvent, TurnInput};
+use makepad_asset_chat::provider::{ChatProvider, ProviderEvent, ThreadedProvider, TurnInput};
 use makepad_asset_chat::qwen::{FleetQwenChatProvider, HttpFleetTransport};
 use makepad_asset_chat::session::{
     CancelFlag, ExecCtx, SendRefusal, Session, SessionId, ToolExecutor,
@@ -40,7 +40,11 @@ const ACTOR_IDLE: Duration = Duration::from_millis(20);
 /// How long a parked client-executed tool may wait for the app's answer
 /// before the broker times the round out with a `Failed` outcome the model
 /// can react to.
-const CLIENT_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+// With the provider on its own thread the actor pumps freely, so this
+// timeout actually fires on time now — give the client real headroom (a
+// first game.map stream can take over 30 s) instead of the old value that
+// was only survivable because the actor starved it as much as the client.
+const CLIENT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct ChatHandle {
@@ -1183,17 +1187,9 @@ impl EnvFactory {
         makepad_asset_chat::fleet_discovery::seed_bases(self.fleet_bases.clone());
         makepad_asset_chat::fleet_discovery::live_bases()
     }
-}
 
-impl ProviderFactory for EnvFactory {
-    fn probe(&mut self, kind: ProviderKind) -> ProviderAvailability {
-        match self.open(kind) {
-            Ok(mut p) => strip_location(p.availability()),
-            Err(reason) => ProviderAvailability::Unavailable { reason },
-        }
-    }
-
-    fn open(&mut self, kind: ProviderKind) -> Result<Box<dyn ChatProvider>, String> {
+    /// The unwrapped (synchronous) provider — status probes only.
+    fn open_raw(&mut self, kind: ProviderKind) -> Result<Box<dyn ChatProvider>, String> {
         match kind {
             ProviderKind::FleetQwen => Ok(Box::new(FleetQwenChatProvider::new(
                 HttpFleetTransport,
@@ -1203,6 +1199,41 @@ impl ProviderFactory for EnvFactory {
             ProviderKind::Grok => Ok(Box::new(makepad_asset_chat::grok::from_env())),
         }
     }
+}
+
+impl ProviderFactory for EnvFactory {
+    fn probe(&mut self, kind: ProviderKind) -> ProviderAvailability {
+        match self.open_raw(kind) {
+            Ok(mut p) => strip_location(p.availability()),
+            Err(reason) => ProviderAvailability::Unavailable { reason },
+        }
+    }
+
+    fn open(&mut self, kind: ProviderKind) -> Result<Box<dyn ChatProvider>, String> {
+        // Sessions get the provider behind ThreadedProvider so the broker
+        // actor NEVER blocks on provider HTTP: the fleet begin_turn's ~18 s
+        // flaky-LAN backoff ran inline on the actor and starved every other
+        // session's events/tool-result routes (entry 13, act three). The
+        // one blocking probe left is the seed here, at session create.
+        match kind {
+            ProviderKind::FleetQwen => {
+                let mut inner = FleetQwenChatProvider::new(HttpFleetTransport, self.bases());
+                let seed = inner.availability();
+                Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
+            }
+            ProviderKind::OpenAi => {
+                let mut inner = makepad_asset_chat::openai::from_env();
+                let seed = inner.availability();
+                Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
+            }
+            ProviderKind::Grok => {
+                let mut inner = makepad_asset_chat::grok::from_env();
+                let seed = inner.availability();
+                Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
+            }
+        }
+    }
+
 }
 
 fn strip_location(av: ProviderAvailability) -> ProviderAvailability {
