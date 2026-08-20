@@ -91,6 +91,8 @@ use crate::pipeline::{
     VIDEO_LENGTHS, VIDEO_SIZES,
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
+// The shared preview widgets: the same set the VJ and DJ surfaces adopt.
+use makepad_asset_widgets::{AudioAction, ContentPreview, PreviewContent};
 use crate::store_views::{
     admin_rows, candidate_cards, catalog_tiles, format_bytes, format_when,
     runs_rows,
@@ -2292,6 +2294,33 @@ script_mod! {
                                             width: Fill height: Fill
                                             flow: Down
                                             spacing: 4
+                                            // Look at the thing without leaving the
+                                            // Library: a mesh orbits here, a picture
+                                            // shows itself, audio shows its waveform.
+                                            PanelHeading{ text: "Preview" }
+                                            detail_preview := SolidView{
+                                                width: Fill height: 300
+                                                flow: Overlay
+                                                draw_bg +: { color: #x0d0d10 }
+                                                detail_preview_pages := PageFlip{
+                                                    width: Fill height: Fill
+                                                    active_page: @detail_preview_shared
+                                                    // Stills, cycling sheets
+                                                    // and audio come from the
+                                                    // SHARED widget set; the
+                                                    // mesh face is this app's
+                                                    // viewer until it moves
+                                                    // into the same crate.
+                                                    detail_preview_shared := View{
+                                                        width: Fill height: Fill
+                                                        detail_content := mod.widgets.ContentPreview{}
+                                                    }
+                                                    detail_preview_mesh := View{
+                                                        width: Fill height: Fill
+                                                        detail_mesh_view := MeshView{}
+                                                    }
+                                                }
+                                            }
                                             View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 align: Align{y: 0.5}
@@ -2331,51 +2360,6 @@ script_mod! {
                                             detail_rev := MonoLabel{ text: "—" }
                                             PanelHeading{ text: "Publish" }
                                             detail_publish := MonoLabel{ text: "—" }
-                                            // Look at the thing without leaving the
-                                            // Library: a mesh orbits here, a picture
-                                            // shows itself, audio shows its waveform.
-                                            PanelHeading{ text: "Preview" }
-                                            detail_preview := SolidView{
-                                                width: Fill height: 260
-                                                flow: Overlay
-                                                draw_bg +: { color: #x0d0d10 }
-                                                detail_preview_pages := PageFlip{
-                                                    width: Fill height: Fill
-                                                    active_page: @detail_preview_none
-                                                    detail_preview_none := View{
-                                                        width: Fill height: Fill
-                                                        align: Align{x: 0.5 y: 0.5}
-                                                        detail_preview_note := HintLabel{
-                                                            text: "Click an asset to preview it."
-                                                        }
-                                                    }
-                                                    detail_preview_image := View{
-                                                        width: Fill height: Fill
-                                                        align: Align{x: 0.5 y: 0.5}
-                                                        detail_preview_img := ThumbFitImage{}
-                                                    }
-                                                    detail_preview_mesh := View{
-                                                        width: Fill height: Fill
-                                                        detail_mesh_view := MeshView{}
-                                                    }
-                                                }
-                                            }
-                                            // Audio: play it here, and scrub
-                                            // across its own spectrogram.
-                                            detail_audio_bar := View{
-                                                visible: false
-                                                width: Fill height: Fit
-                                                flow: Right spacing: 6
-                                                margin: Inset{top: 4}
-                                                align: Align{y: 0.5}
-                                                detail_play_btn := ChipButton{ width: 34 text: "▶" }
-                                                detail_seek := Slider{
-                                                    width: Fill
-                                                    min: 0.0
-                                                    max: 1.0
-                                                }
-                                                detail_audio_time := HintLabel{ width: 62 text: "" }
-                                            }
                                             detail_server_actions := View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 margin: Inset{top: 10}
@@ -9458,27 +9442,28 @@ impl App {
     /// The rail's preview well: what the selected catalog asset actually
     /// LOOKS like, without leaving the Library.
     ///
-    /// A mesh gets a real orbitable view of the payload the store handed
-    /// over; a picture (or a waveform, which is what an audio asset's
-    /// thumbnail is) shows itself. Everything comes from the same
-    /// materialised, digest-named objects the tiles and the Create surface
-    /// use — the preview cannot show one revision while the detail lines
-    /// above it describe another.
+    /// The well is the SHARED preview component (`makepad-asset-widgets`):
+    /// stills, cycling sprite sheets and audio are drawn by the same widgets
+    /// the VJ and DJ surfaces will use, handed typed content — a texture,
+    /// cut frames, or a track's picture plus where its playhead is. Meshes
+    /// still use this app's own viewer; that face moves into the shared set
+    /// next, behind the same door.
+    ///
+    /// Everything comes from the materialised, digest-named objects the
+    /// tiles and the Create surface use, so the picture cannot show one
+    /// revision while the lines above it describe another.
     fn refresh_library_preview(&mut self, cx: &mut Cx) {
         let Some(asset) = self.store.selected else {
-            self.set_library_preview(cx, id!(detail_preview_none));
-            self.ui
-                .label(cx, ids!(detail_preview_note))
-                .set_text(cx, "Click an asset to preview it.");
+            self.show_preview(cx, PreviewContent::Empty("Click an asset to preview it.".into()));
             return;
         };
         let file = store_file_id(&asset);
         let item = self.catalog_work.get(&file).cloned();
         let asset_key = asset.to_string();
-        // A mesh: hand the viewer the payload once it is on disk.
+
+        // A mesh: hand this app's viewer the payload once it is on disk.
         if let Some(item) = &item {
-            let is_mesh = item.meta.content_type.contains("gltf");
-            if is_mesh {
+            if item.meta.content_type.contains("gltf") {
                 if let Some(path) = &item.payload {
                     if self.library_preview_file.as_deref() != Some(file.as_str()) {
                         match std::fs::read(path) {
@@ -9493,47 +9478,23 @@ impl App {
                                 }
                                 self.library_preview_file = Some(file.clone());
                             }
-                            Err(error) => {
-                                log!("library preview: {file} unreadable: {error}");
-                            }
+                            Err(error) => log!("library preview: {file} unreadable: {error}"),
                         }
                     }
                     self.set_library_preview(cx, id!(detail_preview_mesh));
                     return;
                 }
-                self.set_library_preview(cx, id!(detail_preview_none));
-                self.ui
-                    .label(cx, ids!(detail_preview_note))
-                    .set_text(cx, "Loading the model…");
+                self.show_preview(cx, PreviewContent::Empty("Loading the model…".into()));
                 return;
             }
         }
-        // A billboard's picture is its animation sheet: the well cycles the
-        // same cells the card does, on the same clock.
-        if let Some((frames, fps)) = self.catalog_preview_frames.get(&asset_key) {
-            if frames.len() > 1 {
-                // Wall time: the well and the card advance together, and a
-                // preview cycle does not need frame-accurate phase.
-                let secs = crate::store_views::now_ms() as f64 / 1000.0;
-                let index = ((secs * *fps as f64) as usize) % frames.len();
-                self.ui
-                    .image(cx, ids!(detail_preview_img))
-                    .set_texture(cx, Some(frames[index].clone()));
-                self.set_library_preview(cx, id!(detail_preview_image));
-                cx.new_next_frame();
-                return;
-            }
-        }
+
         // Audio: the spectrogram IS the picture, and the transport under it
-        // plays the payload the store handed over. Loading happens once per
-        // asset, when its object lands.
+        // plays the payload the store handed over.
         let is_audio = item
             .as_ref()
             .map(|item| item.meta.content_type.starts_with("audio/"))
             .unwrap_or(false);
-        self.ui
-            .widget(cx, ids!(detail_audio_bar))
-            .set_visible(cx, is_audio);
         if is_audio {
             if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
                 if self.library_audio_file.as_deref() != Some(file.as_str()) {
@@ -9547,47 +9508,74 @@ impl App {
                     }
                 }
             }
-            self.refresh_library_audio(cx);
+            let picture = self.preview_texture(cx, &asset_key);
+            let playing = crate::audio::is_playing();
+            self.show_preview(
+                cx,
+                PreviewContent::Audio {
+                    picture,
+                    fraction: crate::audio::playhead_fraction(),
+                    playing,
+                    position: crate::audio::format_time(crate::audio::playhead_secs()),
+                },
+            );
+            return;
         }
-        // Everything else: the asset's own picture, at the size the rail
-        // has room for. It is already decoded for the tile.
-        let texture = self
-            .ui
-            .widget(cx, ids!(lib_grid))
-            .borrow::<CatalogGrid>()
-            .and_then(|grid| grid.thumb_of(&asset_key));
-        match texture {
-            Some(texture) => {
-                self.ui
-                    .image(cx, ids!(detail_preview_img))
-                    .set_texture(cx, Some(texture));
-                self.set_library_preview(cx, id!(detail_preview_image));
+
+        // A billboard's picture is its animation sheet: the well cycles the
+        // same cells the card does.
+        if let Some((frames, fps)) = self.catalog_preview_frames.get(&asset_key) {
+            if frames.len() > 1 {
+                self.show_preview(
+                    cx,
+                    PreviewContent::Animation { frames: frames.clone(), fps: *fps },
+                );
+                return;
             }
-            None => {
-                self.set_library_preview(cx, id!(detail_preview_none));
-                self.ui
-                    .label(cx, ids!(detail_preview_note))
-                    .set_text(cx, "Fetching the preview…");
-            }
+        }
+
+        // Everything else: the asset's own picture, letterboxed. It is
+        // already decoded for the tile.
+        match self.preview_texture(cx, &asset_key) {
+            Some(texture) => self.show_preview(cx, PreviewContent::Still(texture)),
+            None => self.show_preview(cx, PreviewContent::Empty("Fetching the preview…".into())),
         }
     }
 
-    /// The rail's transport line: what the play button says, where the
-    /// scrubber sits, and how far in the clip we are. Reads the mixer, never
-    /// its own idea of time.
+    /// The decoded picture the grid already holds for this asset.
+    fn preview_texture(&self, cx: &mut Cx, asset: &str) -> Option<Texture> {
+        self.ui
+            .widget(cx, ids!(lib_grid))
+            .borrow::<CatalogGrid>()
+            .and_then(|grid| grid.thumb_of(asset))
+    }
+
+    /// Hand content to the shared well and show it.
+    fn show_preview(&mut self, cx: &mut Cx, content: PreviewContent) {
+        if let Some(mut preview) = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow_mut::<ContentPreview>()
+        {
+            preview.show(cx, content);
+        }
+        self.set_library_preview(cx, id!(detail_preview_shared));
+    }
+
+    /// The playhead, ticked from this app's mixer while a track plays. The
+    /// widget owns no audio — it is told where the playhead is and reports
+    /// where the user wants it.
     fn refresh_library_audio(&mut self, cx: &mut Cx) {
-        let playing = crate::audio::is_playing();
-        self.ui
-            .button(cx, ids!(detail_play_btn))
-            .set_text(cx, if playing { "■" } else { "▶" });
-        let fraction = crate::audio::playhead_fraction();
-        self.ui
-            .slider(cx, ids!(detail_seek))
-            .set_value(cx, fraction);
-        self.ui.label(cx, ids!(detail_audio_time)).set_text(
-            cx,
-            &crate::audio::format_time(crate::audio::playhead_secs()),
-        );
+        let position = crate::audio::format_time(crate::audio::playhead_secs());
+        let (fraction, playing) =
+            (crate::audio::playhead_fraction(), crate::audio::is_playing());
+        if let Some(preview) = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow::<ContentPreview>()
+        {
+            preview.set_transport(cx, fraction, playing, &position);
+        }
     }
 
     fn set_library_preview(&mut self, cx: &mut Cx, page: LiveId) {
@@ -11400,19 +11388,29 @@ impl MatchEvent for App {
                 Err(error) => log!("asset store: invalid tile id {asset}: {error}"),
             }
         }
-        // The rail's own transport: play/stop the selected track, and scrub
-        // across its spectrogram.
-        if self.ui.button(cx, ids!(detail_play_btn)).clicked(actions) {
-            if crate::audio::is_playing() {
-                crate::audio::pause();
-            } else {
-                crate::audio::play();
+        // The shared preview well reports what the user did to the
+        // transport; this app owns the mixer and carries it out. Dragging
+        // the playhead line IS the seek gesture.
+        let preview_action = self
+            .ui
+            .widget(cx, ids!(detail_content))
+            .borrow::<ContentPreview>()
+            .map(|preview| preview.audio_action(cx, actions))
+            .unwrap_or(AudioAction::None);
+        match preview_action {
+            AudioAction::TogglePlay => {
+                if crate::audio::is_playing() {
+                    crate::audio::pause();
+                } else {
+                    crate::audio::play();
+                }
+                self.refresh_library_audio(cx);
             }
-            self.refresh_library_audio(cx);
-        }
-        if let Some(value) = self.ui.slider(cx, ids!(detail_seek)).slided(actions) {
-            crate::audio::seek_fraction(value);
-            self.refresh_library_audio(cx);
+            AudioAction::Seek(fraction) => {
+                crate::audio::seek_fraction(fraction);
+                self.refresh_library_audio(cx);
+            }
+            AudioAction::None => {}
         }
         if self.ui.button(cx, ids!(lib_retire_shown_btn)).clicked(actions) {
             self.open_retire_shown_modal(cx);
@@ -12093,6 +12091,10 @@ impl AppMain for App {
         // Draw shaders must register before the widgets that declare them.
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
+        // Shared preview widgets (ContentPreview / AudioView): the pool this
+        // app draws catalog content with, and the same one the VJ and DJ
+        // surfaces adopt.
+        makepad_asset_widgets::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::mask_paint::script_mod(vm);
         crate::billboard_view::script_mod(vm);

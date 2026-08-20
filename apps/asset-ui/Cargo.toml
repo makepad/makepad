@@ -23,6 +23,9 @@ makepad-xr = { path = "../../xr" }
 # retry), catalog runtimes, committed-event subscriber, verified cache. The
 # VJ worker owns these crates; this app consumes the public API only.
 makepad-asset-client = { path = "../../libs/asset/client" }
+# Shared preview/viewer widgets: the pool every host draws catalog content
+# with (VJ and the DJ surface adopt the same set).
+makepad-asset-widgets = { path = "../../libs/asset/widgets" }
 makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-asset-chat = { path = "../../libs/asset/chat" }
 # Embedded catalog/chat broker for now: the app starts the real Asset
