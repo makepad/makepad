@@ -27,6 +27,9 @@ struct Args {
     spec_draft_max: usize,
     spec_gate: bool,
     spec_sample_gate: bool,
+    build_draft_vocab: bool,
+    draft_vocab_coverage: f64,
+    draft_vocab_text: Vec<PathBuf>,
     spec_determinism_runs: usize,
     prompt_dir: Option<PathBuf>,
     runs: usize,
@@ -65,6 +68,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.bench_pp.is_some() || args.bench_tg.is_some() {
         return run_bench(&model, &vocab, &args, prompt_token_ids);
+    }
+
+    if args.build_draft_vocab {
+        return run_build_draft_vocab(&model, &vocab, &args);
     }
 
     if args.spec_sample_gate {
@@ -201,6 +208,9 @@ fn parse_args(
     let mut spec_draft_max = 0usize;
     let mut spec_gate = false;
     let mut spec_sample_gate = false;
+    let mut build_draft_vocab = false;
+    let mut draft_vocab_coverage = 0.975f64;
+    let mut draft_vocab_text: Vec<PathBuf> = Vec::new();
     let mut spec_determinism_runs = 0usize;
     let mut prompt_dir = None;
     let mut runs = 20usize;
@@ -279,6 +289,17 @@ fn parse_args(
             "--spec-sample-gate" => {
                 spec_sample_gate = true;
             }
+            "--build-draft-vocab" => {
+                build_draft_vocab = true;
+            }
+            "--draft-vocab-coverage" => {
+                let value = args.next().ok_or("--draft-vocab-coverage requires a value")?;
+                draft_vocab_coverage = value.to_string_lossy().parse()?;
+            }
+            "--draft-vocab-text" => {
+                let value = args.next().ok_or("--draft-vocab-text requires a value")?;
+                draft_vocab_text.push(PathBuf::from(value));
+            }
             "--spec-determinism-runs" => {
                 let value = args.next().ok_or("--spec-determinism-runs requires a value")?;
                 spec_determinism_runs = value.to_string_lossy().parse()?;
@@ -338,6 +359,9 @@ fn parse_args(
         spec_draft_max,
         spec_gate,
         spec_sample_gate,
+        build_draft_vocab,
+        draft_vocab_coverage,
+        draft_vocab_text,
         spec_determinism_runs,
         prompt_dir,
         runs,
@@ -706,6 +730,145 @@ fn run_spec_sample_gate(
             );
         }
     }
+    Ok(())
+}
+
+/// Build the MTP draft head's restricted output vocabulary from the model's
+/// OWN outputs: sample a corpus across the prompt classes, count which token
+/// ids the model actually emits, and keep the smallest set covering
+/// `--draft-vocab-coverage` of those occurrences. Writes `<model>.draftvocab`,
+/// which every later session picks up automatically.
+///
+/// Speculation is off while generating, so the corpus is the plain model's
+/// distribution and cannot be biased by the very head it is used to build.
+fn run_build_draft_vocab(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = args
+        .prompt_dir
+        .as_ref()
+        .ok_or("--build-draft-vocab requires --prompt-dir")?;
+    let mut classes: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("txt") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("prompt")
+            .to_string();
+        classes.push((name, std::fs::read_to_string(&path)?));
+    }
+    classes.sort_by(|a, b| a.0.cmp(&b.0));
+    if classes.is_empty() {
+        return Err("--prompt-dir contains no .txt prompt files".into());
+    }
+
+    let mut counts = vec![0u64; vocab.len()];
+    let mut generated = 0u64;
+    let mut context_tokens = 0u64;
+
+    // Reference text broadens the set far more cheaply than generation does
+    // (tokenising is free) and it is the same kind of distribution the model
+    // emits. Outputs alone, at any corpus size we can afford to generate, badly
+    // over-fit: a 25 k-token outputs-only set collapsed draft acceptance from
+    // 0.74 to 0.24 on prompts outside the corpus.
+    for path in &args.draft_vocab_text {
+        let text = std::fs::read_to_string(path)?;
+        let tokens = vocab.tokenize(&text, false, false)?;
+        for token in &tokens {
+            if let Ok(index) = usize::try_from(*token) {
+                if index < counts.len() {
+                    counts[index] += 1;
+                    context_tokens += 1;
+                }
+            }
+        }
+        println!(
+            "draft_vocab.text.{}: {} tokens",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("text"),
+            tokens.len()
+        );
+    }
+
+    for (name, prompt) in &classes {
+        let tokens = vocab.tokenize(prompt, !args.no_bos, args.parse_special)?;
+        // The prompts are themselves representative text the model continues.
+        for token in &tokens {
+            if let Ok(index) = usize::try_from(*token) {
+                if index < counts.len() {
+                    counts[index] += 1;
+                    context_tokens += 1;
+                }
+            }
+        }
+        let max_context = args
+            .max_context
+            .unwrap_or(tokens.len() + args.max_new_tokens + 64)
+            .max(256);
+        let mut class_tokens = 0u64;
+        for run in 0..args.runs {
+            let mut session = LlamaSession::from_model(
+                model,
+                LlamaSessionConfig {
+                    max_context: Some(u32::try_from(max_context)?),
+                    prefill_batch_size: args.prefill_batch_size,
+                    spec_draft_max: 0,
+                    ..LlamaSessionConfig::default()
+                },
+            )?;
+            session.append_tokens(&tokens)?;
+            let params = makepad_ai_llm::LlamaSamplingParams {
+                temperature: args.temperature,
+                top_p: args.top_p,
+                top_k: 0,
+                seed: args.seed + run as u64,
+            };
+            let generation = session.continue_sampled(args.max_new_tokens, params)?;
+            for token in &generation.token_ids {
+                if let Ok(index) = usize::try_from(*token) {
+                    if index < counts.len() {
+                        counts[index] += 1;
+                        class_tokens += 1;
+                    }
+                }
+            }
+        }
+        generated += class_tokens;
+        println!("draft_vocab.corpus.{name}: {class_tokens} tokens over {} runs", args.runs);
+    }
+
+    // A draft head that cannot propose the stop tokens turns every end of turn
+    // into a forced rejection, so they are pinned in regardless of frequency.
+    let mut required = Vec::new();
+    required.extend(vocab.eos_token_id());
+    required.extend(vocab.padding_token_id());
+    required.extend(vocab.bos_token_id());
+
+    let draft_vocab =
+        makepad_ai_llm::DraftVocab::select(&counts, args.draft_vocab_coverage, &required, 256)?;
+    let distinct = counts.iter().filter(|count| **count > 0).count();
+    let path = makepad_ai_llm::DraftVocab::sidecar_path(&model.gguf.path);
+    draft_vocab.write(&path)?;
+
+    println!("draft_vocab.generated_tokens: {generated}");
+    println!("draft_vocab.context_tokens: {context_tokens}");
+    println!("draft_vocab.corpus_tokens: {}", generated + context_tokens);
+    println!("draft_vocab.distinct_tokens: {distinct}");
+    println!("draft_vocab.full_vocab: {}", vocab.len());
+    println!("draft_vocab.kept: {}", draft_vocab.len());
+    println!("draft_vocab.coverage: {:.4}", draft_vocab.coverage());
+    println!(
+        "draft_vocab.head_fraction: {:.4}",
+        draft_vocab.len() as f64 / vocab.len() as f64
+    );
+    println!("draft_vocab.path: {}", path.display());
     Ok(())
 }
 

@@ -593,6 +593,10 @@ pub fn qwen35_hybrid_decode_spec(
 /// the main graph and the MTP draft graph.
 pub const MTP_HIDDEN_CARRY_TENSOR: &str = "hybrid_cache.mtp_h_carry";
 
+/// Name of the row-compacted draft LM head built from the draft vocabulary.
+/// Present only when a `.draftvocab` sidecar was loaded.
+pub const MTP_DRAFT_HEAD_TENSOR: &str = "mtp.draft_head.weight";
+
 /// The `blk.N` multi-token-prediction draft head as a one-layer decode spec.
 /// Returns `None` when the model has no nextn block or it was not loaded.
 pub fn qwen35_mtp_decode_spec(
@@ -601,6 +605,7 @@ pub fn qwen35_mtp_decode_spec(
     max_sequences: u32,
     attention_k_type: TensorType,
     attention_v_type: TensorType,
+    restricted_head: bool,
 ) -> Result<Option<HybridDecodeSpec>> {
     let tensors = model.qwen35_tensors()?;
     let cfg = model.require_qwen35()?;
@@ -641,12 +646,18 @@ pub fn qwen35_mtp_decode_spec(
             .unwrap_or(&tensors.globals.output_norm)
             .name
             .clone(),
-        output_name: mtp
-            .shared_head
-            .as_ref()
-            .unwrap_or(&tensors.globals.output)
-            .name
-            .clone(),
+        // The draft head only has to propose; restricting its output rows to
+        // the tokens the model actually emits is most of its cost. Verify
+        // keeps the full head, so an out-of-set draft is just a rejection.
+        output_name: if restricted_head {
+            MTP_DRAFT_HEAD_TENSOR.to_string()
+        } else {
+            mtp.shared_head
+                .as_ref()
+                .unwrap_or(&tensors.globals.output)
+                .name
+                .clone()
+        },
         rms_epsilon: epsilon,
         final_logit_softcap: None,
         per_layer_input: None,
