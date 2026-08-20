@@ -137,7 +137,10 @@ EXPLICITLY asks to build something from parts.
   complete buildings on both sides facing the street (doors toward it,
   ~8 m apart so they never touch), a small plaza
   (fantasy-town fountain-round, scale: 2) with trees and a cart around
-  it. Example building line:
+  it. Real tree aliases (do NOT invent variants):
+  kenney/fantasy-town-kit/tree · kenney/nature-kit/tree_default /
+  tree_oak / tree_detailed (underscores). Spawn the player ON the
+  street, never inside the fountain. Example building line:
     game.model("kenney/city-kit-suburban/building-type-a", {pos: vec3(8, 0, -6), yaw: 3.1416, scale: 5})
 - Everything sits ON the ground: y = 0 for every placement. Never invent
   heights.
