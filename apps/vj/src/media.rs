@@ -20,12 +20,13 @@ use crate::decks::DeckId;
 use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE};
 use crate::pads::PadKey;
 use makepad_asset_data::{AssetRevisionId, MediaType};
+use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const RING_FRAMES: usize = 3;
@@ -725,8 +726,9 @@ fn parse_wav(bytes: &[u8], max_frames: usize) -> Result<TrackPcm, String> {
     Ok(TrackPcm { frames, sample_rate })
 }
 
-/// Decode an audio clip fully to memory. WAV parses directly; MP4/M4A pulls
-/// the platform decoder's audio track; OGG is honestly unsupported.
+/// Decode an audio clip fully to memory. WAV parses directly, MP3 and Ogg
+/// Vorbis go through this repo's own decoders, and MP4/M4A pulls the platform
+/// decoder's audio track.
 pub fn decode_audio_clip(
     path: &PathBuf,
     media: MediaType,
@@ -765,7 +767,32 @@ pub fn decode_audio_clip(
             }
             Ok(TrackPcm { frames, sample_rate })
         }
-        MediaType::Ogg => Err("ogg decode not supported".into()),
+        // MP3 and Ogg Vorbis go through the repo's own decoders, the same way
+        // WAV does: whole file in, interleaved PCM out, no platform codec.
+        MediaType::Mp3 | MediaType::Ogg => {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let format = if matches!(media, MediaType::Mp3) {
+                AudioFormat::Mp3
+            } else {
+                AudioFormat::OggVorbis
+            };
+            let audio = decode_audio_limited(
+                &bytes,
+                format,
+                AudioLimits::with_max_frames(max_frames),
+            )
+            .map_err(|e| e.to_string())?;
+            let channels = audio.channels.max(1) as usize;
+            let mut frames: Vec<[i16; 2]> = Vec::with_capacity(audio.frames());
+            for frame in audio.pcm_interleaved_f32.chunks_exact(channels) {
+                let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+                frames.push([sample(frame[0]), sample(frame[channels - 1])]);
+            }
+            if frames.is_empty() {
+                return Err(format!("{format:?} decoded to zero frames"));
+            }
+            Ok(TrackPcm { frames, sample_rate: audio.rate.max(1) })
+        }
         other => Err(format!("unsupported audio media {other:?}")),
     }
 }
@@ -842,13 +869,26 @@ pub enum DecodeJob {
     /// thread only uploads the finished result.
     MeshPrep { gen: u64, path: PathBuf },
     /// Same prep, destined for a program slot (A/B overlay).
-    SlotMesh { gen: u64, slot: usize, path: PathBuf },
+    /// Same prep for a program slot; `world` marks a walkable level, which
+    /// the slot presents at authored scale instead of on a turntable.
+    SlotMesh { gen: u64, slot: usize, path: PathBuf, world: bool },
     /// Decode a still (PNG/JPEG) for a program slot.
     Still { gen: u64, slot: usize, path: PathBuf },
+    /// Local `.billboard` manifest with one PNG per frame beside it.
     Billboard { gen: u64, slot: usize, path: PathBuf },
+    /// Catalog sprite actor: ONE packed sheet plus the `stateful-billboard`
+    /// manifest text that says how to cut it (grouped Billboard assets).
+    BillboardSheet { gen: u64, slot: usize, sheet: PathBuf, manifest: PathBuf },
     /// Read + decode a tile thumbnail into BGRA pixels (bounded); the UI
-    /// thread only creates the texture.
-    Thumb { revision: AssetRevisionId, path: PathBuf },
+    /// thread only creates the texture. `may_be_sheet` says whether this
+    /// thumbnail can legitimately be a packed 128² animation sheet (a
+    /// mesh/billboard icon); an image asset's thumbnail never is, however
+    /// sheet-shaped its dimensions. `epoch` is the host's current
+    /// visible-range generation (bumped whenever the grid's visible range
+    /// changes); once the thumb lane has seen a newer epoch, any job still
+    /// waiting from an older one is skipped without decoding when its turn
+    /// comes — see `DecodePool`'s doc comment.
+    Thumb { revision: AssetRevisionId, path: PathBuf, may_be_sheet: bool, epoch: u64 },
 }
 
 /// Largest GLB the mesh lane will lift into memory.
@@ -864,6 +904,12 @@ pub const MAX_THUMB_DIM: usize = 2048;
 /// Stills on A/B can be larger than grid thumbs.
 pub const MAX_STILL_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_STILL_DIM: usize = 4096;
+/// A grouped sprite actor packs every frame of every state into one sheet,
+/// so it is allowed to be bigger than a still — still bounded.
+pub const MAX_SHEET_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_SHEET_DIM: usize = 8192;
+/// Largest `stateful-billboard` manifest text the slot lane will read.
+pub const MAX_BILLBOARD_TEXT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Everything the 3D slot needs, prepared off-thread. The UI's remaining
 /// work is GPU-only: upload the rest bundle / decode-free texture create.
@@ -878,8 +924,22 @@ pub enum PreparedMesh {
         base_color: Option<Vec<u8>>,
     },
     /// Unskinned fallback: the statue path still needs the renderer's own
-    /// loader (a UI-side parse of capped bytes).
-    Statue { glb: Vec<u8>, base_color: Option<Vec<u8>> },
+    /// loader (a UI-side parse of capped bytes). A walkable level also
+    /// carries its triangle collision, built here so the UI thread never
+    /// pays for the BVH.
+    Statue {
+        glb: Vec<u8>,
+        base_color: Option<Vec<u8>>,
+        level: Option<Box<makepad_render::level::LevelCollision>>,
+        /// Walkable-cell graph over the whole map, so the tour plans routes
+        /// instead of scoring the twelve headings in front of its nose.
+        /// Tens of thousands of probes: worker work, never a frame's.
+        nav: Option<Box<makepad_render::level::NavGrid>>,
+        /// Interior spawn found while the collision was being built — the
+        /// grid scan is thousands of ray casts and must not run on the UI
+        /// thread when a map is cued.
+        start: Option<makepad_widgets::Vec3f>,
+    },
 }
 
 pub enum DecodeDone {
@@ -901,6 +961,7 @@ pub enum DecodeDone {
     SlotMesh {
         gen: u64,
         slot: usize,
+        world: bool,
         result: Result<Box<PreparedMesh>, String>,
     },
     Still {
@@ -940,7 +1001,88 @@ pub fn mesh_gate(bytes: u64, joints: usize, vertices: usize, clips: usize) -> Re
 /// Clip preference for the dance lane: dance first, then common loops.
 pub const CLIP_PREFERENCE: [&str; 4] = ["dance", "idle", "walk", "run"];
 
-fn prepare_mesh(path: &PathBuf) -> Result<Box<PreparedMesh>, String> {
+/// Triangle collision for a walkable level, built off the UI thread. The
+/// renderer's prop collider is a box decomposition (a few dozen boxes for a
+/// whole map): a walker standing on those stands in mid-air, so the level's
+/// own triangles are indexed instead.
+fn build_level(
+    model: &makepad_render::StaticModel,
+    glb: &[u8],
+) -> (
+    Option<Box<makepad_render::level::LevelCollision>>,
+    Option<Box<makepad_render::level::NavGrid>>,
+    Option<makepad_widgets::Vec3f>,
+) {
+    use makepad_render::level::{
+        surface_kinds_from_glb, LevelCollision, NavGrid, SurfaceKind, UpAxis, WalkerConfig,
+    };
+    use makepad_render::model::MODEL_VERTEX_FLOATS;
+    // Every classic pack publishes Y-up (the importer converts).
+    let Some(level) =
+        LevelCollision::from_packed(&model.vertices, MODEL_VERTEX_FLOATS, &model.indices, UpAxis::Y)
+    else {
+        return (None, None, None);
+    };
+    // Which floors hurt: the importer's `hazard_N` nodes, or the source
+    // engine's flat names on older publications. Without this every floor is
+    // plain and the tour happily paddles through the nukage.
+    let level = match surface_kinds_from_glb(glb, model.triangle_count()) {
+        Some(kinds) => {
+            let hazard = kinds.iter().filter(|k| **k == SurfaceKind::Hazard).count();
+            let liquid = kinds.iter().filter(|k| **k == SurfaceKind::Liquid).count();
+            makepad_widgets::log!(
+                "vj level: {hazard} hazard + {liquid} liquid of {} triangles classified",
+                kinds.len()
+            );
+            level.with_kinds(kinds)
+        }
+        None => {
+            makepad_widgets::log!(
+                "vj level: no per-triangle surface kinds (no hazard_N nodes, no flat names) \
+                 — every floor is plain until the map is re-imported"
+            );
+            level
+        }
+    };
+    // The nav grid is the expensive part (a capsule probe per cell, a wall
+    // probe per edge) and the reason this whole function is off-thread.
+    let cfg = WalkerConfig::default();
+    let started = std::time::Instant::now();
+    let nav = NavGrid::build(&level, &cfg);
+    let (nx, nz) = nav.dims();
+    use makepad_widgets::log;
+    // The spawn comes from the graph: the middle of the biggest piece of
+    // the map that is actually one piece. Only a level with no graph at all
+    // falls back to the old open-space scan.
+    let start = nav.best_start().and_then(|c| nav.cell(c).map(|c| c.pos));
+    let r = nav.refusals();
+    makepad_widgets::log!(
+        "vj level: refused edges — {} too tall (smallest refused rise {:.4}, step limit {:.3}), \
+         {} too deep, {} walled; {} escape links added; components {:?}",
+        r.too_tall,
+        r.smallest_refused_rise,
+        cfg.step_up,
+        r.too_deep,
+        r.walled,
+        r.escapes,
+        &nav.component_sizes()[..nav.component_sizes().len().min(6)]
+    );
+    log!(
+        "vj level: {} triangles, nav {}×{} columns @ {:.2}, {} cells, {} edges in {:?}",
+        level.triangles(),
+        nx,
+        nz,
+        nav.cell_size(),
+        nav.len(),
+        nav.edge_count(),
+        started.elapsed()
+    );
+    let start = start.or_else(|| level.interior_start(&cfg));
+    let nav = (!nav.is_empty()).then(|| Box::new(nav));
+    (Some(Box::new(level)), nav, start)
+}
+
+fn prepare_mesh(path: &PathBuf, world: bool) -> Result<Box<PreparedMesh>, String> {
     use makepad_render::skin::{SkinnedModel, SKIN_VERTEX_FLOATS};
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_MESH_BYTES {
@@ -948,11 +1090,31 @@ fn prepare_mesh(path: &PathBuf) -> Result<Box<PreparedMesh>, String> {
     }
     let glb = std::fs::read(path).map_err(|e| e.to_string())?;
     let base_color = extract_base_color(&glb);
-    let model = SkinnedModel::parse_glb(&glb).map_err(|e| format!("mesh parse failed: {e}"))?;
+    // Skinned first; an unskinned model (generated props, painted TRELLIS
+    // meshes) does not parse as one — it becomes a statue if it is a valid
+    // static GLB. Only a GLB neither parser accepts is a failure.
+    let model = match SkinnedModel::parse_glb(&glb) {
+        Ok(model) => model,
+        Err(skin_error) => {
+            let static_model = makepad_render::StaticModel::parse_glb(&glb)
+                .map_err(|e| format!("mesh parse failed: {e} (skinned: {skin_error})"))?;
+            let (level, nav, start) = match world {
+                true => build_level(&static_model, &glb),
+                false => (None, None, None),
+            };
+            return Ok(Box::new(PreparedMesh::Statue { glb, base_color, level, nav, start }));
+        }
+    };
     let playable =
         model.joint_count() > 0 && model.joint_count() <= MAX_MESH_JOINTS && !model.clips.is_empty();
     if !playable {
-        return Ok(Box::new(PreparedMesh::Statue { glb, base_color }));
+        return Ok(Box::new(PreparedMesh::Statue {
+            glb,
+            base_color,
+            level: None,
+            nav: None,
+            start: None,
+        }));
     }
     mesh_gate(
         meta.len(),
@@ -1018,9 +1180,11 @@ pub struct ThumbPixels {
 
 /// Read + decode a thumbnail into BGRA, refusing oversized or malformed
 /// images before any pixel reaches the UI thread. Only the 128² packed
-/// sheets asset-ui already splits become multi-frame previews — native
-/// sprites stay one texture at their authored aspect.
-fn decode_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
+/// sheets asset-ui writes for mesh/billboard icons become multi-frame
+/// previews, and only when the caller says the source CAN be one: a
+/// 1024² texture or Flux still passes the sheet dimension test too and
+/// must stay a single frame.
+fn decode_thumb(path: &PathBuf, may_be_sheet: bool) -> Result<ThumbPixels, String> {
     if path.extension().and_then(|e| e.to_str()) == Some("billboard") {
         return decode_billboard_thumb(path);
     }
@@ -1044,7 +1208,10 @@ fn decode_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
         data.truncate(w * h);
     }
     key_sprite_alpha(&mut data);
-    if let Some(frames) = split_sheet_bgra(w, h, &data) {
+    if let Some(frames) = may_be_sheet
+        .then(|| split_sheet_bgra(w, h, &data))
+        .flatten()
+    {
         let first = frames.first().cloned().unwrap_or_default();
         let seq = frames
             .into_iter()
@@ -1072,9 +1239,33 @@ fn decode_billboard_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
     let bb = crate::billboard::Manifest::parse(&text)?;
     let root = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut frames = Vec::new();
-    for frame in bb.preview_frames() {
-        if let Ok(pix) = crate::billboard::decode_frame(&root.join(&frame.file)) {
-            frames.push(pix);
+    // A sheet-backed manifest decodes ONE image and cuts the preview
+    // frames out of it; older ones have a PNG per frame.
+    match crate::billboard::sheet_beside(&bb, root) {
+        Some(sheet) => {
+            let (pixels, w, h) = sheet?;
+            let layout = bb.sheet.ok_or("sheet manifest without a layout")?;
+            for frame in bb.preview_frames() {
+                let Some(cell) = frame.cell else { continue };
+                if let Ok(pix) = crate::billboard::cut_cell(
+                    &pixels,
+                    w,
+                    h,
+                    layout,
+                    cell,
+                    frame.w as usize,
+                    frame.h as usize,
+                ) {
+                    frames.push(pix);
+                }
+            }
+        }
+        None => {
+            for frame in bb.preview_frames() {
+                if let Ok(pix) = crate::billboard::decode_frame(&root.join(&frame.file)) {
+                    frames.push(pix);
+                }
+            }
         }
     }
     let (bgra, width, height) = frames.first().cloned().ok_or("billboard empty")?;
@@ -1135,6 +1326,41 @@ fn split_sheet_bgra(width: usize, height: usize, data: &[u32]) -> Option<Vec<Vec
     (frames.len() > 1).then_some(frames)
 }
 
+/// Decode a packed sprite sheet + its manifest into playable states. Both
+/// files are bounded before a byte is decoded; the sheet is alpha-keyed once
+/// (classic sprites are magenta-keyed) and then cut per cell.
+fn prepare_billboard_sheet(
+    sheet: &PathBuf,
+    manifest: &PathBuf,
+) -> Result<crate::billboard::PreparedBillboard, String> {
+    let text_meta = std::fs::metadata(manifest).map_err(|e| e.to_string())?;
+    if text_meta.len() > MAX_BILLBOARD_TEXT_BYTES {
+        return Err(format!("billboard manifest over budget: {}", text_meta.len()));
+    }
+    let text = std::fs::read_to_string(manifest).map_err(|e| e.to_string())?;
+    let meta = std::fs::metadata(sheet).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_SHEET_BYTES {
+        return Err(format!("sprite sheet over byte budget: {}", meta.len()));
+    }
+    let bytes = std::fs::read(sheet).map_err(|e| e.to_string())?;
+    let image = if bytes.starts_with(&[0xff, 0xd8]) {
+        makepad_widgets::ImageBuffer::from_jpg(&bytes)
+    } else {
+        makepad_widgets::ImageBuffer::from_png(&bytes)
+    }
+    .map_err(|e| format!("sprite sheet decode failed: {e:?}"))?;
+    let (w, h) = (image.width, image.height);
+    if w == 0 || h == 0 || w > MAX_SHEET_DIM || h > MAX_SHEET_DIM {
+        return Err(format!("sprite sheet dimensions out of bounds: {w}x{h}"));
+    }
+    let mut data = image.data;
+    if data.len() > w * h {
+        data.truncate(w * h);
+    }
+    key_sprite_alpha(&mut data);
+    crate::billboard::prepare_from_sheet(&text, &data, w, h)
+}
+
 fn decode_still(path: &PathBuf) -> Result<(Vec<u32>, usize, usize), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_STILL_BYTES {
@@ -1171,10 +1397,191 @@ pub fn key_sprite_alpha(pixels: &mut [u32]) {
     }
 }
 
-/// Two decode workers: deck loads and pad preloads never block the UI, and
-/// at most two files decode at once (bounded memory + CPU).
+/// Sizing policy for the two decode lanes, factored out so it is testable in
+/// isolation from real threads. `cpus` is
+/// `std::thread::available_parallelism()`'s count (or 1 if the platform
+/// can't answer). Returns `(heavy_workers, thumb_workers)`.
+///
+/// Heavy lane (Deck/Pad audio, MeshPrep, SlotMesh, Still, Billboard,
+/// BillboardSheet): these are the seconds-scale jobs — mesh prep is ~1s,
+/// a level's nav/collision build another ~1s, a full track decode longer
+/// still — so the lane scales with the machine, floored at 2 (a
+/// single-core box still overlaps two decodes) and capped at 8 (past that,
+/// more threads just add disk/GPU-upload contention without shortening the
+/// queue).
+///
+/// Thumb lane: deliberately small (2..=4) and only loosely tied to core
+/// count. A thumbnail decode is a few milliseconds of work bounded by
+/// `MAX_THUMB_DIM`, so throughput isn't core-starved the way heavy jobs
+/// are — a handful of dedicated workers is enough to keep a scrolling grid
+/// fed, and a bigger lane would only buy more `MAX_THUMB_DIM²` buffers live
+/// at once (see the memory note on `DecodePool`) for no real gain.
+fn lane_sizes(cpus: usize) -> (usize, usize) {
+    let heavy = cpus.clamp(2, 8);
+    let thumb = (cpus / 2).clamp(2, 4);
+    (heavy, thumb)
+}
+
+/// Bound on the thumb lane's pending stack: past this many queued-but-not-
+/// started thumbnails, the OLDEST pending job (the one furthest from the
+/// current view — it was requested longest ago) is dropped to make room.
+/// Keeps a fast scroll from growing the backlog without limit.
+const MAX_PENDING_THUMBS: usize = 64;
+
+struct PendingThumb {
+    revision: AssetRevisionId,
+    path: PathBuf,
+    may_be_sheet: bool,
+    epoch: u64,
+}
+
+struct ThumbQueueState {
+    /// Push at the back, pop from the back: a stack, not a FIFO queue.
+    stack: VecDeque<PendingThumb>,
+    newest_epoch: u64,
+    closed: bool,
+}
+
+/// LIFO job source shared by the thumb lane's workers. See `DecodePool`'s
+/// doc comment for the full ordering/epoch/cap contract.
+struct ThumbQueue {
+    state: Mutex<ThumbQueueState>,
+    cv: Condvar,
+}
+
+impl ThumbQueue {
+    fn new() -> ThumbQueue {
+        ThumbQueue {
+            state: Mutex::new(ThumbQueueState {
+                stack: VecDeque::new(),
+                newest_epoch: 0,
+                closed: false,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn push(&self, job: PendingThumb) {
+        let mut state = self.state.lock().unwrap();
+        if job.epoch > state.newest_epoch {
+            state.newest_epoch = job.epoch;
+            // A new visible range makes every pending job for the old one
+            // dead weight. Dropping them HERE rather than at pop keeps the
+            // backlog honest: a fast scroll leaves no queue behind it.
+            let newest = state.newest_epoch;
+            state.stack.retain(|j| j.epoch >= newest);
+        }
+        state.stack.push_back(job);
+        while state.stack.len() > MAX_PENDING_THUMBS {
+            state.stack.pop_front(); // drop the oldest pending job
+        }
+        self.cv.notify_one();
+    }
+
+    /// Blocks until a live job is available or the queue is closed. Stale
+    /// jobs (epoch older than the newest one this queue has seen) are
+    /// popped and dropped in place, never decoded — they've certainly
+    /// scrolled out of view by the time their turn comes.
+    fn pop(&self) -> Option<PendingThumb> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            while let Some(job) = state.stack.pop_back() {
+                if job.epoch >= state.newest_epoch {
+                    return Some(job);
+                }
+            }
+            if state.closed {
+                return None;
+            }
+            state = self.cv.wait(state).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        self.cv.notify_all();
+    }
+}
+
+#[cfg(test)]
+fn test_sleep_marker(path: &Path) -> Option<Duration> {
+    let ms: u64 = path
+        .file_stem()?
+        .to_str()?
+        .strip_prefix("vj_test_sleep_")?
+        .parse()
+        .ok()?;
+    Some(Duration::from_millis(ms))
+}
+
+fn run_heavy_job(job: DecodeJob) -> DecodeDone {
+    match job {
+        DecodeJob::Deck { deck, gen, path, media } => {
+            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+                let peaks = wave_peaks(&pcm, WAVE_COLS);
+                (Arc::new(pcm), peaks)
+            });
+            DecodeDone::Deck { deck, gen, result }
+        }
+        DecodeJob::Pad { pad, gen, revision, path, media } => {
+            let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES).map(Arc::new);
+            DecodeDone::Pad { pad, gen, revision, result }
+        }
+        DecodeJob::MeshPrep { gen, path } => {
+            #[cfg(test)]
+            if let Some(delay) = test_sleep_marker(&path) {
+                std::thread::sleep(delay);
+            }
+            let result = prepare_mesh(&path, false);
+            DecodeDone::MeshPrep { gen, result }
+        }
+        DecodeJob::SlotMesh { gen, slot, path, world } => {
+            let result = prepare_mesh(&path, world);
+            DecodeDone::SlotMesh { gen, slot, world, result }
+        }
+        DecodeJob::Still { gen, slot, path } => {
+            let result = decode_still(&path);
+            DecodeDone::Still { gen, slot, result }
+        }
+        DecodeJob::Billboard { gen, slot, path } => {
+            let result = crate::billboard::prepare(&path).map(Box::new);
+            DecodeDone::Billboard { gen, slot, result }
+        }
+        DecodeJob::BillboardSheet { gen, slot, sheet, manifest } => {
+            let result = prepare_billboard_sheet(&sheet, &manifest).map(Box::new);
+            DecodeDone::Billboard { gen, slot, result }
+        }
+        DecodeJob::Thumb { .. } => {
+            unreachable!("Thumb jobs are routed to the thumb lane by DecodePool::submit")
+        }
+    }
+}
+
+/// Two decode lanes so a grid full of thumbnails never queues behind a
+/// heavier job:
+///
+/// - the HEAVY lane (Deck/Pad audio, MeshPrep, SlotMesh, Still, Billboard,
+///   BillboardSheet) is a plain FIFO worker pool sized by `lane_sizes` —
+///   these are the jobs that take real wall-clock time, and a mesh or track
+///   decode that is already wanted must never be starved by ordering games.
+/// - the THUMB lane is a small, dedicated pool (also sized by `lane_sizes`)
+///   that only ever decodes `DecodeJob::Thumb`. Its pending jobs live on a
+///   bounded LIFO stack (`ThumbQueue`), not a queue: the tile under the
+///   operator's eye right now decodes before ones they scrolled past a
+///   moment ago, and a job whose `epoch` has been superseded by a newer one
+///   is skipped — never decoded — instead of wasting a worker on a tile
+///   that has already scrolled away. See `ThumbQueue` and
+///   `MAX_PENDING_THUMBS` for the exact rules.
+///
+/// Memory: a thumb decodes to at most `MAX_THUMB_DIM² × 4` bytes of BGRA
+/// (2048² × 4 = 16 MiB) before the UI thread turns it into a texture and
+/// drops the CPU buffer, so the thumb lane's peak resident memory is
+/// `thumb_workers × 16 MiB` — bounded at 64 MiB even at the lane's cap of
+/// 4 workers.
 pub struct DecodePool {
-    tx: Sender<DecodeJob>,
+    heavy_tx: Sender<DecodeJob>,
+    thumb_queue: Arc<ThumbQueue>,
     rx: Receiver<DecodeDone>,
 }
 
@@ -1186,65 +1593,58 @@ impl Default for DecodePool {
 
 impl DecodePool {
     pub fn new() -> DecodePool {
-        let (tx, job_rx) = channel::<DecodeJob>();
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let (heavy_workers, thumb_workers) = lane_sizes(cpus);
+
+        let (heavy_tx, job_rx) = channel::<DecodeJob>();
         let (done_tx, rx) = channel::<DecodeDone>();
         let job_rx = Arc::new(Mutex::new(job_rx));
-        for i in 0..2 {
+        for i in 0..heavy_workers {
             let jobs = job_rx.clone();
             let done = done_tx.clone();
             let _ = std::thread::Builder::new()
-                .name(format!("vj-decode-{i}"))
+                .name(format!("vj-decode-heavy-{i}"))
                 .spawn(move || loop {
                     let job = {
                         let guard = jobs.lock().unwrap();
                         guard.recv()
                     };
                     let Ok(job) = job else { return };
-                    let out = match job {
-                        DecodeJob::Deck { deck, gen, path, media } => {
-                            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES)
-                                .map(|pcm| {
-                                    let peaks = wave_peaks(&pcm, WAVE_COLS);
-                                    (Arc::new(pcm), peaks)
-                                });
-                            DecodeDone::Deck { deck, gen, result }
-                        }
-                        DecodeJob::Pad { pad, gen, revision, path, media } => {
-                            let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES)
-                                .map(Arc::new);
-                            DecodeDone::Pad { pad, gen, revision, result }
-                        }
-                        DecodeJob::MeshPrep { gen, path } => {
-                            let result = prepare_mesh(&path);
-                            DecodeDone::MeshPrep { gen, result }
-                        }
-                        DecodeJob::SlotMesh { gen, slot, path } => {
-                            let result = prepare_mesh(&path);
-                            DecodeDone::SlotMesh { gen, slot, result }
-                        }
-                        DecodeJob::Still { gen, slot, path } => {
-                            let result = decode_still(&path);
-                            DecodeDone::Still { gen, slot, result }
-                        }
-                        DecodeJob::Billboard { gen, slot, path } => {
-                            let result = crate::billboard::prepare(&path).map(Box::new);
-                            DecodeDone::Billboard { gen, slot, result }
-                        }
-                        DecodeJob::Thumb { revision, path } => {
-                            let result = decode_thumb(&path);
-                            DecodeDone::Thumb { revision, result }
-                        }
-                    };
+                    let out = run_heavy_job(job);
                     if done.send(out).is_err() {
                         return;
                     }
                 });
         }
-        DecodePool { tx, rx }
+
+        let thumb_queue = Arc::new(ThumbQueue::new());
+        for i in 0..thumb_workers {
+            let queue = thumb_queue.clone();
+            let done = done_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("vj-decode-thumb-{i}"))
+                .spawn(move || loop {
+                    let Some(job) = queue.pop() else { return };
+                    let result = decode_thumb(&job.path, job.may_be_sheet);
+                    let out = DecodeDone::Thumb { revision: job.revision, result };
+                    if done.send(out).is_err() {
+                        return;
+                    }
+                });
+        }
+
+        DecodePool { heavy_tx, thumb_queue, rx }
     }
 
     pub fn submit(&self, job: DecodeJob) {
-        let _ = self.tx.send(job);
+        match job {
+            DecodeJob::Thumb { revision, path, may_be_sheet, epoch } => {
+                self.thumb_queue.push(PendingThumb { revision, path, may_be_sheet, epoch });
+            }
+            other => {
+                let _ = self.heavy_tx.send(other);
+            }
+        }
     }
 
     pub fn poll(&self) -> Vec<DecodeDone> {
@@ -1256,6 +1656,17 @@ impl DecodePool {
             }
         }
         out
+    }
+}
+
+impl Drop for DecodePool {
+    fn drop(&mut self) {
+        // Wake any thumb worker blocked on the condvar so it observes
+        // `closed` and exits instead of leaking. The heavy lane needs no
+        // equivalent nudge: dropping `heavy_tx` (a struct field, dropped
+        // right after this fn returns) already unblocks a blocked
+        // `Receiver::recv()` per std::sync::mpsc's own disconnect signal.
+        self.thumb_queue.close();
     }
 }
 
@@ -1509,16 +1920,16 @@ mod tests {
         // Malformed bytes refuse with a typed error.
         let bad = dir.join("bad.png");
         std::fs::write(&bad, b"not an image at all").unwrap();
-        assert!(decode_thumb(&bad).is_err());
+        assert!(decode_thumb(&bad, true).is_err());
         // Over the byte budget refuses BEFORE decode.
         let huge = dir.join("huge.png");
         std::fs::write(&huge, vec![0u8; (MAX_THUMB_BYTES + 1) as usize]).unwrap();
-        let err = decode_thumb(&huge).unwrap_err();
+        let err = decode_thumb(&huge, true).unwrap_err();
         assert!(err.contains("byte budget"), "{err}");
         // Mesh prep on garbage refuses too (worker-side, never the UI).
         let junk = dir.join("junk.glb");
         std::fs::write(&junk, b"gLTF-not-really").unwrap();
-        assert!(prepare_mesh(&junk).is_err());
+        assert!(prepare_mesh(&junk, false).is_err());
     }
 
     #[test]
@@ -1567,6 +1978,149 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lane_sizes_scale_heavy_and_cap_thumb() {
+        // 1 cpu: both lanes floor at their minimum (2 workers each).
+        assert_eq!(lane_sizes(1), (2, 2));
+        // 4 cpus: heavy tracks the core count; thumb stays at its floor.
+        assert_eq!(lane_sizes(4), (4, 2));
+        // 32 cpus: heavy caps at 8; thumb caps at 4.
+        assert_eq!(lane_sizes(32), (8, 4));
+    }
+
+    #[test]
+    fn thumb_queue_is_lifo_and_prunes_stale_and_bounds_pending() {
+        // LIFO: with every job at the same epoch (none stale), the queue
+        // must hand back the most recently pushed job first.
+        let queue = ThumbQueue::new();
+        for i in 0..10u32 {
+            queue.push(PendingThumb {
+                revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                path: PathBuf::from(format!("t{i}.png")),
+                may_be_sheet: false,
+                epoch: 0,
+            });
+        }
+        for expect in (0..10u32).rev() {
+            let job = queue.pop().expect("job available");
+            assert_eq!(job.path, PathBuf::from(format!("t{expect}.png")), "must be newest-first");
+        }
+
+        // Staleness: jobs stamped with an epoch older than the newest one
+        // this queue has seen are skipped (dropped, not decoded).
+        let queue = ThumbQueue::new();
+        for i in 0..5u32 {
+            queue.push(PendingThumb {
+                revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                path: PathBuf::from(format!("old{i}.png")),
+                may_be_sheet: false,
+                epoch: 1,
+            });
+        }
+        queue.push(PendingThumb {
+            revision: AssetRevisionId::from_bytes([9; 32]),
+            path: PathBuf::from("fresh.png"),
+            may_be_sheet: false,
+            epoch: 2,
+        });
+        let job = queue.pop().expect("the fresh-epoch job survives");
+        assert_eq!(job.path, PathBuf::from("fresh.png"));
+        assert!(
+            queue.state.lock().unwrap().stack.is_empty(),
+            "stale jobs must be dropped when popped, not left behind"
+        );
+
+        // Cap: pushing past MAX_PENDING_THUMBS drops the OLDEST pending job.
+        let queue = ThumbQueue::new();
+        for i in 0..(MAX_PENDING_THUMBS + 3) {
+            queue.push(PendingThumb {
+                revision: AssetRevisionId::from_bytes([0; 32]),
+                path: PathBuf::from(format!("p{i}.png")),
+                may_be_sheet: false,
+                epoch: 0,
+            });
+        }
+        let remaining = queue.state.lock().unwrap();
+        assert_eq!(remaining.stack.len(), MAX_PENDING_THUMBS);
+        assert_eq!(
+            remaining.stack.front().unwrap().path,
+            PathBuf::from("p3.png"),
+            "the three oldest (p0..p2) must have been dropped to stay at the cap"
+        );
+    }
+
+    #[test]
+    fn thumb_lane_is_not_blocked_by_a_slow_heavy_job() {
+        let pool = DecodePool::new();
+        // A heavy job that sleeps before failing (nonexistent glb) -- long
+        // enough to prove the thumb lane doesn't queue behind it.
+        pool.submit(DecodeJob::MeshPrep {
+            gen: 1,
+            path: PathBuf::from("vj_test_sleep_600.glb"),
+        });
+
+        let dir = std::env::temp_dir().join(format!("vj_thumb_lane_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Malformed thumbs decode-fail fast, but that still proves the
+        // thumb lane drained them without waiting on the mesh job.
+        for i in 0..8u32 {
+            let path = dir.join(format!("bad{i}.png"));
+            std::fs::write(&path, b"not an image").unwrap();
+            pool.submit(DecodeJob::Thumb {
+                revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                path,
+                may_be_sheet: true,
+                epoch: 0,
+            });
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(400);
+        let mut thumbs = 0;
+        let mut mesh_done = false;
+        while Instant::now() < deadline {
+            for done in pool.poll() {
+                match done {
+                    DecodeDone::Thumb { .. } => thumbs += 1,
+                    DecodeDone::MeshPrep { .. } => mesh_done = true,
+                    _ => {}
+                }
+            }
+            if thumbs == 8 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(thumbs, 8, "all thumbs must finish while the mesh job is still sleeping");
+        assert!(!mesh_done, "the slow mesh job (600ms) must not have finished within 400ms");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shutdown_drains_pending_jobs_without_hang_or_panic() {
+        let pool = DecodePool::new();
+        let dir = std::env::temp_dir().join(format!("vj_shutdown_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..20u32 {
+            let path = dir.join(format!("t{i}.png"));
+            std::fs::write(&path, b"not an image").unwrap();
+            pool.submit(DecodeJob::Thumb {
+                revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                path,
+                may_be_sheet: true,
+                epoch: 0,
+            });
+        }
+        pool.submit(DecodeJob::MeshPrep {
+            gen: 1,
+            path: PathBuf::from("vj_test_sleep_50.glb"),
+        });
+        // Dropping mid-flight (workers still busy/blocked) must not panic
+        // or hang: the heavy lane unblocks via mpsc's own sender-drop
+        // disconnect, the thumb lane via ThumbQueue::close()'s notify_all.
+        drop(pool);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
