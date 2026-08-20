@@ -19,6 +19,15 @@
 //! `local/ai_content_library/` reaches the catalog — intermediates tagged
 //! `intermediate` so program surfaces can exclude them.
 //!
+//! When another process already holds the root lock this one ATTACHES to the
+//! live server instead. An attached instance has SUCCESSION: it watches the
+//! server it joined, and when that server goes silent it tries the root lock
+//! itself — winning means starting the embedded server here (publisher, job
+//! coordinator, a rewritten `listen` file) and reconnecting to itself, losing
+//! means re-reading `listen` and rejoining whoever won. There is no state in
+//! which this app looks healthy while its server is gone: see
+//! [`AssetStore::status_label`].
+//!
 //! Env/token conventions (`ASSET_UI_*`, with `AI_CONTENT_*` still accepted):
 //! - `ASSET_UI_ASSET_SERVER=ip:controlport:dataport` — explicit endpoints;
 //!   unset = LAN discovery on the standard beacon port.
@@ -29,11 +38,14 @@
 //!   No token = anonymous probe.
 //! - `ASSET_UI_ASSET_CACHE=<dir>` — cache parent, default
 //!   `local/asset-ui`.
+//! - `ASSET_UI_ASSET_BEACON=off` — start the embedded server WITHOUT its LAN
+//!   beacon. An instance on an isolated store root (`AI_CONTENT_ASSET_ROOT`)
+//!   must not advertise itself to peers hunting for the real one.
 
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogFacet, CatalogHit, CatalogQuery,
-    CatalogSubscriptionEvent, ClientEvent, ClientOutput, ClientRequest, GcRequest, GcStatusDto,
-    JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
+    CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest, GcRequest,
+    GcStatusDto, JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
     SessionHandles, SessionMsg, SessionStatus,
 };
 use makepad_asset_data::{AssetId, AssetRevisionId};
@@ -41,8 +53,9 @@ pub use makepad_asset_data::AssetKind;
 use makepad_widgets::log;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Committed catalog events retained for the Admin surface (newest first).
 pub const EVENT_LOG_CAP: usize = 200;
@@ -162,6 +175,104 @@ pub fn server_kind_label(kind: AssetKind) -> &'static str {
         AssetKind::Billboard => "billboard",
         AssetKind::Game => "game",
     }
+}
+
+/// How long an ATTACHED instance tolerates a silent server before it tries
+/// to take the store root over. Long enough that a slow GC step or a
+/// momentarily refused long-poll is not mistaken for a death, short enough
+/// that nobody works for minutes against a server that is gone.
+pub const TAKEOVER_AFTER_MS: u64 = 3_500;
+
+/// Gap between takeover attempts while the root lock stays held (the owner
+/// is alive but unreachable, or a rival instance won the race).
+pub const TAKEOVER_RETRY_MS: u64 = 1_000;
+
+/// This process's relationship to the Asset Server its session talks to.
+///
+/// Only [`ServerRole::Attached`] has a succession problem: the server lives
+/// in another process, and when that process dies someone has to become the
+/// host or the app is quietly serverless.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerRole {
+    /// Endpoints pinned by env — someone else's server, never ours to
+    /// succeed. Also the state of a store that was never started.
+    #[default]
+    External,
+    /// This process hosts the embedded server (it holds `<root>/server.lock`).
+    Host,
+    /// Another process hosts it; we joined through the root's `listen` file.
+    Attached,
+}
+
+/// LAN presence of a server this process starts.
+///
+/// The embedded server normally announces itself so every peer app (the VJ,
+/// the sandbox) finds it the way any LAN peer would. An instance pointed at
+/// an isolated root — a test, a second app on a scratch store — must stay
+/// off the beacon, or peers hunting for the real store find the scratch one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Beacon {
+    #[default]
+    Announce,
+    Silent,
+}
+
+/// Whether a hosting process also runs the background loops that make it a
+/// real LAN citizen (the library publisher and the fleet job coordinator).
+///
+/// Production always runs them. Tests take a root over without them: both
+/// loops open their own cache roots and talk to the network, and a unit test
+/// must not announce itself to the fleet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostLoops {
+    #[default]
+    Run,
+    Skip,
+}
+
+/// Sustained-loss detector for the server this process talks to.
+///
+/// One failure is a blip; failures with no answer in between are a death.
+/// Only the FIRST failing instant is kept, so the age of an outage is exact,
+/// and any answer at all resets it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LossWatch {
+    since_ms: Option<u64>,
+}
+
+impl LossWatch {
+    fn failing(&mut self, now_ms: u64) {
+        self.since_ms.get_or_insert(now_ms);
+    }
+
+    fn clear(&mut self) {
+        self.since_ms = None;
+    }
+
+    /// How long the server has been silent, or `None` while it answers.
+    fn down_for(&self, now_ms: u64) -> Option<u64> {
+        self.since_ms.map(|since| now_ms.saturating_sub(since))
+    }
+}
+
+/// Is this refusal the transport failing, or the server answering?
+///
+/// A 401 or a 404 is an ANSWER: the server is alive and this app is simply
+/// wrong about something. Only a socket/deadline failure (or a runtime that
+/// is gone) is evidence that there is nothing on the other end.
+fn is_connection_loss(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::Io { .. } | ClientError::Timeout { .. } | ClientError::RuntimeDown
+    )
+}
+
+/// The session a succession will open once the previous one has released
+/// its single-owner cache roots.
+struct PendingSession {
+    endpoints: Option<ApiEndpoints>,
+    server_id: Option<[u8; 16]>,
+    token: Option<String>,
 }
 
 /// Explicit lifecycle for one remote resource: "empty because loading" and
@@ -290,6 +401,46 @@ pub struct AssetStore {
     /// already being in flight. Cleared when a fresh `gc_dry_run`/
     /// `gc_collect` starts.
     gc_cancel_requested: bool,
+
+    // --- succession (see the module header) --------------------------------
+    /// Host / attached / external. Decides both the status line and whether
+    /// this instance is responsible for succeeding a dead server.
+    role: ServerRole,
+    /// The store root the embedded server uses, captured at `start` so a
+    /// takeover can never land on a different one than the attach did.
+    server_root: PathBuf,
+    /// The library a takeover would start publishing.
+    library_dir: PathBuf,
+    /// LAN presence for a server started here.
+    beacon: Beacon,
+    /// Whether a takeover also starts the publisher/job loops (tests: no).
+    host_loops: HostLoops,
+    /// The session policy `start` resolved from the environment, WITHOUT
+    /// the embed/attach overrides. A succession reuses it (same cache
+    /// parent, same discovery timing) instead of re-reading env behind the
+    /// operator's back.
+    base_config: Option<SessionConfig>,
+    /// The control/data pair attach mode joined. After a loss this is the
+    /// address that must NOT be trusted again: `listen` is re-read, and only
+    /// a DIFFERENT address counts as a new owner to rejoin.
+    attached_endpoints: Option<ApiEndpoints>,
+    /// How long the server has been failing to answer.
+    loss: LossWatch,
+    /// One cheap request kept in flight while the server looks silent. A
+    /// long-poll that succeeds with nothing to report is silent BY DESIGN,
+    /// so only an answer to a question we asked just now can tell a blip
+    /// from a death.
+    probe_req: Option<RequestId>,
+    /// Wall clock of the next takeover attempt while the lock stays held.
+    next_takeover_ms: u64,
+    /// Honest narration of a succession in progress; takes over the status
+    /// line so a serverless instance can never read as connected.
+    succession_note: Option<String>,
+    /// The previous session is being torn down off-thread. Flips when its
+    /// cache roots are free for the next session to open.
+    releasing: Option<Arc<AtomicBool>>,
+    /// What to connect to once `releasing` flips.
+    pending_session: Option<PendingSession>,
 }
 
 /// Transitional source-level name while the app moves from its former
@@ -309,26 +460,35 @@ impl AssetStore {
         if self.connector.is_some() || self.server.is_some() {
             return;
         }
+        self.library_dir = library_dir;
+        self.server_root = default_asset_server_root();
+        self.beacon = beacon_from_env();
         let mut config = session_config_from_env();
+        // Kept pristine: a later succession re-opens a session with the same
+        // POLICY, and overrides only the endpoints/identity/token of whoever
+        // it ends up talking to.
+        self.base_config = Some(config.clone());
         if config.endpoints.is_none() {
-            match start_embedded_asset_server() {
+            match start_embedded_asset_server_at(&self.server_root, self.beacon) {
                 Ok((server, token)) => {
                     config.server_id = Some(server.server_id());
+                    if config.token.is_none() {
+                        config.token = Some(token.clone());
+                    }
                     // Only the HOSTING process publishes the library. When
                     // we merely attached to someone else's server, that
                     // process owns its own library and this one must not
                     // push a second copy of the same rows.
-                    self.publish = start_publish_loop(&server, &token, library_dir);
-                    self.jobs = start_job_loop(&server, &token);
-                    if config.token.is_none() {
-                        config.token = Some(token);
-                    }
-                    self.embedded = Some(server);
+                    self.begin_hosting(server, &token);
                 }
                 Err(error) => {
                     // Another process already owns this catalog. Join it
-                    // instead of painting a fatal CONFIG ERROR.
-                    if let Some(existing) = attach_running_asset_server() {
+                    // instead of painting a fatal CONFIG ERROR — and from
+                    // here on, watch it: an attached instance whose host
+                    // dies must succeed it, not carry on serverless.
+                    if let Some(existing) = attach_running_asset_server_at(&self.server_root) {
+                        self.role = ServerRole::Attached;
+                        self.attached_endpoints = existing.endpoints;
                         if config.endpoints.is_none() {
                             config.endpoints = existing.endpoints;
                         }
@@ -338,6 +498,10 @@ impl AssetStore {
                         if config.token.is_none() {
                             config.token = existing.token;
                         }
+                        log!(
+                            "asset store: {error} — attaching to the running server, \
+                             with succession armed"
+                        );
                     } else {
                         self.start_error = Some(error);
                         return;
@@ -360,19 +524,28 @@ impl AssetStore {
         self.server.is_some()
     }
 
+    /// This process's relationship to the server it talks to.
+    pub fn role(&self) -> ServerRole {
+        self.role
+    }
+
     /// One status line for the connection chip and the honest empty states.
     pub fn status_label(&self) -> String {
         if let Some(error) = &self.start_error {
             return format!("SERVER · CONFIG ERROR · {error}");
         }
+        // A succession in progress is the whole truth for as long as it
+        // lasts: an attached instance whose server died must never keep
+        // rendering the address of a server that is not there.
+        if let Some(note) = &self.succession_note {
+            return format!("SERVER · {note}");
+        }
         match (&self.server, &self.status) {
-            (Some(server), _) => {
-                if self.embedded.is_some() {
-                    format!("SERVER · local · {}", server.label)
-                } else {
-                    format!("SERVER · {}", server.label)
-                }
-            }
+            (Some(server), _) => match self.role {
+                ServerRole::Host => format!("SERVER · local · {}", server.label),
+                ServerRole::Attached => format!("SERVER · attached · {}", server.label),
+                ServerRole::External => format!("SERVER · {}", server.label),
+            },
             (None, Some(SessionStatus::Discovering)) => {
                 "SERVER · discovering on the LAN…".to_string()
             }
@@ -392,13 +565,28 @@ impl AssetStore {
     /// Drain connector/runtime/subscriber channels. Non-blocking; returns
     /// true when any render input changed.
     pub fn poll(&mut self) -> bool {
+        let now = now_ms();
         let mut changed = false;
         if let Some(connector) = &mut self.connector {
             for msg in connector.poll() {
                 changed = true;
                 match msg {
-                    SessionMsg::Status(status) => self.status = Some(status),
+                    SessionMsg::Status(status) => {
+                        // A retry is the connector reporting that whatever it
+                        // was pointed at did not answer — the loss signal for
+                        // an instance that never got a session up at all
+                        // (a `listen` file naming a server that is already
+                        // dead is exactly this case).
+                        match &status {
+                            SessionStatus::Retrying { .. } => self.loss.failing(now),
+                            SessionStatus::Connected { .. } => self.loss.clear(),
+                            _ => {}
+                        }
+                        self.status = Some(status);
+                    }
                     SessionMsg::Up(handles) => {
+                        self.loss.clear();
+                        self.succession_note = None;
                         self.server = Some(ServerInfo {
                             label: handles.server_label.clone(),
                             server_id: handles.server_id,
@@ -442,7 +630,225 @@ impl AssetStore {
                 changed = true;
             }
         }
+        changed |= self.tick_succession(now);
         changed
+    }
+
+    // -----------------------------------------------------------------
+    // Succession: an attached instance never outlives its server silently.
+    // -----------------------------------------------------------------
+
+    /// One tick of the succession machine. Returns true when a render input
+    /// changed. `now_ms` is injected so the whole ladder — blip, sustained
+    /// loss, takeover, retry — is testable without sleeping.
+    fn tick_succession(&mut self, now_ms: u64) -> bool {
+        // A swap is already decided; all that remains is waiting for the
+        // previous session to release its single-owner cache roots.
+        if self.pending_session.is_some() {
+            return self.finish_swap();
+        }
+        if self.role != ServerRole::Attached {
+            return false;
+        }
+        let Some(down_ms) = self.loss.down_for(now_ms) else {
+            return self.clear_succession_note();
+        };
+        // Whatever else happens, find out for certain whether the server is
+        // there — the subscriber's failed long-poll opened the question, a
+        // request of our own closes it.
+        self.submit_probe();
+        if down_ms < TAKEOVER_AFTER_MS {
+            let label = self.attached_label();
+            return self.set_succession_note(format!(
+                "attached · {label} not answering ({}s)",
+                down_ms / 1000
+            ));
+        }
+        if now_ms < self.next_takeover_ms {
+            return false;
+        }
+        self.next_takeover_ms = now_ms.saturating_add(TAKEOVER_RETRY_MS);
+        match takeover_at(&self.server_root, self.attached_endpoints, self.beacon) {
+            Takeover::Hosted { server, token } => {
+                let endpoints = localized_endpoints(&server);
+                let server_id = server.server_id();
+                log!(
+                    "asset store: server lost — took the root over, now hosting {}/{}",
+                    endpoints.control,
+                    endpoints.data
+                );
+                self.begin_hosting(server, &token);
+                self.pending_session = Some(PendingSession {
+                    endpoints: Some(endpoints),
+                    server_id: Some(server_id),
+                    token: Some(token),
+                });
+                self.begin_release();
+                self.set_succession_note(format!(
+                    "took over the store — reconnecting to {}",
+                    endpoints.control
+                ));
+                true
+            }
+            Takeover::Rejoin(running) => {
+                let label = running
+                    .endpoints
+                    .map(|endpoints| endpoints.control.to_string())
+                    .unwrap_or_else(|| "the LAN".to_string());
+                log!("asset store: server lost — the root is held by {label}; rejoining");
+                self.attached_endpoints = running.endpoints;
+                self.pending_session = Some(PendingSession {
+                    endpoints: running.endpoints,
+                    server_id: running.server_id,
+                    token: running.token,
+                });
+                self.begin_release();
+                self.set_succession_note(format!("server lost — rejoining {label}"));
+                true
+            }
+            Takeover::Wait(why) => {
+                self.set_succession_note(format!("server lost — taking over… ({why})"))
+            }
+        }
+    }
+
+    /// Start the embedded server's background loops and become the host.
+    fn begin_hosting(&mut self, server: makepad_asset_store::AssetServer, token: &str) {
+        if self.host_loops == HostLoops::Run {
+            self.publish =
+                start_publish_loop(&server, token, self.library_dir.clone());
+            self.jobs = start_job_loop(&server, token);
+        }
+        self.role = ServerRole::Host;
+        self.embedded = Some(server);
+    }
+
+    /// Ask the server one cheap question while it looks silent.
+    ///
+    /// The subscriber only reports FAILED polls: a poll that succeeds with
+    /// nothing to report sends no event at all, so a blip that healed would
+    /// otherwise look like a death forever. A profiles fetch is a plain
+    /// authenticated GET that changes nothing, and its answer — success, or
+    /// even a refusal, which is still a server talking — clears the loss.
+    fn submit_probe(&mut self) {
+        if self.probe_req.is_some() {
+            return;
+        }
+        let Some(handles) = &mut self.handles else { return };
+        if let Ok(id) = handles
+            .catalog
+            .submit(ClientRequest::FetchJobProfiles { domain: None })
+        {
+            self.probe_req = Some(id);
+        }
+    }
+
+    /// Hand the previous session to a teardown thread and forget it here.
+    ///
+    /// A client cache root is single-owner, enforced by an advisory
+    /// `cache.lock` that a second handle in THIS process conflicts with too,
+    /// so the next session cannot open the same roots until this one's files
+    /// are closed. The join happens off the UI thread because a parked
+    /// long-poll must never freeze a frame.
+    fn begin_release(&mut self) {
+        self.connector = None;
+        self.server = None;
+        self.endpoints = None;
+        self.status = None;
+        self.events_live = false;
+        self.event_note = None;
+        self.loss.clear();
+        // Every in-flight id belonged to the runtime that is going away, and
+        // a cursor is bound to the server that minted it.
+        self.search_req = None;
+        self.search_continuation = false;
+        self.next_cursor = None;
+        self.detail_req = None;
+        self.profiles_req = None;
+        self.probe_req = None;
+        self.gc_req = None;
+        self.gc_cancel_req = None;
+        self.retire_reqs.clear();
+        let released = Arc::new(AtomicBool::new(false));
+        self.releasing = Some(released.clone());
+        let Some(handles) = self.handles.take() else {
+            released.store(true, Ordering::Release);
+            return;
+        };
+        let done = released.clone();
+        let spawned = std::thread::Builder::new()
+            .name("asset-ui-session-release".to_string())
+            .spawn(move || {
+                handles.shutdown();
+                done.store(true, Ordering::Release);
+            });
+        if let Err(error) = spawned {
+            // The closure (and the session inside it) was dropped, which
+            // already joined the runtimes right here. Nothing is left to
+            // wait for, so never leave the swap parked on a thread that
+            // does not exist.
+            log!("asset store: session release thread refused ({error}); released inline");
+            released.store(true, Ordering::Release);
+        }
+    }
+
+    /// Open the decided session once the previous one has let go.
+    fn finish_swap(&mut self) -> bool {
+        if let Some(released) = &self.releasing {
+            if !released.load(Ordering::Acquire) {
+                return false;
+            }
+        }
+        self.releasing = None;
+        let Some(pending) = self.pending_session.take() else {
+            return false;
+        };
+        let mut config = self
+            .base_config
+            .clone()
+            .unwrap_or_else(|| session_config_from_env());
+        if pending.endpoints.is_some() {
+            config.endpoints = pending.endpoints;
+        }
+        if pending.server_id.is_some() {
+            config.server_id = pending.server_id;
+        }
+        if pending.token.is_some() {
+            config.token = pending.token;
+        }
+        match SessionConnector::start(config) {
+            Ok(connector) => {
+                self.connector = Some(connector);
+                self.status = Some(SessionStatus::Discovering);
+            }
+            // Only a malformed policy gets here, and it will not become
+            // well-formed by being retried — say so instead of looping.
+            Err(error) => self.start_error = Some(error.to_string()),
+        }
+        true
+    }
+
+    fn attached_label(&self) -> String {
+        self.attached_endpoints
+            .map(|endpoints| endpoints.control.to_string())
+            .unwrap_or_else(|| "the server".to_string())
+    }
+
+    fn set_succession_note(&mut self, note: String) -> bool {
+        if self.succession_note.as_deref() == Some(note.as_str()) {
+            return false;
+        }
+        self.succession_note = Some(note);
+        true
+    }
+
+    fn clear_succession_note(&mut self) -> bool {
+        // Between sessions the note IS the honest state; only a live session
+        // may retire it.
+        if self.server.is_none() {
+            return false;
+        }
+        self.succession_note.take().is_some()
     }
 
     /// The catalog query for the current filters. Facets are counted only
@@ -658,6 +1064,28 @@ impl AssetStore {
 
     fn on_catalog_event(&mut self, event: ClientEvent) -> bool {
         let id = event.id();
+        if Some(id) == self.probe_req {
+            match event {
+                ClientEvent::Started { .. } | ClientEvent::Progress { .. } => return false,
+                ClientEvent::Done { .. } => {
+                    self.probe_req = None;
+                    self.loss.clear();
+                }
+                ClientEvent::Failed { error, .. } => {
+                    self.probe_req = None;
+                    if is_connection_loss(&error) {
+                        self.loss.failing(now_ms());
+                    } else {
+                        // A refusal is a server ANSWERING. Whatever is wrong,
+                        // it is not "there is nothing there", and taking the
+                        // root over would be plain wrong.
+                        log!("asset store: liveness probe refused ({error}) — server is alive");
+                        self.loss.clear();
+                    }
+                }
+            }
+            return true;
+        }
         if let Some(pos) = self.retire_reqs.iter().position(|r| *r == id) {
             self.retire_reqs.remove(pos);
             match event {
@@ -818,6 +1246,13 @@ impl AssetStore {
     }
 
     fn on_feed_event(&mut self, event: CatalogSubscriptionEvent) {
+        // Every variant except `Retry` is the server having answered.
+        match &event {
+            CatalogSubscriptionEvent::Retry { error, .. } if is_connection_loss(error) => {
+                self.loss.failing(now_ms())
+            }
+            _ => self.loss.clear(),
+        }
         match event {
             CatalogSubscriptionEvent::Ready { .. } => {
                 self.events_live = true;
@@ -932,6 +1367,15 @@ struct RunningServer {
     token: Option<String>,
 }
 
+/// Milliseconds since the epoch. The succession ladder is measured in wall
+/// clock so a status line can say how long the server has been gone.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn checkout_root() -> PathBuf {
     if let Ok(root) = std::env::var("MAKEPAD_ROOT") {
         return PathBuf::from(root);
@@ -951,10 +1395,86 @@ pub(crate) fn default_asset_server_root() -> PathBuf {
     asset_ui_home().join("asset-server")
 }
 
+/// `ASSET_UI_ASSET_BEACON=off` (`0`/`no`/`silent`) starts a server without
+/// its LAN beacon — see the module header.
+fn beacon_from_env() -> Beacon {
+    match env_alias(&["ASSET_UI_ASSET_BEACON", "AI_CONTENT_ASSET_BEACON"]) {
+        Some(value)
+            if matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "off" | "0" | "no" | "silent" | "false"
+            ) =>
+        {
+            Beacon::Silent
+        }
+        _ => Beacon::Announce,
+    }
+}
+
+/// A locally hosted server binds `0.0.0.0`; reach it the way its own
+/// `listen` file advertises it.
+fn localized_endpoints(server: &makepad_asset_store::AssetServer) -> ApiEndpoints {
+    let localize = |addr: SocketAddr| {
+        if addr.ip().is_unspecified() {
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+        } else {
+            addr
+        }
+    };
+    ApiEndpoints {
+        control: localize(server.control_addr()),
+        data: localize(server.data_addr()),
+    }
+}
+
+/// Outcome of one attempt to succeed a server that stopped answering.
+enum Takeover {
+    /// The root lock was free: this process now hosts the store.
+    Hosted {
+        server: makepad_asset_store::AssetServer,
+        token: String,
+    },
+    /// The lock is still held and the root now advertises a DIFFERENT
+    /// server than the silent one — a rival attacher won the race, or the
+    /// owner was only briefly unreachable and rebound. Join what the root
+    /// names now.
+    Rejoin(RunningServer),
+    /// The lock is held and the root still advertises the server that went
+    /// silent: there is nothing new to trust yet.
+    Wait(String),
+}
+
+/// One attempt at succession, arbitrated entirely by `<root>/server.lock`.
+///
+/// `silent` is the address that stopped answering. After a loss the old
+/// `listen` file must never be trusted again — it is re-read on every
+/// attempt, and only an address that CHANGED counts as a new owner. That is
+/// what keeps two attached instances racing for the same dead root from
+/// both rejoining a corpse: the loser reads the winner's freshly written
+/// file, not the stale one it already gave up on.
+fn takeover_at(root: &Path, silent: Option<ApiEndpoints>, beacon: Beacon) -> Takeover {
+    match start_embedded_asset_server_at(root, beacon) {
+        Ok((server, token)) => Takeover::Hosted { server, token },
+        Err(error) => {
+            let Some(running) = attach_running_asset_server_at(root) else {
+                return Takeover::Wait(error);
+            };
+            match (running.endpoints, silent) {
+                (Some(fresh), Some(dead)) if fresh.control == dead.control => {
+                    Takeover::Wait("the root still names the silent server".to_string())
+                }
+                (None, Some(_)) => {
+                    Takeover::Wait("the root names no server yet".to_string())
+                }
+                _ => Takeover::Rejoin(running),
+            }
+        }
+    }
+}
+
 /// When the catalog root is already locked, read the live server's listen
 /// address / id / admin token so the UI can connect as a client.
-fn attach_running_asset_server() -> Option<RunningServer> {
-    let root = default_asset_server_root();
+fn attach_running_asset_server_at(root: &Path) -> Option<RunningServer> {
     let token = std::fs::read_to_string(root.join("admin-token"))
         .ok()
         .map(|t| t.trim().to_string())
@@ -975,9 +1495,11 @@ fn attach_running_asset_server() -> Option<RunningServer> {
     })
 }
 
-fn start_embedded_asset_server() -> Result<(makepad_asset_store::AssetServer, String), String> {
-    let root = default_asset_server_root();
-    let mut cfg = makepad_asset_store::ServerConfig::new(root.clone());
+fn start_embedded_asset_server_at(
+    root: &Path,
+    beacon: Beacon,
+) -> Result<(makepad_asset_store::AssetServer, String), String> {
+    let mut cfg = makepad_asset_store::ServerConfig::new(root.to_path_buf());
     cfg.control_addr = "0.0.0.0:0"
         .parse()
         .map_err(|e| format!("control bind spec: {e}"))?;
@@ -985,7 +1507,10 @@ fn start_embedded_asset_server() -> Result<(makepad_asset_store::AssetServer, St
         .parse()
         .map_err(|e| format!("data bind spec: {e}"))?;
     cfg.bootstrap_admin = true;
-    cfg.discovery = Some(makepad_asset_store::DiscoveryConfig::lan_default());
+    cfg.discovery = match beacon {
+        Beacon::Announce => Some(makepad_asset_store::DiscoveryConfig::lan_default()),
+        Beacon::Silent => None,
+    };
     cfg.log = true;
     let server = makepad_asset_store::AssetServer::start(cfg)
         .map_err(|e| format!("embedded asset server: {e}"))?;
@@ -1029,17 +1554,7 @@ fn start_job_loop(
     server: &makepad_asset_store::AssetServer,
     token: &str,
 ) -> Option<JobLoop> {
-    let localize = |addr: SocketAddr| {
-        if addr.ip().is_unspecified() {
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
-        } else {
-            addr
-        }
-    };
-    let endpoints = ApiEndpoints {
-        control: localize(server.control_addr()),
-        data: localize(server.data_addr()),
-    };
+    let endpoints = localized_endpoints(server);
     let server_id = server.server_id();
     let token = token.to_string();
     let cache = asset_ui_home().join("jobs-cache");
@@ -1107,19 +1622,7 @@ fn start_publish_loop(
     token: &str,
     library_dir: PathBuf,
 ) -> Option<PublishLoop> {
-    // The server binds 0.0.0.0; reach it the way its own `listen` file
-    // advertises it.
-    let localize = |addr: SocketAddr| {
-        if addr.ip().is_unspecified() {
-            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
-        } else {
-            addr
-        }
-    };
-    let endpoints = ApiEndpoints {
-        control: localize(server.control_addr()),
-        data: localize(server.data_addr()),
-    };
+    let endpoints = localized_endpoints(server);
     let server_id = server.server_id();
     let token = token.to_string();
     let cache = asset_ui_home().join("publish-cache");
@@ -1190,7 +1693,13 @@ pub fn session_config_from_env() -> SessionConfig {
             (!text.is_empty()).then_some(text)
         })
         .or_else(|| {
-            std::fs::read_to_string(app_home.join("asset-server").join("admin-token"))
+            // The bootstrap token of THIS process's store root, which
+            // `AI_CONTENT_ASSET_ROOT` may have moved. Reading the default
+            // location unconditionally handed an isolated instance the
+            // shared server's credentials — every request it then made to
+            // its own server was refused (the same trap `import.rs`'s
+            // `hosted_server_session` already had to climb out of).
+            std::fs::read_to_string(default_asset_server_root().join("admin-token"))
                 .ok()
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty())
@@ -1913,5 +2422,225 @@ mod tests {
         );
         assert!(collected.deleted_bytes > 0);
         assert!(!store.gc_busy());
+    }
+
+    // -----------------------------------------------------------------
+    // Succession. An attached instance whose host dies must become the
+    // host (or join whoever did) — never carry on pointing at a dead port
+    // while the window looks healthy. Every server here is `Beacon::Silent`
+    // on its own temp root: a test must not advertise itself to the LAN.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn loss_watch_keeps_the_first_failure_and_any_answer_clears_it() {
+        let mut loss = LossWatch::default();
+        assert_eq!(loss.down_for(1_000), None, "silence is not loss");
+        loss.failing(1_000);
+        loss.failing(1_400);
+        assert_eq!(
+            loss.down_for(2_000),
+            Some(1_000),
+            "a later failure must not restart the outage clock"
+        );
+        loss.clear();
+        assert_eq!(loss.down_for(2_000), None);
+
+        // Only the transport failing is loss; a refusal is a server TALKING.
+        assert!(is_connection_loss(&ClientError::Io {
+            op: "connect",
+            kind: std::io::ErrorKind::ConnectionRefused,
+        }));
+        assert!(is_connection_loss(&ClientError::Timeout { op: "read head" }));
+        assert!(is_connection_loss(&ClientError::RuntimeDown));
+        assert!(!is_connection_loss(&ClientError::Unauthenticated));
+        assert!(!is_connection_loss(&ClientError::Denied));
+        assert!(!is_connection_loss(&ClientError::NotFound { what: "asset" }));
+        assert!(!is_connection_loss(&ClientError::Server { status: 503, detail: None }));
+    }
+
+    #[test]
+    fn the_status_line_names_the_role_and_a_succession_takes_it_over() {
+        let mut store = AssetStore::default();
+        store.server = Some(ServerInfo {
+            label: "127.0.0.1:9701".into(),
+            server_id: [3; 16],
+        });
+        assert_eq!(
+            store.status_label(),
+            "SERVER · 127.0.0.1:9701",
+            "an env-pinned server is nobody's to succeed"
+        );
+        store.role = ServerRole::Host;
+        assert_eq!(store.status_label(), "SERVER · local · 127.0.0.1:9701");
+        store.role = ServerRole::Attached;
+        assert_eq!(store.status_label(), "SERVER · attached · 127.0.0.1:9701");
+
+        // A note outranks the last known session, and survives losing it —
+        // there is no arrangement of these fields that reads as connected
+        // while the server is gone.
+        store.succession_note = Some("server lost — taking over…".to_string());
+        assert_eq!(store.status_label(), "SERVER · server lost — taking over…");
+        store.server = None;
+        store.status = None;
+        assert_eq!(store.status_label(), "SERVER · server lost — taking over…");
+        // …and only a live session may retire it.
+        assert!(!store.clear_succession_note());
+        assert!(store.succession_note.is_some());
+        store.server = Some(ServerInfo { label: "127.0.0.1:9911".into(), server_id: [4; 16] });
+        assert!(store.clear_succession_note());
+        assert_eq!(store.status_label(), "SERVER · attached · 127.0.0.1:9911");
+    }
+
+    #[test]
+    fn takeover_waits_for_a_live_owner_hosts_a_dead_one_and_the_loser_rejoins_the_winner() {
+        let root = live_test_root("succession-lock");
+        let (owner, owner_token) =
+            start_embedded_asset_server_at(&root, Beacon::Silent).expect("owner server");
+        let published = attach_running_asset_server_at(&root).expect("root files");
+        let owned = published.endpoints.expect("listen file");
+        assert_eq!(owned.control.port(), owner.control_addr().port());
+        assert_eq!(published.token.as_deref(), Some(owner_token.as_str()));
+
+        // A live owner holds the lock, and the root still names it: nothing
+        // to succeed, nothing new to trust.
+        match takeover_at(&root, Some(owned), Beacon::Silent) {
+            Takeover::Wait(why) => assert!(why.contains("silent server"), "{why}"),
+            Takeover::Hosted { .. } => panic!("a live owner must never be succeeded"),
+            Takeover::Rejoin(_) => panic!("the root named the same server it always did"),
+        }
+
+        drop(owner);
+        let Takeover::Hosted { server, token } = takeover_at(&root, Some(owned), Beacon::Silent)
+        else {
+            panic!("a free root lock must be taken");
+        };
+        let fresh = localized_endpoints(&server);
+        assert_ne!(
+            fresh.control.port(),
+            owned.control.port(),
+            "a new server binds new ephemeral ports"
+        );
+        // The successor rewrote `listen`, so anyone re-reading the root now
+        // finds IT — this is the only way a loser can be told where to go.
+        let after = attach_running_asset_server_at(&root).expect("root files after takeover");
+        assert_eq!(after.endpoints.expect("listen").control.port(), fresh.control.port());
+        assert_eq!(after.server_id, Some(server.server_id()));
+
+        // And it really serves.
+        let mut cfg = makepad_asset_client::ClientConfig::new(live_test_root("succession-client"));
+        cfg.token = Some(token.clone());
+        let client =
+            makepad_asset_client::AssetClient::connect(cfg, fresh, Some(server.server_id()))
+                .expect("the successor answers a verified connect");
+        client
+            .catalog_search(&CatalogQuery::browse(10), None)
+            .expect("the successor serves the catalog");
+
+        // The race: a second attacher that also gave up on the dead address
+        // must land on the WINNER, never back on the stale file it already
+        // abandoned.
+        match takeover_at(&root, Some(owned), Beacon::Silent) {
+            Takeover::Rejoin(running) => {
+                let rejoin = running.endpoints.expect("the winner's listen file");
+                assert_eq!(rejoin.control.port(), fresh.control.port());
+                assert_ne!(rejoin.control.port(), owned.control.port());
+                assert_eq!(
+                    running.token.as_deref(),
+                    Some(token.as_str()),
+                    "the loser must re-read the winner's credentials too"
+                );
+            }
+            Takeover::Hosted { .. } => panic!("the winner still holds the root lock"),
+            Takeover::Wait(why) => panic!("the root names the winner now: {why}"),
+        }
+
+        drop(client);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_attached_store_takes_over_a_dead_server_and_reconnects_to_itself() {
+        let root = live_test_root("succession-store");
+        let (owner, owner_token) =
+            start_embedded_asset_server_at(&root, Beacon::Silent).expect("owner server");
+        let owner_endpoints = localized_endpoints(&owner);
+        let attached = attach_running_asset_server_at(&root).expect("root files");
+
+        // Exactly what `start` builds when the lock is already held.
+        let mut store = AssetStore::default();
+        store.role = ServerRole::Attached;
+        store.host_loops = HostLoops::Skip;
+        store.beacon = Beacon::Silent;
+        store.server_root = root.clone();
+        store.library_dir = live_test_root("succession-library");
+        store.attached_endpoints = attached.endpoints;
+        // ONE cache parent for both sessions, so the swap really has to
+        // release the single-owner cache roots before it can re-open them.
+        let cache = live_test_root("succession-store-cache");
+        store.base_config = Some(SessionConfig::new(cache.clone()));
+        let config = SessionConfig {
+            endpoints: attached.endpoints,
+            server_id: attached.server_id,
+            token: attached.token.clone(),
+            ..SessionConfig::new(cache)
+        };
+        store.connector = Some(SessionConnector::start(config).expect("attach connector"));
+        poll_until(&mut store, "the attached session", |store| {
+            matches!(store.search, Remote::Ready(_))
+        });
+        assert_eq!(
+            store.status_label(),
+            format!("SERVER · attached · {}", owner_endpoints.control),
+            "attach mode says so"
+        );
+
+        // Healthy: succession does nothing at all.
+        assert!(!store.tick_succession(1_000));
+        assert!(store.succession_note.is_none());
+        assert!(store.embedded.is_none());
+
+        // Sustained loss while the owner is ALIVE (unreachable, not dead):
+        // the lock arbitrates and this instance keeps trying, honestly.
+        store.loss.failing(10_000);
+        assert!(store.tick_succession(10_000 + TAKEOVER_AFTER_MS));
+        assert!(store.status_label().contains("taking over"), "{}", store.status_label());
+        assert!(store.embedded.is_none(), "a live owner keeps the root");
+        assert_eq!(store.role, ServerRole::Attached);
+        store.loss.clear();
+        store.succession_note = None;
+
+        // Now it really dies.
+        drop(owner);
+        store.loss.failing(20_000);
+        assert!(store.tick_succession(21_600));
+        assert_eq!(
+            store.status_label(),
+            format!("SERVER · attached · {} not answering (1s)", owner_endpoints.control),
+            "a blip is reported, not acted on"
+        );
+        assert!(store.embedded.is_none());
+
+        // Sustained: take the root over.
+        assert!(store.tick_succession(20_000 + TAKEOVER_AFTER_MS));
+        assert_eq!(store.role, ServerRole::Host);
+        let hosted = localized_endpoints(store.embedded.as_ref().expect("successor server"));
+        assert_ne!(hosted.control.port(), owner_endpoints.control.port());
+        assert!(store.status_label().contains("took over"), "{}", store.status_label());
+        assert!(!store.connected(), "there is no session until it reconnects");
+        assert!(store.handles.is_none(), "the dead session was handed over for teardown");
+
+        // …and it reconnects to ITSELF, through the real connector, on the
+        // same cache roots the dead session had to let go of first.
+        poll_until(&mut store, "the successor's own session", |store| store.connected());
+        assert_eq!(store.status_label(), format!("SERVER · local · {}", hosted.control));
+        assert!(store.succession_note.is_none(), "a live session retires the note");
+        poll_until(&mut store, "the successor serving the catalog", |store| {
+            matches!(store.search, Remote::Ready(_))
+        });
+
+        drop(store);
+        drop(owner_token);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
