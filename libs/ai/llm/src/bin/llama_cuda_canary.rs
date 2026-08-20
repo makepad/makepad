@@ -643,6 +643,220 @@ fn run_q4k_mmq_case(
     bytes_to_f32(&outputs[&out])
 }
 
+// ---------------------------------------------------------------------------
+// UD- quant kinds (Q3_K / IQ4_XS / IQ4_NL / IQ3_S).
+//
+// These are the tensor types unsloth's Dynamic conversions mix into otherwise
+// K-quant files, and the reason a UD- GGUF used to fail graph planning with
+// "matmul with iq4_xs weights". Two checks per type:
+//
+//   * `get_rows` — dequant only, f32 in and f32 out, so the ported
+//     iq_convert.cuh kernels are compared against the scalar reference in
+//     makepad_ai_cuda::quant_iq with essentially no slack. That reference is
+//     itself pinned bit-exact against llama.cpp's gguf-py dequantizers by
+//     `cpu_reference_matches_gguf_py_oracle`, so this closes the chain
+//     kernel -> reference -> upstream.
+//   * `mul_mat` at three widths, one per route: M=5 hits official MMVQ,
+//     M=33 the dequant-slab + cuBLAS fallback, M=128 the J=128 MMQ tiles.
+//     Those quantize the activations (q8_1) or round them (bf16), so the
+//     tolerances are set by the activation format, not by the weight decode.
+// ---------------------------------------------------------------------------
+
+/// Random blocks with a sane positive f16 super-scale, per type layout.
+fn iq_blocks(rng: &mut Rng, ty: TensorType, k: usize, rows: usize) -> Vec<u8> {
+    let (block_bytes, block_elems, d_off) = match ty {
+        TensorType::Q3K => (110usize, 256usize, 108usize),
+        TensorType::IQ4Xs => (136, 256, 0),
+        TensorType::IQ4Nl => (18, 32, 0),
+        TensorType::IQ3S => (110, 256, 0),
+        _ => unreachable!("iq_blocks: unsupported type {:?}", ty),
+    };
+    assert_eq!(k % block_elems, 0);
+    let mut out = vec![0u8; rows * (k / block_elems) * block_bytes];
+    for block in out.chunks_exact_mut(block_bytes) {
+        for b in block.iter_mut() {
+            *b = rng.byte();
+        }
+        // A random 16-bit pattern is inf/NaN ~1/32 of the time; pin the scale.
+        let d = quant::f32_to_f16(0.002 + 0.01 * (rng.byte() as f32 / 255.0));
+        block[d_off..d_off + 2].copy_from_slice(&d.to_le_bytes());
+    }
+    out
+}
+
+fn iq_dequant_row(ty: TensorType, row: &[u8], k: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; k];
+    assert!(
+        makepad_ai_cuda::quant_iq::dequantize_row_iq(ty.ggml_type(), row, k, &mut out),
+        "no CPU reference dequant for {:?}",
+        ty
+    );
+    out
+}
+
+/// What `mkllm_quantize_q81` (mmvq path) leaves the vec_dot to reconstruct:
+/// per 32 values `d = amax/127` in f32 for the rounding, but the scale is
+/// STORED AS F16, so the effective activation is `round(x/d) * f16(d)`.
+fn q81_round_row(x: &[f32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(x.len());
+    for group in x.chunks(32) {
+        let amax = group.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        let d = amax / 127.0;
+        let d_f16 = f16_rne(d);
+        for &v in group {
+            let q = if amax == 0.0 { 0.0 } else { (v / d).round() };
+            out.push(q * d_f16);
+        }
+    }
+    out
+}
+
+/// Same for `mkllm_quantize_mmq_{ds4,d4}`, which computes the reciprocal
+/// first (`d_inv = 127/amax`, `d = 1/d_inv`) — a different last ulp than
+/// `amax/127`, so it gets its own model rather than sharing the one above.
+fn mmq_round_row(x: &[f32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(x.len());
+    for group in x.chunks(32) {
+        let amax = group.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        let d_inv = if amax > 0.0 { 127.0 / amax } else { 0.0 };
+        let d = if d_inv > 0.0 { 1.0 / d_inv } else { 0.0 };
+        let d_f16 = f16_rne(d);
+        for &v in group {
+            out.push((v * d_inv).round() * d_f16);
+        }
+    }
+    out
+}
+
+fn iq_kinds_canary(exec: &CudaExecRuntime, failures: &mut usize) {
+    let mut rng = Rng::new(0x4951_4d51);
+    let cc = exec.features().compute_capability;
+    // Several K per type: wider shape coverage (K/256 both even and odd), and
+    // it keeps each case's activation buffer a different size so no two cases
+    // can collide in the executor's scratch allocator.
+    for (ty, tag, k) in [
+        (TensorType::Q3K, "q3k", 512usize),
+        (TensorType::Q3K, "q3k1280", 1280usize),
+        (TensorType::IQ4Xs, "iq4xs", 768usize),
+        (TensorType::IQ4Nl, "iq4nl", 1024usize),
+        (TensorType::IQ3S, "iq3s", 1280usize),
+        (TensorType::IQ3S, "iq3s512", 512usize),
+    ] {
+        let n = 33usize;
+        let kind = match ty {
+            TensorType::Q3K => makepad_ai_cuda::llm_ops::QUANT_Q3K,
+            TensorType::IQ4Xs => makepad_ai_cuda::llm_ops::QUANT_IQ4XS,
+            TensorType::IQ4Nl => makepad_ai_cuda::llm_ops::QUANT_IQ4NL,
+            _ => makepad_ai_cuda::llm_ops::QUANT_IQ3S,
+        };
+        let weights = iq_blocks(&mut rng, ty, k, n);
+        let row_bytes = weights.len() / n;
+        let name = |route: &str| -> &'static str {
+            Box::leak(format!("{route}_{tag}").into_boxed_str())
+        };
+
+        // --- dequant: get_rows gathers three rows out of order.
+        {
+            let idx: [i32; 3] = [n as i32 - 1, 0, (n / 2) as i32];
+            let mut bench = Bench::new(128 << 20);
+            let w = bench.tensor("iq_w", ty, &[k as i64, n as i64], &weights);
+            let r = bench.tensor("iq_r", TensorType::I32, &[idx.len() as i64], &as_bytes_i32(&idx));
+            let out = bench
+                .ctx
+                .get_rows(w, r, BufferUsage::Activations)
+                .expect("get_rows");
+            let outputs = bench.run(exec, out, &[out]);
+            let got = bytes_to_f32(&outputs[&out]);
+            let mut want = Vec::with_capacity(k * idx.len());
+            for &row in &idx {
+                let row = row as usize;
+                want.extend(iq_dequant_row(ty, &weights[row * row_bytes..(row + 1) * row_bytes], k));
+            }
+            // Same multiplies in the same order on both sides: exact.
+            compare_tol(name("getrows"), got, want, 0.0, 0.0, failures);
+        }
+
+        // --- matmul, one width per route. Each route rounds its inputs a
+        // different way; model that exactly instead of loosening tolerances,
+        // or the comparison stops being able to see a real decode bug.
+        let mut rows_f32 = Vec::with_capacity(n);
+        for row in 0..n {
+            rows_f32.push(iq_dequant_row(ty, &weights[row * row_bytes..(row + 1) * row_bytes], k));
+        }
+        for (route, m) in [("mmv", 5usize), ("gemm", 33usize), ("mmq", 128usize)] {
+            if m == 128 && cc.0 < 8 {
+                println!("SKIP {}: J=128 MMQ requires sm80+", name("mmq"));
+                continue;
+            }
+            let acts = f32s(&mut rng, k * m);
+            let mut bench = Bench::new(256 << 20);
+            let w = bench.tensor("w", ty, &[k as i64, n as i64], &weights);
+            let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(&acts));
+            let out = bench
+                .ctx
+                .mul_mat(w, x, BufferUsage::Activations)
+                .expect("mul_mat");
+            let outputs = bench.run(exec, out, &[out]);
+            let got = bytes_to_f32(&outputs[&out]);
+            // Which route the dispatcher will actually pick decides how the
+            // inputs get rounded, and each rounding is modelled exactly rather
+            // than absorbed into a loose tolerance — a slack tolerance here
+            // cannot tell a decode bug from a quantization artefact.
+            let routes = unsafe { makepad_ai_cuda::llm_ops::quant_kind_routes(kind) };
+            let taken = match route {
+                "mmv" if routes & makepad_ai_cuda::llm_ops::ROUTE_MMVQ != 0 => "mmv",
+                "mmq" if routes & makepad_ai_cuda::llm_ops::ROUTE_MMQ != 0 => "mmq",
+                _ => "gemm",
+            };
+            let mut want = vec![0.0f32; n * m];
+            // Accumulation error scales with the sum of |term|, not with the
+            // (often cancellation-shrunk) result — an IQ4_XS weight is ~30x an
+            // IQ4_NL one, so a result-relative tolerance would call the same
+            // relative accuracy a failure on one type and a pass on the other.
+            let mut max_mag = 0.0f64;
+            for col in 0..m {
+                let raw = &acts[col * k..(col + 1) * k];
+                let col_act: Vec<f32> = match taken {
+                    "mmv" => q81_round_row(raw),
+                    "gemm" => raw.iter().map(|v| bf16_round(*v)).collect(),
+                    _ => mmq_round_row(raw),
+                };
+                for row in 0..n {
+                    let mut acc = 0.0f64;
+                    let mut mag = 0.0f64;
+                    for i in 0..k {
+                        let wv = if taken == "gemm" {
+                            bf16_round(rows_f32[row][i])
+                        } else {
+                            rows_f32[row][i]
+                        };
+                        let term = wv as f64 * col_act[i] as f64;
+                        acc += term;
+                        mag += term.abs();
+                    }
+                    max_mag = max_mag.max(mag);
+                    want[col * n + row] = acc as f32;
+                }
+            }
+            // mmv: the integer dot inside a sub-block is exact and both sides
+            // use the same scales, so only f32 accumulation order is left.
+            // gemm/mmq: the tile accumulators sum in a different order than the
+            // f64 reference. Bounds are calibrated so a correct kernel clears
+            // them by ~50x and a wrong one (IQ3_S's tiles) misses by ~100x.
+            let mag = max_mag as f32;
+            let (tol_abs, tol_rel) = match taken {
+                "mmv" => (1e-4f32 + 1e-6 * mag, 0.0f32),
+                _ => (1e-3f32 + 1e-4 * mag, 0.0f32),
+            };
+            if taken != route {
+                println!("note {}: kind not verified on {route}, dispatch uses {taken}", name(route));
+            }
+            compare_tol(name(route), got, want, tol_abs, tol_rel, failures);
+        }
+    }
+}
+
+// Field-isolation probe for the one type whose official MMVQ disagrees with
 fn q4k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     if exec.features().compute_capability.0 < 8 {
         println!("SKIP q4k_mmq_forced_ds4: packed MMQ requires sm80+");
@@ -656,7 +870,7 @@ fn q4k_mmq_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     let acts = q4k_mmq_activations(k, m);
     let want = q4k_mmq_reference(&weights, &acts, k, n, m);
 
-    // Quant profiling prints q4k_ds4 + mmq_q4k_j128 when dispatch really
+    // Quant profiling prints mmq_ds4 + mmq_kind_j128 when dispatch really
     // enters the candidate. The numerical proof below is machine-checked:
     // the forced result must match DS4 and differ from the known slab route.
     let forced = run_q4k_mmq_case(exec, &weights, &acts, k, n, m, true, true);
@@ -1505,6 +1719,7 @@ fn opcheck() -> i32 {
     mmvq_swiglu_canary(&exec, &mut failures);
     cpy_set_rows_canary(&exec, &mut failures);
     cpy_ssm_state_canary(&exec, &mut failures);
+    iq_kinds_canary(&exec, &mut failures);
 
     // --- f32 mat-vec and cublas GEMM
     {

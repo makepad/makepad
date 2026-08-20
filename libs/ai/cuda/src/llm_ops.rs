@@ -18,9 +18,8 @@ pub mod names {
     pub const MMV_QUANT_Q81: &str = "mmv_quant_q81";
     pub const MMV_QUANT_Q81_SWIGLU: &str = "mmv_quant_q81_swiglu";
     pub const MMQ_QUANT_Q81: &str = "mmq_quant_q81";
-    pub const MMQ_Q4K: &str = "mmq_q4k";
-    pub const MMQ_Q5K: &str = "mmq_q5k";
-    pub const MMQ_Q6K: &str = "mmq_q6k";
+    pub const MMQ_KIND_J128: &str = "mmq_kind_j128";
+    pub const QUANT_KIND_INFO: &str = "quant_kind_info";
     pub const MMQ_QUANT: &str = "mmq_quant";
     pub const MMVF_F32_M1: &str = "mmvf_f32_m1";
     pub const MMV_F32: &str = "mmv_f32";
@@ -51,10 +50,35 @@ pub mod names {
 }
 
 /// GGUF block kind passed to quantized MMV/MMQ launchers.
+///
+/// 0..=3 are the "legacy" kinds the hand-written kernels in `kernels.cu`
+/// template over. 4..=7 are served only by the vendored official llama.cpp
+/// templates (`fattn/mmq.cuh`, `fattn/mmvq.cuh`) plus the row dequant in
+/// `iq_convert.cuh`; they exist because unsloth's Dynamic (UD-) GGUFs mix
+/// these tensor types into otherwise-K-quant files. Must stay in sync with
+/// `MKLLM_QUANT_*` in `kernels/llm/kernels.cu`.
 pub const QUANT_Q4K: i32 = 0;
 pub const QUANT_Q5K: i32 = 1;
 pub const QUANT_Q6K: i32 = 2;
 pub const QUANT_Q80: i32 = 3;
+pub const QUANT_Q3K: i32 = 4;
+pub const QUANT_IQ4XS: i32 = 5;
+pub const QUANT_IQ4NL: i32 = 6;
+pub const QUANT_IQ3S: i32 = 7;
+pub const QUANT_COUNT: i32 = 8;
+
+/// Kinds whose weights the vendored official MMQ/MMVQ templates serve but the
+/// hand-written legacy kernels (`mmv_quant`, `mmq_quant`, `get_rows_quant`'s
+/// per-element selector) do not.
+pub const fn quant_kind_is_official_only(kind: i32) -> bool {
+    kind > QUANT_Q80 && kind < QUANT_COUNT
+}
+
+/// Bits returned by `quant_kind_routes`: which quantized-matmul routes a kind
+/// is verified on. Anything not set falls back to dequant-slab + cuBLAS, which
+/// every kind supports.
+pub const ROUTE_MMVQ: i32 = 1;
+pub const ROUTE_MMQ: i32 = 2;
 
 pub type Stream = *mut c_void;
 pub type CudaError = i32;
@@ -170,7 +194,8 @@ mod ffi {
             stride_col: i32,
             stream: Stream,
         ) -> CudaError;
-        pub fn mkllm_mmq_q4k_j128(
+        pub fn mkllm_mmq_kind_j128(
+            kind: i32,
             x: *const c_void,
             y: *const c_void,
             dst: *mut f32,
@@ -183,38 +208,16 @@ mod ffi {
             tmp_fixup: *mut f32,
             stream: Stream,
         ) -> CudaError;
-        pub fn mkllm_mmq_q5k_j128(
-            x: *const c_void,
-            y: *const c_void,
-            dst: *mut f32,
-            k: i32,
-            n: i32,
-            m: i32,
-            stride_row_x: i32,
-            stride_col_dst: i32,
-            nsm: i32,
-            tmp_fixup: *mut f32,
-            stream: Stream,
-        ) -> CudaError;
+        pub fn mkllm_quant_kind_routes(kind: i32) -> i32;
+        pub fn mkllm_quant_kind_block_bytes(kind: i32) -> i32;
+        pub fn mkllm_quant_kind_bytes_per_256(kind: i32) -> i32;
+        pub fn mkllm_quant_kind_mmq_ds4(kind: i32) -> i32;
         pub fn mkllm_quantize_mmq_d4(
             x: *const f32,
             y: *mut c_void,
             k: i32,
             m: i32,
             stride_col: i32,
-            stream: Stream,
-        ) -> CudaError;
-        pub fn mkllm_mmq_q6k_j128(
-            x: *const c_void,
-            y: *const c_void,
-            dst: *mut f32,
-            k: i32,
-            n: i32,
-            m: i32,
-            stride_row_x: i32,
-            stride_col_dst: i32,
-            nsm: i32,
-            tmp_fixup: *mut f32,
             stream: Stream,
         ) -> CudaError;
         pub fn mkllm_mmq_quant(
@@ -731,21 +734,13 @@ cuda_forward!(quantize_mmq_ds4(
     stream: Stream,
 ) -> CudaError { mkllm_quantize_mmq_ds4 });
 
-cuda_forward!(mmq_q4k(
-    x: *const c_void,
-    y: *const c_void,
-    dst: *mut f32,
-    k: i32,
-    n: i32,
-    m: i32,
-    stride_row_x: i32,
-    stride_col_dst: i32,
-    nsm: i32,
-    tmp_fixup: *mut f32,
-    stream: Stream,
-) -> CudaError { mkllm_mmq_q4k_j128 });
+cuda_forward!(quant_kind_routes(kind: i32) -> i32 { mkllm_quant_kind_routes });
+cuda_forward!(quant_kind_block_bytes(kind: i32) -> i32 { mkllm_quant_kind_block_bytes });
+cuda_forward!(quant_kind_bytes_per_256(kind: i32) -> i32 { mkllm_quant_kind_bytes_per_256 });
+cuda_forward!(quant_kind_mmq_ds4(kind: i32) -> i32 { mkllm_quant_kind_mmq_ds4 });
 
-cuda_forward!(mmq_q5k(
+cuda_forward!(mmq_kind_j128(
+    kind: i32,
     x: *const c_void,
     y: *const c_void,
     dst: *mut f32,
@@ -757,7 +752,7 @@ cuda_forward!(mmq_q5k(
     nsm: i32,
     tmp_fixup: *mut f32,
     stream: Stream,
-) -> CudaError { mkllm_mmq_q5k_j128 });
+) -> CudaError { mkllm_mmq_kind_j128 });
 
 cuda_forward!(quantize_mmq_d4(
     x: *const f32,
@@ -767,20 +762,6 @@ cuda_forward!(quantize_mmq_d4(
     stride_col: i32,
     stream: Stream,
 ) -> CudaError { mkllm_quantize_mmq_d4 });
-
-cuda_forward!(mmq_q6k(
-    x: *const c_void,
-    y: *const c_void,
-    dst: *mut f32,
-    k: i32,
-    n: i32,
-    m: i32,
-    stride_row_x: i32,
-    stride_col_dst: i32,
-    nsm: i32,
-    tmp_fixup: *mut f32,
-    stream: Stream,
-) -> CudaError { mkllm_mmq_q6k_j128 });
 
 cuda_forward!(mmq_quant(
     kind: i32,
