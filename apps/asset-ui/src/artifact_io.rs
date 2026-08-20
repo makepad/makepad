@@ -135,6 +135,10 @@ pub enum IoDone {
         file: String,
         payload: bool,
         role: Option<makepad_asset_data::FileRole>,
+        /// The container the manifest declares. The role says what a file is
+        /// FOR; this says what it IS, and the two are not the same question
+        /// for audio (WAV/Ogg/MP3) or video.
+        media: Option<makepad_asset_data::MediaType>,
         revision: Option<String>,
         path: Result<PathBuf, String>,
         /// The manifest's declared thumbnail views, carried with the path so
@@ -384,6 +388,7 @@ fn materialize_from_store(
             file: request.file.clone(),
             payload,
             role: Some(file.role),
+            media: Some(file.media),
             revision: Some(file.revision),
             path: Ok(file.path),
             views: file.views,
@@ -392,6 +397,7 @@ fn materialize_from_store(
             file: request.file.clone(),
             payload,
             role: None,
+            media: None,
             revision: None,
             path: Err(error),
             views: Vec::new(),
@@ -445,6 +451,7 @@ fn process(request: IoRequest) -> IoDone {
             file: request.file,
             payload: matches!(request.purpose, IoPurpose::CatalogPayload),
             role: None,
+            media: None,
             revision: None,
             path: Err("no asset store session".to_string()),
             views: Vec::new(),
