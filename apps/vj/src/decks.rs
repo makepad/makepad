@@ -246,6 +246,101 @@ pub fn sync_plan(
     Some(SyncPlan { rate, seek_secs })
 }
 
+/// How far a deck's rate may be trimmed to hold phase against an external
+/// clock, on top of the tempo match. A percent or two is inaudible under a
+/// beat; more than that and the room hears the deck wobble.
+const EXT_PHASE_TRIM: f64 = 0.02;
+/// Fraction of the phase error taken per beat of following.
+const EXT_PHASE_GAIN: f64 = 0.25;
+/// A deck further out of phase than this was not drifting, it was MOVED (a
+/// seek, a scratch, a fresh EXT engage). Land it rather than trim for bars.
+pub const EXT_RESEEK_BEATS: f64 = 0.25;
+
+/// What a deck should do to keep following an external clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExternalFollow {
+    /// Rate to run at: the tempo match plus the phase trim.
+    pub rate: f64,
+    /// Phase error in external beats; positive = the deck is behind.
+    pub error_beats: f64,
+    /// False when the tempo match asks for more stretch than this deck's
+    /// pitch envelope allows — the external tempo has walked out of range
+    /// and the operator has to see that, not silently hear it.
+    pub within_envelope: bool,
+    /// Set when the deck is too far out to trim back.
+    pub reseek_secs: Option<f64>,
+}
+
+/// Tempo-match and phase-follow a deck to an EXTERNAL clock (the room's
+/// beat, as the disciplined clock publishes it).
+///
+/// This is deck-to-deck [`sync_plan`] with the leader replaced by a clock
+/// nobody controls, and one difference that matters: the correction is
+/// spent as a bounded RATE TRIM rather than a seek, because the external
+/// clock is continuous by contract and a deck chasing it must be too. A
+/// seek is only for the case where the deck was moved out from under the
+/// lock.
+pub fn external_follow(
+    external: &SyncView,
+    follower: &SyncView,
+    envelope: f64,
+) -> Option<ExternalFollow> {
+    if !external.grid.has_grid() || !follower.grid.has_grid() {
+        return None;
+    }
+    let target_bpm = external.grid.bpm * external.rate;
+    let mut rate = target_bpm / follower.grid.bpm;
+    if !rate.is_finite() || rate <= 0.0 {
+        return None;
+    }
+    // Half/double time, exactly as the deck-to-deck path folds it; `fold`
+    // remembers how many deck beats one external beat became.
+    let mut fold = 1.0f64;
+    while rate > SYNC_RATE_MAX {
+        rate *= 0.5;
+        fold *= 0.5;
+    }
+    while rate < SYNC_RATE_MIN {
+        rate *= 2.0;
+        fold *= 2.0;
+    }
+    let within_envelope = (rate - 1.0).abs() <= envelope + 1e-9;
+    let rate = rate.clamp(RATE_MIN, RATE_MAX);
+
+    // Phase, in EXTERNAL beats: the deck's beat counter runs `fold` times
+    // faster than the external one, so divide before comparing.
+    let external_beats = external.grid.beat_at(external.position_secs);
+    let follower_beats = follower.grid.beat_at(follower.position_secs) / fold.max(1e-9);
+    let mut error = (external_beats - follower_beats).rem_euclid(1.0);
+    if error > 0.5 {
+        error -= 1.0;
+    }
+    let reseek_secs = match error.abs() > EXT_RESEEK_BEATS {
+        true => sync_plan(external, follower, SyncQuantize::Beat).and_then(|plan| plan.seek_secs),
+        false => None,
+    };
+    let trim = (error * EXT_PHASE_GAIN).clamp(-EXT_PHASE_TRIM, EXT_PHASE_TRIM);
+    Some(ExternalFollow {
+        rate: (rate * (1.0 + trim)).clamp(RATE_MIN, RATE_MAX),
+        error_beats: error,
+        within_envelope,
+        reseek_secs,
+    })
+}
+
+/// What a deck's SYNC control is set to. The control cycles through these.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyncMode {
+    /// Free: the deck runs at its own tempo (or the operator's pitch).
+    #[default]
+    Off,
+    /// Held against the OTHER deck — the classic DJ sync.
+    Deck,
+    /// Held against the room: the VJ's published beat clock, so a deck can
+    /// be played over another DJ or a live source.
+    External,
+}
+
 /// Transport mirror of one deck. `playing/loop/mute/gain` echo what the
 /// mixer was last told; the mixer's device clock stays the position truth
 /// (the host mirrors it back in through [`DeckEngine::observe`]).
@@ -268,6 +363,9 @@ pub struct DeckState {
     pub pitch_range: PitchRange,
     /// Tempo/phase are being held against the other deck.
     pub synced: bool,
+    /// Tempo/phase are being held against the EXTERNAL clock — the room's
+    /// beat rather than the other deck.
+    pub ext_sync: bool,
     /// The operator moved this deck's own pitch, so auto sync leaves it be
     /// until it is loaded again or synced by hand.
     pub auto_opt_out: bool,
@@ -307,6 +405,7 @@ impl Default for DeckState {
             pitch: 0.0,
             pitch_range: PitchRange::Narrow,
             synced: false,
+            ext_sync: false,
             auto_opt_out: false,
             keylock: true,
             scratching: false,
@@ -800,6 +899,82 @@ impl DeckEngine {
             return Vec::new();
         }
         self.sync_to_with(leader, follower, quantize)
+    }
+
+    // ---- external sync (the room is the leader) -----------------------------
+
+    /// What the deck's SYNC control currently reads.
+    pub fn sync_mode(&self, deck: DeckId) -> SyncMode {
+        let state = self.deck(deck);
+        match (state.ext_sync, state.synced) {
+            (true, _) => SyncMode::External,
+            (false, true) => SyncMode::Deck,
+            (false, false) => SyncMode::Off,
+        }
+    }
+
+    /// Any deck following the room. While one is, the loopback detector is
+    /// the thing that knows where the beat is, so it must NOT be parked.
+    pub fn any_external_sync(&self) -> bool {
+        self.decks.iter().any(|state| state.ext_sync)
+    }
+
+    /// The SYNC control cycles OFF → SYNC → EXT → OFF.
+    pub fn cycle_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        match self.sync_mode(deck) {
+            SyncMode::Off => self.sync(deck, true),
+            SyncMode::Deck => {
+                let state = self.deck_mut(deck);
+                state.synced = false;
+                state.ext_sync = true;
+                // Nothing to do until the next external target arrives.
+                Vec::new()
+            }
+            SyncMode::External => {
+                let state = self.deck_mut(deck);
+                state.ext_sync = false;
+                state.auto_opt_out = true;
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn set_ext_sync(&mut self, deck: DeckId, on: bool) {
+        let state = self.deck_mut(deck);
+        state.ext_sync = on;
+        if on {
+            state.synced = false;
+        }
+    }
+
+    /// Hold every EXT deck against the published clock. Called once per
+    /// pump with the clock's current view of the room.
+    ///
+    /// The deck follows a clock that is continuous by contract, so what
+    /// comes out here is a gently walking rate — never a jerk — and a seek
+    /// only when the deck was moved out from under the lock.
+    pub fn follow_external(&mut self, external: &SyncView) -> Vec<DeckCmd> {
+        let mut cmds = Vec::new();
+        for deck in [DeckId::A, DeckId::B] {
+            let state = self.deck(deck);
+            if !state.ext_sync || !state.playing || state.scratching {
+                continue;
+            }
+            let Some(view) = state.sync_view() else { continue };
+            let envelope = state.pitch_range.fraction();
+            let Some(follow) = external_follow(external, &view, envelope) else { continue };
+            let state = self.deck_mut(deck);
+            if (state.rate - follow.rate).abs() > 1e-4 {
+                state.rate = follow.rate;
+                state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
+                cmds.push(DeckCmd::SetRate { deck, rate: follow.rate });
+            }
+            if let Some(secs) = follow.reseek_secs {
+                state.position_secs = secs;
+                cmds.push(DeckCmd::SeekSeconds { deck, secs });
+            }
+        }
+        cmds
     }
 
     pub fn set_auto_sync(&mut self, on: bool) -> Vec<DeckCmd> {
@@ -1734,5 +1909,104 @@ mod tests {
             DeckLoad::Loaded { item } => assert_eq!(item.title, "track 1"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    // ---- external sync (following the room) -------------------------------
+
+    /// The published clock as a leader: a grid with its origin at zero, so
+    /// `position_secs` IS the beat position in seconds.
+    fn external(bpm: f64, beats: f64) -> SyncView {
+        SyncView { grid: grid(bpm, 0.0), position_secs: beats * 60.0 / bpm, rate: 1.0 }
+    }
+
+    #[test]
+    fn ext_matches_the_rooms_tempo_and_trims_toward_its_phase() {
+        // A 124 BPM track under a 128 BPM room, exactly in phase.
+        let room = external(128.0, 8.0);
+        let deck = SyncView { grid: grid(124.0, 0.0), position_secs: 8.0 * 60.0 / 124.0, rate: 1.0 };
+        let follow = external_follow(&room, &deck, 0.08).expect("both have grids");
+        assert!((follow.error_beats).abs() < 1e-9, "{follow:?}");
+        assert!((follow.rate - 128.0 / 124.0).abs() < 1e-9, "{follow:?}");
+        assert!(follow.within_envelope, "3.2% is inside ±8%");
+        assert!(follow.reseek_secs.is_none());
+    }
+
+    #[test]
+    fn ext_speeds_up_when_the_deck_is_behind_and_never_by_much() {
+        let room = external(128.0, 8.2);
+        // The deck is a fifth of a beat behind the room.
+        let deck = SyncView { grid: grid(128.0, 0.0), position_secs: 8.0 * 60.0 / 128.0, rate: 1.0 };
+        let follow = external_follow(&room, &deck, 0.08).unwrap();
+        assert!(follow.error_beats > 0.15, "{follow:?}");
+        assert!(follow.rate > 1.0, "behind means catch up: {follow:?}");
+        assert!(follow.rate <= 1.0 + EXT_PHASE_TRIM + 1e-9, "and gently: {follow:?}");
+        assert!(follow.reseek_secs.is_none(), "a fifth of a beat is trimmable");
+
+        // Half a beat out is not drift — it was moved. Land it.
+        let deck = SyncView { grid: grid(128.0, 0.0), position_secs: 8.7 * 60.0 / 128.0, rate: 1.0 };
+        let follow = external_follow(&room, &deck, 0.08).unwrap();
+        assert!(follow.reseek_secs.is_some(), "{follow:?}");
+    }
+
+    #[test]
+    fn ext_folds_octaves_and_reports_walking_out_of_the_envelope() {
+        // A 64 BPM track under a 128 BPM room plays at 1.0, one beat in two.
+        let room = external(128.0, 4.0);
+        let deck = SyncView { grid: grid(64.0, 0.0), position_secs: 2.0 * 60.0 / 64.0, rate: 1.0 };
+        let follow = external_follow(&room, &deck, 0.08).unwrap();
+        assert!((follow.rate - 1.0).abs() < 0.03, "{follow:?}");
+        assert!(follow.within_envelope);
+        // A room 12% faster than the track needs more stretch than ±8%: it
+        // still follows, but the operator has to be told.
+        let room = external(140.0, 0.0);
+        let deck = SyncView { grid: grid(125.0, 0.0), position_secs: 0.0, rate: 1.0 };
+        let follow = external_follow(&room, &deck, 0.08).unwrap();
+        assert!(!follow.within_envelope, "{follow:?}");
+        assert!(external_follow(&room, &deck, 0.16).unwrap().within_envelope, "±16% covers it");
+    }
+
+    #[test]
+    fn the_sync_control_cycles_off_deck_ext_off() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 120.0);
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Off);
+        assert!(!e.any_external_sync());
+        // With nothing to sync to, the first press still moves the control on
+        // to EXT on the next click — the mode is the operator's, not the
+        // other deck's.
+        e.deck_mut(DeckId::A).synced = true;
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Deck);
+        e.cycle_sync(DeckId::A);
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::External);
+        assert!(e.any_external_sync(), "the detector must stay awake for this");
+        e.cycle_sync(DeckId::A);
+        assert_eq!(e.sync_mode(DeckId::A), SyncMode::Off);
+        assert!(!e.any_external_sync());
+    }
+
+    #[test]
+    fn an_ext_deck_follows_a_walking_room_without_jerking() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        e.deck_mut(DeckId::A).grid = Some(grid(126.0, 0.0));
+        e.play_pause(DeckId::A);
+        e.set_ext_sync(DeckId::A, true);
+        // The room walks from 128 to 130 over a minute; the deck's rate must
+        // walk with it and never step.
+        let mut previous = e.deck(DeckId::A).rate;
+        let mut position = 0.0;
+        for step in 0..120 {
+            let bpm = 128.0 + 2.0 * step as f64 / 120.0;
+            position += 0.5 * bpm / 60.0;
+            e.observe(DeckId::A, position * 60.0 / 126.0, true);
+            e.follow_external(&external(bpm, position));
+            let rate = e.deck(DeckId::A).rate;
+            assert!((rate - previous).abs() < 0.05, "step {step}: {previous} -> {rate}");
+            previous = rate;
+        }
+        let rate = e.deck(DeckId::A).rate;
+        assert!((rate - 130.0 / 126.0).abs() < 0.03, "{rate}");
     }
 }

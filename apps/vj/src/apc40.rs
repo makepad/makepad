@@ -315,7 +315,7 @@ impl PadLed {
 }
 
 /// The APC40 MkII's fixed 128-entry pad palette (velocity → RGB), the
-/// Akai/Ableton clip-colour table. Index = velocity.
+/// Akai APC-family clip-colour table. Index = velocity.
 pub const PAD_PALETTE: [u32; 128] = [
     0x000000, 0x1E1E1E, 0x7F7F7F, 0xFFFFFF, 0xFF4C4C, 0xFF0000, 0x590000, 0x190000,
     0xFFBD6C, 0xFF5400, 0x591D00, 0x271B00, 0xFFFF4C, 0xFFFF00, 0x595900, 0x191900,
