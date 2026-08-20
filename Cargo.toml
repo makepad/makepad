@@ -28,6 +28,7 @@ workspace.members = [
     "examples/video_player",
     "examples/video_codec_test",
     "examples/charts",
+    "examples/datagrid",
     "examples/todo",
     "examples/vector",
     "examples/aichat",
