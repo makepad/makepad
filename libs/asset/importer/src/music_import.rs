@@ -807,15 +807,37 @@ pub fn measure_ogg(bytes: &[u8]) -> Option<Measured> {
 /// the side info), else a deterministic per-track card so the DJ grid still
 /// reads as a grid of distinct tracks.
 pub fn track_thumbnail(bytes: &[u8], container: Container, measured: &Measured, key: &str) -> Vec<u32> {
-    if container == Container::Wav {
-        if let Ok(pcm) = parse_wav(bytes) {
-            return waveform_bgra_512(&pcm);
+    track_picture(bytes, container, measured, key).0
+}
+
+/// The picture for one track, with its size: the high-definition
+/// spectrogram whenever the container decodes to real samples — MP3 and
+/// Ogg included, this app carries its own decoders — else the 512² envelope
+/// strip, else a deterministic per-track card so the DJ grid still reads as
+/// a grid of distinct tracks.
+pub fn track_picture(
+    bytes: &[u8],
+    container: Container,
+    measured: &Measured,
+    key: &str,
+) -> (Vec<u32>, usize, usize) {
+    let media = match container {
+        Container::Wav => Some(makepad_asset_data::MediaType::Wav),
+        Container::Mp3 => Some(makepad_asset_data::MediaType::Mp3),
+        Container::Ogg => Some(makepad_asset_data::MediaType::Ogg),
+        _ => None,
+    };
+    if let Some(media) = media {
+        if let Ok(pcm) = crate::thumbs::decode_audio(bytes, media) {
+            if let Some(hd) = crate::thumbs::audio_picture_hd(&pcm) {
+                return hd;
+            }
         }
     }
     if !measured.envelope.is_empty() {
-        return envelope_bgra_512(&measured.envelope);
+        return (envelope_bgra_512(&measured.envelope), THUMB_DIM, THUMB_DIM);
     }
-    card_bgra_512(key)
+    (card_bgra_512(key), THUMB_DIM, THUMB_DIM)
 }
 
 const WAVE_BG: u32 = 0xff14_181c;
@@ -1222,18 +1244,64 @@ pub fn import_music(
         return Ok(report);
     }
     let total = tracks.len();
-    for (index, track) in tracks.iter().enumerate() {
-        if cancel() {
-            report.cancelled = true;
-            break;
+    let started = std::time::Instant::now();
+    // Decode + bake fan out; publishing stays on this thread because the
+    // client is one connection and the catalog wants one writer. Workers
+    // claim tracks from a shared cursor, so a six-minute track and a
+    // twelve-second sting do not wait for each other — and the bake of the
+    // long one already spreads its own columns across cores. The channel is
+    // bounded, so at most a few tracks' audio is ever resident.
+    let workers = std::thread::available_parallelism()
+        .map(|n| (n.get() / 4).max(2))
+        .unwrap_or(2)
+        .min(tracks.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    // The cancel flag crosses into the bakers as a plain bool: the caller's
+    // closure is not `Sync`, and a baker only needs to know "stop", which
+    // the publishing thread already asks on every track.
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Result<BakedTrack, String>)>(workers * 2);
+    let mut audio_secs = 0.0f64;
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (next, tracks, tx, stop) = (&next, &tracks, tx.clone(), &stop);
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(track) = tracks.get(index) else { break };
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    if tx.send((index, bake_track(track))).is_err() {
+                        break;
+                    }
+                }
+            });
         }
-        progress(MusicProgress {
-            stage: MusicStage::Publishing,
-            done: index,
-            total,
-            current: &track.title,
-        });
-        match publish_track(client, track, namespace, rights) {
+        drop(tx);
+        let mut done = 0usize;
+        while let Ok((index, baked)) = rx.recv() {
+            let track = &tracks[index];
+            if cancel() {
+                report.cancelled = true;
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                break;
+            }
+            progress(MusicProgress {
+                stage: MusicStage::Publishing,
+                done,
+                total,
+                current: &track.title,
+            });
+            done += 1;
+            let outcome = match baked {
+                Ok(baked) => {
+                    audio_secs += baked.measured.millis as f64 / 1000.0;
+                    publish_baked(client, track, baked, namespace, rights)
+                }
+                Err(error) => Err(error),
+            };
+            match outcome {
             Ok(TrackOutcome::Published) => {
                 if log {
                     eprintln!("[music-import] published {}", track.alias);
@@ -1258,7 +1326,15 @@ pub fn import_music(
                 }
                 report.failed.push((track.rel.clone(), error));
             }
+            }
         }
+    });
+    if log {
+        eprintln!(
+            "[music-import] {total} tracks, {:.0}s of audio, {:.1}s wall on {workers} bakers",
+            audio_secs,
+            started.elapsed().as_secs_f64()
+        );
     }
     progress(MusicProgress {
         stage: MusicStage::Publishing,
@@ -1271,44 +1347,85 @@ pub fn import_music(
 
 /// Publish one track: skip when the alias head already carries exactly these
 /// bytes, re-publish as a new revision of the same asset when they changed.
-pub fn publish_track(
-    client: &mut AssetClient,
-    track: &PlannedTrack,
-    namespace: &str,
-    rights: &PublishRights,
-) -> Result<TrackOutcome, String> {
-    let alias = AssetAlias::from_str(&track.alias)
-        .map_err(|e| format!("{}: alias {}: {e}", track.rel, track.alias))?;
+/// One track read, measured and pictured — everything a publish needs that
+/// costs CPU, done off the publishing thread.
+pub struct BakedTrack {
+    bytes: Vec<u8>,
+    pub measured: Measured,
+    thumbnail_bytes: Vec<u8>,
+    dims: (usize, usize),
+}
+
+/// Read, decode, measure and bake one track's picture. No network, no
+/// client: this is the part that fans out across cores.
+pub fn bake_track(track: &PlannedTrack) -> Result<BakedTrack, String> {
     let bytes = std::fs::read(&track.path).map_err(|e| format!("read: {e}"))?;
     if bytes.is_empty() {
         return Err("empty file".into());
     }
     let measured = measure(&bytes, track.container)
         .ok_or_else(|| "unmeasurable duration — not published without one".to_string())?;
+    let (picture, pic_w, pic_h) = track_picture(&bytes, track.container, &measured, &track.alias);
+    let thumbnail_bytes = encode_jpeg_bgra(&picture, pic_w, pic_h)?;
+    Ok(BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h) })
+}
+
+pub fn publish_track(
+    client: &mut AssetClient,
+    track: &PlannedTrack,
+    namespace: &str,
+    rights: &PublishRights,
+) -> Result<TrackOutcome, String> {
+    publish_baked(client, track, bake_track(track)?, namespace, rights)
+}
+
+/// Publish what a baker prepared: probe the alias, decide whether anything
+/// actually changed, and write a revision when it did.
+pub fn publish_baked(
+    client: &mut AssetClient,
+    track: &PlannedTrack,
+    baked: BakedTrack,
+    namespace: &str,
+    rights: &PublishRights,
+) -> Result<TrackOutcome, String> {
+    let alias = AssetAlias::from_str(&track.alias)
+        .map_err(|e| format!("{}: alias {}: {e}", track.rel, track.alias))?;
+    let BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h) } = baked;
     let audio_blob = BlobId::hash_of(&bytes);
+    // The picture is baked BEFORE anything is decided: a re-import is how a
+    // track gets today's imagery, so "unchanged" has to mean the audio AND
+    // the picture are what this importer produces now. Comparing the baked
+    // bytes is exact — no version marker to forget to bump, and no shape
+    // heuristic that loops forever on a track whose picture legitimately is
+    // not a spectrogram.
+    let thumbnail_blob = BlobId::hash_of(&thumbnail_bytes);
     let existing = match client.resolve_alias(&alias) {
         Ok(head) => {
             let manifest = client
                 .fetch_asset_manifest(&head.head_revision)
                 .map_err(|e| format!("head manifest: {e}"))?;
-            let same = manifest
+            let same_audio = manifest
                 .files
                 .iter()
                 .any(|f| f.role == FileRole::Audio && f.blob == audio_blob);
-            if same {
+            let same_picture = manifest
+                .thumbnail
+                .is_some_and(|thumb| thumb.blob == thumbnail_blob);
+            if same_audio && same_picture {
                 return Ok(TrackOutcome::Unchanged);
             }
+            // The audio blob is content-addressed, so a picture-only change
+            // re-uploads nothing: only the thumbnail and the manifest.
             Some(head.asset_id)
         }
         Err(ClientError::NotFound { .. }) => None,
         Err(error) => return Err(format!("alias probe: {error}")),
     };
-    let strip = track_thumbnail(&bytes, track.container, &measured, &track.alias);
     let thumbnail = PublishThumbnail {
-        bytes: encode_jpeg_bgra(&strip, THUMB_DIM, THUMB_DIM)?,
+        bytes: thumbnail_bytes,
         media: ThumbnailMedia::Jpeg,
-        width: THUMB_DIM as u32,
-        height: THUMB_DIM as u32,
+        width: pic_w as u32,
+        height: pic_h as u32,
     };
     let mut request = PublishRequest::new(
         namespace,
