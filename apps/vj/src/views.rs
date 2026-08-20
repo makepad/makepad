@@ -733,25 +733,129 @@ script_mod! {
         }
     }
 
-    // One compact beat block for the chrome bar: the last ~2 seconds of the
-    // captured level as a scope, with a line on every beat and a brighter
-    // one on the downbeat. Replaces the row of SYNC/CONF/PHASE strings.
-    set_type_default() do #(DrawBeatScope::script_shader(vm)){
+    // ---- the chrome bar's beat cluster ------------------------------------
+    //
+    // A miniature of the zoomed DJ waveform: the captured envelope of the
+    // last couple of seconds, with the beat grid ruled over it in the SAME
+    // time axis, so a ruling that sits on a transient means the clock is on
+    // the music. Everything is a single quad reading one 256-texel envelope
+    // texture — the whole picture is uniforms, not geometry.
+    set_type_default() do #(DrawBeatWave::script_shader(vm)){
         ..mod.draw.DrawQuad
+        wave: texture_2d(float)
+
+        color_bg: uniform(#x0b1016)
+        color_wave: uniform(#x2fb894)
+        color_core: uniform(#x9df3d8)
+        color_grid: uniform(#xffffff2b)
+        color_grid_bar: uniform(#xffffffa0)
+        color_dead: uniform(#x243039)
+
+        // The envelope at an age in seconds. Column 0 of the texture is the
+        // OLDEST kept column; `cols - 1` is the newest.
+        env_at: fn(age: float) -> vec2 {
+            let c = clamp(age * self.wave_hz, 0.0, max(self.cols - 1.0, 0.0))
+            let u = (self.cols - 1.0 - c + 0.5) / max(self.tex_w, 1.0)
+            let t = self.wave.sample_as_bgra(vec2(u, 0.5))
+            return vec2(t.x, t.y)
+        }
+
+        // One pixel covers more than one column at this scale, and a peak
+        // that falls between two samples is exactly the transient the eye is
+        // looking for — so a pixel takes the LOUDEST column it covers.
+        env_px: fn(age: float, span: float) -> vec2 {
+            let a = self.env_at(age - span * 0.5)
+            let b = self.env_at(age)
+            let c = self.env_at(age + span * 0.5)
+            return vec2(max(max(a.x, b.x), c.x), max(max(a.y, b.y), c.y))
+        }
+
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
-            sdf.fill(self.bg)
+            let width = max(self.rect_size.x, 1.0)
+            // Right edge = now (minus the capture ring's own latency).
+            let age = self.right_age + (1.0 - self.pos.x) * self.window_secs
+            let span = self.window_secs / width
+            let e = self.env_px(age, span)
+
+            // The grid, ruled on the same axis as the envelope above.
+            let b = self.beat_at_right - age / max(self.beat_secs, 0.0001)
+            let nb = floor(b + 0.5)
+            let px_per_beat = self.beat_secs / max(self.window_secs, 0.0001) * width
+            let d = abs(b - nb) * px_per_beat
+            let is_bar = step(modf(nb + 4096.0, 4.0), 0.5)
+            // The one rules floor to ceiling; the other three are a short
+            // tick in the middle, so a bar is countable at a glance.
+            let half = mix(0.4, 0.9, is_bar)
+            let vpos = abs(self.pos.y - 0.5) * 2.0
+            let reach = mix(0.62, 1.0, is_bar)
+            let ga = (1.0 - smoothstep(half, half + 1.0, d))
+                * (1.0 - smoothstep(reach - 0.12, reach, vpos))
+                * self.grid_on
+            let grid_c = self.color_grid.mix(self.color_grid_bar, is_bar)
+
+            // Mirrored envelope: peak outside, RMS core inside.
+            let feather = 2.0 / max(self.rect_size.y, 2.0)
+            let peak = clamp(e.x, 0.0, 1.0) * 0.92
+            let core = clamp(e.y, 0.0, 1.0) * 0.92
+            let in_peak = 1.0 - smoothstep(peak - feather, peak + feather, vpos)
+            let in_core = 1.0 - smoothstep(core - feather, core + feather, vpos)
+
+            let bg = self.color_bg
+            // No capture: a quiet centre rule where the wave will be, so the
+            // block reads as "nothing coming in", never as "broken".
+            let dead = 1.0 - smoothstep(0.5, 1.5, vpos * self.rect_size.y * 0.5)
+            let base = bg.mix(self.color_dead, dead * (1.0 - self.live))
+
+            let under = base.mix(vec4(grid_c.x, grid_c.y, grid_c.z, 1.0), grid_c.w * ga)
+            let wave_c = self.color_wave.mix(self.color_core, in_core)
+            let body = under.mix(vec4(wave_c.x, wave_c.y, wave_c.z, 1.0), in_peak * self.live)
+            // A whisper of the ruling survives on top of a loud passage.
+            let ruled = body.mix(vec4(grid_c.x, grid_c.y, grid_c.z, 1.0), grid_c.w * ga * 0.35)
+
+            sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 1.5)
+            sdf.fill(ruled)
             return sdf.result
         }
     }
-    mod.widgets.VjBeatScopeBase = #(VjBeatScope::register_widget(vm))
-    mod.widgets.VjBeatScope = set_type_default() do mod.widgets.VjBeatScopeBase{
-        width: 96
+    mod.widgets.VjBeatWaveBase = #(VjBeatWave::register_widget(vm))
+    mod.widgets.VjBeatWave = set_type_default() do mod.widgets.VjBeatWaveBase{
+        width: 120
         height: 22
-        draw_bg +: { bg: #x11161d }
-        draw_bar +: { bg: #x3ee0b0 }
-        draw_beat +: { bg: #xffffff40 }
+    }
+
+    // The lock LED: one dot that flashes on every beat of whatever clock is
+    // driving the room, brighter and warmer on the one. Brightness is a
+    // function of the phase uniform alone — the host never animates it.
+    set_type_default() do #(DrawBeatLed::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_off: uniform(#x1b232c)
+        color_rim: uniform(#xffffff2e)
+        color_beat: uniform(#x3ee0b0)
+        color_down: uniform(#xfff1c8)
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let c = self.rect_size * 0.5
+            let r = min(self.rect_size.x, self.rect_size.y) * 0.5 - 3.0
+            // Bright ON the beat, gone by `fall`. Squared so the attack is a
+            // flash and the tail a glow, which is what the eye reads as a
+            // pulse rather than a blink.
+            let f = clamp(1.0 - self.since / max(self.fall, 0.001), 0.0, 1.0)
+            let env = f * f * self.live
+            let lit = self.color_beat.mix(self.color_down, self.accent)
+            // The one throws a halo; the other three stay inside the dot.
+            sdf.circle(c.x, c.y, r + 3.0)
+            sdf.fill(vec4(lit.x, lit.y, lit.z, env * self.accent * 0.42))
+            sdf.circle(c.x, c.y, r)
+            sdf.fill_keep(self.color_off.mix(lit, env * mix(0.86, 1.0, self.accent)))
+            sdf.stroke(self.color_rim, 1.0)
+            return sdf.result
+        }
+    }
+    mod.widgets.VjBeatLedBase = #(VjBeatLed::register_widget(vm))
+    mod.widgets.VjBeatLed = set_type_default() do mod.widgets.VjBeatLedBase{
+        width: 18
+        height: 22
     }
 
     mod.widgets.VjPadMatrixBase = #(VjPadMatrix::register_widget(vm))
@@ -1603,28 +1707,122 @@ mod tile_fit_tests {
     }
 }
 
-/// Columns of level history the beat scope keeps — about two seconds at the
-/// UI's pump rate, one column per pixel of its 96px width.
-pub const BEAT_SCOPE_COLS: usize = 96;
+/// The window of history the bar's wave shows, in seconds. About a bar of
+/// house music: long enough to read the groove, short enough that a single
+/// kick is still its own spike.
+pub const WAVE_WINDOW_SECS: f64 = 2.0;
+/// How long a beat LED stays lit. Short enough to read as a flash on the
+/// beat, long enough to survive a dropped frame.
+const LED_FALL_SECS: f32 = 0.12;
+
+/// The beat clock as the chrome bar draws it.
+///
+/// Times are in `Cx::seconds_since_app_start`, so both widgets resolve the
+/// phase at DRAW time from a fixed reference: there is no per-frame
+/// animation state on the host, and a late frame lands where it belongs
+/// instead of replaying a missed pulse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BeatRef {
+    /// App-clock time of the next beat.
+    pub next_beat_secs: f64,
+    pub period_secs: f64,
+    /// Bar position of that beat: 0 = the one.
+    pub next_index: u32,
+    /// Beats per bar of the clock driving this.
+    pub bar_beats: u32,
+    /// The clock is flying on its own — no confident source behind it. It
+    /// keeps the beat; the LED says so by burning lower.
+    pub coasting: bool,
+}
+
+impl BeatRef {
+    /// Seconds since the last beat at `now`, and that beat's bar position.
+    pub fn at(&self, now: f64) -> (f64, u32) {
+        let bar = self.bar_beats.max(1) as f64;
+        if !(self.period_secs > 0.0) || !self.period_secs.is_finite() {
+            return (f64::MAX, 1);
+        }
+        // The nudge matters: a frame that lands one ulp before a beat
+        // boundary must read as ON that beat, not a whole beat behind it.
+        let beats = (now - self.next_beat_secs) / self.period_secs;
+        let n = (beats + 1e-9).floor();
+        let since = now - (self.next_beat_secs + n * self.period_secs);
+        let index = (self.next_index as f64 + n).rem_euclid(bar) as u32;
+        (since.max(0.0), index)
+    }
+
+    /// The continuous beat coordinate at `now`, offset so that its floor is
+    /// a multiple of the bar length exactly on a downbeat (and so that it
+    /// stays positive across the whole visible window).
+    pub fn coordinate(&self, now: f64) -> f64 {
+        let (since, index) = self.at(now);
+        if !(self.period_secs > 0.0) {
+            return 0.0;
+        }
+        4096.0 + index as f64 + (since / self.period_secs).clamp(0.0, 1.0)
+    }
+}
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-pub struct DrawBeatScope {
+pub struct DrawBeatWave {
     #[deref]
     draw_super: DrawQuad,
+    /// Envelope-texture width in texels, and the columns actually valid.
+    #[live(1.0)]
+    pub tex_w: f32,
+    #[live(1.0)]
+    pub cols: f32,
+    /// Columns per second of history.
+    #[live(1.0)]
+    pub wave_hz: f32,
+    /// How old the newest column is, in seconds, at this draw.
     #[live]
-    pub bg: Vec4f,
+    pub right_age: f32,
+    /// Seconds of history across the quad.
+    #[live(2.0)]
+    pub window_secs: f32,
+    /// Beat coordinate at the right edge, and the beat period in seconds.
+    #[live]
+    pub beat_at_right: f32,
+    #[live(0.5)]
+    pub beat_secs: f32,
+    /// 1 while a beat grid is worth ruling, 0 while there is none.
+    #[live]
+    pub grid_on: f32,
+    /// 1 while audio is actually arriving.
+    #[live]
+    pub live: f32,
 }
 
-/// The chrome bar's beat block: a two-second scope of the captured level
-/// with a line on every beat and a brighter one on the downbeat.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawBeatLed {
+    #[deref]
+    draw_super: DrawQuad,
+    /// Seconds since the last beat of the driving clock.
+    #[live(9.0)]
+    pub since: f32,
+    /// Seconds for the flash to fall to black.
+    #[live(0.12)]
+    pub fall: f32,
+    /// 1 when the last beat was the one.
+    #[live]
+    pub accent: f32,
+    /// 1 while a clock is actually running.
+    #[live]
+    pub live: f32,
+}
+
+/// The chrome bar's live wave: the captured envelope of the last
+/// [`WAVE_WINDOW_SECS`], with the beat grid ruled over it.
 ///
-/// The old bar spelled the same information across four fixed-width strings
-/// (SYNC / BPM / LOCK / CONF / PHASE) and still could not show whether the
-/// audio was actually moving. A scope answers "is there sound, and is the
-/// grid on it" at a glance, which is the only question in a dark room.
+/// A waveform's job here is to prove the RIGHT AUDIO is coming in; the grid
+/// over it proves the clock is on that audio. Both are drawn by one quad
+/// from one small texture, so the picture costs a 512-byte upload per pump
+/// and nothing at all per frame.
 #[derive(Script, ScriptHook, Widget)]
-pub struct VjBeatScope {
+pub struct VjBeatWave {
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -1635,77 +1833,196 @@ pub struct VjBeatScope {
     layout: Layout,
     #[redraw]
     #[live]
-    draw_bg: DrawBeatScope,
-    #[live]
-    draw_bar: DrawBeatScope,
-    #[live]
-    draw_beat: DrawBeatScope,
+    draw_wave: DrawBeatWave,
     #[rust]
     area: Area,
-    /// Level per column, oldest first.
     #[rust]
-    levels: Vec<f32>,
-    /// Column index of each beat mark, and whether it was a downbeat.
+    texture: Option<Texture>,
+    /// Scratch for the texel upload, kept so a pump allocates nothing.
     #[rust]
-    beats: Vec<(usize, bool)>,
+    texels: Vec<u32>,
+    #[rust]
+    cols: usize,
+    /// App-clock time the newest column was captured.
+    #[rust]
+    stamp_secs: f64,
+    #[rust]
+    beat: Option<BeatRef>,
+    #[rust]
+    live: bool,
+    #[rust]
+    anim_frame: NextFrame,
 }
 
-impl VjBeatScope {
-    /// One column of history. `beat` is `Some(true)` on a downbeat.
-    pub fn push(&mut self, cx: &mut Cx, level: f32, beat: Option<bool>) {
-        if self.levels.len() >= BEAT_SCOPE_COLS {
-            self.levels.remove(0);
-            // Marks slide with the history and fall off the left edge.
-            self.beats.retain(|(col, _)| *col > 0);
-            for (col, _) in self.beats.iter_mut() {
-                *col -= 1;
+impl VjBeatWave {
+    /// Replace the whole envelope history. `cols` runs oldest to newest, one
+    /// entry per `1.0 / hz` seconds, packed `peak << 8 | rms`. `stamp_secs`
+    /// is the app-clock time of the newest column.
+    pub fn set_wave(&mut self, cx: &mut Cx, cols: &[u16], hz: f64, stamp_secs: f64, live: bool) {
+        self.stamp_secs = stamp_secs;
+        self.live = live;
+        self.draw_wave.wave_hz = hz as f32;
+        self.texels.clear();
+        self.texels.extend(cols.iter().map(|packed| {
+            let peak = (packed >> 8) as u32;
+            let rms = (packed & 0xff) as u32;
+            // BGRA-32: peak in R, RMS in G, opaque.
+            0xff00_0000 | (peak << 16) | (rms << 8)
+        }));
+        if self.texels.is_empty() {
+            self.texels.push(0xff00_0000);
+        }
+        let width = self.texels.len();
+        match self.texture.as_ref().filter(|_| width == self.cols) {
+            // Same shape as last time: swap the scratch buffer in and keep
+            // the old one, so a pump allocates nothing at all.
+            Some(texture) => texture.swap_vec_u32(cx, &mut self.texels),
+            None => {
+                self.texture = Some(Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width,
+                        height: 1,
+                        data: Some(std::mem::take(&mut self.texels)),
+                        updated: TextureUpdated::Full,
+                    },
+                ));
             }
         }
-        self.levels.push(level.clamp(0.0, 1.0));
-        if let Some(down) = beat {
-            self.beats.push((self.levels.len().saturating_sub(1), down));
-        }
+        self.cols = width;
         self.area.redraw(cx);
+    }
+
+    /// The grid to rule over the wave; `None` while there is no clock.
+    pub fn set_beat(&mut self, cx: &mut Cx, beat: Option<BeatRef>) {
+        if self.beat != beat {
+            self.beat = beat;
+            self.area.redraw(cx);
+        }
     }
 }
 
-impl Widget for VjBeatScope {
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+impl Widget for VjBeatWave {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            self.area.redraw(cx);
+        }
+    }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         if rect.size.x < 2.0 || rect.size.y < 2.0 {
             return DrawStep::done();
         }
-        self.draw_bg.draw_abs(cx, rect);
-        let cols = BEAT_SCOPE_COLS.max(1);
-        let w = rect.size.x / cols as f64;
-        for (i, level) in self.levels.iter().enumerate() {
-            // A silent column still draws a hairline, so an empty scope
-            // reads as "connected but quiet", not as "broken".
-            let h = (rect.size.y - 2.0) * (*level as f64).max(0.02);
-            self.draw_bar.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(rect.pos.x + i as f64 * w, rect.pos.y + rect.size.y - 1.0 - h),
-                    size: dvec2((w - 0.5).max(0.5), h),
-                },
-            );
+        let now = cx.seconds_since_app_start();
+        match self.texture.as_ref() {
+            Some(texture) => {
+                self.draw_wave.draw_vars.set_texture(0, texture);
+                self.draw_wave.tex_w = self.cols.max(1) as f32;
+                self.draw_wave.cols = self.cols.max(1) as f32;
+            }
+            None => {
+                self.draw_wave.draw_vars.empty_texture(0);
+                self.draw_wave.tex_w = 1.0;
+                self.draw_wave.cols = 1.0;
+            }
         }
-        for (col, down) in &self.beats {
-            let x = rect.pos.x + *col as f64 * w;
-            let (width, inset) = match down {
-                true => (2.0, 0.0),
-                false => (1.0, rect.size.y * 0.35),
-            };
-            self.draw_beat.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(x, rect.pos.y + inset),
-                    size: dvec2(width, rect.size.y - inset),
-                },
-            );
+        self.draw_wave.window_secs = WAVE_WINDOW_SECS as f32;
+        // The wave and the grid share ONE time axis: both are placed by the
+        // age of the newest column, so a ruling that lands on a transient
+        // means the clock really is on that transient.
+        self.draw_wave.right_age = (now - self.stamp_secs).clamp(0.0, WAVE_WINDOW_SECS) as f32;
+        self.draw_wave.live = if self.live { 1.0 } else { 0.0 };
+        match self.beat {
+            Some(beat) if beat.period_secs > 0.0 => {
+                self.draw_wave.beat_at_right = beat.coordinate(now - self.draw_wave.right_age as f64)
+                    as f32;
+                self.draw_wave.beat_secs = beat.period_secs as f32;
+                // Same signal on the rulings: a coasted grid is drawn, and
+                // drawn fainter, because nothing is confirming it.
+                self.draw_wave.grid_on = if beat.coasting { 0.5 } else { 1.0 };
+                // The grid scrolls with real time, so this animates itself.
+                self.anim_frame = cx.new_next_frame();
+            }
+            _ => {
+                self.draw_wave.grid_on = 0.0;
+                self.draw_wave.beat_secs = 0.5;
+            }
         }
+        self.draw_wave.draw_abs(cx, rect);
+        DrawStep::done()
+    }
+}
+
+/// The lock LED: a dot that flashes on every beat of the clock actually
+/// driving the room, accented on the one.
+///
+/// It carries no animation state: the host hands it a fixed beat reference
+/// and the shader works out the brightness from where in the beat the frame
+/// falls, so nothing has to be pumped to keep it honest.
+#[derive(Script, ScriptHook, Widget)]
+pub struct VjBeatLed {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_led: DrawBeatLed,
+    #[rust]
+    area: Area,
+    #[rust]
+    beat: Option<BeatRef>,
+    #[rust]
+    anim_frame: NextFrame,
+}
+
+impl VjBeatLed {
+    pub fn set_beat(&mut self, cx: &mut Cx, beat: Option<BeatRef>) {
+        if self.beat != beat {
+            self.beat = beat;
+            self.area.redraw(cx);
+        }
+    }
+}
+
+impl Widget for VjBeatLed {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.anim_frame.is_event(event).is_some() {
+            self.area.redraw(cx);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
+        if rect.size.x < 2.0 || rect.size.y < 2.0 {
+            return DrawStep::done();
+        }
+        self.draw_led.fall = LED_FALL_SECS;
+        match self.beat {
+            Some(beat) if beat.period_secs > 0.0 => {
+                let (since, index) = beat.at(cx.seconds_since_app_start());
+                self.draw_led.since = since as f32;
+                self.draw_led.accent = if index == 0 { 1.0 } else { 0.0 };
+                // A coasting clock still flashes — that is the whole point
+                // of the flywheel — but it burns lower, so the operator can
+                // see at a glance that nothing is confirming it.
+                self.draw_led.live = if beat.coasting { 0.45 } else { 1.0 };
+                // A pulse is only a pulse if it is redrawn; a dark LED is
+                // not, so an idle app stays idle.
+                self.anim_frame = cx.new_next_frame();
+            }
+            _ => {
+                self.draw_led.since = 9.0;
+                self.draw_led.accent = 0.0;
+                self.draw_led.live = 0.0;
+            }
+        }
+        self.draw_led.draw_abs(cx, rect);
         DrawStep::done()
     }
 }
