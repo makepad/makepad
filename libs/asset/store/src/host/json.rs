@@ -275,6 +275,7 @@ impl<'a> P<'a> {
     }
 
     fn number(&mut self) -> Result<Value, &'static str> {
+        let start = self.i;
         let neg = if self.peek() == Some(b'-') {
             self.i += 1;
             true
@@ -287,22 +288,48 @@ impl<'a> P<'a> {
         }
         let mut mag: i64 = (first - b'0') as i64;
         let mut digits = 1u32;
+        let mut is_float = false;
         while let Some(c) = self.peek() {
             match c {
                 b'0'..=b'9' => {
-                    if digits == 1 && mag == 0 {
-                        return Err("leading zero");
+                    if !is_float {
+                        if digits == 1 && mag == 0 {
+                            return Err("leading zero");
+                        }
+                        mag = mag
+                            .checked_mul(10)
+                            .and_then(|m| m.checked_add((c - b'0') as i64))
+                            .ok_or("integer out of range")?;
+                        digits += 1;
                     }
-                    mag = mag
-                        .checked_mul(10)
-                        .and_then(|m| m.checked_add((c - b'0') as i64))
-                        .ok_or("integer out of range")?;
-                    digits += 1;
                     self.i += 1;
                 }
-                b'.' | b'e' | b'E' => return Err("float not accepted"),
+                // Floats are first-class: tool results carry positions and
+                // angles ("float not accepted" 400'd a world.place answer
+                // whose yaw was 1.5708 — the model then heard the app never
+                // answered). The grammar stays strict JSON; the token is
+                // bounded and parsed as f64.
+                b'.' | b'e' | b'E' | b'+' | b'-' if is_float || matches!(c, b'.' | b'e' | b'E') => {
+                    is_float = true;
+                    self.i += 1;
+                }
                 _ => break,
             }
+        }
+        if is_float {
+            if self.i - start > 64 {
+                return Err("number too long");
+            }
+            let text = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "bad number")?;
+            // Strict JSON number shape — Rust's f64 parse is laxer ("1.").
+            if !valid_json_number(text) {
+                return Err("bad number");
+            }
+            let f: f64 = text.parse().map_err(|_| "bad number")?;
+            if !f.is_finite() {
+                return Err("number out of range");
+            }
+            return Ok(Value::F64(f));
         }
         Ok(Value::Int(if neg { -mag } else { mag }))
     }
@@ -381,6 +408,46 @@ impl<'a> P<'a> {
     }
 }
 
+/// Strict JSON number grammar: `-? int ( . digits )? ( [eE] [+-]? digits )?`.
+fn valid_json_number(t: &str) -> bool {
+    let b = t.as_bytes();
+    let mut i = 0;
+    if i < b.len() && b[i] == b'-' {
+        i += 1;
+    }
+    let d0 = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == d0 {
+        return false;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let f0 = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == f0 {
+            return false;
+        }
+    }
+    if i < b.len() && (b[i] | 32) == b'e' {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let e0 = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == e0 {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,8 +463,16 @@ mod tests {
 
     #[test]
     fn rejects_floats_dups_depth_trailing() {
-        assert!(parse(b"1.5").is_err());
-        assert!(parse(b"1e3").is_err());
+        // Floats are first-class since the world.place tool-result 400
+        // (yaw 1.5708 in the answer body); malformed numerics still refuse.
+        assert_eq!(parse(b"1.5").unwrap(), Value::F64(1.5));
+        assert_eq!(parse(b"1e3").unwrap(), Value::F64(1000.0));
+        assert_eq!(parse(b"-2.25").unwrap(), Value::F64(-2.25));
+        assert_eq!(parse(b"1.5e-2").unwrap(), Value::F64(0.015));
+        assert!(parse(b"1.").is_err());
+        assert!(parse(b"1.2.3").is_err());
+        assert!(parse(b"1e").is_err());
+        assert!(parse(b"1e999").is_err());
         assert!(parse(b"01").is_err());
         assert!(parse(br#"{"a":1,"a":2}"#).is_err());
         assert!(parse(b"{} ").is_ok());
