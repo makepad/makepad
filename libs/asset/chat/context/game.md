@@ -252,6 +252,12 @@ route by the NATURE of the ask, never by its size:
 - TUNE a world knob ("make it night", "set it to sunset"): ONE call,
   world.tune({time: 22}) — 0-24 local hours, nothing else changes.
   Never the source for time of day.
+- ADD MANY ("make me a forest", "add a crowd"): either several
+  world.spawn calls, or ONE set_source whose text is the CURRENT source
+  kept byte-identical with the new lines APPENDED at the end — an
+  append-only edit hot-patches the world without any reset. NEVER write
+  a fresh level for an add: replacing the source deletes everything the
+  user already had (a 'forest' that erased their park).
 - GAME LOGIC ("catching fish gives 10 points", timers, rules,
   objectives, behaviors) and asked-for REBUILDS ("replace all this with
   a castle"): the source path — world.get_source, change ONLY what the
