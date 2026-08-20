@@ -17,6 +17,10 @@ name = "llama-load"
 path = "src/bin/llama_load.rs"
 
 [[bin]]
+name = "llama-load-time"
+path = "src/bin/llama_load_time.rs"
+
+[[bin]]
 name = "llama-graph-census"
 path = "src/bin/llama_graph_census.rs"
 

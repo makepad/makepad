@@ -12,3 +12,7 @@ makepad-ai-loader = { path = "../loader" }
 [[bin]]
 name = "cudnn-v8-bench"
 path = "src/bin/cudnn_v8_bench.rs"
+
+[[bin]]
+name = "swap-bench"
+path = "src/bin/swap_bench.rs"
