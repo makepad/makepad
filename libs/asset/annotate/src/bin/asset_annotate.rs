@@ -37,6 +37,7 @@ struct Config {
     aliases: Vec<String>,
     limit: usize,
     sheet_size: usize,
+    exposure: f32,
     version: u32,
     model_tag: String,
     executor: Vec<String>,
@@ -56,6 +57,7 @@ fn usage() -> ! {
   --alias A           annotate exactly this canon alias (repeatable)
   --limit N           stop after N assets (default 10)
   --sheet-size N      downscale sheets to NxN before the model (default 512)
+  --exposure G        gamma lift on subject pixels, 1.0 disables (default 1.8)
   --version N         annotator version (default {ANNOTATOR_VERSION})
   --model-tag SLUG    label-safe model identity (default qwen35-9b)
   --executor CMD...   executor argv; everything after it is the command
@@ -76,6 +78,7 @@ fn parse_config() -> Config {
         aliases: Vec::new(),
         limit: 10,
         sheet_size: 512,
+        exposure: 1.8,
         version: ANNOTATOR_VERSION,
         model_tag: "qwen35-9b".to_string(),
         executor: Vec::new(),
@@ -101,6 +104,7 @@ fn parse_config() -> Config {
             "--alias" => c.aliases.push(next(&mut i)),
             "--limit" => c.limit = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--sheet-size" => c.sheet_size = next(&mut i).parse().unwrap_or_else(|_| usage()),
+            "--exposure" => c.exposure = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--version" => c.version = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--model-tag" => c.model_tag = next(&mut i),
             "--all" => c.all = true,
@@ -429,7 +433,10 @@ fn run_executor(
     let mut jobs = String::new();
     for c in todo {
         let png = http_get(data, &format!("/v1/thumbnails/alias/{}", c.alias), token)?;
-        let img = sheet::decode_png(&png)?;
+        let mut img = sheet::decode_png(&png)?;
+        // Lift before downscaling: the box filter then averages corrected
+        // values rather than correcting an already-averaged shadow.
+        sheet::lift_exposure(&mut img, cfg.exposure);
         let small = sheet::downscale(&img, cfg.sheet_size);
         let path = sheets.join(format!("{}.ppm", c.asset_hex));
         std::fs::write(&path, sheet::to_ppm(&small))
