@@ -1828,6 +1828,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
                     Some(a) => s(a.clone()),
                     None => Value::Null,
                 }),
+                ("updated_ms", Value::Int(h.updated_ms as i64)),
             ])
         })
         .collect();

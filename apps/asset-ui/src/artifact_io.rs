@@ -33,10 +33,17 @@ pub enum IoPurpose {
     ThumbModel,
     /// WAV payload → waveform-strip PNG, parsed and encoded ON the worker.
     ThumbAudioWaveform,
-    /// Gallery-card preview: read + DECODE an encoded image (sidecar, or an
-    /// image payload that is its own preview) on the worker, so card draws
-    /// never touch the filesystem or a PNG decoder.
-    GalleryPreviewEncoded,
+    /// Gallery-card preview: read + DECODE an encoded image (sidecar, a
+    /// store thumbnail object, or an image payload that is its own preview)
+    /// on the worker, so card draws never touch the filesystem or a PNG
+    /// decoder.
+    ///
+    /// `thumbnail` says the bytes are a PICTURE THE APP MADE, not content:
+    /// only those may be cut into an animation sheet. The caller knows
+    /// which it handed over — a `.thumb` sidecar, or the thumbnail role of
+    /// a catalog revision — and a digest-named store object has no
+    /// extension to infer it from.
+    GalleryPreviewEncoded { thumbnail: bool },
     /// Gallery-card preview for a legacy sidecarless WAV: read + parse +
     /// min/max scan on the worker.
     GalleryPreviewWav,
@@ -183,7 +190,7 @@ impl Drop for ArtifactIo {
 fn is_gallery(purpose: &IoPurpose) -> bool {
     matches!(
         purpose,
-        IoPurpose::GalleryPreviewEncoded
+        IoPurpose::GalleryPreviewEncoded { .. }
             | IoPurpose::GalleryPreviewWav
             | IoPurpose::GalleryPreviewBillboard
     )
@@ -466,20 +473,17 @@ fn process(request: IoRequest) -> IoDone {
                 png,
             }
         }
-        IoPurpose::GalleryPreviewEncoded => {
+        IoPurpose::GalleryPreviewEncoded { thumbnail } => {
             let decoded = std::fs::read(&request.path)
                 .ok()
                 .and_then(|bytes| decode_image_from_data(&bytes).ok());
-            // Walk/idle sheets only ever live in importer-written `.thumb`
-            // sidecars. An image PAYLOAD is always a still: a 1024×1024
+            // Walk/idle sheets only ever live in a picture the app made —
+            // an importer-written `.thumb`, or the thumbnail of a catalog
+            // revision. An image PAYLOAD is always a still: a 1024×1024
             // Flux render passes the sheet dimension test too and must not
             // be chopped into 64 cycling tiles.
-            let sidecar = request
-                .path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("thumb"));
             let (pixels, sequence, fps) = match decoded {
-                Some(image) if sidecar => split_encoded_preview(image),
+                Some(image) if thumbnail => split_encoded_preview(image),
                 Some(image) => (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0),
                 None => (None, Vec::new(), 0.0),
             };
@@ -858,7 +862,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-1.glb".into(),
             path: sidecar.clone(),
-            purpose: IoPurpose::GalleryPreviewEncoded,
+            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -880,7 +884,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-1.glb".into(),
             path: sidecar,
-            purpose: IoPurpose::GalleryPreviewEncoded,
+            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -898,7 +902,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-kaykit.glb".into(),
             path: sheet,
-            purpose: IoPurpose::GalleryPreviewEncoded,
+            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -936,7 +940,9 @@ mod tests {
         io.request(IoRequest {
             file: "lib-flux.png".into(),
             path: render,
-            purpose: IoPurpose::GalleryPreviewEncoded,
+            // A PAYLOAD: the app did not make this picture, so it is never
+            // an animation sheet however sheet-shaped it happens to be.
+            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: false },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -953,6 +959,38 @@ mod tests {
             }
             _ => panic!("wrong completion kind"),
         }
+        // A CATALOG thumbnail is a digest-named cache object with no
+        // extension to infer anything from — and by contract it can be a
+        // packed animation strip. The request says it is a picture the app
+        // made, so it is cut, and the card gets ONE frame instead of a
+        // filmstrip of tiny ones.
+        let object = dir.join("a3f9c1");
+        let blue = makepad_asset_importer::anim_icon::fit_tile(&[0, 0, 255, 255], 1, 1);
+        let white = makepad_asset_importer::anim_icon::fit_tile(&[255, 255, 255, 255], 1, 1);
+        let png = makepad_asset_importer::anim_icon::pack_sheet(&[blue, white]).unwrap();
+        std::fs::write(&object, &png).unwrap();
+        io.request(IoRequest {
+            file: "store:0102030405060708090a0b0c0d0e0f10".into(),
+            path: object,
+            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+            store: None,
+        });
+        match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            IoDone::GalleryPreview { pixels, sequence, .. } => {
+                assert_eq!(sequence.len(), 2, "the strip is cut into its cells");
+                match pixels {
+                    Some(PreviewPixels::Raw { width, height, .. }) => {
+                        assert_eq!(
+                            (width, height),
+                            (128, 128),
+                            "the tile shows one cell, not the whole sheet"
+                        );
+                    }
+                    _ => panic!("expected the first cell as raw pixels"),
+                }
+            }
+            _ => panic!("wrong completion kind"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -962,7 +1000,7 @@ mod tests {
         let mk = |file: &str| IoRequest {
             file: file.into(),
             path: PathBuf::from(file),
-            purpose: IoPurpose::GalleryPreviewEncoded,
+            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
             store: None,
         };
         stack.push_latest(mk("old"));
@@ -988,7 +1026,7 @@ mod tests {
             stack.push_latest(IoRequest {
                 file: format!("f{i}"),
                 path: PathBuf::from("x"),
-                purpose: IoPurpose::GalleryPreviewEncoded,
+                purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
             store: None,
         });
         }
