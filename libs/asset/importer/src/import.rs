@@ -815,6 +815,7 @@ pub fn placeholder_thumb() -> Result<PublishThumbnail, String> {
         media: ThumbnailMedia::Jpeg,
         width: THUMB_DIM as u32,
         height: THUMB_DIM as u32,
+        views: Vec::new(),
     })
 }
 
@@ -1303,7 +1304,7 @@ fn build_png(item: &IndexItem, bytes: Vec<u8>) -> Result<PublishRequest, String>
     let (width, height) = png_dims(&bytes).ok_or("png: malformed header")?;
     let thumbnail = match usable_image_thumb(&bytes) {
         Some((thumb, media, w, h)) => {
-            PublishThumbnail { bytes: thumb, media, width: w, height: h }
+            PublishThumbnail { bytes: thumb, media, width: w, height: h, views: Vec::new() }
         }
         None => placeholder_thumb()?,
     };
@@ -1327,12 +1328,13 @@ fn build_png(item: &IndexItem, bytes: Vec<u8>) -> Result<PublishRequest, String>
 fn build_wav(item: &IndexItem, bytes: Vec<u8>) -> Result<PublishRequest, String> {
     let pcm = parse_wav(&bytes)?;
     // ALWAYS a fresh canonical picture — the on-disk sidecars are stale.
-    let (bytes_jpeg, width, height) = audio_thumbnail_jpeg(&pcm)?;
+    let picture = audio_thumbnail_jpeg(&pcm)?;
     let thumbnail = PublishThumbnail {
-        bytes: bytes_jpeg,
+        bytes: picture.bytes,
         media: ThumbnailMedia::Jpeg,
-        width,
-        height,
+        width: picture.width,
+        height: picture.height,
+        views: picture.views,
     };
     let millis = pcm.millis();
     let mut request = PublishRequest::new(
@@ -1376,7 +1378,7 @@ fn glb_thumbnail(
         .and_then(|thumb| usable_image_thumb(&thumb));
     match rendered.or_else(|| stats.base_color.as_deref().and_then(usable_image_thumb)) {
         Some((thumb, media, width, height)) => {
-            Ok(PublishThumbnail { bytes: thumb, media, width, height })
+            Ok(PublishThumbnail { bytes: thumb, media, width, height, views: Vec::new() })
         }
         None => placeholder_thumb(),
     }
@@ -1501,7 +1503,7 @@ fn build_splat(item: &IndexItem, dir: &Path, bytes: Vec<u8>) -> Result<PublishRe
         .and_then(|thumb| usable_image_thumb(&thumb))
     {
         Some((thumb, media, w, h)) => {
-            PublishThumbnail { bytes: thumb, media, width: w, height: h }
+            PublishThumbnail { bytes: thumb, media, width: w, height: h, views: Vec::new() }
         }
         None => placeholder_thumb()?,
     };
@@ -1563,6 +1565,7 @@ fn build_video(item: &IndexItem, path: &Path, bytes: Vec<u8>) -> Result<PublishR
             media: ThumbnailMedia::Jpeg,
             width: THUMB_DIM as u32,
             height: THUMB_DIM as u32,
+            views: Vec::new(),
         },
     );
     request.categories = vec!["generated".to_string()];

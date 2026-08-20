@@ -586,7 +586,7 @@ fn build_product(
             .ok_or("image: malformed header")?;
             let thumbnail = match usable_image_thumb(&bytes) {
                 Some((thumb, media, w, h)) => {
-                    PublishThumbnail { bytes: thumb, media, width: w, height: h }
+                    PublishThumbnail { bytes: thumb, media, width: w, height: h, views: Vec::new() }
                 }
                 None => placeholder_thumb()?,
             };
@@ -595,12 +595,13 @@ fn build_product(
         MediaType::Wav | MediaType::Mp3 | MediaType::Ogg => {
             let pcm = decode_audio(&bytes, kind.media)?;
             let millis = pcm.millis();
-            let (jpeg, width, height) = audio_thumbnail_jpeg(&pcm)?;
+            let picture = audio_thumbnail_jpeg(&pcm)?;
             let thumbnail = PublishThumbnail {
-                bytes: jpeg,
+                bytes: picture.bytes,
                 media: ThumbnailMedia::Jpeg,
-                width,
-                height,
+                width: picture.width,
+                height: picture.height,
+                views: picture.views,
             };
             (millis, None, thumbnail)
         }
@@ -629,6 +630,7 @@ fn build_product(
                         media: ThumbnailMedia::Jpeg,
                         width: THUMB_DIM as u32,
                         height: THUMB_DIM as u32,
+                        views: Vec::new(),
                     },
                 ),
                 Err(_) => {
@@ -645,6 +647,7 @@ fn build_product(
                             media: ThumbnailMedia::Jpeg,
                             width: THUMB_DIM as u32,
                             height: THUMB_DIM as u32,
+                            views: Vec::new(),
                         },
                     )
                 }
@@ -660,7 +663,7 @@ fn build_product(
             };
             let thumbnail = match inspected.base_color.as_deref().and_then(usable_image_thumb) {
                 Some((thumb, media, w, h)) => {
-                    PublishThumbnail { bytes: thumb, media, width: w, height: h }
+                    PublishThumbnail { bytes: thumb, media, width: w, height: h, views: Vec::new() }
                 }
                 None => placeholder_thumb()?,
             };

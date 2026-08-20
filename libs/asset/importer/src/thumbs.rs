@@ -5,8 +5,10 @@
 //! Everything here is pure and hermetically tested; nothing touches the
 //! network or the library directory.
 
-use makepad_asset_data::MediaType;
+use makepad_asset_data::{MediaType, ThumbnailView, ThumbnailViewKind};
 use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits};
+use makepad_audio_picture::wave::{wave_rgba, WavePalette};
+use makepad_audio_picture::CompositeRegions;
 
 /// Canonical generated-thumbnail size.
 pub const THUMB_DIM: usize = 512;
@@ -210,65 +212,105 @@ pub fn audio_millis(bytes: &[u8], media: MediaType) -> Result<u32, String> {
 /// `None` when the clip has no spectrum to show (silence, or shorter than
 /// one transform); the caller falls back to its own strip, which is the
 /// honest picture of that.
-pub fn audio_picture_hd(pcm: &WavPcm) -> Option<(Vec<u32>, usize, usize)> {
-    let mono: Vec<f32> = pcm.frames.iter().map(|(l, r)| (l + r) * 0.5).collect();
-    let rgba = crate::spectrogram::spectrogram_rgba(
+pub fn audio_picture_hd(pcm: &WavPcm) -> Option<(Vec<u32>, usize, usize, CompositeRegions)> {
+    let mono = makepad_audio_picture::mono(&pcm.frames);
+    let (rgba, regions) = crate::spectrogram::composite_rgba(
         &mono,
         pcm.sample_rate,
         crate::spectrogram::HD_W,
         crate::spectrogram::HD_H,
     )?;
-    let bgra = rgba
-        .chunks_exact(4)
+    Some((rgba_to_bgra(&rgba), crate::spectrogram::HD_W, crate::spectrogram::HD_H, regions))
+}
+
+fn rgba_to_bgra(rgba: &[u8]) -> Vec<u32> {
+    rgba.chunks_exact(4)
         .map(|px| {
             (px[3] as u32) << 24 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
         })
-        .collect();
-    Some((bgra, crate::spectrogram::HD_W, crate::spectrogram::HD_H))
+        .collect()
 }
 
-/// The picture an audio asset publishes: the HD spectrogram when the track
-/// has one, else the 512² strip. JPEG, with the dimensions the manifest
-/// must declare.
-pub fn audio_thumbnail_jpeg(pcm: &WavPcm) -> Result<(Vec<u8>, u32, u32), String> {
-    let (pixels, w, h) = audio_picture_hd(pcm)
-        .unwrap_or_else(|| (waveform_bgra_512(pcm), THUMB_DIM, THUMB_DIM));
-    Ok((encode_jpeg_bgra(&pixels, w, h)?, w as u32, h as u32))
+/// The declared regions of a composite, as manifest views. One place turns
+/// "where the baker put things" into "what the manifest says", so a producer
+/// cannot stamp a layout it did not write.
+pub fn audio_views(regions: CompositeRegions) -> Vec<ThumbnailView> {
+    let rect = |kind, (x, y, w, h): (u32, u32, u32, u32)| ThumbnailView::rect(kind, x, y, w, h);
+    let mut views = vec![
+        rect(ThumbnailViewKind::Fft, regions.fft),
+        rect(ThumbnailViewKind::Wave, regions.wave),
+    ];
+    views.sort_by_key(|v| v.kind);
+    views
 }
 
-/// The min/max strip: the honest picture of something with no spectrum to
-/// show, and the fallback shape the non-PCM importers still draw.
+/// The picture an audio asset publishes, and what its regions are.
+///
+/// The composite when the track has a spectrum — spectrogram with a wave
+/// strip along the bottom edge, both declared — else the 512² strip alone,
+/// declared as one wave region. JPEG, with the dimensions the manifest must
+/// carry.
+pub struct AudioThumbnail {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub views: Vec<ThumbnailView>,
+}
+
+pub fn audio_thumbnail_jpeg(pcm: &WavPcm) -> Result<AudioThumbnail, String> {
+    let (pixels, w, h, views) = match audio_picture_hd(pcm) {
+        Some((pixels, w, h, regions)) => (pixels, w, h, audio_views(regions)),
+        None => {
+            let strip = vec![ThumbnailView::rect(
+                ThumbnailViewKind::Wave,
+                0,
+                0,
+                THUMB_DIM as u32,
+                THUMB_DIM as u32,
+            )];
+            (waveform_bgra_512(pcm), THUMB_DIM, THUMB_DIM, strip)
+        }
+    };
+    Ok(AudioThumbnail {
+        bytes: encode_jpeg_bgra(&pixels, w, h)?,
+        width: w as u32,
+        height: h as u32,
+        views,
+    })
+}
+
+/// The waveform strip on its own: the honest picture of something with no
+/// spectrum to show, and the fallback shape the non-PCM importers still draw.
+///
+/// One renderer, shared with the preview widgets, so the strip in a baked
+/// thumbnail and the strip a well draws live from decoded samples are the
+/// same picture. Its column rule — the LOUDEST SAMPLE in a fixed slice of
+/// time, against the track's own peak, never divided by how many samples
+/// landed in the slice — is what keeps a six-minute song from flattening
+/// into a line.
 pub fn waveform_bgra_512(pcm: &WavPcm) -> Vec<u32> {
-    const BG: u32 = 0xff14_181c;
-    const FG: u32 = 0xff58_c4a0;
-    const MID: u32 = 0xff2a_3238;
     let (width, height) = (THUMB_DIM, THUMB_DIM);
-    let mut out = vec![BG; width * height];
-    let mid_y = height / 2;
-    for x in 0..width {
-        out[mid_y * width + x] = MID;
-    }
-    if pcm.frames.is_empty() {
-        return out;
-    }
-    let per_col = (pcm.frames.len() as f64 / width as f64).max(1.0);
-    for x in 0..width {
-        let start = ((x as f64 * per_col) as usize).min(pcm.frames.len() - 1);
-        let end = (((x + 1) as f64 * per_col) as usize).clamp(start + 1, pcm.frames.len());
-        let (mut lo, mut hi) = (0.0f32, 0.0f32);
-        for &(l, r) in &pcm.frames[start..end] {
-            let mono = (l + r) * 0.5;
-            lo = lo.min(mono);
-            hi = hi.max(mono);
-        }
-        let half = (height / 2) as f32;
-        let y0 = (mid_y as f32 - hi.clamp(-1.0, 1.0) * (half - 1.0)) as usize;
-        let y1 = (mid_y as f32 - lo.clamp(-1.0, 1.0) * (half - 1.0)) as usize;
-        for y in y0.min(height - 1)..=y1.min(height - 1) {
-            out[y * width + x] = FG;
+    let palette = WavePalette::default();
+    let mono = makepad_audio_picture::mono(&pcm.frames);
+    match wave_rgba(&mono, width, height, palette) {
+        Some(rgba) => rgba_to_bgra(&rgba),
+        // Silence has no strip. A flat line on the palette's own ground is
+        // the honest picture of that, and it is what the caller sees rather
+        // than a black square.
+        None => {
+            let bg = pack(palette.background);
+            let mut out = vec![bg; width * height];
+            let mid = height / 2;
+            for x in 0..width {
+                out[mid * width + x] = pack(palette.centre);
+            }
+            out
         }
     }
-    out
+}
+
+fn pack([r, g, b]: [u8; 3]) -> u32 {
+    0xff00_0000 | (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
 
 /// Tolerance for "this image is one flat colour": the importer's own
@@ -454,15 +496,19 @@ mod tests {
         assert_eq!(pcm.frames.len(), 2_000);
         assert_eq!(pcm.millis(), 2_000 * 1000 / 24_000);
         let strip = waveform_bgra_512(&pcm);
+        let wave_fg = pack(WavePalette::default().rms);
         assert_eq!(strip.len(), THUMB_DIM * THUMB_DIM);
-        assert!(strip.iter().any(|p| *p == 0xff58_c4a0), "the strip carries signal");
+        assert!(strip.iter().any(|p| *p == wave_fg), "the strip carries signal");
         // Two thousand frames is shorter than one transform, so there is no
         // spectrum to draw: the HD picture declines and the published
         // thumbnail falls back to the strip, at the strip's size.
         assert!(audio_picture_hd(&pcm).is_none(), "too short for a spectrogram");
-        let (jpeg, w, h) = audio_thumbnail_jpeg(&pcm).unwrap();
-        assert_eq!((w, h), (THUMB_DIM as u32, THUMB_DIM as u32));
-        assert_eq!(jpeg_dims(&jpeg), Some((w, h)));
+        let picture = audio_thumbnail_jpeg(&pcm).unwrap();
+        assert_eq!((picture.width, picture.height), (THUMB_DIM as u32, THUMB_DIM as u32));
+        assert_eq!(jpeg_dims(&picture.bytes), Some((picture.width, picture.height)));
+        // A strip is a strip, and says so.
+        assert_eq!(picture.views.len(), 1);
+        assert_eq!(picture.views[0].kind, ThumbnailViewKind::Wave);
 
         // A real track's length: the picture is the HIGH-DEFINITION
         // spectrogram, and the manifest declares its true size.
@@ -474,12 +520,23 @@ mod tests {
             })
             .collect();
         let track = parse_wav(&wav_pcm16(&long, 44_100)).unwrap();
-        let (pixels, hw, hh) = audio_picture_hd(&track).expect("a track has a spectrum");
+        let (pixels, hw, hh, regions) =
+            audio_picture_hd(&track).expect("a track has a spectrum");
         assert_eq!((hw, hh), (crate::spectrogram::HD_W, crate::spectrogram::HD_H));
         assert_eq!(pixels.len(), hw * hh);
-        let (hd_jpeg, jw, jh) = audio_thumbnail_jpeg(&track).unwrap();
+        // ONE composite: the spectrogram, with a wave strip along the bottom
+        // edge, and both regions declared.
+        assert_eq!(regions.fft, (0, 0, hw as u32, 448));
+        assert_eq!(regions.wave, (0, 448, hw as u32, 64));
+        let hd = audio_thumbnail_jpeg(&track).unwrap();
+        let (jw, jh) = (hd.width, hd.height);
+        let hd_jpeg = hd.bytes;
         assert_eq!((jw, jh), (2048, 512), "published at high definition");
         assert_eq!(jpeg_dims(&hd_jpeg), Some((jw, jh)));
+        assert_eq!(
+            hd.views.iter().map(|v| v.kind).collect::<Vec<_>>(),
+            vec![ThumbnailViewKind::Fft, ThumbnailViewKind::Wave]
+        );
         assert!(
             jw >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
                 && jw <= makepad_asset_data::limits::THUMBNAIL_MAX_DIM
@@ -493,7 +550,7 @@ mod tests {
         let quiet = parse_wav(&wav_pcm16(&vec![(0, 0); 2_000], 24_000)).unwrap();
         let quiet_strip = waveform_bgra_512(&quiet);
         assert!(
-            quiet_strip.iter().any(|p| *p == 0xff58_c4a0),
+            quiet_strip.iter().any(|p| *p == pack(WavePalette::default().centre)),
             "digital silence falls back to the strip and draws its flat line"
         );
         let jpeg = encode_jpeg_bgra(&strip, THUMB_DIM, THUMB_DIM).unwrap();
