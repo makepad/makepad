@@ -35,10 +35,14 @@ makepad-asset-client = { path = "../client" }
 # Each file is its own test binary, which is what makes its `mod common;`
 # resolve; without these entries cargo never compiles them.
 #
-# tests/http/chat_http.rs and tests/http/chat_client_e2e.rs are left out: they
-# import ChatScript / ScriptedLane / ScriptedTurn from the crate root, which
-# only `host` re-exports. Adding those three names to the `pub use host::{…}`
-# list in src/lib.rs is all they need.
+[[test]]
+name = "http_chat_http"
+path = "tests/http/chat_http.rs"
+
+[[test]]
+name = "http_chat_client_e2e"
+path = "tests/http/chat_client_e2e.rs"
+
 [[test]]
 name = "http_client_e2e"
 path = "tests/http/client_e2e.rs"

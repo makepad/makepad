@@ -8,8 +8,11 @@ use super::json::{obj, s, Value};
 use super::routes::{call_state, is_read, method_not_allowed, require_cap, secret_of, Outcome, RouteCtx};
 use super::routes_control::read_json_body;
 use super::util::now_ms;
+use makepad_asset_chat::context::ClientProfile;
 use makepad_asset_chat::session::SessionId;
-use makepad_asset_chat::wire::{AttachmentBinding, ChatEvent, ProviderKind, MAX_ATTACHMENTS};
+use makepad_asset_chat::wire::{
+    AttachmentBinding, ChatEvent, ProviderKind, ToolOutcome, MAX_ATTACHMENTS,
+};
 use crate::{validate_namespace, Capability, PrincipalId};
 use makepad_asset_data::AssetRevisionId;
 use std::str::FromStr;
@@ -70,6 +73,9 @@ pub fn dispatch(
         ["v1", "chat", "sessions", id, "cancel"] if m == Method::Post => {
             session_cancel(conn, head, rc, id)
         }
+        ["v1", "chat", "sessions", id, "tool-result"] if m == Method::Post => {
+            session_tool_result(conn, head, rc, id)
+        }
         _ => return None,
     };
     Some(result)
@@ -124,7 +130,11 @@ fn session_create(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
         Err(o) => return Ok(o),
         Ok(r) => r?,
     };
-    check_known_fields(&body, &["api_version", "namespace", "provider"], "unknown chat session field")?;
+    check_known_fields(
+        &body,
+        &["api_version", "namespace", "provider", "client"],
+        "unknown chat session field",
+    )?;
     match body_u64(&body, "api_version") {
         Some(1) => {}
         _ => return Err(Fail::Http(400, "unsupported api_version")),
@@ -133,12 +143,61 @@ fn session_create(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResul
     validate_namespace(&ns).map_err(Fail::Srv)?;
     let provider = ProviderKind::from_slug(body_str(&body, "provider")?)
         .ok_or(Fail::Http(400, "unknown chat provider"))?;
+    // The connecting app's declared profile selects its taught context and
+    // tool surface. Absent = general; unknown slugs are refused.
+    let profile = match body.get("client") {
+        None => ClientProfile::General,
+        Some(v) => v
+            .as_str()
+            .and_then(ClientProfile::from_slug)
+            .ok_or(Fail::Http(400, "unknown chat client profile"))?,
+    };
     let (owner, token) = auth_owner(head, rc, Some(&ns))?;
-    let view = match chat_of(rc)?.create(owner, ns, token, provider) {
+    let view = match chat_of(rc)?.create(owner, ns, token, provider, profile) {
         Ok(v) => v,
         Err(e) => return Ok(chat_outcome(e)),
     };
     Ok(Outcome::Resp(Resp::json(201, &session_value(&view))))
+}
+
+/// The connected app's answer to a client-executed tool call (the game's
+/// world tools). Owner-scoped like send/cancel; the outcome parses through
+/// the wire type's own bounds.
+fn session_tool_result(
+    conn: &mut Conn,
+    head: &mut Head,
+    rc: &RouteCtx,
+    id: &str,
+) -> RouteResult<Outcome> {
+    let id = sid_of(id)?;
+    let body = match read_json_body(conn, head, rc) {
+        Err(o) => return Ok(o),
+        Ok(r) => r?,
+    };
+    check_known_fields(&body, &["id", "outcome"], "unknown tool result field")?;
+    let call_id = body_str(&body, "id")?;
+    if call_id.is_empty() || call_id.len() > 64 {
+        return Err(Fail::Http(400, "malformed tool call id"));
+    }
+    let call_id = call_id.to_string();
+    // The host's own JSON value and the chat wire's value are distinct
+    // types; re-encode through text (the same bridge event_value uses).
+    let outcome = {
+        let raw = body.get("outcome").ok_or(Fail::Http(400, "missing outcome"))?;
+        let parsed = makepad_asset_client::json::parse(raw.to_json().as_bytes())
+            .map_err(|_| Fail::Http(400, "malformed tool outcome"))?;
+        ToolOutcome::decode(&parsed).map_err(|_| Fail::Http(400, "malformed tool outcome"))?
+    };
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let view = match chat_of(rc)?.get(owner, id.clone()) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    require_chat_ns(head, rc, &view.namespace)?;
+    match chat_of(rc)?.tool_result(owner, id, call_id, outcome) {
+        Ok(()) => Ok(Outcome::Resp(Resp::json(200, &obj(vec![("accepted", Value::Bool(true))])))),
+        Err(e) => Ok(chat_outcome(e)),
+    }
 }
 
 fn session_get(head: &Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {
@@ -378,6 +437,10 @@ fn chat_outcome(e: ChatFail) -> Outcome {
         ChatFail::ToolsConnect { message } => Outcome::Resp(Resp::json(
             503,
             &obj(vec![("error", s("tools_unavailable")), ("message", s(message))]),
+        )),
+        ChatFail::NoClientTool { what } => Outcome::Resp(Resp::json(
+            409,
+            &obj(vec![("error", s("no_client_tool")), ("what", s(what))]),
         )),
     }
 }

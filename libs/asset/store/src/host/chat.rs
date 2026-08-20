@@ -10,13 +10,15 @@
 use super::api::principal_str;
 use super::config::{ChatConfig, ChatScript, ScriptedLane, ScriptedTurn};
 use super::util::log;
+use makepad_asset_chat::catalog_sql::CatalogReader;
+use makepad_asset_chat::context::{self, ClientProfile};
 use makepad_asset_chat::dispatch::AssetServerTools;
 use makepad_asset_chat::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_asset_chat::qwen::{FleetQwenChatProvider, HttpFleetTransport};
 use makepad_asset_chat::session::{
     CancelFlag, ExecCtx, SendRefusal, Session, SessionId, ToolExecutor,
 };
-use makepad_asset_chat::tools::{ConsultTask, ContentToolCall};
+use makepad_asset_chat::tools::{self, ConsultTask, ContentToolCall, ToolDef};
 use makepad_asset_chat::wire::{
     sanitize_public_error, AttachmentBinding, ChatEvent, ChatMessage, ChatRole,
     ProviderAvailability, ProviderKind, ToolOutcome, MAX_MESSAGE_BYTES,
@@ -24,6 +26,7 @@ use makepad_asset_chat::wire::{
 use makepad_asset_client::ApiEndpoints;
 use crate::PrincipalId;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -34,6 +37,10 @@ const PUMP_SLICE: Duration = Duration::from_millis(50);
 const CONSULT_POLL: Duration = Duration::from_millis(20);
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(60);
 const ACTOR_IDLE: Duration = Duration::from_millis(20);
+/// How long a parked client-executed tool may wait for the app's answer
+/// before the broker times the round out with a `Failed` outcome the model
+/// can react to.
+const CLIENT_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct ChatHandle {
@@ -70,6 +77,9 @@ pub enum ChatFail {
     InvalidAttachment { what: String },
     OverBudget { what: &'static str },
     ToolsConnect { message: String },
+    /// A tool-result was posted but no client tool is parked (or the call
+    /// id does not match).
+    NoClientTool { what: &'static str },
 }
 
 enum ChatCmd {
@@ -86,6 +96,14 @@ enum ChatCmd {
     },
     Cancel { owner: PrincipalId, id: SessionId, reply: Sender<Result<SessionView, ChatFail>> },
     Retire { owner: PrincipalId, id: SessionId, reply: Sender<Result<bool, ChatFail>> },
+    /// The client's answer to a parked client-executed tool call.
+    ToolResult {
+        owner: PrincipalId,
+        id: SessionId,
+        call_id: String,
+        outcome: ToolOutcome,
+        reply: Sender<Result<(), ChatFail>>,
+    },
     Shutdown,
 }
 
@@ -94,6 +112,7 @@ struct CreateReq {
     namespace: String,
     token: String,
     provider: ProviderKind,
+    profile: ClientProfile,
     reply: Sender<Result<SessionView, ChatFail>>,
 }
 
@@ -108,6 +127,7 @@ struct SendReq {
 pub fn spawn_broker(
     endpoints: ApiEndpoints,
     cfg: ChatConfig,
+    catalog_db: Option<PathBuf>,
     log_enabled: bool,
     stop: Arc<AtomicBool>,
 ) -> Result<(ChatHandle, JoinHandle<()>), crate::ServerError> {
@@ -127,6 +147,10 @@ pub fn spawn_broker(
                 cfg,
                 factory,
                 sessions: HashMap::new(),
+                // The broker shares a process (and root) with the catalog:
+                // `assets.query` reads the SAME file the store serves,
+                // through makepad-sqlite's read-only WAL snapshot reads.
+                catalog: catalog_db.map(CatalogReader::new),
                 log_enabled,
                 stop,
             };
@@ -170,6 +194,7 @@ impl ChatHandle {
         namespace: String,
         token: String,
         provider: ProviderKind,
+        profile: ClientProfile,
     ) -> Result<SessionView, ChatFail> {
         let (tx, rx) = mpsc::channel();
         self.tx
@@ -178,8 +203,24 @@ impl ChatHandle {
                 namespace,
                 token,
                 provider,
+                profile,
                 reply: tx,
             }))
+            .map_err(|_| ChatFail::Down)?;
+        rx.recv_timeout(Duration::from_secs(15)).map_err(|_| ChatFail::Down)?
+    }
+
+    /// Deliver the client's outcome for a parked client-executed tool.
+    pub fn tool_result(
+        &self,
+        owner: PrincipalId,
+        id: SessionId,
+        call_id: String,
+        outcome: ToolOutcome,
+    ) -> Result<(), ChatFail> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(ChatCmd::ToolResult { owner, id, call_id, outcome, reply: tx })
             .map_err(|_| ChatFail::Down)?;
         rx.recv_timeout(Duration::from_secs(15)).map_err(|_| ChatFail::Down)?
     }
@@ -240,6 +281,7 @@ struct Actor {
     cfg: ChatConfig,
     factory: Box<dyn ProviderFactory>,
     sessions: HashMap<SessionId, Live>,
+    catalog: Option<CatalogReader>,
     log_enabled: bool,
     stop: Arc<AtomicBool>,
 }
@@ -251,6 +293,12 @@ struct Live {
     tools: Option<AssetServerTools>,
     events: Vec<ChatEvent>,
     consult_depth: u32,
+    /// Context/tool-surface flavor the connecting app declared at create.
+    profile: ClientProfile,
+    /// When a client-executed tool parked the turn: since when. The broker
+    /// times the wait out with a Failed outcome after
+    /// [`CLIENT_TOOL_TIMEOUT`].
+    client_wait: Option<Instant>,
 }
 
 impl Actor {
@@ -260,7 +308,13 @@ impl Actor {
                 let _ = reply.send(self.list_providers());
             }
             ChatCmd::Create(req) => {
-                let _ = req.reply.send(self.create(req.owner, req.namespace, req.token, req.provider));
+                let _ = req.reply.send(self.create(
+                    req.owner,
+                    req.namespace,
+                    req.token,
+                    req.provider,
+                    req.profile,
+                ));
             }
             ChatCmd::Get { owner, id, reply } => {
                 let _ = reply.send(self.view_of(&owner, &id));
@@ -276,6 +330,9 @@ impl Actor {
             }
             ChatCmd::Retire { owner, id, reply } => {
                 let _ = reply.send(self.retire(&owner, &id));
+            }
+            ChatCmd::ToolResult { owner, id, call_id, outcome, reply } => {
+                let _ = reply.send(self.client_tool_result(&owner, &id, &call_id, outcome));
             }
             ChatCmd::Shutdown => self.shutdown_all(),
         }
@@ -294,6 +351,7 @@ impl Actor {
         namespace: String,
         token: String,
         provider: ProviderKind,
+        profile: ClientProfile,
     ) -> Result<SessionView, ChatFail> {
         if self.sessions.len() >= self.cfg.max_sessions {
             return Err(ChatFail::OverBudget { what: "chat sessions" });
@@ -328,6 +386,8 @@ impl Actor {
             tools,
             events: Vec::new(),
             consult_depth: 0,
+            profile,
+            client_wait: None,
         };
         let view = view_from(&live);
         self.sessions.insert(id, live);
@@ -366,6 +426,8 @@ impl Actor {
                 endpoints,
                 primary,
                 consult_depth: &mut live.consult_depth,
+                profile: live.profile,
+                catalog: self.catalog.as_mut(),
             };
             live.session.send(&text, &attachments, &mut tools)
         };
@@ -375,6 +437,43 @@ impl Actor {
                 Ok(turn)
             }
             Err(e) => Err(map_send(e)),
+        }
+    }
+
+    /// Resume a parked client-executed tool with the client's outcome.
+    fn client_tool_result(
+        &mut self,
+        owner: &PrincipalId,
+        id: &SessionId,
+        call_id: &str,
+        outcome: ToolOutcome,
+    ) -> Result<(), ChatFail> {
+        let endpoints = self.endpoints;
+        let cap = self.cfg.event_cap;
+        let live = match self.sessions.get_mut(id) {
+            Some(live) if live.owner == *owner => live,
+            Some(_) | None => return Err(ChatFail::NotFound),
+        };
+        let primary = live.session.provider_kind();
+        let result = {
+            let mut tools = SessionTools {
+                inner: &mut live.tools,
+                factory: &mut *self.factory,
+                endpoints,
+                primary,
+                consult_depth: &mut live.consult_depth,
+                profile: live.profile,
+                catalog: self.catalog.as_mut(),
+            };
+            live.session.provide_client_outcome(call_id, outcome, &mut tools)
+        };
+        match result {
+            Ok(()) => {
+                live.client_wait = None;
+                drain_into(live, cap);
+                Ok(())
+            }
+            Err(what) => Err(ChatFail::NoClientTool { what }),
         }
     }
 
@@ -440,8 +539,43 @@ impl Actor {
             return;
         };
         if live.session.is_idle() {
+            live.client_wait = None;
             return;
         }
+        // A turn parked on a client-executed tool does not pump; it waits
+        // for the tool-result route — bounded by CLIENT_TOOL_TIMEOUT.
+        if live.session.awaiting_client_tool().is_some() {
+            let since = *live.client_wait.get_or_insert_with(Instant::now);
+            if since.elapsed() < CLIENT_TOOL_TIMEOUT {
+                return;
+            }
+            let call_id = live
+                .session
+                .awaiting_client_tool()
+                .expect("checked above")
+                .to_string();
+            let primary = live.session.provider_kind();
+            let mut tools = SessionTools {
+                inner: &mut live.tools,
+                factory: &mut *self.factory,
+                endpoints,
+                primary,
+                consult_depth: &mut live.consult_depth,
+                profile: live.profile,
+                catalog: self.catalog.as_mut(),
+            };
+            let _ = live.session.provide_client_outcome(
+                &call_id,
+                ToolOutcome::Failed {
+                    message: "the connected app did not answer this tool call".to_string(),
+                },
+                &mut tools,
+            );
+            live.client_wait = None;
+            drain_into(live, cap);
+            return;
+        }
+        live.client_wait = None;
         let primary = live.session.provider_kind();
         {
             let mut tools = SessionTools {
@@ -450,6 +584,8 @@ impl Actor {
                 endpoints,
                 primary,
                 consult_depth: &mut live.consult_depth,
+                profile: live.profile,
+                catalog: self.catalog.as_mut(),
             };
             let start = Instant::now();
             while !live.session.is_idle() && start.elapsed() < PUMP_SLICE {
@@ -557,14 +693,49 @@ struct SessionTools<'a> {
     endpoints: ApiEndpoints,
     primary: ProviderKind,
     consult_depth: &'a mut u32,
+    profile: ClientProfile,
+    catalog: Option<&'a mut CatalogReader>,
 }
 
-impl ToolExecutor for SessionTools<'_> {
-    fn capability_doc(&mut self) -> String {
-        let mut out = match self.inner {
-            Some(tools) => tools.capability_doc(),
-            None => "Asset tools are not connected.\n".to_string(),
-        };
+impl SessionTools<'_> {
+    /// The dynamic context layer: live catalog headline plus (for general
+    /// sessions) the registered-operation capabilities and consult status.
+    fn dynamic_context(&mut self) -> String {
+        let mut out = String::new();
+        if let Some(catalog) = self.catalog.as_mut() {
+            match catalog.query(
+                "SELECT kind, COUNT(*) AS n FROM search_annotations WHERE live=1 \
+                 GROUP BY kind ORDER BY n DESC",
+            ) {
+                Ok(counts) => {
+                    out.push_str("LIVE STORE right now (kind count): ");
+                    for (i, row) in counts.rows.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        if let [kind, n] = row.as_slice() {
+                            out.push_str(kind);
+                            out.push(' ');
+                            out.push_str(n);
+                        }
+                    }
+                    out.push('\n');
+                }
+                Err(e) => out.push_str(&format!("Catalog SQL currently unavailable: {e}\n")),
+            }
+        } else {
+            out.push_str("Catalog SQL is not configured on this server.\n");
+        }
+        if self.profile == ClientProfile::Game {
+            // Phase 1: existing assets only — no operation/consult teaching,
+            // which also keeps the game context small.
+            return out;
+        }
+        out.push('\n');
+        match self.inner {
+            Some(tools) => out.push_str(&tools.capability_doc()),
+            None => out.push_str("Asset tools are not connected.\n"),
+        }
         out.push_str("\nExternal generative consult:\n");
         if matches!(self.primary, ProviderKind::OpenAi | ProviderKind::Grok) {
             out.push_str(
@@ -598,8 +769,37 @@ impl ToolExecutor for SessionTools<'_> {
                  The consult cannot run tools.\n",
             );
         }
-        let _ = self.endpoints;
         out
+    }
+}
+
+impl ToolExecutor for SessionTools<'_> {
+    fn capability_doc(&mut self) -> String {
+        let dynamic = self.dynamic_context();
+        let _ = self.endpoints;
+        context::assemble(self.profile, &dynamic)
+    }
+
+    fn tool_definitions(&mut self) -> Vec<ToolDef> {
+        match self.profile {
+            ClientProfile::Game => tools::game_definitions(),
+            ClientProfile::General | ClientProfile::Vj => tools::definitions(),
+        }
+    }
+
+    /// Game sessions' world tools are executed by the connected app: the
+    /// session parks and the outcome arrives over the tool-result route.
+    fn client_executes(&mut self, call: &ContentToolCall) -> bool {
+        self.profile.client_world_tools()
+            && matches!(
+                call,
+                ContentToolCall::WorldPlace { .. }
+                    | ContentToolCall::WorldRemove { .. }
+                    | ContentToolCall::WorldMove { .. }
+                    | ContentToolCall::WorldList
+                    | ContentToolCall::WorldGetSource
+                    | ContentToolCall::WorldSetSource { .. }
+            )
     }
 
     fn execute(
@@ -613,11 +813,67 @@ impl ToolExecutor for SessionTools<'_> {
             ContentToolCall::LlmConsult { task, prompt, provider } => {
                 self.consult(*task, prompt, *provider, progress, cancel)
             }
+            ContentToolCall::AssetsQuery { sql } => match self.catalog.as_mut() {
+                Some(catalog) => run_catalog_query(catalog, sql),
+                None => ToolOutcome::Unavailable {
+                    reason: "catalog SQL is not configured on this server".into(),
+                },
+            },
+            ContentToolCall::AssetsSchema => match self.catalog.as_mut() {
+                Some(catalog) => match catalog.schema_text() {
+                    Ok(text) => ToolOutcome::Ok {
+                        value: json_obj(vec![("text", json_s(text))]),
+                    },
+                    Err(message) => ToolOutcome::Failed { message },
+                },
+                None => ToolOutcome::Unavailable {
+                    reason: "catalog SQL is not configured on this server".into(),
+                },
+            },
             other => match self.inner {
                 Some(tools) => tools.execute(other, ctx, progress, cancel),
                 None => ToolOutcome::Failed { message: "asset tools are not connected".into() },
             },
         }
+    }
+}
+
+use makepad_asset_client::json::{obj as json_obj_pairs, s as json_s, Value as JsonValue};
+
+fn json_obj(pairs: Vec<(&str, JsonValue)>) -> JsonValue {
+    json_obj_pairs(pairs)
+}
+
+/// The tool-result wire caps one outcome at 16 KiB; keep the rendered
+/// table comfortably inside it by showing fewer rows when needed.
+const MAX_TABLE_BYTES: usize = 12_000;
+
+fn run_catalog_query(catalog: &mut CatalogReader, sql: &str) -> ToolOutcome {
+    match catalog.query(sql) {
+        Ok(out) => {
+            let mut shown = out.rows.len();
+            let text = loop {
+                let view = makepad_asset_chat::catalog_sql::QueryOutput {
+                    columns: out.columns.clone(),
+                    rows: out.rows[..shown].to_vec(),
+                    truncated: out.truncated || shown < out.rows.len(),
+                    elapsed_ms: out.elapsed_ms,
+                };
+                let text = view.to_text();
+                if text.len() <= MAX_TABLE_BYTES || shown == 0 {
+                    break text;
+                }
+                shown /= 2;
+            };
+            ToolOutcome::Ok {
+                value: json_obj(vec![
+                    ("rows", JsonValue::Int(shown as i64)),
+                    ("text", json_s(text)),
+                ]),
+            }
+        }
+        Err(message) if message.starts_with("refused") => ToolOutcome::Refused { what: message },
+        Err(message) => ToolOutcome::Failed { message },
     }
 }
 

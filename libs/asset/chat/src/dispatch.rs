@@ -611,6 +611,19 @@ impl ToolExecutor for AssetServerTools {
             ContentToolCall::LlmConsult { .. } => ToolOutcome::Unavailable {
                 reason: "llm.consult is executed by the chat broker".to_string(),
             },
+            // Game-client tools: the broker's dispatcher never advertises
+            // them (see `ToolExecutor::tool_definitions`); a model that
+            // calls one anyway gets the honest answer, not an execution.
+            ContentToolCall::AssetsQuery { .. }
+            | ContentToolCall::AssetsSchema
+            | ContentToolCall::WorldPlace { .. }
+            | ContentToolCall::WorldRemove { .. }
+            | ContentToolCall::WorldMove { .. }
+            | ContentToolCall::WorldList
+            | ContentToolCall::WorldGetSource
+            | ContentToolCall::WorldSetSource { .. } => ToolOutcome::Unavailable {
+                reason: "catalog SQL and world tools run in a game chat session".to_string(),
+            },
         }
     }
 }

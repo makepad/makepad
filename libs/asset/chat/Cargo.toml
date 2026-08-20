@@ -20,6 +20,9 @@ description = "Provider-explicit chat + content-tool protocol over the Makepad A
 makepad-asset-data = { path = "../data" }
 makepad-asset-client = { path = "../client" }
 makepad-network = { path = "../../../platform/network" }
+# The broker-side `assets.query` tool: read-only SQL over the co-located
+# server's own catalog file (see src/catalog_sql.rs).
+makepad-sqlite = { path = "../../sqlite_query" }
 
 [dev-dependencies]
 # The REAL dispatch proof: tool execution runs against an actual AssetServer
