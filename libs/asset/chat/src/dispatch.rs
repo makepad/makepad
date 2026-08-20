@@ -621,7 +621,8 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldList
             | ContentToolCall::WorldGetSource
-            | ContentToolCall::WorldSetSource { .. } => ToolOutcome::Unavailable {
+            | ContentToolCall::WorldSetSource { .. }
+            | ContentToolCall::WorldSetPlayerModel { .. } => ToolOutcome::Unavailable {
                 reason: "catalog SQL and world tools run in a game chat session".to_string(),
             },
         }

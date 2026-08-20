@@ -621,6 +621,27 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                 Some(false),
             ),
         },
+        ToolDef {
+            name: "world.set_player_model",
+            api_name: "world_set_player_model",
+            description: "Swap the PLAYER's character to this catalog model IN PLACE — no \
+                          source read, no rewrite, nothing else in the world changes. THE \
+                          way to do 'let me play as X': query kind='character' for the \
+                          alias, then call this. Rigged 'character' aliases only.",
+            args_doc: r#"{"model": "kenney/mini-characters/character-male-b"}"#,
+            parameters: schema_object(
+                vec![(
+                    "model",
+                    schema_string_len(
+                        "catalog canon_alias of a rigged character",
+                        1,
+                        MAX_MODEL_REF_CHARS as i64,
+                    ),
+                )],
+                &["model"],
+                Some(false),
+            ),
+        },
     ]
 }
 
@@ -723,6 +744,7 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_list" => Some("world.list"),
         "world_get_source" => Some("world.get_source"),
         "world_set_source" => Some("world.set_source"),
+        "world_set_player_model" => Some("world.set_player_model"),
         _ => None,
     }
 }
@@ -1102,6 +1124,10 @@ pub enum ContentToolCall {
     /// primary path (sandbox sessions only; evaluated with last-good
     /// rollback on the client).
     WorldSetSource { source: String, note: Option<String> },
+    /// Swap the player's character rig in place — no source round-trip,
+    /// structurally incapable of resetting the world (the cheap §4.5-style
+    /// verb; sandbox sessions only).
+    WorldSetPlayerModel { model: String },
 }
 
 /// Longest model reference `world.place` accepts (canon aliases run long:
@@ -1181,6 +1207,7 @@ impl ContentToolCall {
             ContentToolCall::WorldList => "world.list",
             ContentToolCall::WorldGetSource => "world.get_source",
             ContentToolCall::WorldSetSource { .. } => "world.set_source",
+            ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
         }
     }
 
@@ -1497,6 +1524,12 @@ impl ContentToolCall {
                     })
                     .transpose()?;
                 Ok(ContentToolCall::WorldSetSource { source, note })
+            }
+            "world.set_player_model" => {
+                check_known(args, &["model"], "world.set_player_model argument")?;
+                let model = need_str(args, "model", MAX_MODEL_REF_CHARS)?;
+                check_model_ref(&model)?;
+                Ok(ContentToolCall::WorldSetPlayerModel { model })
             }
             other => Err(format!("unknown tool '{}'", bounded(other, 32))),
         }
@@ -2098,6 +2131,9 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
                 pairs.push(("note", json::s(n.clone())));
             }
             json::obj(pairs)
+        }
+        ContentToolCall::WorldSetPlayerModel { model } => {
+            json::obj(vec![("model", json::s(model.clone()))])
         }
     }
 }

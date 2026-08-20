@@ -1877,6 +1877,87 @@ impl SkinnedModel {
         self.nodes.iter().map(|n| n.rest).collect()
     }
 
+    /// Ground speed the walk `clip` depicts at playback rate 1, in the
+    /// model's own units per second — the number that makes stride-matched
+    /// locomotion possible for ANY rig: playback rate = ground_speed / this,
+    /// and the feet stay planted at every travel speed (play-session-1
+    /// entry 20, "the walking ANIMATION is too fast" — for every walker).
+    ///
+    /// Method: the support foot, whatever the rig calls it. Candidates are
+    /// the clip-animated nodes whose rest origin sits in the lower body;
+    /// each carries a probe at its rest ground reach, so a hip-pivoted
+    /// block leg (kenney mini rigs have no foot bones) measures exactly
+    /// like a real foot bone. Across one sampled cycle the lowest probe is
+    /// the support; the median planar speed of the support probe between
+    /// consecutive samples with the SAME support (excludes swap frames) is
+    /// the depicted ground speed. `None` when the clip animates no
+    /// lower-body node or the measurement is degenerate — callers keep
+    /// their heuristic.
+    pub fn walk_clip_ground_speed(&self, clip_index: usize) -> Option<f32> {
+        let clip = self.clips.get(clip_index)?;
+        if clip.duration <= 1.0e-3 {
+            return None;
+        }
+        let rest = self.rest_pose();
+        let origins: Vec<Vec3f> = (0..self.nodes.len())
+            .map(|i| {
+                self.node_mesh_transform(&rest, i)
+                    .map(|m| Vec3f { x: m.v[12], y: m.v[13], z: m.v[14] })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let min_y = origins.iter().map(|o| o.y).fold(f32::MAX, f32::min);
+        let max_y = origins.iter().map(|o| o.y).fold(f32::MIN, f32::max);
+        let height = max_y - min_y;
+        if !(height > 1.0e-3) {
+            return None;
+        }
+        let animated: std::collections::HashSet<usize> =
+            clip.channels.iter().map(|c| c.node).collect();
+        // (node, rest ground reach below its origin)
+        let candidates: Vec<(usize, f32)> = origins
+            .iter()
+            .enumerate()
+            .filter(|(i, o)| animated.contains(i) && o.y - min_y < height * 0.45)
+            .map(|(i, o)| (i, o.y - min_y))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        const STEPS: usize = 48;
+        let dt = clip.duration / STEPS as f32;
+        let mut pose = self.rest_pose();
+        let mut prev: Option<(usize, Vec3f)> = None;
+        let mut speeds: Vec<f32> = Vec::new();
+        for s in 0..=STEPS {
+            self.sample_clip(clip_index, s as f32 * dt, &mut pose);
+            let mut support: Option<(usize, Vec3f)> = None;
+            for (node, reach) in &candidates {
+                let Some(m) = self.node_mesh_transform(&pose, *node) else {
+                    continue;
+                };
+                let p = mat4_mul_point(&m, Vec3f { x: 0.0, y: -reach, z: 0.0 });
+                if support.map_or(true, |(_, sp)| p.y < sp.y) {
+                    support = Some((*node, p));
+                }
+            }
+            let Some((node, p)) = support else { continue };
+            if let Some((prev_node, pp)) = prev {
+                if prev_node == node {
+                    let (dx, dz) = (p.x - pp.x, p.z - pp.z);
+                    speeds.push((dx * dx + dz * dz).sqrt() / dt);
+                }
+            }
+            prev = Some((node, p));
+        }
+        if speeds.len() < STEPS / 4 {
+            return None;
+        }
+        speeds.sort_by(|a, b| a.total_cmp(b));
+        let v = speeds[speeds.len() / 2];
+        (v > 1.0e-3).then_some(v)
+    }
+
     /// Reset translation on every skeleton root to its rest value while
     /// preserving all authored rotations and child motion.
     ///
