@@ -67,7 +67,8 @@ pub use discovery::{
 };
 pub use dto::{
     AliasDto, AssetDetailDto, AssetRow, CandidateDto, CandidateStateDto, CatalogEventDto,
-    CatalogEventKind, CatalogHit, ClaimedJobDto, EventsPageDto, GameAliasDto, GcPhaseDto,
+    CatalogEventKind, CatalogFacet, CatalogHit, ClaimedJobDto, EventsPageDto, FacetKind,
+    GameAliasDto, GcPhaseDto,
     GcStatusDto, HealthDto, ImportEntryDto, RetireDto,
     ImportReportDto, ImportStatusDto, JobAttemptDto, JobDetailDto, JobId, JobProfileDto,
     ChatEventBodyDto, ChatEventDto, ChatEventsPageDto, ChatProviderDto, ChatProviderKind,

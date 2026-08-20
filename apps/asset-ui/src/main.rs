@@ -77,7 +77,7 @@ use crate::billboard_view::BillboardView;
 use crate::mesh_view::MeshView;
 use crate::thumbnail_renderer::ThumbnailRenderer;
 use crate::asset_store_state::{
-    server_kind_label, session_config_from_env, AssetStoreState, LocalLibraryFilters,
+    server_kind_label, session_config_from_env, AssetStoreState, LibraryFilters,
     Remote, SERVER_KINDS,
 };
 use makepad_asset_client::GcStatusDto;
@@ -2139,7 +2139,9 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     lib_search := FilterInput{ width: 250 empty_text: "Search the catalog: title, alias, category, tag…" }
                                     FieldCaption{ text: "Kind" }
-                                    lib_kind_drop := FieldDrop{ width: 220 }
+                                    lib_kind_drop := FieldDrop{ width: 150 }
+                                    FieldCaption{ text: "Label" }
+                                    lib_label_drop := FieldDrop{ width: 220 }
                                     lib_clear_btn := GhostButton{ text: "Clear" }
                                     lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
@@ -3165,7 +3167,7 @@ pub struct App {
     /// straight onto the server query — the Library surface has no other
     /// source than the catalog.
     #[rust]
-    lib_filters: LocalLibraryFilters,
+    lib_filters: LibraryFilters,
     /// Server-side state backed by one Asset Server session:
     /// discovery/auth/retry and all catalog work live on its worker threads;
     /// `poll` only drains typed results on the UI thread.
@@ -3208,6 +3210,10 @@ pub struct App {
     /// server filters on.
     #[rust]
     lib_kind_options: Vec<String>,
+    /// Facets behind the label dropdown, same row offset: the catalog's own
+    /// category/tag counts for the current result set, most used first.
+    #[rust]
+    lib_label_options: Vec<makepad_asset_client::CatalogFacet>,
     /// The filter state the Library list was last drawn for. When it changes
     /// the RESULT SET changes, so both list viewports go back to the top —
     /// a filter that shrinks the results under a scrolled viewport otherwise
@@ -8279,6 +8285,9 @@ impl App {
         if let Some(kind) = &self.lib_filters.kind {
             parts.push(format!("kind {kind}"));
         }
+        if let Some((_, label)) = &self.lib_filters.label {
+            parts.push(format!("label {label}"));
+        }
         if parts.is_empty() {
             "the current filter".to_string()
         } else {
@@ -8619,10 +8628,23 @@ impl App {
                 .into_iter()
                 .find(|candidate| server_kind_label(*candidate) == label)
         });
-        let server_changed =
-            self.store.filters.text != query || self.store.filters.kind != server_kind;
+        // A picked facet is the filter its own vocabulary uses: the server
+        // matches categories and tags through separate label rows.
+        let (category, tag) = match &self.lib_filters.label {
+            Some((makepad_asset_client::FacetKind::Category, label)) => {
+                (Some(label.clone()), None)
+            }
+            Some((makepad_asset_client::FacetKind::Tag, label)) => (None, Some(label.clone())),
+            None => (None, None),
+        };
+        let server_changed = self.store.filters.text != query
+            || self.store.filters.kind != server_kind
+            || self.store.filters.category != category
+            || self.store.filters.tag != tag;
         self.store.filters.text = query.clone();
         self.store.filters.kind = server_kind;
+        self.store.filters.category = category;
+        self.store.filters.tag = tag;
         self.lib_filters.query = query;
         if server_changed {
             self.store.submit_search();
@@ -8654,14 +8676,33 @@ impl App {
         drop.set_selected_item(cx, selected_row);
         self.lib_kind_options = kinds;
 
+        // Labels: the catalog's own categories and tags, counted server-side
+        // over the whole result set (not this page) in the same snapshot as
+        // the rows. An empty catalog offers nothing rather than a made-up
+        // vocabulary.
+        let facets: Vec<makepad_asset_client::CatalogFacet> = self
+            .store
+            .search
+            .ready()
+            .map(|results| results.facets.clone())
+            .unwrap_or_default();
+        let mut label_rows = vec!["all labels".to_string()];
+        label_rows.extend(facets.iter().map(facet_row_text));
+        let label_row = facet_row(&facets, self.lib_filters.label.as_ref());
+        let label_drop = self.ui.drop_down2(cx, ids!(lib_label_drop));
+        label_drop.set_labels(cx, label_rows);
+        label_drop.set_selected_item(cx, label_row);
+        self.lib_label_options = facets;
+
         self.read_filters_from_ui(cx);
 
         // A changed filter is a changed result set: send the viewport home
         // before the new rows are laid out.
         let signature = format!(
-            "{}|{:?}",
+            "{}|{:?}|{:?}",
             self.lib_filters.query.trim().to_ascii_lowercase(),
             self.lib_filters.kind,
+            self.lib_filters.label,
         );
         if self.lib_view_signature != signature {
             self.lib_view_signature = signature;
@@ -8690,8 +8731,9 @@ impl App {
         // "Retire shown" is a bulk server delete: it stays disabled until a
         // filter actually narrows the catalog to something.
         let shown = self.shown_catalog_assets().len();
-        let filter_active =
-            !self.lib_filters.query.trim().is_empty() || self.lib_filters.kind.is_some();
+        let filter_active = !self.lib_filters.query.trim().is_empty()
+            || self.lib_filters.kind.is_some()
+            || self.lib_filters.label.is_some();
         let retire_btn = self.ui.button(cx, ids!(lib_retire_shown_btn));
         retire_btn.set_text(cx, &format!("× Retire {shown} shown"));
         retire_btn.set_enabled(cx, filter_active && shown > 0);
@@ -10619,14 +10661,26 @@ impl MatchEvent for App {
                 filters_changed = true;
             }
         }
+        if let Some(index) = self.ui.drop_down2(cx, ids!(lib_label_drop)).changed(actions) {
+            // Row 0 is "all labels"; every other row is one counted facet.
+            let picked = facet_at(&self.lib_label_options, index);
+            if picked != self.lib_filters.label {
+                self.lib_filters.label = picked;
+                filters_changed = true;
+            }
+        }
         if filters_changed {
             self.refresh_library_ui(cx);
         }
         if self.ui.button(cx, ids!(lib_clear_btn)).clicked(actions) {
             self.ui.text_input(cx, ids!(lib_search)).set_text(cx, "");
             self.lib_filters.kind = None;
+            self.lib_filters.label = None;
             self.ui
                 .drop_down2(cx, ids!(lib_kind_drop))
+                .set_selected_item(cx, 0);
+            self.ui
+                .drop_down2(cx, ids!(lib_label_drop))
                 .set_selected_item(cx, 0);
             self.refresh_library_ui(cx);
         }
@@ -11837,6 +11891,104 @@ fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> 
         "mp4" | "mov" => ("video", "video/mp4", false),
         _ => return None,
     })
+}
+
+/// The Library's label dropdown: row 0 is "all labels", row `n + 1` is
+/// facet `n`. Reading and writing that offset lives here so the render and
+/// the click can never disagree about it.
+fn facet_at(
+    facets: &[makepad_asset_client::CatalogFacet],
+    row: usize,
+) -> Option<(makepad_asset_client::FacetKind, String)> {
+    row.checked_sub(1)
+        .and_then(|index| facets.get(index))
+        .map(|facet| (facet.kind, facet.label.clone()))
+}
+
+/// Which row shows a picked facet, or 0 when the pick is not in this result
+/// set (a filter can narrow it away) — the dropdown then reads "all labels"
+/// rather than pointing at some other label.
+fn facet_row(
+    facets: &[makepad_asset_client::CatalogFacet],
+    picked: Option<&(makepad_asset_client::FacetKind, String)>,
+) -> usize {
+    let Some((kind, label)) = picked else {
+        return 0;
+    };
+    facets
+        .iter()
+        .position(|facet| facet.kind == *kind && &facet.label == label)
+        .map_or(0, |index| index + 1)
+}
+
+/// One dropdown row: a `#` marks the tag vocabulary (categories carry no
+/// prefix) and the server's count follows the label.
+fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
+    format!(
+        "{}{}   {}",
+        match facet.kind {
+            makepad_asset_client::FacetKind::Category => "",
+            makepad_asset_client::FacetKind::Tag => "#",
+        },
+        facet.label,
+        facet.count
+    )
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+    use makepad_asset_client::{CatalogFacet, FacetKind};
+
+    fn facet(kind: FacetKind, label: &str, count: u64) -> CatalogFacet {
+        CatalogFacet { kind, label: label.to_string(), count }
+    }
+
+    /// The dropdown's first row is "all labels", so every facet sits one row
+    /// down. Reading a row and showing a pick have to agree about that, or
+    /// picking "doom" silently filters by "kenney".
+    #[test]
+    fn the_label_dropdown_row_maps_back_to_the_facet_it_shows() {
+        let facets = vec![
+            facet(FacetKind::Category, "doom", 102),
+            facet(FacetKind::Tag, "prop", 40),
+            facet(FacetKind::Category, "kenney", 7),
+        ];
+        assert_eq!(facet_at(&facets, 0), None, "row 0 clears the filter");
+        for (row, want) in [
+            (1, (FacetKind::Category, "doom")),
+            (2, (FacetKind::Tag, "prop")),
+            (3, (FacetKind::Category, "kenney")),
+        ] {
+            let picked = facet_at(&facets, row).expect("a facet row");
+            assert_eq!((picked.0, picked.1.as_str()), want);
+            assert_eq!(facet_row(&facets, Some(&picked)), row, "round trip");
+        }
+        assert_eq!(facet_at(&facets, 4), None, "past the end selects nothing");
+
+        // Same label, different vocabulary: they are separate filters and
+        // must not be confused for one another.
+        let both = vec![
+            facet(FacetKind::Category, "doom", 2),
+            facet(FacetKind::Tag, "doom", 1),
+        ];
+        assert_eq!(facet_at(&both, 1).unwrap().0, FacetKind::Category);
+        assert_eq!(facet_at(&both, 2).unwrap().0, FacetKind::Tag);
+        assert_eq!(facet_row(&both, Some(&(FacetKind::Tag, "doom".into()))), 2);
+
+        // A pick the current result set no longer contains reads as "all
+        // labels" rather than pointing at whatever sits in its old row.
+        assert_eq!(facet_row(&facets, Some(&(FacetKind::Tag, "gone".into()))), 0);
+        assert_eq!(facet_row(&facets, None), 0);
+    }
+
+    /// The row text is the label, its count, and a `#` that says which of
+    /// the two server-side filters a pick would use.
+    #[test]
+    fn a_facet_row_shows_its_vocabulary_and_its_count() {
+        assert_eq!(facet_row_text(&facet(FacetKind::Category, "doom", 102)), "doom   102");
+        assert_eq!(facet_row_text(&facet(FacetKind::Tag, "prop", 40)), "#prop   40");
+    }
 }
 
 #[cfg(test)]

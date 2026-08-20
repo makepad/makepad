@@ -48,6 +48,10 @@ pub struct Budgets {
     pub max_search_index_terms: u32,
     /// Snippet output bound, in bytes.
     pub max_search_snippet_bytes: u32,
+    /// Most facet rows (label + count) one search may ask for. Facets are
+    /// opt-in per query, so this bounds the extra aggregation, not the
+    /// ordinary page.
+    pub max_search_facets: u32,
     /// Most exact input bindings one typed operation may pin.
     pub max_operation_inputs: u32,
     /// Largest canonical operation spec document.
@@ -75,6 +79,8 @@ pub const MAX_SEARCH_QUERY_TERMS: u32 = 256;
 pub const MAX_SEARCH_RESULTS: u32 = 10_000;
 pub const MAX_SEARCH_INDEX_TERMS: u32 = 65_536;
 pub const MAX_SEARCH_SNIPPET_BYTES: u32 = 16 * 1024;
+/// Hard ceiling on requested facet rows.
+pub const MAX_SEARCH_FACETS: u32 = 1_000;
 
 impl Budgets {
     /// The frozen v1 defaults. Tests may shrink individual fields to hit
@@ -98,6 +104,7 @@ impl Budgets {
             max_search_results: 100,
             max_search_index_terms: 16_384,
             max_search_snippet_bytes: 320,
+            max_search_facets: 64,
             max_operation_inputs: 8,
             max_operation_spec_bytes: 16 * 1024,
             max_operation_rounds: 8,
@@ -165,6 +172,9 @@ impl Budgets {
             || self.max_search_snippet_bytes > MAX_SEARCH_SNIPPET_BYTES
         {
             return Err(ServerError::InvalidInput { what: "budget max_search_snippet_bytes" });
+        }
+        if self.max_search_facets == 0 || self.max_search_facets > MAX_SEARCH_FACETS {
+            return Err(ServerError::InvalidInput { what: "budget max_search_facets" });
         }
         // Operation budgets: zero disables the feature it gates; spec bytes
         // are bound whole as a single blob (c_int domain); the liveness

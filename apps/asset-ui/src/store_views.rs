@@ -1715,6 +1715,7 @@ mod tests {
             }],
             total: 1,
             more: false,
+            facets: Vec::new(),
         });
         let rows = catalog_rows(&store);
         assert!(matches!(
@@ -1744,6 +1745,7 @@ mod tests {
                 hits: Vec::new(),
                 total: 0,
                 more: false,
+                facets: Vec::new(),
             }),
         ] {
             store.search = state;
