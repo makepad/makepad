@@ -744,7 +744,11 @@ fn bsp38_to_glb(bytes: &[u8], bank: &WalBank) -> Result<Bsp38Map, String> {
                     name: mover.name.clone(),
                     pos: mover.centre,
                     closed_y: mover.centre[1],
+                    // A Quake II door mostly slides SIDEWAYS: the Y pair is
+                    // only the vertical part of the move, and `offset`
+                    // carries the whole of it.
                     open_y: mover.centre[1] + mover.travel[1],
+                    offset: mover.travel,
                 });
             }
             MoverKind::Lift => {
@@ -759,12 +763,12 @@ fn bsp38_to_glb(bytes: &[u8], bank: &WalBank) -> Result<Bsp38Map, String> {
                     up_y,
                     down_y,
                 ));
-                nav_lifts.push(NavDoor {
-                    name: mover.name.clone(),
-                    pos: mover.centre,
-                    closed_y: up_y,
-                    open_y: down_y,
-                });
+                nav_lifts.push(NavDoor::vertical(
+                    mover.name.clone(),
+                    mover.centre,
+                    up_y,
+                    down_y,
+                ));
             }
         }
     }
@@ -3504,10 +3508,21 @@ mod tests {
                 let off = view.get("byteOffset").and_then(Value::as_i64).unwrap_or(0) as usize;
                 let len = view.get("byteLength").and_then(Value::as_i64)? as usize;
                 let png = &bin[off..off + len];
-                crate::classic_import::decode_png_stored(png).ok()
+                crate::classic_import::decode_png_stored(png)
+                    .ok()
+                    .map(|(rgba, w, h)| (rgba, w, h, png.to_vec()))
             })
-            .find(|(_, w, h)| (*w, *h) == (crate::skybox::EQUIRECT_W, crate::skybox::EQUIRECT_H));
+            .find(|(_, w, h, _)| {
+                (*w, *h) == (crate::skybox::EQUIRECT_W, crate::skybox::EQUIRECT_H)
+            });
         assert!(equirect.is_some(), "the sky node carries a 1024x512 panorama");
+        // The panorama is the one thing here that can be silently WRONG — a
+        // quarter turn or a mirror still renders a sky — so leave it on disk
+        // for a human to look at rather than only counting its pixels.
+        if let Some((_, _, _, png)) = &equirect {
+            let _ = std::fs::write(staged.join("worlds/demo1-sky.png"), png);
+            eprintln!("demo1 sky: {}", staged.join("worlds/demo1-sky.png").display());
+        }
 
         // Anchors and the walker facts.
         let text = std::fs::read_to_string(staged.join("worlds/demo1.spawn")).unwrap();
@@ -3549,7 +3564,6 @@ mod tests {
             "demo1 T-junctions rose to {left} (ratchet {Q2_DEMO1_T_JUNCTIONS})"
         );
         let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&staged);
     }
 
     /// demo1 has neither a `func_plat` nor a key, so the rest of the contract

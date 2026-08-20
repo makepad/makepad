@@ -1408,12 +1408,9 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
                 );
                 node.parts = node_parts;
                 extra.push(node);
-                door_meta.push(crate::world_nav::NavDoor {
-                    name,
-                    pos,
-                    closed_y,
-                    open_y,
-                });
+                door_meta.push(crate::world_nav::NavDoor::vertical(
+                    name, pos, closed_y, open_y,
+                ));
             }
             MoverKind::Lift => {
                 let name = format!("lift_{}", lift_meta.len() + 1);
@@ -1428,12 +1425,9 @@ fn map_to_world(src: &BuildMap, art: &ArtBank) -> Result<BuildWorld, String> {
                 );
                 node.parts = node_parts;
                 extra.push(node);
-                lift_meta.push(crate::world_nav::NavDoor {
-                    name,
-                    pos,
-                    closed_y,
-                    open_y,
-                });
+                lift_meta.push(crate::world_nav::NavDoor::vertical(
+                    name, pos, closed_y, open_y,
+                ));
             }
         }
     }

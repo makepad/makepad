@@ -50,17 +50,15 @@ pub(crate) fn convert_bsp(
         nav.doors = map
             .doors
             .iter()
-            .map(|d| {
-                let travel = (d.travel[0] * d.travel[0]
-                    + d.travel[1] * d.travel[1]
-                    + d.travel[2] * d.travel[2])
-                    .sqrt();
-                crate::world_nav::NavDoor {
-                    name: d.name.clone(),
-                    pos: d.centre,
-                    closed_y: d.centre[1],
-                    open_y: d.centre[1] + travel,
-                }
+            .map(|d| crate::world_nav::NavDoor {
+                name: d.name.clone(),
+                pos: d.centre,
+                closed_y: d.centre[1],
+                // A Quake door mostly slides SIDEWAYS: the Y pair is the
+                // vertical part of the move and says nothing on its own,
+                // which is what `offset` is for.
+                open_y: d.centre[1] + d.travel[1],
+                offset: d.travel,
             })
             .collect();
         // A plat travels straight down, so its anchor is the Y pair the
@@ -68,11 +66,13 @@ pub(crate) fn convert_bsp(
         nav.lifts = map
             .lifts
             .iter()
-            .map(|l| crate::world_nav::NavDoor {
-                name: l.name.clone(),
-                pos: l.centre,
-                closed_y: l.centre[1],
-                open_y: l.down_y,
+            .map(|l| {
+                crate::world_nav::NavDoor::vertical(
+                    l.name.clone(),
+                    l.centre,
+                    l.centre[1],
+                    l.down_y,
+                )
             })
             .collect();
         nav.teleports = map.teleports.clone();

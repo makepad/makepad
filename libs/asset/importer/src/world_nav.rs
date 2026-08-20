@@ -48,6 +48,40 @@ pub struct NavDoor {
     pub pos: [f32; 3],
     pub closed_y: f32,
     pub open_y: f32,
+    /// Travel as a VECTOR, metres, GLB space.
+    ///
+    /// A Doom door and every lift move straight up or down, so this is
+    /// `[0, open_y - closed_y, 0]` and the two Y fields already said
+    /// everything. A Quake / Quake II / Quake III `func_door` slides
+    /// SIDEWAYS: `open_y == closed_y`, the Y pair says nothing, and a door
+    /// like that used to publish no anchor at all — the catalog could not
+    /// tell a sliding door from a wall.
+    pub offset: [f32; 3],
+}
+
+impl NavDoor {
+    /// A door or lift that travels straight up or down — everything Doom
+    /// and Build build, and every plat in every engine.
+    pub fn vertical(name: impl Into<String>, pos: [f32; 3], closed_y: f32, open_y: f32) -> Self {
+        Self {
+            name: name.into(),
+            pos,
+            closed_y,
+            open_y,
+            offset: [0.0, open_y - closed_y, 0.0],
+        }
+    }
+
+    /// How far it travels, metres, whichever way it goes.
+    pub fn travel(&self) -> f32 {
+        let o = self.offset;
+        let len = (o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt();
+        if len > 0.0 {
+            len
+        } else {
+            (self.open_y - self.closed_y).abs()
+        }
+    }
 }
 
 /// One teleporter: step anywhere in the pad AABB and arrive at `dst`
@@ -141,16 +175,25 @@ impl WorldNav {
         if let Some(v) = self.eye_height {
             out.push_str(&format!("eye {v:.4}\n"));
         }
-        for d in &self.doors {
+        // The travel vector is APPENDED, so a reader that only knows the
+        // five-number form still gets the same five numbers.
+        for (tag, d) in self
+            .doors
+            .iter()
+            .map(|d| ("door", d))
+            .chain(self.lifts.iter().map(|l| ("lift", l)))
+        {
             out.push_str(&format!(
-                "door {} {:.4} {:.4} {:.4} {:.4} {:.4}\n",
-                d.name, d.pos[0], d.pos[1], d.pos[2], d.closed_y, d.open_y
-            ));
-        }
-        for l in &self.lifts {
-            out.push_str(&format!(
-                "lift {} {:.4} {:.4} {:.4} {:.4} {:.4}\n",
-                l.name, l.pos[0], l.pos[1], l.pos[2], l.closed_y, l.open_y
+                "{tag} {} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.4}\n",
+                d.name,
+                d.pos[0],
+                d.pos[1],
+                d.pos[2],
+                d.closed_y,
+                d.open_y,
+                d.offset[0],
+                d.offset[1],
+                d.offset[2]
             ));
         }
         for m in &self.markers {
@@ -221,6 +264,7 @@ impl WorldNav {
                         pos: [nums[0], nums[1], nums[2]],
                         closed_y: nums[3],
                         open_y: nums[4],
+                        offset: nav_offset(&nums),
                     });
                 }
                 Some("marker") => {
@@ -247,6 +291,7 @@ impl WorldNav {
                         pos: [nums[0], nums[1], nums[2]],
                         closed_y: nums[3],
                         open_y: nums[4],
+                        offset: nav_offset(&nums),
                     });
                 }
                 Some("teleport") => {
@@ -337,8 +382,12 @@ impl WorldNav {
             if out.len() >= MAX_ANCHORS_PER_ASSET {
                 break;
             }
-            let travel = door.open_y - door.closed_y;
-            if travel == 0.0 || !travel.is_finite() || !door.pos.iter().all(|v| v.is_finite()) {
+            let travel = door.travel();
+            if travel == 0.0
+                || !travel.is_finite()
+                || !door.pos.iter().all(|v| v.is_finite())
+                || !door.offset.iter().all(|v| v.is_finite())
+            {
                 continue;
             }
             if out.iter().any(|a: &Anchor| a.name == door.name) {
@@ -352,12 +401,15 @@ impl WorldNav {
                         y: door.closed_y,
                         z: door.pos[2],
                     },
-                    rot: Quat::IDENTITY,
+                    // The DIRECTION rides in the rotation: this is the turn
+                    // that takes +Y onto the travel, so the whole vector is
+                    // `rot * (0, scale.y, 0)`. Scale stays positive because
+                    // a negative one is not a size, and a lift travelling
+                    // down is a rotation of half a turn rather than a sign.
+                    rot: from_y_to(door.offset),
                     scale: Vec3 {
                         x: 1.0,
-                        // Scale must stay positive: a lift travels DOWN, so
-                        // its direction rides in `pos.y` vs the GLB clip.
-                        y: travel.abs(),
+                        y: travel,
                         z: 1.0,
                     },
                 },
@@ -433,6 +485,47 @@ fn height_transform(v: f32) -> Transform {
     }
 }
 
+/// The travel vector of a `door`/`lift` line: the three numbers after the
+/// Y pair when the writer put them there, else straight up or down, which
+/// is what every sidecar written before they existed meant.
+fn nav_offset(nums: &[f32]) -> [f32; 3] {
+    if nums.len() >= 8 {
+        [nums[5], nums[6], nums[7]]
+    } else {
+        [0.0, nums[4] - nums[3], 0.0]
+    }
+}
+
+/// The shortest rotation taking +Y onto `v`. Identity for a door that opens
+/// upward, so every anchor written before this existed keeps its value.
+fn from_y_to(v: [f32; 3]) -> Quat {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len <= 1.0e-8 {
+        return Quat::IDENTITY;
+    }
+    let d = [v[0] / len, v[1] / len, v[2] / len];
+    // cos of the angle between +Y and d.
+    let dot = d[1];
+    if dot >= 1.0 - 1.0e-6 {
+        return Quat::IDENTITY;
+    }
+    if dot <= -1.0 + 1.0e-6 {
+        // Straight down: half a turn about any axis square to +Y.
+        return Quat { x: 0.0, y: 0.0, z: 1.0, w: 0.0 };
+    }
+    // axis = +Y x d
+    let axis = [d[2], 0.0, -d[0]];
+    let alen = (axis[0] * axis[0] + axis[2] * axis[2]).sqrt();
+    let angle = dot.clamp(-1.0, 1.0).acos();
+    let s = (angle * 0.5).sin() / alen;
+    Quat {
+        x: axis[0] * s,
+        y: 0.0,
+        z: axis[2] * s,
+        w: (angle * 0.5).cos(),
+    }
+}
+
 /// Yaw about +Y (the GLB up axis).
 fn yaw_quat(yaw: f32) -> Quat {
     let h = yaw * 0.5;
@@ -493,18 +586,8 @@ mod tests {
             floor_y: Some(0.109_4),
             step_height: Some(0.375),
             eye_height: Some(0.640_6),
-            doors: vec![NavDoor {
-                name: "door_1".into(),
-                pos: [3.0, 0.0, 1.0],
-                closed_y: 0.0,
-                open_y: 1.9375,
-            }],
-            lifts: vec![NavDoor {
-                name: "lift_1".into(),
-                pos: [6.0, 1.0, 2.0],
-                closed_y: 1.0,
-                open_y: 0.0,
-            }],
+            doors: vec![NavDoor::vertical("door_1", [3.0, 0.0, 1.0], 0.0, 1.9375)],
+            lifts: vec![NavDoor::vertical("lift_1", [6.0, 1.0, 2.0], 1.0, 0.0)],
             teleports: vec![NavTeleport {
                 name: "teleport_1".into(),
                 pad_min: [1.0, 1.0],
@@ -606,5 +689,100 @@ mod tests {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'));
             assert!(name.as_bytes()[0].is_ascii_lowercase());
         }
+    }
+
+    /// A door that slides SIDEWAYS used to publish no anchor at all: its two
+    /// Y heights are equal, and "travel == 0" read as "does not move". The
+    /// catalog could not tell it from a wall.
+    #[test]
+    fn a_sideways_door_publishes_an_anchor_with_its_direction() {
+        let nav = WorldNav {
+            starts: vec![NavStart {
+                name: PRIMARY.into(),
+                pos: [0.0, 0.6, 0.0],
+                yaw: 0.0,
+                pitch: 0.0,
+            }],
+            doors: vec![NavDoor {
+                name: "door_1".into(),
+                pos: [2.0, 1.0, 3.0],
+                closed_y: 1.0,
+                // Straight along +X: nothing vertical about it.
+                open_y: 1.0,
+                offset: [1.5, 0.0, 0.0],
+            }],
+            ..WorldNav::default()
+        };
+        let text = nav.to_text();
+        let back = WorldNav::parse(&text).expect("parse");
+        assert_eq!(back.doors, nav.doors, "the travel vector round trips");
+
+        let anchor = back
+            .anchors()
+            .into_iter()
+            .find(|a| a.name == "door_1")
+            .expect("a sliding door is still a door");
+        assert!((anchor.transform.scale.y - 1.5).abs() < 1e-4, "{anchor:?}");
+        // The whole vector is `rot * (0, scale.y, 0)`.
+        let q = anchor.transform.rot;
+        let v = rotate_y_axis(q, anchor.transform.scale.y);
+        for (got, want) in v.iter().zip(&[1.5f32, 0.0, 0.0]) {
+            assert!((got - want).abs() < 1e-3, "{v:?}");
+        }
+    }
+
+    /// Straight up stays the identity rotation, so every anchor written
+    /// before the travel vector existed keeps exactly the value it had.
+    #[test]
+    fn a_door_that_opens_upward_keeps_the_identity_rotation() {
+        let nav = WorldNav {
+            starts: vec![NavStart {
+                name: PRIMARY.into(),
+                pos: [0.0, 0.6, 0.0],
+                yaw: 0.0,
+                pitch: 0.0,
+            }],
+            doors: vec![NavDoor::vertical("door_1", [1.0, 0.0, 2.0], 0.0, 1.9375)],
+            lifts: vec![NavDoor::vertical("lift_1", [4.0, 1.0, 2.0], 1.0, 0.0)],
+            ..WorldNav::default()
+        };
+        let anchors = nav.anchors();
+        let door = anchors.iter().find(|a| a.name == "door_1").unwrap();
+        assert_eq!(door.transform.rot, Quat::IDENTITY);
+        assert!((door.transform.scale.y - 1.9375).abs() < 1e-4);
+        // A lift travels DOWN, which is half a turn rather than a negative
+        // size: the scale is still a size.
+        let lift = anchors.iter().find(|a| a.name == "lift_1").unwrap();
+        assert!(lift.transform.scale.y > 0.0);
+        let v = rotate_y_axis(lift.transform.rot, lift.transform.scale.y);
+        assert!(v[1] < -0.9, "the lift travels down: {v:?}");
+    }
+
+    /// `rot * (0, len, 0)`.
+    fn rotate_y_axis(q: Quat, len: f32) -> [f32; 3] {
+        let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+        let v = [0.0f32, len, 0.0];
+        // t = 2 * q_vec x v; v' = v + w*t + q_vec x t
+        let t = [
+            2.0 * (y * v[2] - z * v[1]),
+            2.0 * (z * v[0] - x * v[2]),
+            2.0 * (x * v[1] - y * v[0]),
+        ];
+        [
+            v[0] + w * t[0] + (y * t[2] - z * t[1]),
+            v[1] + w * t[1] + (z * t[0] - x * t[2]),
+            v[2] + w * t[2] + (x * t[1] - y * t[0]),
+        ]
+    }
+
+    /// An old sidecar has no travel vector on its `door` line, and must
+    /// still mean "straight up by the difference of the two heights".
+    #[test]
+    fn a_five_number_door_line_still_means_straight_up() {
+        let text = "world-spawn 1\n0 0 0\n0 0\ndoor door_1 1.0 0.0 2.0 0.0 1.5\n";
+        let nav = WorldNav::parse(text).expect("parse");
+        assert_eq!(nav.doors.len(), 1);
+        assert_eq!(nav.doors[0].offset, [0.0, 1.5, 0.0]);
+        assert!((nav.doors[0].travel() - 1.5).abs() < 1e-6);
     }
 }
