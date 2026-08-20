@@ -5073,22 +5073,40 @@ impl Renderer {
     ///    (`len_per_unit`), so a sidecar baked for a different sun would
     ///    draw every shadow at the wrong length. The tolerance only absorbs
     ///    normalisation ulps, not a different sky.
+    /// A baked silhouette serves ANY sun whose shadow length is within a
+    /// sane stretch of the baked one — the instance build stretches the
+    /// sample window along the sun axis by the ratio (play-session-1 entry
+    /// 18: exact-length matching rejected every sidecar the moment a level
+    /// authored its own `time_of_day`, and the whole dynamic tier fell to
+    /// blobs). Past the band the stretch distorts (a noon bake pulled to a
+    /// sunset length smears) — those keep the blob tier.
+    fn sun_len_compatible(baked: f32, now: f32) -> bool {
+        baked > 0.0 && now > 0.0 && (0.2..=5.0).contains(&(now / baked))
+    }
+
     fn load_shadow_sdf_sidecar(
         sidecar: &std::path::Path,
         glb: &std::path::Path,
         expect_hash: Option<u64>,
         sun: &SunLight,
     ) -> Option<crate::shadow_sdf::ShadowSdfAtlas> {
-        let stamp = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-        if stamp(sidecar)? <= stamp(glb)? {
-            return None;
+        // Staleness by mtime is only meaningful for checkout files with no
+        // recorded identity. A caller that KNOWS the expected content hash
+        // (store-streamed rigs — the cache writes both files at arbitrary
+        // times) must not lose its shadows to write ordering.
+        if expect_hash.is_none() {
+            let stamp =
+                |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            if stamp(sidecar)? <= stamp(glb)? {
+                return None;
+            }
         }
         let (atlas, hash) =
             crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(&std::fs::read(sidecar).ok()?)?;
         if expect_hash.is_some_and(|h| h != hash) {
             return None;
         }
-        if (atlas.len_per_unit - sun.shadow_len_per_unit()).abs() > 1.0e-3 {
+        if !Self::sun_len_compatible(atlas.len_per_unit, sun.shadow_len_per_unit()) {
             return None;
         }
         Some(atlas)
@@ -5151,7 +5169,8 @@ impl Renderer {
         // checkout sidecar; they carry no mtime, only the sun gate applies.
         let streamed = self.model_sdf_bytes.get(key).and_then(|bytes| {
             let (atlas, _hash) = crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes)?;
-            ((atlas.len_per_unit - sun.shadow_len_per_unit()).abs() <= 1.0e-3).then_some(atlas)
+            Self::sun_len_compatible(atlas.len_per_unit, sun.shadow_len_per_unit())
+                .then_some(atlas)
         });
         let glb = Self::models_root().join(format!("{key}.glb"));
         let sidecar = Self::models_root().join(format!("{key}.shadowsdf"));
@@ -6176,6 +6195,13 @@ impl Renderer {
                             let rel = yaw - (-gz).atan2(gx);
                             let band2 = 2.0 * meta.band_world.max(1.0e-4);
                             let scale = sx.max(sz) * a.size_mul;
+                            // Sun-tolerant stretch: the window IS the sample
+                            // map, so scaling its ALONG components by the
+                            // current-vs-baked shadow-length ratio stretches
+                            // the baked silhouette to today's sun.
+                            let sun_len = sun.shadow_len_per_unit();
+                            let stretch =
+                                (sun_len / meta.len_per_unit.max(0.05)).clamp(0.2, 5.0);
                             // Ride the highest surface under the
                             // silhouette's run (see sdf_quad_ground) —
                             // rect.x is the window's down-sun edge.
@@ -6184,7 +6210,7 @@ impl Renderer {
                                 &receiver,
                                 gx,
                                 gz,
-                                (-meta.rect.x).max(0.0) * scale,
+                                (-meta.rect.x * stretch).max(0.0) * scale,
                             );
                             // The quad's window origin — the bake's ground
                             // anchor, the silhouette's FOOT end — sits at
@@ -6200,11 +6226,15 @@ impl Renderer {
                                     item.gait_blend,
                                     meta.rows as f32,
                                 ),
-                                d: meta.rect,
+                                d: vec4(
+                                    meta.rect.x * stretch,
+                                    meta.rect.y,
+                                    meta.rect.z * stretch,
+                                    meta.rect.w,
+                                ),
                                 e: vec4(
                                     SDF_SOFT_BASE / band2,
-                                    SDF_SOFT_HARDEN
-                                        / (meta.len_per_unit.max(0.2) * band2),
+                                    SDF_SOFT_HARDEN / (sun_len.max(0.2) * band2),
                                     0.0,
                                     0.0,
                                 ),
@@ -6348,6 +6378,10 @@ impl Renderer {
                             let rel = yaw - (-gz).atan2(gx);
                             let band2 = 2.0 * meta.band_world.max(1.0e-4);
                             let scale = sx.max(sz) * a.size_mul;
+                            // Sun-tolerant stretch, exactly as for rigs.
+                            let sun_len = sun.shadow_len_per_unit();
+                            let stretch =
+                                (sun_len / meta.len_per_unit.max(0.05)).clamp(0.2, 5.0);
                             // Same raised-receiver guard as the characters:
                             // a car parked on grass beside a proud road
                             // slab must not bury its silhouette under it.
@@ -6356,7 +6390,7 @@ impl Renderer {
                                 &receiver,
                                 gx,
                                 gz,
-                                (-meta.rect.x).max(0.0) * scale,
+                                (-meta.rect.x * stretch).max(0.0) * scale,
                             );
                             // Window origin pinned at the root, exactly as
                             // for characters: the wheels' contact line
@@ -6366,11 +6400,15 @@ impl Renderer {
                                 a: vec4(a.root.x, y_quad, a.root.z, a.lift),
                                 b: vec4(gx, gz, scale, a.alpha),
                                 c: vec4(rel, 0.0, 0.0, meta.rows as f32),
-                                d: meta.rect,
+                                d: vec4(
+                                    meta.rect.x * stretch,
+                                    meta.rect.y,
+                                    meta.rect.z * stretch,
+                                    meta.rect.w,
+                                ),
                                 e: vec4(
                                     SDF_SOFT_BASE / band2,
-                                    SDF_SOFT_HARDEN
-                                        / (meta.len_per_unit.max(0.2) * band2),
+                                    SDF_SOFT_HARDEN / (sun_len.max(0.2) * band2),
                                     0.0,
                                     0.0,
                                 ),
