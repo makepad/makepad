@@ -57,8 +57,14 @@ pub enum PreviewContent {
     /// the level's collision and navigation off the frame thread, then let a
     /// walker tour it, opening doors as it goes.
     ///
+    /// `source` is whatever the host knows about where the map came from —
+    /// its namespace, its alias, its title, run together. ONE walker walks
+    /// every classic game; the only per-game difference is the STYLE it
+    /// walks in (eye height, step rule, gravity, bob, speed), and this
+    /// string is what picks it. See [`crate::walk_world`] for the law.
+    ///
     /// Needs the `renderer` feature.
-    World { glb: Vec<u8>, texture_png: Option<Vec<u8>> },
+    World { glb: Vec<u8>, texture_png: Option<Vec<u8>>, source: String },
 }
 
 script_mod! {
@@ -254,12 +260,12 @@ impl ContentPreview {
             PreviewContent::Mesh { glb, texture_png } => {
                 self.set_still(cx, None);
                 self.shape = WellShape::Scene;
-                self.show_scene(cx, glb, texture_png, false);
+                self.show_scene(cx, glb, texture_png, None);
             }
-            PreviewContent::World { glb, texture_png } => {
+            PreviewContent::World { glb, texture_png, source } => {
                 self.set_still(cx, None);
                 self.shape = WellShape::Scene;
-                self.show_scene(cx, glb, texture_png, true);
+                self.show_scene(cx, glb, texture_png, Some(&source));
             }
         }
         self.view.redraw(cx);
@@ -293,20 +299,30 @@ impl ContentPreview {
 
     /// Hand a GLB to the 3D face. Without the `renderer` feature there is
     /// no such face, and the well says so rather than showing nothing.
+    ///
+    /// A non-empty `source` means "walk this as a level": it is the only
+    /// per-game input the walker takes, and it selects a STYLE, never a code
+    /// path — see [`crate::walk_world`].
     #[cfg(feature = "renderer")]
-    fn show_scene(&mut self, cx: &mut Cx, glb: Vec<u8>, texture_png: Option<Vec<u8>>, world: bool) {
+    fn show_scene(
+        &mut self,
+        cx: &mut Cx,
+        glb: Vec<u8>,
+        texture_png: Option<Vec<u8>>,
+        walk_as: Option<&str>,
+    ) {
         use crate::scene_view::SceneView;
         if let Some(mut scene) = self.view.widget(cx, ids!(scene)).borrow_mut::<SceneView>() {
-            match world {
-                true => scene.show_world(cx, glb, texture_png, "", Vec::new()),
-                false => scene.show_mesh(cx, glb, texture_png),
+            match walk_as {
+                Some(source) => scene.show_world(cx, glb, texture_png, source, Vec::new()),
+                None => scene.show_mesh(cx, glb, texture_png),
             }
         }
         self.face(cx, id!(scene_face));
     }
 
     #[cfg(not(feature = "renderer"))]
-    fn show_scene(&mut self, cx: &mut Cx, _glb: Vec<u8>, _png: Option<Vec<u8>>, _world: bool) {
+    fn show_scene(&mut self, cx: &mut Cx, _glb: Vec<u8>, _png: Option<Vec<u8>>, _walk: Option<&str>) {
         self.view.label(cx, ids!(empty_note)).set_text(
             cx,
             "3D preview needs the renderer feature of makepad-asset-widgets",

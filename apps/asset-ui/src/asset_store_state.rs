@@ -32,7 +32,6 @@
 
 use makepad_asset_client::{
     ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogFacet, CatalogHit, CatalogQuery,
-    FacetKind,
     CatalogSubscriptionEvent, ClientEvent, ClientOutput, ClientRequest, GcRequest, GcStatusDto,
     JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
     SessionHandles, SessionMsg, SessionStatus,
