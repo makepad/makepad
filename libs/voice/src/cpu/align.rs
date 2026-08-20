@@ -23,8 +23,18 @@ use crate::model::WhisperHparams;
 pub const AUDIO_FRAME_MS: i64 = 20;
 
 /// Median filter width over the frame axis, as in the reference
-/// implementations (`medfilt_width = 7`).
-const MEDIAN_WIDTH: usize = 7;
+/// implementations (`medfilt_width = 7`). `MAKEPAD_VOICE_ALIGN_MEDFILT`
+/// overrides for experiments (odd, 1 disables).
+fn median_width() -> usize {
+    static WIDTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        std::env::var("MAKEPAD_VOICE_ALIGN_MEDFILT")
+            .ok()
+            .and_then(|text| text.trim().parse::<usize>().ok())
+            .filter(|width| *width >= 1 && *width <= 31)
+            .unwrap_or(7)
+    })
+}
 
 // ---------------------------------------------------------------------------
 // which heads align
@@ -298,7 +308,10 @@ pub(crate) fn dtw_spans(cost: &[f32], n: usize, m: usize) -> (Vec<usize>, Vec<us
 }
 
 /// `MAKEPAD_VOICE_ALIGN_SHARPEN` — attention temperature β for alignment
-/// (see [`align_rows`]). Default 1.0.
+/// (see [`align_rows`]). Default 2.0: singing smears attention across
+/// doubled vocals, and a swept audit (β 1–4, two tracks) found ~2 the
+/// plateau — sharper DTW paths, better snapped word times, before the
+/// forced-stage text agreement starts to degrade at β ≥ 4.
 fn sharpen_beta() -> f32 {
     static BETA: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *BETA.get_or_init(|| {
@@ -306,7 +319,7 @@ fn sharpen_beta() -> f32 {
             .ok()
             .and_then(|text| text.trim().parse::<f32>().ok())
             .filter(|beta| beta.is_finite() && *beta > 0.0 && *beta <= 8.0)
-            .unwrap_or(1.0)
+            .unwrap_or(2.0)
     })
 }
 
@@ -384,8 +397,9 @@ pub fn align_rows(
                 filtered[i * m + j] = ((filtered[i * m + j] as f64 - mean) / std) as f32;
             }
         }
+        let width = median_width();
         for i in 0..n {
-            median_filter(&mut filtered[i * m..(i + 1) * m], MEDIAN_WIDTH);
+            median_filter(&mut filtered[i * m..(i + 1) * m], width);
         }
         for (out, value) in matrix.iter_mut().zip(filtered.iter()) {
             *out += *value * inverse_slots;
