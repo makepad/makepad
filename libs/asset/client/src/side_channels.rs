@@ -18,6 +18,7 @@ use crate::error::{ClientError, ClientResult};
 use makepad_asset_data::{AssetFile, AssetId, AssetRevisionId, FileRole, MediaType};
 
 /// One derived file to attach.
+#[derive(Clone, Debug)]
 pub struct SideChannelFile {
     pub role: FileRole,
     pub media: MediaType,
