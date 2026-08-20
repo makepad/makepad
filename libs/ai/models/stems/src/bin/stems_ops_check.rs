@@ -18,7 +18,7 @@ use makepad_ai_common::backend::{BufferStorageMode, DeviceRuntime};
 use makepad_ai_common::{
     BufferUsage, Context, Graph, InitParams, Op, Prec, TensorId, TensorType, GGML_ROPE_TYPE_NORMAL,
 };
-use makepad_ai_stems::config::{DIM_HEAD, HEADS, ROPE_THETA};
+use makepad_ai_stems::config::{CHUNK_FRAMES, DIM_HEAD, HEADS, NUM_BANDS, ROPE_THETA};
 
 const ACT: BufferUsage = BufferUsage::Activations;
 
@@ -300,13 +300,16 @@ fn case_attention(runtime: &DeviceRuntime, report: &mut Report) {
 // ---------------------------------------------------------------------------
 
 fn case_batched_matmul(runtime: &DeviceRuntime, report: &mut Report) {
-    let (k, n, m, batch) = (67usize, 41usize, 23usize, 7usize);
+    // The model's real column count: one 5.5 s chunk is CHUNK_FRAMES frames
+    // over NUM_BANDS bands, i.e. 68262 folded columns. `n` is kept small only
+    // so the f64 reference below stays sub-second.
+    let (k, n, m, batch) = (DIM_HEAD, 16usize, CHUNK_FRAMES, NUM_BANDS);
     let mut rng = Rng(0xbeef_00d);
     let weights = rng.vec(k * n);
     let acts = rng.vec(k * m * batch);
 
     let mut ctx = Context::new(InitParams {
-        mem_size: 32 << 20,
+        mem_size: 512 << 20,
         mem_buffer: None,
         no_alloc: false,
     });
@@ -360,14 +363,18 @@ fn case_batched_matmul(runtime: &DeviceRuntime, report: &mut Report) {
 // ---------------------------------------------------------------------------
 
 fn case_broadcasts(runtime: &DeviceRuntime, report: &mut Report) {
-    let (d, heads, seq, batch) = (DIM_HEAD, HEADS, 11usize, 3usize);
+    // Deliberately the model's real attention-output shape. A launcher that
+    // packs ne1*ne2*ne3 into one CUDA grid dimension asks for 546096 blocks
+    // here and the launch fails outright — which is exactly the bug a
+    // toy-sized case sails past.
+    let (d, heads, seq, batch) = (DIM_HEAD, HEADS, CHUNK_FRAMES, NUM_BANDS);
     let mut rng = Rng(0xfeed_face);
     let n = d * heads * seq * batch;
     let x = rng.vec(n);
     let gates = rng.vec(heads * seq * batch);
 
     let mut ctx = Context::new(InitParams {
-        mem_size: 32 << 20,
+        mem_size: 768 << 20,
         mem_buffer: None,
         no_alloc: false,
     });

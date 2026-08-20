@@ -8,7 +8,7 @@ use crate::graph::{build_graph, StemsGraph};
 use crate::stft::Stft;
 use crate::weights::{StemsWeights, DEFAULT_GRAPH_EXTRA_BYTES};
 use makepad_ai_common::backend::{
-    compile_graph_session, new_runtime, BufferStorageMode, GraphSession, GraphTensorWrite, Runtime,
+    BufferStorageMode, DeviceGraphSession, DeviceRuntime, GraphDevice,
 };
 use makepad_ai_common::{DiffusionError, Result, TensorId};
 use std::path::Path;
@@ -123,7 +123,7 @@ pub fn empty_stem_set(frames: usize) -> StemSet {
 pub struct StemsModel {
     weights: StemsWeights,
     graph: StemsGraph,
-    session: GraphSession,
+    session: DeviceGraphSession,
     stft: Stft,
     /// Reused per chunk so a long demix does not churn the allocator.
     features: Vec<f32>,
@@ -136,24 +136,38 @@ impl StemsModel {
     /// runtime. Expensive (seconds): do it once, off any latency-sensitive
     /// thread.
     pub fn load(checkpoint: impl AsRef<Path>) -> Result<Self> {
-        let runtime = new_runtime()?;
+        let runtime = DeviceRuntime::new()?;
         Self::load_with_runtime(checkpoint, runtime)
     }
 
-    /// NOTE: this configures `runtime`'s command-buffer budget for interactive
-    /// co-tenancy (see [`CB_MAX_OPS`]). Each `Runtime` owns its own command
-    /// queue, so only this separator's submissions are affected.
-    pub fn load_with_runtime(checkpoint: impl AsRef<Path>, runtime: Runtime) -> Result<Self> {
-        if let Some(ops) = command_buffer_ops_limit() {
-            runtime.set_command_buffer_limits(ops, CB_MAX_BYTES);
+    /// NOTE: on Metal this configures `runtime`'s command-buffer budget for
+    /// interactive co-tenancy (see [`CB_MAX_OPS`]). Each Metal `Runtime` owns
+    /// its own command queue, so only this separator's submissions are
+    /// affected. CUDA has no equivalent knob — its dispatches are already
+    /// individually preemptible — so the budget is simply not applied there.
+    pub fn load_with_runtime(checkpoint: impl AsRef<Path>, runtime: DeviceRuntime) -> Result<Self> {
+        if let DeviceRuntime::Metal(metal) = &runtime {
+            if let Some(ops) = command_buffer_ops_limit() {
+                metal.set_command_buffer_limits(ops, CB_MAX_BYTES);
+            }
         }
+        // Half-precision matmul weights are a Metal-side win (faster AND
+        // slightly more accurate there, and half the resident bytes). On CUDA
+        // they are a loss: cuBLAS has no f16-weight x f32-activation GEMM, so
+        // an f16 weight would fall off the GEMM path onto the generic batched
+        // kernel that re-reads the activations once per output row. f32 is
+        // also the arithmetic the oracle-parity gate is measured in.
+        let f16 = match runtime.device() {
+            GraphDevice::Metal => crate::weights::f16_weights_enabled(),
+            GraphDevice::Cuda => crate::weights::f16_weights_requested(),
+        };
         let mut weights =
-            StemsWeights::load_with_extra(checkpoint, DEFAULT_GRAPH_EXTRA_BYTES)?;
+            StemsWeights::load_with_options(checkpoint, DEFAULT_GRAPH_EXTRA_BYTES, f16)?;
         let graph = build_graph(&mut weights)?;
-        let session = compile_graph_session(
-            &runtime,
+        let session = runtime.compile_graph(
             &weights.ctx,
             &graph.graph,
+            &graph.masks,
             BufferStorageMode::Shared,
             BufferStorageMode::Shared,
         )?;
@@ -206,17 +220,11 @@ impl StemsModel {
 
         // -- forward --
         let outputs: Vec<TensorId> = self.graph.masks.to_vec();
-        let execution = self
-            .session
-            .execute(
-                &self.weights.ctx,
-                &[GraphTensorWrite {
-                    tensor_id: self.graph.features,
-                    bytes: as_bytes(&self.features),
-                }],
-                &outputs,
-            )
-            .map_err(DiffusionError::model)?;
+        let execution = self.session.execute(
+            &self.weights.ctx,
+            &[(self.graph.features, as_bytes(&self.features))],
+            &outputs,
+        )?;
         let t_forward = t0.elapsed();
 
         // -- complex mask + inverse STFT --

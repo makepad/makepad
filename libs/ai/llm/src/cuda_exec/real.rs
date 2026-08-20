@@ -33,14 +33,18 @@ use makepad_ai_cuda::llm_ops::{
     quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
     quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched, rms_norm_mul,
     rope_multi, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
+
     QUANT_IQ3S as MKLLM_QUANT_IQ3S, QUANT_IQ4NL as MKLLM_QUANT_IQ4NL,
     QUANT_IQ4XS as MKLLM_QUANT_IQ4XS, QUANT_Q3K as MKLLM_QUANT_Q3K,
     QUANT_Q4K as MKLLM_QUANT_Q4K, QUANT_Q5K as MKLLM_QUANT_Q5K, QUANT_Q6K as MKLLM_QUANT_Q6K,
     QUANT_Q80 as MKLLM_QUANT_Q80, ROUTE_MMQ, ROUTE_MMVQ,
 };
+use makepad_ai_cuda::roformer_ops::{
+    attn_head_dim_supported, roformer_attn_f32, roformer_rope_normal_f32,
+};
 use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
-    GGML_ROPE_TYPE_MROPE,
+    GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NORMAL,
 };
 
 use super::CudaDeviceFeatures;
@@ -646,8 +650,23 @@ impl Runtime {
         ctx: &Context,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Arena> {
+        self.create_context_arena_sized(ctx, 0, progress)
+    }
+
+    /// As above, but guaranteeing at least `min_total` bytes of address space.
+    ///
+    /// A context built with `set_no_alloc(true)` deliberately sizes its arena
+    /// to the real leaves only and leaves every intermediate to the graph
+    /// planner — so the device buffer has to be sized from the PLAN, not from
+    /// `ctx.mem_size()`, or the first planned activation lands out of bounds.
+    pub(super) fn create_context_arena_sized(
+        &self,
+        ctx: &Context,
+        min_total: usize,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Arena> {
         let ro_split = ctx.ro_split();
-        let main_size = ctx.mem_size() - ro_split;
+        let main_size = ctx.mem_size().max(min_total) - ro_split;
         let required = (ro_split + main_size) as u64;
         let features = self.features();
         if required + VRAM_RESERVE_BYTES > features.free_vram_bytes {
@@ -838,6 +857,39 @@ impl Runtime {
         view.run(writes, wanted)
     }
 
+    /// Plan `graph` once, mirror `ctx` to the device once, and keep both for
+    /// repeated execution.
+    ///
+    /// This is `execute_raw_graph` split at its seam. That entry re-plans and
+    /// re-uploads the whole arena on every call, which is right for a one-shot
+    /// canary and catastrophic for a model that runs the same graph over and
+    /// over (BS-RoFormer: ~700 dispatches and 264-527 MB of weights per
+    /// 5.5-second span of audio). The device buffer is sized from the plan,
+    /// not from `ctx.mem_size()`, so a `no_alloc` graph context works.
+    pub(super) fn create_raw_session(
+        &self,
+        ctx: &Context,
+        graph: &crate::Graph,
+        pinned: &[TensorId],
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<RawSession> {
+        let plan = plan_raw_graph(ctx, graph, pinned)?;
+        let arena = self.create_context_arena_sized(ctx, plan.required_size, progress)?;
+        let arena_ref = ArenaRef {
+            ro_dev: arena.ro_dev,
+            ro_split: arena.ro_split,
+            main_dev: arena.main_dev,
+            main_size: arena.main_size,
+            _keep: arena.state.clone(),
+        };
+        Ok(RawSession {
+            state: self.state.clone(),
+            _arena: arena,
+            arena: arena_ref,
+            plan,
+        })
+    }
+
     pub(super) fn read_arena_bytes(
         &self,
         arena: &Arena,
@@ -928,6 +980,13 @@ enum KernelSel {
     // llama.cpp ggml-cuda.cu:3994-4004 RMS_NORM + MUL (+ ADD)
     NormMul { add: bool },
     RopeMulti,
+    // ggml GGML_ROPE_TYPE_NORMAL: interleaved adjacent pairs, NOT the
+    // split-half convention `RopeMulti` implements.
+    RopeNormal,
+    // Batched, maskless, non-causal f32 attention (BS-RoFormer axial
+    // attention). The `Flash*` kernels above all require an f16 KV cache and
+    // a mask and have no batch axis.
+    RoformerAttn,
     Unary(i32),
     // llama.cpp ggml-cuda.cu:4012-4017 UNARY(SILU/SIGMOID/SOFTPLUS) + MUL
     UnaryMul(i32),
@@ -1094,26 +1153,61 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
             let q = src(0)?;
             let k = src(1)?;
             let v = src(2)?;
-            if t.src[3].is_none() {
-                return Err(unsupported_node(t, "flash attention without mask"));
-            }
             if t.src[4].is_some() {
                 return Err(unsupported_node(t, "flash attention sinks"));
-            }
-            if k.desc.ty != TensorType::F16 || v.desc.ty != TensorType::F16 {
-                return Err(unsupported_node(t, "non-f16 flash K/V"));
-            }
-            if q.desc.ty != TensorType::F32 {
-                return Err(unsupported_node(t, "non-f32 flash Q"));
             }
             if t.op_param_f32(1) != 0.0 || t.op_param_f32(2) != 0.0 {
                 return Err(unsupported_node(t, "flash max_bias/softcap"));
             }
-            if q.ne[3] != 1 {
-                return Err(unsupported_node(t, "multi-stream flash attention"));
+            if q.desc.ty != TensorType::F32 {
+                return Err(unsupported_node(t, "non-f32 flash Q"));
             }
             if q.ne[2] % k.ne[2] != 0 {
                 return Err(unsupported_node(t, "non-integer GQA ratio"));
+            }
+            // The maskless all-f32 shape (BS-RoFormer axial attention) is a
+            // different kernel family: no KV cache, a real batch axis, and
+            // f32 K/V because the parity gate is measured in f32. Route it
+            // before the decode-shaped selection below, which assumes the
+            // opposite of every one of those.
+            if t.src[3].is_none() {
+                if k.desc.ty != TensorType::F32 || v.desc.ty != TensorType::F32 {
+                    return Err(unsupported_node(t, "maskless flash attention needs f32 K/V"));
+                }
+                if v.ne[0] != q.ne[0] {
+                    return Err(unsupported_node(t, "maskless flash attention needs Dv == D"));
+                }
+                if !attn_head_dim_supported(q.ne[0]) {
+                    return Err(unsupported_node(
+                        t,
+                        &format!("maskless flash attention head dim {}", q.ne[0]),
+                    ));
+                }
+                if k.ne[1] != v.ne[1] {
+                    return Err(unsupported_node(t, "flash K/V disagree on key count"));
+                }
+                if k.ne[3] != q.ne[3] || v.ne[3] != q.ne[3] {
+                    return Err(unsupported_node(t, "flash q/k/v disagree on batch"));
+                }
+                if !t.is_contiguous() {
+                    return Err(unsupported_node(t, "strided flash attention output"));
+                }
+                // dim-0 must be the contiguous f32 axis for every operand.
+                for (name, operand) in [("q", q), ("k", k), ("v", v)] {
+                    if operand.nb[0] != 4 {
+                        return Err(unsupported_node(
+                            t,
+                            &format!("flash {name} has a strided head dimension"),
+                        ));
+                    }
+                }
+                return Ok(KernelSel::RoformerAttn);
+            }
+            if k.desc.ty != TensorType::F16 || v.desc.ty != TensorType::F16 {
+                return Err(unsupported_node(t, "non-f16 flash K/V"));
+            }
+            if q.ne[3] != 1 {
+                return Err(unsupported_node(t, "multi-stream flash attention"));
             }
             // llama.cpp fattn.cu get_best_fattn_kernel + switch_ncols*:
             // D=256 Turing+: MMA_F16; GQA>4 + n_tokens>4 -> ncols1=8,ncols2=8.
@@ -1168,14 +1262,29 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
             // only accepts NORMAL/NEOX. Qwen3.5 is IMROPE, so they also emit
             // rope_multi then SET_ROWS. Do not invent an IMROPE+SET_ROWS fuse.
             let mode = t.op_param_i32(2);
-            if mode != GGML_ROPE_TYPE_IMROPE && (mode & GGML_ROPE_TYPE_MROPE) == 0 {
-                return Err(unsupported_node(t, &format!("rope mode {mode}")));
-            }
             if t.src[2].is_some() {
                 return Err(unsupported_node(t, "rope freq_factors"));
             }
             if t.desc.ty != TensorType::F32 {
                 return Err(unsupported_node(t, "non-f32 rope"));
+            }
+            if mode == GGML_ROPE_TYPE_NORMAL {
+                // `rope_multi` rotates `(x[ic], x[ic + n_dims/2])`; NORMAL
+                // rotates `(x[2i], x[2i+1])`. They are not the same kernel
+                // with a flag, and mixing them up is silent, not fatal.
+                if t.op_param_f32(7) != 0.0 {
+                    return Err(unsupported_node(t, "NORMAL rope with yarn ext_factor"));
+                }
+                if t.op_param_f32(8) != 1.0 {
+                    return Err(unsupported_node(t, "NORMAL rope with attn_factor != 1"));
+                }
+                if t.ne[0] % 2 != 0 {
+                    return Err(unsupported_node(t, "NORMAL rope with an odd ne0"));
+                }
+                return Ok(KernelSel::RopeNormal);
+            }
+            if mode != GGML_ROPE_TYPE_IMROPE && (mode & GGML_ROPE_TYPE_MROPE) == 0 {
+                return Err(unsupported_node(t, &format!("rope mode {mode}")));
             }
             KernelSel::RopeMulti
         }
@@ -1228,12 +1337,28 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
             match a.desc.ty {
                 TensorType::F16 => KernelSel::MulMatBatched { a_f16: true },
                 TensorType::F32 => {
-                    if a.ne[2] != 1 || a.ne[3] != 1 || b.ne[2] != 1 || b.ne[3] != 1 {
-                        KernelSel::MulMatBatched { a_f16: false }
-                    } else if m_total <= MMV_MAX_COLUMNS {
-                        KernelSel::MmvF32
-                    } else {
+                    let a_2d = a.ne[2] == 1 && a.ne[3] == 1;
+                    let b_2d = b.ne[2] == 1 && b.ne[3] == 1;
+                    if a_2d && b_2d {
+                        if m_total <= MMV_MAX_COLUMNS {
+                            KernelSel::MmvF32
+                        } else {
+                            KernelSel::GemmF32
+                        }
+                    } else if a_2d
+                        && a.is_contiguous()
+                        && b.is_contiguous()
+                        && t.is_contiguous()
+                    {
+                        // One 2D weight against a contiguous batched
+                        // activation: the batch axes are just more columns,
+                        // so this is a single GEMM rather than N_batch
+                        // launches of the per-output-row fallback kernel
+                        // (which re-reads the activations once per output
+                        // row and is bandwidth-bound by two orders).
                         KernelSel::GemmF32
+                    } else {
+                        KernelSel::MulMatBatched { a_f16: false }
                     }
                 }
                 ty => {
@@ -2019,6 +2144,47 @@ impl ArenaRef {
     }
 }
 
+/// A graph compiled once and executed many times, without the hybrid-decode
+/// machinery: the model owns the `Context`, hands in one plain ggml `Graph`,
+/// writes its inputs and reads its outputs by `TensorId`.
+///
+/// Deliberately mirrors `MetalGraphSession::execute` so a device-neutral model
+/// (BS-RoFormer today) is one enum away from running on either store.
+pub(super) struct RawSession {
+    state: Rc<DeviceState>,
+    // Owns the device allocations; `arena` below is the borrowed view the
+    // dispatcher resolves offsets against. Field order matters for drop: the
+    // view's `_keep` clone must not be the last reference.
+    _arena: Arena,
+    arena: ArenaRef,
+    plan: GraphPlan,
+}
+
+impl RawSession {
+    pub(super) fn execute(
+        &self,
+        ctx: &Context,
+        writes: &[(TensorId, &[u8])],
+        wanted: &[TensorId],
+    ) -> Result<BTreeMap<TensorId, Vec<u8>>> {
+        let view = ExecView {
+            state: &self.state,
+            arena: &self.arena,
+            ctx,
+            plan: &self.plan,
+        };
+        view.run_borrowed(writes, wanted)
+    }
+
+    pub(super) fn device_bytes(&self) -> usize {
+        self.arena.ro_split + self.arena.main_size
+    }
+
+    pub(super) fn node_count(&self) -> usize {
+        self.plan.nodes.len()
+    }
+}
+
 pub(super) struct Compiled {
     state: Rc<DeviceState>,
     arena: ArenaRef,
@@ -2301,6 +2467,18 @@ struct ExecView<'a> {
 
 impl ExecView<'_> {
     fn write_inputs(&self, writes: &[(TensorId, Vec<u8>)]) -> Result<()> {
+        let borrowed: Vec<(TensorId, &[u8])> = writes
+            .iter()
+            .map(|(tensor_id, bytes)| (*tensor_id, bytes.as_slice()))
+            .collect();
+        self.write_inputs_borrowed(&borrowed)
+    }
+
+    /// The owning form above exists for the hybrid-decode path, whose writes
+    /// are built into fresh `Vec`s anyway. Graph inputs that already live in a
+    /// caller-owned buffer (a whole chunk spectrum, tens of MB per execution)
+    /// take this one and are staged straight into pinned memory.
+    fn write_inputs_borrowed(&self, writes: &[(TensorId, &[u8])]) -> Result<()> {
         let stream = self.state.stream;
         let total: usize = writes.iter().map(|(_, bytes)| bytes.len()).sum();
         if total == 0 {
@@ -2445,7 +2623,19 @@ impl ExecView<'_> {
         writes: &[(TensorId, Vec<u8>)],
         wanted: &[TensorId],
     ) -> Result<BTreeMap<TensorId, Vec<u8>>> {
-        self.write_inputs(writes)?;
+        let borrowed: Vec<(TensorId, &[u8])> = writes
+            .iter()
+            .map(|(tensor_id, bytes)| (*tensor_id, bytes.as_slice()))
+            .collect();
+        self.run_borrowed(&borrowed, wanted)
+    }
+
+    fn run_borrowed(
+        &self,
+        writes: &[(TensorId, &[u8])],
+        wanted: &[TensorId],
+    ) -> Result<BTreeMap<TensorId, Vec<u8>>> {
+        self.write_inputs_borrowed(writes)?;
         let stream = self.state.stream;
         let mut profile = std::env::var_os("MAKEPAD_LLAMA_CUDA_PROFILE")
             .map(|_| EventTimeline::new(stream))
@@ -2956,6 +3146,82 @@ impl ExecView<'_> {
                     "flash_decode",
                 )
             }
+            KernelSel::RoformerAttn => {
+                let q_id = self.src_id(&t, 0)?;
+                let k_id = self.src_id(&t, 1)?;
+                let v_id = self.src_id(&t, 2)?;
+                let q = &tensors[q_id];
+                let k = &tensors[k_id];
+                let v = &tensors[v_id];
+                let scale = t.op_param_f32(0);
+                let dims = |what: &str, value: i64| -> Result<i32> {
+                    i32::try_from(value).map_err(|_| {
+                        LlamaError::format(format!("roformer attention {what} exceeds i32"))
+                    })
+                };
+                check(
+                    unsafe {
+                        roformer_attn_f32(
+                            self.ptr_of(q_id)?,
+                            self.ptr_of(k_id)?,
+                            self.ptr_of(v_id)?,
+                            self.ptr_of(node_id)?,
+                            dims("head dim", q.ne[0])?,
+                            dims("query count", q.ne[1])?,
+                            dims("key count", k.ne[1])?,
+                            dims("head count", q.ne[2])?,
+                            dims("kv head count", k.ne[2])?,
+                            dims("batch", q.ne[3])?,
+                            scale,
+                            q.nb[1],
+                            q.nb[2],
+                            q.nb[3],
+                            k.nb[1],
+                            k.nb[2],
+                            k.nb[3],
+                            v.nb[1],
+                            v.nb[2],
+                            v.nb[3],
+                            t.nb[1],
+                            t.nb[2],
+                            t.nb[3],
+                            stream,
+                        )
+                    },
+                    "roformer_attn",
+                )
+            }
+            KernelSel::RopeNormal => {
+                let s_id = self.src_id(&t, 0)?;
+                let pos_id = self.src_id(&t, 1)?;
+                let s = &tensors[s_id];
+                check(
+                    unsafe {
+                        roformer_rope_normal_f32(
+                            self.ptr_of(s_id)?,
+                            self.ptr_of(pos_id)? as *const i32,
+                            self.ptr_of(node_id)?,
+                            s.ne[0] as i32,
+                            s.ne[1] as i32,
+                            s.ne[2] as i32,
+                            s.ne[3] as i32,
+                            t.op_param_i32(1),
+                            t.op_param_f32(5),
+                            t.op_param_f32(6),
+                            s.nb[0],
+                            s.nb[1],
+                            s.nb[2],
+                            s.nb[3],
+                            t.nb[0],
+                            t.nb[1],
+                            t.nb[2],
+                            t.nb[3],
+                            stream,
+                        )
+                    },
+                    "rope_normal",
+                )
+            }
             KernelSel::Norm { l2 } => {
                 let s_id = self.src_id(&t, 0)?;
                 let s = &tensors[s_id];
@@ -3292,7 +3558,12 @@ impl ExecView<'_> {
                 if !a.is_contiguous() || !b.is_contiguous() || !t.is_contiguous() {
                     return Err(LlamaError::unsupported("strided f32 GEMM"));
                 }
-                let (m, n, k) = (a.ne[1] as i32, b.ne[1] as i32, a.ne[0] as i32);
+                // Batch axes of a contiguous activation are extra columns of
+                // one GEMM (identity when ne2 == ne3 == 1).
+                let n_total = b.ne[1] * b.ne[2] * b.ne[3];
+                let n = i32::try_from(n_total)
+                    .map_err(|_| LlamaError::format("f32 GEMM column count exceeds i32"))?;
+                let (m, k) = (a.ne[1] as i32, a.ne[0] as i32);
                 let alpha = 1.0f32;
                 let beta = 0.0f32;
                 let status = unsafe {

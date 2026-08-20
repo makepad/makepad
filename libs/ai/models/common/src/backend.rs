@@ -1,6 +1,7 @@
 use crate::{DiffusionError, Result};
 use makepad_ai_llm::metal_compiled::{self as backend_impl, MetalGraphSession, MetalPreparedGraph};
-use makepad_ai_llm::{Context, Graph};
+use makepad_ai_llm::{Context, CudaExecRuntime, CudaRawGraphSession, Graph};
+use std::collections::BTreeMap;
 
 pub use crate::accel::*;
 pub use crate::gpu as cuda;
@@ -135,6 +136,179 @@ pub fn compile_graph_session(
 ) -> Result<GraphSession> {
     let prepared = prepare_graph(runtime, ctx, graph)?;
     create_graph_session(runtime, ctx, &prepared, input_storage, output_storage)
+}
+
+// ---------------------------------------------------------------------------
+// Device-neutral compiled-graph seam
+//
+// The `Runtime` / `GraphSession` pair above is Metal-typed: it is what the
+// flux text encoders and VAE were written against, and on a CUDA box those
+// models run through the imperative `gpu_*` surface instead. A model whose
+// whole forward pass is ONE ggml graph (BS-RoFormer / stems) wants the third
+// thing — the same graph, either store — so it gets this pair, which picks a
+// device at runtime and fails closed with both reasons if neither is usable.
+// ---------------------------------------------------------------------------
+
+/// Which compiled-graph store a [`DeviceRuntime`] is driving.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphDevice {
+    Metal,
+    Cuda,
+}
+
+impl GraphDevice {
+    pub fn name(self) -> &'static str {
+        match self {
+            GraphDevice::Metal => "metal",
+            GraphDevice::Cuda => "cuda",
+        }
+    }
+}
+
+/// A device that can compile and run a ggml `Graph`.
+pub enum DeviceRuntime {
+    Metal(Runtime),
+    Cuda(CudaExecRuntime),
+}
+
+/// One graph compiled for a [`DeviceRuntime`].
+pub enum DeviceGraphSession {
+    Metal(GraphSession),
+    Cuda(CudaRawGraphSession),
+}
+
+/// What one execution produced, keyed by the output `TensorId` the caller
+/// asked for.
+pub struct GraphExecution {
+    pub outputs: BTreeMap<makepad_ai_llm::TensorId, Vec<u8>>,
+}
+
+/// `MAKEPAD_AI_GRAPH_BACKEND=metal|cuda` pins the choice; otherwise CUDA wins
+/// where it exists (it is the fleet path and an order of magnitude faster)
+/// and Metal is the fallback.
+fn requested_graph_device() -> Option<GraphDevice> {
+    match std::env::var("MAKEPAD_AI_GRAPH_BACKEND")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("cuda") | Some("CUDA") => Some(GraphDevice::Cuda),
+        Some("metal") | Some("METAL") => Some(GraphDevice::Metal),
+        _ => None,
+    }
+}
+
+impl DeviceRuntime {
+    /// Bind a device: the pinned one if `MAKEPAD_AI_GRAPH_BACKEND` names it,
+    /// else CUDA, else Metal. An explicit request that cannot be honoured is
+    /// an error rather than a silent fallback — a fleet job that quietly ran
+    /// on the wrong store would be worse than one that refused to start.
+    pub fn new() -> Result<Self> {
+        match requested_graph_device() {
+            Some(GraphDevice::Cuda) => CudaExecRuntime::new()
+                .map(DeviceRuntime::Cuda)
+                .map_err(|err| {
+                    DiffusionError::model(format!(
+                        "MAKEPAD_AI_GRAPH_BACKEND=cuda but CUDA is unusable: {err}"
+                    ))
+                }),
+            Some(GraphDevice::Metal) => Runtime::new().map(DeviceRuntime::Metal).map_err(|err| {
+                DiffusionError::model(format!(
+                    "MAKEPAD_AI_GRAPH_BACKEND=metal but Metal is unusable: {err}"
+                ))
+            }),
+            None => match CudaExecRuntime::new() {
+                Ok(runtime) => Ok(DeviceRuntime::Cuda(runtime)),
+                Err(cuda_error) => match Runtime::new() {
+                    Ok(runtime) => Ok(DeviceRuntime::Metal(runtime)),
+                    Err(metal_error) => Err(DiffusionError::model(format!(
+                        "no compiled-graph device available (cuda: {cuda_error}; metal: \
+                         {metal_error})"
+                    ))),
+                },
+            },
+        }
+    }
+
+    pub fn device(&self) -> GraphDevice {
+        match self {
+            DeviceRuntime::Metal(_) => GraphDevice::Metal,
+            DeviceRuntime::Cuda(_) => GraphDevice::Cuda,
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            DeviceRuntime::Metal(runtime) => format!("metal:{}", runtime.backend_info().name),
+            DeviceRuntime::Cuda(runtime) => runtime.device_description(),
+        }
+    }
+
+    /// Compile `graph` over `ctx`. `outputs` are the tensors the caller will
+    /// read back; they are pinned alive so the activation planner cannot
+    /// recycle their storage mid-graph.
+    pub fn compile_graph(
+        &self,
+        ctx: &Context,
+        graph: &Graph,
+        outputs: &[makepad_ai_llm::TensorId],
+        input_storage: BufferStorageMode,
+        output_storage: BufferStorageMode,
+    ) -> Result<DeviceGraphSession> {
+        match self {
+            DeviceRuntime::Metal(runtime) => Ok(DeviceGraphSession::Metal(compile_graph_session(
+                runtime,
+                ctx,
+                graph,
+                input_storage,
+                output_storage,
+            )?)),
+            DeviceRuntime::Cuda(runtime) => Ok(DeviceGraphSession::Cuda(
+                runtime
+                    .create_raw_graph_session(ctx, graph, outputs)
+                    .map_err(|err| DiffusionError::model(err.to_string()))?,
+            )),
+        }
+    }
+}
+
+impl DeviceGraphSession {
+    pub fn device(&self) -> GraphDevice {
+        match self {
+            DeviceGraphSession::Metal(_) => GraphDevice::Metal,
+            DeviceGraphSession::Cuda(_) => GraphDevice::Cuda,
+        }
+    }
+
+    pub fn execute(
+        &self,
+        ctx: &Context,
+        writes: &[(makepad_ai_llm::TensorId, &[u8])],
+        outputs: &[makepad_ai_llm::TensorId],
+    ) -> Result<GraphExecution> {
+        match self {
+            DeviceGraphSession::Metal(session) => {
+                let inputs: Vec<GraphTensorWrite<'_>> = writes
+                    .iter()
+                    .map(|(tensor_id, bytes)| GraphTensorWrite {
+                        tensor_id: *tensor_id,
+                        bytes,
+                    })
+                    .collect();
+                let run = session
+                    .execute(ctx, &inputs, outputs)
+                    .map_err(DiffusionError::model)?;
+                Ok(GraphExecution {
+                    outputs: run.outputs,
+                })
+            }
+            DeviceGraphSession::Cuda(session) => Ok(GraphExecution {
+                outputs: session
+                    .execute(ctx, writes, outputs)
+                    .map_err(|err| DiffusionError::model(err.to_string()))?,
+            }),
+        }
+    }
 }
 
 /// Release model-owned dense CUDA weight namespaces plus every reusable
