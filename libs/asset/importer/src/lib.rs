@@ -72,9 +72,14 @@ pub fn readable_head(
         Err(error) if stale_schema(&error).is_some() => {
             let found = stale_schema(&error).unwrap_or(0);
             // Loud, once per asset: a catalog crossing a schema bump should
-            // say so, not silently look like a first-time import.
+            // say so, not silently look like a first-time import. `0` is the
+            // server-side refusal, where the old version is not reported.
+            let was = match found {
+                0 => "an older schema".to_string(),
+                v => format!("schema v{v}"),
+            };
             eprintln!(
-                "[import] head manifest is schema v{found}, this build reads v{} \
+                "[import] head manifest is {was}, this build reads v{} \
                  — publishing a fresh revision",
                 makepad_asset_data::CONTENT_SCHEMA_VERSION
             );
@@ -85,15 +90,32 @@ pub fn readable_head(
 }
 
 /// The schema version of a head this build is too new to read, if that is
-/// what went wrong. ONLY that: a refusal, a timeout, a digest mismatch or a
-/// malformed document are all reasons to stop, and must not be mistaken for
-/// "there is nothing here".
+/// what went wrong.
+///
+/// Two shapes, because a stored document can be refused at either end. The
+/// client refuses it locally with `UnsupportedSchema`; the SERVER refuses to
+/// serve it at all with a 422, because it validates what it holds against
+/// the same contract. Both mean the same thing on this path: the head that
+/// is there cannot be read under today's contract.
+///
+/// ONLY on the head-manifest FETCH path. A 422 while PUBLISHING means the
+/// document being written is bad, which is a reason to stop, not a reason to
+/// write it again.
+///
+/// Everything else — a timeout, a denial, a digest mismatch, a malformed
+/// document — stays an error.
 pub fn stale_schema(error: &makepad_asset_client::ClientError) -> Option<u16> {
+    use makepad_asset_client::ClientError;
+    if !error.is_unreadable_stored_document() {
+        return None;
+    }
     match error {
-        makepad_asset_client::ClientError::Content(
-            makepad_asset_data::AssetDataError::UnsupportedSchema { found },
-        ) => Some(*found),
-        _ => None,
+        ClientError::Content(makepad_asset_data::AssetDataError::UnsupportedSchema {
+            found,
+        }) => Some(*found),
+        // The server holds it and will not serve it; it does not report
+        // which version it was.
+        _ => Some(0),
     }
 }
 
@@ -114,8 +136,15 @@ mod tests {
             })),
             Some(3)
         );
+        assert_eq!(
+            super::stale_schema(&ClientError::Server { status: 422, detail: None }),
+            Some(0),
+            "the server refusing to serve what it holds is the same situation"
+        );
         // Not "unreadable": these are real failures.
         for error in [
+            ClientError::Server { status: 500, detail: None },
+            ClientError::Server { status: 409, detail: None },
             ClientError::Content(AssetDataError::BadMagic),
             ClientError::Content(AssetDataError::TrailingBytes),
             ClientError::Content(AssetDataError::Malformed { what: "thumbnail" }),
