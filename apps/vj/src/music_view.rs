@@ -312,6 +312,19 @@ script_mod! {
             color: #x55636f
             text_style: theme.font_regular{font_size: 7}
         }
+        // Where the panel is in the transcript, and whether it is still
+        // following the song: bright while the operator is browsing (he put
+        // it there), a faint tick while the playhead owns it.
+        draw_thumb +: {
+            color: uniform(#x3ee0b0)
+            browsing: instance(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 1.5)
+                sdf.fill(vec4(self.color.xyz, mix(0.18, 0.85, self.browsing)))
+                return sdf.result
+            }
+        }
     }
 
     // ---- explorer / queue rows --------------------------------------------
@@ -2264,6 +2277,10 @@ const LYRIC_STAMP_W: f64 = 34.0;
 /// Depth granted to each text pass, so an overdrawn run is not eaten by the
 /// depth test (see `views::VideoProgram::draw_lyric_row` — same law).
 const LYRIC_DEPTH_STEP: f32 = 0.01;
+/// How long the reader stays where the operator put it after the last wheel
+/// notch, before the playhead takes the scroll back. Long enough to read a
+/// verse ahead, short enough that a forgotten scroll heals itself.
+pub const LYRIC_FOLLOW_RESUME_SECS: f64 = 4.0;
 
 /// The transcript, beside the deck that is playing it.
 ///
@@ -2291,6 +2308,8 @@ pub struct VjLyricReader {
     draw_text: DrawText,
     #[live]
     draw_time: DrawText,
+    #[live]
+    draw_thumb: DrawQuad,
     #[rust]
     area: Area,
     #[rust]
@@ -2314,6 +2333,18 @@ pub struct VjLyricReader {
     tops: Vec<f64>,
     #[rust]
     drawn_scroll: f64,
+    /// Where the operator scrolled to, in list pixels, while auto-follow is
+    /// paused. `None` = following the playhead.
+    #[rust]
+    manual_scroll: Option<f64>,
+    /// App-clock seconds of the last wheel notch, so following resumes by
+    /// itself after [`LYRIC_FOLLOW_RESUME_SECS`].
+    #[rust]
+    manual_at: f64,
+    /// Armed while the reader is browsing, so the resume happens on its own
+    /// even if nothing else in the app asks for a frame.
+    #[rust]
+    follow_frame: NextFrame,
     #[rust]
     events: Vec<LyricEvent>,
 }
@@ -2365,6 +2396,65 @@ impl VjLyricReader {
     /// the waveform does rather than jumping every few seconds.
     fn float_index(&self) -> f64 {
         float_index(&self.lines, self.position)
+    }
+
+    /// Whether the reader is currently BROWSING (the operator scrolled) or
+    /// following the playhead.
+    pub fn is_following(&self) -> bool {
+        self.manual_scroll.is_none()
+    }
+
+    /// Give the scroll back to the playhead. Called when the resume timeout
+    /// passes and when a click seeks — a seek re-centres by definition.
+    fn resume_follow(&mut self) {
+        self.manual_scroll = None;
+    }
+
+    /// Scroll range the auto-follow itself can produce, so browsing can
+    /// never leave the transcript.
+    fn scroll_bounds(&self, view_h: f64) -> (f64, f64) {
+        lyric_scroll_bounds(self.tops.last().copied().unwrap_or(0.0), view_h)
+    }
+
+    /// Wheel/trackpad scrolling: browse freely, and pause auto-follow for
+    /// [`LYRIC_FOLLOW_RESUME_SECS`] after the last notch. (Dragging is NOT a
+    /// scroll gesture here — VJ law: a drag belongs to a control.)
+    fn scroll_by(&mut self, cx: &mut Cx, delta: f64, now: f64) {
+        if self.lines.is_empty() || delta.abs() < f64::EPSILON {
+            return;
+        }
+        let view_h = self.area.rect(cx).size.y;
+        let (min, max) = self.scroll_bounds(view_h);
+        let from = self.manual_scroll.unwrap_or(self.drawn_scroll);
+        self.manual_scroll = Some((from + delta).clamp(min, max));
+        self.manual_at = now;
+        debug_assert!(lyric_still_browsing(self.manual_at, now));
+        self.follow_frame = cx.new_next_frame();
+        self.area.redraw(cx);
+    }
+
+    /// A hairline on the right edge: how far through the transcript the
+    /// panel sits, and — by its brightness — whether the operator or the
+    /// playhead is driving it. Nothing to grab: the wheel is the control.
+    fn draw_scroll_thumb(&mut self, cx: &mut Cx2d, rect: Rect, scroll: f64) {
+        let content = self.tops.last().copied().unwrap_or(0.0);
+        if content <= rect.size.y || rect.size.y < LYRIC_ROW_H * 2.0 {
+            return;
+        }
+        let (min, max) = self.scroll_bounds(rect.size.y);
+        let span = (max - min).max(1.0);
+        let at = ((scroll - min) / span).clamp(0.0, 1.0);
+        let height = (rect.size.y * (rect.size.y / content)).max(12.0);
+        let top = rect.pos.y + at * (rect.size.y - height);
+        let browsing = f32::from(u8::from(!self.is_following()));
+        self.draw_thumb.set_uniform(cx, live_id!(browsing), &[browsing]);
+        self.draw_thumb.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(rect.pos.x + rect.size.x - 4.0, top),
+                size: dvec2(2.0, height),
+            },
+        );
     }
 
     /// Word-wrap every line for the panel's current width, and rebuild the
@@ -2450,6 +2540,28 @@ pub fn float_index(lines: &[LyricRow], secs: f64) -> f64 {
     index as f64 + ((secs - from) / (to - from)).clamp(0.0, 1.0)
 }
 
+/// Scroll range a transcript `content` pixels tall can occupy in a panel
+/// `view_h` tall — exactly the range the playhead's own centring produces
+/// (head 0..content, panel centred on it), so browsing can reach every line
+/// the song would have scrolled to and no further.
+pub fn lyric_scroll_bounds(content: f64, view_h: f64) -> (f64, f64) {
+    let half = (view_h - LYRIC_ROW_H) * 0.5;
+    (-half, (content - half).max(-half))
+}
+
+/// Where a wheel notch of `delta` leaves a panel sitting at `from`.
+pub fn lyric_browse_to(from: f64, delta: f64, content: f64, view_h: f64) -> f64 {
+    let (min, max) = lyric_scroll_bounds(content, view_h);
+    (from + delta).clamp(min, max)
+}
+
+/// Whether the panel is still the operator's at `now`, given the last wheel
+/// notch at `at`. Auto-follow takes it back after
+/// [`LYRIC_FOLLOW_RESUME_SECS`] — a click that seeks gives it back at once.
+pub fn lyric_still_browsing(at: f64, now: f64) -> bool {
+    now - at < LYRIC_FOLLOW_RESUME_SECS
+}
+
 /// `m:ss` for the gutter.
 pub fn lyric_stamp(secs: f64) -> String {
     let secs = secs.max(0.0) as u64;
@@ -2473,6 +2585,21 @@ impl WidgetNode for VjLyricReader {
 
 impl Widget for VjLyricReader {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // Browsing heals itself: once the operator has stopped scrolling for
+        // LYRIC_FOLLOW_RESUME_SECS the playhead takes the panel back. Driven
+        // from a frame the reader asks for, so it happens whether or not
+        // anything else in the app is animating.
+        if self.follow_frame.is_event(event).is_some() {
+            if self.manual_scroll.is_some() {
+                let now = cx.seconds_since_app_start();
+                if !lyric_still_browsing(self.manual_at, now) {
+                    self.resume_follow();
+                } else {
+                    self.follow_frame = cx.new_next_frame();
+                }
+                self.area.redraw(cx);
+            }
+        }
         match event.hits(cx, self.area) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 let rect = self.area.rect(cx);
@@ -2480,8 +2607,23 @@ impl Widget for VjLyricReader {
                 if row >= 0.0 {
                     if let Some(line) = self.lines.get(row as usize) {
                         self.events.push(LyricEvent::Seek { secs: line.start_secs });
+                        // The seek re-centres the panel, so browsing ends
+                        // here rather than fighting the new playhead.
+                        self.resume_follow();
                     }
                 }
+            }
+            // Wheel / trackpad: browse the transcript. The panel keeps what
+            // the operator chose until the resume timeout; a drag is still
+            // not a scroll (VJ law).
+            Hit::FingerScroll(fe) => {
+                let delta = if fe.scroll.y.abs() > f64::EPSILON {
+                    fe.scroll.y
+                } else {
+                    fe.scroll.x
+                };
+                let now = cx.seconds_since_app_start();
+                self.scroll_by(cx, delta, now);
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) if !self.lines.is_empty() => {
                 cx.set_cursor(MouseCursor::Hand);
@@ -2517,7 +2659,17 @@ impl Widget for VjLyricReader {
         let index = (float.floor() as usize).min(self.lines.len() - 1);
         let head = self.tops[index]
             + (float - index as f64) * (self.tops[index + 1] - self.tops[index]);
-        let scroll = head - (rect.size.y - LYRIC_ROW_H) * 0.5;
+        let follow = head - (rect.size.y - LYRIC_ROW_H) * 0.5;
+        // Browsing wins over the playhead until it times out; the bounds are
+        // re-clamped here because a rewrap can change the list's height
+        // under a scroll taken before it.
+        let scroll = match self.manual_scroll {
+            Some(at) => {
+                let (min, max) = self.scroll_bounds(rect.size.y);
+                at.clamp(min, max)
+            }
+            None => follow,
+        };
         self.drawn_scroll = scroll;
 
         let current = self.current();
@@ -2601,6 +2753,7 @@ impl Widget for VjLyricReader {
             self.wrapped[index] = rows;
         }
         self.draw_text.draw_depth = 0.0;
+        self.draw_scroll_thumb(cx, rect, scroll);
         DrawStep::done()
     }
 }
@@ -2824,6 +2977,43 @@ mod tests {
             loaded: true,
             ..WaveLane::default()
         }
+    }
+
+    #[test]
+    /// The reader's browse rule: the wheel moves the panel inside the range
+    /// the playhead itself could have scrolled to, and never past the ends
+    /// of the transcript.
+    fn browsing_the_transcript_stays_inside_it() {
+        // 40 lines of one row each in a 200px panel.
+        let content = 40.0 * LYRIC_ROW_H;
+        let view = 200.0;
+        let (min, max) = lyric_scroll_bounds(content, view);
+        assert!(min < 0.0, "the first line can sit in the middle: {min}");
+        assert!(max > min);
+        assert_eq!(lyric_browse_to(0.0, -10_000.0, content, view), min, "top stop");
+        assert_eq!(lyric_browse_to(0.0, 10_000.0, content, view), max, "bottom stop");
+        let stepped = lyric_browse_to(0.0, 40.0, content, view);
+        assert!((stepped - 40.0).abs() < 1e-9, "a notch moves by its own delta");
+        // The range is exactly what the playhead's own centring covers: the
+        // head runs from the first line to the last, so a short transcript
+        // browses over its own height and no further.
+        assert!((max - min - content).abs() < 1e-9, "{min}..{max} for {content}px");
+        let (short_min, short_max) = lyric_scroll_bounds(2.0 * LYRIC_ROW_H, view);
+        assert!((short_max - short_min - 2.0 * LYRIC_ROW_H).abs() < 1e-9);
+    }
+
+    #[test]
+    /// Auto-follow pauses while the operator scrolls and comes back by
+    /// itself — the state machine, without a Cx.
+    fn following_pauses_while_browsing_and_resumes_after_the_timeout() {
+        let at = 100.0;
+        assert!(lyric_still_browsing(at, at), "the notch itself");
+        assert!(lyric_still_browsing(at, at + LYRIC_FOLLOW_RESUME_SECS - 0.01));
+        assert!(!lyric_still_browsing(at, at + LYRIC_FOLLOW_RESUME_SECS));
+        assert!(!lyric_still_browsing(at, at + 60.0));
+        // Every further notch extends the pause from ITS own time.
+        let later = at + LYRIC_FOLLOW_RESUME_SECS - 0.5;
+        assert!(lyric_still_browsing(later, later + 1.0));
     }
 
     #[test]
