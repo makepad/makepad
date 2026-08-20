@@ -101,6 +101,25 @@ fn facet_tags(rec: &Record, annotator: &Annotator) -> Vec<String> {
     if let Some(s) = &rec.size {
         out.push(format!("{VLM_PREFIX}size-{s}"));
     }
+    // Person facets (v5): the retrieval keys of "the old guy", "the cop",
+    // "the girl with the ponytail" — identity words first, then features,
+    // then clothing colours. "clean" and "average" are absences like conn
+    // "none": nothing queries them and they would sit on most characters.
+    if let Some(a) = &rec.age {
+        out.push(format!("{VLM_PREFIX}age-{a}"));
+    }
+    if let Some(j) = &rec.job {
+        out.push(format!("{VLM_PREFIX}job-{j}"));
+    }
+    if let Some(b) = rec.build.as_deref().filter(|b| *b != "average") {
+        out.push(format!("{VLM_PREFIX}build-{b}"));
+    }
+    for f in rec.face.iter().filter(|f| f.as_str() != "clean") {
+        out.push(format!("{VLM_PREFIX}face-{f}"));
+    }
+    for h in &rec.hair {
+        out.push(format!("{VLM_PREFIX}hair-{h}"));
+    }
     for c in &rec.colors {
         out.push(format!("{VLM_PREFIX}col-{c}"));
     }
@@ -244,6 +263,38 @@ mod tests {
         for t in ["cc-by-4-0", "fantasy-town-kit", "kenney", "mesh"] {
             assert!(up.tags.iter().any(|x| x == t), "lost tag {t}: {:?}", up.tags);
         }
+    }
+
+    /// v5, the query-twice fix: "the old guy" hits `vlm-age-old` in
+    /// search_labels, never a `LIKE '%old%'` substring.
+    #[test]
+    fn person_facets_publish_as_tags() {
+        let rec = parse_record(
+            "what: old bald man\ncat: character\nrole: standalone\nconn: none\n\
+             size: tall\nage: old\nbuild: average\nhair: bald\n\
+             face: beard, clean\njob: farmer\ncolors: orange, brown\n\
+             style: low-poly\ndesc: old bald man with a full grey beard in an orange shirt",
+        );
+        assert_eq!(rec.age.as_deref(), Some("old"));
+        assert_eq!(rec.hair, vec!["bald"]);
+        assert_eq!(rec.face, vec!["beard", "clean"]);
+        assert_eq!(rec.job.as_deref(), Some("farmer"));
+        let up = plan_upload(&base(), &rec, &v(5, "qwen38-27b"));
+        for t in ["vlm-age-old", "vlm-face-beard", "vlm-hair-bald", "vlm-job-farmer"] {
+            assert!(up.tags.iter().any(|x| x == t), "missing {t}: {:?}", up.tags);
+        }
+        // Absences never become facets: "clean" faces and "average" builds
+        // would sit on most of the cast (the conn-"none" rule).
+        assert!(!up.tags.iter().any(|x| x == "vlm-face-clean"));
+        assert!(!up.tags.iter().any(|x| x.starts_with("vlm-build-")));
+        // A hair colour rides beside the shape word.
+        let rec2 = parse_record("what: old woman\ncat: character\nhair: long grey\nage: old");
+        assert_eq!(rec2.hair, vec!["long", "grey"]);
+        // Job words stay contained: junk and empty words never coin a facet.
+        let junk = parse_record("what: man\ncat: character\njob: person");
+        assert_eq!(junk.job, None);
+        let multi = parse_record("what: man\ncat: character\njob: Police Officer!");
+        assert_eq!(multi.job.as_deref(), Some("police"));
     }
 
     #[test]

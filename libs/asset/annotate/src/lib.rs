@@ -50,7 +50,16 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 /// (`sheet::zoom_to_subject`): each turntable cell is cropped onto its
 /// subject before downscaling, which is what turned "a wooden staff" back
 /// into a police officer's bare hand. desc budget 10 → 20 words.
-pub const ANNOTATOR_VERSION: u32 = 4;
+///
+/// v5: person FACETS (age/build/hair/face/job lines in PROMPT_PERSON,
+/// published as `vlm-age-old`, `vlm-job-police`, `vlm-face-beard`,
+/// `vlm-hair-bald` … tags): "the old guy" must hit a facet in
+/// search_labels, not a `LIKE '%old%'` substring that also matches
+/// holding/gold/soldier — the play-session query-twice defect. The kit
+/// prompt is unchanged; a filtered `--kind character --person` pass
+/// re-annotates the 30 characters, everything else re-runs idempotently
+/// whenever its next filtered pass comes around.
+pub const ANNOTATOR_VERSION: u32 = 5;
 
 /// The question put to the vision model about one turntable sheet.
 ///

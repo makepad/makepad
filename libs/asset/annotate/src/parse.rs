@@ -28,6 +28,19 @@ pub const COLORS: &[&str] = &[
     "white", "beige", "tan", "gold", "silver", "teal", "cyan", "navy", "maroon", "olive",
 ];
 
+/// Person facets (the character prompt variant, v5). "The old guy" must hit
+/// a FACET, not a `LIKE '%old%'` substring that also matches holding, gold
+/// and soldier — the query-twice defect of play-session-1's character lane.
+pub const AGES: &[&str] = &["child", "young", "adult", "old"];
+pub const BUILDS: &[&str] = &["slim", "average", "heavy", "broad"];
+/// Hair length/shape words; a hair COLOUR from [`COLORS`] rides beside them.
+pub const HAIR: &[&str] = &["bald", "short", "long", "ponytail", "bun", "braid", "curly"];
+/// Face and headwear — the things a kid names a character by.
+pub const FACE: &[&str] = &[
+    "beard", "moustache", "stubble", "glasses", "sunglasses", "mask", "hat", "helmet", "cap",
+    "hood", "crown", "clean",
+];
+
 /// One asset's parsed annotation facts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Record {
@@ -39,6 +52,15 @@ pub struct Record {
     pub colors: Vec<String>,
     pub style: Vec<String>,
     pub desc: String,
+    // Person facets (character variant only; absent lines stay empty).
+    pub age: Option<String>,
+    pub build: Option<String>,
+    /// Hair shape word(s) plus at most one hair colour.
+    pub hair: Vec<String>,
+    /// Facial features and headwear.
+    pub face: Vec<String>,
+    /// One sanitized occupation word ("police", "farmer", "knight").
+    pub job: Option<String>,
 }
 
 impl Record {
@@ -85,6 +107,27 @@ fn pick_many(value: &str, vocab: &[&str], max: usize) -> Vec<String> {
         }
     }
     out
+}
+
+/// Occupation is the facet people actually ask characters by ("the cop"),
+/// and no closed list would hold it — so it is a SINGLE sanitized word:
+/// lowercase ascii-alphanumeric, 3..=20 chars, and never a word that says
+/// nothing. A rambling reply cannot coin more than one contained token.
+fn sanitize_job(value: &str) -> Option<String> {
+    let first = value.split([',', '/', ';']).next()?.trim();
+    let word: String = first
+        .split_whitespace()
+        .next()?
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    const EMPTY: &[&str] =
+        &["person", "human", "character", "unknown", "none", "civilian", "man", "woman"];
+    if word.len() < 3 || word.len() > 20 || EMPTY.contains(&word.as_str()) {
+        return None;
+    }
+    Some(word)
 }
 
 fn clamp_words(text: &str, max_words: usize) -> String {
@@ -145,6 +188,31 @@ pub fn parse_record(reply: &str) -> Record {
             "style" => {
                 rec.style = pick_many(value, STYLES, 2);
                 seen.push("style");
+            }
+            "age" => {
+                rec.age = pick(value, AGES);
+                seen.push("age");
+            }
+            "build" => {
+                rec.build = pick(value, BUILDS);
+                seen.push("build");
+            }
+            "hair" => {
+                rec.hair = pick_many(value, HAIR, 2);
+                for c in pick_many(value, COLORS, 1) {
+                    if !rec.hair.contains(&c) {
+                        rec.hair.push(c);
+                    }
+                }
+                seen.push("hair");
+            }
+            "face" | "head" => {
+                rec.face = pick_many(value, FACE, 3);
+                seen.push("face");
+            }
+            "job" | "role2" | "occupation" => {
+                rec.job = sanitize_job(value);
+                seen.push("job");
             }
             "desc" | "description" => {
                 // 20 words: enough for the person variant's "age, hair,
