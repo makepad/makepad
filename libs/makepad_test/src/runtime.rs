@@ -733,7 +733,7 @@ impl Locator {
 
     pub fn try_assert_text(&self, expected: impl AsRef<str>) -> TestResult<()> {
         let expected = expected.as_ref();
-        let widget = self.resolve_unique_visible()?;
+        let widget = self.resolve_unique_readable()?;
         match widget.text.as_deref() {
             Some(actual) if actual == expected => Ok(()),
             Some(actual) => Err(TestError::new(format!(
@@ -767,7 +767,7 @@ impl Locator {
 
     pub fn try_assert_value(&self, expected: impl AsRef<str>) -> TestResult<()> {
         let expected = expected.as_ref();
-        let widget = self.resolve_unique_visible()?;
+        let widget = self.resolve_unique_readable()?;
         match widget.value.as_deref() {
             Some(actual) if actual == expected => Ok(()),
             Some(actual) => Err(TestError::new(format!(
@@ -800,7 +800,7 @@ impl Locator {
     }
 
     pub fn try_assert_checked(&self, expected: bool) -> TestResult<()> {
-        let widget = self.resolve_unique_visible()?;
+        let widget = self.resolve_unique_readable()?;
         match widget.checked {
             Some(actual) if actual == expected => Ok(()),
             Some(actual) => Err(TestError::new(format!(
@@ -833,7 +833,7 @@ impl Locator {
     }
 
     pub fn try_assert_enabled(&self, expected: bool) -> TestResult<()> {
-        let widget = self.resolve_unique_visible()?;
+        let widget = self.resolve_unique_readable()?;
         if widget.enabled == expected {
             return Ok(());
         }
@@ -993,7 +993,7 @@ impl Locator {
         let deadline = Instant::now() + self.app.action_timeout();
         let mut last_seen = None::<String>;
         while Instant::now() < deadline {
-            let widget = match self.resolve_unique_visible() {
+            let widget = match self.resolve_unique_readable() {
                 Ok(widget) => widget,
                 Err(err) if selector_resolution_error(err.message()) => {
                     thread::sleep(self.app.poll_interval());
@@ -1035,7 +1035,7 @@ impl Locator {
         let deadline = Instant::now() + self.app.action_timeout();
         let mut last_seen = None::<bool>;
         while Instant::now() < deadline {
-            let widget = match self.resolve_unique_visible() {
+            let widget = match self.resolve_unique_readable() {
                 Ok(widget) => widget,
                 Err(err) if selector_resolution_error(err.message()) => {
                     thread::sleep(self.app.poll_interval());
@@ -1068,10 +1068,36 @@ impl Locator {
     fn resolve_unique_visible(&self) -> TestResult<WidgetSnapshot> {
         let query = self.selector.describe();
         let matches = self.app.query_widgets(&self.selector, true)?;
+        Self::unique(query, matches, "matched no visible widgets")
+    }
+
+    /// Resolution for state reads (`wait_text`, `assert_checked`, …) rather
+    /// than interaction.
+    ///
+    /// A widget the app has drawn but a container clips away — content below
+    /// the fold of a scrolling page, a status label under a long form — has no
+    /// on-screen rect, so there is nothing to click and `visible` is false.
+    /// Its *state* is still perfectly readable, though, and asserting on it is
+    /// a normal thing for a test to want. So prefer a visible match (identical
+    /// behaviour whenever one exists) and fall back to an off-screen one only
+    /// when nothing visible matches.
+    fn resolve_unique_readable(&self) -> TestResult<WidgetSnapshot> {
+        let query = self.selector.describe();
+        let visible = self.app.query_widgets(&self.selector, true)?;
+        if !visible.is_empty() {
+            return Self::unique(query, visible, "matched no visible widgets");
+        }
+        let all = self.app.query_widgets(&self.selector, false)?;
+        Self::unique(query, all, "matched no widgets")
+    }
+
+    fn unique(
+        query: String,
+        matches: Vec<WidgetSnapshot>,
+        empty_message: &str,
+    ) -> TestResult<WidgetSnapshot> {
         match matches.as_slice() {
-            [] => Err(TestError::new(format!(
-                "selector `{query}` matched no visible widgets"
-            ))),
+            [] => Err(TestError::new(format!("selector `{query}` {empty_message}"))),
             [single] => Ok(single.clone()),
             _ => Err(TestError::new(format!(
                 "selector `{query}` matched multiple widgets:\n{}",
