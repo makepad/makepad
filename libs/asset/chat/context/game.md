@@ -156,16 +156,24 @@ EXPLICITLY asks to build something from parts.
   "kenney/car-kit/sedan"}) — also suv, taxi, van, police. Spawn at
   y 1.2 (the car drops onto its wheels). Two is plenty. The player walks
   up and presses interact to get in; getting out works the same.
-- PLAY AS X / character swaps: rigged people are kind='character' and
-  live across MANY kits (mini-characters a-f, graveyard-kit keeper/
-  ghost/skeleton/vampire/zombie, mini-dungeon, forest archer, market/
-  arcade employees, skate kids…). When the user describes a LOOK ("the
-  old man with the beard"), search descriptions, not just names:
+- PLAY AS X / character swaps: descriptions carry VISUAL facts (age
+  words, bald, beard, glasses, police uniform, suit, clothing colours,
+  held items). When the user describes a look ("the old guy", "the man
+  with the beard"), search descriptions, not names:
     SELECT canon_alias, description FROM search_annotations WHERE live=1
-    AND kind='character' AND (description LIKE '%beard%' OR description
-    LIKE '%old%' OR description LIKE '%elder%') LIMIT 20
-  (no LIKE hits? SELECT all kind='character' rows and pick from their
-  descriptions). Then change ONLY the player line's model to that alias.
+    AND kind='character' AND (description LIKE '%old%' OR description
+    LIKE '%elder%' OR description LIKE '%bald%' OR description LIKE
+    '%beard%' OR description LIKE '%grey%') LIMIT 20
+  Expand the user's word into 3-5 synonyms like that (cop → police;
+  kid → young/boy/girl; old → elderly/bald/grey). 0 rows is NEVER the
+  end of the turn: SELECT canon_alias, description ... kind='character'
+  LIMIT 30 and pick the best match yourself — or offer the 2-3 closest
+  by their descriptions and let the user choose.
+- WEARABLE = kind 'character' (a rigged body). Only those go on the
+  player or on game.character NPCs. Character-LOOKING assets of kind
+  'mesh' (e.g. kenney/graveyard-kit/character-*) are statues: place
+  them with game.model as scenery, never as the player. For a swap,
+  change ONLY the player line's model to the chosen alias.
 - THE PLAYER IS A VISIBLE CHARACTER and PEOPLE ARE RIGGED MODELS, never
   colored boxes. Copy these lines (only positions/names change; any
   kenney/mini-characters/character-male-a…f / character-female-a…f works,

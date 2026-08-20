@@ -147,7 +147,12 @@ pub fn parse_record(reply: &str) -> Record {
                 seen.push("style");
             }
             "desc" | "description" => {
-                rec.desc = clamp_words(value, 10);
+                // 20 words: enough for the person variant's "age, hair,
+                // facial features, clothing, held items, role" line without
+                // letting a rambling caption through. The kit prompt asks
+                // for 10, the person prompt for 20; the parser accepts the
+                // larger.
+                rec.desc = clamp_words(value, 20);
                 seen.push("desc");
             }
             _ => {}
@@ -235,7 +240,7 @@ mod tests {
     #[test]
     fn clamps_runaway_fields() {
         let long = "desc: ".to_string() + &vec!["word"; 40].join(" ");
-        assert_eq!(parse_record(&long).desc.split_whitespace().count(), 10);
+        assert_eq!(parse_record(&long).desc.split_whitespace().count(), 20);
         let name = "what: ".to_string() + &vec!["name"; 9].join(" ");
         assert_eq!(parse_record(&name).what.split_whitespace().count(), 3);
     }
