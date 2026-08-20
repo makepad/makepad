@@ -30,6 +30,10 @@ makepad-zip-file = { path = "../../zip_file" }
 # Own MP3 / Ogg Vorbis decoders: waveform thumbnails and duration for the
 # music formats the library actually ships, without a platform codec.
 makepad-audio-decode = { path = "../../audio_decode" }
+# The picture recipes (spectrogram, antialiased wave strip, composite),
+# shared with the preview widgets so a baked thumbnail and a live preview
+# are the same picture rather than two drifting copies.
+makepad-audio-picture = { path = "../../audio_picture" }
 makepad-fast-inflate = { path = "../../fast_inflate" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }

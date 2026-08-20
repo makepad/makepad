@@ -28,7 +28,10 @@ use makepad_asset_client::{
     AssetClient, ClientError, PublishFile, PublishRequest, PublishRights, PublishThumbnail,
 };
 use makepad_asset_data::limits::MAX_ALIAS_BYTES;
-use makepad_asset_data::{AssetAlias, AssetKind, BlobId, FileRole, MediaType, ThumbnailMedia};
+use makepad_asset_data::{
+    AssetAlias, AssetKind, BlobId, FileRole, MediaType, ThumbnailMedia, ThumbnailView,
+    ThumbnailViewKind,
+};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -807,7 +810,7 @@ pub fn measure_ogg(bytes: &[u8]) -> Option<Measured> {
 /// the side info), else a deterministic per-track card so the DJ grid still
 /// reads as a grid of distinct tracks.
 pub fn track_thumbnail(bytes: &[u8], container: Container, measured: &Measured, key: &str) -> Vec<u32> {
-    track_picture(bytes, container, measured, key).0
+    track_picture(bytes, container, measured, key).pixels
 }
 
 /// The picture for one track, with its size: the high-definition
@@ -820,7 +823,7 @@ pub fn track_picture(
     container: Container,
     measured: &Measured,
     key: &str,
-) -> (Vec<u32>, usize, usize) {
+) -> TrackPicture {
     let media = match container {
         Container::Wav => Some(makepad_asset_data::MediaType::Wav),
         Container::Mp3 => Some(makepad_asset_data::MediaType::Mp3),
@@ -829,15 +832,48 @@ pub fn track_picture(
     };
     if let Some(media) = media {
         if let Ok(pcm) = crate::thumbs::decode_audio(bytes, media) {
-            if let Some(hd) = crate::thumbs::audio_picture_hd(&pcm) {
-                return hd;
+            if let Some((pixels, w, h, regions)) = crate::thumbs::audio_picture_hd(&pcm) {
+                return TrackPicture {
+                    pixels,
+                    width: w,
+                    height: h,
+                    views: crate::thumbs::audio_views(regions),
+                };
             }
         }
     }
     if !measured.envelope.is_empty() {
-        return (envelope_bgra_512(&measured.envelope), THUMB_DIM, THUMB_DIM);
+        // The envelope strip is a wave picture, and says so: a preview that
+        // wants the wave has the whole picture, and one that hoped for a
+        // spectrogram learns there is none rather than reading this as one.
+        return TrackPicture {
+            pixels: envelope_bgra_512(&measured.envelope),
+            width: THUMB_DIM,
+            height: THUMB_DIM,
+            views: vec![ThumbnailView::rect(
+                ThumbnailViewKind::Wave,
+                0,
+                0,
+                THUMB_DIM as u32,
+                THUMB_DIM as u32,
+            )],
+        };
     }
-    (card_bgra_512(key), THUMB_DIM, THUMB_DIM)
+    // A colour card is not a picture OF the audio, so it declares nothing.
+    TrackPicture {
+        pixels: card_bgra_512(key),
+        width: THUMB_DIM,
+        height: THUMB_DIM,
+        views: Vec::new(),
+    }
+}
+
+/// A track's baked picture and what its regions are.
+pub struct TrackPicture {
+    pub pixels: Vec<u32>,
+    pub width: usize,
+    pub height: usize,
+    pub views: Vec<ThumbnailView>,
 }
 
 const WAVE_BG: u32 = 0xff14_181c;
@@ -1354,6 +1390,9 @@ pub struct BakedTrack {
     pub measured: Measured,
     thumbnail_bytes: Vec<u8>,
     dims: (usize, usize),
+    /// What the baked picture's regions ARE — declared on the published
+    /// thumbnail so a preview reads the layout instead of measuring it.
+    views: Vec<ThumbnailView>,
 }
 
 /// Read, decode, measure and bake one track's picture. No network, no
@@ -1365,9 +1404,15 @@ pub fn bake_track(track: &PlannedTrack) -> Result<BakedTrack, String> {
     }
     let measured = measure(&bytes, track.container)
         .ok_or_else(|| "unmeasurable duration — not published without one".to_string())?;
-    let (picture, pic_w, pic_h) = track_picture(&bytes, track.container, &measured, &track.alias);
-    let thumbnail_bytes = encode_jpeg_bgra(&picture, pic_w, pic_h)?;
-    Ok(BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h) })
+    let picture = track_picture(&bytes, track.container, &measured, &track.alias);
+    let thumbnail_bytes = encode_jpeg_bgra(&picture.pixels, picture.width, picture.height)?;
+    Ok(BakedTrack {
+        bytes,
+        measured,
+        thumbnail_bytes,
+        dims: (picture.width, picture.height),
+        views: picture.views,
+    })
 }
 
 pub fn publish_track(
@@ -1390,7 +1435,7 @@ pub fn publish_baked(
 ) -> Result<TrackOutcome, String> {
     let alias = AssetAlias::from_str(&track.alias)
         .map_err(|e| format!("{}: alias {}: {e}", track.rel, track.alias))?;
-    let BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h) } = baked;
+    let BakedTrack { bytes, measured, thumbnail_bytes, dims: (pic_w, pic_h), views } = baked;
     let audio_blob = BlobId::hash_of(&bytes);
     // The picture is baked BEFORE anything is decided: a re-import is how a
     // track gets today's imagery, so "unchanged" has to mean the audio AND
@@ -1426,6 +1471,7 @@ pub fn publish_baked(
         media: ThumbnailMedia::Jpeg,
         width: pic_w as u32,
         height: pic_h as u32,
+        views,
     };
     let mut request = PublishRequest::new(
         namespace,

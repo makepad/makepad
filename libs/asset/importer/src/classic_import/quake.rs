@@ -1108,7 +1108,7 @@ pub(crate) fn decode_quake_mdl_ex(bytes: &[u8], as_character: bool) -> Result<De
         ));
     }
     let icon_png = if tiles.len() >= 2 {
-        crate::anim_icon::pack_sheet(&tiles).ok()
+        crate::anim_icon::pack_sheet(&tiles).ok().map(|sheet| sheet.png)
     } else if let Some(tile) = tiles.first() {
         encode_png_rgba(tile, crate::anim_icon::TILE as u32, crate::anim_icon::TILE as u32).ok()
     } else {
