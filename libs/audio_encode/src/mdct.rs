@@ -230,8 +230,11 @@ fn butterfly_span(
     debug_assert!(tw_re.len() >= half && tw_im.len() >= half);
     #[cfg(target_arch = "aarch64")]
     {
-        if half >= 4 {
-            debug_assert_eq!(half % 4, 0, "stage halves are powers of two >= 4");
+        // Whole 4-lane groups only: FFT stage halves are always powers of
+        // two so this is every real call, but the guard (not just a
+        // debug_assert) is what makes an odd length safe rather than an
+        // out-of-bounds vector load.
+        if half >= 4 && half % 4 == 0 {
             // SAFETY: all six slices hold at least `half` f32s (asserted
             // above); `k + 4 <= half` inside the loop, so every 128-bit
             // load/store is in bounds. Lanewise fmul/fadd/fsub round
