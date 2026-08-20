@@ -2,13 +2,18 @@ This image is a 4x4 grid of 16 renders of ONE low-poly 3D game CHARACTER on a da
 
 You are describing this character so a program can find people by their look, for requests like "the old man with the beard" or "a woman in a red dress". Report what the PERSON looks like — the things a stranger would notice first — not a caption.
 
-Reply with exactly these eight lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
+Reply with exactly these thirteen lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
 
 what: 2 to 4 words naming the person by their most distinctive look or apparent role, like old bald man, police officer, young woman, orc warrior
 cat: character
 role: standalone
 conn: none
 size: tall
+age: one word from: child young adult old
+build: one word from: slim average heavy broad
+hair: 1 to 3 words: bald, or the hair's length/shape (short long ponytail bun braid curly) and its colour
+face: 1 to 3 words for facial features and headwear from: beard moustache stubble glasses sunglasses mask hat helmet cap hood crown clean
+job: ONE word for the occupation or role the outfit suggests, like police, farmer, knight, pirate, chef — or "-" if the clothes suggest none
 colors: 1 to 3 dominant clothing colours, comma separated, plain colour words
 style: 1 or 2 words from: low-poly cartoon realistic toy medieval modern sci-fi rustic
 desc: at most 20 words of concrete visual detail: age impression, hair or baldness and its colour, facial hair, anything worn on the head or face, clothing and its colours, anything held or carried, and the occupation or role the outfit suggests

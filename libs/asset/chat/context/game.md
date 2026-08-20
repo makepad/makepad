@@ -160,21 +160,27 @@ EXPLICITLY asks to build something from parts.
   "kenney/car-kit/sedan"}) — also suv, taxi, van, police. Spawn at
   y 1.2 (the car drops onto its wheels). Two is plenty. The player walks
   up and presses interact to get in; getting out works the same.
-- PLAY AS X / character swaps: descriptions carry VISUAL facts (age
-  words, bald, beard, glasses, police uniform, suit, clothing colours,
-  held items). When the user describes a look ("the old guy", "the man
-  with the beard"), search descriptions, not names:
-    SELECT canon_alias, description FROM search_annotations WHERE live=1
-    AND kind='character' AND (description LIKE '%old%' OR description
-    LIKE '%elder%' OR description LIKE '%bald%' OR description LIKE
-    '%beard%' OR description LIKE '%grey%') LIMIT 20
-  Expand the user's word into 3-5 synonyms like that (cop → police;
-  kid → young/boy/girl; old → elderly/bald/grey). 0 rows is NEVER the
-  end of the turn: SELECT canon_alias, description ... kind='character'
-  LIMIT 30 and pick the best match yourself — or offer the 2-3 closest
-  by their descriptions and let the user choose. Then swap with ONE
-  call — world.set_player_model({model: "<alias>"}) — no get_source,
-  no set_source: it swaps the body in place and nothing else changes.
+- PLAY AS X / character swaps: characters carry exact FACET labels in
+  search_labels — query those FIRST, they cannot false-match the way
+  substrings do ('%old%' also hits holding/gold/soldier). One query
+  answers "the old guy":
+    SELECT a.canon_alias, a.description FROM search_annotations a
+    JOIN search_labels l ON l.asset_id = a.asset_id WHERE a.live=1
+    AND a.kind='character' AND l.label IN ('vlm-age-old') LIMIT 20
+  Facet vocabulary: vlm-age-{child,young,adult,old} ·
+  vlm-job-<word> (police, farmer, knight, chef …) ·
+  vlm-face-{beard,moustache,glasses,hat,helmet,cap,hood,crown,mask} ·
+  vlm-hair-{bald,short,long,ponytail,bun,braid,curly,<colour>} ·
+  vlm-col-<clothing colour>. Map the ask onto facets (cop →
+  vlm-job-police; the bald guy → vlm-hair-bald; girl → vlm-age-young;
+  list several with IN (...) to OR them). When no facet fits, or facet
+  rows come back empty, fall back to description LIKE with 3-5 synonyms
+  — and 0 rows is STILL never the end of the turn: SELECT canon_alias,
+  description ... kind='character' LIMIT 30 and pick the best match
+  yourself, or offer the 2-3 closest and let the user choose. Then swap
+  with ONE call — world.set_player_model({model: "<alias>"}) — no
+  get_source, no set_source: it swaps the body in place and nothing
+  else changes.
 - WEARABLE = kind 'character' (a rigged body). Only those go on the
   player or on game.character NPCs. Character-LOOKING assets of kind
   'mesh' (e.g. kenney/graveyard-kit/character-*) are statues: place
