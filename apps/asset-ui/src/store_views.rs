@@ -1028,13 +1028,37 @@ impl Widget for RunTray {
 // Catalog grid (the Library's tile view)
 // ---------------------------------------------------------------------------
 
-/// Grid card layout constants; `grid_columns` derives the per-row card count
-/// from the width the grid actually received.
-pub const GRID_CARD_W: f64 = 150.0;
-pub const GRID_GAP: f64 = 8.0;
+/// The card size the grid AIMS for. Columns are chosen so the real card
+/// width lands near it, and then the cards STRETCH to fill the row exactly —
+/// a fixed-size card leaves a gutter down the right that grows with every
+/// pixel of window the layout refuses to use.
+pub const GRID_CARD_W: f64 = 168.0;
+pub const GRID_GAP: f64 = 10.0;
+/// Inner padding of a card, and the gap between its picture and its title.
+/// A card is a picture with a caption; both need room to be either.
+pub const GRID_CARD_PAD: f64 = 9.0;
+pub const GRID_CARD_SPACING: f64 = 6.0;
+/// Height of the title zone: exactly two lines at the card's text size,
+/// reserved whether a title needs them or not. Cards in a row are then the
+/// same height, and no card's second line straddles its own bottom edge.
+pub const GRID_TITLE_H: f64 = 26.0;
+/// Picture aspect inside a card (the shape a rendered icon and a spectrogram
+/// tile both read well at).
+pub const GRID_THUMB_ASPECT: f64 = 0.62;
 /// Card slots available in the Row template (c1..c8); extra width on very
 /// wide windows becomes margin instead of a ninth column.
 pub const GRID_MAX_COLS: usize = 8;
+
+/// The real card size for a panel `width` wide at `cols` per row: the row is
+/// divided exactly, so `cols` cards plus `cols - 1` gaps span the panel.
+pub fn grid_card_size(width: f64, cols: usize) -> (f64, f64) {
+    let cols = cols.max(1);
+    let gaps = GRID_GAP * (cols - 1) as f64;
+    let card_w = ((width - gaps) / cols as f64).max(64.0);
+    let thumb_h = ((card_w - 2.0 * GRID_CARD_PAD) * GRID_THUMB_ASPECT).max(24.0).round();
+    let card_h = GRID_CARD_PAD * 2.0 + thumb_h + GRID_CARD_SPACING + GRID_TITLE_H;
+    (card_w.round(), card_h.round())
+}
 
 /// Cadence of a cycling card when the picture did not say. Slow enough to
 /// read a sprite, fast enough to show what the animation IS — but only a
@@ -1314,10 +1338,17 @@ impl Widget for CatalogGrid {
         // The widget's area rect is one frame behind, which is fine: a
         // resize re-chunks the rows on the next frame.
         let width = self.view.area().rect(cx).size.x;
+        // Room the cards actually get, once the scrollbar has its gutter.
+        let inner = (width - 14.0).max(0.0);
         if width > GRID_CARD_W {
-            self.last_cols = grid_columns(width - 14.0); // scrollbar gutter
+            self.last_cols = grid_columns(inner);
         }
         let cols = self.columns();
+        // The cards then STRETCH to divide that room exactly, so a row spans
+        // the panel at every window width instead of leaving a gutter that
+        // grows with the window.
+        let (card_w, card_h) = grid_card_size(inner, cols);
+        let thumb_h = card_h - GRID_CARD_PAD * 2.0 - GRID_CARD_SPACING - GRID_TITLE_H;
         // One clock for the whole grid, so a wall of sprites animates in
         // step; `animating` records whether a CYCLING card was actually on
         // screen this pass.
@@ -1368,6 +1399,11 @@ impl Widget for CatalogGrid {
                 ids!(c4.grid_thumb), ids!(c5.grid_thumb), ids!(c6.grid_thumb),
                 ids!(c7.grid_thumb), ids!(c8.grid_thumb),
             ];
+            let thumb_boxes = [
+                ids!(c1.grid_thumb_box), ids!(c2.grid_thumb_box), ids!(c3.grid_thumb_box),
+                ids!(c4.grid_thumb_box), ids!(c5.grid_thumb_box), ids!(c6.grid_thumb_box),
+                ids!(c7.grid_thumb_box), ids!(c8.grid_thumb_box),
+            ];
             while let Some(row_id) = list.next_visible_item(cx) {
                 if row_id >= rows {
                     continue;
@@ -1380,6 +1416,17 @@ impl Widget for CatalogGrid {
                     if !visible {
                         continue;
                     }
+                    // Stretch this card to its share of the row, and give
+                    // its picture the height that keeps the aspect.
+                    let mut cell = item.view(cx, slots[slot]);
+                    script_apply_eval!(cx, cell, {
+                        width: #(card_w)
+                        height: #(card_h)
+                    });
+                    let mut picture = item.view(cx, thumb_boxes[slot]);
+                    script_apply_eval!(cx, picture, {
+                        height: #(thumb_h)
+                    });
                     match self.tiles.get(index) {
                         Some(tile) => {
                             item.label(cx, titles[slot]).set_text(cx, &tile.title);
@@ -2311,6 +2358,42 @@ mod tests {
         assert_eq!(grid_columns(GRID_CARD_W), 1);
         assert_eq!(grid_columns(2.0 * GRID_CARD_W + GRID_GAP), 2);
         assert_eq!(grid_columns(10_000.0), GRID_MAX_COLS);
+    }
+
+    /// Cards divide the row EXACTLY: whatever the window width, `cols`
+    /// cards plus their gaps span the panel, so there is never a gutter down
+    /// the right that grows as the window does. And a card's height follows
+    /// its width, so its picture keeps its shape and its two-line title zone
+    /// is always there.
+    #[test]
+    fn cards_stretch_to_fill_the_row_at_every_width() {
+        for width in [320.0f64, 641.0, 900.0, 1280.0, 1739.0, 2560.0] {
+            let cols = grid_columns(width);
+            let (card_w, card_h) = grid_card_size(width, cols);
+            let spanned = card_w * cols as f64 + GRID_GAP * (cols - 1) as f64;
+            assert!(
+                (spanned - width).abs() <= cols as f64,
+                "{cols} cards of {card_w} span {spanned} of {width}"
+            );
+            // The card is a picture plus a fixed two-line caption.
+            let thumb_h = card_h - GRID_CARD_PAD * 2.0 - GRID_CARD_SPACING - GRID_TITLE_H;
+            assert!(thumb_h > 0.0, "the picture has room at {width}");
+            let expect = ((card_w - 2.0 * GRID_CARD_PAD) * GRID_THUMB_ASPECT).round();
+            assert!(
+                (thumb_h - expect).abs() <= 1.0,
+                "the picture keeps its aspect at {width}: {thumb_h} vs {expect}"
+            );
+            // Cards stay near the size the grid aims for rather than
+            // stretching to twice it before adding a column.
+            assert!(
+                card_w >= GRID_CARD_W * 0.75 || cols == 1,
+                "{card_w} is not a card at {width}"
+            );
+            assert!(card_w <= GRID_CARD_W * 2.0 || cols == GRID_MAX_COLS);
+        }
+        // A panel narrower than one card still gets one card, not zero.
+        assert_eq!(grid_columns(0.0), 1);
+        assert!(grid_card_size(0.0, 1).0 >= 64.0);
     }
 
     /// Thumbnails are bound by asset id — the identity of the digest-named
