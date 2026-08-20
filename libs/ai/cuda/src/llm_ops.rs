@@ -38,8 +38,11 @@ pub mod names {
     pub const FATTN_MMA_F16: &str = "fattn_mma_f16";
     pub const FATTN_VEC_F16: &str = "fattn_vec_f16";
     pub const NORM: &str = "norm";
+    pub const LAYER_NORM: &str = "layer_norm";
     pub const RMS_NORM_MUL: &str = "rms_norm_mul";
     pub const ROPE_MULTI: &str = "rope_multi";
+    pub const ROPE_VISION: &str = "rope_vision";
+    pub const UPSCALE_BILINEAR: &str = "upscale_bilinear";
     pub const UNARY: &str = "unary";
     pub const UNARY_MUL: &str = "unary_mul";
     pub const GLU: &str = "glu";
@@ -406,6 +409,74 @@ mod ffi {
             x_nb1: usize,
             x_nb2: usize,
             x_nb3: usize,
+            d_nb1: usize,
+            d_nb2: usize,
+            d_nb3: usize,
+            stream: Stream,
+        ) -> CudaError;
+        pub fn mkllm_layer_norm(
+            x: *const c_void,
+            dst: *mut c_void,
+            ne0: i32,
+            ne1: i32,
+            ne2: i32,
+            ne3: i32,
+            eps: f32,
+            x_nb1: usize,
+            x_nb2: usize,
+            x_nb3: usize,
+            d_nb1: usize,
+            d_nb2: usize,
+            d_nb3: usize,
+            stream: Stream,
+        ) -> CudaError;
+        pub fn mkllm_rope_vision(
+            src: *const c_void,
+            pos: *const i32,
+            dst: *mut c_void,
+            ne0: i32,
+            ne1: i32,
+            ne2: i32,
+            ne3: i32,
+            n_dims: i32,
+            sect_0: i32,
+            sect_1: i32,
+            freq_base: f32,
+            freq_scale: f32,
+            ext_factor: f32,
+            attn_factor: f32,
+            corr_dim0: f32,
+            corr_dim1: f32,
+            s_nb0: usize,
+            s_nb1: usize,
+            s_nb2: usize,
+            s_nb3: usize,
+            d_nb0: usize,
+            d_nb1: usize,
+            d_nb2: usize,
+            d_nb3: usize,
+            stream: Stream,
+        ) -> CudaError;
+        #[allow(clippy::too_many_arguments)]
+        pub fn mkllm_upscale_bilinear(
+            src: *const c_void,
+            dst: *mut c_void,
+            ne00: i32,
+            ne01: i32,
+            ne0: i32,
+            ne1: i32,
+            ne2: i32,
+            ne3: i32,
+            sf2: f32,
+            sf3: f32,
+            sfx: f32,
+            sfy: f32,
+            poffs: f32,
+            aa: i32,
+            s_nb00: usize,
+            s_nb01: usize,
+            s_nb02: usize,
+            s_nb03: usize,
             d_nb1: usize,
             d_nb2: usize,
             d_nb3: usize,
@@ -962,6 +1033,76 @@ cuda_forward!(norm(
     d_nb3: usize,
     stream: Stream,
 ) -> CudaError { mkllm_norm });
+
+cuda_forward!(layer_norm(
+    x: *const c_void,
+    dst: *mut c_void,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    eps: f32,
+    x_nb1: usize,
+    x_nb2: usize,
+    x_nb3: usize,
+    d_nb1: usize,
+    d_nb2: usize,
+    d_nb3: usize,
+    stream: Stream,
+) -> CudaError { mkllm_layer_norm });
+
+cuda_forward!(rope_vision(
+    src: *const c_void,
+    pos: *const i32,
+    dst: *mut c_void,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    n_dims: i32,
+    sect_0: i32,
+    sect_1: i32,
+    freq_base: f32,
+    freq_scale: f32,
+    ext_factor: f32,
+    attn_factor: f32,
+    corr_dim0: f32,
+    corr_dim1: f32,
+    s_nb0: usize,
+    s_nb1: usize,
+    s_nb2: usize,
+    s_nb3: usize,
+    d_nb0: usize,
+    d_nb1: usize,
+    d_nb2: usize,
+    d_nb3: usize,
+    stream: Stream,
+) -> CudaError { mkllm_rope_vision });
+
+cuda_forward!(upscale_bilinear(
+    src: *const c_void,
+    dst: *mut c_void,
+    ne00: i32,
+    ne01: i32,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    sf2: f32,
+    sf3: f32,
+    sfx: f32,
+    sfy: f32,
+    poffs: f32,
+    aa: i32,
+    s_nb00: usize,
+    s_nb01: usize,
+    s_nb02: usize,
+    s_nb03: usize,
+    d_nb1: usize,
+    d_nb2: usize,
+    d_nb3: usize,
+    stream: Stream,
+) -> CudaError { mkllm_upscale_bilinear });
 
 cuda_forward!(rms_norm_mul(
     x: *const c_void,

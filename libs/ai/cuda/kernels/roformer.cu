@@ -226,9 +226,13 @@ extern "C" cudaError_t makepad_cuda_roformer_attn_f32(
     // Note the ceiling: three (BR x D) f32 tiles plus the score tile must fit
     // the 48 KB static shared-memory budget, which D=128 blows at BC=32 —
     // adding it means re-tiling, not just another case label.
+    // 72 is the Qwen3-VL vision tower (n_embd 1152 / 16 heads); its three
+    // (32 x 73) f32 tiles plus the score tile come to ~31.8 KB, inside the
+    // budget. D must stay divisible by ROF_SUBS (4): 72 / 4 = 18.
     switch (d) {
         case 32: ROF_LAUNCH(32); break;
         case 64: ROF_LAUNCH(64); break;
+        case 72: ROF_LAUNCH(72); break;
         default: return cudaErrorInvalidValue;
     }
 #undef ROF_LAUNCH
