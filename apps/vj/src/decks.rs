@@ -57,6 +57,22 @@ pub enum DeckTarget {
     B,
 }
 
+/// Analysis the STORE already holds for a track, as blob references off its
+/// manifest: four Ogg Vorbis stems in `FileRole::STEMS` order (drums, bass,
+/// vocals, other) and the word-aligned lyrics JSON.
+///
+/// This is the fetch-or-compute switch. Present means the expensive work was
+/// done once, somewhere, and this deck downloads a few hundred kilobytes
+/// instead of spending a third of the track's duration on the GPU; absent
+/// means the local separation/bake path runs exactly as it always has.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackSideChannels {
+    /// `(blob, byte_len)` per stem, in `FileRole::STEMS` order. The contract
+    /// is all-four-or-none, so this is one option over the whole set.
+    pub stems: Option<[(BlobId, u64); 4]>,
+    pub lyrics: Option<(BlobId, u64)>,
+}
+
 /// What a music tile resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackItem {
@@ -66,6 +82,8 @@ pub struct TrackItem {
     pub media_blob: BlobId,
     pub media_len: u64,
     pub media: MediaType,
+    /// Precomputed stems/lyrics on the store, when this revision carries any.
+    pub side: TrackSideChannels,
 }
 
 /// Crossfader gain law.
@@ -1212,6 +1230,7 @@ mod tests {
             media_blob: BlobId::from_bytes([seed ^ 0xff; 32]),
             media_len: 4000 + seed as u64,
             media: MediaType::Wav,
+            side: TrackSideChannels::default(),
         }
     }
 
