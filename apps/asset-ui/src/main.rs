@@ -114,30 +114,28 @@ fn import_item_source(file: &str) -> String {
 
 /// An import preview PNG as the frames a card draws: the cells the picture
 /// DECLARED when it is a packed sheet (a sprite actor, a model turntable),
-/// otherwise the one picture it is. No dimension guessing — an import
-/// preview that says nothing about itself is a still.
+/// otherwise the one picture it is. Interpretation and cutting are the ONE
+/// shared path (`makepad_asset_widgets::thumb`); the stamp read here is a
+/// declaration the packer wrote, never a measurement.
 fn import_thumb_frames(cx: &mut Cx, png: &[u8]) -> Option<(Vec<Texture>, f32)> {
     let image = ImageBuffer::from_png(png).ok()?;
+    let plan = match makepad_asset_importer::anim_icon::read_layout(png) {
+        Some((cells, fps)) => makepad_asset_widgets::ThumbPlan::Cells(cells, fps),
+        None => makepad_asset_widgets::ThumbPlan::Whole,
+    };
     let (w, h) = (image.width, image.height);
     let level0 = w.saturating_mul(h);
     let pixels = if image.data.len() >= level0 { &image.data[..level0] } else { &image.data[..] };
-    match makepad_asset_importer::anim_icon::read_layout(png) {
-        Some((cells, fps)) => {
-            let frames = makepad_asset_importer::anim_icon::cut_cells_bgra(
-                w, h, pixels, cells.cell_w, cells.cols, cells.first, cells.count,
-            );
-            if frames.is_empty() {
-                return Some((vec![image.into_new_texture(cx)], 0.0));
-            }
-            let (cw, ch) = (cells.cell_w as usize, cells.cell_h as usize);
+    match makepad_asset_widgets::cut_plan_bgra(w, h, pixels, &plan) {
+        makepad_asset_widgets::ThumbPixels::Frames { width, height, frames, fps } => {
             let textures = frames
                 .into_iter()
                 .map(|data| {
                     Texture::new_with_format(
                         cx,
                         TextureFormat::VecBGRAu8_32 {
-                            width: cw,
-                            height: ch,
+                            width,
+                            height,
                             data: Some(data),
                             updated: TextureUpdated::Full,
                         },
@@ -146,7 +144,27 @@ fn import_thumb_frames(cx: &mut Cx, png: &[u8]) -> Option<(Vec<Texture>, f32)> {
                 .collect();
             Some((textures, fps))
         }
-        None => Some((vec![image.into_new_texture(cx)], 0.0)),
+        // A still — the whole picture, or a single packed cell. Keep the
+        // encoded buffer's mip path for the whole-image case.
+        makepad_asset_widgets::ThumbPixels::Still { width, height, bgra }
+            if width != w || height != h =>
+        {
+            Some((
+                vec![Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        width,
+                        height,
+                        data: Some(bgra),
+                        updated: TextureUpdated::Full,
+                    },
+                )],
+                0.0,
+            ))
+        }
+        makepad_asset_widgets::ThumbPixels::Still { .. } => {
+            Some((vec![image.into_new_texture(cx)], 0.0))
+        }
     }
 }
 
@@ -523,6 +541,11 @@ script_mod! {
     // size — it does NOT center the result in the slot. Each card wraps one
     // of these in a fixed-size aligning box; the box is what visibly
     // centers portrait/square/strip textures, with no stretch and no crop.
+    //
+    // LIVE-PICTURE slots ONLY (webcam frames, in-flight generation
+    // candidates, input-tray stills the host composed): an ASSET's
+    // thumbnail is always mod.widgets.AssetThumb, which obeys the asset's
+    // declared views — never a bare Image.
     let ThumbFitImage = Image{
         width: Fill
         height: Fill
@@ -679,7 +702,7 @@ script_mod! {
         View{
             width: 46 height: 36
             align: Align{x: 0.5 y: 0.5}
-            thumb := ThumbFitImage{}
+            thumb := mod.widgets.AssetThumb{}
         }
         kind := HintLabel{
             text: ""
@@ -821,7 +844,7 @@ script_mod! {
                         View{
                             width: Fill height: Fill
                             align: Align{x: 0.5 y: 0.5}
-                            thumb := ThumbFitImage{}
+                            thumb := mod.widgets.AssetThumb{}
                         }
                         // Member-count badge over the thumbnail: the cue
                         // that this tile IS a multi-artifact run and its ×
@@ -892,11 +915,12 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             flow: Down
-            spacing: 8
             scroll_bar: ScrollBar{}
             Row := View{
                 width: Fill height: Fit
                 flow: Right spacing: 10
+                // PortalList stacks items flush; the row gap is padding.
+                padding: Inset{bottom: 10}
                 c1 := CandidateCell{} c2 := CandidateCell{}
                 c3 := CandidateCell{} c4 := CandidateCell{}
             }
@@ -922,21 +946,23 @@ script_mod! {
         grid_thumb_box := View{
             width: Fill height: 88
             align: Align{x: 0.5 y: 0.5}
-            grid_thumb := ThumbFitImage{}
+            // THE thumbnail widget — obeys the asset's declared views.
+            grid_thumb := mod.widgets.AssetThumb{}
         }
         // Exactly two lines, reserved whether the title needs them or not,
         // so no card's text straddles its own bottom edge and every card in
-        // a row is the same height. A longer title ends in an ellipsis
-        // rather than a half-drawn third line.
+        // a row is the same height. A longer title wraps once and ends line
+        // two in an ellipsis (the layouter's max_rows machinery, tested in
+        // draw::text::layouter). Height is re-applied per draw from
+        // GRID_TITLE_H; 30 here only covers the pre-sized first frame.
         grid_title := Label{
             width: Fill
-            height: 34
+            height: 30
             max_lines: 2
             text_overflow: TextOverflow.Ellipsis
             draw_text +: {
                 color: #xc6cfd8
                 text_style: theme.font_regular{font_size: 8}
-                wrap: TextWrap.Word
             }
         }
     }
@@ -951,27 +977,37 @@ script_mod! {
         list := PortalList{
             width: Fill height: Fill
             flow: Down
-            spacing: 8
             scroll_bar: ScrollBar{}
+            // The gaps — between the columns AND below the row — are
+            // re-applied per draw from store_views::GRID_GAP (PortalList adds
+            // no spacing between its items, so the row gap is bottom
+            // padding). The literals here only cover the pre-sized frame.
             Row := View{
                 width: Fill height: Fit
-                flow: Right spacing: 8
+                flow: Right spacing: 10
+                padding: Inset{bottom: 10}
                 c1 := CatalogCell{} c2 := CatalogCell{} c3 := CatalogCell{} c4 := CatalogCell{}
                 c5 := CatalogCell{} c6 := CatalogCell{} c7 := CatalogCell{} c8 := CatalogCell{}
             }
             // One asset per row: its picture, then everything the catalog
-            // knows about it, reading left to right.
+            // knows about it, reading left to right. The bottom padding is
+            // the gap between rows — PortalList itself stacks items flush.
             ListRow := View{
                 width: Fill height: Fit
+                padding: Inset{bottom: 6}
+                // Fit, not fixed: the row is as tall as its content needs,
+                // so the alias line can never straddle the card's bottom
+                // edge. Every row has the same content shape, so rows stay
+                // uniform anyway.
                 lr_card := GalleryCard{
-                    width: Fill height: 76
+                    width: Fill height: Fit
                     flow: Right spacing: 10
-                    padding: 6
+                    padding: Inset{left: 6 right: 10 top: 6 bottom: 8}
                     align: Align{y: 0.5}
                     View{
                         width: 96 height: 64
                         align: Align{x: 0.5 y: 0.5}
-                        lr_thumb := ThumbFitImage{}
+                        lr_thumb := mod.widgets.AssetThumb{}
                     }
                     View{
                         width: Fill height: Fit flow: Down spacing: 2
@@ -993,6 +1029,8 @@ script_mod! {
                         }
                         lr_alias := Label{
                             width: Fill
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
                             draw_text +: {
                                 color: #x8a939d
                                 text_style: theme.font_regular{font_size: 7.5}
@@ -2441,10 +2479,23 @@ script_mod! {
                                     lib_list_btn := ViewRowsChip{}
                                     lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
-                                View{
-                                    width: Fill height: Fill flow: Right spacing: 8
-                                    lib_catalog_page := View{
+                                // Grid | rail split, user-adjustable: the
+                                // rail starts at a sane 330 and never has to
+                                // steal more of the grid than its owner
+                                // wants to give it.
+                                lib_split := Splitter{
+                                    width: Fill height: Fill
+                                    axis: SplitterAxis.Horizontal
+                                    align: SplitterAlign.FromB(330.0)
+                                    size: 6.0
+                                    draw_bg +: {
+                                        color: #x1a1a1f
+                                        color_hover: #x3d9bf0
+                                        color_drag: #x3d9bf0
+                                    }
+                                    a: View{
                                         width: Fill height: Fill flow: Down spacing: 6
+                                        padding: Inset{right: 6}
                                         // The catalog starts straight under the
                                         // filters: nothing stands between what
                                         // the user typed and what it found.
@@ -2483,8 +2534,9 @@ script_mod! {
                                     }
                                     // Selected-item rail: prompt + provenance +
                                     // revision/publish detail and the actions.
-                                    detail_panel := StorePanel{
-                                        width: 330
+                                    // The SPLITTER owns its width.
+                                    b: StorePanel{
+                                        width: Fill
                                         height: Fill
                                         detail_scroll := QuietScrollY{
                                             width: Fill height: Fill
@@ -3540,9 +3592,10 @@ pub struct App {
     library_audio_file: Option<String>,
     /// Materialised thumbnail objects for catalog tiles, keyed by asset id.
     /// The path is a digest-named cache object, so a tile can never show a
-    /// picture that belongs to another revision.
+    /// picture that belongs to another revision. The manifest's declared
+    /// views travel WITH the path: the decode obeys the declaration.
     #[rust]
-    catalog_thumb_paths: HashMap<String, PathBuf>,
+    catalog_thumb_paths: HashMap<String, (PathBuf, Vec<makepad_asset_data::ThumbnailView>)>,
     /// Assets whose thumbnail is being materialised right now.
     #[rust]
     catalog_thumb_pending: HashSet<String>,
@@ -8126,6 +8179,7 @@ impl App {
                     role,
                     revision,
                     path,
+                    views,
                 } => {
                     self.catalog_work.pending.remove(&file);
                     match path {
@@ -8154,7 +8208,7 @@ impl App {
                             if let Some(asset) = file.strip_prefix("store:") {
                                 self.catalog_thumb_pending.remove(asset);
                                 self.catalog_thumb_paths
-                                    .insert(asset.to_string(), path.clone());
+                                    .insert(asset.to_string(), (path.clone(), views));
                             }
                             // A Library tile's picture only needs a redraw:
                             // rebuilding the whole rail for each of a
@@ -8424,12 +8478,13 @@ impl App {
         };
         for asset_id in wanted {
             let file = format!("store:{asset_id}");
-            if let Some(path) = self.catalog_thumb_paths.get(&asset_id) {
+            if let Some((path, views)) = self.catalog_thumb_paths.get(&asset_id) {
                 // Already on disk: straight to the decode queue the gallery
-                // and tray share.
+                // and tray share, with the manifest's declaration riding
+                // along so the worker cuts what the producer declared.
                 self.extra_preview_work.retain(|(f, _)| f != &file);
                 self.extra_preview_work
-                    .push((file, PreviewWork::Encoded(path.clone())));
+                    .push((file, PreviewWork::Declared(path.clone(), views.clone())));
                 continue;
             }
             if !self.catalog_thumb_pending.insert(asset_id.clone()) {
@@ -8476,16 +8531,15 @@ impl App {
                 continue;
             }
             let (path, purpose) = match work {
+                // A local sidecar carries no manifest: its own stamped
+                // layout (a declaration too) is read on the worker, and an
+                // unstamped picture draws whole. Nothing is measured.
                 PreviewWork::Encoded(path) => {
-                    // A picture the app made may be an animation sheet; a
-                    // payload never is. A `.thumb` sidecar says so by its
-                    // name, a catalog tile by its identity — its object is
-                    // the revision's thumbnail, digest-named and extensionless.
-                    let thumbnail = file.starts_with("store:")
-                        || path
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("thumb"));
-                    (path, IoPurpose::GalleryPreviewEncoded { thumbnail })
+                    (path, IoPurpose::GalleryPreviewEncoded { views: Vec::new() })
+                }
+                // A catalog thumbnail's manifest declaration rides along.
+                PreviewWork::Declared(path, views) => {
+                    (path, IoPurpose::GalleryPreviewEncoded { views })
                 }
                 PreviewWork::WavPayload(path) => (path, IoPurpose::GalleryPreviewWav),
                 PreviewWork::StatefulBillboard(path) => {

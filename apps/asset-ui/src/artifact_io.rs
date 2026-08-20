@@ -38,12 +38,16 @@ pub enum IoPurpose {
     /// on the worker, so card draws never touch the filesystem or a PNG
     /// decoder.
     ///
-    /// `thumbnail` says the bytes are a PICTURE THE APP MADE, not content:
-    /// only those may be cut into an animation sheet. The caller knows
-    /// which it handed over — a `.thumb` sidecar, or the thumbnail role of
-    /// a catalog revision — and a digest-named store object has no
-    /// extension to infer it from.
-    GalleryPreviewEncoded { thumbnail: bool },
+    /// `views` is the manifest's DECLARATION of what the picture is
+    /// (`ThumbnailMeta::views`) — the shared `makepad_asset_widgets::thumb`
+    /// interpreter obeys it. Empty means the manifest declared nothing; the
+    /// picture's own stamped layout (a declaration too, written by the
+    /// packer) is then consulted, and failing that the whole image draws as
+    /// one still. Dimensions are NEVER measured to decide what a picture
+    /// means.
+    GalleryPreviewEncoded {
+        views: Vec<makepad_asset_data::ThumbnailView>,
+    },
     /// Gallery-card preview for a legacy sidecarless WAV: read + parse +
     /// min/max scan on the worker.
     GalleryPreviewWav,
@@ -133,6 +137,9 @@ pub enum IoDone {
         role: Option<makepad_asset_data::FileRole>,
         revision: Option<String>,
         path: Result<PathBuf, String>,
+        /// The manifest's declared thumbnail views, carried with the path so
+        /// the decode that follows obeys the declaration.
+        views: Vec<makepad_asset_data::ThumbnailView>,
     },
 }
 
@@ -379,6 +386,7 @@ fn materialize_from_store(
             role: Some(file.role),
             revision: Some(file.revision),
             path: Ok(file.path),
+            views: file.views,
         },
         Err(error) => IoDone::CatalogFile {
             file: request.file.clone(),
@@ -386,6 +394,7 @@ fn materialize_from_store(
             role: None,
             revision: None,
             path: Err(error),
+            views: Vec::new(),
         },
     }
 }
@@ -438,6 +447,7 @@ fn process(request: IoRequest) -> IoDone {
             role: None,
             revision: None,
             path: Err("no asset store session".to_string()),
+            views: Vec::new(),
         },
         IoPurpose::ViewerOpen { generation, copy_to } => {
             let bytes = std::fs::read(&request.path).map_err(|error| error.to_string());
@@ -473,7 +483,7 @@ fn process(request: IoRequest) -> IoDone {
                 png,
             }
         }
-        IoPurpose::GalleryPreviewEncoded { thumbnail } => {
+        IoPurpose::GalleryPreviewEncoded { views } => {
             // The BYTES first, so a stamped sheet's declared layout can be
             // read before the picture is decoded into pixels.
             let bytes = std::fs::read(&request.path).ok();
@@ -481,19 +491,20 @@ fn process(request: IoRequest) -> IoDone {
                 .as_deref()
                 .and_then(makepad_asset_importer::anim_icon::read_layout);
             let decoded = bytes.and_then(|bytes| decode_image_from_data(&bytes).ok());
-            let (pixels, sequence, fps) = match (decoded, layout) {
-                // The picture SAYS it is a sheet, and says exactly which
-                // cells are frames and how fast. Nothing is measured.
-                (Some(image), Some((cells, fps))) => cut_declared_preview(image, cells, fps),
-                // No declaration: a revision published before the views
-                // contract. The old dimension guess is the only thing left,
-                // and it is still gated on the picture being one the app
-                // made (an importer-written `.thumb` or a catalog
-                // thumbnail) — a 1024-square Flux render passes that guess
-                // too and must not be chopped into 64 cycling tiles.
-                (Some(image), None) if thumbnail => legacy_split_preview(image),
-                (Some(image), None) => (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0),
-                (None, _) => (None, Vec::new(), 0.0),
+            // What the picture IS, by declaration only — the manifest's
+            // views first, the packer's stamped layout second, one still
+            // image otherwise. `makepad_asset_widgets::thumb` is the single
+            // interpreter; there is no dimension guess left to fall to.
+            let plan = if !views.is_empty() {
+                makepad_asset_widgets::plan_views(&views)
+            } else if let Some((cells, fps)) = layout {
+                makepad_asset_widgets::ThumbPlan::Cells(cells, fps)
+            } else {
+                makepad_asset_widgets::ThumbPlan::Whole
+            };
+            let (pixels, sequence, fps) = match decoded {
+                Some(image) => cut_planned_preview(image, &plan),
+                None => (None, Vec::new(), 0.0),
             };
             IoDone::GalleryPreview {
                 file: request.file,
@@ -528,77 +539,44 @@ fn process(request: IoRequest) -> IoDone {
     }
 }
 
-/// Cut the cells a picture DECLARED, at the rate it declared. The frame
-/// count is the producer's, so the clear padding a packer added to clear the
-/// 256px thumbnail floor is simply not among them.
-fn cut_declared_preview(
+/// Run the shared interpreter's plan over a decoded picture. A whole-image
+/// plan keeps the encoded buffer (the stock mipmapping path); a region or
+/// cell plan cuts through `makepad_asset_widgets::thumb` — the ONE cutter.
+fn cut_planned_preview(
     image: ImageBuffer,
-    cells: makepad_asset_data::ThumbnailCells,
-    fps: f32,
+    plan: &makepad_asset_widgets::ThumbPlan,
 ) -> (Option<PreviewPixels>, Vec<PreviewPixels>, f32) {
-    let level0 = image.width.saturating_mul(image.height);
-    let pixels = if image.data.len() >= level0 {
-        &image.data[..level0]
-    } else {
-        image.data.as_slice()
-    };
-    let frames = makepad_asset_importer::anim_icon::cut_cells_bgra(
-        image.width,
-        image.height,
-        pixels,
-        cells.cell_w,
-        cells.cols,
-        cells.first,
-        cells.count,
-    );
-    if frames.is_empty() {
+    if matches!(plan, makepad_asset_widgets::ThumbPlan::Whole) {
         return (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0);
     }
-    let (w, h) = (cells.cell_w as usize, cells.cell_h as usize);
-    let sequence: Vec<PreviewPixels> = frames
-        .into_iter()
-        .map(|data| PreviewPixels::Raw { width: w, height: h, data })
-        .collect();
-    let first = sequence.first().cloned();
-    // One frame is a still that happens to be packed: no cycling, no clock.
-    let fps = if sequence.len() > 1 { fps } else { 0.0 };
-    (first, sequence, fps)
-}
-
-/// LEGACY ONLY: a 128-tile walk/idle sheet found by measuring the picture,
-/// for revisions published before a sheet declared itself. Square stills stay
-/// a single texture. Delete with the last un-stamped thumbnail.
-fn legacy_split_preview(
-    image: ImageBuffer,
-) -> (Option<PreviewPixels>, Vec<PreviewPixels>, f32) {
     let level0 = image.width.saturating_mul(image.height);
     let pixels = if image.data.len() >= level0 {
         &image.data[..level0]
     } else {
         image.data.as_slice()
     };
-    if let Some(frames) = makepad_asset_importer::anim_icon::legacy_split_sheet_bgra(
-        image.width,
-        image.height,
-        pixels,
-    ) {
-        let tile = makepad_asset_importer::anim_icon::TILE;
-        let sequence: Vec<PreviewPixels> = frames
-            .into_iter()
-            .map(|data| PreviewPixels::Raw {
-                width: tile,
-                height: tile,
-                data,
-            })
-            .collect();
-        let pixels = sequence.first().cloned();
-        (
-            pixels,
-            sequence,
-            makepad_asset_importer::anim_icon::SHEET_PREVIEW_FPS,
-        )
-    } else {
-        (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0)
+    match makepad_asset_widgets::cut_plan_bgra(image.width, image.height, pixels, plan) {
+        makepad_asset_widgets::ThumbPixels::Still { width, height, bgra } => {
+            // A cut that degraded to the full picture keeps the encoded
+            // buffer instead of a second copy of the same pixels.
+            if width == image.width && height == image.height {
+                (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0)
+            } else {
+                (
+                    Some(PreviewPixels::Raw { width, height, data: bgra }),
+                    Vec::new(),
+                    0.0,
+                )
+            }
+        }
+        makepad_asset_widgets::ThumbPixels::Frames { width, height, frames, fps } => {
+            let sequence: Vec<PreviewPixels> = frames
+                .into_iter()
+                .map(|data| PreviewPixels::Raw { width, height, data })
+                .collect();
+            let first = sequence.first().cloned();
+            (first, sequence, fps)
+        }
     }
 }
 
@@ -908,7 +886,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-1.glb".into(),
             path: sidecar.clone(),
-            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+            purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -930,7 +908,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-1.glb".into(),
             path: sidecar,
-            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+            purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -948,7 +926,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-kaykit.glb".into(),
             path: sheet,
-            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+            purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -973,7 +951,9 @@ mod tests {
         }
 
         // A generated 1024×1024 image payload has sheet-shaped dimensions
-        // but is its own still preview: never split into cycling tiles.
+        // but declares nothing — no manifest views, no stamp — so it is its
+        // own still preview: never split into cycling tiles. Dimensions are
+        // not a declaration.
         let render = dir.join("lib-flux.png");
         let mut rgba = vec![0u8; 1024 * 1024 * 4];
         for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
@@ -986,9 +966,7 @@ mod tests {
         io.request(IoRequest {
             file: "lib-flux.png".into(),
             path: render,
-            // A PAYLOAD: the app did not make this picture, so it is never
-            // an animation sheet however sheet-shaped it happens to be.
-            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: false },
+            purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -1007,9 +985,9 @@ mod tests {
         }
         // A CATALOG thumbnail is a digest-named cache object with no
         // extension to infer anything from — and by contract it can be a
-        // packed animation strip. The request says it is a picture the app
-        // made, so it is cut, and the card gets ONE frame instead of a
-        // filmstrip of tiny ones.
+        // packed animation strip. The packer STAMPED its layout into the
+        // PNG (a declaration), so it is cut, and the card gets ONE frame
+        // instead of a filmstrip of tiny ones.
         let object = dir.join("a3f9c1");
         let blue = makepad_asset_importer::anim_icon::fit_tile(&[0, 0, 255, 255], 1, 1);
         let white = makepad_asset_importer::anim_icon::fit_tile(&[255, 255, 255, 255], 1, 1);
@@ -1018,7 +996,7 @@ mod tests {
         io.request(IoRequest {
             file: "store:0102030405060708090a0b0c0d0e0f10".into(),
             path: object,
-            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+            purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         });
         match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -1037,6 +1015,94 @@ mod tests {
             }
             _ => panic!("wrong completion kind"),
         }
+
+        // An AUDIO COMPOSITE: the manifest declares an FFT region and a
+        // wave region — RECT views, no animation. The card is the STATIC
+        // spectrogram crop, whatever the picture's dimensions. This is the
+        // exact asset that was once guessed into a cycling sheet.
+        use makepad_asset_data::{
+            ThumbnailLayout, ThumbnailRect, ThumbnailView, ThumbnailViewKind,
+        };
+        let composite = dir.join("b4e2d7");
+        let mut rgba = vec![0u8; 512 * 128 * 4];
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            let y = i / 512;
+            // FFT half bright, wave half dark: the crop is checkable.
+            let v = if y < 64 { 200 } else { 20 };
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        let png = makepad_asset_ai::testpattern::encode_png_rgba(&rgba, 512, 128).unwrap();
+        std::fs::write(&composite, &png).unwrap();
+        let fft_views = vec![
+            ThumbnailView {
+                kind: ThumbnailViewKind::Fft,
+                layout: ThumbnailLayout::Rect(ThumbnailRect { x: 0, y: 0, w: 512, h: 64 }),
+                fps: None,
+            },
+            ThumbnailView {
+                kind: ThumbnailViewKind::Wave,
+                layout: ThumbnailLayout::Rect(ThumbnailRect { x: 0, y: 64, w: 512, h: 64 }),
+                fps: None,
+            },
+        ];
+        io.request(IoRequest {
+            file: "store:0102030405060708090a0b0c0d0e0f11".into(),
+            path: composite,
+            purpose: IoPurpose::GalleryPreviewEncoded { views: fft_views.clone() },
+            store: None,
+        });
+        match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            IoDone::GalleryPreview { pixels, sequence, fps, .. } => {
+                assert!(sequence.is_empty(), "an audio composite NEVER cycles");
+                assert_eq!(fps, 0.0);
+                match pixels {
+                    Some(PreviewPixels::Raw { width, height, data }) => {
+                        assert_eq!((width, height), (512, 64), "the declared FFT region");
+                        assert!(
+                            data.iter().all(|px| (px & 0xff) > 100),
+                            "the crop is the bright FFT half, not the wave"
+                        );
+                    }
+                    _ => panic!("expected the FFT crop as raw pixels"),
+                }
+            }
+            _ => panic!("wrong completion kind"),
+        }
+
+        // Precedence: the MANIFEST's declaration outranks the picture's own
+        // stamp. A stamped two-cell sheet whose manifest says "this is one
+        // still image region" draws still.
+        let stamped = dir.join("c5f3e8");
+        let red2 = makepad_asset_importer::anim_icon::fit_tile(&[255, 0, 0, 255], 1, 1);
+        let cyan = makepad_asset_importer::anim_icon::fit_tile(&[0, 255, 255, 255], 1, 1);
+        let sheet2 = makepad_asset_importer::anim_icon::pack_sheet(&[red2, cyan]).unwrap();
+        std::fs::write(&stamped, &sheet2.png).unwrap();
+        io.request(IoRequest {
+            file: "store:0102030405060708090a0b0c0d0e0f12".into(),
+            path: stamped,
+            purpose: IoPurpose::GalleryPreviewEncoded {
+                views: vec![ThumbnailView {
+                    kind: ThumbnailViewKind::Image,
+                    layout: ThumbnailLayout::Rect(ThumbnailRect {
+                        x: 0,
+                        y: 0,
+                        w: sheet2.width,
+                        h: sheet2.height,
+                    }),
+                    fps: None,
+                }],
+            },
+            store: None,
+        });
+        match io.rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            IoDone::GalleryPreview { sequence, .. } => {
+                assert!(
+                    sequence.is_empty(),
+                    "manifest views outrank the stamp: no cycling"
+                );
+            }
+            _ => panic!("wrong completion kind"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1046,7 +1112,7 @@ mod tests {
         let mk = |file: &str| IoRequest {
             file: file.into(),
             path: PathBuf::from(file),
-            purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+            purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         };
         stack.push_latest(mk("old"));
@@ -1072,7 +1138,7 @@ mod tests {
             stack.push_latest(IoRequest {
                 file: format!("f{i}"),
                 path: PathBuf::from("x"),
-                purpose: IoPurpose::GalleryPreviewEncoded { thumbnail: true },
+                purpose: IoPurpose::GalleryPreviewEncoded { views: Vec::new() },
             store: None,
         });
         }
