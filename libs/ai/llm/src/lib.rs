@@ -11,6 +11,7 @@ pub mod tensor;
 pub mod cuda_exec;
 pub mod exec;
 pub mod gguf;
+pub mod draft_vocab;
 pub mod model;
 pub mod plan;
 pub mod qwen35;
@@ -18,7 +19,7 @@ pub mod qwen35_runtime;
 pub mod qwen35moe;
 pub mod qwen35moe_runtime;
 pub mod runtime;
-pub mod session;
+mod session;
 pub mod vision;
 pub mod vocab;
 pub mod weights;
@@ -121,6 +122,7 @@ pub use runtime::{
     LogitsProbeSpec, MoeFfnGraph, MoeFfnRun, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind,
     RmsNormSpec,
 };
+pub use draft_vocab::DraftVocab;
 pub use session::{
     LlamaGeneration, LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
     SpeculativeStats,
