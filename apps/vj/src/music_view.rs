@@ -39,6 +39,10 @@ pub const STEM_COLOR_KILLED: [f32; 4] = [0.35, 0.38, 0.42, 1.0];
 /// Deepest pyramid level built: 2^15 finest columns is about five minutes
 /// in one texel, past which a level holds a single column.
 const MAX_WAVE_LEVELS: usize = 16;
+/// How much of the half-lane the loudest column of a track fills. Mirrored
+/// by the `0.78` in `DrawWaveLane::pixel`: a column at the track's own
+/// reference level draws this tall, and nothing draws taller.
+pub const WAVE_ENVELOPE: f32 = 0.78;
 /// One entry of [`STEM_COLORS`] as a shader colour.
 pub fn stem_color(stem: usize) -> Vec4f {
     let c = STEM_COLORS[stem.min(STEM_COLORS.len() - 1)];
@@ -78,21 +82,21 @@ script_mod! {
 
         // One column of one pyramid level. Each level is stored as its own
         // block of rows in the same texture, so a level is a row offset and
-        // a column count — hand-encoded mips.
-        level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec3 {
+        // a column count — hand-encoded mips. `xyz` are the bands, `w` is
+        // the column's level against the whole track: its height.
+        level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
             let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
             let wrap = floor(c / self.tex_w)
             let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
             let v = (base_row + wrap + 0.5) / self.tex_h
-            let t = self.tiles.sample_as_bgra(vec2(u, v))
-            return vec3(t.x, t.y, t.z)
+            return self.tiles.sample_as_bgra(vec2(u, v))
         }
 
         // What this PIXEL covers, alias-free at any zoom. Each level is a
         // max-reduction of the one below, so a transient never disappears
         // as the view pulls back; the two levels either side of the current
         // scale are blended so zooming does not pop.
-        tile_span: fn(column: float) -> vec3 {
+        tile_span: fn(column: float) -> vec4 {
             let lo = self.level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
             if self.lod_blend <= 0.0 {
                 if self.lo_scale <= 1.0 {
@@ -161,39 +165,39 @@ script_mod! {
             if column < 0.0 || column >= self.cols {
                 return bg
             }
-            let t = self.tile_span(column) * self.amp_scale
-            // Each stem's contribution is scaled by its knob, so the SHAPE
-            // of the wave is the shape of what the deck will play. The
-            // overview strip passes ones here and stays the reference.
-            let raw = self.stem_span(column) * self.amp_scale
-            let stem = vec4(
-                raw.x * self.gain_vocals,
-                raw.y * self.gain_drums,
-                raw.z * self.gain_bass,
-                raw.w * self.gain_other
-            )
+            let t = self.tile_span(column)
+            // THE HEIGHT OF A COLUMN IS HOW LOUD THE TRACK IS THERE. The
+            // level channel was normalized once, against the whole track,
+            // when the tiles were built; nothing here may raise it. A quiet
+            // intro draws short and a drop draws tall, in the grey region
+            // and in the separated one alike, so the seam between them is
+            // invisible in height and only the colouring changes.
+            let level = clamp(t.w, 0.0, 1.0) * 0.78
+
             // A column the separator has reached is coloured by WHAT it is;
-            // one it has not is coloured by frequency. Both are the same
+            // one it has not is a single honest grey. Both are the same
             // mirrored, layered envelope, so the picture only gains meaning
             // as the separation catches up — it never jumps.
+            let raw = self.stem_span(column)
             let present = raw.x + raw.y + raw.z + raw.w
             let separated = step(0.004, present) * self.has_stems
 
-            // Unseparated: one grey peak envelope, the honest picture of
-            // audio nobody has taken apart yet.
-            let peak = max(max(t.x, t.y), t.z)
-            let grey_h = clamp(peak, 0.0, 1.0) * 0.78
-            // Separated: bass at the core, then drums, vocals, other.
-            let s_bass = clamp(stem.z, 0.0, 1.0) * 0.55
-            let s_drums = clamp(stem.y, 0.0, 1.0) * 0.40
-            let s_vocals = clamp(stem.x, 0.0, 1.0) * 0.36
-            let s_other = clamp(stem.w, 0.0, 1.0) * 0.30
+            // The stems PARTITION that height in proportion to what each
+            // one contributes to the column — they never scale it up. A
+            // killed stem takes its share away with it, so the shape of the
+            // wave is the shape of what the deck will play; the overview
+            // strip passes ones here and stays the reference picture.
+            let inverse = 1.0 / max(present, 0.0001)
+            let grey_h = level
+            let s_bass = level * raw.z * inverse * self.gain_bass
+            let s_drums = level * raw.y * inverse * self.gain_drums
+            let s_vocals = level * raw.x * inverse * self.gain_vocals
+            let s_other = level * raw.w * inverse * self.gain_other
 
             let e0 = mix(grey_h, s_bass, separated)
             let e1 = mix(grey_h, s_bass + s_drums, separated)
-            let e2raw = mix(grey_h, s_bass + s_drums + s_vocals, separated)
-            let e2 = min(e2raw, 1.0)
-            let e3 = min(mix(grey_h, e2raw + s_other, separated), 1.0)
+            let e2 = mix(grey_h, s_bass + s_drums + s_vocals, separated)
+            let e3 = mix(grey_h, s_bass + s_drums + s_vocals + s_other, separated)
 
             let c0 = self.color_grey.mix(self.color_bass, separated)
             let c1 = self.color_grey.mix(self.color_drums, separated)
@@ -1229,9 +1233,6 @@ pub struct DrawWaveLane {
     /// A column that is a downbeat, so bars rule where the music does.
     #[live]
     pub beat_phase: f32,
-    /// Display gain on the packed band energies.
-    #[live(1.0)]
-    pub amp_scale: f32,
     /// 1 for a deck that is playing, less for a parked one.
     #[live(1.0)]
     pub active: f32,
@@ -1385,21 +1386,69 @@ pub fn build_pyramid(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
     Some(WavePyramid { texture, width, height, levels })
 }
 
-/// The three-band pyramid: red = low, green = mid, blue = high.
+/// The band + level pyramid: red = low, green = mid, blue = high, and
+/// alpha = the column's level against the whole track, which is the only
+/// channel that decides how tall a column draws.
 pub fn zoom_texture(cx: &mut Cx, tiles: &WaveTiles) -> Option<WavePyramid> {
-    let columns: Vec<[u8; 4]> = tiles
-        .zoom
-        .iter()
-        .map(|c| [c[0], c[1], c[2], 255])
-        .collect();
-    build_pyramid(cx, &columns)
+    build_pyramid(cx, &tiles.zoom)
 }
 
-/// The stem-energy pyramid, laid out identically to the band one so the
+/// The stem-share pyramid, laid out identically to the band one so the
 /// shader can sample both with the same level selection: red = vocals,
 /// green = drums, blue = bass, alpha = other.
 pub fn stem_texture(cx: &mut Cx, columns: &[[u8; 4]]) -> Option<WavePyramid> {
     build_pyramid(cx, columns)
+}
+
+/// What one separated column is MADE of, from the four stems' RMS.
+///
+/// These are shares, not levels: the shader normalizes them by their sum
+/// and uses them only to divide the column's height between the four
+/// colours. Nothing here can make a column taller, which is what keeps a
+/// separated span the same height as the raw span next to it — and what
+/// makes it safe to recompute this as the separator streams in, since a
+/// column's colour cannot move when coverage grows.
+///
+/// The lanes are put on the same perceptual curve the band tiles use, so a
+/// quiet stem is still legible beside a loud one, and the loudest lane of
+/// the column is stored at full scale to spend the whole byte on the split.
+pub fn stem_column_shares(rms: [f64; 4]) -> [u8; 4] {
+    let top = rms.iter().fold(0.0f64, |a, b| a.max(*b));
+    if top <= 1e-9 {
+        // Separated but silent: nothing to divide, and no height to divide
+        // it into. A single count keeps the column marked as covered so it
+        // does not fall back to the grey colouring mid-song.
+        return [1; 4];
+    }
+    let mut out = [0u8; 4];
+    for (lane, value) in out.iter_mut().enumerate() {
+        let share = (rms[lane] / top).clamp(0.0, 1.0).powf(crate::wave_analysis::WAVE_CURVE as f64);
+        *value = (share * 255.0).round() as u8;
+    }
+    out
+}
+
+/// The height of one column's envelope, as a fraction of the half-lane —
+/// the Rust mirror of the height law in `DrawWaveLane::pixel`, and what the
+/// tests measure. Keep the two in step: the shader is the picture, this is
+/// the proof.
+pub fn column_height(tile: [u8; 4]) -> f32 {
+    (tile[3] as f32 / 255.0).clamp(0.0, 1.0) * WAVE_ENVELOPE
+}
+
+/// The same column drawn as separated stems: the cumulative edges of the
+/// bass, drums, vocals and other layers. Mirrors the shader's partition —
+/// with every knob up, the last edge is exactly [`column_height`].
+pub fn stem_stack(tile: [u8; 4], stems: [u8; 4], gains: [f32; 4]) -> [f32; 4] {
+    let height = column_height(tile);
+    let present: f32 = stems.iter().map(|s| *s as f32).sum();
+    let inverse = 1.0 / present.max(0.0001);
+    let share = |lane: usize| height * stems[lane] as f32 * inverse * gains[lane];
+    let bass = share(2);
+    let drums = share(1);
+    let vocals = share(0);
+    let other = share(3);
+    [bass, bass + drums, bass + drums + vocals, bass + drums + vocals + other]
 }
 
 // ---------------------------------------------------------------------------
@@ -1932,7 +1981,6 @@ impl Widget for VjWaveScroll {
             let (beat_cols, phase) = lane.grid_columns().unwrap_or((0.0, 0.0));
             self.draw_lane.beat_cols = beat_cols as f32;
             self.draw_lane.beat_phase = phase as f32;
-            self.draw_lane.amp_scale = 1.6;
             self.draw_lane.active = if lane.playing { 1.0 } else { 0.55 };
             self.draw_lane.draw_abs(cx, lane_rect);
         }
@@ -2166,7 +2214,6 @@ impl Widget for VjWaveOverview {
         // No beat rulings at this scale — the strip is about shape.
         self.draw_lane.beat_cols = 0.0;
         self.draw_lane.beat_phase = 0.0;
-        self.draw_lane.amp_scale = 1.6;
         self.draw_lane.active = if self.active { 1.0 } else { 0.7 };
         self.draw_lane.color_vocals = stem_color(0);
         self.draw_lane.color_drums = stem_color(1);
@@ -2756,6 +2803,7 @@ pub fn format_pitch(pitch: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mixer::TrackPcm;
 
     fn grid(bpm: f64, first: f64, downbeat_phase: u32) -> TrackGrid {
         TrackGrid {
@@ -2964,5 +3012,191 @@ mod tests {
         let short = 300;
         assert_eq!(TILE_TEX_WIDTH.min(short), short);
         assert_eq!(short.div_ceil(short), 1);
+    }
+
+    // ---- the height law ----------------------------------------------------
+    //
+    // A column is as tall as the music is loud there, measured once against
+    // the whole track. Colour — bands, stems, knobs — divides that height
+    // up; nothing is allowed to set it.
+
+    /// One stem of the fixture: a steady tone, quiet for the first half of
+    /// the track and loud for the second, so the same audio appears at two
+    /// levels twenty decibels apart.
+    fn stem_tone(rate: u32, secs: f64, hz: f64, gain: f64, quiet_gain: f64) -> Vec<[i16; 2]> {
+        let len = (rate as f64 * secs) as usize;
+        let half = len / 2;
+        (0..len)
+            .map(|index| {
+                let time = index as f64 / rate as f64;
+                let level = if index < half { quiet_gain } else { 1.0 };
+                let value = gain * level * (2.0 * std::f64::consts::PI * hz * time).sin();
+                let sample = (value * 30_000.0) as i16;
+                [sample, sample]
+            })
+            .collect()
+    }
+
+    /// The four stems and the track they add up to: a quiet half at -20 dB
+    /// and a loud half, identical in content.
+    fn quiet_then_loud(rate: u32, secs: f64) -> (TrackPcm, [Vec<[i16; 2]>; 4]) {
+        let quiet = 0.1;
+        let stems = [
+            stem_tone(rate, secs, 900.0, 0.22, quiet), // vocals
+            stem_tone(rate, secs, 3_500.0, 0.30, quiet), // drums
+            stem_tone(rate, secs, 60.0, 0.40, quiet),  // bass
+            stem_tone(rate, secs, 220.0, 0.14, quiet), // other
+        ];
+        let len = stems[0].len();
+        let mut frames = vec![[0i16; 2]; len];
+        for index in 0..len {
+            let sum: i32 = stems.iter().map(|stem| stem[index][0] as i32).sum();
+            let sample = sum.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            frames[index] = [sample, sample];
+        }
+        (TrackPcm { frames, sample_rate: rate }, stems)
+    }
+
+    /// RMS of one stem over the frames one zoom column covers.
+    fn column_rms(stem: &[[i16; 2]], rate: u32, column: usize) -> f64 {
+        let frames_per_col = rate as f64 / ZOOM_COLS_PER_SEC;
+        let from = (column as f64 * frames_per_col) as usize;
+        let to = (((column + 1) as f64 * frames_per_col) as usize).min(stem.len());
+        if from >= to {
+            return 0.0;
+        }
+        let sum: f64 = stem[from..to]
+            .iter()
+            .map(|frame| {
+                let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32_768.0;
+                mono * mono
+            })
+            .sum();
+        (sum / (to - from) as f64).sqrt()
+    }
+
+    /// The tiles of the fixture, plus a column well inside the quiet half
+    /// and one well inside the loud half.
+    fn fixture() -> (WaveTiles, [Vec<[i16; 2]>; 4], u32, usize, usize) {
+        let rate = 44_100u32;
+        let secs = 20.0;
+        let (pcm, stems) = quiet_then_loud(rate, secs);
+        let analysis = crate::wave_analysis::analyze(&pcm);
+        let cols = analysis.tiles.zoom.len();
+        assert!(cols > 1_000, "{cols} columns");
+        // A quarter and three quarters in: the middle of each half.
+        (analysis.tiles, stems, rate, cols / 4, cols * 3 / 4)
+    }
+
+    #[test]
+    fn a_quiet_intro_draws_short_and_the_drop_draws_tall() {
+        let (tiles, _stems, _rate, quiet, loud) = fixture();
+        let quiet_h = column_height(tiles.zoom[quiet]);
+        let loud_h = column_height(tiles.zoom[loud]);
+        assert!(loud_h > 0.6, "the drop should nearly fill the lane, got {loud_h}");
+        assert!(
+            quiet_h < 0.3 * loud_h,
+            "a -20 dB intro drew {quiet_h} against a drop of {loud_h}"
+        );
+        // And nothing draws past the track's own reference level.
+        for column in &tiles.zoom {
+            assert!(column_height(*column) <= WAVE_ENVELOPE + 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_stems_partition_the_column_and_never_scale_it() {
+        let (tiles, stems, rate, quiet, loud) = fixture();
+        for column in [quiet, loud] {
+            let rms = [
+                column_rms(&stems[0], rate, column),
+                column_rms(&stems[1], rate, column),
+                column_rms(&stems[2], rate, column),
+                column_rms(&stems[3], rate, column),
+            ];
+            let shares = stem_column_shares(rms);
+            let tile = tiles.zoom[column];
+            let stack = stem_stack(tile, shares, [1.0; 4]);
+            // Every knob up: the coloured column is EXACTLY as tall as the
+            // grey one. This is the seam.
+            let height = column_height(tile);
+            assert!(
+                (stack[3] - height).abs() <= 1e-5,
+                "column {column}: coloured {} vs grey {height}",
+                stack[3]
+            );
+            // The layers stack outward, none of them inverted.
+            assert!(stack[0] <= stack[1] && stack[1] <= stack[2] && stack[2] <= stack[3]);
+            // Each stem is present in proportion to what it contributes:
+            // the bass tone is the loudest lane, so it owns the core.
+            assert!(stack[0] > 0.2 * stack[3], "bass core {} of {}", stack[0], stack[3]);
+            // Killing a stem takes away its share and nothing else.
+            let killed = stem_stack(tile, shares, [1.0, 1.0, 0.0, 1.0]);
+            let bass = stack[0];
+            assert!(
+                (killed[3] - (stack[3] - bass)).abs() <= 1e-5,
+                "killing the bass changed the rest: {} vs {}",
+                killed[3],
+                stack[3] - bass
+            );
+            // And no knob can make a column taller than its level.
+            assert!(stack[3] <= column_height(tile) + 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_seam_holds_and_the_coloured_half_keeps_its_dynamics() {
+        let (tiles, stems, rate, quiet, loud) = fixture();
+        // A lane is about 120 device pixels of half-height; a pixel is
+        // therefore this much of the envelope.
+        let pixel = 1.0 / 120.0;
+        let mut heights = Vec::new();
+        for column in [quiet, loud] {
+            let rms = [
+                column_rms(&stems[0], rate, column),
+                column_rms(&stems[1], rate, column),
+                column_rms(&stems[2], rate, column),
+                column_rms(&stems[3], rate, column),
+            ];
+            let tile = tiles.zoom[column];
+            let coloured = stem_stack(tile, stem_column_shares(rms), [1.0; 4])[3];
+            let grey = column_height(tile);
+            assert!(
+                (coloured - grey).abs() <= pixel,
+                "seam jumps by {} at column {column}",
+                (coloured - grey).abs()
+            );
+            heights.push(coloured);
+        }
+        // The separated picture has the same dynamics as the raw one: the
+        // quiet half is short there too, which is the bug this guards.
+        assert!(
+            heights[0] < 0.3 * heights[1],
+            "separated intro {} against separated drop {}",
+            heights[0],
+            heights[1]
+        );
+    }
+
+    #[test]
+    fn a_loud_stem_cannot_lift_a_quiet_column() {
+        // The old failure: four stems each normalized to their own scale,
+        // stacked, and clamped — every busy column filled the lane. A
+        // column that is a quarter of the track's level draws a quarter of
+        // the height however loud its four stems are relative to each other.
+        let quiet_tile = [80u8, 90, 70, 64];
+        let full_stems = stem_column_shares([0.30, 0.30, 0.30, 0.30]);
+        assert_eq!(full_stems, [255; 4], "an even column is an even split");
+        let stack = stem_stack(quiet_tile, full_stems, [1.0; 4]);
+        let height = column_height(quiet_tile);
+        assert!((stack[3] - height).abs() <= 1e-5, "{} vs {height}", stack[3]);
+        assert!(height < 0.26, "a quarter-level column drew {height}");
+        // Each of the four owns a quarter of it.
+        assert!((stack[0] - height * 0.25).abs() <= 1e-5);
+        // Silence that has been separated stays silent rather than falling
+        // back to the grey colouring.
+        assert_eq!(stem_column_shares([0.0; 4]), [1; 4]);
+        let silent = stem_stack([0, 0, 0, 0], [1; 4], [1.0; 4]);
+        assert_eq!(silent, [0.0; 4]);
     }
 }

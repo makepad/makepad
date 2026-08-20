@@ -7518,6 +7518,12 @@ impl App {
     /// colour. Recomputed from the published table rather than folded per
     /// chunk, so it does not matter whether separation or analysis lands
     /// first — the colour is always whatever has actually been separated.
+    ///
+    /// Colour, and only colour: what goes in the texture is each lane's
+    /// SHARE of the column, never its level. A column's height comes from
+    /// the track-wide level channel of the analysis tiles, so a span that
+    /// has just been separated is exactly as tall as it was a moment
+    /// earlier in grey, and no span is ever measured against itself.
     fn rebuild_stem_colour(&mut self, deck: DeckId) -> bool {
         let index = deck.index();
         let Some(analysis) = self.deck_analysis[index].as_ref() else { return false };
@@ -7541,7 +7547,7 @@ impl App {
             let offset = from - chunk * stems.chunk_frames;
             let span = to - from;
             let mut any = false;
-            let mut out = [0u8; 4];
+            let mut rms = [0.0f64; 4];
             for (lane, blocks) in stems.lanes.iter().enumerate() {
                 let Some(Some(block)) = blocks.get(chunk) else { continue };
                 let end = (offset + span).min(block.len());
@@ -7554,14 +7560,10 @@ impl App {
                     let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0;
                     sum += mono * mono;
                 }
-                let rms = (sum / (end - offset) as f64).sqrt();
-                // The same perceptual curve the band tiles use, so the two
-                // colourings carry the same weight on screen.
-                let value = (rms * 4.0).clamp(0.0, 1.0).powf(0.62);
-                out[lane] = (value * 255.0) as u8;
+                rms[lane] = (sum / (end - offset) as f64).sqrt();
             }
             if any {
-                tiles[column] = out;
+                tiles[column] = crate::music_view::stem_column_shares(rms);
             }
         }
         let changed = self.deck_stem_tiles[index] != tiles;

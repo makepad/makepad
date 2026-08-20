@@ -5,9 +5,15 @@
 //!
 //! - a **beat grid**: global BPM, beat period, the position of the first
 //!   beat and which beat of the bar is the downbeat,
-//! - **waveform tiles**: a three-band energy envelope at
-//!   [`ZOOM_COLS_PER_SEC`] columns per second for the scrolling view, plus a
-//!   coarse whole-track strip for the overview.
+//! - **waveform tiles**: a three-band energy envelope plus an absolute
+//!   LEVEL at [`ZOOM_COLS_PER_SEC`] columns per second for the scrolling
+//!   view, plus a coarse whole-track strip for the overview.
+//!
+//! The level channel is the waveform's one law: how tall a column draws is
+//! how loud that moment of the track is, measured once against the whole
+//! track and never against a span, a window, or a stem. Everything else the
+//! surface knows about a column — its bands, its separated stems — only
+//! decides what COLOUR that height is drawn in.
 //!
 //! Both are cached beside the media cache, keyed by the blob digest, so the
 //! second load of a track is a file read.
@@ -42,11 +48,20 @@ const MAX_BPM: f64 = 180.0;
 /// Band split for the coloured waveform (and for the onset lanes).
 const BAND_LOW_HZ: f32 = 200.0;
 const BAND_HIGH_HZ: f32 = 2_000.0;
+/// Display curve on every normalized level in the tiles: the eye reads
+/// energy, not amplitude. One constant, so the bands, the level and the
+/// stem colours all sit on the same scale.
+pub const WAVE_CURVE: f32 = 0.62;
+/// The percentile a track is normalized against, rather than its maximum,
+/// so a single clipped transient cannot flatten the whole picture.
+const REFERENCE_PERCENTILE: f64 = 0.995;
 /// Cache format magic + version. Version 2 is the least-squares beat grid:
 /// version 1 sidecars carry a grid that drifts off the transients, so they
-/// are re-analysed rather than reused.
+/// are re-analysed rather than reused. Version 3 adds the level channel to
+/// every zoom column; version 2 sidecars have no absolute loudness in them
+/// at all, so they are re-analysed too.
 const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -123,21 +138,25 @@ impl TrackGrid {
     }
 }
 
-/// Three-band energy per waveform column, 0..=255.
+/// Band energy and absolute level per waveform column, 0..=255.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WaveTiles {
-    /// `[low, mid, high]` interleaved per column, `ZOOM_COLS_PER_SEC` per second.
-    pub zoom: Vec<[u8; 3]>,
+    /// `[low, mid, high, level]` per column, `ZOOM_COLS_PER_SEC` per second.
+    ///
+    /// The three bands say what the column is MADE of. `level` says how
+    /// loud it is against the whole track, and it is the only thing that
+    /// sets a column's height on screen.
+    pub zoom: Vec<[u8; 4]>,
     /// Whole track in [`OVERVIEW_COLS`] columns: `[peak, loudness]`.
     pub overview: Vec<[u8; 2]>,
 }
 
 impl WaveTiles {
-    pub fn zoom_at(&self, column: isize) -> [u8; 3] {
+    pub fn zoom_at(&self, column: isize) -> [u8; 4] {
         if column < 0 {
-            return [0; 3];
+            return [0; 4];
         }
-        self.zoom.get(column as usize).copied().unwrap_or([0; 3])
+        self.zoom.get(column as usize).copied().unwrap_or([0; 4])
     }
 }
 
@@ -628,45 +647,73 @@ fn refine_grid(onset: &[f32], seed_period: f64, seed_offset: f64) -> Option<(f64
     Some((period, offset))
 }
 
+/// The scale that maps a track's own loudness onto the display: one over a
+/// high percentile of `values`, rather than over their maximum, so a single
+/// clipped transient cannot flatten the whole picture. Zero for silence.
+///
+/// This is the ONLY normalization the waveform is allowed. It is taken over
+/// the whole track, so a column's height means the same thing wherever it
+/// sits and whatever else has been computed by the time it is drawn.
+fn track_scale(values: impl Iterator<Item = f32>) -> f32 {
+    let mut values: Vec<f32> = values.collect();
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let index =
+        ((values.len() as f64 * REFERENCE_PERCENTILE) as usize).min(values.len().saturating_sub(1));
+    let reference = values.get(index).copied().unwrap_or(0.0);
+    if reference > 1e-6 {
+        1.0 / reference
+    } else {
+        0.0
+    }
+}
+
+/// How loud one hop is, in linear amplitude: the peak keeps the transients,
+/// the broadband RMS keeps the body. Both are linear in level, so halving
+/// the audio halves this — which is what makes a quiet intro draw short
+/// beside a loud drop instead of being lifted to meet it.
+fn hop_level(peak: f32, rms: [f32; 3]) -> f32 {
+    let broadband = (rms[0] * rms[0] + rms[1] * rms[1] + rms[2] * rms[2]).sqrt();
+    0.5 * peak + 0.5 * broadband
+}
+
 /// Build the display tiles from the per-hop envelopes.
 fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
     // Normalize each band by a high percentile so quiet tracks still fill
     // the display, without one clipped transient flattening everything.
+    // These are the COLOUR of a column, never its height.
     let mut band_scale = [1.0f32; 3];
-    for band in 0..3 {
-        let mut values: Vec<f32> = envelopes.band_rms.iter().map(|r| r[band]).collect();
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let index = ((values.len() as f64 * 0.995) as usize).min(values.len().saturating_sub(1));
-        let reference = values.get(index).copied().unwrap_or(0.0);
-        band_scale[band] = if reference > 1e-6 { 1.0 / reference } else { 0.0 };
+    for (band, scale) in band_scale.iter_mut().enumerate() {
+        *scale = track_scale(envelopes.band_rms.iter().map(|rms| rms[band]));
     }
+    // The height of a column is its level against the whole track — one
+    // scale for the entire file, computed here, applied nowhere else.
+    let levels: Vec<f32> = envelopes
+        .peak
+        .iter()
+        .zip(&envelopes.band_rms)
+        .map(|(peak, rms)| hop_level(*peak, *rms))
+        .collect();
+    let level_scale = track_scale(levels.iter().copied());
     let zoom = envelopes
         .band_rms
         .iter()
-        .map(|rms| {
-            let mut out = [0u8; 3];
+        .zip(&levels)
+        .map(|(rms, level)| {
+            let mut out = [0u8; 4];
             for band in 0..3 {
                 // A mild curve: the eye reads energy, not amplitude.
-                let value = (rms[band] * band_scale[band]).clamp(0.0, 1.0).powf(0.62);
+                let value = (rms[band] * band_scale[band]).clamp(0.0, 1.0).powf(WAVE_CURVE);
                 out[band] = (value * 255.0) as u8;
             }
+            let value = (level * level_scale).clamp(0.0, 1.0).powf(WAVE_CURVE);
+            out[3] = (value * 255.0) as u8;
             out
         })
         .collect();
 
     let mut overview = vec![[0u8; 2]; OVERVIEW_COLS];
     let hops = envelopes.peak.len().max(1);
-    let peak_scale = {
-        let mut values = envelopes.peak.clone();
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let index = ((values.len() as f64 * 0.995) as usize).min(values.len().saturating_sub(1));
-        let reference = values.get(index).copied().unwrap_or(0.0);
-        if reference > 1e-6 {
-            1.0 / reference
-        } else {
-            0.0
-        }
-    };
+    let peak_scale = track_scale(envelopes.peak.iter().copied());
     for column in 0..OVERVIEW_COLS {
         let start = column * hops / OVERVIEW_COLS;
         let end = (((column + 1) * hops) / OVERVIEW_COLS).max(start + 1).min(hops);
@@ -679,7 +726,7 @@ fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
         }
         let mean = (energy / (end - start).max(1) as f64) as f32;
         overview[column] = [
-            ((peak * peak_scale).clamp(0.0, 1.0).powf(0.62) * 255.0) as u8,
+            ((peak * peak_scale).clamp(0.0, 1.0).powf(WAVE_CURVE) * 255.0) as u8,
             // Loudness for the hot/cold colouring, on a dB-ish curve.
             (((1.0 + 40.0 * mean).ln() / (41.0f32).ln()).clamp(0.0, 1.0) * 255.0) as u8,
         ];
@@ -787,7 +834,7 @@ fn cache_path(dir: &Path, key: &AnalysisKey) -> PathBuf {
 
 pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        64 + analysis.tiles.zoom.len() * 3 + analysis.tiles.overview.len() * 2,
+        64 + analysis.tiles.zoom.len() * 4 + analysis.tiles.overview.len() * 2,
     );
     out.extend_from_slice(CACHE_MAGIC);
     out.extend_from_slice(&CACHE_VERSION.to_le_bytes());
@@ -839,8 +886,8 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
     }
     let mut zoom = Vec::with_capacity(zoom_len);
     for _ in 0..zoom_len {
-        let column = take(3)?;
-        zoom.push([column[0], column[1], column[2]]);
+        let column = take(4)?;
+        zoom.push([column[0], column[1], column[2], column[3]]);
     }
     let overview_len = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
     if overview_len > 1_000_000 {
