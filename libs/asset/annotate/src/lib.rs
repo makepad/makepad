@@ -1,0 +1,49 @@
+//! Asset annotation pass: turntable sheet -> vision model -> queryable store
+//! metadata.
+//!
+//! # What the pass owns
+//!
+//! Exactly two things on an asset's annotation record:
+//!
+//! * `description` — replaced with one dense construction line (target ≤ 20
+//!   tokens) so that a 30-row SQL result stays a few hundred tokens in the
+//!   calling chat model's 8k context.
+//! * tags prefixed [`VLM_PREFIX`] — the structured facets a level builder
+//!   filters on.
+//!
+//! Everything else on the record (title, kind, categories, creator,
+//! generator/backend/model, prompt, provenance, visibility, and every tag
+//! without the prefix) is carried through untouched. The store's annotation
+//! route is a whole-record PUT, so "carried through" means the pass reads the
+//! current record and writes it back with only its own fields recomputed.
+//!
+//! # Replace semantics
+//!
+//! [`plan_upload`] recomputes the owned fields FROM SCRATCH on every run: the
+//! description is overwritten and the tag set is rebuilt as
+//! `(previous tags without the prefix) + (this run's facets)`. No previous
+//! value of an owned field can survive a re-run, which is what makes the
+//! eventual "annotate with 3.5 now, hard-replace with 3.8 later" a plain
+//! re-run rather than a migration. There is deliberately no compatibility
+//! shim and no multi-version coexistence logic — the only versioning is the
+//! `vlm-v<N>` tag, used to skip already-current assets and to invalidate
+//! everything when the prompt or the model changes.
+
+pub mod parse;
+pub mod plan;
+pub mod sheet;
+
+pub use parse::{parse_record, Record};
+pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload, VLM_PREFIX};
+
+/// Bump when the prompt or the output contract changes: every asset tagged
+/// with an older version is re-annotated and its owned fields replaced.
+pub const ANNOTATOR_VERSION: u32 = 1;
+
+/// The question put to the vision model about one turntable sheet.
+///
+/// This prompt is the iterated artifact of the pass. It asks for level
+/// construction facts (what the piece is in kit terms, how it connects, which
+/// way it faces) rather than a caption, and it fixes a strict key/value reply
+/// shape because a 9B model follows that far more reliably than JSON.
+pub const PROMPT: &str = include_str!("prompt.txt");
