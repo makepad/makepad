@@ -627,6 +627,21 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "world.tune",
+            api_name: "world_tune",
+            description: "Adjust a WORLD knob on the running level in ONE cheap call — \
+                          nothing else changes, nothing resets. Knobs: time (0-24 local \
+                          hours; 0 midnight, 12 noon, 22 night). THE way to do 'make it \
+                          night / morning / sunset'. Other tuning still uses the source \
+                          path.",
+            args_doc: r#"{"time": 22}"#,
+            parameters: schema_object(
+                vec![("time", schema_number("local hour 0-24"))],
+                &[],
+                Some(false),
+            ),
+        },
+        ToolDef {
             name: "world.get_source",
             api_name: "world_get_source",
             description: "Read the running game's current splash source. Call this before \
@@ -785,6 +800,7 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_set_source" => Some("world.set_source"),
         "world_set_player_model" => Some("world.set_player_model"),
         "world_spawn" => Some("world.spawn"),
+        "world_tune" => Some("world.tune"),
         _ => None,
     }
 }
@@ -1180,6 +1196,11 @@ pub enum ContentToolCall {
         form: Option<SpawnForm>,
         tag: Option<String>,
     },
+    /// Adjust a WORLD knob on the running level in one cheap call (§4.5
+    /// tune slice; sandbox sessions only). World knobs are idempotent
+    /// splash setters, so the tune rides the addon lane — nothing resets.
+    /// Currently: `time` (0-24 local hours).
+    WorldTune { time: Option<f64> },
 }
 
 /// The spawn form override of [`ContentToolCall::WorldSpawn`]. Absent, the
@@ -1282,6 +1303,7 @@ impl ContentToolCall {
             ContentToolCall::WorldSetSource { .. } => "world.set_source",
             ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
             ContentToolCall::WorldSpawn { .. } => "world.spawn",
+            ContentToolCall::WorldTune { .. } => "world.tune",
         }
     }
 
@@ -1604,6 +1626,27 @@ impl ContentToolCall {
                 let model = need_str(args, "model", MAX_MODEL_REF_CHARS)?;
                 check_model_ref(&model)?;
                 Ok(ContentToolCall::WorldSetPlayerModel { model })
+            }
+            "world.tune" => {
+                check_known(args, &["time"], "world.tune argument")?;
+                let time = match args.get("time") {
+                    None => None,
+                    Some(v) => {
+                        let t = match v {
+                            Value::F64(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => return Err("time must be a number".to_string()),
+                        };
+                        if !(0.0..=24.0).contains(&t) {
+                            return Err("time must be 0..=24 local hours".to_string());
+                        }
+                        Some(t)
+                    }
+                };
+                if time.is_none() {
+                    return Err("world.tune needs at least one knob (time)".to_string());
+                }
+                Ok(ContentToolCall::WorldTune { time })
             }
             "world.spawn" => {
                 check_known(args, &["model", "pos", "form", "tag"], "world.spawn argument")?;
@@ -2231,6 +2274,13 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         }
         ContentToolCall::WorldSetPlayerModel { model } => {
             json::obj(vec![("model", json::s(model.clone()))])
+        }
+        ContentToolCall::WorldTune { time } => {
+            let mut pairs = Vec::new();
+            if let Some(t) = time {
+                pairs.push(("time", Value::F64(*t)));
+            }
+            json::obj(pairs)
         }
         ContentToolCall::WorldSpawn { model, pos, form, tag } => {
             let mut pairs = vec![("model", json::s(model.clone()))];

@@ -895,6 +895,7 @@ impl ToolExecutor for SessionTools<'_> {
                     | ContentToolCall::WorldSetSource { .. }
                     | ContentToolCall::WorldSetPlayerModel { .. }
                     | ContentToolCall::WorldSpawn { .. }
+                    | ContentToolCall::WorldTune { .. }
             )
     }
 
