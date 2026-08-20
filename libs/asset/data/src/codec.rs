@@ -30,7 +30,12 @@ pub(crate) const MAGIC: [u8; 4] = *b"MPC1";
 /// v3: `Rights` becomes the complete rights record — exact license identity
 /// and revision, pinned terms digest/URL, upstream source and archive
 /// digest, and the source-determined redistribution/derivative policy.
-pub const CONTENT_SCHEMA_VERSION: u16 = 3;
+/// v4: a thumbnail may declare what its regions ARE (`ThumbnailMeta::views`)
+/// — the FFT and wave halves of an audio composite, the packed cell layout
+/// of a sprite sheet — so consumers read the layout instead of measuring
+/// pixels and guessing. Appended after the five fields a thumbnail has always
+/// carried, which stay in place, at their width, in their order.
+pub const CONTENT_SCHEMA_VERSION: u16 = 4;
 
 /// Document kind tags, so one manifest kind can never be decoded as another.
 pub(crate) mod dockind {

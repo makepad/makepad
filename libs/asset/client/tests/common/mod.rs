@@ -81,6 +81,7 @@ pub fn prop_manifest(
             width: 512,
             height: 512,
             byte_len: thumb.len() as u64,
+            views: Vec::new(),
         }),
         metrics: Metrics {
             total_bytes: glb.len() as u64 + thumb.len() as u64,
@@ -224,6 +225,7 @@ impl FixtureStore {
                 width: 512,
                 height: 512,
                 byte_len: thumb.len() as u64,
+                views: Vec::new(),
             },
             catalog_snapshot: None,
             search_algorithm_version: 1,

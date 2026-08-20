@@ -63,6 +63,15 @@ pub const THUMBNAIL_MIN_DIM: u32 = 256;
 pub const THUMBNAIL_CANONICAL_DIM: u32 = 512;
 pub const THUMBNAIL_MAX_DIM: u32 = 4096;
 
+/// Regions one thumbnail may declare about itself. Eight is generous for
+/// everything the catalog bakes today — an audio composite declares two, a
+/// sprite sheet one — and keeps the added metadata a rounding error against
+/// `MAX_DOCUMENT_BYTES`.
+pub const MAX_THUMBNAIL_VIEWS: usize = 8;
+/// Ceiling for a declared cycling rate. Above this a "frame" is shorter than
+/// a display refresh, so it is a producer bug, not a fast animation.
+pub const MAX_THUMBNAIL_FPS: f32 = 240.0;
+
 /// Splash source admission ceiling for a game revision.
 pub const MAX_SPLASH_SOURCE_BYTES: u64 = 1024 * 1024;
 

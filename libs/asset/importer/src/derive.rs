@@ -350,7 +350,7 @@ pub struct DerivedFile {
 /// Everything a deriver produced for one source: the typed files, the
 /// mandatory thumbnail, MEASURED stats (zeros = unmeasured, never guessed),
 /// and the deriver's own identity for provenance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DerivedBundle {
     pub kind: AssetKind,
     pub files: Vec<DerivedFile>,
@@ -893,6 +893,7 @@ mod tests {
             media: ThumbnailMedia::Png,
             width: 512,
             height: 512,
+            views: Vec::new(),
         }
     }
 
@@ -1129,7 +1130,7 @@ mod tests {
                 .expect("blob bytes");
             assert_eq!(bytes, want.bytes, "blob bytes for {:?}", want.role);
         }
-        let thumb = manifest.thumbnail.expect("mandatory thumbnail");
+        let thumb = manifest.thumbnail.clone().expect("mandatory thumbnail");
         let want_thumb = scripted_thumbnail(&source);
         assert_eq!(thumb.blob, BlobId::hash_of(&want_thumb.bytes));
         assert_eq!((thumb.width, thumb.height), (512, 512));

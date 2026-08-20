@@ -1469,7 +1469,7 @@ impl<'a> Operations<'a> {
             kind: out_spec.kind,
             files: out.files.clone(),
             dependencies: vec![],
-            thumbnail: out.thumbnail,
+            thumbnail: out.thumbnail.clone(),
             metrics: out.metrics,
             coordinate_system: CoordinateSystem {
                 units_per_meter: 1.0,

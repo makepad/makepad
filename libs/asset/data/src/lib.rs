@@ -51,7 +51,8 @@ pub use activation::{
 pub use asset::{
     Anchor, AssetFile, AssetKind, AssetManifest, Axis, Capabilities, CoordinateSystem,
     DerivativePolicy, DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, PrefabClass,
-    Provenance, Redistribution, Rights, SpawnParam, SpawnRecipe, ThumbnailMedia, ThumbnailMeta,
+    Provenance, Redistribution, Rights, SpawnParam, SpawnRecipe, ThumbnailCells, ThumbnailLayout,
+    ThumbnailMedia, ThumbnailMeta, ThumbnailRect, ThumbnailView, ThumbnailViewKind,
 };
 pub use codec::CONTENT_SCHEMA_VERSION;
 pub use content_set::{AssetSlot, ContentSetManifest};

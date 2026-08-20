@@ -479,7 +479,7 @@ impl<'a> Variants<'a> {
                 recipe: row.recipe_digest,
                 inputs,
                 outputs: result.outputs.clone(),
-                thumbnail: result.thumbnail,
+                thumbnail: result.thumbnail.clone(),
                 metrics: result.metrics,
                 rights: base_manifest.rights.clone(),
             };
