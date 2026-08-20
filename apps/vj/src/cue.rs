@@ -167,6 +167,10 @@ pub struct CueEngine {
     /// paused, and free for the next cue to replace.
     held: Option<(SlotId, CueItem)>,
     last_error: Option<String>,
+    /// WHOSE load failed, so a grid can put the error back on the tile the
+    /// operator clicked instead of only in the status bar. Cleared by the
+    /// next click, exactly like `last_error`.
+    last_error_asset: Option<AssetId>,
     /// B over A: both slots stay open; new cues replace the overlay slot.
     overlay: bool,
     /// Where the operator's crossfader stands (0 = A, 1 = B). The next cue
@@ -250,6 +254,24 @@ impl CueEngine {
         self.last_error.as_deref()
     }
 
+    /// The asset whose load produced [`Self::last_error`], if the failure
+    /// belonged to one.
+    pub fn failed_asset(&self) -> Option<AssetId> {
+        self.last_error_asset
+    }
+
+    /// The cue being PREPARED right now — fetching, opening a decoder or
+    /// pre-rolling — and therefore the one a grid should mark as busy. An
+    /// armed cue is not busy: its media is ready and it is only waiting for
+    /// the beat it was scheduled on.
+    pub fn loading_asset(&self) -> Option<AssetId> {
+        let pending = self.pending.as_ref()?;
+        match pending.state {
+            PendingState::Armed { .. } => None,
+            _ => Some(pending.item.asset),
+        }
+    }
+
     pub fn armed(&self) -> Option<(CueGen, CueScheduleId, SlotId)> {
         let pending = self.pending.as_ref()?;
         let PendingState::Armed { slot, schedule } = pending.state else { return None };
@@ -321,6 +343,7 @@ impl CueEngine {
         let mut cmds = Vec::new();
         self.gen += 1;
         self.last_error = None;
+        self.last_error_asset = None;
         if self.overlay {
             let target = self.overlay_slot();
             if self.live.as_ref().is_some_and(|(slot, _)| *slot == target) {
@@ -384,8 +407,8 @@ impl CueEngine {
     /// The media fetch for `gen` failed; surfaces an honest error unless a
     /// newer click already superseded it.
     pub fn media_failed(&mut self, gen: CueGen, error: String) -> Vec<CueCmd> {
-        if self.pending.as_ref().is_some_and(|p| p.gen == gen) {
-            self.pending = None;
+        if let Some(pending) = self.pending.take_if(|p| p.gen == gen) {
+            self.last_error_asset = Some(pending.item.asset);
             self.last_error = Some(error);
         }
         Vec::new()
@@ -500,6 +523,7 @@ impl CueEngine {
             return Vec::new();
         }
         let pending = self.pending.take().expect("checked above");
+        self.last_error_asset = Some(pending.item.asset);
         if let PendingState::Armed { schedule, .. } = pending.state {
             self.last_error = Some(error);
             return vec![CueCmd::CancelArm { schedule }, self.close_slot(slot)];
