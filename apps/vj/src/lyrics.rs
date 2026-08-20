@@ -48,7 +48,12 @@ pub const WHISPER_RATE: f64 = 16_000.0;
 /// silences, and version 3 adds a start time per WORD so the karaoke fill
 /// hops word by word instead of crawling.
 const CACHE_FORMAT: &str = "vj-lyrics";
-pub const CACHE_VERSION: u32 = 3;
+/// …and version 4 replaces the envelope-guessed word times with measured
+/// ones on the whisper backend: cross-attention DTW during transcription,
+/// a teacher-forced second pass per segment, onset snapping and a sanity
+/// layer (`lyrics_align`), with per-line confidence populated from what the
+/// audit can actually defend.
+pub const CACHE_VERSION: u32 = 4;
 
 /// The whisper checkpoint this bake wants. MIT weights, so no license gate.
 const WHISPER_MODEL_FILE: &str = "ggml-large-v3-turbo.bin";
@@ -1648,6 +1653,8 @@ fn run_job(
         }
     };
     let envelope = VocalEnvelope::build(&mono, rate);
+    let analysis =
+        crate::lyrics_align::analyze_vocals(&mono, rate, crate::lyrics_align::OnsetPreset::Snapping);
     let samples = crate::stems::resample(&mono, rate, WHISPER_RATE);
     drop(mono);
 
@@ -1664,16 +1671,62 @@ fn run_job(
     let Some(backend) = backend.as_mut() else { return };
     status(out, &job, "lyrics: transcribing…");
     let language = std::env::var("VJ_LYRICS_LANG").unwrap_or_else(|_| "en".to_string());
-    let segments = match backend.transcribe(&samples, &language) {
-        Ok(segments) => segments,
-        Err(error) => {
-            status(out, &job, format!("lyrics: {error}"));
-            return;
+    // Whisper gets the measured path: cross-attention DTW word times,
+    // teacher-forced re-alignment per segment, onset snap, sanity layer
+    // (`lyrics_align`). The Apple backend has no attention to read and keeps
+    // the envelope pipeline.
+    let (onset, timed, lines) = match backend.bake_aligned(
+        &samples,
+        &analysis,
+        job.duration_secs,
+        &language,
+    ) {
+        Some((segments, timed_lines)) => {
+            let hops = word_hops_enabled();
+            let mut snapped = 0usize;
+            let mut total_ms = 0.0f64;
+            let mut max_ms = 0.0f64;
+            for segment in &segments {
+                for word in &segment.words {
+                    if let Some(delta) = word.snap {
+                        snapped += 1;
+                        total_ms += delta.abs() * 1000.0;
+                        max_ms = max_ms.max(delta.abs() * 1000.0);
+                    }
+                }
+            }
+            let onset = OnsetStats {
+                snapped,
+                mean_ms: if snapped > 0 { total_ms / snapped as f64 } else { 0.0 },
+                max_ms,
+            };
+            let timed = timed_lines.iter().filter(|line| line.confident).count();
+            let lines: Vec<LyricLine> = timed_lines
+                .into_iter()
+                .map(|line| LyricLine {
+                    start_secs: line.start,
+                    end_secs: line.end,
+                    text: line.text,
+                    words: line.words,
+                    confident: line.confident && hops,
+                })
+                .collect();
+            (onset, timed, lines)
+        }
+        None => {
+            let segments = match backend.transcribe(&samples, &language) {
+                Ok(segments) => segments,
+                Err(error) => {
+                    status(out, &job, format!("lyrics: {error}"));
+                    return;
+                }
+            };
+            let mut lines = segments_to_lines(&segments, Some(&envelope), job.duration_secs);
+            let onset = refine_onsets(&mut lines, &envelope);
+            let timed = time_words(&mut lines, &envelope);
+            (onset, timed, lines)
         }
     };
-    let mut lines = segments_to_lines(&segments, Some(&envelope), job.duration_secs);
-    let onset = refine_onsets(&mut lines, &envelope);
-    let timed = time_words(&mut lines, &envelope);
     let lyrics = TrackLyrics {
         backend: backend.name().to_string(),
         model: backend.model().to_string(),
@@ -1789,6 +1842,49 @@ impl Transcriber {
                 .next()
                 .unwrap_or(WHISPER_MODEL_FILE),
             Transcriber::NativeApple(_) => "SFSpeechRecognizer",
+        }
+    }
+
+    /// The measured word path, whisper only: transcription with
+    /// cross-attention capture, then the full `lyrics_align` refinement
+    /// (teacher-forced windows, onset snap, sanity layer). `None` on the
+    /// Apple backend, which has no attention to read — the caller falls
+    /// back to the envelope pipeline.
+    fn bake_aligned(
+        &mut self,
+        samples_16k: &[f32],
+        analysis: &crate::lyrics_align::VocalAnalysis,
+        duration_secs: f64,
+        language: &str,
+    ) -> Option<(
+        Vec<crate::lyrics_align::SegmentWords>,
+        Vec<crate::lyrics_align::TimedLine>,
+    )> {
+        match self {
+            Transcriber::Whisper { model, state, .. } => {
+                let mut params = makepad_voice::WhisperParams::default();
+                params.language = language.to_string();
+                params.no_timestamps = false;
+                params.single_segment = false;
+                params.temperature = 0.0;
+                params.suppress_blank = true;
+                let aligned = state.transcribe_aligned(model, samples_16k, &params);
+                let config = crate::lyrics_align::PipelineConfig {
+                    language: language.to_string(),
+                    force: true,
+                    snap: true,
+                };
+                Some(crate::lyrics_align::refine(
+                    state,
+                    model,
+                    samples_16k,
+                    aligned,
+                    analysis,
+                    duration_secs,
+                    &config,
+                ))
+            }
+            Transcriber::NativeApple(_) => None,
         }
     }
 

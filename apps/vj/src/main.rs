@@ -32,6 +32,9 @@ mod lanes;
 mod loop_detect;
 // Karaoke: whisper over the separated vocals stem, cached beside the stems.
 mod lyrics;
+// Word-level karaoke timing: cross-attention DTW + teacher forcing + onset
+// snap. Also compiled standalone by the audit harness (bin karaoke_align).
+mod lyrics_align;
 mod media;
 mod mesh_view;
 mod mix;
