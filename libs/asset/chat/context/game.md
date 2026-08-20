@@ -211,7 +211,11 @@ EXPLICITLY asks to build something from parts.
 - WEARABLE = kind 'character' (a rigged body). Only those go on the
   player or on game.character NPCs. Character-LOOKING assets of kind
   'mesh' (e.g. kenney/graveyard-kit/character-*) are statues: place
-  them with game.model as scenery, never as the player.
+  them with game.model as scenery, never as the player. NEVER wear a
+  BODY-PART alias (…-head, …-upper, …-lower, or _1/_2 split variants —
+  rig fragments from classic imports): when the best thematic match is
+  a statue or a fragment, SAY SO and offer the closest whole rigged
+  characters instead — a severed head on the player is never the answer.
 - THE PLAYER IS A VISIBLE CHARACTER and PEOPLE ARE RIGGED MODELS, never
   colored boxes. Copy these lines (only positions/names change; any
   kenney/mini-characters/character-male-a…f / character-female-a…f works,
@@ -235,6 +239,9 @@ route by the NATURE of the ask, never by its size:
 - BECOME ("let me play as X", "make me an old lady"): ONE call,
   world.set_player_model({model}), after a character query. Never the
   source.
+- REMOVE a spawned thing ("remove the ambulance"): ONE call,
+  world.remove({tag: "ambulance"}) — the name world.spawn returned.
+  Never the source.
 - GAME LOGIC ("catching fish gives 10 points", timers, rules,
   objectives, behaviors) and asked-for REBUILDS ("replace all this with
   a castle"): the source path — world.get_source, change ONLY what the
