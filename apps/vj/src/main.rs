@@ -51,7 +51,7 @@ use crate::beat_sync::{
     fit_loop_to_grid, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
 };
 use crate::catalog::{BrowseModel, CatCmd, CatGen, TileMedia, TileThumb};
-use crate::cue::{CueCmd, CueEngine, CueGen, CueItem, CueScheduleId, CueSidecar, SlotId};
+use crate::cue::{CueCmd, CueEngine, CueGen, CueItem, CueScheduleId, SlotId};
 use crate::loop_detect::{
     analyze_video_loop, FrameSignature, LoopDetection, LoopKind, MotionSummary,
 };
@@ -3166,10 +3166,6 @@ pub struct App {
     /// Last event-driven refresh per surface (see EVENT_REFRESH_COOLDOWN_S).
     #[rust]
     last_event_refresh: [Option<Instant>; 4],
-    /// Dev automation (`VJ_AUTO_PAD=<n>`, `VJ_CAPTURE=<png>`,
-    /// `VJ_CAPTURE_AT_S=<s>`): click one pad once tiles are in, then write
-    /// the main-window framebuffer — lets a scripted run exercise the cue
-    /// path without a pointer.
     /// A tile clicked before its manifest resolved; fires on arrival.
     #[rust]
     pending_click: Option<AssetId>,
@@ -3192,48 +3188,6 @@ pub struct App {
     tstats_last: f64,
     #[rust]
     tstats_prev: WidgetTreeStats,
-    #[rust]
-    auto_pad_done: bool,
-    /// Remaining pads of a `VJ_AUTO_PAD=<n>[,<n>…]` sequence, and the host
-    /// clock at which the next one may fire (`VJ_AUTO_PAD_GAP_S`, default
-    /// 6 s). A sequence exercises the SECOND click — cue into standby with
-    /// an armed fade — which one click can never reach.
-    #[rust]
-    auto_pad_queue: Vec<usize>,
-    #[rust]
-    auto_pad_next_at: Option<f64>,
-    /// `VJ_AUTO_FX` fired (once per run).
-    #[rust]
-    auto_fx_done: bool,
-    /// `VJ_MIX_MODE` fired (once per run), and whether its first numeric
-    /// field has been consumed as p1.
-    #[rust]
-    auto_mix_done: bool,
-    #[rust]
-    auto_mix_p1_set: bool,
-    /// `VJ_MIX_SWEEP` progress: next mode index and when it may fire.
-    #[rust]
-    mix_sweep_i: u8,
-    #[rust]
-    mix_sweep_at: Option<f64>,
-    /// `VJ_AUTO_PLAY=a|b|ab` fired (once per run): start the named decks so a
-    /// frame-time measurement has music under it without a pointer.
-    #[rust]
-    auto_play_done: bool,
-    /// `VJ_AUTO_SCRATCH=<hz>` — drive deck A's record from the host clock at
-    /// display cadence, so the scratch path can be measured without pointer
-    /// injection. `None` while idle.
-    #[rust]
-    auto_scratch_hz: Option<f64>,
-    #[rust]
-    auto_scratch_started: bool,
-    #[rust]
-    auto_filter_done: bool,
-    /// `VJ_BILLBOARD_FIXTURE` fired (once per run).
-    #[rust]
-    fixture_done: bool,
-    #[rust]
-    auto_capture_at: Option<f64>,
     #[rust]
     awaiting_preroll: [Option<CueGen>; 2],
     /// Settled program mix (0 = slot A on screen, 1 = slot B).
@@ -6099,253 +6053,6 @@ impl App {
         self.grids_dirty = true;
     }
 
-    /// `VJ_BILLBOARD_FIXTURE=<manifest.txt>:<sheet.png>` — cue a grouped
-    /// sprite actor straight off disk. The catalog publishes exactly this
-    /// pair (role `Source` text + role `Texture` sheet); the hook skips only
-    /// the two blob transfers, so OpenSlot → sheet split → BillboardSlot →
-    /// arm/fade → program output all run for real without a server.
-    fn pump_billboard_fixture(&mut self, cx: &mut Cx) {
-        if self.fixture_done {
-            return;
-        }
-        self.fixture_done = true;
-        let Ok(spec) = std::env::var("VJ_BILLBOARD_FIXTURE") else { return };
-        let Some((manifest, sheet)) = spec.rsplit_once(':') else {
-            log!("fixture: expected <manifest.txt>:<sheet.png>, got {spec:?}");
-            return;
-        };
-        let item = CueItem {
-            asset: AssetId::from_bytes([0xbb; 16]),
-            revision: AssetRevisionId::from_bytes([0xbb; 32]),
-            title: "fixture actor".to_string(),
-            media_blob: BlobId::from_bytes([0xbb; 32]),
-            media_len: 0,
-            media: MediaType::Png,
-            sidecar: Some(CueSidecar { blob: BlobId::from_bytes([0xcc; 32]), len: 0 }),
-            kind: Some(AssetKind::Billboard),
-        };
-        let Some(gen) = self.cue.click(item).into_iter().find_map(|cmd| match cmd {
-            CueCmd::FetchMedia { gen, .. } => Some(gen),
-            _ => None,
-        }) else {
-            return;
-        };
-        // Both files are already local: seed the pair the fetches would have.
-        let mut pair = CuePair::begin(gen);
-        pair.manifest_landed(gen, PathBuf::from(manifest));
-        let ready = pair.sheet_landed(gen, PathBuf::from(sheet));
-        self.cue_pair = Some(pair);
-        log!("fixture: cue {manifest} + {sheet}");
-        if let Some(path) = ready {
-            let cmds = self.cue.media_ready(gen, path);
-            self.run_cue_cmds(cx, cmds);
-        }
-        let at = std::env::var("VJ_CAPTURE_AT_S")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(6.0);
-        self.auto_capture_at = Some(cx.seconds_since_app_start() + at);
-    }
-
-    /// `VJ_AUTO_PAD` / `VJ_CAPTURE` dev automation (see the fields).
-    fn pump_automation(&mut self, cx: &mut Cx) {
-        self.pump_billboard_fixture(cx);
-        // VJ_AUTO_FILTER=<text>: type into the grid filter once (server search).
-        if !self.auto_filter_done {
-            self.auto_filter_done = true;
-            if let Ok(text) = std::env::var("VJ_AUTO_FILTER") {
-                log!("auto: filter {text:?}");
-                let cmds = self.model(Surface::Video).set_text(text.trim().to_string());
-                self.run_cat_cmds(Surface::Video, cmds);
-                return; // let the filtered page land before auto-clicking
-            }
-        }
-        // VJ_AUTO_FX=<index>[:p1[:p2]] — arm one effect once, so a capture
-        // can show it without a pointer (there is no click injection).
-        if !self.auto_fx_done {
-            self.auto_fx_done = true;
-            if let Ok(spec) = std::env::var("VJ_AUTO_FX") {
-                let mut parts = spec.split(':');
-                if let Some(kind) = parts.next().and_then(|v| v.parse::<u8>().ok()) {
-                    self.fx.kind = crate::fx::FxId(kind.min(crate::fx::FxId::COUNT - 1));
-                    if let Some(p1) = parts.next().and_then(|v| v.parse::<f32>().ok()) {
-                        self.fx.p1 = p1.clamp(0.0, 1.0);
-                    }
-                    if let Some(p2) = parts.next().and_then(|v| v.parse::<f32>().ok()) {
-                        self.fx.p2 = p2.clamp(0.0, 1.0);
-                    }
-                    log!("auto: fx {:?} p1 {:.2} p2 {:.2}", self.fx.kind, self.fx.p1, self.fx.p2);
-                    self.sync_fx_ui(cx);
-                }
-            }
-        }
-        // VJ_AUTO_PLAY=a|b|ab — press play once the deck actually holds PCM,
-        // so a frame-time run has music under it. VJ_AUTO_SCRATCH=<hz> then
-        // wobbles deck A's record from the host clock.
-        if !self.auto_play_done {
-            if let Ok(spec) = std::env::var("VJ_AUTO_PLAY") {
-                let spec = spec.to_ascii_lowercase();
-                let wanted: Vec<DeckId> = [('a', DeckId::A), ('b', DeckId::B)]
-                    .into_iter()
-                    .filter(|(ch, _)| spec.contains(*ch))
-                    .map(|(_, deck)| deck)
-                    .collect();
-                let ready = wanted
-                    .iter()
-                    .all(|deck| self.mixer.deck_snapshot(*deck).1 > 0.0);
-                if !wanted.is_empty() && ready {
-                    self.auto_play_done = true;
-                    for deck in wanted {
-                        log!("auto: play {deck:?}");
-                        let cmds = self.decks.play_pause(deck);
-                        self.run_deck_cmds(cx, cmds);
-                    }
-                    self.auto_scratch_hz = std::env::var("VJ_AUTO_SCRATCH")
-                        .ok()
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .filter(|hz| *hz > 0.0);
-                }
-            } else {
-                self.auto_play_done = true;
-            }
-        }
-        // VJ_MIX_MODE=<name|index>[:p1[:p2]][:A|B|AB] — arm one downstream
-        // mix mode once, so a capture can show it without a pointer.
-        if !self.auto_mix_done {
-            self.auto_mix_done = true;
-            if let Ok(spec) = std::env::var("VJ_MIX_MODE") {
-                let mut parts = spec.split(':');
-                if let Some(name) = parts.next() {
-                    let mode = crate::mix::MIX_INFO
-                        .iter()
-                        .position(|i| i.name.eq_ignore_ascii_case(name.replace('_', " ").trim()))
-                        .map(|i| MixId(i as u8))
-                        .or_else(|| name.parse::<u8>().ok().map(MixId::clamped));
-                    if let Some(mode) = mode {
-                        self.set_mix_mode(cx, mode);
-                        for part in parts {
-                            match part.to_ascii_uppercase().as_str() {
-                                "A" => self.mix.bus = FxBus::A,
-                                "B" => self.mix.bus = FxBus::B,
-                                "AB" | "BOTH" => self.mix.bus = FxBus::Both,
-                                value => {
-                                    if let Ok(v) = value.parse::<f32>() {
-                                        // First number is p1, second p2.
-                                        if self.auto_mix_p1_set {
-                                            self.mix.p2 = v.clamp(0.0, 1.0);
-                                        } else {
-                                            self.mix.p1 = v.clamp(0.0, 1.0);
-                                            self.auto_mix_p1_set = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        log!(
-                            "auto: mix {} p1 {:.2} p2 {:.2} bus {}",
-                            mode.info().name,
-                            self.mix.p1,
-                            self.mix.p2,
-                            self.mix.bus.label()
-                        );
-                        self.sync_mix_mode_ui(cx);
-                    }
-                }
-            }
-        }
-        if !self.auto_pad_done {
-            self.auto_pad_done = true;
-            self.auto_pad_queue = std::env::var("VJ_AUTO_PAD")
-                .ok()
-                .map(|spec| {
-                    spec.split(',').filter_map(|v| v.trim().parse::<usize>().ok()).collect()
-                })
-                .unwrap_or_default();
-        }
-        if !self.auto_pad_queue.is_empty() {
-            let now = cx.seconds_since_app_start();
-            let due = self.auto_pad_next_at.is_none_or(|at| now >= at);
-            let pad = self.auto_pad_queue[0];
-            // Wait for the tile's manifest: an unresolved tile ignores clicks.
-            let resolved = self
-                .video_pad_assets
-                .get(pad)
-                .copied()
-                .flatten()
-                .filter(|asset| {
-                    self.video_model
-                        .tile(asset)
-                        .is_some_and(|t| t.revision.is_some() && t.media.is_some())
-                });
-            if let (true, Some(asset)) = (due, resolved) {
-                self.auto_pad_queue.remove(0);
-                log!("auto: click pad {pad} -> {asset}");
-                self.video_tile_clicked(cx, asset);
-                let gap = std::env::var("VJ_AUTO_PAD_GAP_S")
-                    .ok()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(6.0);
-                self.auto_pad_next_at = Some(now + gap);
-                let at = std::env::var("VJ_CAPTURE_AT_S")
-                    .ok()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(6.0);
-                // The capture lands after the LAST click of the sequence.
-                self.auto_capture_at = Some(now + gap * self.auto_pad_queue.len() as f64 + at);
-            }
-        }
-        // VJ_MIX_SWEEP=<dir> — once both cues are up, step through every
-        // downstream mix mode, writing one frame per mode. One run, one
-        // capture set: the modes are only meaningful with A and B both on
-        // screen, which is expensive to set up over and over.
-        if let Ok(dir) = std::env::var("VJ_MIX_SWEEP") {
-            let now = cx.seconds_since_app_start();
-            let ready = self.cue.live().is_some() && self.cue.held().is_some();
-            if ready && self.auto_pad_queue.is_empty() {
-                let due = self.mix_sweep_at.is_none_or(|at| now >= at);
-                if due && self.mix_sweep_i < crate::mix::MixId::COUNT {
-                    let mode = MixId(self.mix_sweep_i);
-                    self.set_mix_mode(cx, mode);
-                    // Park the fader mid-travel: a wipe shows its pattern,
-                    // a dissolve shows both, a key shows the cut.
-                    self.set_visual_mix(cx, 0.5);
-                    let name = mode.info().name.to_ascii_lowercase().replace(' ', "_");
-                    let path = format!("{dir}/mix_{}_{name}.png", self.mix_sweep_i);
-                    log!("auto: mix sweep -> {path}");
-                    cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
-                    self.mix_sweep_i += 1;
-                    self.mix_sweep_at = Some(now + 1.5);
-                }
-            }
-        }
-        if let Some(at) = self.auto_capture_at {
-            if cx.seconds_since_app_start() >= at {
-                self.auto_capture_at = None;
-                if let Ok(path) = std::env::var("VJ_CAPTURE") {
-                    log!("auto: capture -> {path}");
-                    cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
-                }
-                // Diagnostic: what do the slot passes actually hold?
-                for slot in [SlotId::A, SlotId::B] {
-                    let tex = self.slot_mesh_source(cx, slot).map(|(t, _)| t)
-                        .or_else(|| self.slot_splat_source(cx, slot).map(|(t, _)| t));
-                    let Some(tex) = tex else {
-                        log!("auto: slot {slot:?} media={:?} no 3D source", self.slot_media[slot.index()]);
-                        continue;
-                    };
-                    match cx.debug_read_render_texture(&tex) {
-                        Some((w, h, px)) => {
-                            let lit = px.chunks_exact(4).filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8).count();
-                            let opaque = px.chunks_exact(4).filter(|p| p[3] > 8).count();
-                            log!("auto: slot {slot:?} pass {w}x{h} lit={lit} opaque={opaque} of {}", w * h);
-                        }
-                        None => log!("auto: slot {slot:?} texture not allocated"),
-                    }
-                }
-            }
-        }
-    }
-
     /// A connection-class failure was seen on the live session. One failure
     /// is noise (a slow poll); failures that keep coming for the grace
     /// period mean the server is gone — asset servers bind ephemeral ports,
@@ -8508,26 +8215,8 @@ impl App {
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
-        self.pump_auto_scratch(cx);
         self.push_wave_positions(cx);
         self.schedule_music_frame(cx);
-    }
-
-    /// `VJ_AUTO_SCRATCH=<hz>`: a synthetic hand on deck A's record, driven
-    /// from the host clock at display cadence. It exercises exactly the load
-    /// a real drag does (scratch DSP + a wave redraw per frame) without
-    /// pointer injection, which is what makes the scratch path measurable.
-    fn pump_auto_scratch(&mut self, cx: &mut Cx) {
-        let Some(hz) = self.auto_scratch_hz else { return };
-        if !self.auto_scratch_started {
-            self.auto_scratch_started = true;
-            let cmds = self.decks.scratch(DeckId::A, ScratchMotion::Grab);
-            self.run_deck_cmds(cx, cmds);
-        }
-        let phase = cx.seconds_since_app_start() * hz * std::f64::consts::TAU;
-        let rate = (phase.sin() * 2.0) as f32;
-        let cmds = self.decks.scratch(DeckId::A, ScratchMotion::Move { rate });
-        self.run_deck_cmds(cx, cmds);
     }
 
     /// Ask for another frame while anything on the surface is moving.
@@ -9573,7 +9262,6 @@ impl AppMain for App {
             }
         }
         if self.refresh_timer.is_event(event).is_some() {
-            self.pump_automation(cx);
             for slot in [SlotId::A, SlotId::B] {
                 if self.slot_sync_beats[slot.index()] > 0 {
                     self.apply_slot_beat_sync(slot);
