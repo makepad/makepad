@@ -42,9 +42,11 @@ const MAX_BPM: f64 = 180.0;
 /// Band split for the coloured waveform (and for the onset lanes).
 const BAND_LOW_HZ: f32 = 200.0;
 const BAND_HIGH_HZ: f32 = 2_000.0;
-/// Cache format magic + version.
+/// Cache format magic + version. Version 2 is the least-squares beat grid:
+/// version 1 sidecars carry a grid that drifts off the transients, so they
+/// are re-analysed rather than reused.
 const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -434,11 +436,21 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
             }
         }
     }
-    let (period, offset, comb) = refine_comb(onset, period);
+    let (period, hop_offset) = refine_comb(onset, period);
+    // The comb hands back a hop index; the beat is at that hop's centre.
+    let seed_offset = hop_offset + HOP_CENTRE;
+    let (period, offset) =
+        refine_grid(onset, period, seed_offset).unwrap_or((period, seed_offset));
+    // Keep the published anchor the first beat at or after zero, which is
+    // what `TrackGrid` promises and what the bar numbering counts from.
+    let offset = offset.rem_euclid(period);
     let bpm = 60.0 * hop_rate / period;
     if !(MIN_BPM..=MAX_BPM).contains(&bpm) {
         return TrackGrid::default();
     }
+    // `comb_energy` indexes the envelope by hop, so it wants the anchor back
+    // in hop coordinates.
+    let comb_offset = offset - HOP_CENTRE;
 
     // Downbeat: the bar phase whose beats carry the most low-band onset.
     let mut downbeat_phase = 0u32;
@@ -447,7 +459,7 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
         let energy = comb_energy(
             &envelopes.low_onset,
             period * 4.0,
-            offset + phase as f64 * period,
+            comb_offset + phase as f64 * period,
         );
         if energy > best_low {
             best_low = energy;
@@ -457,7 +469,8 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
 
     // Confidence: how much better the comb does than a random phase, times
     // the correlation strength.
-    let mean_comb = comb_energy(onset, period, offset + period * 0.5).max(1e-9);
+    let comb = comb_energy(onset, period, comb_offset);
+    let mean_comb = comb_energy(onset, period, comb_offset + period * 0.5).max(1e-9);
     let separation = ((comb / mean_comb - 1.0) / 1.5).clamp(0.0, 1.0);
     let confidence = ((0.6 * best_score as f64 + 0.4 * separation) * 1.2).clamp(0.0, 1.0) as f32;
 
@@ -471,8 +484,9 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
 }
 
 /// Joint period/phase refinement: sweep a narrow band of periods, and for
-/// each find the phase that maximizes the comb. Returns the winner.
-fn refine_comb(onset: &[f32], period: f64) -> (f64, f64, f64) {
+/// each find the phase that maximizes the comb. Returns the winner; the
+/// offset is a hop INDEX, not a sub-hop position.
+fn refine_comb(onset: &[f32], period: f64) -> (f64, f64) {
     let mut best = (period, 0.0f64, f64::NEG_INFINITY);
     let span = (period * 0.03).max(0.5);
     let steps = 48;
@@ -481,21 +495,137 @@ fn refine_comb(onset: &[f32], period: f64) -> (f64, f64, f64) {
         if candidate <= 1.0 {
             continue;
         }
-        // Phase sweep at tenth-of-a-hop resolution.
-        let phase_steps = (candidate * 10.0).round() as usize;
+        // Phase sweep at hop resolution: `comb_energy` rounds its sample
+        // points to a hop anyway, so a finer sweep does not see a finer
+        // phase — it only makes every member of a tie score identically and
+        // hands back the lowest of them, which is a systematic half-hop of
+        // grid that lands before the beat. `refine_grid` does the sub-hop
+        // work, on the onsets themselves.
+        let phase_steps = candidate.round().max(1.0) as usize;
         let mut local = (0.0f64, f64::NEG_INFINITY);
         for phase in 0..phase_steps {
-            let offset = phase as f64 * candidate / phase_steps as f64;
-            let energy = comb_energy(onset, candidate, offset);
+            let energy = comb_energy(onset, candidate, phase as f64);
             if energy > local.1 {
-                local = (offset, energy);
+                local = (phase as f64, energy);
             }
         }
         if local.1 > best.2 {
             best = (candidate, local.0, local.1);
         }
     }
-    best
+    (best.0, best.1)
+}
+
+/// A transient anywhere inside hop `i` raises that hop's energy over the one
+/// before it, so the flux peaks at `i` whatever the sub-hop position was:
+/// the unbiased estimate of when it happened is the CENTRE of hop `i`.
+///
+/// (Parabolic interpolation of the flux peak is the obvious alternative and
+/// it is worse — measured over a click sweep it pulls the estimate back
+/// toward the hop's leading edge by a stable 0.4 of a hop, i.e. it puts the
+/// whole grid 4 ms early.)
+const HOP_CENTRE: f64 = 0.5;
+
+/// Where the strongest onset within `radius` hops of `centre` is, in hops,
+/// with its strength. `None` when that stretch of the envelope is flat.
+fn onset_peak_near(onset: &[f32], centre: f64, radius: f64) -> Option<(f64, f64)> {
+    if onset.is_empty() {
+        return None;
+    }
+    let from = (centre - radius).round().max(0.0) as usize;
+    let to = ((centre + radius).round().max(0.0) as usize).min(onset.len() - 1);
+    if from > to {
+        return None;
+    }
+    let mut best = from;
+    for index in from..=to {
+        if onset[index] > onset[best] {
+            best = index;
+        }
+    }
+    if onset[best] <= 0.0 {
+        return None;
+    }
+    Some((best as f64 + HOP_CENTRE, onset[best] as f64))
+}
+
+/// Refit the grid against the onsets it predicts.
+///
+/// The comb pins the period to about a hundredth of a hop, because that is
+/// as fine as its 48-step sweep goes. A hundredth of a hop is a tenth of a
+/// millisecond per beat, which sounds harmless and is not: over the nine
+/// hundred beats of a seven-minute track it walks the grid the better part
+/// of a tenth of a second, so the rulings sit visibly between the drum hits
+/// everywhere except wherever the comb happened to be anchored. Fitting a
+/// straight line through the onset the grid lands nearest — every beat of
+/// the track, weighted by how strong that onset is, with the worst fifth
+/// dropped so a bar with no drum on it cannot drag the fit — pins the period
+/// to a part in a million and the phase to about a millisecond.
+///
+/// Returns `None` when the track has too few onsets to fit, or when the fit
+/// runs away from the period the comb found; the caller keeps the comb's.
+fn refine_grid(onset: &[f32], seed_period: f64, seed_offset: f64) -> Option<(f64, f64)> {
+    if seed_period <= 2.0 || onset.len() < 16 {
+        return None;
+    }
+    let mut period = seed_period;
+    let mut offset = seed_offset;
+    for pass in 0..4 {
+        // A wide first look (a fifth of a beat either way) so a seed that is
+        // a few hops out still finds its onsets; tight after that.
+        let radius = period * if pass == 0 { 0.22 } else { 0.10 };
+        let mut points: Vec<(f64, f64, f64)> = Vec::new();
+        let mut beat = 0i64;
+        loop {
+            let predicted = offset + beat as f64 * period;
+            if predicted - radius >= onset.len() as f64 {
+                break;
+            }
+            if predicted >= 0.0 {
+                if let Some((position, weight)) = onset_peak_near(onset, predicted, radius) {
+                    points.push((beat as f64, position, weight));
+                }
+            }
+            beat += 1;
+        }
+        if points.len() < 8 {
+            return None;
+        }
+        let mut residuals: Vec<f64> = points
+            .iter()
+            .map(|(beat, at, _)| (at - (offset + beat * period)).abs())
+            .collect();
+        residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let cut = residuals[(residuals.len() * 4) / 5].max(HOP_CENTRE);
+
+        let (mut sum_w, mut sum_b, mut sum_t, mut sum_bb, mut sum_bt) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for (beat, at, weight) in &points {
+            if (at - (offset + beat * period)).abs() > cut {
+                continue;
+            }
+            sum_w += weight;
+            sum_b += weight * beat;
+            sum_t += weight * at;
+            sum_bb += weight * beat * beat;
+            sum_bt += weight * beat * at;
+        }
+        let denominator = sum_w * sum_bb - sum_b * sum_b;
+        if denominator.abs() < 1e-9 {
+            return None;
+        }
+        let next_period = (sum_w * sum_bt - sum_b * sum_t) / denominator;
+        let next_offset = (sum_t - next_period * sum_b) / sum_w;
+        if !next_period.is_finite() || !next_offset.is_finite() || next_period <= 1.0 {
+            return None;
+        }
+        // The fit refines a tempo; it does not get to choose a different one.
+        if (next_period / seed_period - 1.0).abs() > 0.05 {
+            return None;
+        }
+        period = next_period;
+        offset = next_offset;
+    }
+    Some((period, offset))
 }
 
 /// Build the display tiles from the per-hop envelopes.
@@ -885,16 +1015,28 @@ pub fn list_local_audio(dir: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Exactly when a click fixture puts its hits down, in source seconds.
+    /// The grid the analysis publishes has to land on THESE, which is a
+    /// stronger statement than "the tempo is right".
+    fn click_onsets(rate: u32, bpm: f64, seconds: f64, first_beat: f64) -> Vec<f64> {
+        let len = (rate as f64 * seconds) as usize;
+        let period = 60.0 * rate as f64 / bpm;
+        let mut out = Vec::new();
+        let mut position = first_beat * rate as f64;
+        while (position as usize) < len {
+            out.push(position as usize as f64 / rate as f64);
+            position += period;
+        }
+        out
+    }
+
     /// A click track: one short percussive hit per beat, plus a stronger
     /// low-frequency hit on the downbeat of each bar.
     fn click_track(rate: u32, bpm: f64, seconds: f64, first_beat: f64) -> TrackPcm {
         let len = (rate as f64 * seconds) as usize;
-        let period = 60.0 * rate as f64 / bpm;
         let mut frames = vec![[0i16; 2]; len];
-        let mut beat = 0usize;
-        let mut position = first_beat * rate as f64;
-        while (position as usize) < len {
-            let start = position as usize;
+        for (beat, onset) in click_onsets(rate, bpm, seconds, first_beat).iter().enumerate() {
+            let start = (onset * rate as f64).round() as usize;
             let downbeat = beat % 4 == 0;
             let length = (rate as f64 * 0.05) as usize;
             for index in 0..length {
@@ -914,10 +1056,111 @@ mod tests {
                 let sample = (value * 24_000.0) as i16;
                 frames[start + index] = [sample, sample];
             }
-            beat += 1;
-            position += period;
         }
         TrackPcm { frames, sample_rate: rate }
+    }
+
+    /// A millisecond-resolution onset envelope, built independently of the
+    /// analysis (finer hop, longer look-back, no baseline subtraction) so it
+    /// can be used as ground truth for where the transients of a real
+    /// recording actually are.
+    fn reference_onsets(pcm: &TrackPcm) -> (Vec<f32>, f64) {
+        let rate = pcm.sample_rate.max(1) as f64;
+        let hop = (rate * 0.001).round().max(1.0) as usize;
+        let mut low = OnePole::new(BAND_LOW_HZ, rate as f32);
+        let mut mid = OnePole::new(BAND_HIGH_HZ, rate as f32);
+        let mut energy: Vec<[f32; 3]> = Vec::with_capacity(pcm.frames.len() / hop + 1);
+        let mut sums = [0.0f64; 3];
+        let mut in_hop = 0usize;
+        for frame in &pcm.frames {
+            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let low_band = low.process(mono);
+            let mid_band = mid.process(mono) - low_band;
+            let high_band = mono - low.state - mid_band;
+            for (sum, value) in sums.iter_mut().zip([low_band, mid_band, high_band]) {
+                *sum += (value as f64) * (value as f64);
+            }
+            in_hop += 1;
+            if in_hop == hop {
+                let inverse = 1.0 / in_hop as f64;
+                energy.push([
+                    (sums[0] * inverse).sqrt() as f32,
+                    (sums[1] * inverse).sqrt() as f32,
+                    (sums[2] * inverse).sqrt() as f32,
+                ]);
+                sums = [0.0; 3];
+                in_hop = 0;
+            }
+        }
+        // A ten-millisecond look-back, so a one-millisecond hop still sees a
+        // whole attack rather than the noise inside one.
+        let look = 10usize;
+        let mut onset = vec![0.0f32; energy.len()];
+        for index in look..energy.len() {
+            let mut sum = 0.0f32;
+            for band in 0..3 {
+                let now = (1.0 + 96.0 * energy[index][band]).ln();
+                let before = (1.0 + 96.0 * energy[index - look][band]).ln();
+                sum += [1.25f32, 1.0, 0.75][band] * (now - before).max(0.0);
+            }
+            onset[index] = sum;
+        }
+        (onset, hop as f64 / rate)
+    }
+
+    /// Median distance from every ruling of `grid` to the strongest
+    /// transient in the half-beat around it, and the spread of those
+    /// distances, in milliseconds. A grid that is merely at the right TEMPO
+    /// but drifting shows up as a large spread; one that is offset shows up
+    /// in the median.
+    fn grid_vs_transients(pcm: &TrackPcm, grid: &TrackGrid) -> (f64, f64, usize) {
+        let (onset, step) = reference_onsets(pcm);
+        let duration = pcm.frames.len() as f64 / pcm.sample_rate.max(1) as f64;
+        let mut offsets: Vec<f64> = Vec::new();
+        let mut beat = grid.beat_at(0.0).ceil() as i64;
+        while grid.secs_at_beat(beat as f64) < duration {
+            let at = grid.secs_at_beat(beat as f64);
+            let half = grid.beat_secs * 0.25;
+            let from = ((at - half) / step).round().max(0.0) as usize;
+            let to = ((at + half) / step).round().max(0.0) as usize;
+            beat += 1;
+            if to >= onset.len() {
+                break;
+            }
+            let mut best = from;
+            for index in from..=to {
+                if onset[index] > onset[best] {
+                    best = index;
+                }
+            }
+            if onset[best] > 0.0 {
+                offsets.push((best as f64 * step - at) * 1_000.0);
+            }
+        }
+        if offsets.is_empty() {
+            return (0.0, 0.0, 0);
+        }
+        let mut sorted = offsets.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        let mut spread: Vec<f64> = offsets.iter().map(|v| (v - median).abs()).collect();
+        spread.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        (median, spread[spread.len() / 2], offsets.len())
+    }
+
+    /// Worst and median distance from a click to the nearest ruling of
+    /// `grid`, in milliseconds.
+    fn grid_error_ms(grid: &TrackGrid, onsets: &[f64]) -> (f64, f64) {
+        let mut errors: Vec<f64> = onsets
+            .iter()
+            .map(|onset| {
+                let nearest = grid.secs_at_beat(grid.beat_at(*onset).round());
+                (nearest - onset).abs() * 1_000.0
+            })
+            .collect();
+        errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let worst = errors.last().copied().unwrap_or(0.0);
+        (worst, errors[errors.len() / 2])
     }
 
     #[test]
@@ -939,6 +1182,104 @@ mod tests {
             );
             assert!(analysis.grid.confidence > 0.4, "{:?}", analysis.grid);
         }
+    }
+
+    /// The grid has to land on the hits, not merely count them at the right
+    /// rate. A tempo-only check passes with the whole grid a hop early, and
+    /// passes just as happily when a period a thousandth of a hop out walks
+    /// the rulings off the transients over the length of a track — which is
+    /// what the beat lines did on real music. So: every click of a long
+    /// fixture, at several tempi, sample rates and starting phases.
+    #[test]
+    fn every_ruling_lands_on_its_click() {
+        for &(rate, bpm, first) in &[
+            (48_000u32, 120.0f64, 0.35f64),
+            (48_000, 120.0, 0.0),
+            (44_100, 128.0, 0.123),
+            (44_100, 128.0, 0.257),
+            (48_000, 96.0, 0.72),
+            (44_100, 140.0, 0.399),
+        ] {
+            let seconds = 180.0;
+            let pcm = click_track(rate, bpm, seconds, first);
+            let grid = analyze(&pcm).grid;
+            assert!(
+                (grid.bpm - bpm).abs() < 0.02,
+                "rate {rate} bpm {bpm} first {first}: measured {:.4}",
+                grid.bpm
+            );
+            let onsets = click_onsets(rate, bpm, seconds, first);
+            let (worst, median) = grid_error_ms(&grid, &onsets);
+            assert!(
+                worst < 10.0,
+                "rate {rate} bpm {bpm} first {first}: worst click is {worst:.1} ms off the \
+                 grid (median {median:.1} ms) over {} beats — {grid:?}",
+                onsets.len()
+            );
+        }
+    }
+
+    /// The same statement over real recordings, which is where the drift
+    /// actually showed. Opt in with a colon-separated list of tracks:
+    ///
+    /// ```text
+    /// VJ_AUDIO_SAMPLE=/a.mp3:/b.mp3 cargo test -p makepad-vj --release \
+    ///     -- --nocapture the_grid_sits_on_the_transients
+    /// ```
+    ///
+    /// When a track has separated `stems/drums.wav` beside it the drums are
+    /// the reference; otherwise the full mix is, which for four-to-the-floor
+    /// material is the same transients.
+    #[test]
+    fn the_grid_sits_on_the_transients_of_a_real_track() {
+        let Ok(sample) = std::env::var("VJ_AUDIO_SAMPLE") else {
+            eprintln!("VJ_AUDIO_SAMPLE not set; skipping the real-track beat grid");
+            return;
+        };
+        for path in sample.split(':').filter(|p| !p.is_empty()) {
+            let path = Path::new(path);
+            let pcm = decode_audio_file(path).expect("deck decode");
+            let grid = analyze(&pcm).grid;
+            let drums = path.parent().map(|dir| dir.join("stems/drums.wav"));
+            let reference = drums
+                .filter(|drums| drums.is_file())
+                .and_then(|drums| decode_audio_file(&drums).ok());
+            let against = reference.as_ref().unwrap_or(&pcm);
+            let (median, spread, beats) = grid_vs_transients(against, &grid);
+            eprintln!(
+                "{}: {:.2} BPM, first beat {:.4}s, {beats} beats vs {} — median {median:+.1} ms, \
+                 spread {spread:.1} ms",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                grid.bpm,
+                grid.first_beat_secs,
+                if reference.is_some() { "the drum stem" } else { "the mix" },
+            );
+            assert!(
+                median.abs() < 15.0,
+                "{}: the grid sits {median:+.1} ms off the transients",
+                path.display()
+            );
+        }
+    }
+
+    /// The same fixture cut in half must produce the same grid: a period
+    /// fitted to the first half and one fitted to the whole track only agree
+    /// when the period is right, so this is the drift check on its own.
+    #[test]
+    fn the_grid_does_not_drift_across_a_long_track() {
+        let short = analyze(&click_track(44_100, 128.0, 60.0, 0.41)).grid;
+        let long = analyze(&click_track(44_100, 128.0, 300.0, 0.41)).grid;
+        assert!(
+            (short.bpm - long.bpm).abs() < 0.01,
+            "sixty seconds says {:.4} BPM, five minutes says {:.4}",
+            short.bpm,
+            long.bpm
+        );
+        // Five minutes in, the two grids must still name the same beat.
+        let drift = (short.secs_at_beat(short.beat_at(280.0).round())
+            - long.secs_at_beat(long.beat_at(280.0).round()))
+        .abs();
+        assert!(drift < 0.010, "the two grids are {:.1} ms apart at 280 s", drift * 1e3);
     }
 
     #[test]
@@ -1055,3 +1396,4 @@ mod tests {
         assert_eq!(AnalysisKey::from_path(&path), AnalysisKey::from_path(&path));
     }
 }
+
