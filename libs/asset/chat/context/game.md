@@ -55,6 +55,7 @@ SPLASH RULES (each one breaks the game if ignored):
   fields; a level is usually 30-120 lines.
 - Store models place with `game.model("<canon_alias>", {pos, yaw, scale,
   collide, tag})` — yaw is RADIANS. Never guess an alias; query first.
+  `yaw` also orients cars, characters and movers.
 - `game.find_model("query", {count}) -> [ids]` searches the installed
   library at runtime and returns DISTINCT model ids (useful for variety),
   but exact aliases from your catalog query are better.
@@ -86,7 +87,7 @@ game.sky({})
 game.sun({time_of_day: 10.0})
 game.terrain({size: 160, cells: 65, smooth: true, seed: 3, amp: 6})
 
-let hero = game.character({pos: vec3(0, 6, 8), color: #4a7fd6, player: true, view: "third"})
+let hero = game.player_character({pos: vec3(0, 6, 8)})
 game.label(hero, "You")
 
 // A hut from store models (aliases came from a catalog query):
@@ -142,16 +143,24 @@ Query the annotated set like this (ONE query answers it):
   "kenney/car-kit/sedan"}) — also suv, taxi, van, police. Spawn at
   y 1.2 (the car drops onto its wheels). Two is plenty. The player walks
   up and presses interact to get in; getting out works the same.
-- THE PLAYER IS A VISIBLE CHARACTER (always, unless first-person is
-  asked): game.player_character({pos, model:
-  "kenney/mini-characters/character-male-a"}) — a rigged body with the
-  follow camera and car enter/exit built in. Rigged people are kind
-  'character' in the catalog (kenney/mini-characters/character-male-a…f,
-  character-female-a…f and more — query them).
-- PEOPLE make it alive: two or three villagers —
-  let v = game.character({pos, model: "kenney/mini-characters/character-female-b", tag: "villager"})
-  game.wander(v, {home: <their spot>, range: 12, speed: 2})
-- Finish with a label on the player and a short hint text.
+- THE PLAYER IS A VISIBLE CHARACTER and PEOPLE ARE RIGGED MODELS, never
+  colored boxes. Copy these lines (only positions/names change; any
+  kenney/mini-characters/character-male-a…f / character-female-a…f works,
+  rigs load on demand):
+    let hero = game.player_character({pos: vec3(0, 0, 4), model: "kenney/mini-characters/character-male-b"})
+    game.label(hero, "You")
+    let v1 = game.character({pos: vec3(-2, 0, 2), model: "kenney/mini-characters/character-female-b", tag: "villager"})
+    game.wander(v1, {home: vec3(-2, 0, 2), range: 8, speed: 2})
+    game.label(v1, "Mara")
+- Finish with a short hint text.
+
+EDITING A LIVE WORLD (any follow-up request after the first build):
+world.get_source, change ONLY what the request names, world.set_source
+with the full updated source. The engine preserves the player's position
+and save data across the reload — a small edit never resets the world.
+Example — "let me play as the zombie": query the catalog for the alias
+(canon_alias LIKE '%zombie%'), then change just the player line's
+model: "<that alias>" and set_source. One property, not a rewrite.
 
 WORKFLOW EXAMPLE for "make me a small village":
 1. world.get_source (see the running world)
