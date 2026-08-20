@@ -1036,8 +1036,10 @@ pub const GRID_GAP: f64 = 8.0;
 /// wide windows becomes margin instead of a ninth column.
 pub const GRID_MAX_COLS: usize = 8;
 
-/// Cadence of a cycling card. Slow enough to read a sprite, fast enough to
-/// show what the animation IS.
+/// Cadence of a cycling card when the picture did not say. Slow enough to
+/// read a sprite, fast enough to show what the animation IS — but only a
+/// fallback: a stamped sheet declares its own rate, and the actor's rate is
+/// the one the card should run at.
 pub const SHEET_FPS: f32 = 7.0;
 
 pub fn grid_columns(width: f64) -> usize {
@@ -1105,6 +1107,10 @@ pub struct CatalogGrid {
     /// the clock, so an animating wall costs a texture bind, not an upload.
     #[rust]
     anims: HashMap<String, Vec<Texture>>,
+    /// The rate each sheet DECLARED. A card runs at the rate its producer
+    /// wrote down, not at one number for the whole grid.
+    #[rust]
+    anim_fps: HashMap<String, f32>,
     /// Set while the last draw actually had a cycling card ON SCREEN — an
     /// off-screen sprite must not keep the app awake.
     #[rust]
@@ -1161,6 +1167,8 @@ impl CatalogGrid {
     /// server): the digests behind them no longer describe this catalog.
     pub fn clear_thumbnails(&mut self, cx: &mut Cx) {
         self.textures.clear();
+        self.anims.clear();
+        self.anim_fps.clear();
         self.wanted.clear();
         self.view.redraw(cx);
     }
@@ -1182,22 +1190,27 @@ impl CatalogGrid {
 
     /// A sheet-backed thumbnail: every cell, in order. The first frame is
     /// the still picture for anything that does not cycle.
-    pub fn install_anim(&mut self, cx: &mut Cx, asset: String, frames: Vec<Texture>) {
+    pub fn install_anim(&mut self, cx: &mut Cx, asset: String, frames: Vec<Texture>, fps: f32) {
         if let Some(first) = frames.first() {
             self.textures.insert(asset.clone(), first.clone());
         }
         if frames.len() > 1 {
+            if fps > 0.0 {
+                self.anim_fps.insert(asset.clone(), fps);
+            }
             self.anims.insert(asset, frames);
         }
         self.view.redraw(cx);
         cx.new_next_frame();
     }
 
-    /// Which frame a cycling card shows right now. One clock for the whole
-    /// grid, so a wall of sprites animates in step instead of shimmering.
+    /// Which frame a cycling card shows right now. One CLOCK for the whole
+    /// grid — so a wall of sprites animates in step instead of shimmering —
+    /// but each card's own declared rate against it.
     fn frame_at(&self, asset: &str, now: f64) -> Option<Texture> {
         let frames = self.anims.get(asset)?;
-        let index = ((now * SHEET_FPS as f64) as usize) % frames.len();
+        let fps = self.anim_fps.get(asset).copied().unwrap_or(SHEET_FPS);
+        let index = ((now * fps as f64) as usize) % frames.len();
         frames.get(index).cloned()
     }
 

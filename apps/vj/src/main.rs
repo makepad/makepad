@@ -30,6 +30,8 @@ mod fx;
 mod gen;
 mod lanes;
 mod loop_detect;
+// Karaoke: whisper over the separated vocals stem, cached beside the stems.
+mod lyrics;
 mod media;
 mod mesh_view;
 mod mix;
@@ -62,6 +64,9 @@ use crate::music_view::{
     format_bpm, format_duration, format_pitch, track_list_hits, OverviewEvent, TrackKey,
     TrackListHit, TrackRowEntry, VjTrackList, VjWaveOverview, VjWaveScroll, WaveEvent, WaveLane,
 };
+use crate::lyrics::{
+    KaraokeSchedule, KaraokeTiming, LyricsDispatch, LyricsJob, LyricsMsg, LyricsPool, TrackLyrics,
+};
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis};
 use crate::fx::FxState;
@@ -86,10 +91,13 @@ use makepad_asset_data::{
     MediaType,
 };
 use makepad_show_control::{
-    is_vj_reserved_midi, ColorControl, HazardArms, HazardControl, LightSample,
+    is_vj_reserved_midi, ColorControl, HazardArms, HazardControl,
     MoverControl, PerformanceConfig, PerformanceState, PowerCaps, PresetBank, RoomShow,
     SpatialLightSample, StrobeControl, VideoLightAnalyzer, ARTNET_BROADCAST_ADDR,
 };
+// Only exercised by `program_light_mix_uses_the_exact_picture_fraction_and_blackout_gate`.
+#[cfg(test)]
+use makepad_show_control::LightSample;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -566,6 +574,13 @@ script_mod! {
                                 default: 0.9
                             }
                             master_value := PanelLabel{width: 38 text: "90%"}
+                            // Karaoke subtitles on the program output: the
+                            // live deck's transcribed vocals, beat-quantized,
+                            // drawn over whatever the projector is showing.
+                            karaoke_enable := Toggle{
+                                text: "Karaoke"
+                                active: false
+                            }
                             open_output := ChromeButton{text: "OUTPUT"}
                             output_window_status := PanelLabel{width: 96 text: "output open"}
                         }
@@ -3278,6 +3293,25 @@ pub struct App {
     /// What the deck should say about its separation.
     #[rust]
     deck_stem_status: [String; 2],
+    /// Karaoke: whisper over the separated vocals, off-thread, once per track.
+    #[rust(LyricsPool::new())]
+    lyrics: LyricsPool,
+    /// One read probe and one bake per track digest, however many times a
+    /// deck is loaded or a separation run reports its coverage.
+    #[rust]
+    lyrics_dispatch: LyricsDispatch,
+    /// The transcript per deck, and the beat-quantized display schedule built
+    /// from it plus that deck's grid. The schedule is rebuilt whenever either
+    /// half arrives, because they land in either order.
+    #[rust]
+    deck_lyrics: [Option<Arc<TrackLyrics>>; 2],
+    #[rust]
+    deck_karaoke: [Option<Arc<KaraokeSchedule>>; 2],
+    #[rust]
+    deck_lyrics_status: [String; 2],
+    /// Karaoke subtitles on the program output.
+    #[rust]
+    karaoke_on: bool,
     /// Rows on screen, so a row click maps back to a track.
     #[rust]
     music_rows: Vec<TrackRowEntry>,
@@ -5461,6 +5495,13 @@ impl App {
                                             self.deck_stems[deck.index()] = None;
                             self.deck_stem_tex[deck.index()] = None;
                             self.deck_stem_tiles[deck.index()] = Vec::new();
+                            // The old track's words must not sit over the new
+                            // one; the separation worker re-reports coverage
+                            // for this deck and the cache hit puts them back
+                            // in a file read if this track has any.
+                            self.deck_lyrics[deck.index()] = None;
+                            self.deck_karaoke[deck.index()] = None;
+                            self.deck_lyrics_status[deck.index()] = String::new();
                             self.mixer.clear_deck_stems(deck);
                             self.submit_analysis(deck, pcm.clone());
                             self.submit_separation(deck, pcm);
@@ -5633,6 +5674,7 @@ impl App {
         }
         self.pump_analysis(cx);
         self.pump_stems(cx);
+        self.pump_lyrics(cx);
         self.observe_decks();
         self.sync_mesh_liveness(cx);
         self.schedule_music_frame(cx);
@@ -5873,7 +5915,15 @@ impl App {
                 let thumb = manifest
                     .thumbnail
                     .as_ref()
-                    .map(|t| TileThumb { blob: t.blob, len: t.byte_len })
+                    .map(|t| TileThumb {
+                        blob: t.blob,
+                        len: t.byte_len,
+                        // Straight off the manifest: whether this picture is
+                        // a packed sheet, which of its cells are frames, and
+                        // how fast they run. Nothing measured, nothing
+                        // inferred from the kind.
+                        anim: t.animation(),
+                    })
                     .or_else(|| {
                         // No preview published (classic sprites/flats are
                         // bare PNGs): a small still IS its own thumbnail.
@@ -5886,7 +5936,7 @@ impl App {
                         media.as_ref().and_then(|m| {
                             (matches!(m.media, MediaType::Png | MediaType::Jpeg)
                                 && m.len <= media::MAX_THUMB_BYTES)
-                                .then_some(TileThumb { blob: m.blob, len: m.len })
+                                .then_some(TileThumb { blob: m.blob, len: m.len, anim: None })
                         })
                     });
                 // player_nav: a World's anchors (player_start, keys, exit)
@@ -5914,7 +5964,9 @@ impl App {
             (CatPurpose::Thumb { revision }, ClientOutput::Blob { path, .. }) => {
                 // Decode on the worker pool; only the finished BGRA pixels
                 // come back to this thread.
-                let may_be_sheet = self.thumb_may_be_sheet(revision);
+                // What the MANIFEST said this picture is; the kind gate is
+                // only consulted when it said nothing.
+                let (sheet, legacy_may_be_sheet) = self.thumb_layout(revision);
                 // Stamped with the visible-range generation: a decode for
                 // tiles the operator has already scrolled past is dropped
                 // unstarted rather than holding up the ones under their
@@ -5922,7 +5974,8 @@ impl App {
                 self.decode.submit(DecodeJob::Thumb {
                     revision,
                     path,
-                    may_be_sheet,
+                    sheet,
+                    legacy_may_be_sheet,
                     epoch: self.view_epoch,
                 });
             }
@@ -6622,8 +6675,16 @@ impl App {
     /// 128²-tile strips), never by the thumbnail's dimensions: a 1024² PBR
     /// map or Flux still is dimensionally a 64-tile sheet and must stay one
     /// still picture.
-    fn thumb_may_be_sheet(&self, revision: AssetRevisionId) -> bool {
-        SURFACES
+    /// What a revision's thumbnail says about itself, and — only when it
+    /// says nothing — whether its catalog kind allows the legacy guess.
+    ///
+    /// A declared layout is the answer; the kind gate is what is left for
+    /// revisions published before thumbnails could declare anything.
+    fn thumb_layout(
+        &self,
+        revision: AssetRevisionId,
+    ) -> (Option<(makepad_asset_data::ThumbnailCells, f32)>, bool) {
+        let tile = SURFACES
             .iter()
             .flat_map(|surface| match surface {
                 Surface::Video => self.video_model.tiles(),
@@ -6631,8 +6692,12 @@ impl App {
                 Surface::Sfx => self.sfx_model.tiles(),
                 Surface::Mesh => self.mesh_model.tiles(),
             })
-            .find(|tile| tile.revision == Some(revision))
-            .is_some_and(|tile| catalog::kind_may_be_sheet(tile.kind))
+            .find(|tile| tile.revision == Some(revision));
+        let Some(tile) = tile else { return (None, false) };
+        match tile.thumb.as_ref().and_then(|t| t.anim.clone()) {
+            Some(anim) => (Some(anim), false),
+            None => (None, catalog::kind_may_be_sheet(tile.kind)),
+        }
     }
 
     fn sync_video_pad_window(&mut self, cx: &mut Cx) {
@@ -7213,6 +7278,9 @@ impl App {
                 self.deck_stem_tiles[index] = tiles;
             }
             self.push_deck_wave(cx, done.deck);
+            // The grid is what quantizes the karaoke display to the music;
+            // a transcript that landed before it must be re-scheduled now.
+            self.rebuild_karaoke(done.deck);
             self.music_rows.clear();
         }
     }
@@ -7253,6 +7321,30 @@ impl App {
                         continue;
                     }
                     self.deck_stem_status[deck.index()] = "stems: live".to_string();
+                }
+                StemsMsg::Coverage { deck, gen, digest, model_frames, complete } => {
+                    // The separation worker is the only place the track's
+                    // digest exists (hashing decoded PCM is not UI-thread
+                    // work), so it is also where the karaoke bake is armed.
+                    // A read probe goes out immediately — a track transcribed
+                    // in an earlier session shows its words the moment it
+                    // loads — and the bake only once the whole vocals stem is
+                    // actually on disk.
+                    if self.decks.deck(deck).load_gen != gen {
+                        continue;
+                    }
+                    if !self.lyrics_dispatch.should_dispatch(&digest, complete) {
+                        continue;
+                    }
+                    let (_, duration, _) = self.mixer.deck_position(deck);
+                    self.lyrics.submit(LyricsJob {
+                        deck,
+                        gen,
+                        digest,
+                        model_frames,
+                        duration_secs: duration,
+                        bake: complete,
+                    });
                 }
                 StemsMsg::Chunk(chunk) => {
                     let deck = chunk.deck;
@@ -7309,6 +7401,71 @@ impl App {
                 self.run_deck_cmds(cx, cmds);
             }
         }
+    }
+
+    /// Take finished transcriptions and hang them on the deck that asked.
+    fn pump_lyrics(&mut self, cx: &mut Cx) {
+        for message in self.lyrics.poll() {
+            match message {
+                LyricsMsg::Status { deck, gen, text } => {
+                    if self.decks.deck(deck).load_gen != gen {
+                        continue;
+                    }
+                    self.deck_lyrics_status[deck.index()] = text;
+                }
+                LyricsMsg::Ready { deck, gen, digest, lyrics } => {
+                    let _ = digest;
+                    if self.decks.deck(deck).load_gen != gen {
+                        continue;
+                    }
+                    self.deck_lyrics[deck.index()] = Some(lyrics);
+                    self.rebuild_karaoke(deck);
+                    if self.karaoke_on {
+                        self.video_pump = cx.new_next_frame();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rebuild a deck's display schedule. The transcript is in track time and
+    /// the grid decides where the appear/leave moments land, so this runs
+    /// whenever EITHER arrives — they land in either order, and a track whose
+    /// analysis is still running would otherwise keep an ungridded schedule.
+    fn rebuild_karaoke(&mut self, deck: DeckId) {
+        let index = deck.index();
+        let Some(lyrics) = self.deck_lyrics[index].as_ref() else {
+            self.deck_karaoke[index] = None;
+            return;
+        };
+        let grid = self.deck_analysis[index].as_ref().map(|a| &a.grid);
+        let timing = KaraokeTiming::from_grid(grid);
+        self.deck_karaoke[index] = Some(Arc::new(KaraokeSchedule::build(
+            lyrics.lines.clone(),
+            timing,
+        )));
+    }
+
+    /// What the program should be showing right now: the live deck's current
+    /// line, the next one, and how far the sweep has crossed the current one.
+    fn karaoke_overlay(&self) -> Option<crate::views::KaraokeOverlay> {
+        if !self.karaoke_on {
+            return None;
+        }
+        let (_, _, playing_a) = self.mixer.deck_position(DeckId::A);
+        let (_, _, playing_b) = self.mixer.deck_position(DeckId::B);
+        let deck = crate::lyrics::live_deck(self.decks.crossfader, playing_a, playing_b);
+        let schedule = self.deck_karaoke[deck.index()].as_ref()?;
+        let (position, _, _) = self.mixer.deck_position(deck);
+        let frame = schedule.at(position);
+        if frame.current.is_none() && frame.next.is_none() {
+            return None;
+        }
+        Some(crate::views::KaraokeOverlay {
+            current: frame.current.and_then(|i| schedule.text(i)).map(str::to_string),
+            next: frame.next.and_then(|i| schedule.text(i)).map(str::to_string),
+            progress: frame.progress,
+        })
     }
 
     /// Per-zoom-column RMS of every separated stem lane, for the waveform's
@@ -7528,7 +7685,12 @@ impl App {
                 _ => String::new(),
             };
             self.set_label(cx, base + 6, &refs.grid_state, &grid_text);
-            let stem_text = if !self.deck_stem_status[index].is_empty() {
+            // The karaoke bake runs behind the separation and finishes long
+            // after it; while it has something to say it owns this line,
+            // because "stems: live" is old news by then.
+            let stem_text = if !self.deck_lyrics_status[index].is_empty() {
+                self.deck_lyrics_status[index].clone()
+            } else if !self.deck_stem_status[index].is_empty() {
                 self.deck_stem_status[index].clone()
             } else if stems_ready {
                 "stems: live".to_string()
@@ -7906,12 +8068,14 @@ impl App {
         self.fx_phase1 = (self.fx_phase1 + rate1 * dt) % 1.0e4;
         self.fx_phase2 = (self.fx_phase2 + rate2 * dt) % 1.0e4;
         let phases = (self.fx_phase1, self.fx_phase2);
+        let karaoke = self.karaoke_overlay();
         for target in [ids!(program), ids!(preview)] {
             let widget = self.ui.widget(cx, target);
             let borrow = widget.borrow_mut::<views::VideoProgram>();
             if let Some(mut program) = borrow {
                 program.set_sources(cx, a.clone(), b.clone(), mix, mix_state);
                 program.set_fx(cx, fx, beat, time, phases);
+                program.set_karaoke(cx, karaoke.clone());
             }
         }
         if let Some(mut deck) = self
@@ -7944,6 +8108,15 @@ impl App {
                 .any(SlotPlayer::needs_frame_pump)
             || self.slot_media.iter().any(|kind| *kind != SlotMedia::Empty)
             || self.fx.kind.0 != 0
+            // The sweep across the current line moves every frame, so
+            // karaoke keeps the pump alive on its own — a black program
+            // with subtitles is a legitimate output. The condition is the
+            // TOGGLE, not the overlay: during an instrumental there is
+            // nothing to draw, and a pump that stopped there would never
+            // wake up for the verse.
+            || (self.karaoke_on
+                && (self.mixer.deck_position(DeckId::A).2
+                    || self.mixer.deck_position(DeckId::B).2))
         {
             self.video_pump = cx.new_next_frame();
         }
@@ -8851,6 +9024,25 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(external_sync_now)).clicked(actions) {
             self.force_armed_fade_now(cx);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(karaoke_enable)).changed(actions) {
+            self.karaoke_on = on;
+            // Turning it off has to clear the words that are already on the
+            // program, not merely stop updating them.
+            if !on {
+                for target in [ids!(program), ids!(preview)] {
+                    if let Some(mut program) = self
+                        .ui
+                        .widget(cx, target)
+                        .borrow_mut::<views::VideoProgram>()
+                    {
+                        program.set_karaoke(cx, None);
+                    }
+                }
+            }
+            // Turning it ON has to start the frame pump: with no video
+            // playing nothing else would ever ask for another frame.
+            self.video_pump = cx.new_next_frame();
         }
         // Per-slot transport (the strip above each cue well).
         for slot in [SlotId::A, SlotId::B] {
