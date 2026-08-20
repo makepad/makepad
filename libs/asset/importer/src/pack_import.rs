@@ -2421,13 +2421,13 @@ fn build_manifest(
     for file in files {
         let pack_path = file.pack_path.clone();
         let key = file.key.clone();
-        let is_model = file.kind == MediaKind::Glb;
         match hash_and_measure(root, file) {
             Ok(h) => hashed.push(h),
-            // ONE unusable model must not cost the other three hundred.
-            // A pack is a vendor's folder, not a curated set: a model in a
-            // shape this importer declares it does not SUPPORT is named and
-            // left out, and the rest of the kit imports.
+            // ONE unusable entry must not cost the other three hundred.
+            // A pack is a vendor's folder, not a curated set: an entry in a
+            // shape this importer declares it does not SUPPORT — a model
+            // binding two texture FILES, a name too long to be a catalog
+            // key — is named and left out, and the rest of the kit imports.
             //
             // `Unsupported` and nothing else. `Malformed` is not a synonym
             // for it: a truncated GLB, or one pointing a texture at
@@ -2436,10 +2436,15 @@ fn build_manifest(
             // Io/Changed/Traversal/Special, which say the tree is moving or
             // hostile underneath us and the re-verify contract depends on
             // nothing being quietly dropped.
-            Err(error) if is_model && error.kind == PackImportErrorKind::Unsupported =>
-            {
-                skipped.push((pack_path, error.to_string()));
-                skipped_keys.insert(key);
+            Err(error) if error.kind == PackImportErrorKind::Unsupported => {
+                // One line per ASSET, not per file: a model and its
+                // thumbnail share a key, and both fail an over-long-key
+                // check independently. Files arrive sorted by pack path, so
+                // `x.glb` is recorded before `x.png` and the reason named is
+                // the payload's own.
+                if skipped_keys.insert(key) {
+                    skipped.push((pack_path, error.to_string()));
+                }
             }
             Err(error) => return Err(error),
         }
@@ -3453,6 +3458,25 @@ fn parse_key(key: &str) -> Result<PackEntryKey, PackImportError> {
 }
 
 fn hash_and_measure(root: &PackRoot, file: DiscoveredFile) -> Result<HashedFile, PackImportError> {
+    // Can this entry's key exist at all? The key contract is the CATALOG's
+    // (`MAX_KEY_SEGMENT_BYTES` and friends, in the frozen `makepad_asset_data`
+    // limits), so a vendor file whose name overruns it can never publish —
+    // brick-kit ships two, `square-{lq,hq}-brick-slope-corner-outside-inverted-2x2`,
+    // one byte over the 48-byte segment budget.
+    //
+    // Asked here, before a single byte is hashed, and answered `Unsupported`
+    // so it costs that entry and not the other 294. Refusing the whole pack
+    // for it was the same all-or-nothing shape as the multi-texture rule:
+    // an entire kit lost to one long file name.
+    if let Err(error) = file.key.parse::<PackEntryKey>() {
+        return Err(PackImportError::new(
+            PackImportErrorKind::Unsupported,
+            format!(
+                "{}: entry key {} cannot exist in the catalog ({error})",
+                file.pack_path, file.key
+            ),
+        ));
+    }
     let mut handle = root.open_relative(&file.local_rel, &file.pack_path)?;
     let identity = identity_of(&handle, &file.pack_path)?;
     if !identity.is_file || !identity.matches(&file.snapshot) {
@@ -7818,6 +7842,40 @@ mod tests {
                 .unwrap();
         let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, ["good-a", "good-b"], "the skipped model is not published");
+    }
+
+    /// brick-kit ships `square-lq-brick-slope-corner-outside-inverted-2x2`
+    /// and its `hq` twin: 49 bytes of stem against the catalog's 48-byte
+    /// key-segment budget. That budget is the CONTRACT's
+    /// (`makepad_asset_data::limits::MAX_KEY_SEGMENT_BYTES`) and is frozen,
+    /// so the two models genuinely cannot publish — but 294 others in the
+    /// kit can, and used to be lost with them.
+    #[test]
+    fn a_name_too_long_to_be_a_catalog_key_costs_that_model_only() {
+        let pack = test_root("longname");
+        let out = test_bundle("longname_out");
+        let long = "square-lq-brick-slope-corner-outside-inverted-2x2";
+        assert_eq!(long.len(), 49, "the real brick-kit stem, one byte over");
+        assert!(long.parse::<PackEntryKey>().is_err(), "cannot be a key");
+        fs::write(pack.join(format!("{long}.glb")), tiny_glb()).unwrap();
+        fs::write(pack.join(format!("{long}.png")), valid_png(512, 512)).unwrap();
+        for stem in ["brick-a", "brick-b"] {
+            fs::write(pack.join(format!("{stem}.glb")), tiny_glb()).unwrap();
+            fs::write(pack.join(format!("{stem}.png")), valid_png(512, 512)).unwrap();
+        }
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect("one over-long name must not refuse the kit");
+        assert_eq!(report.assets, 2, "the other models imported");
+        assert_eq!(report.skipped_models.len(), 1);
+        let (path, why) = &report.skipped_models[0];
+        assert_eq!(path, &format!("{long}.glb"));
+        assert!(why.contains("cannot exist in the catalog"), "{why}");
+        // Its thumbnail did not survive it as a stray image asset.
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, ["brick-a", "brick-b"]);
     }
 
     /// The per-model escape hatch is for shapes we do not SUPPORT, never
