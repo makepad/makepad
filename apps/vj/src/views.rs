@@ -1388,6 +1388,13 @@ pub struct GridEntry {
     pub texture: Option<Texture>,
     pub frames: Vec<Texture>,
     pub fps: f32,
+    /// The thumbnail DECLARED a cell layout, so what this tile shows is one
+    /// of those cells: a sprite/mesh preview tile its producer already
+    /// aspect-fit and centred, padding and all. Such a tile is shown WHOLE
+    /// (see [`thumb_fill`]) — cropping into it eats the sprite, and for a
+    /// single-frame actor there is no second frame to give the game away.
+    /// Straight off the manifest, never measured.
+    pub cells: bool,
     /// The one marked tile: on the clip grid the last one CLICKED (green
     /// ring, nothing else), on the SFX bank a pad with voices playing.
     pub active: bool,
@@ -1466,9 +1473,20 @@ fn thumb_aspect(cx: &mut Cx, frame: Option<&Texture>) -> f32 {
 const TILE_CROP: f32 = 0.6;
 
 fn thumb_fill(entry: &GridEntry) -> f32 {
-    // A packed sprite sheet is a GRID of frames: crop it and the cell grid
-    // shows a neighbour's arm. Sheets stay contain, always.
-    if entry.frames.len() > 1 {
+    fill_for_thumb(entry.frames.len(), entry.cells)
+}
+
+/// How far a tile showing `frames` frames of a `cells`-declared (or not)
+/// thumbnail crops toward cover.
+///
+/// A packed sprite sheet is a GRID of frames: crop it and the cell grid
+/// shows a neighbour's arm. Sheets stay contain, always — including the
+/// ONE-cell sheet a single-frame actor publishes (`GridEntry::cells`), whose
+/// single tile is a whole sprite the producer already letterboxed into a
+/// square. Cover-cropping that square in a 164x104 tile would take a quarter
+/// of the sprite's height off the top and bottom.
+fn fill_for_thumb(frames: usize, cells: bool) -> f32 {
+    if frames > 1 || cells {
         0.0
     } else {
         TILE_CROP
@@ -1478,6 +1496,26 @@ fn thumb_fill(entry: &GridEntry) -> f32 {
 #[cfg(test)]
 mod tile_fit_tests {
     use super::*;
+
+    #[test]
+    /// A tile whose thumbnail DECLARED cells shows its cell whole, whether
+    /// the declaration held one cell or eight: the producer already fit the
+    /// sprite into that square, so cropping into it cuts the sprite. Only a
+    /// plain picture (a clip still, a photo) crops toward cover.
+    fn declared_cell_tiles_are_contained_even_with_a_single_frame() {
+        assert_eq!(fill_for_thumb(0, true), 0.0, "one-cell sprite strip");
+        assert_eq!(fill_for_thumb(4, true), 0.0, "cycling sprite strip");
+        assert_eq!(fill_for_thumb(4, false), 0.0, "any multi-frame sheet");
+        assert_eq!(fill_for_thumb(0, false), TILE_CROP, "a plain still crops");
+        assert_eq!(fill_for_thumb(1, false), TILE_CROP, "a still set frame-wise");
+        // FIT is what a contained tile then does with the cell: the whole
+        // square stays visible, bars on the wide axis of a 164x104 tile.
+        let (w, h) = fit_scale(164.0 / 104.0, 1.0);
+        assert!(w < 1.0 && h == 1.0, "a square cell letterboxes: {w} {h}");
+        // What cropping would have cost: a quarter of the sprite's height.
+        let (_, ch) = cover_scale(164.0 / 104.0, 1.0);
+        assert!(ch > 1.5, "cover would grow the vertical axis past 1.5: {ch}");
+    }
 
     #[test]
     fn cover_crops_a_wide_image_left_and_right_in_a_square_tile() {
