@@ -31,8 +31,9 @@ use makepad_ai_cuda::llm_ops::{
     get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
     mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
     quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
-    quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched, rms_norm_mul,
-    rope_multi, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
+    layer_norm, quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched,
+    rms_norm_mul, rope_multi, rope_vision, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
+    upscale_bilinear,
 
     QUANT_IQ3S as MKLLM_QUANT_IQ3S, QUANT_IQ4NL as MKLLM_QUANT_IQ4NL,
     QUANT_IQ4XS as MKLLM_QUANT_IQ4XS, QUANT_Q3K as MKLLM_QUANT_Q3K,
@@ -44,7 +45,7 @@ use makepad_ai_cuda::roformer_ops::{
 };
 use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
-    GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NORMAL,
+    GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_VISION,
 };
 
 use super::CudaDeviceFeatures;
@@ -977,9 +978,17 @@ enum KernelSel {
     FlashMma,
     FlashVec,
     Norm { l2: bool },
+    // ggml GGML_OP_NORM: mean/variance LayerNorm. `Norm` above is RMS/L2 math
+    // and is not a substitute.
+    LayerNorm,
+    UpscaleBilinear { aa: bool },
     // llama.cpp ggml-cuda.cu:3994-4004 RMS_NORM + MUL (+ ADD)
     NormMul { add: bool },
     RopeMulti,
+    // GGML_ROPE_TYPE_VISION: two sections, pair split at `n_dims` and a
+    // sector-indexed theta. Shares the MROPE bit with `RopeMulti` but is a
+    // different kernel — routing it to `RopeMulti` is silently wrong.
+    RopeVision,
     // ggml GGML_ROPE_TYPE_NORMAL: interleaved adjacent pairs, NOT the
     // split-half convention `RopeMulti` implements.
     RopeNormal,
@@ -1255,6 +1264,29 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                 KernelSel::FlashDecode
             }
         }
+        Op::Norm => {
+            let s0 = src(0)?;
+            if s0.desc.ty != TensorType::F32 || t.desc.ty != TensorType::F32 {
+                return Err(unsupported_node(t, "non-f32 layer norm"));
+            }
+            KernelSel::LayerNorm
+        }
+        Op::Upscale => {
+            let s0 = src(0)?;
+            if s0.desc.ty != TensorType::F32 || t.desc.ty != TensorType::F32 {
+                return Err(unsupported_node(t, "non-f32 upscale"));
+            }
+            let mode_flags = t.op_param_i32(0);
+            if (mode_flags & 0xFF) != crate::core::ScaleMode::Bilinear as i32 {
+                return Err(unsupported_node(
+                    t,
+                    &format!("upscale mode {}", mode_flags & 0xFF),
+                ));
+            }
+            KernelSel::UpscaleBilinear {
+                aa: (mode_flags & crate::core::GGML_SCALE_FLAG_ANTIALIAS) != 0,
+            }
+        }
         Op::RmsNorm => KernelSel::Norm { l2: false },
         Op::L2Norm => KernelSel::Norm { l2: true },
         Op::Rope => {
@@ -1282,6 +1314,11 @@ fn select_kernel(tensors: &[Tensor], t: &Tensor) -> Result<KernelSel> {
                     return Err(unsupported_node(t, "NORMAL rope with an odd ne0"));
                 }
                 return Ok(KernelSel::RopeNormal);
+            }
+            // VISION carries the MROPE bit but is a different kernel; it must
+            // be tested BEFORE the mrope check or it silently runs mrope math.
+            if mode == GGML_ROPE_TYPE_VISION {
+                return Ok(KernelSel::RopeVision);
             }
             if mode != GGML_ROPE_TYPE_IMROPE && (mode & GGML_ROPE_TYPE_MROPE) == 0 {
                 return Err(unsupported_node(t, &format!("rope mode {mode}")));
@@ -1888,7 +1925,10 @@ fn dump_plan(nodes: &[PlannedNode], tensors: &[Tensor]) {
             | KernelSel::CopyViewTo
             | KernelSel::SetRows { .. }
             | KernelSel::RopeMulti
+            | KernelSel::RopeVision
             | KernelSel::Norm { .. }
+            | KernelSel::LayerNorm
+            | KernelSel::UpscaleBilinear { .. }
             | KernelSel::Unary(_)
             | KernelSel::Glu(_) => {
                 let tensor = &tensors[node.node_id];
@@ -2382,6 +2422,8 @@ impl Compiled {
                                 | KernelSel::Unary(_)
                                 | KernelSel::Glu(_)
                                 | KernelSel::Norm { .. }
+                                | KernelSel::LayerNorm
+                                | KernelSel::UpscaleBilinear { .. }
                                 | KernelSel::Concat
                                 | KernelSel::GetRowsF32
                                 | KernelSel::GetRowsQuant(_) => {
@@ -3247,6 +3289,135 @@ impl ExecView<'_> {
                         )
                     },
                     "norm",
+                )
+            }
+            KernelSel::LayerNorm => {
+                let s_id = self.src_id(&t, 0)?;
+                let s = &tensors[s_id];
+                let eps = t.op_param_f32(0);
+                check(
+                    unsafe {
+                        layer_norm(
+                            self.ptr_of(s_id)?,
+                            self.ptr_of(node_id)?,
+                            s.ne[0] as i32,
+                            s.ne[1] as i32,
+                            s.ne[2] as i32,
+                            s.ne[3] as i32,
+                            eps,
+                            s.nb[1],
+                            s.nb[2],
+                            s.nb[3],
+                            t.nb[1],
+                            t.nb[2],
+                            t.nb[3],
+                            stream,
+                        )
+                    },
+                    "layer_norm",
+                )
+            }
+            KernelSel::UpscaleBilinear { aa } => {
+                let s_id = self.src_id(&t, 0)?;
+                let s = &tensors[s_id];
+                // Mirrors metal_compiled.rs upscale arg construction.
+                let mut sf0 = t.ne[0] as f32 / s.ne[0] as f32;
+                let mut sf1 = t.ne[1] as f32 / s.ne[1] as f32;
+                let sf2 = t.ne[2] as f32 / s.ne[2] as f32;
+                let sf3 = t.ne[3] as f32 / s.ne[3] as f32;
+                let mode_flags = t.op_param_i32(0);
+                let mut poffs = 0.5f32;
+                if (mode_flags & crate::core::GGML_SCALE_FLAG_ALIGN_CORNERS) != 0 {
+                    poffs = 0.0;
+                    if t.ne[0] > 1 && s.ne[0] > 1 {
+                        sf0 = (t.ne[0] - 1) as f32 / (s.ne[0] - 1) as f32;
+                    }
+                    if t.ne[1] > 1 && s.ne[1] > 1 {
+                        sf1 = (t.ne[1] - 1) as f32 / (s.ne[1] - 1) as f32;
+                    }
+                }
+                check(
+                    unsafe {
+                        upscale_bilinear(
+                            self.ptr_of(s_id)?,
+                            self.ptr_of(node_id)?,
+                            s.ne[0] as i32,
+                            s.ne[1] as i32,
+                            t.ne[0] as i32,
+                            t.ne[1] as i32,
+                            t.ne[2] as i32,
+                            t.ne[3] as i32,
+                            sf2,
+                            sf3,
+                            sf0,
+                            sf1,
+                            poffs,
+                            i32::from(aa),
+                            s.nb[0],
+                            s.nb[1],
+                            s.nb[2],
+                            s.nb[3],
+                            t.nb[1],
+                            t.nb[2],
+                            t.nb[3],
+                            stream,
+                        )
+                    },
+                    "upscale_bilinear",
+                )
+            }
+            KernelSel::RopeVision => {
+                let s_id = self.src_id(&t, 0)?;
+                let pos_id = self.src_id(&t, 1)?;
+                let s = &tensors[s_id];
+                let n_dims = t.op_param_i32(1);
+                let n_ctx_orig = t.op_param_i32(4);
+                let freq_base = t.op_param_f32(5);
+                let freq_scale = t.op_param_f32(6);
+                let ext_factor = t.op_param_f32(7);
+                let attn_factor = t.op_param_f32(8);
+                let beta_fast = t.op_param_f32(9);
+                let beta_slow = t.op_param_f32(10);
+                let sect_0 = t.op_param_i32(11);
+                let sect_1 = t.op_param_i32(12);
+                let corr_factor = |n_rot: f32| -> f32 {
+                    n_dims as f32
+                        * ((n_ctx_orig as f32 / (n_rot * 2.0 * std::f32::consts::PI)).ln())
+                        / (2.0 * freq_base.ln())
+                };
+                let corr0 = corr_factor(beta_fast).floor().max(0.0);
+                let corr1 = corr_factor(beta_slow).ceil().min(n_dims as f32 - 1.0);
+                check(
+                    unsafe {
+                        rope_vision(
+                            self.ptr_of(s_id)?,
+                            self.ptr_of(pos_id)? as *const i32,
+                            self.ptr_of(node_id)?,
+                            s.ne[0] as i32,
+                            s.ne[1] as i32,
+                            s.ne[2] as i32,
+                            s.ne[3] as i32,
+                            n_dims,
+                            sect_0,
+                            sect_1,
+                            freq_base,
+                            freq_scale,
+                            ext_factor,
+                            attn_factor,
+                            corr0,
+                            corr1,
+                            s.nb[0],
+                            s.nb[1],
+                            s.nb[2],
+                            s.nb[3],
+                            t.nb[0],
+                            t.nb[1],
+                            t.nb[2],
+                            t.nb[3],
+                            stream,
+                        )
+                    },
+                    "rope_vision",
                 )
             }
             KernelSel::NormMul { add } => {

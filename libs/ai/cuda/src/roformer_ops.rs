@@ -27,7 +27,7 @@ pub mod names {
 /// Head dims [`roformer_attn_f32`] is compiled and verified for. Anything else
 /// is rejected by the kernel (and should be rejected earlier, at planning
 /// time, so the failure names the tensor).
-pub const ATTN_HEAD_DIMS: &[i64] = &[32, 64];
+pub const ATTN_HEAD_DIMS: &[i64] = &[32, 64, 72];
 
 pub fn attn_head_dim_supported(head_dim: i64) -> bool {
     ATTN_HEAD_DIMS.contains(&head_dim)
