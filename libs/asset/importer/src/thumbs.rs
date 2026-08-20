@@ -198,9 +198,32 @@ pub fn audio_millis(bytes: &[u8], media: MediaType) -> Result<u32, String> {
     Ok((secs * 1000.0).clamp(0.0, u32::MAX as f64) as u32)
 }
 
-/// The canonical 512×512 waveform strip, freshly rendered from PCM (never a
-/// stale sidecar), as BGRA pixels.
+/// The canonical 512×512 picture of an audio asset, freshly rendered from
+/// PCM (never a stale sidecar), as BGRA pixels.
+///
+/// A SPECTROGRAM, not a waveform: every mastered track's waveform is the
+/// same filled rectangle, while a spectrogram shows what the thing is — a
+/// beat, a voice, a pad, a field recording — at icon size. Silence and
+/// scraps too short to transform fall back to the waveform, which at least
+/// says "there is nothing here" honestly.
 pub fn waveform_bgra_512(pcm: &WavPcm) -> Vec<u32> {
+    let mono: Vec<f32> = pcm.frames.iter().map(|(l, r)| (l + r) * 0.5).collect();
+    if let Some(rgba) =
+        crate::spectrogram::spectrogram_rgba(&mono, pcm.sample_rate, THUMB_DIM, THUMB_DIM)
+    {
+        return rgba
+            .chunks_exact(4)
+            .map(|px| {
+                (px[3] as u32) << 24 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
+            })
+            .collect();
+    }
+    waveform_strip_bgra_512(pcm)
+}
+
+/// The old min/max strip: the honest picture of something with no spectrum
+/// to show.
+fn waveform_strip_bgra_512(pcm: &WavPcm) -> Vec<u32> {
     const BG: u32 = 0xff14_181c;
     const FG: u32 = 0xff58_c4a0;
     const MID: u32 = 0xff2a_3238;
@@ -417,8 +440,27 @@ mod tests {
         assert_eq!(pcm.millis(), 2_000 * 1000 / 24_000);
         let strip = waveform_bgra_512(&pcm);
         assert_eq!(strip.len(), THUMB_DIM * THUMB_DIM);
-        // The strip carries signal (not all background).
-        assert!(strip.iter().any(|p| *p == 0xff58_c4a0));
+        // The fixture alternates every sample: a tone at Nyquist. Its
+        // picture is bright along the TOP (the highest band) and dark in
+        // the middle — which is exactly what a spectrogram should say
+        // about it, and what a waveform strip could never show.
+        let brightness = |y: usize| {
+            let p = strip[y * THUMB_DIM + THUMB_DIM / 2];
+            ((p >> 16) & 0xff) + ((p >> 8) & 0xff) + (p & 0xff)
+        };
+        assert!(
+            brightness(0) > brightness(THUMB_DIM / 2),
+            "a Nyquist tone lights the top band: {} vs {}",
+            brightness(0),
+            brightness(THUMB_DIM / 2)
+        );
+        // Silence has no spectrum, and falls back to the honest strip.
+        let quiet = parse_wav(&wav_pcm16(&vec![(0, 0); 2_000], 24_000)).unwrap();
+        let quiet_strip = waveform_bgra_512(&quiet);
+        assert!(
+            quiet_strip.iter().any(|p| *p == 0xff58_c4a0),
+            "digital silence falls back to the strip and draws its flat line"
+        );
         let jpeg = encode_jpeg_bgra(&strip, THUMB_DIM, THUMB_DIM).unwrap();
         assert_eq!(jpeg_dims(&jpeg), Some((THUMB_DIM as u32, THUMB_DIM as u32)));
         // Garbage refuses.
