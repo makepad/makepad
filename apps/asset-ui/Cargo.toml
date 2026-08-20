@@ -40,3 +40,10 @@ makepad-asset-importer = { path = "../../libs/asset/importer" }
 # the bytes when a digest-named cache object has no name to read. Zero
 # dependencies, and the same decoder the preview well draws with.
 makepad-audio-decode = { path = "../../libs/audio_decode" }
+# "Split audio layers": the analysis bake. Separation (BS-RoFormer on the
+# ggml Metal runtime), the word-aligned lyrics bake, and the ONE shared
+# encode/publish of both as typed side-channel files — the same crate the VJ
+# calls, so a track analysed here is a track a deck never has to separate.
+makepad-ai-stems = { path = "../../libs/ai/models/stems" }
+makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
+makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }
