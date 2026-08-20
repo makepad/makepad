@@ -42,6 +42,7 @@ pub mod dto;
 pub mod error;
 pub mod http;
 pub mod json;
+pub mod side_channels;
 pub mod publish;
 pub mod resolver;
 pub mod runtime;

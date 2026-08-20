@@ -58,6 +58,10 @@ workspace.members = [
     "libs/audio_decode",
     # === own Ogg Vorbis encoder (stem side-channels) ===
     "libs/audio_encode",
+    # === shared karaoke alignment core + lyrics schema ===
+    "libs/audio_lyrics",
+    # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
+    "libs/audio_sidechannels",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
     # === necessary tools ===

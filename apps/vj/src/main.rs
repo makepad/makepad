@@ -34,7 +34,7 @@ mod loop_detect;
 mod lyrics;
 // Word-level karaoke timing: cross-attention DTW + teacher forcing + onset
 // snap. Also compiled standalone by the audit harness (bin karaoke_align).
-mod lyrics_align;
+pub use makepad_audio_lyrics::align as lyrics_align;
 mod media;
 mod mesh_view;
 mod mix;
