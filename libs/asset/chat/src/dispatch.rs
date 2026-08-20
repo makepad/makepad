@@ -706,6 +706,7 @@ pub(crate) fn kind_label(kind: AssetKind) -> &'static str {
         AssetKind::World => "world",
         AssetKind::Prefab => "prefab",
         AssetKind::Billboard => "billboard",
+        AssetKind::Game => "game",
     }
 }
 
@@ -728,6 +729,8 @@ fn role_parse(s: &str) -> Option<FileRole> {
         "audio" => R::Audio,
         "video" => R::Video,
         "source" => R::Source,
+        "splat" => R::Splat,
+        "ao_texture" => R::AoTexture,
         _ => return None,
     })
 }
@@ -753,6 +756,8 @@ fn media_parse(s: &str) -> Option<MediaType> {
         "mp4" => M::Mp4,
         "bin" => M::Bin,
         "text" => M::Text,
+        "ply" => M::Ply,
+        "mp3" => M::Mp3,
         _ => return None,
     })
 }

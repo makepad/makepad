@@ -130,7 +130,7 @@ pub struct DiscoveryListener {
 pub const MAX_ENTRIES: usize = 256;
 
 /// Bind the discovery port so several clients on ONE host can listen at
-/// once (VJ + AI Content + a game all discover the same server).
+/// once (VJ + AI Content + a game all discover the same server / fleet).
 ///
 /// Unix: `SO_REUSEADDR` + `SO_REUSEPORT` before bind — on macOS and Linux,
 /// BROADCAST datagrams (which beacons are) are delivered to every member of
@@ -145,7 +145,7 @@ pub const MAX_ENTRIES: usize = 256;
 /// port already in use — configure explicit endpoints" condition rather
 /// than a silent security hole.
 #[cfg(unix)]
-fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
+pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
     use std::os::unix::io::FromRawFd;
 
     const AF_INET: i32 = 2;
@@ -229,7 +229,7 @@ fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
 }
 
 #[cfg(not(unix))]
-fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
+pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
     UdpSocket::bind(("0.0.0.0", port))
 }
 

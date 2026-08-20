@@ -415,7 +415,9 @@ impl ImportManifest {
         }
         self.rights.validate()?;
         // Content that may not be redistributed can never be imported into a
-        // catalog that serves peers: refuse before any publication.
+        // catalog that serves peers: refuse before any publication. LanLocal
+        // is accepted — an asset server IS the owner's LAN; the boundary it
+        // must never cross is the internet, which is an exporter's concern.
         if self.rights.redistribution == Redistribution::Forbidden {
             return Err(AssetDataError::Mismatch {
                 what: "forbidden redistribution on import",
