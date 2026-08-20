@@ -7470,6 +7470,7 @@ impl App {
                         text: line.text.clone(),
                         stamp: crate::music_view::lyric_stamp(line.start_secs),
                         words: line.words.clone(),
+                        confident: line.confident,
                     })
                     .collect()
             })

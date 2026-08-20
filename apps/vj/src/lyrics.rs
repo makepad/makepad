@@ -71,6 +71,14 @@ pub struct LyricLine {
     pub end_secs: f64,
     pub text: String,
     pub words: Vec<f64>,
+    /// Whether those word times are good enough to HOP through.
+    ///
+    /// Word times and the right to use them are separate on purpose. A
+    /// producer of times may be sure of a line and unsure of the next one,
+    /// and the display must be told which is which: a fill that hops crisply
+    /// onto the wrong word is worse than one that sweeps and never claimed to
+    /// know. False (or no times at all) renders as the linear sweep.
+    pub confident: bool,
 }
 
 impl LyricLine {
@@ -80,7 +88,13 @@ impl LyricLine {
             end_secs,
             text: text.into(),
             words: Vec::new(),
+            confident: false,
         }
+    }
+
+    /// True when the display should hop word by word rather than sweep.
+    pub fn hops(&self) -> bool {
+        self.confident && self.words.len() >= 2
     }
 }
 
@@ -121,7 +135,7 @@ pub fn sung_fraction(line: &LyricLine, secs: f64) -> f32 {
     if secs <= line.start_secs {
         return 0.0;
     }
-    if line.words.is_empty() {
+    if !line.hops() {
         let span = (line.end_secs - line.start_secs).max(1e-3);
         return (((secs - line.start_secs) / span).clamp(0.0, 1.0)) as f32;
     }
@@ -137,8 +151,52 @@ pub fn sung_fraction(line: &LyricLine, secs: f64) -> f32 {
     if total == 0 {
         return 0.0;
     }
-    let hop = ((secs - line.words[index]) / WORD_HOP_SECS).clamp(0.0, 1.0);
+    // A word normally fills in one quick hop and then holds until the next
+    // one is due. A SUSTAINED word cannot: a singer holding a note for two
+    // seconds would leave the line frozen and looking broken, when what the
+    // ear hears is a word still going. So a word held well past this line's
+    // own pace fills across its whole interval instead — slowly, still
+    // ending exactly where the hop would have, so nothing jumps.
+    let ends = line
+        .words
+        .get(index + 1)
+        .copied()
+        .unwrap_or(line.end_secs)
+        .max(line.words[index]);
+    let span = ends - line.words[index];
+    let fill = if span > sustain_threshold(line) {
+        span
+    } else {
+        WORD_HOP_SECS.min(span.max(1e-3))
+    };
+    let hop = ((secs - line.words[index]) / fill.max(1e-3)).clamp(0.0, 1.0);
     (((before as f64 + hop * width as f64) / total as f64).clamp(0.0, 1.0)) as f32
+}
+
+/// How long a word has to last before it counts as held rather than sung at
+/// this line's pace. The reference is the line's own median interval, so a
+/// slow ballad is not treated as one long sustain and a fast verse is not
+/// judged against somebody else's tempo.
+fn sustain_threshold(line: &LyricLine) -> f64 {
+    if line.words.len() < 2 {
+        return f64::INFINITY;
+    }
+    let mut spans: Vec<f64> = Vec::with_capacity(line.words.len());
+    for index in 0..line.words.len() {
+        let ends = line
+            .words
+            .get(index + 1)
+            .copied()
+            .unwrap_or(line.end_secs)
+            .max(line.words[index]);
+        spans.push(ends - line.words[index]);
+    }
+    spans.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // The lower quartile, not the median: the sustains themselves drag a
+    // median up until the line's own held notes no longer look held. What
+    // "this line's pace" means is how fast its QUICK words go.
+    let pace = spans[spans.len() / 4];
+    (pace * 1.2).max(WORD_HOP_SECS * 3.0)
 }
 
 /// `(chars before word `index`, chars the word covers, chars in the line)`.
@@ -209,6 +267,7 @@ impl TrackLyrics {
                                 .collect(),
                         ),
                     ),
+                    ("c", Value::Bool(line.confident)),
                 ])
             })
             .collect();
@@ -256,7 +315,14 @@ impl TrackLyrics {
                     words.push(number(at)?);
                 }
             }
-            lines.push(LyricLine { start_secs: start, end_secs: end, text, words });
+            let confident = item.get("c").and_then(|v| v.as_bool()).unwrap_or(false);
+            lines.push(LyricLine {
+                start_secs: start,
+                end_secs: end,
+                text,
+                words,
+                confident,
+            });
         }
         Some(TrackLyrics {
             backend: value.get("backend")?.as_str()?.to_string(),
@@ -905,6 +971,10 @@ const WORD_SNAP_SECS: f64 = 0.15;
 /// No word gets less than this; it stops a snap from stacking two words on
 /// one instant when the stem is ambiguous.
 const WORD_MIN_SECS: f64 = 0.06;
+/// How far before a line's stamp the search for its first word's attack
+/// reaches. The stamp is whisper's; the attack is the stem's, and the stem
+/// is the one that was there.
+const ONSET_REACH_SECS: f64 = 0.05;
 
 impl VocalEnvelope {
     /// Every syllable onset the stem shows between `from` and `to`.
@@ -994,22 +1064,22 @@ impl VocalEnvelope {
     /// It is not a forced aligner and does not pretend to be: it is the
     /// timing the isolated vocal can support, and it costs one pass over an
     /// envelope that is already in memory.
-    pub fn word_times(&self, line: &LyricLine) -> Vec<f64> {
+    pub fn word_times(&self, line: &LyricLine) -> (Vec<f64>, usize) {
         let words: Vec<&str> = line.text.split_whitespace().collect();
         if words.is_empty() || self.values.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         if words.len() == 1 {
-            return vec![line.start_secs];
+            return (vec![line.start_secs], 1);
         }
         let lo = self.frame_at(line.start_secs);
         let hi = self.frame_at(line.end_secs).max(lo);
         if hi <= lo + 2 {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let peak = self.values[lo..=hi].iter().fold(0.0f32, |m, v| m.max(*v));
         if peak <= 0.0 {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let gate = (peak * 0.18).max(self.loud * 0.08);
         // Voiced frames only. A line whose gate leaves nothing is not one the
@@ -1023,7 +1093,7 @@ impl VocalEnvelope {
         let clock: &[usize] = if voiced.len() >= words.len() * 2 {
             &voiced
         } else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
         // A first guess: each word gets a share of the line's VOICED time
         // proportional to its length. Voiced, not wall clock — the breath in
@@ -1044,10 +1114,16 @@ impl VocalEnvelope {
         // the order and leaving enough onsets for the words still to come.
         // A guess landing between two syllables is what reads as "off"; an
         // attack is what the ear is listening for.
-        let onsets = self.onsets_between(line.start_secs - 0.05, line.end_secs);
+        let onsets = self.onsets_between(line.start_secs - ONSET_REACH_SECS, line.end_secs);
         let mut out = Vec::with_capacity(words.len());
         let mut cursor = 0usize;
         let mut previous = f64::NEG_INFINITY;
+        // How many words the stem actually PLACED, as opposed to guessed.
+        // The display uses this to decide whether it has earned the right to
+        // hop word by word or should fall back to a smooth sweep: a fill that
+        // hops confidently onto the wrong word is worse than one that never
+        // claimed to know.
+        let mut placed = 0usize;
         for index in 0..words.len() {
             let want = estimate[index];
             let remaining = words.len() - index - 1;
@@ -1075,6 +1151,7 @@ impl VocalEnvelope {
             let at = match chosen {
                 Some(slot) => {
                     cursor = slot + 1;
+                    placed += 1;
                     onsets[slot]
                 }
                 None => want.max(previous + WORD_MIN_SECS),
@@ -1087,20 +1164,104 @@ impl VocalEnvelope {
             out.push(at);
             previous = at;
         }
-        out
+        (out, placed)
     }
 }
 
-/// Fill in every line's word times from the stem.
+/// Share of a line's words that must land on an attack the stem really shows
+/// before the display is allowed to hop through them.
+const WORD_CONFIDENCE: f64 = 0.8;
+
+/// Fill in every line's word times — but only where the stem earned them.
+///
+/// Graceful degradation beats confident wrongness. A fill that hops crisply
+/// onto the WRONG word is worse than a smooth sweep, because the sweep never
+/// claimed to know where the words were and the hop did. So a line keeps its
+/// word times only if the stem placed most of them on real attacks, in order,
+/// with no word swallowing the line; anything short of that stores no times
+/// at all and renders as the honest linear sweep. Both look deliberate, and
+/// the display never claims more precision than the audio supports.
 pub fn time_words(lines: &mut [LyricLine], envelope: &VocalEnvelope) -> usize {
+    time_words_with(lines, envelope, word_hops_enabled())
+}
+
+/// Whether this build hops. OFF by default: the stem-driven word alignment
+/// in this module is approximate, and an approximate hop lies about its own
+/// precision in a way the smooth sweep does not. `VJ_KARAOKE_WORD_HOPS=1`
+/// turns it on for the work of making it exact.
+pub fn word_hops_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("VJ_KARAOKE_WORD_HOPS")
+            .map(|value| matches!(value.trim(), "1" | "on" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
+/// The same, told explicitly whether to hop — the form tests and the audit
+/// use, so neither depends on the process environment.
+pub fn time_words_with(
+    lines: &mut [LyricLine],
+    envelope: &VocalEnvelope,
+    hops: bool,
+) -> usize {
     let mut timed = 0;
     for line in lines.iter_mut() {
-        line.words = envelope.word_times(line);
-        if !line.words.is_empty() {
+        line.words = Vec::new();
+        if !hops {
+            continue;
+        }
+        let (times, placed) = envelope.word_times(line);
+        if word_times_are_trustworthy(line, &times, placed) {
+            // A line begins where its first word begins.
+            line.start_secs = line.start_secs.min(times[0]).max(0.0);
+            line.words = times;
+            line.confident = true;
             timed += 1;
         }
     }
     timed
+}
+
+/// Whether a line's word times are good enough to hop on.
+pub fn word_times_are_trustworthy(line: &LyricLine, times: &[f64], placed: usize) -> bool {
+    let words = line.text.split_whitespace().count();
+    if times.len() != words || times.len() < 2 {
+        return false;
+    }
+    // Floored, so a short line is allowed the same one miss a long one is:
+    // ceiling arithmetic on four words silently demands all four.
+    if placed < (times.len() as f64 * WORD_CONFIDENCE).floor() as usize {
+        return false;
+    }
+    let span = line.end_secs - line.start_secs;
+    if span <= 0.0 {
+        return false;
+    }
+    for index in 0..times.len() {
+        // The first word may sit a hair before the line's own stamp: the
+        // onset search reaches back past it, and the attack is the truth.
+        if !times[index].is_finite()
+            || times[index] < line.start_secs - ONSET_REACH_SECS
+            || times[index] > line.end_secs
+        {
+            return false;
+        }
+        if index > 0 && times[index] - times[index - 1] < WORD_MIN_SECS - 1e-9 {
+            return false;
+        }
+    }
+    // One word eating most of a line is an assignment that went wrong, not a
+    // singer holding a note — a real sustain is one word among several.
+    if times.len() >= 4 {
+        for index in 0..times.len() {
+            let ends = times.get(index + 1).copied().unwrap_or(line.end_secs);
+            if ends - times[index] > span * 0.6 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Snap every line's start to the vocal onset the stem shows near it.
@@ -1196,6 +1357,16 @@ impl KaraokeTiming {
         self.first_beat_secs + beats * self.beat_secs
     }
 
+    /// The least time a line may hold the screen. A beat, bounded: enough
+    /// that a line is always seen, short enough that a dense verse is not
+    /// pushed further and further behind itself.
+    pub fn floor_secs(&self) -> f64 {
+        if self.beat_secs <= 1e-4 {
+            return 0.35;
+        }
+        self.beat_secs.clamp(0.25, 1.0)
+    }
+
     /// The beat at or after `secs`.
     pub fn beat_ceil(&self, secs: f64) -> f64 {
         if self.beat_secs <= 1e-4 {
@@ -1233,20 +1404,38 @@ pub struct KaraokeSchedule {
 
 impl KaraokeSchedule {
     pub fn build(lines: Vec<LyricLine>, timing: KaraokeTiming) -> KaraokeSchedule {
-        let mut appear = Vec::with_capacity(lines.len());
+        let mut appear: Vec<f64> = Vec::with_capacity(lines.len());
         let mut leave = Vec::with_capacity(lines.len());
         let mut previous_end = f64::NEG_INFINITY;
+        let floor = timing.floor_secs();
         for line in &lines {
             // The line goes up on the BEAT at or before its lead-in target,
             // so the displayed lead is never shorter than the target — and
             // never before the previous line has been sung out, because a
             // singer mid-phrase must not have the words taken away.
             let wanted = timing.beat_floor(line.start_secs - timing.lead_in_secs);
-            let at = wanted.max(previous_end).min(line.start_secs).max(0.0);
+            let mut at = wanted.max(previous_end).min(line.start_secs).max(0.0);
+            // …but never at or before the line before it. Three separate
+            // clamps above can collapse two lines onto one instant — two
+            // lines both pinned to zero at the top of a track, or a start
+            // pulled back by the onset snap under the previous line's end —
+            // and the lookup takes the LAST line whose moment has passed, so
+            // a collapsed pair means the earlier one is never shown at all.
+            // Every line gets a beat of the screen to itself; a line pushed
+            // past its own first word is late, which is survivable, where a
+            // line nobody ever sees is not.
+            if let Some(previous) = appear.last() {
+                at = at.max(previous + floor);
+            }
+            at = at.min((line.end_secs - 0.05).max(0.0));
             appear.push(at);
             // …and comes down on the beat at or after its last word plus a
             // hold, so the final syllable is still readable.
-            leave.push(timing.beat_ceil(line.end_secs + timing.hold_secs).max(at));
+            leave.push(
+                timing
+                    .beat_ceil(line.end_secs + timing.hold_secs)
+                    .max(at + floor),
+            );
             previous_end = line.end_secs;
         }
         KaraokeSchedule { lines, appear, leave, timing }
@@ -2023,7 +2212,7 @@ mod tests {
         );
         let envelope = VocalEnvelope::build(&audio, rate);
         let mut lines = vec![line(1.0, 3.9, "aaa bbb ccc ddd")];
-        let timed = time_words(&mut lines, &envelope);
+        let timed = time_words_with(&mut lines, &envelope, true);
         assert_eq!(timed, 1);
         let words = &lines[0].words;
         assert_eq!(words.len(), 4, "{words:?}");
@@ -2044,6 +2233,7 @@ mod tests {
     fn the_fill_hops_word_by_word_and_holds_between_them() {
         let mut line = line(1.0, 4.0, "aaa bbb ccc");
         line.words = vec![1.0, 2.0, 3.0];
+        line.confident = true;
         // Before the line: nothing.
         assert_eq!(sung_fraction(&line, 0.5), 0.0);
         // The first word fills over the hop and then HOLDS: the fraction at
@@ -2126,7 +2316,7 @@ mod tests {
         }
         let envelope = VocalEnvelope::build(&audio, rate);
         let mut lines = vec![line(0.5, 2.4, "one two three four five six")];
-        assert_eq!(time_words(&mut lines, &envelope), 1);
+        assert_eq!(time_words_with(&mut lines, &envelope, true), 1);
         let words = &lines[0].words;
         assert_eq!(words.len(), 6, "{words:?}");
         let attacks = envelope.onsets_between(0.35, 2.5);
@@ -2148,7 +2338,7 @@ mod tests {
         let rate = 16_000.0;
         let envelope = VocalEnvelope::build(&vec![0.0f32; 16_000 * 4], rate);
         let mut lines = vec![line(1.0, 3.0, "nothing to hear here")];
-        assert_eq!(time_words(&mut lines, &envelope), 0);
+        assert_eq!(time_words_with(&mut lines, &envelope, true), 0);
         assert!(lines[0].words.is_empty());
         // …and the display falls back rather than freezing.
         assert!((sung_fraction(&lines[0], 2.0) - 0.5).abs() < 1e-6);
@@ -2274,6 +2464,122 @@ mod tests {
         }
     }
 
+    /// Walk a schedule at display rate and report, per line, the seconds it
+    /// held the bright row and the order it did so in.
+    fn walk(schedule: &KaraokeSchedule, until: f64) -> Vec<(usize, f64)> {
+        let step = 1.0 / 60.0;
+        let mut runs: Vec<(usize, f64)> = Vec::new();
+        let mut at = 0.0;
+        while at < until {
+            if let Some(index) = schedule.at(at).current {
+                match runs.last_mut() {
+                    Some((last, held)) if *last == index => *held += step,
+                    _ => runs.push((index, step)),
+                }
+            }
+            at += step;
+        }
+        runs
+    }
+
+    #[test]
+    fn every_line_gets_the_screen_exactly_once_and_long_enough_to_read() {
+        // The failure this locks out is a line NOBODY EVER SEES. Three clamps
+        // shape a line's appear moment — the lead-in, the previous line's
+        // end, and zero — and any of them can put two lines on the same
+        // instant: two lines pinned to zero at the top of a track, or a start
+        // pulled back under the line before it. The lookup takes the last
+        // line whose moment has passed, so a collapsed pair silently drops
+        // the earlier one.
+        let timing = KaraokeTiming::from_grid(Some(&grid(128.0)));
+        let mut lines = vec![
+            // Two lines inside the first lead-in: both would clamp to zero.
+            line(0.30, 0.90, "one"),
+            line(0.95, 1.60, "two"),
+            // A line whose start was snapped back under its predecessor.
+            line(1.55, 2.40, "three"),
+            // Butted, then a gap, then dense again.
+            line(2.40, 3.10, "four"),
+            line(8.00, 9.50, "five"),
+            line(9.55, 10.10, "six"),
+            line(10.12, 10.60, "seven"),
+        ];
+        // …and a long tail of ordinary lines, so the guarantee is not a
+        // property of a hand-picked seven.
+        let mut at = 12.0;
+        for index in 0..30 {
+            let length = 0.8 + (index % 5) as f64 * 0.35;
+            lines.push(line(at, at + length, &format!("line {index}")));
+            at += length + (index % 3) as f64 * 0.2;
+        }
+        let last = lines.last().unwrap().end_secs;
+        let schedule = KaraokeSchedule::build(lines, timing);
+        let runs = walk(&schedule, last + 4.0);
+
+        // Every line, exactly once, in order.
+        let order: Vec<usize> = runs.iter().map(|(index, _)| *index).collect();
+        assert_eq!(
+            order,
+            (0..schedule.lines.len()).collect::<Vec<_>>(),
+            "lines were skipped, repeated or shown out of order"
+        );
+        // …and each held the screen long enough to be read.
+        let floor = timing.floor_secs();
+        for (index, held) in &runs {
+            assert!(
+                *held >= floor - 0.02,
+                "line {index} ({:?}) held the screen for only {held:.3}s, floor {floor:.3}s",
+                schedule.lines[*index].text,
+            );
+        }
+        // The appear moments are strictly increasing, which is the invariant
+        // the lookup's binary search depends on.
+        for pair in schedule.appear.windows(2) {
+            assert!(pair[1] > pair[0], "{:?}", schedule.appear);
+        }
+    }
+
+    #[test]
+    fn a_held_note_keeps_the_fill_moving_instead_of_freezing() {
+        // A singer holding one word for two seconds while the rest of the
+        // line is quick: hopping and then freezing looks broken, so the held
+        // word fills across its own interval instead — and still lands
+        // exactly where the hop would have.
+        let mut held = line(0.0, 5.0, "aaa bbb ccc ddd");
+        held.words = vec![0.0, 0.3, 0.6, 2.6];
+        held.confident = true;
+        let a = sung_fraction(&held, 2.8);
+        let b = sung_fraction(&held, 3.6);
+        let c = sung_fraction(&held, 4.4);
+        assert!(a < b && b < c, "the fill froze on the held word: {a} {b} {c}");
+        assert!((sung_fraction(&held, 5.0) - 1.0).abs() < 1e-6);
+        // A word at the line's own pace still hops: quick, then holds.
+        let quick = sung_fraction(&held, 0.3 + WORD_HOP_SECS + 1e-3);
+        assert_eq!(quick, sung_fraction(&held, 0.55));
+    }
+
+    #[test]
+    fn word_times_that_cannot_be_trusted_are_not_offered_to_the_display() {
+        let mut good = line(0.0, 4.0, "aaa bbb ccc ddd");
+        let times = vec![0.0, 1.0, 2.0, 3.0];
+        assert!(word_times_are_trustworthy(&good, &times, 4));
+        // Most of them guessed rather than placed: sweep instead.
+        assert!(!word_times_are_trustworthy(&good, &times, 1));
+        // Out of order, or stacked on one instant.
+        assert!(!word_times_are_trustworthy(&good, &[0.0, 1.0, 0.9, 3.0], 4));
+        assert!(!word_times_are_trustworthy(&good, &[0.0, 1.0, 1.0, 3.0], 4));
+        // Outside the line, or the wrong number of them.
+        assert!(!word_times_are_trustworthy(&good, &[0.0, 1.0, 2.0, 9.0], 4));
+        assert!(!word_times_are_trustworthy(&good, &[0.0, 1.0, 2.0], 3));
+        // One word swallowing the line is a bad assignment, not a sustain.
+        assert!(!word_times_are_trustworthy(&good, &[0.0, 0.2, 0.4, 0.6], 4));
+        // …and an untrusted line renders as the sweep, whatever it carries.
+        good.words = times;
+        good.confident = false;
+        assert!(!good.hops());
+        assert!((sung_fraction(&good, 2.0) - 0.5).abs() < 1e-6);
+    }
+
     #[test]
     fn without_a_grid_the_timing_still_leads_the_voice() {
         let timing = KaraokeTiming::from_grid(None);
@@ -2377,8 +2683,13 @@ mod tests {
         let transcribe_secs = started.elapsed().as_secs_f64();
         let mut lines = segments_to_lines(&segments, Some(&envelope), duration);
         let onset = refine_onsets(&mut lines, &envelope);
-        let timed = time_words(&mut lines, &envelope);
-        eprintln!("  word-timed lines: {timed} of {}", lines.len());
+        // The audit always measures the algorithm, whatever this build ships
+        // as its default.
+        let timed = time_words_with(&mut lines, &envelope, true);
+        eprintln!(
+            "  word-timed lines: {timed} of {} (the rest render as the smooth sweep)",
+            lines.len()
+        );
 
         // ---- the timing audit ------------------------------------------
         //
