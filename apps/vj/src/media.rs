@@ -1192,9 +1192,11 @@ pub struct ThumbPixels {
 ///
 /// A picture that DECLARED its cell layout is cut at that layout, exactly:
 /// the frames the producer wrote, at the rate it wrote them, with the clear
-/// padding it added for the thumbnail height floor simply not among them.
-/// A picture that declared nothing is a still — unless it is old enough to
-/// predate the declaration, which is what `legacy_may_be_sheet` is for.
+/// padding it added for the thumbnail height floor simply not among them —
+/// down to a ONE-cell declaration, which is a still of that cell (see
+/// [`declared_thumb`]). A picture that declared nothing is a still — unless
+/// it is old enough to predate the declaration, which is what
+/// `legacy_may_be_sheet` is for.
 fn decode_thumb(
     path: &PathBuf,
     sheet: Option<(ThumbnailCells, f32)>,
@@ -1224,17 +1226,8 @@ fn decode_thumb(
     }
     key_sprite_alpha(&mut data);
     if let Some((cells, fps)) = sheet {
-        let frames = cut_declared_cells(w, h, &data, cells);
-        if frames.len() > 1 {
-            let (cw, ch) = (cells.cell_w as usize, cells.cell_h as usize);
-            let first = frames.first().cloned().unwrap_or_default();
-            return Ok(ThumbPixels {
-                bgra: first,
-                width: cw,
-                height: ch,
-                frames: frames.into_iter().map(|f| (f, cw, ch)).collect(),
-                fps,
-            });
+        if let Some(cut) = declared_thumb(w, h, &data, cells, fps) {
+            return Ok(cut);
         }
     } else if let Some(frames) = legacy_may_be_sheet
         .then(|| legacy_split_sheet_bgra(w, h, &data))
@@ -1260,6 +1253,50 @@ fn decode_thumb(
         fps: 0.0,
         bgra: data,
     })
+}
+
+/// What a DECLARED cell layout means for a decoded picture, once its cells
+/// are cut. `None` = the declaration bought nothing (a stale stamp whose
+/// range lies outside the picture), so the caller draws the whole image.
+///
+/// TWO cells or more cycle. ONE cell is a STILL **of that cell** — never of
+/// the whole picture: a single-frame sprite actor (`bpak`, `clip`, `cand`,
+/// every Doom pickup) publishes its preview as one painted 128² tile on a
+/// 1024x256 strip, the rest clear padding bought to clear the 256px
+/// published-thumbnail floor. Drawing the strip put that tile in the corner
+/// of a picture eight times as wide as it — the tiny top-left sprites the
+/// SPRITE shelf showed. The tile itself is already the frame's content,
+/// aspect-fit and CENTRED by the producer (`anim_icon::fit_tile`), so the
+/// cell IS the content rect and nothing here has to measure pixels.
+///
+/// Same precedence as the shared cutter in `makepad-asset-widgets`
+/// (`thumb::plan_views`: an `Anim` view of one cell is a still of it).
+fn declared_thumb(
+    width: usize,
+    height: usize,
+    data: &[u32],
+    cells: ThumbnailCells,
+    fps: f32,
+) -> Option<ThumbPixels> {
+    let (cw, ch) = (cells.cell_w.max(1) as usize, cells.cell_h.max(1) as usize);
+    let mut frames = cut_declared_cells(width, height, data, cells);
+    match frames.len() {
+        0 => None,
+        1 => Some(ThumbPixels {
+            bgra: frames.remove(0),
+            width: cw,
+            height: ch,
+            frames: Vec::new(),
+            fps: 0.0,
+        }),
+        _ => Some(ThumbPixels {
+            bgra: frames[0].clone(),
+            width: cw,
+            height: ch,
+            frames: frames.into_iter().map(|f| (f, cw, ch)).collect(),
+            fps,
+        }),
+    }
 }
 
 /// Cut the cells a manifest NAMED, row-major from the declared origin. A
@@ -2229,6 +2266,60 @@ mod tests {
         // A range past the edge stops instead of reading past the picture.
         let over = ThumbnailCells { first: 6, count: 8, ..cells };
         assert_eq!(cut_declared_cells(w, h, &data, over).len(), 2);
+    }
+
+    /// The published shape of a SINGLE-FRAME sprite actor (`bpak`, `clip`,
+    /// `cand`, every Doom pickup): one painted 128² tile at the top-left of
+    /// a 1024x256 strip, the other fifteen cells clear padding bought to
+    /// clear the 256px published-thumbnail floor.
+    fn one_cell_strip() -> (usize, usize, Vec<u32>) {
+        let (w, h) = (1024usize, 256usize);
+        let mut data = vec![SHEET_CLEAR; w * h];
+        for y in 0..SHEET_TILE {
+            for x in 0..SHEET_TILE {
+                data[y * w + x] = 0xFF44AA66;
+            }
+        }
+        (w, h, data)
+    }
+
+    #[test]
+    /// A ONE-cell declaration is a still OF THAT CELL. This is the tiny
+    /// top-left sprite bug: the strip declares `cells 8 128 128 0 1`, and
+    /// drawing the whole 1024x256 picture left a 128px sprite in the corner
+    /// of a tile eight times as wide as it.
+    fn a_single_declared_cell_is_a_still_of_that_cell() {
+        let (w, h, data) = one_cell_strip();
+        let cells = ThumbnailCells { cols: 8, cell_w: 128, cell_h: 128, first: 0, count: 1 };
+        let cut = declared_thumb(w, h, &data, cells, 8.0).expect("one cell is a usable cut");
+        assert_eq!((cut.width, cut.height), (128, 128), "the CELL, not the strip");
+        assert_eq!(cut.bgra.len(), 128 * 128);
+        assert!(cut.bgra.iter().all(|p| *p == 0xFF44AA66), "the painted tile");
+        assert!(cut.frames.is_empty(), "one cell is a still, not an animation");
+        assert_eq!(cut.fps, 0.0);
+    }
+
+    #[test]
+    /// The same decision for the other counts: two or more cells cycle at
+    /// the declared rate, and a declaration that fits nothing inside the
+    /// picture buys nothing (the caller draws the whole image).
+    fn declared_cells_cycle_and_a_stale_declaration_declines() {
+        let (w, h, data) = one_cell_strip();
+        let cells = ThumbnailCells { cols: 8, cell_w: 128, cell_h: 128, first: 0, count: 3 };
+        let cut = declared_thumb(w, h, &data, cells, 6.0).expect("three cells");
+        assert_eq!(cut.frames.len(), 3);
+        assert_eq!(cut.fps, 6.0);
+        assert!(cut.frames.iter().all(|(px, fw, fh)| (*fw, *fh) == (128, 128)
+            && px.len() == 128 * 128));
+        // The still frame a grid without an animation clock shows is the
+        // FIRST declared cell, at cell size.
+        assert_eq!((cut.width, cut.height), (128, 128));
+        assert!(cut.bgra.iter().all(|p| *p == 0xFF44AA66));
+
+        // A stamp from a bigger picture than the one that arrived: every
+        // cell lies outside, so nothing is cut and nothing is guessed.
+        let stale = ThumbnailCells { cols: 8, cell_w: 512, cell_h: 512, first: 0, count: 4 };
+        assert!(declared_thumb(w, h, &data, stale, 8.0).is_none());
     }
 
     #[test]

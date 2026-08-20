@@ -6842,6 +6842,7 @@ impl App {
                         texture: None,
                         frames: Vec::new(),
                         fps: 0.0,
+                        cells: false,
                         active: false,
                         placeholder: true,
                     };
@@ -6890,6 +6891,11 @@ impl App {
                     .revision
                     .and_then(|rev| self.thumb_anims.get(&rev).cloned())
                     .unwrap_or((Vec::new(), 0.0));
+                // Straight off the manifest: this picture declared a cell
+                // layout, so the tile draws one of its cells whole. True for
+                // a single-cell sprite strip too, which has no second frame
+                // to reveal it — see `GridEntry::cells`.
+                let cells = tile.thumb.as_ref().is_some_and(|t| t.anim.is_some());
                 GridEntry {
                     asset: tile.asset,
                     title: tile.title.clone(),
@@ -6899,6 +6905,7 @@ impl App {
                     texture,
                     frames,
                     fps,
+                    cells,
                     active,
                     placeholder: false,
                 }
