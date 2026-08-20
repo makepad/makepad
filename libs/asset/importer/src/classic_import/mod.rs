@@ -2333,6 +2333,43 @@ mod tests {
         assert_eq!(hx.get("liquid").and_then(Value::as_bool), Some(true));
         assert_eq!(hx.get("solid").and_then(Value::as_bool), Some(false));
 
+        // func_plat brushes are lifts: authored and resting UP, travelling
+        // down, so a walker meets the platform where the map drew it.
+        assert!(!map.lifts.is_empty(), "e1m1 has two func_plat");
+        let lift = named("lift_1").expect("lift_1");
+        let lx = lift.get("extras").unwrap();
+        assert_eq!(lx.get("kind").and_then(Value::as_str), Some("lift"));
+        assert_eq!(lx.get("default").and_then(Value::as_str), Some("up"));
+        assert!(
+            lift.get("translation").is_none(),
+            "a lift's rest pose is the authored one"
+        );
+        let travel = match lx.get("travel") {
+            Some(Value::F64(f)) => *f,
+            Some(Value::Int(i)) => *i as f64,
+            other => panic!("lift travel: {other:?}"),
+        };
+        assert!(travel < 0.0, "a plat drops: {travel}");
+
+        // The teleport pad and where it lands. E1M1's one teleporter is the
+        // only way out of the water tunnel.
+        assert!(!map.teleports.is_empty(), "e1m1 has a trigger_teleport");
+        for t in &map.teleports {
+            assert!(t.pad_max[0] > t.pad_min[0] && t.pad_max[1] > t.pad_min[1], "{t:?}");
+            assert!(t.dst.iter().all(|v| v.is_finite()), "{t:?}");
+        }
+
+        // A `func_door_secret` is drawn as a wall and says so.
+        assert!(
+            nodes.iter().any(|n| {
+                n.get("extras")
+                    .and_then(|e| e.get("secret"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            }),
+            "e1m1 has seven func_door_secret"
+        );
+
         // func_door brushes move.
         let door = named("door_1").expect("door_1");
         let dx = door.get("extras").unwrap();

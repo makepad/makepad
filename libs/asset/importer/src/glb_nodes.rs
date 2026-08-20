@@ -91,6 +91,21 @@ impl ExtraPart {
 }
 
 impl ExtraNode {
+    /// Mark a door hidden. A `func_door_secret` (Quake) or an `ML_SECRET`
+    /// line (Doom) is DRAWN as a wall and opens like any other door: a
+    /// walker that cannot tell it apart is stuck in the room forever, so
+    /// the flag is part of the contract rather than trivia.
+    pub fn secret(mut self, secret: bool) -> Self {
+        for (key, value) in self.extras.iter_mut() {
+            if key == "secret" {
+                *value = Value::Bool(secret);
+                return self;
+            }
+        }
+        self.extras.push(("secret".into(), Value::Bool(secret)));
+        self
+    }
+
     /// A door: geometry authored CLOSED, resting OPEN, with its clip.
     pub fn door(
         name: impl Into<String>,
