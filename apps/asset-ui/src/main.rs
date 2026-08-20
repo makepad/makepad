@@ -8615,16 +8615,23 @@ impl App {
                     if let Some(asset) = file.strip_prefix("store:") {
                         let (domain, content_type) = store_media_of(&bytes);
                         let title = self.store_asset_title(asset);
-                        let is_music = self.store_asset_namespace(asset).as_deref() == Some("music");
+                        let clip_before = audio::clip_generation();
                         if self.display_artifact(
                             cx, domain, content_type, &bytes, 0, copy_to.as_deref(), false,
                         ) {
-                            // A MUSIC row starts playing on click — a music
-                            // library where every track needs a second Play
-                            // click auditions like a filing cabinet. Only the
-                            // music namespace: sfx/speech reopens keep the
-                            // one-shot loop guard (see display_artifact).
-                            if is_music && audio::is_ready() && !audio::is_playing() {
+                            // A clicked CATALOG audio row plays immediately —
+                            // music, sfx and speech alike; a library where
+                            // every row needs a second Play click auditions
+                            // like a filing cabinet. Gated on the clip
+                            // GENERATION so it only fires when this display
+                            // actually decoded new audio (never for images,
+                            // never on a redraw that reused the clip) — the
+                            // History-reopen loop guard in display_artifact
+                            // stays what it is.
+                            if audio::clip_generation() != clip_before
+                                && audio::is_ready()
+                                && !audio::is_playing()
+                            {
                                 crate::video_player::stop_audio();
                                 audio::play();
                                 self.arm_audio_pump(cx);
@@ -8971,18 +8978,6 @@ impl App {
 
     /// The catalog row's title for a store open, so the caption says what
     /// the user clicked instead of a raw id.
-    /// Namespace of a catalog asset as the current search served it —
-    /// `None` when the asset is not in the loaded result page.
-    fn store_asset_namespace(&self, asset: &str) -> Option<String> {
-        self.store.search.ready().and_then(|results| {
-            results
-                .hits
-                .iter()
-                .find(|hit| hit.asset_id.to_string() == asset)
-                .map(|hit| hit.namespace.clone())
-        })
-    }
-
     fn store_asset_title(&self, asset: &str) -> String {
         self.store
             .search
