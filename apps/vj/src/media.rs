@@ -19,7 +19,7 @@ use crate::cue::SlotId;
 use crate::decks::DeckId;
 use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE};
 use crate::pads::PadKey;
-use makepad_asset_data::{AssetRevisionId, MediaType};
+use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
 use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use std::collections::VecDeque;
@@ -880,15 +880,24 @@ pub enum DecodeJob {
     /// manifest text that says how to cut it (grouped Billboard assets).
     BillboardSheet { gen: u64, slot: usize, sheet: PathBuf, manifest: PathBuf },
     /// Read + decode a tile thumbnail into BGRA pixels (bounded); the UI
-    /// thread only creates the texture. `may_be_sheet` says whether this
-    /// thumbnail can legitimately be a packed 128² animation sheet (a
-    /// mesh/billboard icon); an image asset's thumbnail never is, however
-    /// sheet-shaped its dimensions. `epoch` is the host's current
-    /// visible-range generation (bumped whenever the grid's visible range
-    /// changes); once the thumb lane has seen a newer epoch, any job still
-    /// waiting from an older one is skipped without decoding when its turn
-    /// comes — see `DecodePool`'s doc comment.
-    Thumb { revision: AssetRevisionId, path: PathBuf, may_be_sheet: bool, epoch: u64 },
+    /// thread only creates the texture.
+    ///
+    /// `sheet` is what the MANIFEST declared about the picture: the cell
+    /// layout of a packed animation sheet and the rate its producer wrote
+    /// down, or `None` for a still — and for the pre-contract revisions
+    /// whose thumbnails say nothing, where `legacy_may_be_sheet` decides
+    /// instead. `epoch` is the host's current visible-range generation
+    /// (bumped whenever the grid's visible range changes); once the thumb
+    /// lane has seen a newer epoch, any job still waiting from an older one
+    /// is skipped without decoding when its turn comes — see `DecodePool`'s
+    /// doc comment.
+    Thumb {
+        revision: AssetRevisionId,
+        path: PathBuf,
+        sheet: Option<(ThumbnailCells, f32)>,
+        legacy_may_be_sheet: bool,
+        epoch: u64,
+    },
 }
 
 /// Largest GLB the mesh lane will lift into memory.
@@ -1179,12 +1188,18 @@ pub struct ThumbPixels {
 }
 
 /// Read + decode a thumbnail into BGRA, refusing oversized or malformed
-/// images before any pixel reaches the UI thread. Only the 128² packed
-/// sheets asset-ui writes for mesh/billboard icons become multi-frame
-/// previews, and only when the caller says the source CAN be one: a
-/// 1024² texture or Flux still passes the sheet dimension test too and
-/// must stay a single frame.
-fn decode_thumb(path: &PathBuf, may_be_sheet: bool) -> Result<ThumbPixels, String> {
+/// images before any pixel reaches the UI thread.
+///
+/// A picture that DECLARED its cell layout is cut at that layout, exactly:
+/// the frames the producer wrote, at the rate it wrote them, with the clear
+/// padding it added for the thumbnail height floor simply not among them.
+/// A picture that declared nothing is a still — unless it is old enough to
+/// predate the declaration, which is what `legacy_may_be_sheet` is for.
+fn decode_thumb(
+    path: &PathBuf,
+    sheet: Option<(ThumbnailCells, f32)>,
+    legacy_may_be_sheet: bool,
+) -> Result<ThumbPixels, String> {
     if path.extension().and_then(|e| e.to_str()) == Some("billboard") {
         return decode_billboard_thumb(path);
     }
@@ -1208,8 +1223,21 @@ fn decode_thumb(path: &PathBuf, may_be_sheet: bool) -> Result<ThumbPixels, Strin
         data.truncate(w * h);
     }
     key_sprite_alpha(&mut data);
-    if let Some(frames) = may_be_sheet
-        .then(|| split_sheet_bgra(w, h, &data))
+    if let Some((cells, fps)) = sheet {
+        let frames = cut_declared_cells(w, h, &data, cells);
+        if frames.len() > 1 {
+            let (cw, ch) = (cells.cell_w as usize, cells.cell_h as usize);
+            let first = frames.first().cloned().unwrap_or_default();
+            return Ok(ThumbPixels {
+                bgra: first,
+                width: cw,
+                height: ch,
+                frames: frames.into_iter().map(|f| (f, cw, ch)).collect(),
+                fps,
+            });
+        }
+    } else if let Some(frames) = legacy_may_be_sheet
+        .then(|| legacy_split_sheet_bgra(w, h, &data))
         .flatten()
     {
         let first = frames.first().cloned().unwrap_or_default();
@@ -1222,7 +1250,7 @@ fn decode_thumb(path: &PathBuf, may_be_sheet: bool) -> Result<ThumbPixels, Strin
             width: SHEET_TILE,
             height: SHEET_TILE,
             frames: seq,
-            fps: 8.0,
+            fps: LEGACY_SHEET_FPS,
         });
     }
     Ok(ThumbPixels {
@@ -1232,6 +1260,34 @@ fn decode_thumb(path: &PathBuf, may_be_sheet: bool) -> Result<ThumbPixels, Strin
         fps: 0.0,
         bgra: data,
     })
+}
+
+/// Cut the cells a manifest NAMED, row-major from the declared origin. A
+/// range that runs off the picture stops rather than reading whatever is
+/// next in memory.
+fn cut_declared_cells(
+    width: usize,
+    height: usize,
+    data: &[u32],
+    cells: ThumbnailCells,
+) -> Vec<Vec<u32>> {
+    let (cw, ch) = (cells.cell_w.max(1) as usize, cells.cell_h.max(1) as usize);
+    let cols = cells.cols.max(1) as usize;
+    let mut frames = Vec::new();
+    for i in 0..cells.count as usize {
+        let index = cells.first as usize + i;
+        let (ox, oy) = ((index % cols) * cw, (index / cols) * ch);
+        if ox + cw > width || oy + ch > height || data.len() < width * height {
+            break;
+        }
+        let mut tile = vec![0u32; cw * ch];
+        for y in 0..ch {
+            let src = (oy + y) * width + ox;
+            tile[y * cw..(y + 1) * cw].copy_from_slice(&data[src..src + cw]);
+        }
+        frames.push(tile);
+    }
+    frames
 }
 
 fn decode_billboard_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
@@ -1280,12 +1336,17 @@ fn decode_billboard_thumb(path: &PathBuf) -> Result<ThumbPixels, String> {
 
 const SHEET_TILE: usize = 128;
 const SHEET_W: usize = 1024;
+/// Playback rate for a sheet that did NOT declare one. Only pre-contract
+/// revisions reach it; everything else runs at the rate its producer wrote.
+const LEGACY_SHEET_FPS: f32 = 8.0;
 /// Studio-clear padding used by packed 128² sheets (asset-ui `anim_icon`).
 const SHEET_CLEAR: u32 = 0xFF1A1F29;
 
-/// True for the 1024-wide packed sheet, or any single-row 128-tall strip
-/// with at least two tiles. Regular square thumbs (256/512/1024) stay still.
-fn is_anim_sheet(width: usize, height: usize) -> bool {
+/// LEGACY ONLY: true for the 1024-wide packed sheet, or any single-row
+/// 128-tall strip with at least two tiles. Regular square thumbs
+/// (256/512/1024) stay still. This is the guess a declared layout replaced —
+/// it gets a 1024-square render wrong, and always did.
+fn legacy_is_anim_sheet(width: usize, height: usize) -> bool {
     if width < SHEET_TILE * 2 || height < SHEET_TILE {
         return false;
     }
@@ -1300,10 +1361,11 @@ fn is_sheet_clear(p: u32) -> bool {
     a == 0 || p == SHEET_CLEAR
 }
 
-/// Split a decoded BGRA sheet into 128² frames. Matches asset-ui
-/// `anim_icon::split_sheet_bgra` — no greedy contact-sheet guess.
-fn split_sheet_bgra(width: usize, height: usize, data: &[u32]) -> Option<Vec<Vec<u32>>> {
-    if !is_anim_sheet(width, height) || data.len() < width * height {
+/// LEGACY ONLY: split a decoded BGRA sheet into 128² frames by measuring it.
+/// Reserved for revisions published before a thumbnail declared its layout;
+/// delete with the last of them.
+fn legacy_split_sheet_bgra(width: usize, height: usize, data: &[u32]) -> Option<Vec<Vec<u32>>> {
+    if !legacy_is_anim_sheet(width, height) || data.len() < width * height {
         return None;
     }
     let cols = width / SHEET_TILE;
@@ -1431,7 +1493,8 @@ const MAX_PENDING_THUMBS: usize = 64;
 struct PendingThumb {
     revision: AssetRevisionId,
     path: PathBuf,
-    may_be_sheet: bool,
+    sheet: Option<(ThumbnailCells, f32)>,
+    legacy_may_be_sheet: bool,
     epoch: u64,
 }
 
@@ -1625,7 +1688,7 @@ impl DecodePool {
                 .name(format!("vj-decode-thumb-{i}"))
                 .spawn(move || loop {
                     let Some(job) = queue.pop() else { return };
-                    let result = decode_thumb(&job.path, job.may_be_sheet);
+                    let result = decode_thumb(&job.path, job.sheet, job.legacy_may_be_sheet);
                     let out = DecodeDone::Thumb { revision: job.revision, result };
                     if done.send(out).is_err() {
                         return;
@@ -1638,8 +1701,9 @@ impl DecodePool {
 
     pub fn submit(&self, job: DecodeJob) {
         match job {
-            DecodeJob::Thumb { revision, path, may_be_sheet, epoch } => {
-                self.thumb_queue.push(PendingThumb { revision, path, may_be_sheet, epoch });
+            DecodeJob::Thumb { revision, path, sheet, legacy_may_be_sheet, epoch } => {
+                self.thumb_queue
+                    .push(PendingThumb { revision, path, sheet, legacy_may_be_sheet, epoch });
             }
             other => {
                 let _ = self.heavy_tx.send(other);
@@ -1920,11 +1984,11 @@ mod tests {
         // Malformed bytes refuse with a typed error.
         let bad = dir.join("bad.png");
         std::fs::write(&bad, b"not an image at all").unwrap();
-        assert!(decode_thumb(&bad, true).is_err());
+        assert!(decode_thumb(&bad, None, true).is_err());
         // Over the byte budget refuses BEFORE decode.
         let huge = dir.join("huge.png");
         std::fs::write(&huge, vec![0u8; (MAX_THUMB_BYTES + 1) as usize]).unwrap();
-        let err = decode_thumb(&huge, true).unwrap_err();
+        let err = decode_thumb(&huge, None, true).unwrap_err();
         assert!(err.contains("byte budget"), "{err}");
         // Mesh prep on garbage refuses too (worker-side, never the UI).
         let junk = dir.join("junk.glb");
@@ -1999,7 +2063,8 @@ mod tests {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
                 path: PathBuf::from(format!("t{i}.png")),
-                may_be_sheet: false,
+                sheet: None,
+                legacy_may_be_sheet: false,
                 epoch: 0,
             });
         }
@@ -2015,14 +2080,16 @@ mod tests {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
                 path: PathBuf::from(format!("old{i}.png")),
-                may_be_sheet: false,
+                sheet: None,
+                legacy_may_be_sheet: false,
                 epoch: 1,
             });
         }
         queue.push(PendingThumb {
             revision: AssetRevisionId::from_bytes([9; 32]),
             path: PathBuf::from("fresh.png"),
-            may_be_sheet: false,
+            sheet: None,
+            legacy_may_be_sheet: false,
             epoch: 2,
         });
         let job = queue.pop().expect("the fresh-epoch job survives");
@@ -2038,7 +2105,8 @@ mod tests {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([0; 32]),
                 path: PathBuf::from(format!("p{i}.png")),
-                may_be_sheet: false,
+                sheet: None,
+                legacy_may_be_sheet: false,
                 epoch: 0,
             });
         }
@@ -2071,7 +2139,8 @@ mod tests {
             pool.submit(DecodeJob::Thumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
                 path,
-                may_be_sheet: true,
+                sheet: None,
+                legacy_may_be_sheet: true,
                 epoch: 0,
             });
         }
@@ -2108,7 +2177,8 @@ mod tests {
             pool.submit(DecodeJob::Thumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
                 path,
-                may_be_sheet: true,
+                sheet: None,
+                legacy_may_be_sheet: true,
                 epoch: 0,
             });
         }
@@ -2124,7 +2194,45 @@ mod tests {
     }
 
     #[test]
-    fn only_128_packed_sheets_split() {
+    /// A DECLARED layout is cut exactly as declared: the producer's frame
+    /// count, the producer's cell size, the producer's origin. None of it is
+    /// measured, so a picture the legacy guess would refuse (or chop wrong)
+    /// comes out right.
+    #[test]
+    fn a_declared_layout_is_cut_exactly() {
+        // 4x2 grid of 3x3 cells, each filled with its own value.
+        let (cw, ch, cols, rows) = (3usize, 3usize, 4usize, 2usize);
+        let (w, h) = (cols * cw, rows * ch);
+        let mut data = vec![0u32; w * h];
+        for i in 0..cols * rows {
+            let (ox, oy) = ((i % cols) * cw, (i / cols) * ch);
+            for y in 0..ch {
+                for x in 0..cw {
+                    data[(oy + y) * w + ox + x] = i as u32 + 1;
+                }
+            }
+        }
+        let cells = ThumbnailCells {
+            cols: cols as u32,
+            cell_w: cw as u32,
+            cell_h: ch as u32,
+            first: 1,
+            count: 3,
+        };
+        let frames = cut_declared_cells(w, h, &data, cells);
+        assert_eq!(frames.len(), 3, "three frames, from cell one");
+        assert!(frames[0].iter().all(|p| *p == 2));
+        assert!(frames[2].iter().all(|p| *p == 4));
+        // These dimensions are nothing like a 128-tile sheet: the legacy
+        // guess refuses them, which is exactly why the declaration matters.
+        assert!(legacy_split_sheet_bgra(w, h, &data).is_none());
+        // A range past the edge stops instead of reading past the picture.
+        let over = ThumbnailCells { first: 6, count: 8, ..cells };
+        assert_eq!(cut_declared_cells(w, h, &data, over).len(), 2);
+    }
+
+    #[test]
+    fn only_128_packed_sheets_split_by_the_legacy_guess() {
         // A native sprite with lots of keyed/clear pixels must stay one frame.
         let mut sprite = vec![0u32; 64 * 128];
         for y in 20..100 {
@@ -2132,10 +2240,10 @@ mod tests {
                 sprite[y * 64 + x] = 0xFF2244AAu32;
             }
         }
-        assert!(split_sheet_bgra(64, 128, &sprite).is_none());
+        assert!(legacy_split_sheet_bgra(64, 128, &sprite).is_none());
 
         // A 256² photograph-like thumb is not a sheet even if it divides by 128.
-        assert!(split_sheet_bgra(256, 256, &vec![0xFF808080u32; 256 * 256]).is_none());
+        assert!(legacy_split_sheet_bgra(256, 256, &vec![0xFF808080u32; 256 * 256]).is_none());
 
         // 1024×128 packed sheet: two painted tiles, the rest studio-clear.
         let mut sheet = vec![SHEET_CLEAR; SHEET_W * SHEET_TILE];
@@ -2146,7 +2254,7 @@ mod tests {
                 }
             }
         }
-        let frames = split_sheet_bgra(SHEET_W, SHEET_TILE, &sheet).expect("two painted tiles");
+        let frames = legacy_split_sheet_bgra(SHEET_W, SHEET_TILE, &sheet).expect("two painted tiles");
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].len(), SHEET_TILE * SHEET_TILE);
     }

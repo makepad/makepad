@@ -17,7 +17,7 @@
 //!   keyed by the immutable revision, never by list position.
 
 use makepad_asset_client::{CatalogQuery, PageCursor};
-use makepad_asset_data::{AssetId, AssetKind, AssetRevisionId, BlobId, MediaType};
+use makepad_asset_data::{AssetId, AssetKind, AssetRevisionId, BlobId, MediaType, ThumbnailCells};
 use std::collections::{HashMap, VecDeque};
 
 pub type CatGen = u64;
@@ -38,10 +38,15 @@ pub struct TileMedia {
 }
 
 /// The manifest's typed thumbnail blob (immutable per revision).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TileThumb {
     pub blob: BlobId,
     pub len: u64,
+    /// The cell layout the manifest DECLARED, when the picture is a packed
+    /// sheet, and the rate its producer wrote down. `None` means the
+    /// thumbnail says nothing about itself, which is what every revision
+    /// published before the views contract means.
+    pub anim: Option<(ThumbnailCells, f32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,10 +78,15 @@ pub struct Tile {
     pub state: TileState,
 }
 
-/// Whether a tile's THUMBNAIL may be a packed animation strip. Decided by
-/// catalog kind, never by pixel dimensions: a 1024² PBR map or Flux still is
-/// dimensionally a 64-tile sheet and must never cycle, while a sprite actor's
-/// 128²-tile strip must.
+/// LEGACY ONLY: whether a tile's THUMBNAIL may be a packed animation strip,
+/// decided by catalog kind because the picture itself does not say.
+///
+/// A thumbnail now DECLARES its cell layout ([`TileThumb::anim`]), so this
+/// question is answered from the manifest and nothing is guessed. What
+/// remains is revisions published before that contract: their pictures carry
+/// no declaration, and the only thing standing between a sprite actor's
+/// 128²-tile strip and a 1024-square PBR map that is dimensionally the same
+/// sheet is this kind gate. Delete it with the last un-declared revision.
 pub fn kind_may_be_sheet(kind: Option<AssetKind>) -> bool {
     matches!(
         kind,
@@ -1039,7 +1049,7 @@ mod tests {
             rev(1),
             Some(media(1)),
             None,
-            Some(TileThumb { blob: BlobId::from_bytes([5; 32]), len: 20 }),
+            Some(TileThumb { blob: BlobId::from_bytes([5; 32]), len: 20, anim: None }),
         );
         assert_eq!(m.tile(&a1).unwrap().state, TileState::Ready);
         assert!(cmds.iter().any(|c| matches!(

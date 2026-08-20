@@ -474,18 +474,26 @@ fn process(request: IoRequest) -> IoDone {
             }
         }
         IoPurpose::GalleryPreviewEncoded { thumbnail } => {
-            let decoded = std::fs::read(&request.path)
-                .ok()
-                .and_then(|bytes| decode_image_from_data(&bytes).ok());
-            // Walk/idle sheets only ever live in a picture the app made —
-            // an importer-written `.thumb`, or the thumbnail of a catalog
-            // revision. An image PAYLOAD is always a still: a 1024×1024
-            // Flux render passes the sheet dimension test too and must not
-            // be chopped into 64 cycling tiles.
-            let (pixels, sequence, fps) = match decoded {
-                Some(image) if thumbnail => split_encoded_preview(image),
-                Some(image) => (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0),
-                None => (None, Vec::new(), 0.0),
+            // The BYTES first, so a stamped sheet's declared layout can be
+            // read before the picture is decoded into pixels.
+            let bytes = std::fs::read(&request.path).ok();
+            let layout = bytes
+                .as_deref()
+                .and_then(makepad_asset_importer::anim_icon::read_layout);
+            let decoded = bytes.and_then(|bytes| decode_image_from_data(&bytes).ok());
+            let (pixels, sequence, fps) = match (decoded, layout) {
+                // The picture SAYS it is a sheet, and says exactly which
+                // cells are frames and how fast. Nothing is measured.
+                (Some(image), Some((cells, fps))) => cut_declared_preview(image, cells, fps),
+                // No declaration: a revision published before the views
+                // contract. The old dimension guess is the only thing left,
+                // and it is still gated on the picture being one the app
+                // made (an importer-written `.thumb` or a catalog
+                // thumbnail) — a 1024-square Flux render passes that guess
+                // too and must not be chopped into 64 cycling tiles.
+                (Some(image), None) if thumbnail => legacy_split_preview(image),
+                (Some(image), None) => (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0),
+                (None, _) => (None, Vec::new(), 0.0),
             };
             IoDone::GalleryPreview {
                 file: request.file,
@@ -520,9 +528,47 @@ fn process(request: IoRequest) -> IoDone {
     }
 }
 
-/// A 128-tile walk/idle sheet becomes the same multi-frame preview the
-/// library already cycles for billboards. Square stills stay a single texture.
-fn split_encoded_preview(
+/// Cut the cells a picture DECLARED, at the rate it declared. The frame
+/// count is the producer's, so the clear padding a packer added to clear the
+/// 256px thumbnail floor is simply not among them.
+fn cut_declared_preview(
+    image: ImageBuffer,
+    cells: makepad_asset_data::ThumbnailCells,
+    fps: f32,
+) -> (Option<PreviewPixels>, Vec<PreviewPixels>, f32) {
+    let level0 = image.width.saturating_mul(image.height);
+    let pixels = if image.data.len() >= level0 {
+        &image.data[..level0]
+    } else {
+        image.data.as_slice()
+    };
+    let frames = makepad_asset_importer::anim_icon::cut_cells_bgra(
+        image.width,
+        image.height,
+        pixels,
+        cells.cell_w,
+        cells.cols,
+        cells.first,
+        cells.count,
+    );
+    if frames.is_empty() {
+        return (Some(PreviewPixels::Encoded(image)), Vec::new(), 0.0);
+    }
+    let (w, h) = (cells.cell_w as usize, cells.cell_h as usize);
+    let sequence: Vec<PreviewPixels> = frames
+        .into_iter()
+        .map(|data| PreviewPixels::Raw { width: w, height: h, data })
+        .collect();
+    let first = sequence.first().cloned();
+    // One frame is a still that happens to be packed: no cycling, no clock.
+    let fps = if sequence.len() > 1 { fps } else { 0.0 };
+    (first, sequence, fps)
+}
+
+/// LEGACY ONLY: a 128-tile walk/idle sheet found by measuring the picture,
+/// for revisions published before a sheet declared itself. Square stills stay
+/// a single texture. Delete with the last un-stamped thumbnail.
+fn legacy_split_preview(
     image: ImageBuffer,
 ) -> (Option<PreviewPixels>, Vec<PreviewPixels>, f32) {
     let level0 = image.width.saturating_mul(image.height);
@@ -531,7 +577,7 @@ fn split_encoded_preview(
     } else {
         image.data.as_slice()
     };
-    if let Some(frames) = makepad_asset_importer::anim_icon::split_sheet_bgra(
+    if let Some(frames) = makepad_asset_importer::anim_icon::legacy_split_sheet_bgra(
         image.width,
         image.height,
         pixels,
@@ -897,7 +943,7 @@ mod tests {
         let sheet = dir.join("lib-kaykit.glb.thumb");
         let red = makepad_asset_importer::anim_icon::fit_tile(&[255, 0, 0, 255], 1, 1);
         let green = makepad_asset_importer::anim_icon::fit_tile(&[0, 255, 0, 255], 1, 1);
-        let png = makepad_asset_importer::anim_icon::pack_sheet(&[red, green]).unwrap();
+        let png = makepad_asset_importer::anim_icon::pack_sheet(&[red, green]).unwrap().png;
         std::fs::write(&sheet, &png).unwrap();
         io.request(IoRequest {
             file: "lib-kaykit.glb".into(),
@@ -967,7 +1013,7 @@ mod tests {
         let object = dir.join("a3f9c1");
         let blue = makepad_asset_importer::anim_icon::fit_tile(&[0, 0, 255, 255], 1, 1);
         let white = makepad_asset_importer::anim_icon::fit_tile(&[255, 255, 255, 255], 1, 1);
-        let png = makepad_asset_importer::anim_icon::pack_sheet(&[blue, white]).unwrap();
+        let png = makepad_asset_importer::anim_icon::pack_sheet(&[blue, white]).unwrap().png;
         std::fs::write(&object, &png).unwrap();
         io.request(IoRequest {
             file: "store:0102030405060708090a0b0c0d0e0f10".into(),
