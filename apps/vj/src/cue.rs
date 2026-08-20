@@ -256,6 +256,16 @@ impl CueEngine {
         Some((pending.gen, schedule, slot))
     }
 
+    /// The transition the engine believes is running right now. Until it is
+    /// landed with `fade_complete_for`, BOTH its slots are spoken for (the
+    /// outgoing one is "still fading", the incoming one is live), so every
+    /// later click parks in `WaitingSlot`. A host that starts a fade must
+    /// therefore always be able to land it again — see
+    /// `a_started_fade_that_is_never_landed_wedges_every_later_click`.
+    pub fn active_fade(&self) -> Option<CueScheduleId> {
+        self.active_fade.map(|(schedule, _)| schedule)
+    }
+
     /// The slot the next cue should load into. With a program playing, the
     /// slot FARTHEST from the fader first (preload the other channel); with
     /// nothing playing, the slot the fader is on (so the cue shows up where
@@ -895,6 +905,65 @@ mod tests {
             panic!("parked cue must open");
         };
         assert_eq!((slot, gen), (old, gen3));
+    }
+
+    /// The wedge behind "clicking a tile stopped cueing anything".
+    ///
+    /// A fade that STARTS but is never landed leaves both slots spoken for
+    /// — the outgoing one is still fading, the incoming one is live — so
+    /// `free_slot` runs out of answers and every later click parks in
+    /// `WaitingSlot` forever: the standby label fills in, the program never
+    /// moves, and the crossfade never happens again for the rest of the
+    /// session. `fade_complete_for` is the only release, which is why the
+    /// host must land EVERY fade it starts, including the ones the audio
+    /// mixer refused and the host cut itself (`App::arm_fade`) and the ones
+    /// whose `Completed` the single-slot phase mailbox dropped
+    /// (`stale_fade_to_land`).
+    #[test]
+    fn a_started_fade_that_is_never_landed_wedges_every_later_click() {
+        let mut cue = CueEngine::new();
+        let (_, first, live) = make_live(&mut cue, 1);
+        cue.fade_complete_for(first);
+        assert_eq!(cue.active_fade(), None, "a landed fade holds no slots");
+
+        // Second click: pre-rolls on the far slot and starts its fade…
+        let gen2 = fetch_gen(&cue.click(item(2)));
+        let standby = open(&mut cue, gen2, 2);
+        let second = arm(&mut cue, standby, gen2);
+        start(&mut cue, gen2, second);
+        assert_eq!(cue.active_fade(), Some(second));
+
+        // …but nothing lands it, so a third click has nowhere to go. This
+        // is the exact failure the operator sees: the click registers, the
+        // media is fetched, and no slot ever opens.
+        let gen3 = fetch_gen(&cue.click(item(3)));
+        assert!(
+            cue.media_ready(gen3, "/m/3".into()).is_empty(),
+            "an unlanded fade leaves no free slot"
+        );
+        assert_eq!(cue.next().map(|i| i.title.as_str()), Some("clip 3"));
+        assert_eq!(cue.live().map(|i| i.title.as_str()), Some("clip 2"));
+
+        // Landing it is the whole cure: the old program parks and the cue
+        // that was waiting claims the slot at once.
+        let commands = cue.fade_complete_for(second);
+        assert_eq!(commands[0], CueCmd::HoldSlot { slot: live });
+        let CueCmd::OpenSlot { slot, gen, .. } = commands[1].clone() else {
+            panic!("the parked cue must open once the fade lands: {commands:?}");
+        };
+        assert_eq!((slot, gen), (live, gen3));
+        assert_eq!(cue.active_fade(), None);
+
+        // And the grid keeps working afterwards: click four still cues.
+        let third = arm(&mut cue, slot, gen3);
+        start(&mut cue, gen3, third);
+        cue.fade_complete_for(third);
+        let gen4 = fetch_gen(&cue.click(item(4)));
+        assert_eq!(
+            open(&mut cue, gen4, 4),
+            standby,
+            "the released slot is reused by the next click"
+        );
     }
 
     #[test]
