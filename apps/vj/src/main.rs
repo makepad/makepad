@@ -53,7 +53,8 @@ use crate::apc40::{
     PAD_COUNT,
 };
 use crate::beat_sync::{
-    fit_loop_to_grid, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
+    fit_loop_to_grid, BeatClock, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
+    BeatTarget, ClockSource, TapTempo,
 };
 use crate::catalog::{BrowseModel, CatCmd, CatGen, TileMedia, TileThumb};
 use crate::cue::{CueCmd, CueEngine, CueGen, CueItem, CueScheduleId, SlotId};
@@ -61,7 +62,8 @@ use crate::loop_detect::{
     analyze_video_loop, FrameSignature, LoopDetection, LoopKind, MotionSummary,
 };
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, FadeCurve, ScratchMotion, TrackItem,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, FadeCurve, ScratchMotion, SyncMode,
+    SyncView, TrackItem,
 };
 use crate::music_view::{
     format_bpm, format_duration, format_pitch, track_list_hits, OverviewEvent, TrackKey,
@@ -71,7 +73,7 @@ use crate::lyrics::{
     KaraokeSchedule, KaraokeTiming, LyricsDispatch, LyricsJob, LyricsMsg, LyricsPool, TrackLyrics,
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
-use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis};
+use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
 use crate::fx::FxState;
 use crate::gen::{GenCmd, GenModel, GenTag, ProfilesState};
 use crate::lanes::{LatestWins, AUDIO_LANE};
@@ -501,12 +503,24 @@ script_mod! {
                                 draw_text.color: #xa9b4bf
                                 draw_text.text_style.font_size: 10
                             }
-                            // ONE beat block: a 2-second scope with beat lines
-                            // (brighter on the downbeat), the BPM in one font,
-                            // and the lock as a word. Fixed widths so the beat
-                            // pump cannot reflow the bar, and narrow enough
-                            // that MASTER and OUTPUT always fit beside it.
-                            beat_scope := VjBeatScope{width: 96 height: 22}
+                            // ONE beat block: a live wave of the captured
+                            // audio with the beat grid ruled over it (so the
+                            // rulings visibly sit on the transients), the LED
+                            // that flashes the beat, the BPM, and the lock as
+                            // a word. Its own draw batch: the wave and the LED
+                            // animate every frame and must not drag the rest
+                            // of the bar's geometry along with them. Fixed
+                            // widths so the beat pump cannot reflow the bar.
+                            beat_cluster := View{
+                                width: Fit
+                                height: Fit
+                                flow: Right
+                                spacing: 6
+                                align: Align{x: 0.0, y: 0.5}
+                                new_batch: true
+                                beat_wave := VjBeatWave{width: 120 height: 22}
+                                beat_led := VjBeatLed{width: 18 height: 22}
+                            }
                             external_bpm := Label{
                                 flow: Flow.Right{wrap: false}
                                 max_lines: 1
@@ -560,8 +574,19 @@ script_mod! {
                                 text: "Lock audio"
                                 active: true
                             }
-                            // "FORCE" said nothing about what it forces. It
-                            // re-locks the beat detector to the audio NOW.
+                            // TAP is the operator's clock, and it says two
+                            // things with one gesture: ONE press moves the
+                            // downbeat to the press and leaves the tempo
+                            // alone ("the one is HERE"), four rhythmic
+                            // presses hand over the tempo as well.
+                            beat_tap := ChromeButton{
+                                width: 46
+                                text: "TAP"
+                            }
+                            // ...and RESYNC is the other direction: the
+                            // machine works it out. The detector drops its
+                            // grid, re-derives tempo and phase from the audio
+                            // playing now, and any tap override goes with it.
                             external_sync_now := ChromeButton{
                                 width: 74
                                 text: "RESYNC"
@@ -583,6 +608,13 @@ script_mod! {
                             karaoke_enable := Toggle{
                                 text: "Karaoke"
                                 active: false
+                            }
+                            // Line-sweep vs the aligned best-effort word
+                            // mapper: hop word-by-word where confidence
+                            // allows, smooth line sweep where it does not.
+                            karaoke_word_hops := Toggle{
+                                text: "Word hops"
+                                active: true
                             }
                             open_output := ChromeButton{text: "OUTPUT"}
                             output_window_status := PanelLabel{width: 96 text: "output open"}
@@ -706,6 +738,26 @@ script_mod! {
                                                     }
                                                 }
                                             }
+                                            // Under the well: does this slot
+                                            // follow the beat? ON by default.
+                                            View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 4
+                                                align: Align{x: 0.0, y: 0.5}
+                                                slot_a_beatsync := ChromeButton{
+                                                    width: 58
+                                                    text: "SYNC"
+                                                }
+                                                slot_a_sync_state := PanelLabel{
+                                                    width: Fill
+                                                    flow: Flow.Right{wrap: false}
+                                                    max_lines: 1
+                                                    text: ""
+                                                    draw_text.text_style.font_size: 9
+                                                }
+                                            }
                                         }
                                         // ---- program ----
                                         View{
@@ -806,6 +858,24 @@ script_mod! {
                                                             draw_text.text_style.font_size: 12
                                                         }
                                                     }
+                                                }
+                                            }
+                                            View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 4
+                                                align: Align{x: 0.0, y: 0.5}
+                                                slot_b_beatsync := ChromeButton{
+                                                    width: 58
+                                                    text: "SYNC"
+                                                }
+                                                slot_b_sync_state := PanelLabel{
+                                                    width: Fill
+                                                    flow: Flow.Right{wrap: false}
+                                                    max_lines: 1
+                                                    text: ""
+                                                    draw_text.text_style.font_size: 9
                                                 }
                                             }
                                         }
@@ -2228,6 +2298,50 @@ pub struct BeatInfo {
     pub beats_observed: u64,
 }
 
+/// Columns of capture envelope the chrome bar's wave keeps.
+pub const WAVE_COLS: usize = 256;
+/// One envelope column per 10 ms of AUDIO — the ring advances on the sample
+/// clock, not on the UI pump, so its time axis is exactly uniform however
+/// late a frame runs. 256 columns is 2.56 s of history.
+pub const WAVE_HZ: f64 = 100.0;
+
+/// The capture envelope of the last [`WAVE_COLS`] columns: peak in the high
+/// byte, RMS in the low one, so one `u16` is a whole column.
+#[derive(Clone, Copy)]
+pub struct WaveRing {
+    cols: [u16; WAVE_COLS],
+    /// Where the next column goes; the oldest kept column is here too.
+    head: usize,
+}
+
+impl Default for WaveRing {
+    fn default() -> Self {
+        WaveRing { cols: [0; WAVE_COLS], head: 0 }
+    }
+}
+
+impl WaveRing {
+    fn push(&mut self, peak: f32, rms: f32) {
+        // The same perceptual curve the deck waveforms use, so a quiet room
+        // still draws a legible wave and the two surfaces agree about how
+        // loud "loud" looks.
+        let curve = |value: f32| {
+            (value.clamp(0.0, 1.0).powf(crate::wave_analysis::WAVE_CURVE) * 255.0).round() as u16
+        };
+        let peak = curve(peak);
+        let rms = curve(rms);
+        self.cols[self.head] = (peak << 8) | rms;
+        self.head = (self.head + 1) % WAVE_COLS;
+    }
+
+    /// Unroll into `out`, oldest column first.
+    pub fn unroll(&self, out: &mut Vec<u16>) {
+        out.clear();
+        out.extend_from_slice(&self.cols[self.head..]);
+        out.extend_from_slice(&self.cols[..self.head]);
+    }
+}
+
 /// Published by the sync worker; read by the UI thread each pump.
 #[derive(Clone, Default)]
 pub struct SyncSnapshot {
@@ -2237,6 +2351,12 @@ pub struct SyncSnapshot {
     pub peak: f32,
     pub lock_state: BeatLockState,
     pub beat: Option<BeatInfo>,
+    /// Capture envelope for the bar's wave, and when its newest column was
+    /// published — the wave's right edge in host time.
+    pub wave: WaveRing,
+    pub wave_stamp: Option<Instant>,
+    /// True while the detector is parked because a deck owns the clock.
+    pub suppressed: bool,
 }
 
 struct SyncShared {
@@ -2251,23 +2371,74 @@ struct SyncShared {
 pub struct SyncWorker {
     shared: Arc<SyncShared>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    resync: Arc<std::sync::atomic::AtomicBool>,
+    suppress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SyncWorker {
     pub fn start(feed: Arc<CaptureFeed>) -> SyncWorker {
         let shared = Arc::new(SyncShared { snap: Mutex::new(SyncSnapshot::default()) });
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resync = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let suppress = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread_shared = shared.clone();
         let thread_stop = stop.clone();
+        let thread_resync = resync.clone();
+        let thread_suppress = suppress.clone();
         let _ = std::thread::Builder::new().name("vj-beat-sync".into()).spawn(move || {
             let mut scratch: Vec<f32> = Vec::with_capacity(CAPTURE_RING);
             let mut analyzer: Option<BeatSyncAnalyzer> = None;
             let mut lock_started_beat: Option<i64> = None;
             let mut seen_dropped: u64 = 0;
+            let mut wave = WaveRing::default();
+            // Partial envelope column: peak, sum of squares, samples.
+            let mut column = (0.0f32, 0.0f64, 0usize);
+            let mut wave_stamp: Option<Instant> = None;
+            let mut was_suppressed = false;
             while !thread_stop.load(Ordering::Acquire) {
                 scratch.clear();
+                // The ring is ALWAYS drained, suppressed or not: leaving it
+                // to overflow would count as dropped samples and reset the
+                // analyzer under us the moment it is wanted again.
                 let rate = feed.drain_into(&mut scratch);
+                // While a deck is playing, the loopback detector would be
+                // re-detecting OUR OWN output — a laggier, wobblier copy of
+                // a grid the deck already knows sample-exactly. Park it.
+                let suppressed = thread_suppress.load(Ordering::Acquire);
+                if suppressed != was_suppressed {
+                    was_suppressed = suppressed;
+                    // Coming back, its sample clock has a hole in it: the
+                    // only honest thing to do is start looking again.
+                    if let Some(analyzer) = analyzer.as_mut() {
+                        analyzer.reset();
+                    }
+                    lock_started_beat = None;
+                }
+                // RESYNC: throw the grid away and re-derive tempo and phase
+                // from the audio that is playing now.
+                if thread_resync.swap(false, Ordering::AcqRel) {
+                    if let Some(analyzer) = analyzer.as_mut() {
+                        analyzer.reset();
+                    }
+                    lock_started_beat = None;
+                }
                 if rate >= 8_000 && !scratch.is_empty() {
+                    // The envelope the chrome bar draws, on the SAMPLE clock:
+                    // one column per `1/WAVE_HZ` seconds of audio however
+                    // unevenly this thread happens to be scheduled.
+                    let step = ((rate as f64 / WAVE_HZ).round() as usize).max(1);
+                    for sample in &scratch {
+                        let sample = if sample.is_finite() { *sample } else { 0.0 };
+                        column.0 = column.0.max(sample.abs());
+                        column.1 += (sample as f64) * (sample as f64);
+                        column.2 += 1;
+                        if column.2 >= step {
+                            wave.push(column.0, (column.1 / column.2 as f64).sqrt() as f32);
+                            column = (0.0, 0.0, 0);
+                        }
+                    }
+                    wave_stamp = Some(Instant::now());
+
                     // A device-rate change restarts the analyzer: its whole
                     // grid is in samples of one rate.
                     let stale = analyzer
@@ -2277,9 +2448,14 @@ impl SyncWorker {
                         analyzer = None;
                         lock_started_beat = None;
                     }
-                    analyzer
-                        .get_or_insert_with(|| BeatSyncAnalyzer::new(rate as f64))
-                        .push_mono(&scratch);
+                    // The wave above is drawn whatever happens — it proves
+                    // the right audio is arriving — but the ANALYSIS is what
+                    // costs, and it is pointless while a deck owns the clock.
+                    if !suppressed {
+                        analyzer
+                            .get_or_insert_with(|| BeatSyncAnalyzer::new(rate as f64))
+                            .push_mono(&scratch);
+                    }
                 }
                 let stats = feed.stats();
                 if stats.dropped_samples > seen_dropped {
@@ -2292,7 +2468,8 @@ impl SyncWorker {
                     }
                     lock_started_beat = None;
                 }
-                let analyzer_snapshot = analyzer.as_ref().map(BeatSyncAnalyzer::snapshot);
+                let analyzer_snapshot =
+                    analyzer.as_ref().filter(|_| !suppressed).map(BeatSyncAnalyzer::snapshot);
                 let lock_state = analyzer_snapshot
                     .as_ref()
                     .map(|snapshot| snapshot.state)
@@ -2308,15 +2485,32 @@ impl SyncWorker {
                     snap.peak = stats.peak;
                     snap.lock_state = lock_state;
                     snap.beat = beat;
+                    snap.wave = wave;
+                    snap.wave_stamp = wave_stamp;
+                    snap.suppressed = suppressed;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        SyncWorker { shared, stop }
+        SyncWorker { shared, stop, resync, suppress }
+    }
+
+    /// Park the detector: a deck is playing, so the room is only ever going
+    /// to tell us what that deck already knows exactly. The capture ring is
+    /// still drained and the wave still drawn; only the analysis stops.
+    pub fn set_suppressed(&self, on: bool) {
+        self.suppress.store(on, Ordering::Release);
     }
 
     pub fn snapshot(&self) -> SyncSnapshot {
         self.shared.snap.lock().unwrap().clone()
+    }
+
+    /// Drop the tracked grid and re-derive tempo and phase from the audio
+    /// that is playing now. This is what RESYNC means: the MACHINE decides
+    /// where the beat is, from scratch.
+    pub fn resync(&self) {
+        self.resync.store(true, Ordering::Release);
     }
 }
 
@@ -2378,6 +2572,8 @@ impl Drop for SyncWorker {
 const CONF_QUANTIZE: f32 = 0.5;
 const CONF_MUSICAL: f32 = 0.75;
 const BAR_BEATS: u64 = 4;
+/// How long the TAP button stays lit after a press.
+const TAP_FLASH_SECS: f64 = 0.14;
 /// Bar preference needs this many tracked beats — a fresh lock has no
 /// trustworthy downbeat yet.
 const MIN_BEATS_FOR_BAR: u64 = 8;
@@ -2408,6 +2604,135 @@ fn extrapolate_beat(beat: &BeatInfo, now: Instant) -> BeatInfo {
         beat.beat_index = (beat.beat_index + periods) % BAR_BEATS;
     }
     beat
+}
+
+/// An operator-set beat clock, from the TAP button.
+///
+/// Two strengths, and the difference is the whole point of the button:
+///
+/// * `bpm: None` — **the one is HERE**. Tempo keeps coming from whatever
+///   clock is underneath (deck grid or detector); only the downbeat moves to
+///   the moment of the press. This is the fix for a grid that is right about
+///   the tempo and wrong about which beat is beat one.
+/// * `bpm: Some(..)` — tempo AND phase come from the taps: the operator's
+///   ear replaces the machine's, for as long as the override stands.
+///
+/// It outranks every other clock while it stands, because the operator asked
+/// for it. See `App::pump_beat_override` for how the machine gets it back.
+#[derive(Clone, Copy, Debug)]
+struct BeatOverride {
+    /// The tap that defined beat one.
+    anchor: Instant,
+    bpm: Option<f64>,
+    /// Which deck (if any) was leading when the override was set.
+    leader: Option<DeckId>,
+    /// Set once the detector has actually LOST its grid since the tap: only
+    /// then may a fresh confident lock take the clock back.
+    saw_unlock: bool,
+}
+
+impl BeatOverride {
+    /// Project the override onto `now`. `base` supplies the tempo for a
+    /// phase-only anchor, so an override with no tapped tempo dies quietly
+    /// (returns `None`) when there is no clock under it to anchor.
+    fn beat(&self, base: Option<&BeatInfo>, now: Instant) -> Option<BeatInfo> {
+        let period = match self.bpm {
+            Some(bpm) if bpm.is_finite() && bpm > 0.0 => Duration::from_secs_f64(60.0 / bpm),
+            _ => base.map(|beat| beat.period).filter(|period| !period.is_zero())?,
+        };
+        let secs = period.as_secs_f64();
+        let elapsed = now.saturating_duration_since(self.anchor).as_secs_f64();
+        let beats = (elapsed / secs).floor().max(0.0);
+        Some(BeatInfo {
+            bpm: (60.0 / secs) as f32,
+            // The operator is the authority here: a tapped clock quantizes
+            // like a hard lock, which is why one taps in the first place.
+            confidence: 1.0,
+            locked: true,
+            period,
+            next_beat: self.anchor + Duration::from_secs_f64((beats + 1.0) * secs),
+            beat_index: (beats as u64 + 1) % BAR_BEATS,
+            // Bar preference still has to earn itself after the tap.
+            beats_observed: beats as u64,
+        })
+    }
+}
+
+/// How many beats one cycle of an `frames`-frame sprite state spans when
+/// the slot is beat-synced.
+///
+/// The rule is FOUR FRAMES TO THE BEAT, rounded to a power-of-two number of
+/// beats and held between one and eight. A four-frame walk is one frame per
+/// quarter beat and marches one cycle per beat; an eight-frame cycle takes
+/// two beats at the same stride; a sixteen-frame one takes a bar. Powers of
+/// two are the whole point — any other rounding puts the loop point
+/// somewhere that is not a musical boundary, and the eye sees that.
+fn sprite_cycle_beats(frames: usize) -> u32 {
+    let want = (frames.max(1) as f64 / 4.0).max(1.0);
+    let below = 1u32 << want.log2().floor().clamp(0.0, 3.0) as u32;
+    let above = (below * 2).min(8);
+    // Nearest in RATIO, which is what "nearest power of two" has to mean.
+    match want / below as f64 <= above as f64 / want {
+        true => below,
+        false => above,
+    }
+}
+
+/// The source ladder, as a decision.
+///
+/// Operator first, always. Then: a deck FOLLOWING the room means the room
+/// is in charge and that deck's grid must never be read back (it would be
+/// chasing itself). Otherwise a playing deck is master — the normal show,
+/// and while it is, the detector has nothing to add but latency, because
+/// all it can hear is that deck's own output. The detector is the source
+/// only when the VJ is standing alone against somebody else's music.
+fn resolve_clock_source(
+    operator: bool,
+    external_follow: bool,
+    deck: bool,
+    detector: bool,
+) -> ClockSource {
+    if operator {
+        return ClockSource::Operator;
+    }
+    match (external_follow, deck, detector) {
+        (true, _, true) => ClockSource::External,
+        (_, true, _) => ClockSource::Deck,
+        (_, false, true) => ClockSource::Detector,
+        _ => ClockSource::None,
+    }
+}
+
+/// Where a raw estimate says the beat is, in the clock's own terms.
+///
+/// `bar_aware` sources (a deck's analysed grid, an operator tap) can vouch
+/// for the downbeat, so their corrections may move the bar; a detector
+/// listening to a room cannot, so it only ever corrects the phase.
+fn beat_target(beat: &BeatInfo, now: Instant, bar_aware: bool) -> Option<BeatTarget> {
+    let period = beat.period.as_secs_f64();
+    if !(period > 0.0) || !period.is_finite() {
+        return None;
+    }
+    let beat = extrapolate_beat(beat, now);
+    let until = beat.next_beat.saturating_duration_since(now).as_secs_f64();
+    let phase = (1.0 - until / period).clamp(0.0, 1.0);
+    Some(match bar_aware {
+        true => BeatTarget::in_bar((beat.beat_index + BAR_BEATS - 1) % BAR_BEATS, phase, period),
+        false => BeatTarget::phase_only(phase, period),
+    })
+}
+
+/// The detector has genuinely dropped its grid — not merely re-settled on
+/// one. Only this arms a hand-back of the clock from a tap override.
+fn detector_lost_grid(lock_state: BeatLockState) -> bool {
+    matches!(lock_state, BeatLockState::Unlocked | BeatLockState::Lost)
+}
+
+/// Whether a fresh detector lock may take the clock back from a tap
+/// override: it must have lost the grid first (a new track), and the lock it
+/// came back with must be one the fade policy would trust on its own.
+fn detector_reclaims(lock_state: BeatLockState, confidence: f32, saw_unlock: bool) -> bool {
+    matches!(lock_state, BeatLockState::Locked) && saw_unlock && confidence >= CONF_MUSICAL
 }
 
 /// The quantize policy. No lock (or low confidence) = immediate with the
@@ -3171,9 +3496,34 @@ pub struct App {
     /// The hot preset the explorer is on; `None` is ALL.
     #[rust]
     preset: Option<catalog::Preset>,
-    /// Beat index the scope last drew a mark for, so one beat makes one line.
-    #[rust(u32::MAX)]
-    beat_scope_index: u32,
+    /// THE published beat clock — the disciplined oscillator every consumer
+    /// reads, its monotonic time base, and the confidence it inherited from
+    /// whatever source it last followed (kept through a coast).
+    #[rust]
+    beat_clock: BeatClock,
+    #[rust]
+    clock_epoch: Option<Instant>,
+    #[rust]
+    clock_confidence: f32,
+    /// Which rung of the source ladder the clock is on.
+    #[rust]
+    clock_source: ClockSource,
+    /// Operator tap tempo, and the clock override its taps produce.
+    #[rust]
+    tap_tempo: TapTempo,
+    #[rust]
+    beat_override: Option<BeatOverride>,
+    /// App-clock time of the last TAP press, so the button can flash it.
+    #[rust]
+    tap_flash_secs: Option<f64>,
+    /// Scratch for the chrome wave upload, so a pump allocates nothing.
+    #[rust]
+    wave_cols: Vec<u16>,
+    /// Per-slot SYNC: the slot's content is held to the beat grid — video
+    /// loops rate-fitted, sprite states stepped on beat subdivisions. ON by
+    /// default, because a VJ surface that ignores the music is the odd one.
+    #[rust([true, true])]
+    slot_beat_sync: [bool; 2],
     /// Hands-free crossfade (the AUTOFADE button).
     #[rust]
     auto_fade: AutoFade,
@@ -3789,25 +4139,19 @@ impl App {
         Some(((1.0 - until / period).clamp(0.0, 1.0), period))
     }
 
-    /// Advance the smoothed beat oscillator one frame: free-run at the
-    /// analyzer's period, steer gently toward its phase (wrap-aware), so a
-    /// re-settled estimate never snaps the visuals. Call once per frame.
+    /// Advance the visual beat phase one frame.
+    ///
+    /// This used to be a second phase-locked loop steering toward the raw
+    /// analyzer, because the raw analyzer jumped. It no longer does: the
+    /// published clock is continuous by contract, so the visuals ride it
+    /// directly and only free-run when there is no clock at all.
     fn pump_beat_pll(&mut self, now: f64) {
         let dt = (now - self.beat_pll_last.replace(now).unwrap_or(now)).clamp(0.0, 0.25);
-        let Some((target, period)) = self.analyzer_beat_phase() else {
+        let Some((target, _period)) = self.analyzer_beat_phase() else {
             self.beat_pll_phase = (self.beat_pll_phase + dt / 0.5).fract();
             return;
         };
-        let mut phase = (self.beat_pll_phase + dt / period).fract();
-        let mut err = target - phase;
-        if err > 0.5 {
-            err -= 1.0;
-        } else if err < -0.5 {
-            err += 1.0;
-        }
-        // ~8% of the error per frame: locks within a beat, never jitters.
-        phase = (phase + err * 0.08 + 1.0).fract();
-        self.beat_pll_phase = phase;
+        self.beat_pll_phase = target;
     }
 
     /// Beat phase for the visuals: smoothed + the operator's SHIFT knob.
@@ -3827,17 +4171,44 @@ impl App {
 
     fn pump_billboards(&mut self, cx: &mut Cx) {
         let now = cx.seconds_since_app_start();
+        // The published beat position, if the slot's SYNC is going to want
+        // it. Read ONCE: both slots must step on the same clock.
+        let beat_position = self
+            .clock_secs(Instant::now())
+            .filter(|_| self.beat_clock.running())
+            .map(|secs| self.beat_clock.position_at(secs));
         for index in 0..2 {
             if self.slot_held[index] {
                 continue; // parked: keep the last frame
             }
+            let synced = self.slot_beat_sync[index] && self.external_sync_enabled;
             let Some(bb) = self.billboards[index].as_mut() else { continue };
             let Some(state) = bb.states.get(bb.state_i) else { continue };
             let last = bb.last.replace(now).unwrap_or(now);
             bb.accum += (now - last).min(0.25);
-            let step = 1.0 / f64::from(state.fps.max(1.0));
             let looping = state.r#loop;
             let n = state.frames.len().max(1);
+            // SYNC: a looping state's whole cycle spans a musical unit, so
+            // a walk marches in time and a flame flickers on the beat. The
+            // clock is continuous, so this never judders.
+            if let (true, true, Some(position)) = (synced, looping, beat_position) {
+                let beats = sprite_cycle_beats(n);
+                let cycle = (position / beats as f64).rem_euclid(1.0);
+                bb.frame_i = ((cycle * n as f64).floor() as usize).min(n - 1);
+                bb.accum = 0.0;
+                if let Some(tex) = bb
+                    .textures
+                    .get(bb.state_i)
+                    .and_then(|frames| frames.get(bb.frame_i))
+                {
+                    self.slot_textures[index] = Some(tex.clone());
+                    if let Some((_, w, h)) = state.frames.get(bb.frame_i) {
+                        self.slot_aspect[index] = *w as f32 / (*h).max(1) as f32;
+                    }
+                }
+                continue;
+            }
+            let step = 1.0 / f64::from(state.fps.max(1.0));
             while bb.accum >= step {
                 bb.accum -= step;
                 if bb.frame_i + 1 < n {
@@ -3880,6 +4251,53 @@ impl App {
         }
     }
 
+    fn slot_beatsync_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(slot_a_beatsync),
+            SlotId::B => ids!(slot_b_beatsync),
+        }
+    }
+
+    fn slot_sync_state_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(slot_a_sync_state),
+            SlotId::B => ids!(slot_b_sync_state),
+        }
+    }
+
+    /// The per-slot SYNC control: is this slot's content held to the beat,
+    /// and — the honest half — what that is actually doing right now.
+    fn sync_slot_beatsync_ui(&mut self, cx: &mut Cx) {
+        for slot in [SlotId::A, SlotId::B] {
+            let index = slot.index();
+            let on = self.slot_beat_sync[index];
+            self.paint_chip(cx, Self::slot_beatsync_path(slot), on, Some("SYNC"));
+            let text = match (on, self.external_sync_enabled) {
+                (false, _) => "free".to_string(),
+                (true, false) => "bypassed".to_string(),
+                (true, true) => match self.slot_media[index] {
+                    SlotMedia::Billboard => {
+                        let frames = self
+                            .billboards[index]
+                            .as_ref()
+                            .and_then(|bb| bb.states.get(bb.state_i))
+                            .map(|state| state.frames.len().max(1))
+                            .unwrap_or(1);
+                        format!("{} frames / {} beat", frames, sprite_cycle_beats(frames))
+                    }
+                    _ => match self.applied_fit[index] {
+                        Some(fit) => format!("loop {} beats · ×{:.3}", fit.beats, fit.playback_rate),
+                        None => match self.slot_sync_beats[index] {
+                            0 => "natural rate".to_string(),
+                            beats => format!("{beats} beats / loop"),
+                        },
+                    },
+                },
+            };
+            self.set_status_label(cx, Self::slot_sync_state_path(slot), &text);
+        }
+    }
+
     fn slot_pos_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
             SlotId::A => ids!(slot_a_pos),
@@ -3918,7 +4336,10 @@ impl App {
     /// tempo drifts; silently free when there is no lock.
     fn apply_slot_beat_sync(&mut self, slot: SlotId) {
         let i = slot.index();
-        let beats = self.slot_sync_beats[i];
+        let beats = match self.slot_beat_sync[i] {
+            true => self.slot_sync_beats[i],
+            false => 0,
+        };
         let period = self.current_beat().filter(|b| b.locked).map(|b| b.period.as_secs_f64());
         let Some(player) = self.players[i].as_mut() else { return };
         let rate = match (beats, period) {
@@ -4063,6 +4484,7 @@ impl App {
             self.mute_painted = Some(self.video_muted);
             self.paint_icon_button(cx, ids!(video_mute), self.video_muted);
         }
+        self.sync_slot_beatsync_ui(cx);
     }
 
     /// Spin (turntable / orbit) on or off for a 3D or splat slot.
@@ -4558,8 +4980,284 @@ impl App {
     /// it is strictly better than listening to the room. The capture-based
     /// detector stays the source for everything else.
     fn current_beat(&self) -> Option<BeatInfo> {
-        self.deck_beat()
-            .or_else(|| self.sync_worker.as_ref().and_then(|worker| worker.snapshot().beat))
+        let now = Instant::now();
+        let secs = self.clock_secs(now)?;
+        if !self.beat_clock.running() {
+            return None;
+        }
+        let position = self.beat_clock.position_at(secs);
+        let period = self.beat_clock.period_secs();
+        if !(period > 0.0) || !period.is_finite() {
+            return None;
+        }
+        // The next whole beat of the published position — which is the same
+        // number every consumer would compute for itself, because the clock
+        // is continuous and everybody reads it at the instant they ask.
+        let until = ((position.ceil() - position) * period).max(0.0);
+        Some(BeatInfo {
+            bpm: self.beat_clock.bpm() as f32,
+            // A coast keeps the confidence it earned: through a breakdown
+            // the held grid is exactly what a fade should land on.
+            confidence: self.clock_confidence,
+            locked: true,
+            period: Duration::from_secs_f64(period),
+            next_beat: now + Duration::from_secs_f64(until),
+            beat_index: (position.ceil() as i64).rem_euclid(BAR_BEATS as i64) as u64,
+            beats_observed: position.max(0.0) as u64,
+        })
+    }
+
+    /// The clock's own time base: monotonic seconds since the first pump.
+    fn clock_secs(&self, at: Instant) -> Option<f64> {
+        Some(at.saturating_duration_since(self.clock_epoch?).as_secs_f64())
+    }
+
+    /// The raw source the clock should be following right now.
+    ///
+    /// Priority: the operator's tap, then a playing deck's whole-file grid,
+    /// then the room. The flag says whether the source knows where the ONE
+    /// is — a detector listening to a room does not, so its corrections are
+    /// phase-only and the bar grouping stays where it was.
+    fn beat_source(&self, snap: &SyncSnapshot) -> Option<(BeatInfo, bool, ClockSource)> {
+        let detector = snap
+            .beat
+            .clone()
+            .filter(|beat| beat.locked && beat.confidence >= CONF_QUANTIZE);
+        let deck = self.deck_beat();
+        let machine = match resolve_clock_source(
+            false,
+            self.decks.any_external_sync(),
+            deck.is_some(),
+            detector.is_some(),
+        ) {
+            ClockSource::External => detector.map(|beat| (beat, false, ClockSource::External)),
+            ClockSource::Deck => deck.map(|beat| (beat, true, ClockSource::Deck)),
+            ClockSource::Detector => detector.map(|beat| (beat, false, ClockSource::Detector)),
+            _ => None,
+        };
+        if let Some(over) = self.beat_override.as_ref() {
+            let base = machine.as_ref().map(|(beat, _, _)| beat);
+            if let Some(beat) = over.beat(base, Instant::now()) {
+                return Some((beat, true, ClockSource::Operator));
+            }
+        }
+        machine
+    }
+
+    /// The published clock as a deck-sync leader, so an EXT deck can be
+    /// tempo-matched to the room with the same arithmetic that matches it
+    /// to the other deck.
+    fn external_sync_view(&self) -> Option<SyncView> {
+        if !self.beat_clock.running() {
+            return None;
+        }
+        let secs = self.clock_secs(Instant::now())?;
+        let bpm = self.beat_clock.bpm();
+        if !(bpm > 1.0) || !bpm.is_finite() {
+            return None;
+        }
+        let beat_secs = 60.0 / bpm;
+        Some(SyncView {
+            grid: TrackGrid {
+                bpm,
+                beat_secs,
+                first_beat_secs: 0.0,
+                downbeat_phase: 0,
+                confidence: self.clock_confidence,
+            },
+            position_secs: self.beat_clock.position_at(secs) * beat_secs,
+            rate: 1.0,
+        })
+    }
+
+    /// Hold every EXT deck against the published clock.
+    fn pump_external_sync(&mut self, cx: &mut Cx) {
+        if !self.decks.any_external_sync() {
+            return;
+        }
+        let Some(external) = self.external_sync_view() else { return };
+        let cmds = self.decks.follow_external(&external);
+        self.run_deck_cmds(cx, cmds);
+    }
+
+    /// Drive the published clock from whatever source is current.
+    ///
+    /// Nothing confident to follow is NOT a reason to stop: the clock coasts
+    /// on the tempo and phase it last believed, which is what carries the
+    /// visuals through a breakdown and puts them back on the grid the drop
+    /// lands on.
+    fn pump_beat_clock(&mut self, snap: &SyncSnapshot) {
+        let now = Instant::now();
+        let epoch = *self.clock_epoch.get_or_insert(now);
+        let secs = now.saturating_duration_since(epoch).as_secs_f64();
+        // While a deck owns the clock the detector has nothing to add: it
+        // would only be listening to that deck's own output. Park it — but
+        // NOT when a deck is following external audio, because then the
+        // room is the one thing that knows where the beat is.
+        if let Some(worker) = self.sync_worker.as_ref() {
+            worker.set_suppressed(self.deck_beat().is_some() && !self.decks.any_external_sync());
+        }
+        match self.beat_source(snap) {
+            Some((beat, bar_aware, source)) => {
+                self.clock_confidence = beat.confidence;
+                if let Some(target) = beat_target(&beat, now, bar_aware) {
+                    self.clock_source = source;
+                    self.beat_clock.discipline(secs, target);
+                    return;
+                }
+                self.beat_clock.coast(secs);
+            }
+            // Nothing to follow: the clock keeps the grid it had, and only
+            // says so — the source it was following is still the source it
+            // is coasting on.
+            None => self.beat_clock.coast(secs),
+        }
+    }
+
+    /// Register a TAP press and turn the run into a clock override.
+    ///
+    /// ONE press is "the one is here": phase-only, the tempo underneath is
+    /// left alone. FOUR rhythmic presses escalate to a full tap tempo. That
+    /// overloading is deliberate — the first tap of a tempo run is on a beat
+    /// the operator already means as beat one, so the same gesture serves
+    /// both and there is no second button to aim at in the dark.
+    fn tap_beat(&mut self, cx: &mut Cx) {
+        let now_secs = cx.seconds_since_app_start();
+        // Timestamp the press, not the frame it is handled in: the anchor is
+        // what the whole room's downbeat will be built from.
+        let anchor = Instant::now();
+        let Some(clock) = self.tap_tempo.tap(now_secs) else { return };
+        let over = BeatOverride {
+            anchor,
+            bpm: clock.bpm,
+            leader: self.decks.sync_leader(),
+            saw_unlock: false,
+        };
+        // Re-anchor the published clock NOW, at operator speed — a fast
+        // slew, not a teleport, so nothing driven by the phase glitches.
+        let base = self.current_beat();
+        if let Some(beat) = over.beat(base.as_ref(), anchor) {
+            if let Some((secs, target)) =
+                self.clock_secs(anchor).zip(beat_target(&beat, anchor, true))
+            {
+                self.beat_clock.anchor(secs, target);
+            }
+        }
+        self.beat_override = Some(over);
+        self.tap_flash_secs = Some(now_secs);
+        self.paint_chip(cx, ids!(beat_tap), true, None);
+        // Every consumer reads the clock through `current_beat`, so the
+        // fades, the loop rate-fit and the visual PLL all move with this.
+        for slot in [SlotId::A, SlotId::B] {
+            self.apply_slot_beat_sync(slot);
+        }
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// Hand the clock back to the machine. RESYNC is the operator saying
+    /// "you work it out": the detector drops its grid and re-derives tempo
+    /// and phase from the audio, and any tap override is dropped with it.
+    fn resync_beat(&mut self, cx: &mut Cx) {
+        self.beat_override = None;
+        self.tap_tempo.clear();
+        if let Some(worker) = self.sync_worker.as_ref() {
+            worker.resync();
+        }
+        // There is nothing to anchor to at the moment of the press — the
+        // detector is only just starting to look — so the operator's intent
+        // is carried forward: the next confident grid is taken at operator
+        // speed instead of eased in over bars.
+        self.beat_clock.arm_operator();
+        for slot in [SlotId::A, SlotId::B] {
+            self.apply_slot_beat_sync(slot);
+        }
+        self.video_pump = cx.new_next_frame();
+    }
+
+    /// When the machine may take the clock back from a tap override.
+    ///
+    /// Only two things end an override on their own, and both mean "the
+    /// music the operator tapped is gone":
+    ///
+    /// * the detector LOST its grid and has since re-locked confidently — a
+    ///   new track, not the one that was tapped. A detector that merely
+    ///   re-settles on the same track never qualifies, so the override
+    ///   cannot be yanked out from under a running set;
+    /// * a different deck took over the sync lead, bringing its own
+    ///   whole-file grid with it.
+    ///
+    /// Anything else is the operator's job: RESYNC hands it back in a click.
+    fn pump_beat_override(&mut self, lock_state: BeatLockState, confidence: f32) {
+        let leader = self.decks.sync_leader();
+        let Some(over) = self.beat_override.as_mut() else { return };
+        if over.leader != leader && leader.is_some() {
+            self.beat_override = None;
+            self.tap_tempo.clear();
+            return;
+        }
+        if detector_lost_grid(lock_state) {
+            over.saw_unlock = true;
+        }
+        if detector_reclaims(lock_state, confidence, over.saw_unlock) {
+            self.beat_override = None;
+            self.tap_tempo.clear();
+        }
+    }
+
+    /// Feed the chrome bar's beat cluster: the wave, the grid ruled over it,
+    /// and the LED.
+    ///
+    /// Both widgets resolve their own phase at DRAW time, so all they are
+    /// given here is a fixed reference converted once into the app clock —
+    /// nothing is animated from this 20 Hz pump.
+    fn refresh_beat_cluster(
+        &mut self,
+        cx: &mut Cx,
+        snap: &SyncSnapshot,
+        clock: Option<&BeatInfo>,
+        flowing: bool,
+    ) {
+        let now = Instant::now();
+        let now_secs = cx.seconds_since_app_start();
+        let beat_ref = clock.filter(|beat| !beat.period.is_zero()).map(|beat| {
+            let beat = extrapolate_beat(beat, now);
+            let until = beat.next_beat.saturating_duration_since(now).as_secs_f64();
+            views::BeatRef {
+                next_beat_secs: now_secs + until,
+                period_secs: beat.period.as_secs_f64(),
+                next_index: beat.beat_index as u32,
+                bar_beats: BAR_BEATS as u32,
+                coasting: self.beat_clock.coasting(),
+            }
+        });
+        snap.wave.unroll(&mut self.wave_cols);
+        // The wave's right edge is the moment the newest column was
+        // published, not this frame: the grid rides the same axis, so a
+        // ruling on a transient means the clock really is on that transient.
+        let stamp_secs = snap
+            .wave_stamp
+            .map(|at| now_secs - now.saturating_duration_since(at).as_secs_f64())
+            .unwrap_or(now_secs);
+        let live = flowing && self.loopback_selected;
+        let cols = std::mem::take(&mut self.wave_cols);
+        let wave = self.ui.widget(cx, ids!(beat_wave));
+        if let Some(mut wave) = wave.borrow_mut::<views::VjBeatWave>() {
+            wave.set_wave(cx, &cols, WAVE_HZ, stamp_secs, live);
+            wave.set_beat(cx, beat_ref);
+        }
+        self.wave_cols = cols;
+        let led = self.ui.widget(cx, ids!(beat_led));
+        if let Some(mut led) = led.borrow_mut::<views::VjBeatLed>() {
+            led.set_beat(cx, beat_ref);
+        }
+        // The TAP button lights on the press and falls back to chrome a
+        // moment later — two paints per press, none in between.
+        if let Some(at) = self.tap_flash_secs {
+            if now_secs - at > TAP_FLASH_SECS {
+                self.tap_flash_secs = None;
+                self.paint_chip(cx, ids!(beat_tap), false, None);
+            }
+        }
     }
 
     /// Project the leading deck's analysed grid onto the host clock.
@@ -4783,7 +5481,7 @@ impl App {
             .map(|player| player.duration_secs)
             .unwrap_or(0.0);
         let fit = self.slot_scan[index].and_then(|revision| {
-            if !self.external_sync_enabled {
+            if !self.external_sync_enabled || !self.slot_beat_sync[index] {
                 return None;
             }
             let beat = beat.as_ref().filter(|b| b.locked && b.confidence >= CONF_MUSICAL)?;
@@ -5725,6 +6423,9 @@ impl App {
         self.pump_transitions(cx);
         self.pump_loop_reports();
         self.update_status_ui(cx);
+        // The published clock has just been advanced; hold every EXT deck
+        // against it before anything else reads a deck position.
+        self.pump_external_sync(cx);
         if self.grids_dirty {
             self.grids_dirty = false;
             self.rebuild_grids(cx);
@@ -6178,6 +6879,9 @@ impl App {
     }
 
     fn pump_decodes(&mut self, cx: &mut Cx) {
+        // The whole batch, not each result: a hundred small thumbnail
+        // uploads in one frame hitch exactly as hard as one big mesh.
+        let batch = media::UiStep::new("decode results (whole batch)");
         for done in self.decode.poll() {
             match done {
                 DecodeDone::Deck { deck, gen, result } => match result {
@@ -6272,6 +6976,7 @@ impl App {
                     }
                     match result {
                         Ok(prepared) => {
+                            let step = media::UiStep::new("billboard frame textures");
                             let mut textures = Vec::new();
                             for state in &prepared.states {
                                 let mut frames = Vec::new();
@@ -6288,6 +6993,7 @@ impl App {
                                 }
                                 textures.push(frames);
                             }
+                            step.done(cx);
                             let start = prepared
                                 .states
                                 .iter()
@@ -6331,6 +7037,7 @@ impl App {
                         Ok((bgra, w, h)) => {
                             self.slot_aspect[slot.index()] =
                                 w.max(1) as f32 / h.max(1) as f32;
+                            let step = media::UiStep::new("still texture upload");
                             self.slot_textures[slot.index()] = Some(Texture::new_with_format(
                                 cx,
                                 TextureFormat::VecBGRAu8_32 {
@@ -6340,6 +7047,7 @@ impl App {
                                     updated: TextureUpdated::Full,
                                 },
                             ));
+                            step.done(cx);
                             self.slot_media[slot.index()] = SlotMedia::Still;
                             self.show_output_page(cx, id!(video_out_page));
                             let cmds = self.cue.preroll_ready(slot, gen);
@@ -6406,6 +7114,7 @@ impl App {
                 }
             }
         }
+        batch.done(cx);
     }
 
     /// Trim the thumbnail cache to its budget, dropping the LEAST RECENTLY
@@ -7123,38 +7832,62 @@ impl App {
             "SYSTEM AUDIO: WAITING FOR CAPTURE".to_string()
         };
         let now = Instant::now();
+        // Does the machine still own the clock? Ask before drawing anything,
+        // so one pump cannot show a lock word from a clock that just changed.
+        self.pump_beat_override(
+            snap.lock_state,
+            snap.beat.as_ref().map(|beat| beat.confidence).unwrap_or(0.0),
+        );
+        self.pump_beat_clock(&snap);
         // One word, not a sentence: the bar has to fit MASTER and OUTPUT too.
         // A playing deck owns the beat clock: its grid came from a whole
         // file and its playhead from the device clock, which beats
-        // listening to the room. The detector is the fallback.
+        // listening to the room. The detector is the fallback — and a tap
+        // override outranks both while it stands.
         let deck_beat = self.deck_beat();
         let deck_source = deck_beat.as_ref().and(self.decks.sync_leader());
-        let lock_text = match deck_source {
-            Some(DeckId::A) => "● DECK A",
-            Some(DeckId::B) => "● DECK B",
-            None => match snap.lock_state {
-                BeatLockState::Unlocked => "FREE",
-                BeatLockState::Acquiring => "SEEK",
-                BeatLockState::Locked => "● LOCK",
-                BeatLockState::Holdover => "HOLD",
-                BeatLockState::Lost => "LOST",
+        // The word names the RUNG OF THE LADDER the clock is on — never
+        // something that implies detection when a deck is master.
+        let lock_text = match self.beat_override.as_ref() {
+            // TAP = tempo and phase are the operator's; ONE = only the
+            // downbeat was moved and the tempo underneath still rules.
+            Some(over) if over.bpm.is_some() => "● TAP",
+            Some(_) => "● ONE",
+            // A coasting clock says so: it is still running the grid it last
+            // believed, and that is the honest word for it.
+            None if self.beat_clock.coasting() => "HOLD",
+            None if self.clock_source == ClockSource::External => "● EXT",
+            None => match deck_source {
+                Some(DeckId::A) => "● DECK A",
+                Some(DeckId::B) => "● DECK B",
+                None => match snap.lock_state {
+                    BeatLockState::Unlocked => "FREE",
+                    BeatLockState::Acquiring => "SEEK",
+                    BeatLockState::Locked => "● LOCK",
+                    BeatLockState::Holdover => "HOLD",
+                    BeatLockState::Lost => "LOST",
+                },
             },
         };
-        let bpm_text = deck_beat
+        // Everything below reads the SAME resolved clock the fades, the
+        // visual PLL and the loop rate-fit run on.
+        let clock = self.current_beat();
+        // The NOMINAL tempo, not the effective one: a correction in flight
+        // is a transient, and a BPM readout that swings to 280 while the
+        // clock catches half a beat is a lie about the music.
+        let bpm_text = clock
             .as_ref()
-            .or(snap.beat.as_ref())
-            .map(|beat| format!("{:>5.1}", beat.bpm))
+            .map(|_| format!("{:>5.1}", self.beat_clock.nominal_bpm()))
             .unwrap_or_else(|| "---.-".to_string());
         let confidence_text = format!(
             "CONF: {:>3.0}%",
-            deck_beat
+            clock
                 .as_ref()
-                .or(snap.beat.as_ref())
                 .map(|beat| beat.confidence * 100.0)
                 .unwrap_or(0.0)
                 .clamp(0.0, 100.0)
         );
-        let phase_text = match snap.beat.as_ref() {
+        let phase_text = match clock.as_ref() {
             Some(beat) if !beat.period.is_zero() => {
                 let beat = extrapolate_beat(beat, now);
                 let until = beat.next_beat.saturating_duration_since(now).as_secs_f64();
@@ -7177,19 +7910,7 @@ impl App {
         self.set_status_label(cx, ids!(external_capture), &capture_text);
         self.set_status_label(cx, ids!(external_lock), lock_text);
         self.set_status_label(cx, ids!(external_bpm), &bpm_text);
-        // One column of scope per pump, with a mark on the beat the grid is
-        // actually on — the block answers "is there sound and are we on it".
-        let beat_mark = snap.beat.as_ref().and_then(|beat| {
-            let extrapolated = extrapolate_beat(beat, now);
-            (extrapolated.beat_index != self.beat_scope_index as u64).then(|| {
-                self.beat_scope_index = extrapolated.beat_index as u32;
-                extrapolated.beat_index % BAR_BEATS == 0
-            })
-        });
-        let scope = self.ui.widget(cx, ids!(beat_scope));
-        if let Some(mut scope) = scope.borrow_mut::<views::VjBeatScope>() {
-            scope.push(cx, snap.peak.clamp(0.0, 1.0), beat_mark);
-        }
+        self.refresh_beat_cluster(cx, &snap, clock.as_ref(), flowing);
         self.set_status_label(cx, ids!(external_confidence), &confidence_text);
         self.set_status_label(cx, ids!(external_phase), &phase_text);
 
@@ -7765,7 +8486,22 @@ impl App {
             self.paint_lit(cx, ids.play, playing);
             self.paint_lit(cx, ids.loop_button, loop_on);
             self.paint_lit(cx, ids.mute, muted);
-            self.paint_lit(cx, ids.sync, synced);
+            // The SYNC control wears its mode: chrome when free, lit when
+            // held against the other deck, and lit reading EXT + the room's
+            // tempo when it is following the room instead.
+            let mode = self.decks.sync_mode(deck);
+            let sync_text = match mode {
+                SyncMode::External => match self.beat_clock.running() {
+                    true => format!("EXT {:.0}", self.beat_clock.nominal_bpm()),
+                    false => "EXT —".to_string(),
+                },
+                _ => "SYNC".to_string(),
+            };
+            if self.label_cache.get(&(base + 9)).map(String::as_str) != Some(sync_text.as_str()) {
+                self.label_cache.insert(base + 9, sync_text.clone());
+                refs.sync.set_text(cx, &sync_text);
+            }
+            self.paint_lit(cx, ids.sync, mode != SyncMode::Off || synced);
             self.paint_lit(cx, ids.keylock, keylock);
             for (band, kill) in ids.eq_kills.iter().enumerate() {
                 self.paint_lit(cx, kill, eq_kill[band]);
@@ -8397,8 +9133,10 @@ impl App {
                 self.run_deck_cmds(cx, cmds);
             }
             if refs.sync.clicked(actions) {
-                let cmds = self.decks.sync(deck, true);
+                // OFF → SYNC (the other deck) → EXT (the room) → OFF.
+                let cmds = self.decks.cycle_sync(deck);
                 self.run_deck_cmds(cx, cmds);
+                self.sync_deck_controls(cx);
             }
             if refs.keylock.clicked(actions) {
                 let cmds = self.decks.toggle_keylock(deck);
@@ -9114,8 +9852,18 @@ impl MatchEvent for App {
                 self.apply_loop_fit(slot);
             }
         }
+        if self.ui.button(cx, ids!(beat_tap)).clicked(actions) {
+            self.tap_beat(cx);
+        }
         if self.ui.button(cx, ids!(external_sync_now)).clicked(actions) {
-            self.force_armed_fade_now(cx);
+            self.resync_beat(cx);
+        }
+        if let Some(on) = self.ui.check_box(cx, ids!(karaoke_word_hops)).changed(actions) {
+            // Live switch between the line sweep and the aligned word
+            // mapper: re-time both decks' schedules from their caches.
+            crate::lyrics::set_word_hops(on);
+            self.rebuild_karaoke(cx, DeckId::A);
+            self.rebuild_karaoke(cx, DeckId::B);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(karaoke_enable)).changed(actions) {
             self.karaoke_on = on;
@@ -9159,6 +9907,13 @@ impl MatchEvent for App {
                     _ => 0,
                 };
                 self.apply_slot_beat_sync(slot);
+            }
+            if self.ui.button(cx, Self::slot_beatsync_path(slot)).clicked(actions) {
+                self.slot_beat_sync[i] = !self.slot_beat_sync[i];
+                self.apply_slot_beat_sync(slot);
+                self.apply_loop_fit(slot);
+                self.sync_slot_beatsync_ui(cx);
+                self.video_pump = cx.new_next_frame();
             }
             if let Some(v) = self.ui.slider(cx, Self::slot_pos_path(slot)).end_slide(actions) {
                 self.mixer.flush_slot_audio(slot);
@@ -10218,5 +10973,267 @@ mod sync_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         drop(worker); // detached stop — must not hang the test thread
+    }
+
+    #[test]
+    fn sync_worker_publishes_a_stamped_capture_envelope() {
+        let feed = Arc::new(CaptureFeed::new());
+        let worker = SyncWorker::start(feed.clone());
+        let mut buffer = AudioBuffer::new_with_size(512, 2);
+        for channel in 0..2 {
+            for (index, sample) in buffer.channel_mut(channel).iter_mut().enumerate() {
+                *sample = if index % 64 == 0 { 0.8 } else { 0.05 };
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut cols = Vec::new();
+        loop {
+            // 10 buffers = 5120 samples = ten 10 ms columns at 48 kHz.
+            for _ in 0..10 {
+                feed.push(48_000.0, &buffer);
+            }
+            let snap = worker.snapshot();
+            snap.wave.unroll(&mut cols);
+            assert_eq!(cols.len(), WAVE_COLS);
+            if cols.iter().filter(|col| **col > 0).count() >= 8 {
+                // The newest columns are at the END: the wave draws left to
+                // right, oldest to now.
+                assert!(cols[WAVE_COLS - 1] > 0, "newest column must be last");
+                let peak = (cols[WAVE_COLS - 1] >> 8) as f32 / 255.0;
+                let rms = (cols[WAVE_COLS - 1] & 0xff) as f32 / 255.0;
+                let drawn = 0.8f32.powf(crate::wave_analysis::WAVE_CURVE);
+                assert!((peak - drawn).abs() < 0.02, "{peak} vs {drawn}");
+                assert!(rms > 0.0 && rms < peak, "rms {rms} peak {peak}");
+                let stamp = snap.wave_stamp.expect("a filled ring is stamped");
+                assert!(stamp.elapsed() < Duration::from_secs(1));
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker never filled the wave");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(worker);
+    }
+
+    #[test]
+    fn the_wave_ring_unrolls_oldest_first() {
+        let level = |index: usize| (index % 200) as f32 / 200.0;
+        let drawn = |index: usize| {
+            (level(index).powf(crate::wave_analysis::WAVE_CURVE) * 255.0).round() as u16
+        };
+        let mut ring = WaveRing::default();
+        for index in 0..WAVE_COLS + 3 {
+            ring.push(level(index), 0.0);
+        }
+        let mut cols = Vec::new();
+        ring.unroll(&mut cols);
+        assert_eq!(cols.len(), WAVE_COLS);
+        // The last three pushes are the last three columns, in order.
+        for (back, index) in (WAVE_COLS..WAVE_COLS + 3).rev().enumerate() {
+            assert_eq!(cols[WAVE_COLS - 1 - back] >> 8, drawn(index), "back {back}");
+        }
+    }
+
+    // ---- tap tempo as a clock override ------------------------------------
+
+    fn detector_beat(bpm: f32, next_in: Duration, index: u64) -> BeatInfo {
+        BeatInfo {
+            bpm,
+            confidence: 0.9,
+            locked: true,
+            period: Duration::from_secs_f64(60.0 / bpm as f64),
+            next_beat: Instant::now() + next_in,
+            beat_index: index,
+            beats_observed: 32,
+        }
+    }
+
+    #[test]
+    fn one_tap_moves_the_downbeat_and_keeps_the_tempo() {
+        let base = detector_beat(120.0, Duration::from_millis(370), 2);
+        let anchor = Instant::now();
+        let over = BeatOverride { anchor, bpm: None, leader: None, saw_unlock: false };
+        let beat = over.beat(Some(&base), anchor).expect("a clock underneath supplies the tempo");
+        // Tempo untouched...
+        assert_eq!(beat.period, base.period);
+        assert!((beat.bpm - 120.0).abs() < 1e-3);
+        // ...phase re-anchored: the tap IS beat one, so the next beat is the
+        // second of the bar, one period away.
+        assert_eq!(beat.beat_index, 1);
+        assert_eq!(beat.next_beat, anchor + base.period);
+        assert!(beat.locked && beat.confidence >= CONF_MUSICAL);
+        // Bar preference has to earn itself again from the tap.
+        assert_eq!(beat.beats_observed, 0);
+    }
+
+    #[test]
+    fn four_taps_replace_tempo_and_phase() {
+        let base = detector_beat(120.0, Duration::from_millis(370), 2);
+        let anchor = Instant::now();
+        let over = BeatOverride { anchor, bpm: Some(128.0), leader: None, saw_unlock: false };
+        let period = Duration::from_secs_f64(60.0 / 128.0);
+        let beat = over.beat(Some(&base), anchor + period * 5).expect("a tapped tempo stands alone");
+        assert!((beat.bpm - 128.0).abs() < 1e-3, "{}", beat.bpm);
+        assert_eq!(beat.period, period);
+        // Five whole beats after the one: the sixth is bar position 1.
+        assert_eq!(beat.beat_index, (5 + 1) % BAR_BEATS);
+        assert_eq!(beat.beats_observed, 5);
+        // And it still stands with no clock underneath at all.
+        assert!(over.beat(None, anchor).is_some());
+    }
+
+    #[test]
+    fn a_phase_only_override_needs_a_clock_underneath() {
+        let over = BeatOverride {
+            anchor: Instant::now(),
+            bpm: None,
+            leader: None,
+            saw_unlock: false,
+        };
+        // Nothing to anchor: "the one is here" says nothing about tempo, so
+        // it must not invent one.
+        assert!(over.beat(None, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn the_detector_takes_the_clock_back_only_after_losing_it() {
+        // A confident lock that never dropped is the SAME music the operator
+        // tapped: it may not yank the clock back mid-set.
+        assert!(!detector_reclaims(BeatLockState::Locked, 0.95, false));
+        // Nor may a shaky one, even after a dropout.
+        assert!(!detector_reclaims(BeatLockState::Locked, 0.4, true));
+        // A new track: grid lost, then a lock the fade policy would trust.
+        assert!(detector_reclaims(BeatLockState::Locked, 0.95, true));
+        // Only a real dropout arms it — re-settling does not.
+        assert!(detector_lost_grid(BeatLockState::Unlocked));
+        assert!(detector_lost_grid(BeatLockState::Lost));
+        assert!(!detector_lost_grid(BeatLockState::Acquiring));
+        assert!(!detector_lost_grid(BeatLockState::Holdover));
+    }
+
+    #[test]
+    fn four_taps_at_a_tempo_produce_that_clock() {
+        // End to end over the two halves: the tap rule makes a BPM, the
+        // override turns it into the grid every consumer reads.
+        let mut tap = TapTempo::new();
+        let period = 60.0 / 124.0;
+        let mut clock = None;
+        for index in 0..4 {
+            clock = tap.tap(index as f64 * period);
+        }
+        let clock = clock.expect("rhythmic taps stand");
+        let bpm = clock.bpm.expect("four taps make a tempo");
+        let anchor = Instant::now();
+        let over = BeatOverride { anchor, bpm: Some(bpm), leader: None, saw_unlock: false };
+        let beat = over.beat(None, anchor).unwrap();
+        assert!((beat.bpm - 124.0).abs() < 0.01, "{}", beat.bpm);
+        assert_eq!(beat.beat_index, 1);
+        // The bar rules from the tap: the LED reads the same reference.
+        let led = views::BeatRef {
+            next_beat_secs: 10.0 + beat.period.as_secs_f64(),
+            period_secs: beat.period.as_secs_f64(),
+            next_index: beat.beat_index as u32,
+            bar_beats: BAR_BEATS as u32,
+            coasting: false,
+        };
+        let (since, index) = led.at(10.0);
+        assert!(since < 1e-9, "the tap itself is a beat: {since}");
+        assert_eq!(index, 0, "and it is the ONE");
+        let (since, index) = led.at(10.0 + beat.period.as_secs_f64() * 2.0);
+        assert!(since < 1e-9, "{since}");
+        assert_eq!(index, 2);
+    }
+
+    #[test]
+    fn the_source_ladder_puts_the_dj_above_the_room_and_the_operator_above_both() {
+        use ClockSource::*;
+        // The normal show: a deck is playing, so the deck IS the clock and
+        // the detector — which can only hear that deck — is not consulted.
+        assert_eq!(resolve_clock_source(false, false, true, true), Deck);
+        assert_eq!(resolve_clock_source(false, false, true, false), Deck);
+        // VJ standalone against somebody else's music.
+        assert_eq!(resolve_clock_source(false, false, false, true), Detector);
+        // A deck following the room: the room leads, the deck's own grid is
+        // never read back or it would be chasing itself.
+        assert_eq!(resolve_clock_source(false, true, true, true), External);
+        // ...but EXT with nothing detected falls back to the deck rather
+        // than to nothing at all.
+        assert_eq!(resolve_clock_source(false, true, true, false), Deck);
+        // The operator outranks every one of them.
+        assert_eq!(resolve_clock_source(true, true, true, true), Operator);
+        assert_eq!(resolve_clock_source(false, false, false, false), None);
+    }
+
+    #[test]
+    fn a_sprite_cycle_spans_a_power_of_two_number_of_beats() {
+        // Four frames to the beat: a four-frame walk marches one cycle per
+        // beat, eight frames take two, a sixteen-frame cycle takes a bar.
+        assert_eq!(sprite_cycle_beats(4), 1);
+        assert_eq!(sprite_cycle_beats(8), 2);
+        assert_eq!(sprite_cycle_beats(16), 4);
+        assert_eq!(sprite_cycle_beats(32), 8);
+        // Short states never go below one beat...
+        assert_eq!(sprite_cycle_beats(1), 1);
+        assert_eq!(sprite_cycle_beats(2), 1);
+        assert_eq!(sprite_cycle_beats(3), 1);
+        // ...odd counts land on the nearer power of two...
+        assert_eq!(sprite_cycle_beats(6), 2);
+        assert_eq!(sprite_cycle_beats(5), 1);
+        assert_eq!(sprite_cycle_beats(12), 4);
+        // ...and long ones stop at a bar-and-a-bar rather than running away.
+        assert_eq!(sprite_cycle_beats(64), 8);
+        assert_eq!(sprite_cycle_beats(300), 8);
+        // Every answer is a power of two.
+        for frames in 1..64 {
+            let beats = sprite_cycle_beats(frames);
+            assert!(beats.is_power_of_two() && (1..=8).contains(&beats), "{frames} -> {beats}");
+        }
+    }
+
+    #[test]
+    fn a_synced_sprite_steps_on_the_grid() {
+        // The stepper is `floor(fract(position / cycle_beats) * frames)`;
+        // walk a synthetic clock through a bar and check the frames land on
+        // the subdivisions rather than on wall-clock fps.
+        let frames = 8usize;
+        let beats = sprite_cycle_beats(frames) as f64;
+        assert_eq!(beats, 2.0);
+        let frame_at = |position: f64| {
+            let cycle = (position / beats).rem_euclid(1.0);
+            ((cycle * frames as f64).floor() as usize).min(frames - 1)
+        };
+        // One frame per quarter beat, and the cycle restarts on the beat
+        // that starts the two-beat unit.
+        assert_eq!(frame_at(0.0), 0);
+        assert_eq!(frame_at(0.25), 1);
+        assert_eq!(frame_at(0.5), 2);
+        assert_eq!(frame_at(1.0), 4);
+        assert_eq!(frame_at(1.75), 7);
+        assert_eq!(frame_at(2.0), 0);
+        assert_eq!(frame_at(4.0), 0);
+        // A frame drawn a hair before the boundary is still the last one:
+        // the step happens ON the beat, never before it.
+        assert_eq!(frame_at(2.0 - 1e-9), 7);
+    }
+
+    #[test]
+    fn a_beat_reference_resolves_the_phase_between_beats() {
+        let led = views::BeatRef {
+            next_beat_secs: 4.0,
+            period_secs: 0.5,
+            next_index: 0,
+            bar_beats: BAR_BEATS as u32,
+            coasting: false,
+        };
+        // Half a beat before the one: the LED is dark and counting beat four.
+        let (since, index) = led.at(3.75);
+        assert!((since - 0.25).abs() < 1e-9, "{since}");
+        assert_eq!(index, 3);
+        // The grid coordinate the wave rules with lands on whole numbers
+        // exactly on the beat, and on a multiple of the bar on the one.
+        let on_the_one = led.coordinate(4.0);
+        assert!((on_the_one.fract()).abs() < 1e-9, "{on_the_one}");
+        assert!((on_the_one % BAR_BEATS as f64).abs() < 1e-9, "{on_the_one}");
+        let third = led.coordinate(5.0);
+        assert!((third % BAR_BEATS as f64 - 2.0).abs() < 1e-9, "{third}");
     }
 }
