@@ -103,7 +103,7 @@ use makepad_show_control::{
 // Only exercised by `program_light_mix_uses_the_exact_picture_fraction_and_blackout_gate`.
 #[cfg(test)]
 use makepad_show_control::LightSample;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -635,6 +635,11 @@ script_mod! {
                                 bar_size: 72.0
                             }
                             b: View{
+                            // Breathing room against the splitter bar: the
+                            // program column used to start flush on the
+                            // handle, so slot A's header sat on the edge of
+                            // the GEN panel. Same inset as the panels use.
+                            padding: Inset{left: 10.0, right: 4.0}
                             width: Fill
                             height: Fill
                             pages := PageFlip{
@@ -3761,6 +3766,20 @@ pub struct App {
     filter_timer: Timer,
     #[rust]
     video_pump: NextFrame,
+    /// Finished decodes the operator is WAITING for (the clicked cue, a
+    /// deck, a pad): always handled in the tick they arrive.
+    #[rust]
+    decode_ready: VecDeque<DecodeDone>,
+    /// Finished THUMBNAILS: decoration, handled only while the frame budget
+    /// lasts and continued next frame. A screenful arriving at once used to
+    /// spend 20ms of every 50ms tick uploading them.
+    #[rust]
+    decode_backlog: VecDeque<DecodeDone>,
+    /// Armed while `decode_backlog` still holds anything, so the rest of a
+    /// thumbnail burst lands at frame rate instead of waiting for the 20Hz
+    /// poll timer.
+    #[rust]
+    decode_pump: NextFrame,
 }
 
 /// Minimum spacing between catalog refreshes triggered by publish events.
@@ -6878,11 +6897,35 @@ impl App {
         self.grids_dirty = true;
     }
 
+    /// The next finished decode to spend UI-thread time on.
+    ///
+    /// What the operator clicked comes first and always: a cue must never
+    /// queue behind a screenful of thumbnails. Thumbnails then fill what is
+    /// left of the frame budget and the rest waits for the next frame — the
+    /// grid fills a beat later instead of the whole app stuttering.
+    fn next_decode_result(&mut self, deadline: std::time::Instant) -> Option<DecodeDone> {
+        if let Some(done) = self.decode_ready.pop_front() {
+            return Some(done);
+        }
+        if std::time::Instant::now() < deadline {
+            return self.decode_backlog.pop_front();
+        }
+        None
+    }
+
     fn pump_decodes(&mut self, cx: &mut Cx) {
         // The whole batch, not each result: a hundred small thumbnail
         // uploads in one frame hitch exactly as hard as one big mesh.
         let batch = media::UiStep::new("decode results (whole batch)");
         for done in self.decode.poll() {
+            match done {
+                DecodeDone::Thumb { .. } => self.decode_backlog.push_back(done),
+                done => self.decode_ready.push_back(done),
+            }
+        }
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_micros((media::UI_STEP_BUDGET_MS * 1000.0) as u64);
+        while let Some(done) = self.next_decode_result(deadline) {
             match done {
                 DecodeDone::Deck { deck, gen, result } => match result {
                     Ok((pcm, peaks)) => {
@@ -7113,6 +7156,9 @@ impl App {
                     }
                 }
             }
+        }
+        if !self.decode_backlog.is_empty() {
+            self.decode_pump = cx.new_next_frame();
         }
         batch.done(cx);
     }
@@ -7552,6 +7598,8 @@ impl App {
                         frames: Vec::new(),
                         fps: 0.0,
                         cells: false,
+                        loading: false,
+                        failed: false,
                         active: false,
                         placeholder: true,
                     };
@@ -7605,6 +7653,30 @@ impl App {
                 // a single-cell sprite strip too, which has no second frame
                 // to reveal it — see `GridEntry::cells`.
                 let cells = tile.thumb.as_ref().is_some_and(|t| t.anim.is_some());
+                // Loading feedback, straight off the engines that know: the
+                // cue being prepared for the program grid, the pad loader
+                // for the SFX bank. An ARMED cue is ready — it is only
+                // waiting for its beat — so it stops spinning.
+                let (loading, failed) = match surface {
+                    Surface::Sfx => match self.pads.pad(&tile.asset).map(|p| p.load.clone()) {
+                        Some(pads::PadLoad::Loading { .. }) => (true, false),
+                        Some(pads::PadLoad::Failed { .. }) => (false, true),
+                        _ => (false, false),
+                    },
+                    _ => (
+                        self.cue.loading_asset() == Some(tile.asset),
+                        self.cue.failed_asset() == Some(tile.asset),
+                    ),
+                };
+                // The tile says it in words too — a spinner over a dark
+                // thumbnail is easy to miss on a 56px pad.
+                let state = if loading {
+                    "LOADING".to_string()
+                } else if failed {
+                    "FAILED".to_string()
+                } else {
+                    state
+                };
                 GridEntry {
                     asset: tile.asset,
                     title: tile.title.clone(),
@@ -7615,6 +7687,8 @@ impl App {
                     frames,
                     fps,
                     cells,
+                    loading,
+                    failed,
                     active,
                     placeholder: false,
                 }
@@ -7746,8 +7820,29 @@ impl App {
             .next()
             .map(|i| i.title.clone())
             .unwrap_or_else(|| "—".to_string());
+        // A cue that is still fetching/decoding says so, in the bar as well
+        // as on its tile: "standby" for something ready and waiting for its
+        // beat, "loading" for something still being made ready.
+        let loading_now = self.cue.loading_asset().is_some();
+        // Push the busy marks straight at the grids: a click has to answer
+        // in the next frame, and a grid rebuild only happens when the
+        // catalog changes.
+        let cue_loading = self.cue.loading_asset();
+        let cue_failed = self.cue.failed_asset();
+        let video = self.ui.widget(cx, ids!(video_grid));
+        if let Some(mut pads) = video.borrow_mut::<VjPadMatrix>() {
+            pads.set_busy(cx, cue_loading, cue_failed);
+        }
+        for path in [ids!(music_grid), ids!(sfx_grid), ids!(mesh_grid)] {
+            let widget = self.ui.widget(cx, path);
+            if let Some(mut grid) = widget.borrow_mut::<VjTileGrid>() {
+                grid.set_busy(cx, cue_loading, cue_failed);
+            };
+        }
         let next_text = if next == "—" {
             "standby —".to_string()
+        } else if loading_now {
+            format!("loading  {next}")
         } else {
             format!("standby  {next}")
         };
@@ -7771,7 +7866,8 @@ impl App {
             }
             if live_slot.is_some() || next_title.is_some() {
                 let title = next_title.clone().unwrap_or_else(|| "—".to_string());
-                return (format!("{name}  NEXT"), title);
+                let role = if loading_now { "LOAD" } else { "NEXT" };
+                return (format!("{name}  {role}"), title);
             }
             (name.to_string(), "—".to_string())
         };
@@ -10349,6 +10445,9 @@ impl AppMain for App {
             let cmds = self.gen.ensure_profiles();
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
+        }
+        if self.decode_pump.is_event(event).is_some() {
+            self.pump_decodes(cx);
         }
         if self.video_pump.is_event(event).is_some() {
             self.pump_video(cx);

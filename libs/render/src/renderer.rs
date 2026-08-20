@@ -2927,19 +2927,46 @@ impl Renderer {
             None
         };
         let png = png.or(embedded_png.as_deref());
-        // NO BAKE AT LOAD. AO is an offline product (tools/ao_bake); the game
-        // loads it or goes without. Baking here cost every launch for an
-        // answer that never changes.
-        let pack: String = id.split('/').take(2).collect::<Vec<_>>().join("/");
         // Prefer the prebaked sidecar. It carries the exact mesh the atlas was
         // baked against — including the ao_uv lane, which the runtime has no
         // way to reconstruct — so loading it is what makes the AO texture mean
         // anything. Absent or stale, the plain glb still renders, just unlit by
         // AO, which is the correct outcome for an unbaked library.
-        let mut model = aomesh
+        let model = aomesh
             .and_then(StaticModel::from_aomesh)
             .or_else(|| Self::load_aomesh(id))
             .map_or_else(|| StaticModel::parse_glb(glb), Ok)?;
+        self.load_model_parsed(cx, id, model, png, ao_png)
+    }
+
+    /// The GPU half of [`load_model_with_ao`], over a model somebody ELSE
+    /// parsed.
+    ///
+    /// Parsing is the expensive half and it needs no `Cx`: a Doom E1M1 GLB
+    /// measured 29.6ms of parse against 3.4ms of upload, and on the UI
+    /// thread that is two dropped frames every time a world is cued. A
+    /// caller with a worker thread (`apps/vj`) runs
+    /// [`StaticModel::parse_glb`] there and hands the result here, so only
+    /// the buffer/texture creation — which genuinely cannot happen off the
+    /// UI thread — is paid in the frame.
+    ///
+    /// Identical in every other respect to [`load_model_with_ao`], including
+    /// the resident-id early return, so the two paths cannot drift.
+    pub fn load_model_parsed(
+        &mut self,
+        cx: &mut Cx,
+        id: &str,
+        mut model: StaticModel,
+        png: Option<&[u8]>,
+        ao_png: Option<&[u8]>,
+    ) -> Result<usize, String> {
+        if let Some(at) = self.static_models.iter().position(|(k, _)| k == id) {
+            return Ok(self.static_models[at].1.triangles);
+        }
+        // NO BAKE AT LOAD. AO is an offline product (tools/ao_bake); the game
+        // loads it or goes without. Baking here cost every launch for an
+        // answer that never changes.
+        let pack: String = id.split('/').take(2).collect::<Vec<_>>().join("/");
         // Taken out first: the parts are uploaded on their own below, and
         // everything after this point sees the model exactly as it did
         // before doors and skies existed.
