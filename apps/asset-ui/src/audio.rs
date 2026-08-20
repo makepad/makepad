@@ -1,4 +1,4 @@
-//! WAV artifact playback + waveform strip.
+//! Artifact playback + waveform strip.
 //!
 //! Same shape as the sandbox's `VideoAudio` mixer (apps/sandbox/src/
 //! video_player.rs): a process-global resampling stereo queue mixed
@@ -139,6 +139,74 @@ pub fn clear() {
     WAV_MIXER.playing.store(false, Ordering::Release);
     *WAV_MIXER.clip.lock().unwrap() = None;
     WAV_MIXER.cursor_fp.store(0, Ordering::Release);
+}
+
+/// Which load request is current. A user clicking down a list starts several;
+/// only the newest may install itself, or a slow decode of the track before
+/// last lands on top of the one they are looking at.
+static LOAD_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Take a track's bytes — WAV, MP3 or Ogg — and make the transport play them.
+///
+/// Decoding happens on a worker: the music library is MP3s, and turning six
+/// minutes of one into PCM on the frame thread is a visible stall. The mixer
+/// is process-global, so the worker installs the result itself; there is
+/// nothing to plumb back through the widget tree.
+///
+/// The transport goes unavailable immediately, because the previous track is
+/// no longer what the well is showing — a stale clip left loaded is a play
+/// button that plays the wrong song.
+pub fn load_clip_async(bytes: Vec<u8>) {
+    let generation = LOAD_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    clear();
+    let bytes = Arc::new(bytes);
+    let spawned = std::thread::Builder::new()
+        .name("asset-ui-audio-decode".into())
+        .spawn({
+            let bytes = Arc::clone(&bytes);
+            move || {
+                let Ok(pcm) = decode_clip(&bytes) else {
+                    return;
+                };
+                // A newer pick happened while this was decoding: drop it.
+                if LOAD_GENERATION.load(Ordering::Acquire) == generation {
+                    load(pcm);
+                }
+            }
+        });
+    if spawned.is_err() {
+        // No worker to be had: decode here rather than leave a dead
+        // transport under a drawn waveform.
+        if let Ok(pcm) = decode_clip(&bytes) {
+            load(pcm);
+        }
+    }
+}
+
+/// Any container the catalog carries, in the mixer's shape. RIFF is parsed
+/// here (it is a header and a memcpy); MP3 and Ogg go through the shared
+/// zero-dependency decoder, the same one the preview well draws with.
+pub fn decode_clip(bytes: &[u8]) -> Result<WavPcm, String> {
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return parse_wav(bytes);
+    }
+    let format = makepad_audio_decode::sniff(bytes).ok_or("unrecognised audio container")?;
+    let audio = makepad_audio_decode::decode_audio_limited(
+        bytes,
+        format,
+        makepad_audio_decode::Limits::default(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let channels = audio.channels.max(1) as usize;
+    Ok(WavPcm {
+        frames: audio
+            .pcm_interleaved_f32
+            .chunks_exact(channels)
+            .map(|frame| (frame[0], frame[channels - 1]))
+            .collect(),
+        sample_rate: audio.rate.max(1),
+        channels: audio.channels.max(1),
+    })
 }
 
 /// Start or resume. Starting from the end restarts at zero.
