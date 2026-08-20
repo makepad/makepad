@@ -63,6 +63,13 @@ pub struct Splash {
     /// None leaves the storage default.
     #[rust]
     storage_quota: Option<u64>,
+    /// How much CPU, memory, timers and concurrency this isolate may use
+    /// (see splash_limits.rs). None = the built-in defaults.
+    ///
+    /// `#[rust]`, like every other host-assigned field here: a script that
+    /// could raise its own limits from its own DSL would not have limits.
+    #[rust]
+    limits: Option<crate::splash_limits::SplashLimits>,
     /// What to call this script in error messages. Set by the host to the
     /// mini-app's id; empty for previews and one-off evals.
     ///
@@ -140,7 +147,13 @@ impl Splash {
         }
 
         if self.vm_id == MAIN_SPLASH_VM_ID {
-            self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
+            // Privilege only ever narrows when Splashes nest. `allow_net` is a
+            // `#[live]` field, so a script CAN write `Splash{allow_net: true}`
+            // in its own body — harmless while nothing evaluates such a widget,
+            // and a network grant it was never given the moment something does.
+            // A nested isolate gets at most what the isolate creating it has.
+            let allow_net = self.allow_net && cx.current_vm_allows_net();
+            self.vm_id = cx.alloc_splash_vm_with_network(allow_net);
         }
         // (Re)bind this isolate's storage jail and host-bridge identity.
         // Keyed by heap so the script can neither read nor retarget them.
@@ -150,6 +163,8 @@ impl Splash {
         crate::splash_host::set_caps_for_heap(heap_key, self.host_caps.clone());
         crate::splash_host::set_prompts_for_heap(heap_key, self.host_prompts);
         crate::splash_storage::set_quota_for_heap(heap_key, self.storage_quota);
+        crate::splash_limits::set_limits_for_heap(heap_key, self.limits);
+        cx.sync_splash_http_cap(self.vm_id);
 
         let body_key = self.body_key();
         // Full code string: prefix + body (no closing - parser auto-closes)
@@ -485,6 +500,19 @@ impl Splash {
         }
     }
 
+    /// Sets this isolate's resource limits (CPU share, timers, heap ceiling,
+    /// concurrent requests). `None` restores the defaults. Like the other
+    /// host-assigned state, call BEFORE `set_text` so the isolate is created
+    /// with them; setting them later applies from that moment.
+    pub fn set_limits(&mut self, cx: &mut Cx, limits: Option<crate::splash_limits::SplashLimits>) {
+        self.limits = limits;
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_limits::set_limits_for_heap(heap_key, limits);
+            cx.sync_splash_http_cap(self.vm_id);
+        }
+    }
+
     /// Marks whether this isolate's surface may raise user prompts; see
     /// `SplashHostRequest::may_prompt`. Defaults true.
     pub fn set_host_prompts(&mut self, cx: &mut Cx, may_prompt: bool) {
@@ -574,6 +602,13 @@ impl SplashRef {
     pub fn set_storage_quota(&self, cx: &mut Cx, total_bytes: Option<u64>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_storage_quota(cx, total_bytes);
+        }
+    }
+
+    /// See [`Splash::set_limits`].
+    pub fn set_limits(&self, cx: &mut Cx, limits: Option<crate::splash_limits::SplashLimits>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_limits(cx, limits);
         }
     }
 

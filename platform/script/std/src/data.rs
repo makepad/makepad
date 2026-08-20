@@ -33,4 +33,9 @@ pub struct ScriptData {
     pub socket_streams: std::rc::Rc<std::cell::RefCell<Vec<ScriptSocketStream>>>,
     pub http_requests: Vec<ScriptHttp>,
     pub http_servers: Vec<ScriptHttpServer>,
+    /// How many HTTP requests this script may have in flight at once. `None`
+    /// (the default) is unlimited, which is right for an embedder's own
+    /// script; a host running untrusted script sets it, since each in-flight
+    /// request holds a connection and a callback the host will have to run.
+    pub max_inflight_http: Option<usize>,
 }

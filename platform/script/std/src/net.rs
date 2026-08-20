@@ -753,6 +753,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
             };
 
             let std = vm.std_mut::<ScriptStd>();
+            if let Some(cap) = std.data.max_inflight_http {
+                if std.data.http_requests.len() >= cap {
+                    return script_err_limit!(vm.trap(), "too many requests in flight");
+                }
+            }
             let Some(runtime) = std.net.as_ref() else {
                 return script_err_io!(vm.trap(), "script net runtime is not configured");
             };

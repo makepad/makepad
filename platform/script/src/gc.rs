@@ -699,6 +699,18 @@ impl ScriptHeap {
     /// - Use minimum thresholds to avoid GC thrashing on small heaps
     /// - Objects are weighted more heavily as they're the primary allocation type
 
+    /// Live slots across every table — what an embedder hosting untrusted
+    /// script measures a heap by. Cheap: the same five subtractions
+    /// [`Self::needs_gc`] already does, and meaningful right after a sweep,
+    /// where what is left is what the script is actually holding on to.
+    pub fn live_slots(&self) -> usize {
+        (self.objects.len() - self.objects_free.len())
+            + (self.strings.len() - self.strings_free.len())
+            + (self.arrays.len() - self.arrays_free.len())
+            + (self.pods.len() - self.pods_free.len())
+            + (self.handles.len() - self.handles_free.len())
+    }
+
     pub fn needs_gc(&self) -> bool {
         // Minimum thresholds before GC can trigger (avoid thrashing on small heaps)
         const MIN_OBJECTS: usize = 1024;
