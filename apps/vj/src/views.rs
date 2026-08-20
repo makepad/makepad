@@ -663,6 +663,10 @@ script_mod! {
             empty: instance(0.0)
             border_size: 1.0
             border_radius: 5.0
+            // One state, one mark: the tile last clicked wears a green
+            // ring, every other tile is a plain outline. Anything else the
+            // grid used to paint (LIVE / CUE, dim second-place rings) read
+            // as noise across forty pads.
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.border_radius)
@@ -671,7 +675,7 @@ script_mod! {
                 sdf.stroke(
                     self.border_color.mix(self.border_color_selected, self.selected)
                         * (1.0 - self.empty * 0.6),
-                    self.border_size + self.selected
+                    self.border_size + self.selected * 1.5
                 )
                 return sdf.result
             }
@@ -702,11 +706,6 @@ script_mod! {
                         draw_text.text_style: theme.font_bold{font_size: 7}
                     }
                     View{width: Fill height: 1}
-                    grid_state := Label{
-                        text: ""
-                        draw_text.color: #x3ee0b0
-                        draw_text.text_style.font_size: 7
-                    }
                 }
                 View{width: Fill height: Fill}
                 // Small name so a pad is readable before its thumbnail lands.
@@ -1146,20 +1145,15 @@ pub struct GridEntry {
     pub texture: Option<Texture>,
     pub frames: Vec<Texture>,
     pub fps: f32,
-    /// On air: full LIVE ring.
+    /// The one marked tile: on the clip grid the last one CLICKED (green
+    /// ring, nothing else), on the SFX bank a pad with voices playing.
     pub active: bool,
-    /// Cued next / parked in a well: a dim mark only.
-    pub secondary: bool,
     /// A reserved-but-empty cell of the PENDING head column. It draws as
     /// the quiet grey placeholder and cannot be clicked — the column keeps
     /// its full height from the moment it opens so that filling it never
     /// moves a tile the operator is already reaching for.
     pub placeholder: bool,
 }
-
-/// Ring strength for a cued / parked (not on-air) tile: clearly dimmer
-/// than LIVE so the operator never reads two "selected" pads.
-const SECONDARY_MARK: f32 = 0.3;
 
 fn entry_frame(entry: &GridEntry, time: f64) -> Option<Texture> {
     if entry.frames.len() > 1 {
@@ -1570,13 +1564,7 @@ impl Widget for VjTileGrid {
                     script_apply_eval!(cx, thumb, {
                         draw_bg +: { fill: #(fill) img_aspect: #(aspect) }
                     });
-                    let selected = if entry.active {
-                        1.0
-                    } else if entry.secondary {
-                        SECONDARY_MARK
-                    } else {
-                        0.0
-                    };
+                    let selected = f32::from(u8::from(entry.active));
                     script_apply_eval!(cx, cell, {
                         draw_bg +: { selected: #(selected) }
                     });
@@ -1844,16 +1832,6 @@ impl VjPadMatrix {
                 let (selected, empty, fill, aspect) = if let Some(entry) = self.visible_at(pad) {
                     cell.label(cx, ids!(grid_pad)).set_text(cx, &format!("{:02}", pad + 1));
                     cell.label(cx, ids!(grid_title)).set_text(cx, &entry.title);
-                    cell.label(cx, ids!(grid_state)).set_text(
-                        cx,
-                        if entry.active {
-                            "LIVE"
-                        } else if entry.secondary {
-                            "CUE"
-                        } else {
-                            ""
-                        },
-                    );
                     let now = cx.seconds_since_app_start();
                     let frame = entry_frame(entry, now);
                     let aspect = thumb_aspect(cx, frame.as_ref());
@@ -1863,19 +1841,15 @@ impl VjPadMatrix {
                     let image = cell.image(cx, ids!(grid_thumb));
                     image.set_visible(cx, frame.is_some());
                     image.set_texture(cx, frame);
-                    let selected = if entry.active {
-                        1.0
-                    } else if entry.secondary {
-                        SECONDARY_MARK
-                    } else {
-                        0.0
-                    };
+                    // The grid's ONLY state paint: a green ring on the tile
+                    // last clicked. LIVE / CUE / HOLD live in the program
+                    // strip's labels, not on forty tiles at once.
+                    let selected = f32::from(u8::from(entry.active));
                     (selected, 0.0, fill, aspect)
                 } else {
                     // No content: a quiet, greyed placeholder, not a black pad.
                     cell.label(cx, ids!(grid_pad)).set_text(cx, "");
                     cell.label(cx, ids!(grid_title)).set_text(cx, "");
-                    cell.label(cx, ids!(grid_state)).set_text(cx, "");
                     let image = cell.image(cx, ids!(grid_thumb));
                     image.set_visible(cx, false);
                     image.set_texture(cx, None);
