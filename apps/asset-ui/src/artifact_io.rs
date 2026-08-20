@@ -458,10 +458,7 @@ fn client_for<'a>(
         None => true,
     };
     if fresh {
-        let cache = crate::import::pack_icons_dir("store", "blobs")
-            .parent()
-            .map(|p| p.join("store-cache"))
-            .unwrap_or_else(|| std::env::temp_dir().join("asset-ui-store-cache"));
+        let cache = crate::asset_store_state::instance_cache_parent().join("store-cache");
         let client = crate::store_content::connect(&source.session, &cache)
             .ok_or("cannot reach the asset server")?;
         *store = Some((source.session.clone(), client));
