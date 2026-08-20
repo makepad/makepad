@@ -971,7 +971,14 @@ fn data_route(
         .cloned()
         .or_else(|| published.lock().unwrap().blobs.get(blob.as_bytes()).cloned());
     let Some(bytes) = seeded else {
-        write_error(stream, 404, "not found");
+        if req.method == "HEAD" {
+            // A HEAD response must not carry a body; a framed error body
+            // here would be an over-read on the client side.
+            let head = response_head(404, "application/json", 0, &[]);
+            write_raw(stream, head.as_bytes());
+        } else {
+            write_error(stream, 404, "not found");
+        }
         return;
     };
     let mut bytes = bytes.clone();
