@@ -174,7 +174,7 @@ fn browse(core: &AssetServerCore, text: &str) -> (usize, u64, Duration) {
     let page = core
         .search()
         .search(
-            &SearchQuery { text, filters: SearchFilters::default(), page_size: 100 },
+            &SearchQuery { text, filters: SearchFilters::default(), page_size: 100, facets: 0 },
             &SearchViewer { principal: None, scope: ViewerScope::All },
             None,
         )

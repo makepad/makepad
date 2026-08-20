@@ -326,6 +326,14 @@ pub struct SearchQuery<'a> {
     pub text: &'a str,
     pub filters: SearchFilters<'a>,
     pub page_size: u32,
+    /// How many facet rows to return with the page; 0 asks for none.
+    ///
+    /// Facets ride the page rather than a route of their own so they are
+    /// counted in the SAME read snapshot as the hits — a separate call
+    /// could land either side of a commit and show counts that disagree
+    /// with the rows on screen. Callers that do not need them (a game
+    /// binding an alias, a pad wall paging through kinds) pay nothing.
+    pub facets: u32,
 }
 
 /// What the caller may see. The transport layer resolves credentials into
@@ -364,6 +372,35 @@ pub struct SearchPage {
     pub total: u64,
     /// Present iff more results exist; feed back verbatim to continue.
     pub cursor: Option<Vec<u8>>,
+    /// Label counts over the WHOLE result set (not just this page), most
+    /// used first. Empty unless the query asked for facets — see
+    /// [`SearchQuery::facets`].
+    pub facets: Vec<Facet>,
+}
+
+/// Which vocabulary a facet label belongs to. Both are annotation labels;
+/// they are separate filters (`category` / `tag`) and separate index rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FacetKind {
+    Category,
+    Tag,
+}
+
+impl FacetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FacetKind::Category => "category",
+            FacetKind::Tag => "tag",
+        }
+    }
+}
+
+/// One label of the current result set, and how many of its assets carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Facet {
+    pub kind: FacetKind,
+    pub label: String,
+    pub count: u64,
 }
 
 // ---- validation helpers ----------------------------------------------------
@@ -1100,6 +1137,13 @@ impl<'a> Search<'a> {
         if query.page_size == 0 {
             return Err(ServerError::InvalidInput { what: "search page size zero" });
         }
+        if query.facets > self.budgets.max_search_facets {
+            return Err(ServerError::OverBudget {
+                what: "search facets",
+                limit: self.budgets.max_search_facets as u64,
+                found: query.facets as u64,
+            });
+        }
         if query.page_size > self.budgets.max_search_results {
             return Err(ServerError::OverBudget {
                 what: "search page size",
@@ -1159,7 +1203,12 @@ impl<'a> Search<'a> {
         };
         // A viewer scoped to zero namespaces sees nothing, by construction.
         if matches!(&scope_namespaces, Some(v) if v.is_empty()) {
-            return Ok(SearchPage { hits: Vec::new(), total: 0, cursor: None });
+            return Ok(SearchPage {
+                hits: Vec::new(),
+                total: 0,
+                cursor: None,
+                facets: Vec::new(),
+            });
         }
 
         // -- fingerprint the full query shape for cursor binding -------------
@@ -1245,7 +1294,43 @@ impl<'a> Search<'a> {
             } else {
                 None
             };
-            Ok(SearchPage { hits, total, cursor })
+            // Facets come out of the SAME snapshot as the page: the counts
+            // a user sees can never describe a different generation than
+            // the rows under them. The candidate set is the query without
+            // its keyset or page limit, so a facet counts every match, not
+            // just this page's.
+            let facets = if query.facets == 0 {
+                Vec::new()
+            } else {
+                let (facet_sql, facet_binds) = build_facet_sql(
+                    &terms,
+                    browse,
+                    f,
+                    &viewer.principal,
+                    &scope_namespaces,
+                    query.facets as u64,
+                );
+                let mut s = db.prepare("search facets", &facet_sql)?;
+                apply_binds(&mut s, &facet_binds)?;
+                let mut out = Vec::new();
+                while s.step()? {
+                    let kind = match s.column_text(0).as_str() {
+                        "category" => FacetKind::Category,
+                        "tag" => FacetKind::Tag,
+                        // The label index only ever holds those two kinds
+                        // (a CHECK constraint says so); anything else is a
+                        // corrupt row, not a new vocabulary to guess at.
+                        _ => continue,
+                    };
+                    out.push(Facet {
+                        kind,
+                        label: s.column_text(1),
+                        count: s.column_u64(2),
+                    });
+                }
+                out
+            };
+            Ok(SearchPage { hits, total, cursor, facets })
         })
     }
 }
@@ -1387,6 +1472,31 @@ mod tests {
 /// `limit: None` the statement is the COUNT form (no keyset, no order); with
 /// a limit it is the page form. All caller strings travel as binds — SQL text
 /// varies only by clause structure, never by content.
+/// Label counts over the same candidate set the page is cut from, most used
+/// first. `build_sql`'s counting form is exactly that candidate SELECT
+/// wrapped in a COUNT, so the facet query reuses it as a subquery: one
+/// definition of "what matches", three uses (count, page, facets).
+fn build_facet_sql(
+    terms: &[String],
+    browse: bool,
+    f: &SearchFilters<'_>,
+    principal: &Option<PrincipalId>,
+    scope: &Option<Vec<&str>>,
+    limit: u64,
+) -> (String, Vec<Bind>) {
+    let (candidates, mut binds) = build_candidate_sql(terms, browse, f, principal, scope);
+    let sql = format!(
+        "SELECT l.kind, l.label, COUNT(*) AS n
+         FROM search_labels l
+         JOIN ({candidates}) c ON c.asset_id = l.asset_id
+         GROUP BY l.kind, l.label
+         ORDER BY n DESC, l.kind ASC, l.label ASC
+         LIMIT ?"
+    );
+    binds.push(Bind::U64(limit));
+    (sql, binds)
+}
+
 fn build_sql(
     terms: &[String],
     browse: bool,
@@ -1396,12 +1506,57 @@ fn build_sql(
     keyset: Option<&Keyset>,
     limit: Option<u64>,
 ) -> (String, Vec<Bind>) {
+    let counting = limit.is_none();
+    let (mut sql, mut binds) = build_candidate_sql(terms, browse, f, principal, scope);
+    // Keyset: resume strictly after (score DESC, canon_alias ASC, asset ASC).
+    // In browse mode every score is 0, so the score comparison degenerates
+    // and only the (alias, asset) tail remains.
+    if let Some(k) = keyset {
+        if browse {
+            sql.push_str(" AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))");
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Blob(k.asset.to_vec()));
+        } else {
+            sql.push_str(
+                " AND (score < ? OR (score = ? AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))))",
+            );
+            binds.push(Bind::U64(k.score));
+            binds.push(Bind::U64(k.score));
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Text(k.alias.clone()));
+            binds.push(Bind::Blob(k.asset.to_vec()));
+        }
+    }
+    if counting {
+        sql.insert_str(0, "SELECT COUNT(*) FROM (");
+        sql.push(')');
+    } else {
+        if browse {
+            sql.push_str(" ORDER BY a.canon_alias ASC, a.asset_id ASC");
+        } else {
+            sql.push_str(" ORDER BY score DESC, a.canon_alias ASC, a.asset_id ASC");
+        }
+        sql.push_str(" LIMIT ?");
+        binds.push(Bind::U64(limit.unwrap_or(1)));
+    }
+    (sql, binds)
+}
+
+/// Everything that decides WHETHER an asset matches — the term join or the
+/// browse scan, visibility, scope and every filter — with no keyset, order
+/// or limit. Counting wraps it, the page appends its keyset and order to it,
+/// and the facet aggregation joins the label index against it, so all three
+/// answer for exactly the same set.
+fn build_candidate_sql(
+    terms: &[String],
+    browse: bool,
+    f: &SearchFilters<'_>,
+    principal: &Option<PrincipalId>,
+    scope: &Option<Vec<&str>>,
+) -> (String, Vec<Bind>) {
     let mut binds: Vec<Bind> = Vec::new();
     let mut sql = String::with_capacity(1024);
-    let counting = limit.is_none();
-    if counting {
-        sql.push_str("SELECT COUNT(*) FROM (");
-    }
     if browse {
         sql.push_str(
             "SELECT a.asset_id, a.namespace, a.title, a.description, a.live, 0 AS score, a.kind,
@@ -1474,8 +1629,8 @@ fn build_sql(
     }
     // Exclusion reads the same label index; it is applied after the positive
     // label clauses so an asset carrying both `tag` and `exclude_tag` drops.
-    // Being part of the shared builder, it binds identically in the COUNT and
-    // the page form, so `total` and the keyset walk never disagree.
+    // Being part of the shared builder, it binds identically in the COUNT,
+    // the page and the facet form, so they never disagree.
     if let Some(v) = f.exclude_tag {
         sql.push_str(
             " AND NOT EXISTS(SELECT 1 FROM search_labels l WHERE l.asset_id = a.asset_id AND l.kind = 'tag' AND l.label = ?)",
@@ -1489,42 +1644,9 @@ fn build_sql(
     if f.live_only {
         sql.push_str(" AND a.live = 1");
     }
-    // Keyset: resume strictly after (score DESC, canon_alias ASC, asset ASC).
-    // In browse mode every score is 0, so the score comparison degenerates
-    // and only the (alias, asset) tail remains.
-    if browse {
-        if let Some(k) = keyset {
-            sql.push_str(
-                " AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))",
-            );
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Blob(k.asset.to_vec()));
-        }
-    } else {
+    if !browse {
         sql.push_str(" GROUP BY a.asset_id HAVING COUNT(DISTINCT p.term) = ?");
         binds.push(Bind::U64(terms.len() as u64));
-        if let Some(k) = keyset {
-            sql.push_str(
-                " AND (score < ? OR (score = ? AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))))",
-            );
-            binds.push(Bind::U64(k.score));
-            binds.push(Bind::U64(k.score));
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Text(k.alias.clone()));
-            binds.push(Bind::Blob(k.asset.to_vec()));
-        }
-    }
-    if counting {
-        sql.push(')');
-    } else {
-        if browse {
-            sql.push_str(" ORDER BY a.canon_alias ASC, a.asset_id ASC");
-        } else {
-            sql.push_str(" ORDER BY score DESC, a.canon_alias ASC, a.asset_id ASC");
-        }
-        sql.push_str(" LIMIT ?");
-        binds.push(Bind::U64(limit.unwrap_or(1)));
     }
     (sql, binds)
 }
