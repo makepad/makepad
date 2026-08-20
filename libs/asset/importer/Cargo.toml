@@ -27,6 +27,9 @@ makepad-asset-client = { path = "../client" }
 makepad-render = { path = "../../render" }
 makepad-gltf = { path = "../../gltf" }
 makepad-zip-file = { path = "../../zip_file" }
+# Own MP3 / Ogg Vorbis decoders: waveform thumbnails and duration for the
+# music formats the library actually ships, without a platform codec.
+makepad-audio-decode = { path = "../../audio_decode" }
 makepad-fast-inflate = { path = "../../fast_inflate" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }

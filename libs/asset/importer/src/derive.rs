@@ -27,7 +27,7 @@
 //! the seam, the scripted implementation in the tests is the contract
 //! executor. Wiring a real generator is a later, separate step.
 
-use crate::coordinator::JobOutcome;
+use makepad_asset_importer::coordinator::JobOutcome;
 use makepad_asset_client::json::Value;
 use makepad_asset_client::util::{from_hex_exact, sanitize_text, to_hex};
 use makepad_asset_client::{
@@ -223,11 +223,13 @@ fn declared_rights(body: &Value) -> Result<Option<PublishRights>, String> {
             PolicyWord::Allowed => Redistribution::Allowed,
             PolicyWord::AttributionRequired => Redistribution::AttributionRequired,
             PolicyWord::Forbidden => Redistribution::Forbidden,
+            PolicyWord::LocalOnly => Redistribution::LanLocal,
         },
         derivatives: match derivatives {
             PolicyWord::Allowed => DerivativePolicy::Allowed,
             PolicyWord::AttributionRequired => DerivativePolicy::AttributionRequired,
             PolicyWord::Forbidden => DerivativePolicy::Forbidden,
+            PolicyWord::LocalOnly => DerivativePolicy::LocalPreview,
         },
     }))
 }
@@ -237,6 +239,8 @@ enum PolicyWord {
     Allowed,
     AttributionRequired,
     Forbidden,
+    /// LAN-only (redistribution) / local-preview-only (derivatives).
+    LocalOnly,
 }
 
 fn policy_of(body: &Value, key: &'static str) -> Result<Option<PolicyWord>, String> {
@@ -248,6 +252,9 @@ fn policy_of(body: &Value, key: &'static str) -> Result<Option<PolicyWord>, Stri
                 "allowed" => PolicyWord::Allowed,
                 "attribution-required" => PolicyWord::AttributionRequired,
                 "forbidden" => PolicyWord::Forbidden,
+                "lan-local" | "user-owned-local" | "local-preview-only" | "local-preview" => {
+                    PolicyWord::LocalOnly
+                }
                 _ => return Err(format!("unknown {key} policy")),
             }))
         }

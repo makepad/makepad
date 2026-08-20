@@ -44,6 +44,10 @@ pub const QUAKE3_CREDITS: &str = "id Software Quake III Arena demo";
 const SCALE: f32 = 1.0 / 64.0;
 /// Q3 `DEFAULT_VIEWHEIGHT` (standing).
 const VIEW_HEIGHT: f32 = 26.0;
+/// A spawn entity's origin sits this far above the floor (player bbox mins z).
+const ORIGIN_ABOVE_FLOOR: f32 = 24.0;
+/// Q3 `STEPSIZE`.
+const STEP_HEIGHT: f32 = 18.0;
 
 const LUMP_ENTITIES: usize = 0;
 const LUMP_TEXTURES: usize = 1;
@@ -2109,11 +2113,12 @@ struct WorldSpawn {
 }
 
 fn write_spawn_sidecar(glb: &Path, spawn: WorldSpawn) {
-    let text = format!(
-        "world-spawn 1\n{:.4} {:.4} {:.4}\n{:.5} {:.5}\n",
-        spawn.pos[0], spawn.pos[1], spawn.pos[2], spawn.yaw, spawn.pitch
-    );
-    let _ = std::fs::write(glb.with_extension("spawn"), text);
+    // Q3 player: origin 24 units above the floor, eye +26 from there,
+    // STEPSIZE 18 — at this converter's 1/64 map scale.
+    let eye = (VIEW_HEIGHT + ORIGIN_ABOVE_FLOOR) * SCALE;
+    let nav = crate::world_nav::WorldNav::single(spawn.pos, spawn.yaw, spawn.pitch)
+        .with_heights(spawn.pos[1] - eye, eye, STEP_HEIGHT * SCALE);
+    let _ = std::fs::write(glb.with_extension("spawn"), nav.to_text());
 }
 
 fn bsp46_spawn(text: &[u8]) -> Option<WorldSpawn> {

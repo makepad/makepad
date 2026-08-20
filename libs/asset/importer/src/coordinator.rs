@@ -28,7 +28,7 @@ use crate::gen_kinds::{kind_of, GenKind, InputNeed};
 use crate::glb::inspect_glb;
 use crate::import::{placeholder_thumb, usable_image_thumb};
 use crate::thumbs::{
-    encode_jpeg_bgra, jpeg_dims, parse_wav, placeholder_bgra_512, png_dims, waveform_bgra_512,
+    decode_audio, encode_jpeg_bgra, jpeg_dims, placeholder_bgra_512, png_dims, waveform_bgra_512,
     THUMB_DIM,
 };
 use crate::videothumb::probe_video;
@@ -592,8 +592,8 @@ fn build_product(
             };
             (0, Some(dims), thumbnail)
         }
-        MediaType::Wav => {
-            let pcm = parse_wav(&bytes)?;
+        MediaType::Wav | MediaType::Mp3 | MediaType::Ogg => {
+            let pcm = decode_audio(&bytes, kind.media)?;
             let millis = pcm.millis();
             let strip = waveform_bgra_512(&pcm);
             let thumbnail = PublishThumbnail {
