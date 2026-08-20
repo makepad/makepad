@@ -20,10 +20,19 @@
 //! "is this vertex within half a snap quantum of that edge" is the same
 //! question in all three cases.
 //!
-//! Quake II and Quake III do not go through here: their compilers (`qbsp3`,
-//! `q3map`) already run a T-junction fix, so their BSPs arrive welded.
-//! Doom, Quake 1 and Build never did — Quake 1's "sparklies" are exactly
-//! this defect.
+//! Every classic converter goes through here, including Quake II and Quake
+//! III — which for a long time did not, on the reasoning that `qbsp3` and
+//! `q3map` already run a T-junction fix so their BSPs arrive welded. They
+//! do. But that is about the BSP's OWN faces: these converters then re-cut
+//! every face wherever it crosses a texture cell, because the tiles are
+//! packed into an atlas and a UV cannot wrap through one, and neighbouring
+//! faces do not agree about where those cuts fall. Quake II's demo1 came
+//! out of a pre-welded BSP with 6211 fresh cracks, all of the converter's
+//! own making. A compiler that welded its input says nothing about a
+//! converter that splits its output.
+//!
+//! Doom, Quake 1 and Build never welded at all — Quake 1's "sparklies" are
+//! exactly this defect.
 
 /// Half of `snap_pos`'s 1/1024 m quantum: a vertex this close to an edge is
 /// ON it — the quantiser could have put it either side.
