@@ -5,6 +5,9 @@
 //! Everything here is pure and hermetically tested; nothing touches the
 //! network or the library directory.
 
+use makepad_asset_data::MediaType;
+use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits};
+
 /// Canonical generated-thumbnail size.
 pub const THUMB_DIM: usize = 512;
 /// Bounded WAV decode (30 min at 48 kHz — library clips are far smaller).
@@ -110,6 +113,13 @@ pub fn parse_wav(bytes: &[u8]) -> Result<WavPcm, String> {
         Ok(())
     };
     match (format, bits) {
+        // 8-bit unsigned PCM (classic game sfx: Quake II, Doom).
+        (1, 8) => {
+            for frame in data.chunks_exact(ch) {
+                let sample = |i: usize| (frame[i] as f32 - 128.0) / 128.0;
+                push(&mut frames, sample(0), sample(ch - 1))?;
+            }
+        }
         (1, 16) => {
             for frame in data.chunks_exact(2 * ch) {
                 let sample = |i: usize| {
@@ -134,6 +144,58 @@ pub fn parse_wav(bytes: &[u8]) -> Result<WavPcm, String> {
         return Err("wav: empty data".into());
     }
     Ok(WavPcm { frames, sample_rate })
+}
+
+/// Decode any audio media the catalog carries into the same bounded PCM the
+/// waveform strip and the duration measurement want.
+///
+/// WAV parses here; MP3 and Ogg Vorbis go through this repo's own decoders
+/// (`makepad-audio-decode`), so importing a music library needs no platform
+/// codec and behaves identically on every host the worker runs on.
+pub fn decode_audio(bytes: &[u8], media: MediaType) -> Result<WavPcm, String> {
+    let format = match media {
+        MediaType::Wav => return parse_wav(bytes),
+        MediaType::Mp3 => AudioFormat::Mp3,
+        MediaType::Ogg => AudioFormat::OggVorbis,
+        other => return Err(format!("not an audio media type: {other:?}")),
+    };
+    let audio = decode_audio_limited(bytes, format, Limits::with_max_frames(MAX_WAV_FRAMES))
+        .map_err(|e| format!("{format:?}: {e}"))?;
+    let channels = audio.channels.max(1) as usize;
+    let mut frames = Vec::with_capacity(audio.frames());
+    for frame in audio.pcm_interleaved_f32.chunks_exact(channels) {
+        frames.push((frame[0].clamp(-1.0, 1.0), frame[channels - 1].clamp(-1.0, 1.0)));
+    }
+    if frames.is_empty() {
+        return Err(format!("{format:?}: empty data"));
+    }
+    Ok(WavPcm { frames, sample_rate: audio.rate.max(1) })
+}
+
+/// Duration in milliseconds without decoding the audio, for the formats that
+/// carry it in a header. Falls back to a full decode for WAV, which is cheap.
+///
+/// This answers for the same samples [`decode_audio`] returns, which for MP3
+/// means the gapless trim comes off the header's frame count: an importer that
+/// stores this and later renders a waveform from the PCM must not find the two
+/// disagreeing by the encoder's delay and padding.
+pub fn audio_millis(bytes: &[u8], media: MediaType) -> Result<u32, String> {
+    let secs = match media {
+        MediaType::Mp3 => {
+            let decoder = makepad_audio_decode::mp3::Mp3Decoder::new(bytes)
+                .map_err(|e| e.to_string())?;
+            let rate = decoder.rate().max(1) as f64;
+            let (front, back) = decoder.trim();
+            let total = makepad_audio_decode::mp3::probe_duration(bytes)
+                .map_err(|e| e.to_string())?;
+            (total - (front + back) as f64 / rate).max(0.0)
+        }
+        MediaType::Ogg => {
+            makepad_audio_decode::vorbis::probe_duration(bytes).map_err(|e| e.to_string())?
+        }
+        other => return Ok(decode_audio(bytes, other)?.millis()),
+    };
+    Ok((secs * 1000.0).clamp(0.0, u32::MAX as f64) as u32)
 }
 
 /// The canonical 512×512 waveform strip, freshly rendered from PCM (never a
@@ -166,6 +228,99 @@ pub fn waveform_bgra_512(pcm: &WavPcm) -> Vec<u32> {
         let y1 = (mid_y as f32 - lo.clamp(-1.0, 1.0) * (half - 1.0)) as usize;
         for y in y0.min(height - 1)..=y1.min(height - 1) {
             out[y * width + x] = FG;
+        }
+    }
+    out
+}
+
+/// Tolerance for "this image is one flat colour": the importer's own
+/// placeholder tile is a dark ground with a slightly lighter 64px grid, so a
+/// hair more than exact equality is needed to recognise it.
+const PLACEHOLDER_RANGE: u8 = 18;
+
+/// Is this thumbnail a placeholder rather than a picture of the asset?
+///
+/// The catalog must not fill up with rows whose thumbnail is the "no visual
+/// available" tile, a flat colour, or a fully transparent image — a grid of
+/// those is indistinguishable from a broken import. Undecodable bytes are
+/// NOT called placeholders: the pack validator refuses them on its own terms.
+pub fn thumbnail_is_placeholder(bytes: &[u8]) -> bool {
+    let Some((rgba, w, h)) = decode_rgba(bytes) else {
+        return false;
+    };
+    let pixels = (w as usize) * (h as usize);
+    if pixels == 0 || rgba.len() < pixels * 4 {
+        return false;
+    }
+    // Sample at most ~65k pixels: a 4096² thumbnail must not cost a second.
+    let stride = (pixels / 65_536).max(1);
+    let mut lo = [255u8; 3];
+    let mut hi = [0u8; 3];
+    let mut max_alpha = 0u8;
+    let mut seen = 0usize;
+    for i in (0..pixels).step_by(stride) {
+        let p = &rgba[i * 4..i * 4 + 4];
+        for c in 0..3 {
+            lo[c] = lo[c].min(p[c]);
+            hi[c] = hi[c].max(p[c]);
+        }
+        max_alpha = max_alpha.max(p[3]);
+        seen += 1;
+    }
+    if seen < 16 {
+        return false;
+    }
+    if max_alpha < 8 {
+        return true;
+    }
+    (0..3).all(|c| hi[c].saturating_sub(lo[c]) <= PLACEHOLDER_RANGE)
+}
+
+/// Decode PNG or JPEG bytes to RGBA. Only what [`thumbnail_is_placeholder`]
+/// needs — the pack path validates the containers separately.
+fn decode_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
+        use makepad_zune_png::makepad_zune_core::colorspace::ColorSpace;
+        let mut dec = makepad_zune_png::PngDecoder::new(ZCursor::new(bytes));
+        let pixels = dec.decode_raw().ok()?;
+        let (w, h) = dec.dimensions()?;
+        let channels = match dec.colorspace()? {
+            ColorSpace::RGBA => 4,
+            ColorSpace::RGB => 3,
+            ColorSpace::Luma => 1,
+            ColorSpace::LumaA => 2,
+            _ => return None,
+        };
+        return Some((to_rgba(&pixels, w * h, channels), w as u32, h as u32));
+    }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        use makepad_zune_jpeg::makepad_zune_core::bytestream::ZCursor;
+        use makepad_zune_jpeg::makepad_zune_core::colorspace::ColorSpace;
+        use makepad_zune_jpeg::makepad_zune_core::options::DecoderOptions;
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+        let mut dec =
+            makepad_zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+        let pixels = dec.decode().ok()?;
+        let (w, h) = dec.dimensions()?;
+        let channels = if pixels.len() >= w * h * 4 { 4 } else { 3 };
+        return Some((to_rgba(&pixels, w * h, channels), w as u32, h as u32));
+    }
+    None
+}
+
+fn to_rgba(src: &[u8], pixels: usize, channels: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels * 4);
+    for i in 0..pixels {
+        let p = i * channels;
+        if p + channels > src.len() {
+            break;
+        }
+        match channels {
+            4 => out.extend_from_slice(&src[p..p + 4]),
+            3 => out.extend_from_slice(&[src[p], src[p + 1], src[p + 2], 255]),
+            2 => out.extend_from_slice(&[src[p], src[p], src[p], src[p + 1]]),
+            _ => out.extend_from_slice(&[src[p], src[p], src[p], 255]),
         }
     }
     out
@@ -271,5 +426,109 @@ mod tests {
         // Placeholder is well-formed too.
         let jpeg = encode_jpeg_bgra(&placeholder_bgra_512(), THUMB_DIM, THUMB_DIM).unwrap();
         assert_eq!(jpeg_dims(&jpeg), Some((512, 512)));
+    }
+
+    #[test]
+    fn decode_audio_routes_by_media_and_refuses_the_rest() {
+        let frames: Vec<(i16, i16)> = (0..500).map(|i| (i as i16 * 60, -(i as i16) * 60)).collect();
+        let wav = wav_pcm16(&frames, 24_000);
+        // WAV still goes through the RIFF parser, byte for byte.
+        let direct = parse_wav(&wav).unwrap();
+        let routed = decode_audio(&wav, MediaType::Wav).unwrap();
+        assert_eq!(direct.sample_rate, routed.sample_rate);
+        assert_eq!(direct.frames.len(), routed.frames.len());
+        assert_eq!(audio_millis(&wav, MediaType::Wav).unwrap(), direct.millis());
+
+        // Compressed media that is not actually compressed audio errors with
+        // the format named, and never panics.
+        assert!(decode_audio(b"not an mp3", MediaType::Mp3).is_err());
+        assert!(decode_audio(b"not an ogg", MediaType::Ogg).is_err());
+        assert!(decode_audio(&[], MediaType::Mp3).is_err());
+        assert!(audio_millis(b"OggS not really", MediaType::Ogg).is_err());
+        // Non-audio media is refused by name rather than misparsed.
+        match decode_audio(&wav, MediaType::Glb) {
+            Err(err) => assert!(err.contains("Glb"), "{err}"),
+            Ok(_) => panic!("a GLB is not audio"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    use crate::classic_import::encode_png_rgba;
+
+    fn png(pixels: impl Fn(u32, u32) -> [u8; 4], w: u32, h: u32) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&pixels(x, y));
+            }
+        }
+        encode_png_rgba(&rgba, w, h).unwrap()
+    }
+
+    #[test]
+    fn a_flat_tile_is_a_placeholder() {
+        let flat = png(|_, _| [32, 38, 46, 255], 256, 256);
+        assert!(thumbnail_is_placeholder(&flat));
+    }
+
+    #[test]
+    fn the_importers_own_placeholder_tile_is_caught() {
+        // Same shape as `placeholder_bgra_512`: dark ground, faint grid.
+        let tile = png(
+            |x, y| {
+                if x % 64 == 0 || y % 64 == 0 {
+                    [60, 50, 42, 255]
+                } else {
+                    [46, 38, 32, 255]
+                }
+            },
+            512,
+            512,
+        );
+        assert!(thumbnail_is_placeholder(&tile));
+    }
+
+    #[test]
+    fn a_fully_transparent_image_is_a_placeholder() {
+        let empty = png(|_, _| [200, 30, 30, 0], 256, 256);
+        assert!(thumbnail_is_placeholder(&empty));
+    }
+
+    #[test]
+    fn a_real_render_is_kept() {
+        let render = png(
+            |x, y| {
+                let v = ((x * 3 + y * 5) % 200) as u8;
+                [v, 40 + v / 2, 255 - v, 255]
+            },
+            256,
+            256,
+        );
+        assert!(!thumbnail_is_placeholder(&render));
+    }
+
+    #[test]
+    fn an_animated_strip_of_sprites_is_kept() {
+        // 1024x256 strip: dark studio clear with one bright sprite tile.
+        let strip = png(
+            |x, y| {
+                if x < 128 && y < 128 && (x + y) % 3 != 0 {
+                    [220, 180, 60, 255]
+                } else {
+                    [26, 31, 41, 255]
+                }
+            },
+            1024,
+            256,
+        );
+        assert!(!thumbnail_is_placeholder(&strip));
+    }
+
+    #[test]
+    fn undecodable_bytes_are_not_called_placeholders() {
+        assert!(!thumbnail_is_placeholder(b"not an image"));
     }
 }
