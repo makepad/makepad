@@ -1,4 +1,5 @@
-// Qwen3.5 vision tower (clip arch, projector "qwen3vl_merger") on makepad-ggml metal.
+// Qwen3-VL family vision tower (clip arch, projector "qwen3vl_merger"), on
+// Metal or CUDA. Serves Qwen3.5-9B and Qwen3.8-27B from the same code.
 //
 // Loads the separate mmproj GGUF, preprocesses an RGB image (smart-resize +
 // normalize + block-major patch unfold), runs the 27-block SigLIP-style ViT
@@ -7,18 +8,46 @@
 //
 // Reference implementation: llama.cpp tools/mtmd (clip.cpp models/qwen3vl.cpp,
 // mtmd-image.cpp mtmd_image_preprocessor_dyn_size). Preprocessing here is an
-// exact port; the graph mirrors the reference node-for-node with flash
-// attention enabled. Parity is validated by the vlm-vision-probe bin against
-// dumps from tools/vlm_oracle/clip_dump.
+// exact port; the graph mirrors the reference node-for-node. Parity is
+// validated by the vlm-vision-probe bin against dumps from
+// tools/vlm_oracle/clip_dump.
+//
+// The tower runs on Metal or CUDA from one graph builder. The only
+// backend-conditional detail is the K/V dtype fed to the one `flash_attn_ext`
+// node: Metal casts K/V to f16, CUDA keeps them f32 because its maskless
+// (non-causal) kernel is the f32 roformer path. Both are gated against the
+// same CPU oracle; f32 K/V scores marginally closer to it.
+//
+// Config, not fork: Qwen3.5-9B and Qwen3.8-27B share this tower exactly (27
+// blocks, n_embd 1152, ffn 4304, 16 heads, patch 16, merge 2, no deepstack);
+// they differ only in `clip.vision.projection_dim` (4096 vs 5120), which is
+// read from the GGUF.
 
 use std::collections::BTreeMap;
 
 use crate::metal_compiled::{prepare_graph, MetalGraphSession, MetalGraphTensorWrite};
 use crate::{
-    BufferUsage, Context, Graph, Op, Prec, ScaleMode, TensorId, TensorType, UnaryOp,
-    GGML_ROPE_TYPE_VISION,
+    BufferUsage, Context, CudaExecRuntime, CudaRawGraphSession, Graph, Op, Prec, ScaleMode,
+    TensorId, TensorType, UnaryOp, GGML_ROPE_TYPE_VISION,
 };
 use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
+
+/// Which device the tower runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisionBackend {
+    Metal,
+    Cuda,
+}
+
+enum VisionRuntime {
+    Metal(MetalRuntime),
+    Cuda(Box<CudaExecRuntime>),
+}
+
+enum VisionSession {
+    Metal(MetalGraphSession),
+    Cuda(Box<CudaRawGraphSession>),
+}
 
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufArray, GgufFile, GgufValue};
@@ -333,7 +362,7 @@ fn block_order_row_indices(grid_w: usize, grid_h: usize) -> Vec<i32> {
 }
 
 struct VisionGraph {
-    session: MetalGraphSession,
+    session: VisionSession,
     input_patches: TensorId,
     input_positions: TensorId,
     input_block_index: TensorId,
@@ -345,26 +374,65 @@ struct VisionGraph {
 pub struct VisionTower {
     pub config: VisionConfig,
     weights: LoadedGgufWeights,
-    runtime: MetalRuntime,
+    runtime: VisionRuntime,
     graphs: BTreeMap<(usize, usize), VisionGraph>,
 }
 
 impl VisionTower {
     /// Load the mmproj GGUF. `max_patches` bounds the activation arena that is
     /// reserved up front (patches = output tokens * 4).
+    ///
+    /// Backend: CUDA when a usable device is present, else Metal.
+    /// `MAKEPAD_VISION_BACKEND=cuda|metal` pins it (and turns a missing backend
+    /// into an error rather than a silent fallback).
     pub fn load(path: &str, max_patches: usize) -> Result<Self> {
         let gguf = GgufFile::open(path)?;
         let config = VisionConfig::from_gguf(&gguf)?;
         let layout = GgufWeightLayout::from_tensors(gguf.tensors.iter().cloned())?;
         let extra = Self::activation_bytes_estimate(&config, max_patches);
         let weights = layout.allocate_and_load_with_extra(&gguf, extra)?;
-        let runtime = MetalRuntime::new().map_err(LlamaError::format)?;
+        let runtime = Self::select_runtime()?;
         Ok(Self {
             config,
             weights,
             runtime,
             graphs: BTreeMap::new(),
         })
+    }
+
+    fn select_runtime() -> Result<VisionRuntime> {
+        let pinned = std::env::var("MAKEPAD_VISION_BACKEND").ok();
+        match pinned.as_deref() {
+            Some("cuda") => Ok(VisionRuntime::Cuda(Box::new(CudaExecRuntime::new()?))),
+            Some("metal") => Ok(VisionRuntime::Metal(
+                MetalRuntime::new().map_err(LlamaError::format)?,
+            )),
+            Some(other) => Err(LlamaError::unsupported(format!(
+                "MAKEPAD_VISION_BACKEND must be 'cuda' or 'metal', got '{other}'"
+            ))),
+            None => match CudaExecRuntime::new() {
+                Ok(cuda) => Ok(VisionRuntime::Cuda(Box::new(cuda))),
+                Err(_) => Ok(VisionRuntime::Metal(
+                    MetalRuntime::new().map_err(LlamaError::format)?,
+                )),
+            },
+        }
+    }
+
+    /// Which device this tower is running on.
+    pub fn backend(&self) -> VisionBackend {
+        match self.runtime {
+            VisionRuntime::Metal(_) => VisionBackend::Metal,
+            VisionRuntime::Cuda(_) => VisionBackend::Cuda,
+        }
+    }
+
+    /// Human-readable device description, for probe/service logs.
+    pub fn device_description(&self) -> String {
+        match &self.runtime {
+            VisionRuntime::Metal(_) => "metal".to_string(),
+            VisionRuntime::Cuda(cuda) => cuda.device_description(),
+        }
     }
 
     fn activation_bytes_estimate(config: &VisionConfig, max_patches: usize) -> usize {
@@ -396,33 +464,57 @@ impl VisionTower {
         let patches_bytes = f32s_as_bytes(&image.patches);
         let positions_bytes = i32s_as_bytes(&positions);
         let block_index_bytes = i32s_as_bytes(&block_index);
-        let writes = vec![
-            MetalGraphTensorWrite {
-                tensor_id: graph.input_patches,
-                bytes: &patches_bytes,
-            },
-            MetalGraphTensorWrite {
-                tensor_id: graph.input_positions,
-                bytes: &positions_bytes,
-            },
-            MetalGraphTensorWrite {
-                tensor_id: graph.input_block_index,
-                bytes: &block_index_bytes,
-            },
-        ];
-        let execution = graph
-            .session
-            .execute(&self.weights.ctx, &writes, &[graph.output])
-            .map_err(LlamaError::format)?;
-        let bytes = execution
-            .outputs
-            .get(&graph.output)
-            .ok_or_else(|| LlamaError::format("vision graph returned no output"))?;
-        Ok(bytes_to_f32s(bytes))
+
+        match &graph.session {
+            VisionSession::Metal(session) => {
+                let writes = vec![
+                    MetalGraphTensorWrite {
+                        tensor_id: graph.input_patches,
+                        bytes: &patches_bytes,
+                    },
+                    MetalGraphTensorWrite {
+                        tensor_id: graph.input_positions,
+                        bytes: &positions_bytes,
+                    },
+                    MetalGraphTensorWrite {
+                        tensor_id: graph.input_block_index,
+                        bytes: &block_index_bytes,
+                    },
+                ];
+                let execution = session
+                    .execute(&self.weights.ctx, &writes, &[graph.output])
+                    .map_err(LlamaError::format)?;
+                let bytes = execution
+                    .outputs
+                    .get(&graph.output)
+                    .ok_or_else(|| LlamaError::format("vision graph returned no output"))?;
+                Ok(bytes_to_f32s(bytes))
+            }
+            VisionSession::Cuda(session) => {
+                let writes: Vec<(TensorId, &[u8])> = vec![
+                    (graph.input_patches, patches_bytes.as_slice()),
+                    (graph.input_positions, positions_bytes.as_slice()),
+                    (graph.input_block_index, block_index_bytes.as_slice()),
+                ];
+                let outputs = session.execute(&self.weights.ctx, &writes, &[graph.output])?;
+                let bytes = outputs
+                    .get(&graph.output)
+                    .ok_or_else(|| LlamaError::format("vision graph returned no output"))?;
+                Ok(bytes_to_f32s(bytes))
+            }
+        }
     }
 
     fn build_graph(&mut self, grid_w: usize, grid_h: usize) -> Result<VisionGraph> {
         let cfg = self.config.clone();
+        // Metal's maskless flash kernel takes f16 K/V; CUDA's takes f32.
+        // `MAKEPAD_VISION_KV=f32|f16` pins it, so either shape can be run on
+        // either backend and gated against the same oracle.
+        let kv_f16 = match std::env::var("MAKEPAD_VISION_KV").ok().as_deref() {
+            Some("f32") => false,
+            Some("f16") => true,
+            _ => matches!(self.runtime, VisionRuntime::Metal(_)),
+        };
         let n_patches = grid_w * grid_h;
         let n_embd = cfg.n_embd as i64;
         let n_heads = cfg.n_heads as i64;
@@ -602,19 +694,32 @@ impl VisionTower {
                 )
                 .map_err(err)?;
 
-            // full bidirectional flash attention (no mask), f16 K/V
+            // full bidirectional attention (no mask)
             let q_p = ctx.permute(q3, [0, 2, 1, 3]).map_err(err)?;
             let k_p = ctx.permute(k3, [0, 2, 1, 3]).map_err(err)?;
             let v_p = ctx.permute(v3, [0, 2, 1, 3]).map_err(err)?;
-            let k_h = new_f16_like(ctx, k_p, &[d_head, n, n_heads, 1])?;
-            let k_h = ctx.cpy(k_p, k_h, a).map_err(err)?;
-            let v_h = new_f16_like(ctx, v_p, &[d_head, n, n_heads, 1])?;
-            let v_h = ctx.cpy(v_p, v_h, a).map_err(err)?;
-            let mut attn = ctx
-                .flash_attn_ext(q_p, k_h, v_h, None, scale, 0.0, 0.0, a)
-                .map_err(err)?;
-            ctx.flash_attn_ext_set_prec(attn, Prec::F32).map_err(err)?;
-            attn = ctx.reshape(attn, &[n_embd, n]).map_err(err)?;
+            let attn = if kv_f16 {
+                // f16 K/V — the Metal path.
+                let k_h = new_f16_like(ctx, k_p, &[d_head, n, n_heads, 1])?;
+                let k_h = ctx.cpy(k_p, k_h, a).map_err(err)?;
+                let v_h = new_f16_like(ctx, v_p, &[d_head, n, n_heads, 1])?;
+                let v_h = ctx.cpy(v_p, v_h, a).map_err(err)?;
+                let attn = ctx
+                    .flash_attn_ext(q_p, k_h, v_h, None, scale, 0.0, 0.0, a)
+                    .map_err(err)?;
+                ctx.flash_attn_ext_set_prec(attn, Prec::F32).map_err(err)?;
+                ctx.reshape(attn, &[n_embd, n]).map_err(err)?
+            } else {
+                // f32 K/V — routes to the CUDA maskless kernel.
+                // Contiguous copies because that path reads plain strides.
+                let k_c = ctx.cont_3d(k_p, d_head, n, n_heads).map_err(err)?;
+                let v_c = ctx.cont_3d(v_p, d_head, n, n_heads).map_err(err)?;
+                let attn = ctx
+                    .flash_attn_ext(q_p, k_c, v_c, None, scale, 0.0, 0.0, a)
+                    .map_err(err)?;
+                ctx.flash_attn_ext_set_prec(attn, Prec::F32).map_err(err)?;
+                ctx.reshape(attn, &[n_embd, n]).map_err(err)?
+            };
 
             let mut o = ctx.mul_mat(out_w, attn, a).map_err(err)?;
             o = ctx.binary_like_a(Op::Add, o, out_b, a).map_err(err)?;
@@ -656,16 +761,25 @@ impl VisionTower {
         graph
             .build_forward_expand(&self.weights.ctx, cur)
             .map_err(err)?;
-        let prepared = prepare_graph(&self.weights.ctx, &graph, self.runtime.features())
-            .map_err(err)?;
-        let session = MetalGraphSession::from_runtime(
-            self.runtime.clone(),
-            &self.weights.ctx,
-            &prepared,
-            BufferStorageMode::Shared,
-            BufferStorageMode::Shared,
-        )
-        .map_err(err)?;
+        let session = match &self.runtime {
+            VisionRuntime::Metal(runtime) => {
+                let prepared =
+                    prepare_graph(&self.weights.ctx, &graph, runtime.features()).map_err(err)?;
+                VisionSession::Metal(
+                    MetalGraphSession::from_runtime(
+                        runtime.clone(),
+                        &self.weights.ctx,
+                        &prepared,
+                        BufferStorageMode::Shared,
+                        BufferStorageMode::Shared,
+                    )
+                    .map_err(err)?,
+                )
+            }
+            VisionRuntime::Cuda(runtime) => VisionSession::Cuda(Box::new(
+                runtime.create_raw_graph_session(&self.weights.ctx, &graph, &[cur])?,
+            )),
+        };
 
         Ok(VisionGraph {
             session,
