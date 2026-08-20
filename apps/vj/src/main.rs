@@ -46,6 +46,9 @@ mod stems;
 mod wave_analysis;
 mod pads;
 mod service;
+// Stems/lyrics the STORE already holds: fetch instead of separate, and give
+// back what this machine had to compute.
+mod side_channels;
 mod views;
 
 use crate::apc40::{
@@ -63,7 +66,10 @@ use crate::loop_detect::{
 };
 use crate::decks::{
     DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, FadeCurve, ScratchMotion, SyncMode,
-    SyncView, TrackItem,
+    SyncView, TrackItem, TrackSideChannels,
+};
+use crate::side_channels::{
+    FetchedJob, SideChannelMsg, SideChannelPool, WriteBackJob, WriteBackMsg, WriteBackPool,
 };
 use crate::music_view::{
     format_bpm, format_duration, format_pitch, track_list_hits, OverviewEvent, TrackKey,
@@ -87,6 +93,7 @@ use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, G
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
 use crate::mix::{FxBus, MixId, MixState};
+use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
     JobId, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus, TierPreference,
@@ -2008,6 +2015,9 @@ enum CatPurpose {
     JobEnqueue { tag: GenTag },
     JobStatus { job: JobId },
     JobCancel { job: JobId },
+    /// Offering this machine's locally computed stems/lyrics back to the
+    /// store. Fire and forget: one line either way, never a dialog.
+    SideChannelPublish { asset: AssetId },
 }
 
 /// What a media-lane request was for (keyed by `(lane, request)`).
@@ -2017,8 +2027,50 @@ enum MediaPurpose {
     /// The cue's companion file (grouped sprite actor manifest text).
     CueSource { gen: CueGen },
     Deck { deck: DeckId, gen: u64, media: MediaType },
+    /// One of the four precomputed stem oggs for a deck's track; `index` is
+    /// its place in `FileRole::STEMS`.
+    DeckStem { deck: DeckId, gen: u64, index: usize },
+    /// The deck track's precomputed lyrics document.
+    DeckLyrics { deck: DeckId, gen: u64 },
     Pad { pad: AssetId, gen: u64, revision: AssetRevisionId, media: MediaType },
     Mesh { gen: u64 },
+}
+
+/// The side-channel blobs a deck load is waiting on. Complete means the
+/// whole set landed and the decode job can go out — but only once the track
+/// itself is installed, because the track's rate and length decide the
+/// chunk geometry.
+#[derive(Clone, Debug)]
+struct PendingSideChannels {
+    gen: u64,
+    /// In `FileRole::STEMS` order.
+    stems: [Option<PathBuf>; 4],
+    /// False once the lyrics landed, or once their fetch failed — a missing
+    /// transcript is not a reason to hold the stems back.
+    want_lyrics: bool,
+    lyrics: Option<PathBuf>,
+}
+
+impl PendingSideChannels {
+    fn new(gen: u64, want_lyrics: bool) -> PendingSideChannels {
+        PendingSideChannels { gen, stems: Default::default(), want_lyrics, lyrics: None }
+    }
+
+    fn complete(&self) -> bool {
+        self.stems.iter().all(Option::is_some) && !self.want_lyrics
+    }
+
+    /// The decode job, once every file is on disk.
+    fn into_job(self, deck: DeckId, gen: u64, pcm: Arc<TrackPcm>) -> Option<FetchedJob> {
+        let [a, b, c, d] = self.stems;
+        Some(FetchedJob {
+            deck,
+            gen,
+            pcm,
+            stem_files: [a?, b?, c?, d?],
+            lyrics_file: self.lyrics,
+        })
+    }
 }
 
 /// Two-file cue pairing. The engine is a single-media state machine, but a
@@ -2161,6 +2213,33 @@ fn select_billboard_source(manifest: &AssetManifest) -> Option<TileMedia> {
         len: file.byte_len,
         media: file.media,
     })
+}
+
+/// The precomputed analysis a music revision carries: four stem oggs and/or
+/// a lyrics document, published as side-channel files on the audio asset.
+///
+/// Read straight off the manifest rather than through `select_file`: a
+/// side-channel has exactly one slot (tier `Any`, lod 0) by contract, so
+/// there is nothing to select between, and the stem set is all-four-or-none.
+fn side_channel_refs(manifest: &AssetManifest) -> TrackSideChannels {
+    side_channel_refs_of(&manifest.files)
+}
+
+fn side_channel_refs_of(files: &[makepad_asset_data::AssetFile]) -> TrackSideChannels {
+    let file = |role: FileRole| {
+        files
+            .iter()
+            .find(|f| f.role == role)
+            .map(|f| (f.blob, f.byte_len))
+    };
+    let stems = FileRole::STEMS.map(file);
+    TrackSideChannels {
+        stems: stems
+            .iter()
+            .all(Option::is_some)
+            .then(|| stems.map(|slot| slot.expect("checked above"))),
+        lyrics: file(FileRole::Lyrics),
+    }
 }
 
 fn format_time(secs: f64) -> String {
@@ -3646,6 +3725,32 @@ pub struct App {
     /// Source separation, off-thread, per deck.
     #[rust(StemsPool::new())]
     stems: StemsPool,
+    /// The other way to get stems: precomputed ones off the store, decoded
+    /// on their own worker so a deck load never waits behind a model.
+    #[rust(SideChannelPool::new())]
+    sidechan: SideChannelPool,
+    /// Side-channel blobs in flight per deck. Armed for a generation means
+    /// this load fetches its stems and does NOT separate.
+    #[rust]
+    deck_side_channels: [Option<PendingSideChannels>; 2],
+    /// The precomputed files a music revision carries, learned from its
+    /// manifest while browsing. Bounded like the anchor map.
+    #[rust]
+    track_side_channels: HashMap<AssetRevisionId, TrackSideChannels>,
+    /// Giving locally computed analysis back to the store, lowest priority
+    /// in the app, at most one offer per asset per session.
+    #[rust(WriteBackPool::new())]
+    writeback: WriteBackPool,
+    #[rust]
+    writeback_stems: HashSet<AssetId>,
+    #[rust]
+    writeback_lyrics: HashSet<AssetId>,
+    /// One side-channel publication per asset at a time; the next one waits
+    /// here so it can build on the revision the first leaves behind.
+    #[rust]
+    publish_inflight: HashSet<AssetId>,
+    #[rust]
+    publish_deferred: Vec<(AssetId, Vec<makepad_asset_client::side_channels::SideChannelFile>)>,
     /// Separated audio as it streams in, per deck.
     #[rust]
     deck_stems: [Option<Arc<TrackStems>>; 2],
@@ -6184,6 +6289,10 @@ impl App {
         for cmd in cmds {
             match cmd {
                 DeckCmd::LoadTrack { deck, gen, item } => {
+                    // A new load supersedes whatever the last one was still
+                    // fetching: stale files landing later find no pending set
+                    // and are dropped.
+                    self.deck_side_channels[deck.index()] = None;
                     // A local file never goes near the store: it decodes
                     // straight off disk on the same worker pool.
                     if let Some(path) = self.local_by_asset.get(&item.asset).cloned() {
@@ -6213,6 +6322,10 @@ impl App {
                             MediaPurpose::Deck { deck, gen, media: item.media },
                         );
                     }
+                    // Whatever the store already knows about this track rides
+                    // along with the audio: a few hundred kilobytes of stems
+                    // instead of a third of the track's duration on the GPU.
+                    self.begin_side_channel_fetch(deck, gen, &item);
                 }
                 DeckCmd::InstallTrack { deck } => {
                     let key = self
@@ -6242,7 +6355,19 @@ impl App {
                             self.deck_lyrics_status[deck.index()] = String::new();
                             self.mixer.clear_deck_stems(deck);
                             self.submit_analysis(deck, pcm.clone());
-                            self.submit_separation(deck, pcm);
+                            // Fetch or compute, decided when the track was
+                            // clicked: a deck whose side-channel fetch is
+                            // armed for this generation never loads the
+                            // separation model at all. The fetch's own
+                            // failure paths fall back here.
+                            if self.side_channels_armed(deck, key.1) {
+                                self.deck_stem_status[deck.index()] =
+                                    "stems: fetching…".to_string();
+                                self.deck_stem_busy[deck.index()] = Some(true);
+                                self.try_start_side_channels(deck, key.1);
+                            } else {
+                                self.submit_separation(deck, pcm);
+                            }
                         }
                     }
                 }
@@ -6413,6 +6538,7 @@ impl App {
         self.pump_analysis(cx);
         self.pump_stems(cx);
         self.pump_lyrics(cx);
+        self.pump_side_channel_writeback();
         self.observe_decks();
         self.sync_mesh_liveness(cx);
         self.schedule_music_frame(cx);
@@ -6589,6 +6715,14 @@ impl App {
                             );
                         }
                         CatPurpose::JobCancel { .. } => {}
+                        CatPurpose::SideChannelPublish { asset } => {
+                            // A store that will not take them (no write
+                            // capability, an older server) is not an error
+                            // the operator can act on mid-set: one line, and
+                            // the asset stays marked so nothing retries.
+                            log!("side-channels: {asset} refused: {error}");
+                            self.side_channel_publish_settled(asset);
+                        }
                     }
                 }
             }
@@ -6680,6 +6814,13 @@ impl App {
                                 .then_some(TileThumb { blob: m.blob, len: m.len, anim: None })
                         })
                     });
+                // Precomputed stems/lyrics decide, at load time, whether this
+                // track is FETCHED or separated on this machine — so they are
+                // learned here, where the manifest is, and remembered against
+                // the revision that carries them.
+                if surface == Surface::Music {
+                    self.remember_side_channels(revision, &manifest);
+                }
                 // player_nav: a World's anchors (player_start, keys, exit)
                 // feed the walker slot's player planner when it is cued.
                 // Bounded: a long browse session must not grow without end.
@@ -6734,8 +6875,38 @@ impl App {
             (CatPurpose::JobCancel { job }, ClientOutput::JobCancelled(count)) => {
                 self.gen.cancel_confirmed_at(job, count, Some(now_ms()));
             }
+            (CatPurpose::SideChannelPublish { asset }, ClientOutput::SideChannels(outcome)) => {
+                match outcome {
+                    SideChannelOutcome::Published { revision } => {
+                        log!("side-channels published for {asset}: revision {revision}");
+                    }
+                    SideChannelOutcome::AlreadyPresent { .. } => {
+                        log!("side-channels already published by another client");
+                    }
+                }
+                self.side_channel_publish_settled(asset);
+            }
             _ => {}
         }
+    }
+
+    /// Remember what a music revision's manifest says it already carries.
+    /// Bounded like the anchor map: a long browse must not grow without end,
+    /// and the only entries worth keeping are the ones that HAVE something.
+    fn remember_side_channels(&mut self, revision: AssetRevisionId, manifest: &AssetManifest) {
+        let refs = side_channel_refs(manifest);
+        if refs.stems.is_none() && refs.lyrics.is_none() {
+            // A republish can also take side-channels AWAY; a stale entry
+            // would send this deck fetching blobs the store no longer has.
+            self.track_side_channels.remove(&revision);
+            return;
+        }
+        if self.track_side_channels.len() >= 256
+            && !self.track_side_channels.contains_key(&revision)
+        {
+            self.track_side_channels.clear();
+        }
+        self.track_side_channels.insert(revision, refs);
     }
 
     fn pump_media_lanes(&mut self, cx: &mut Cx) {
@@ -6790,6 +6961,12 @@ impl App {
                             }
                             MediaPurpose::Deck { deck, gen, media } => {
                                 self.decode.submit(DecodeJob::Deck { deck, gen, path, media });
+                            }
+                            MediaPurpose::DeckStem { deck, gen, index } => {
+                                self.side_channel_landed(deck, gen, Some(index), path);
+                            }
+                            MediaPurpose::DeckLyrics { deck, gen } => {
+                                self.side_channel_landed(deck, gen, None, path);
                             }
                             MediaPurpose::Pad { pad, gen, revision, media } => {
                                 self.decode.submit(DecodeJob::Pad {
@@ -6853,6 +7030,12 @@ impl App {
                 let cmds = self.decks.track_failed(deck, gen, error);
                 self.run_deck_cmds(cx, cmds);
             }
+            MediaPurpose::DeckStem { deck, gen, .. } => {
+                self.side_channel_failed(deck, gen, true, &error);
+            }
+            MediaPurpose::DeckLyrics { deck, gen } => {
+                self.side_channel_failed(deck, gen, false, &error);
+            }
             MediaPurpose::Pad { pad, gen, .. } => {
                 let cmds = self.pads.load_failed(pad, gen, error);
                 self.run_pad_cmds(cmds);
@@ -6895,6 +7078,11 @@ impl App {
                 .spawn(move || up.shutdown());
         }
         self.cat_reqs.clear();
+        // Side-channel offers die with the session that was carrying them.
+        // Nothing retries a write-back: the assets stay marked, and the next
+        // machine to separate this track makes the offer instead.
+        self.publish_inflight.clear();
+        self.publish_deferred.clear();
         let orphaned: Vec<((usize, RequestId), MediaPurpose)> = self.media_reqs.drain().collect();
         for ((lane, id), purpose) in orphaned {
             self.media_request_failed(cx, lane, id, purpose, "asset server lost".to_string());
@@ -8160,6 +8348,146 @@ impl App {
         "stems: full mix".to_string()
     }
 
+    // ---- music mode: stems and lyrics the store already has ----------------
+
+    /// Start the download of a track's precomputed side-channels beside its
+    /// audio.
+    ///
+    /// Arming is all-or-nothing: unless every stem blob is on its way this
+    /// deck stays on the local path, because three stems out of four is not
+    /// a stem mix. The lyrics document is optional in both directions.
+    fn begin_side_channel_fetch(&mut self, deck: DeckId, gen: u64, item: &TrackItem) {
+        let index = deck.index();
+        let Some(stems) = item.side.stems else { return };
+        let lyrics = item.side.lyrics;
+        let mut pending = PendingSideChannels::new(gen, false);
+        let Some(up) = self.up.as_mut() else { return };
+        let Some(runtime) = up.media.get_mut(AUDIO_LANE) else { return };
+        for (slot, (blob, len)) in stems.iter().enumerate() {
+            let request = ClientRequest::FetchBlob {
+                blob: *blob,
+                expected_len: Some(*len),
+                pin: false,
+            };
+            let Ok(id) = runtime.submit(request) else {
+                // The session is going away; the completions of whatever did
+                // go out find no pending set and are dropped.
+                return;
+            };
+            self.media_reqs
+                .insert((AUDIO_LANE, id), MediaPurpose::DeckStem { deck, gen, index: slot });
+        }
+        if let Some((blob, len)) = lyrics {
+            let request = ClientRequest::FetchBlob {
+                blob,
+                expected_len: Some(len),
+                pin: false,
+            };
+            if let Ok(id) = runtime.submit(request) {
+                self.media_reqs
+                    .insert((AUDIO_LANE, id), MediaPurpose::DeckLyrics { deck, gen });
+                pending.want_lyrics = true;
+            }
+        }
+        self.deck_side_channels[index] = Some(pending);
+    }
+
+    /// True when this deck's load is being served from the store's own
+    /// analysis — the one condition under which separation is skipped.
+    fn side_channels_armed(&self, deck: DeckId, gen: u64) -> bool {
+        self.deck_side_channels[deck.index()]
+            .as_ref()
+            .is_some_and(|pending| pending.gen == gen)
+    }
+
+    /// One downloaded side-channel file landed.
+    fn side_channel_landed(&mut self, deck: DeckId, gen: u64, slot: Option<usize>, path: PathBuf) {
+        let index = deck.index();
+        {
+            let Some(pending) = self.deck_side_channels[index].as_mut() else { return };
+            if pending.gen != gen {
+                return;
+            }
+            match slot {
+                Some(slot) => {
+                    if let Some(entry) = pending.stems.get_mut(slot) {
+                        *entry = Some(path);
+                    }
+                }
+                None => {
+                    pending.lyrics = Some(path);
+                    pending.want_lyrics = false;
+                }
+            }
+        }
+        self.try_start_side_channels(deck, gen);
+    }
+
+    /// A side-channel file is not coming. Missing lyrics only cost the words;
+    /// a missing stem costs the whole set, and the deck separates locally
+    /// after all.
+    fn side_channel_failed(&mut self, deck: DeckId, gen: u64, stem: bool, error: &str) {
+        if !self.side_channels_armed(deck, gen) {
+            return;
+        }
+        let index = deck.index();
+        if !stem {
+            if let Some(pending) = self.deck_side_channels[index].as_mut() {
+                pending.want_lyrics = false;
+                pending.lyrics = None;
+            }
+            self.try_start_side_channels(deck, gen);
+            return;
+        }
+        self.deck_side_channels[index] = None;
+        log!("deck {deck:?}: side-channel stem fetch failed ({error}); separating locally");
+        self.fall_back_to_separation(deck, gen);
+    }
+
+    /// Hand the fetched files to the decode worker, once they are ALL here
+    /// and the track itself is installed — the track's rate and length are
+    /// what the stems are resampled to and cut by, so neither half is any
+    /// use without the other. Called from both sides; whichever completes
+    /// last is the one that starts the job.
+    fn try_start_side_channels(&mut self, deck: DeckId, gen: u64) {
+        let index = deck.index();
+        if !self.deck_side_channels[index]
+            .as_ref()
+            .is_some_and(|pending| pending.gen == gen && pending.complete())
+        {
+            return;
+        }
+        if !self.deck_track_is(deck, gen) {
+            return;
+        }
+        let Some((pcm, _)) = self.deck_tracks[index].as_ref() else { return };
+        let pcm = pcm.clone();
+        let Some(pending) = self.deck_side_channels[index].take() else { return };
+        let Some(job) = pending.into_job(deck, gen, pcm) else { return };
+        self.deck_stem_status[index] = "stems: side-channel".to_string();
+        self.deck_stem_busy[index] = Some(true);
+        self.sidechan.submit(job);
+    }
+
+    /// Whether `deck_tracks` holds the audio of THIS load generation — the
+    /// deck holds the previous track's PCM until the new one installs.
+    fn deck_track_is(&self, deck: DeckId, gen: u64) -> bool {
+        let state = self.decks.deck(deck);
+        state.load_gen == gen && state.is_loaded() && self.deck_tracks[deck.index()].is_some()
+    }
+
+    /// Separate locally after all: the fetched side-channel never arrived or
+    /// would not decode. When the track has not installed yet there is
+    /// nothing to do here — the arming is gone, so `InstallTrack` separates.
+    fn fall_back_to_separation(&mut self, deck: DeckId, gen: u64) {
+        if !self.deck_track_is(deck, gen) {
+            return;
+        }
+        let Some((pcm, _)) = self.deck_tracks[deck.index()].as_ref() else { return };
+        let pcm = pcm.clone();
+        self.submit_separation(deck, pcm);
+    }
+
     /// Ask the separator for this deck's stems, starting where the
     /// playhead is so the knobs go live where they are needed first.
     fn submit_separation(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
@@ -8183,7 +8511,21 @@ impl App {
     /// separation arrive.
     fn pump_stems(&mut self, cx: &mut Cx) {
         let mut touched = [false; 2];
-        for message in self.stems.poll() {
+        // Two sources, one vocabulary: the local separator and the fetched
+        // side-channel publish the same chunks and the same status lines, so
+        // everything below this point is blind to which one served the deck.
+        let mut messages = self.stems.poll();
+        for message in self.sidechan.poll() {
+            match message {
+                SideChannelMsg::Stems(message) => messages.push(message),
+                SideChannelMsg::Fallback { deck, gen, reason } => {
+                    log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
+                    self.deck_side_channels[deck.index()] = None;
+                    self.fall_back_to_separation(deck, gen);
+                }
+            }
+        }
+        for message in messages {
             match message {
                 StemsMsg::Status { deck, gen, text, working } => {
                     if self.decks.deck(deck).load_gen != gen {
@@ -8213,6 +8555,12 @@ impl App {
                     // actually on disk.
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
+                    }
+                    // A track this machine separated end to end is worth
+                    // giving back — before the dispatch gate below, which
+                    // stops at the SECOND report of the same coverage.
+                    if complete {
+                        self.arm_stems_write_back(deck, &digest, model_frames);
                     }
                     if !self.lyrics_dispatch.should_dispatch(&digest, complete) {
                         continue;
@@ -8295,10 +8643,13 @@ impl App {
                     self.deck_lyrics_status[deck.index()] = text;
                 }
                 LyricsMsg::Ready { deck, gen, digest, lyrics } => {
-                    let _ = digest;
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
+                    // Words this machine has and the store does not: the same
+                    // offer the stems make, and free — the document is already
+                    // in hand.
+                    self.arm_lyrics_write_back(deck, &digest, &lyrics);
                     self.deck_lyrics[deck.index()] = Some(lyrics);
                     self.rebuild_karaoke(cx, deck);
                     if self.karaoke_on {
@@ -8306,6 +8657,119 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    // ---- music mode: giving the analysis back ------------------------------
+
+    /// Offer a locally separated store track's stems back to the store.
+    ///
+    /// Everything about this is deliberately timid. It runs ONLY for a track
+    /// that came from the store (a local file has no asset to attach to),
+    /// ONLY when that track's manifest carried no stems (otherwise there is
+    /// nothing to add), and ONLY once per asset per session — a refusal is a
+    /// refusal, not something to try again in a loop. The reading and the
+    /// encoding happen on the write-back worker, which stands aside before it
+    /// starts: the deck it just separated is probably playing.
+    fn arm_stems_write_back(&mut self, deck: DeckId, digest: &str, model_frames: u64) {
+        let Some(item) = self.decks.deck(deck).item() else { return };
+        if item.side.stems.is_some() {
+            return;
+        }
+        let asset = item.asset;
+        if self.local_by_asset.contains_key(&asset) || self.up.is_none() {
+            return;
+        }
+        if !self.writeback_stems.insert(asset) {
+            return;
+        }
+        self.writeback.submit(WriteBackJob {
+            asset,
+            digest: digest.to_string(),
+            model_frames,
+        });
+    }
+
+    /// The same offer for a baked transcript. No encode stands between the
+    /// document and the store, so this one goes straight out.
+    fn arm_lyrics_write_back(&mut self, deck: DeckId, digest: &str, lyrics: &TrackLyrics) {
+        let Some(item) = self.decks.deck(deck).item() else { return };
+        if item.side.lyrics.is_some() {
+            return;
+        }
+        let asset = item.asset;
+        if self.local_by_asset.contains_key(&asset) || self.up.is_none() {
+            return;
+        }
+        if !self.writeback_lyrics.insert(asset) {
+            return;
+        }
+        let files =
+            makepad_audio_sidechannels::side_channel_files(None, Some(lyrics.to_json(digest)));
+        self.submit_side_channel_publish(asset, files);
+    }
+
+    /// Take finished write-back encodes and offer them to the store.
+    fn pump_side_channel_writeback(&mut self) {
+        for message in self.writeback.poll() {
+            match message {
+                WriteBackMsg::Encoded { asset, oggs } => {
+                    let files =
+                        makepad_audio_sidechannels::side_channel_files(Some(*oggs), None);
+                    self.submit_side_channel_publish(asset, files);
+                }
+                WriteBackMsg::Skipped { asset, reason } => {
+                    log!("side-channels: nothing to publish for {asset}: {reason}");
+                }
+            }
+        }
+    }
+
+    /// Publish attached side-channel files on the catalog runtime's bulk
+    /// lane — the deck's own audio lane stays clear for the next load.
+    ///
+    /// ONE publication per asset at a time. Each attach reads the head
+    /// revision and stages a successor, so two of them in flight together
+    /// (stems finishing while the transcript lands) would both build on the
+    /// same head and the loser would drop the winner's files. The second
+    /// waits for the first to settle and then builds on what it left.
+    fn submit_side_channel_publish(
+        &mut self,
+        asset: AssetId,
+        files: Vec<makepad_asset_client::side_channels::SideChannelFile>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        if self.publish_inflight.contains(&asset) {
+            if self.publish_deferred.len() < 8 {
+                self.publish_deferred.push((asset, files));
+            }
+            return;
+        }
+        let bytes: usize = files.iter().map(|file| file.bytes.len()).sum();
+        let roles: Vec<FileRole> = files.iter().map(|file| file.role).collect();
+        let Some(up) = self.up.as_mut() else { return };
+        match up.catalog.submit(ClientRequest::PublishSideChannels {
+            asset,
+            files: Arc::new(files),
+        }) {
+            Ok(id) => {
+                self.cat_reqs.insert(id, CatPurpose::SideChannelPublish { asset });
+                self.publish_inflight.insert(asset);
+                log!("side-channels: offering {roles:?} ({bytes} bytes) for {asset}");
+            }
+            Err(error) => log!("side-channels: publish not submitted: {error}"),
+        }
+    }
+
+    /// A publication finished, one way or the other: let whatever was waiting
+    /// on this asset go, now that it can see the revision this one left.
+    fn side_channel_publish_settled(&mut self, asset: AssetId) {
+        self.publish_inflight.remove(&asset);
+        if let Some(at) = self.publish_deferred.iter().position(|(a, _)| *a == asset) {
+            let (asset, files) = self.publish_deferred.remove(at);
+            self.submit_side_channel_publish(asset, files);
         }
     }
 
@@ -9201,6 +9665,7 @@ impl App {
             media_blob: media.blob,
             media_len: media.len,
             media: media.media,
+            side: self.track_side_channels.get(&revision).cloned().unwrap_or_default(),
         };
         let cmds = self.decks.click(item, self.deck_target);
         self.run_deck_cmds(cx, cmds);
@@ -9538,6 +10003,9 @@ impl App {
             media_blob: digest,
             media_len: 0,
             media: MediaType::Wav,
+            // A file on this machine has no revision on any store: it
+            // separates locally, exactly as it always has.
+            side: TrackSideChannels::default(),
         })
     }
 
@@ -9555,6 +10023,11 @@ impl App {
                     media_blob: media.blob,
                     media_len: media.len,
                     media: media.media,
+                    side: self
+                        .track_side_channels
+                        .get(&revision)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             }
             TrackKey::Local(path) => self.local_track_item(&path),
@@ -10742,6 +11215,81 @@ mod sync_tests {
             pair.manifest_landed(9, "/m/manifest".into()),
             Some(PathBuf::from("/m/sheet"))
         );
+    }
+
+    /// What a manifest is read for on the music surface: the fetch-or-compute
+    /// switch. Reading it wrong in either direction is expensive — a missed
+    /// set costs a GPU separation that did not need to happen, and a
+    /// half-read one would put three stems on four knobs.
+    #[test]
+    fn a_manifest_offers_its_stems_only_as_a_complete_set() {
+        use makepad_asset_data::AssetFile;
+        let file = |role: FileRole, seed: u8, media: MediaType| AssetFile {
+            role,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media,
+            blob: BlobId::from_bytes([seed; 32]),
+            byte_len: 1000 + seed as u64,
+            dims: None,
+        };
+        let audio = file(FileRole::Audio, 1, MediaType::Mp3);
+
+        // Nothing but the audio: the deck separates, as it always has.
+        let bare = side_channel_refs_of(&[audio]);
+        assert_eq!(bare, TrackSideChannels::default());
+
+        // Three stems out of four is not a stem mix.
+        let partial: Vec<AssetFile> = FileRole::STEMS[..3]
+            .iter()
+            .enumerate()
+            .map(|(i, role)| file(*role, 10 + i as u8, MediaType::Ogg))
+            .collect();
+        assert!(side_channel_refs_of(&partial).stems.is_none());
+
+        // The whole set, in the contract's order — and the refs come back in
+        // that same order, which is what the lane mapping indexes.
+        let mut files: Vec<AssetFile> = FileRole::STEMS
+            .iter()
+            .enumerate()
+            .map(|(i, role)| file(*role, 20 + i as u8, MediaType::Ogg))
+            .collect();
+        files.push(file(FileRole::Lyrics, 40, MediaType::Json));
+        files.push(audio);
+        let refs = side_channel_refs_of(&files);
+        let stems = refs.stems.expect("a complete set");
+        for (slot, (blob, len)) in stems.iter().enumerate() {
+            assert_eq!(*blob, BlobId::from_bytes([20 + slot as u8; 32]));
+            assert_eq!(*len, 1000 + 20 + slot as u64);
+        }
+        assert_eq!(refs.lyrics, Some((BlobId::from_bytes([40; 32]), 1040)));
+
+        // Lyrics alone are worth having: the words show, the knobs do not.
+        let words = side_channel_refs_of(&[file(FileRole::Lyrics, 40, MediaType::Json)]);
+        assert!(words.stems.is_none());
+        assert!(words.lyrics.is_some());
+    }
+
+    /// A deck starts its decode only when every file it asked for is on
+    /// disk — and a lyrics fetch that failed must not hold the stems back.
+    #[test]
+    fn a_side_channel_set_is_complete_only_when_nothing_is_outstanding() {
+        let mut pending = PendingSideChannels::new(4, true);
+        for slot in 0..4 {
+            assert!(!pending.complete(), "slot {slot} is still missing");
+            pending.stems[slot] = Some(PathBuf::from(format!("/tmp/{slot}.ogg")));
+        }
+        assert!(!pending.complete(), "the lyrics were asked for and are not here");
+        pending.want_lyrics = false;
+        assert!(pending.complete());
+        assert!(pending
+            .clone()
+            .into_job(DeckId::A, 4, Arc::new(TrackPcm { frames: vec![], sample_rate: 44_100 }))
+            .is_some());
+        // A set that never wanted lyrics is complete without them.
+        let mut bare = PendingSideChannels::new(4, false);
+        bare.stems = std::array::from_fn(|slot| Some(PathBuf::from(format!("/tmp/{slot}.ogg"))));
+        assert!(bare.complete());
     }
 
     #[test]
