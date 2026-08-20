@@ -119,6 +119,95 @@ pub fn lift_exposure(img: &mut Rgb, gamma: f32) {
     }
 }
 
+/// Zoom every turntable cell onto its subject: per cell, find the bounding
+/// box of non-background pixels, expand it to a square with a margin, and
+/// resample that crop to fill the cell.
+///
+/// A mini-character occupies ~15% of its cell; fed to the tower at 512 the
+/// whole person is ~60px and faces are quantisation noise — the model names
+/// guesses (a bare hand came back "a wooden staff", a black suit "a grey
+/// tunic"). Zoomed, the same patch budget lands on the subject. Generic by
+/// construction: the pass knows only "background vs not", never what the
+/// subject is — no VRAM cost, unlike feeding a larger sheet.
+///
+/// Deliberately NOT used for construction-kit pieces: their relative size
+/// in the cell is a signal (`size:` line) that zooming would destroy.
+pub fn zoom_to_subject(src: &Rgb, grid: usize, margin_frac: f32) -> Rgb {
+    if grid == 0 || src.w % grid != 0 || src.h % grid != 0 {
+        return Rgb { w: src.w, h: src.h, pixels: src.pixels.clone() };
+    }
+    // The background is read from the sheet itself (its corners are always
+    // empty), not from SHEET_BG: served thumbnails have gone through
+    // renderer generations with slightly different fields, and a constant
+    // that misses by a few counts silently turns the zoom into a no-op.
+    const TOL: i32 = 12;
+    let corner = |x: usize, y: usize| {
+        let p = (y * src.w + x) * 3;
+        [src.pixels[p], src.pixels[p + 1], src.pixels[p + 2]]
+    };
+    let bg = corner(0, 0);
+    let (cw, ch) = (src.w / grid, src.h / grid);
+    let mut out = Rgb { w: src.w, h: src.h, pixels: src.pixels.clone() };
+    let is_bg = |p: &[u8]| (0..3).all(|c| (p[c] as i32 - bg[c] as i32).abs() <= TOL);
+    for gy in 0..grid {
+        for gx in 0..grid {
+            let (x0, y0) = (gx * cw, gy * ch);
+            // Subject bbox within this cell.
+            let (mut minx, mut miny, mut maxx, mut maxy) = (cw, ch, 0usize, 0usize);
+            let mut any = false;
+            for y in 0..ch {
+                let row = (y0 + y) * src.w * 3;
+                for x in 0..cw {
+                    let p = row + (x0 + x) * 3;
+                    if !is_bg(&src.pixels[p..p + 3]) {
+                        any = true;
+                        minx = minx.min(x);
+                        miny = miny.min(y);
+                        maxx = maxx.max(x);
+                        maxy = maxy.max(y);
+                    }
+                }
+            }
+            if !any {
+                continue;
+            }
+            // Square crop around the subject, clamped inside the cell.
+            let bw = (maxx - minx + 1) as f32;
+            let bh = (maxy - miny + 1) as f32;
+            let side = (bw.max(bh) * (1.0 + margin_frac)).min(cw.min(ch) as f32);
+            let cx = (minx + maxx) as f32 * 0.5;
+            let cy = (miny + maxy) as f32 * 0.5;
+            let half = side * 0.5;
+            let sx0 = (cx - half).clamp(0.0, cw as f32 - side);
+            let sy0 = (cy - half).clamp(0.0, ch as f32 - side);
+            // Bilinear upsample of the crop to fill the cell.
+            for y in 0..ch {
+                let fy = sy0 + (y as f32 + 0.5) / ch as f32 * side - 0.5;
+                let iy = fy.floor().max(0.0) as usize;
+                let ty = (fy - iy as f32).clamp(0.0, 1.0);
+                let iy1 = (iy + 1).min(ch - 1);
+                for x in 0..cw {
+                    let fx = sx0 + (x as f32 + 0.5) / cw as f32 * side - 0.5;
+                    let ix = fx.floor().max(0.0) as usize;
+                    let tx = (fx - ix as f32).clamp(0.0, 1.0);
+                    let ix1 = (ix + 1).min(cw - 1);
+                    let at = |px: usize, py: usize, c: usize| {
+                        src.pixels[((y0 + py) * src.w + x0 + px) * 3 + c] as f32
+                    };
+                    let d = ((y0 + y) * src.w + x0 + x) * 3;
+                    for c in 0..3 {
+                        let top = at(ix, iy, c) * (1.0 - tx) + at(ix1, iy, c) * tx;
+                        let bot = at(ix, iy1, c) * (1.0 - tx) + at(ix1, iy1, c) * tx;
+                        out.pixels[d + c] =
+                            (top * (1.0 - ty) + bot * ty).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Serialise as binary P6 PPM, the interchange format the batch executor
 /// reads. Deliberately the dumbest possible container: no compression, no
 /// dependency, and trivially reimplemented by any other executor.

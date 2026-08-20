@@ -16,7 +16,7 @@
 
 use makepad_asset_annotate::plan::{Annotator, BaseAnnotation};
 use makepad_asset_annotate::{
-    needs_annotation, parse_record, plan_upload, sheet, ANNOTATOR_VERSION, PROMPT,
+    needs_annotation, parse_record, plan_upload, sheet, ANNOTATOR_VERSION, PROMPT, PROMPT_PERSON,
 };
 use makepad_asset_client::api::{AnnotationUpload, Api, ApiEndpoints};
 use makepad_asset_client::http::HttpLimits;
@@ -34,6 +34,8 @@ struct Config {
     store: PathBuf,
     work: PathBuf,
     kit: Option<String>,
+    kind: Option<String>,
+    person: bool,
     aliases: Vec<String>,
     limit: usize,
     sheet_size: usize,
@@ -54,6 +56,8 @@ fn usage() -> ! {
   --store DIR         asset-server state dir (default {DEFAULT_STORE})
   --work DIR          scratch dir for sheets and batch files
   --kit NAME          annotate assets carrying this category label
+  --kind K            annotate assets of this catalog kind (e.g. character)
+  --person            person-description prompt variant (for characters)
   --alias A           annotate exactly this canon alias (repeatable)
   --limit N           stop after N assets (default 10)
   --sheet-size N      downscale sheets to NxN before the model (default 512)
@@ -75,6 +79,8 @@ fn parse_config() -> Config {
         store: PathBuf::from(DEFAULT_STORE),
         work: PathBuf::from("local/annotate"),
         kit: None,
+        kind: None,
+        person: false,
         aliases: Vec::new(),
         limit: 10,
         sheet_size: 512,
@@ -101,6 +107,8 @@ fn parse_config() -> Config {
             "--store" => c.store = PathBuf::from(next(&mut i)),
             "--work" => c.work = PathBuf::from(next(&mut i)),
             "--kit" => c.kit = Some(next(&mut i)),
+            "--kind" => c.kind = Some(next(&mut i)),
+            "--person" => c.person = true,
             "--alias" => c.aliases.push(next(&mut i)),
             "--limit" => c.limit = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "--sheet-size" => c.sheet_size = next(&mut i).parse().unwrap_or_else(|_| usage()),
@@ -182,8 +190,10 @@ fn load_candidates(db: &mut Database, cfg: &Config) -> Result<Vec<Candidate>, St
              AND l.kind = 'category' AND l.label = '{}')",
             kit.replace('\'', "''")
         )
+    } else if let Some(kind) = &cfg.kind {
+        format!("a.kind = '{}'", kind.replace('\'', "''"))
     } else {
-        return Err("need --kit or --alias".to_string());
+        return Err("need --kit, --kind or --alias".to_string());
     };
     let sql = format!(
         "SELECT hex(a.asset_id), a.canon_alias, a.title, a.description, a.kind, \
@@ -434,6 +444,13 @@ fn run_executor(
     for c in todo {
         let png = http_get(data, &format!("/v1/thumbnails/alias/{}", c.alias), token)?;
         let mut img = sheet::decode_png(&png)?;
+        // People are small in their cells; zoom each view onto the subject
+        // so the tower's patch budget lands on the person, not the empty
+        // background. Kit pieces keep their true in-cell size (it feeds the
+        // size line).
+        if cfg.person {
+            img = sheet::zoom_to_subject(&img, 4, 0.15);
+        }
         // Lift before downscaling: the box filter then averages corrected
         // values rather than correcting an already-averaged shadow.
         sheet::lift_exposure(&mut img, cfg.exposure);
@@ -448,6 +465,25 @@ fn run_executor(
         // how it connects — which is the whole point of the pass.
         let (kit, name) = c.alias.rsplit_once('/').unwrap_or(("", c.alias.as_str()));
         let kit = kit.rsplit('/').next().unwrap_or("");
+        if cfg.person {
+            // Person framing: the SET name is context, but the questions are
+            // about the person. No construction-kit talk — a character does
+            // not snap onto a grid, and the grid frame biases the answers
+            // toward objects.
+            let set_frame = if kit.is_empty() {
+                String::new()
+            } else {
+                format!(" It comes from the Kenney \"{kit}\" set.")
+            };
+            jobs.push_str(&format!(
+                "{}\t{}\tThe set calls this character \"{}\".{} Describe the PERSON you see; trust the images over the name where they disagree.\n",
+                c.asset_hex,
+                path.display(),
+                name,
+                set_frame,
+            ));
+            continue;
+        }
         // Kit-level context beside the piece name: without the frame a wall
         // panel reads as "a book"; with it the model knows pieces snap on a
         // grid and names them in kit terms. The images still decide
@@ -472,7 +508,8 @@ fn run_executor(
     let prompt_path = cfg.work.join("prompt.txt");
     let out_path = cfg.work.join("replies.tsv");
     std::fs::write(&jobs_path, &jobs).map_err(|e| format!("write jobs: {e}"))?;
-    std::fs::write(&prompt_path, PROMPT).map_err(|e| format!("write prompt: {e}"))?;
+    let prompt = if cfg.person { PROMPT_PERSON } else { PROMPT };
+    std::fs::write(&prompt_path, prompt).map_err(|e| format!("write prompt: {e}"))?;
     let _ = std::fs::remove_file(&out_path);
 
     println!("running executor over {} sheets...", todo.len());

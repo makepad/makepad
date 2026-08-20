@@ -44,7 +44,13 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 /// 4096→5120), and the per-job context now frames the KIT (Kenney set,
 /// low-poly construction kit, grid-snapping pieces) alongside the piece
 /// name.
-pub const ANNOTATOR_VERSION: u32 = 3;
+///
+/// v4: the person-description variant (PROMPT_PERSON, generic observation
+/// categories — never per-set feature lists) and the subject zoom
+/// (`sheet::zoom_to_subject`): each turntable cell is cropped onto its
+/// subject before downscaling, which is what turned "a wooden staff" back
+/// into a police officer's bare hand. desc budget 10 → 20 words.
+pub const ANNOTATOR_VERSION: u32 = 4;
 
 /// The question put to the vision model about one turntable sheet.
 ///
@@ -53,3 +59,10 @@ pub const ANNOTATOR_VERSION: u32 = 3;
 /// way it faces) rather than a caption, and it fixes a strict key/value reply
 /// shape because a 9B model follows that far more reliably than JSON.
 pub const PROMPT: &str = include_str!("prompt.txt");
+
+/// The person-description variant, for `kind='character'` assets: the same
+/// strict reply shape (so the parser and the plan are shared), but the
+/// questions are about the PERSON — age impression, hair/baldness, facial
+/// hair, clothing colours, accessories — so "the old man with the beard"
+/// becomes a description LIKE match (play-session-1, character lane).
+pub const PROMPT_PERSON: &str = include_str!("prompt_person.txt");
