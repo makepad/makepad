@@ -24,6 +24,9 @@ pub mod world_place;
 pub mod world_nav;
 pub mod glb;
 pub mod glb_nodes;
+// Six-face `env/` cube skies (Quake II / Quake III) -> the one equirect image
+// the renderer's `cube` sky projection samples.
+pub mod skybox;
 // Idempotent ai-content-library publication (one-shot + continuous). Public
 // because the Asset UI runs the same watcher in-process against its own
 // embedded Asset Server.
