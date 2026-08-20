@@ -78,6 +78,7 @@ use crate::mesh_view::MeshView;
 use crate::thumbnail_renderer::ThumbnailRenderer;
 use crate::asset_store_state::{
     server_kind_label, session_config_from_env, AssetStoreState, LibraryFilters,
+    MAX_CATALOG_ROWS,
     Remote, SERVER_KINDS,
 };
 use makepad_asset_client::GcStatusDto;
@@ -91,9 +92,11 @@ use crate::pipeline::{
 };
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 use crate::store_views::{
-    admin_rows, candidate_cards, catalog_rows, format_bytes, runs_rows, short_digest, truncate,
+    admin_rows, candidate_cards, catalog_rows, catalog_tiles, format_bytes, runs_rows,
+    short_digest, truncate,
     should_start_file_drag, upstream_preview_allowed, CandidateSheet, GalleryEntry, InputAsset,
-    InputTray, LibraryGallery, PreviewWork, RowAction, RunTray, RunTrayMember,
+    CatalogGrid, CatalogTile, InputTray, LibraryGallery, PreviewWork, RowAction, RunTray,
+    RunTrayMember,
     StoreListPanel, StoreRow,
     TileDelete,
 };
@@ -725,6 +728,55 @@ script_mod! {
                 width: Fill height: 140
                 align: Align{x: 0.5 y: 0.5}
                 HintLabel{ text: "Waiting for admitted image GPUs…" }
+            }
+        }
+    }
+
+    // Library tile: one catalog asset, its thumbnail streamed from the
+    // store by digest. No file drag handle — a catalog asset is not a file
+    // on this machine until something asks for it.
+    let CatalogCell = GalleryCard{
+        width: 150 height: 126
+        flow: Down spacing: 4
+        padding: 5
+        View{
+            width: 140 height: 88
+            align: Align{x: 0.5 y: 0.5}
+            grid_thumb := ThumbFitImage{}
+        }
+        grid_title := Label{
+            width: Fill
+            draw_text +: {
+                color: #xc6cfd8
+                text_style: theme.font_regular{font_size: 8}
+            }
+        }
+    }
+
+    // Wrapping, virtualized catalog grid: PortalList rows of up to eight
+    // card slots; the Rust side shows `columns(width)` of them per row and
+    // sizes the range from the SERVER's match count.
+    mod.widgets.CatalogGridBase = #(CatalogGrid::register_widget(vm))
+    mod.widgets.CatalogGrid = set_type_default() do mod.widgets.CatalogGridBase{
+        width: Fill
+        height: Fill
+        list := PortalList{
+            width: Fill height: Fill
+            flow: Down
+            spacing: 8
+            scroll_bar: ScrollBar{}
+            Row := View{
+                width: Fill height: Fit
+                flow: Right spacing: 8
+                c1 := CatalogCell{} c2 := CatalogCell{} c3 := CatalogCell{} c4 := CatalogCell{}
+                c5 := CatalogCell{} c6 := CatalogCell{} c7 := CatalogCell{} c8 := CatalogCell{}
+            }
+            Empty := View{
+                width: Fill height: 140
+                flow: Down spacing: 4
+                align: Align{x: 0.5 y: 0.5}
+                HintLabel{ text: "Nothing in the catalog matches." }
+                HintLabel{ text: "Clear the filters, or import a pack from LOAD." }
             }
         }
     }
@@ -2143,6 +2195,8 @@ script_mod! {
                                     FieldCaption{ text: "Label" }
                                     lib_label_drop := FieldDrop{ width: 220 }
                                     lib_clear_btn := GhostButton{ text: "Clear" }
+                                    lib_grid_btn := ChipButton{ text: "● Tiles" }
+                                    lib_list_btn := ChipButton{ text: "List" }
                                     lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
                                 View{
@@ -2159,7 +2213,19 @@ script_mod! {
                                             gc_cancel_btn := GhostButton{ text: "Cancel GC" visible: false }
                                             gc_collect_btn := DangerButton{ text: "Collect garbage" }
                                         }
-                                        lib_server_list := mod.widgets.StoreListPanel{}
+                                        lib_views := PageFlip{
+                                            width: Fill
+                                            height: Fill
+                                            active_page: @lib_grid_page
+                                            lib_grid_page := View{
+                                                width: Fill height: Fill
+                                                lib_grid := mod.widgets.CatalogGrid{}
+                                            }
+                                            lib_list_page := View{
+                                                width: Fill height: Fill
+                                                lib_server_list := mod.widgets.StoreListPanel{}
+                                            }
+                                        }
                                     }
                                     // Selected-item rail: prompt + provenance +
                                     // revision/publish detail and the actions.
@@ -3211,6 +3277,17 @@ pub struct App {
     /// Catalog assets pulled into the Create surface (see [`CatalogWork`]).
     #[rust]
     catalog_work: CatalogWork,
+    /// Library body: tiles (default) or the row list.
+    #[rust]
+    lib_tiles: LibViewMode,
+    /// Materialised thumbnail objects for catalog tiles, keyed by asset id.
+    /// The path is a digest-named cache object, so a tile can never show a
+    /// picture that belongs to another revision.
+    #[rust]
+    catalog_thumb_paths: HashMap<String, PathBuf>,
+    /// Assets whose thumbnail is being materialised right now.
+    #[rust]
+    catalog_thumb_pending: HashSet<String>,
     #[rust]
     lib_kind_options: Vec<String>,
     /// Facets behind the label dropdown, same row offset: the catalog's own
@@ -7813,10 +7890,28 @@ impl App {
                             self.refresh_gallery(cx, false);
                         }
                         Ok(path) => {
-                            self.catalog_work.set_thumbnail(&file, path);
-                            self.refresh_gallery(cx, false);
+                            if let Some(asset) = file.strip_prefix("store:") {
+                                self.catalog_thumb_pending.remove(asset);
+                                self.catalog_thumb_paths
+                                    .insert(asset.to_string(), path.clone());
+                            }
+                            // A Library tile's picture only needs a redraw:
+                            // rebuilding the whole rail for each of a
+                            // thousand thumbnails would be quadratic. A card
+                            // the Create surface adopted does need the rail
+                            // rebuilt, because its entry carries the path.
+                            if self.catalog_work.get(&file).is_some() {
+                                self.catalog_work.set_thumbnail(&file, path);
+                                self.refresh_gallery(cx, false);
+                            } else {
+                                self.ui.redraw(cx);
+                            }
                         }
+
                         Err(error) => {
+                            if let Some(asset) = file.strip_prefix("store:") {
+                                self.catalog_thumb_pending.remove(asset);
+                            }
                             log!("catalog: {file} could not be materialised: {error}");
                         }
                     }
@@ -8002,6 +8097,16 @@ impl App {
                         }
                     }
                     self.install_input_thumb(cx, &file, texture.clone());
+                    // The same decoded picture is what the Library tile
+                    // wanted: one decode serves the rail card and the grid
+                    // card of the same asset.
+                    if let Some(asset) = file.strip_prefix("store:").map(str::to_string) {
+                        if let Some(mut grid) =
+                            self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>()
+                        {
+                            grid.install_thumb(cx, asset, texture.clone());
+                        }
+                    }
                     if let Some(mut tray) = self
                         .ui
                         .widget(cx, ids!(run_tray_list))
@@ -8028,6 +8133,53 @@ impl App {
     /// Route draw-recorded preview misses to the LIFO decode pool. Newly
     /// visible cards are requested last so they inflate first; several
     /// cores run at once.
+    /// Pictures for the Library tiles. A tile's thumbnail is a store object
+    /// named by its digest: materialise it into the verified cache once,
+    /// then decode it on the worker like any other encoded preview. Nothing
+    /// on this machine is consulted — the picture belongs to the revision
+    /// the catalog is showing.
+    fn pump_catalog_thumbs(&mut self, cx: &mut Cx) {
+        let wanted = match self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>() {
+            Some(mut grid) => grid.take_wanted(),
+            None => return,
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        for asset_id in wanted {
+            let file = format!("store:{asset_id}");
+            if let Some(path) = self.catalog_thumb_paths.get(&asset_id) {
+                // Already on disk: straight to the decode queue the gallery
+                // and tray share.
+                self.extra_preview_work.retain(|(f, _)| f != &file);
+                self.extra_preview_work
+                    .push((file, PreviewWork::Encoded(path.clone())));
+                continue;
+            }
+            if !self.catalog_thumb_pending.insert(asset_id.clone()) {
+                continue;
+            }
+            let Ok(asset) = asset_id.parse::<makepad_asset_data::AssetId>() else {
+                continue;
+            };
+            if let Some(io) = &self.artifact_io {
+                io.request(IoRequest {
+                    file,
+                    path: PathBuf::new(),
+                    purpose: IoPurpose::CatalogThumb,
+                    store: Some(crate::artifact_io::StoreSource {
+                        asset,
+                        prefer: crate::store_content::default_viewable_roles(),
+                        session: session.clone(),
+                    }),
+                });
+            }
+        }
+    }
+
     fn pump_gallery_previews(&mut self, cx: &mut Cx) {
         let mut wanted = Vec::new();
         if let Some(mut gallery) = self
@@ -8869,12 +9021,7 @@ impl App {
 
         // A changed filter is a changed result set: send the viewport home
         // before the new rows are laid out.
-        let signature = format!(
-            "{}|{:?}|{:?}",
-            self.lib_filters.query.trim().to_ascii_lowercase(),
-            self.lib_filters.kind,
-            self.lib_filters.label,
-        );
+        let signature = library_view_signature(&self.lib_filters);
         if self.lib_view_signature != signature {
             self.lib_view_signature = signature;
             if let Some(mut list) = self
@@ -8884,15 +9031,25 @@ impl App {
             {
                 list.scroll_to_top(cx);
             }
+            if let Some(mut grid) = self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>()
+            {
+                grid.scroll_to_top(cx);
+            }
         }
 
+        let (loaded, walking) = self.store.catalog_loaded();
         let count_text = match &self.store.search {
-            Remote::Ready(results) => format!(
-                "{} shown · {} on server{}",
-                results.hits.len(),
-                results.total,
-                if results.more { " · more available" } else { "" }
-            ),
+            Remote::Ready(results) => {
+                let total = results.total as usize;
+                let held = total.min(MAX_CATALOG_ROWS);
+                if walking && loaded < held {
+                    format!("{loaded} of {total} loaded…")
+                } else if held < total {
+                    format!("{held} shown · {total} on server · first {held} held")
+                } else {
+                    format!("{loaded} of {total} on server")
+                }
+            }
             Remote::Loading => "searching server…".to_string(),
             Remote::Failed(error) => format!("server search failed · {error}"),
             Remote::Idle if self.store.connected() => "server catalog not loaded".to_string(),
@@ -8922,6 +9079,32 @@ impl App {
         {
             list.set_rows(cx, catalog_rows(&self.store));
         }
+        // Tiles: one card per catalog asset, sized to the SERVER's match
+        // count so the scrollbar covers the whole result set while the walk
+        // fills it in.
+        let tiles = catalog_tiles(&self.store);
+        let total = self
+            .store
+            .search
+            .ready()
+            .map(|results| (results.total as usize).min(MAX_CATALOG_ROWS))
+            .unwrap_or(0);
+        if let Some(mut grid) = self.ui.widget(cx, ids!(lib_grid)).borrow_mut::<CatalogGrid>() {
+            grid.set_tiles(cx, tiles, total);
+        }
+        let (grid_on, list_on) = match self.lib_tiles {
+            LibViewMode::Tiles => ("● Tiles", "List"),
+            LibViewMode::List => ("Tiles", "● List"),
+        };
+        self.ui.button(cx, ids!(lib_grid_btn)).set_text(cx, grid_on);
+        self.ui.button(cx, ids!(lib_list_btn)).set_text(cx, list_on);
+        self.ui.page_flip(cx, ids!(lib_views)).set_active_page(
+            cx,
+            match self.lib_tiles {
+                LibViewMode::Tiles => id!(lib_grid_page).into(),
+                LibViewMode::List => id!(lib_list_page).into(),
+            },
+        );
         self.ui
             .label(cx, ids!(remote_connection))
             .set_text(cx, &self.store.status_label());
@@ -10872,6 +11055,53 @@ impl MatchEvent for App {
                 .set_selected_item(cx, 0);
             self.refresh_library_ui(cx);
         }
+        if self.ui.button(cx, ids!(lib_grid_btn)).clicked(actions)
+            && self.lib_tiles != LibViewMode::Tiles
+        {
+            self.lib_tiles = LibViewMode::Tiles;
+            self.refresh_library_ui(cx);
+        }
+        if self.ui.button(cx, ids!(lib_list_btn)).clicked(actions)
+            && self.lib_tiles != LibViewMode::List
+        {
+            self.lib_tiles = LibViewMode::List;
+            self.refresh_library_ui(cx);
+        }
+        // Tile clicks: same act as a row click — select, open from the
+        // store, adopt into the Create surface.
+        let grid_widget = self.ui.widget(cx, ids!(lib_grid));
+        let grid_cols = grid_widget
+            .borrow::<CatalogGrid>()
+            .map_or(1, |grid| grid.last_cols.max(1));
+        let grid_list = grid_widget.portal_list(cx, ids!(list));
+        let mut picked_tile = None;
+        let slots = [
+            ids!(c1), ids!(c2), ids!(c3), ids!(c4),
+            ids!(c5), ids!(c6), ids!(c7), ids!(c8),
+        ];
+        'grid_rows: for (row_id, item) in grid_list.items_with_actions(actions) {
+            for (slot, path) in slots.iter().enumerate() {
+                if item.view(cx, *path).finger_down(actions).is_some() {
+                    let index = row_id * grid_cols + slot;
+                    picked_tile = grid_widget
+                        .borrow::<CatalogGrid>()
+                        .and_then(|grid| grid.tile_at(index))
+                        .map(|tile| tile.asset);
+                    break 'grid_rows;
+                }
+            }
+        }
+        if let Some(asset) = picked_tile {
+            match asset.parse::<makepad_asset_data::AssetId>() {
+                Ok(asset_id) => {
+                    self.store.select(asset_id);
+                    self.open_store_asset(cx, asset_id);
+                    self.adopt_catalog_asset(cx, asset_id, true);
+                    self.refresh_library_ui(cx);
+                }
+                Err(error) => log!("asset store: invalid tile id {asset}: {error}"),
+            }
+        }
         if self.ui.button(cx, ids!(lib_retire_shown_btn)).clicked(actions) {
             self.open_retire_shown_modal(cx);
         }
@@ -12067,8 +12297,11 @@ impl AppMain for App {
         }
 
         self.ui.handle_event(cx, event, &mut Scope::empty());
-        // Draw passes above recorded any gallery-preview cache misses;
-        // route them through the IO worker (bounded, deduplicated).
+        // Draw passes above recorded any preview cache misses; route them
+        // through the IO worker (bounded, deduplicated). The Library tiles
+        // record theirs the same way, and their pictures come from the
+        // store by digest.
+        self.pump_catalog_thumbs(cx);
         self.pump_gallery_previews(cx);
     }
 }
@@ -12094,6 +12327,16 @@ fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> 
         "mp4" | "mov" => ("video", "video/mp4", false),
         _ => return None,
     })
+}
+
+/// Which body the Library shows. Tiles are the default — a catalog is
+/// pictures first — and the list is there for the rows the grid cannot
+/// spell out (aliases, revisions, lifecycle).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum LibViewMode {
+    #[default]
+    Tiles,
+    List,
 }
 
 /// Catalog assets the Create surface is working with.
@@ -12198,6 +12441,19 @@ fn rail_shows(item: &crate::library::LibraryMeta) -> bool {
     )
 }
 
+/// What makes the Library's result set a DIFFERENT one. When this changes,
+/// both bodies scroll back to the top: a filter that narrows the results
+/// under a scrolled viewport otherwise leaves the user looking past the end
+/// of them, which reads as "found nothing".
+fn library_view_signature(filters: &LibraryFilters) -> String {
+    format!(
+        "{}|{:?}|{:?}",
+        filters.query.trim().to_ascii_lowercase(),
+        filters.kind,
+        filters.label,
+    )
+}
+
 /// The Library's label dropdown: row 0 is "all labels", row `n + 1` is
 /// facet `n`. Reading and writing that offset lives here so the render and
 /// the click can never disagree about it.
@@ -12238,6 +12494,57 @@ fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
         facet.label,
         facet.count
     )
+}
+
+#[cfg(test)]
+mod library_view_tests {
+    use super::*;
+    use makepad_asset_client::FacetKind;
+
+    /// A changed filter is a changed RESULT SET, and both Library bodies go
+    /// back to the top when it changes — a narrowed filter must not leave
+    /// the user staring past the end of the new results, which reads as
+    /// "found nothing". The signature is what decides that, so every field
+    /// a user can change has to be in it.
+    #[test]
+    fn every_filter_a_user_can_change_moves_the_view_signature() {
+        let base = LibraryFilters::default();
+        let sig = library_view_signature(&base);
+        assert_eq!(sig, library_view_signature(&base), "same filter, same view");
+
+        let mut typed = base.clone();
+        typed.query = "rocket".into();
+        assert_ne!(library_view_signature(&typed), sig, "search text");
+
+        let mut cased = typed.clone();
+        cased.query = "ROCKET".into();
+        assert_eq!(
+            library_view_signature(&cased),
+            library_view_signature(&typed),
+            "case and padding are not a different result set"
+        );
+        let mut padded = typed.clone();
+        padded.query = "  rocket ".into();
+        assert_eq!(library_view_signature(&padded), library_view_signature(&typed));
+
+        let mut kinded = base.clone();
+        kinded.kind = Some("prop".into());
+        assert_ne!(library_view_signature(&kinded), sig, "kind facet");
+
+        let mut labelled = base.clone();
+        labelled.label = Some((FacetKind::Category, "doom".into()));
+        assert_ne!(library_view_signature(&labelled), sig, "label facet");
+
+        // The two vocabularies are separate filters: the same word in each
+        // is a different result set.
+        let mut tagged = base.clone();
+        tagged.label = Some((FacetKind::Tag, "doom".into()));
+        assert_ne!(
+            library_view_signature(&tagged),
+            library_view_signature(&labelled),
+            "a category is not a tag"
+        );
+    }
 }
 
 #[cfg(test)]
