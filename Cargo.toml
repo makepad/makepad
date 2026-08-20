@@ -9,6 +9,7 @@ workspace.members = [
     "libs/asset/widgets",
     "libs/asset/store",
     "libs/asset/chat",
+    "libs/asset/annotate",
     "libs/render",
     "libs/sim",
     "libs/sim/math",
