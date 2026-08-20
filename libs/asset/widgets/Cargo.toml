@@ -28,3 +28,21 @@ edition = "2021"
 
 [dependencies]
 makepad-widgets = { path = "../../../widgets" }
+# Two ZERO-DEPENDENCY leaf crates, which is the whole reason they are
+# allowed here: the sandbox can take either without dragging a workspace
+# along. They let a well DRAW a track — decode the bytes the host handed
+# over and render the same spectrogram and wave strip the importer bakes —
+# instead of only ever showing a picture somebody else made.
+makepad-audio-decode = { path = "../../audio_decode" }
+makepad-audio-picture = { path = "../../audio_picture" }
+
+[features]
+# Renderer-backed faces: the mesh turntable and the autonomous world
+# walkthrough. OFF by default, because makepad-render is a real dependency
+# and `apps/sandbox` (a nested cargo workspace) must be able to adopt the
+# 2D faces without it. A host that wants a mesh or a world well turns it on.
+renderer = ["dep:makepad-render"]
+
+[dependencies.makepad-render]
+path = "../../render"
+optional = true

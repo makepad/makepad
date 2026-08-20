@@ -25,7 +25,8 @@ makepad-xr = { path = "../../xr" }
 makepad-asset-client = { path = "../../libs/asset/client" }
 # Shared preview/viewer widgets: the pool every host draws catalog content
 # with (VJ and the DJ surface adopt the same set).
-makepad-asset-widgets = { path = "../../libs/asset/widgets" }
+# The renderer feature brings the 3D faces (mesh turntable, world walker).
+makepad-asset-widgets = { path = "../../libs/asset/widgets", features = ["renderer"] }
 makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-asset-chat = { path = "../../libs/asset/chat" }
 # Embedded catalog/chat broker for now: the app starts the real Asset
