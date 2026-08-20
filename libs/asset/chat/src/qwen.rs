@@ -371,22 +371,30 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         // Connect-refused/timeout means the TCP session never opened, so no
         // job exists server-side — the ONE retriable POST failure class on
         // this flaky LAN (anything after connect could have created the job
-        // and must not be replayed).
+        // and must not be replayed). The box's dead windows are BURSTY
+        // (several seconds of no-connect between fast answers), so the
+        // backoff rides out ~18 s before giving up on the turn.
         let url = format!("{base}/generate");
-        let resp = match self.transport.post_json(&url, &body) {
-            Ok(v) => v,
-            Err(e) if e.contains("connect ") => {
-                std::thread::sleep(Duration::from_millis(500));
+        let resp = {
+            let mut last: Option<String> = None;
+            let mut ok = None;
+            for wait_ms in [0u64, 500, 1500, 3000, 5000, 8000] {
+                if wait_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(wait_ms));
+                }
                 match self.transport.post_json(&url, &body) {
-                    Ok(v) => v,
-                    Err(e2) if e2.contains("connect ") => {
-                        std::thread::sleep(Duration::from_millis(1500));
-                        self.transport.post_json(&url, &body)?
+                    Ok(v) => {
+                        ok = Some(v);
+                        break;
                     }
-                    Err(e2) => return Err(e2),
+                    Err(e) if e.contains("connect ") => last = Some(e),
+                    Err(e) => return Err(e),
                 }
             }
-            Err(e) => return Err(e),
+            match ok {
+                Some(v) => v,
+                None => return Err(last.unwrap_or_else(|| "generate: no attempt ran".into())),
+            }
         };
         let job = resp
             .get("job_id")
