@@ -138,6 +138,11 @@ pub fn file_role_name(role: FileRole) -> &'static str {
         FileRole::Depth => "depth",
         FileRole::Splat => "splat",
         FileRole::AoTexture => "ao_texture",
+        FileRole::StemDrums => "stem_drums",
+        FileRole::StemBass => "stem_bass",
+        FileRole::StemVocals => "stem_vocals",
+        FileRole::StemOther => "stem_other",
+        FileRole::Lyrics => "lyrics",
     }
 }
 
@@ -165,6 +170,11 @@ const ALL_ROLES: &[FileRole] = &[
     FileRole::Depth,
     FileRole::Splat,
     FileRole::AoTexture,
+    FileRole::StemDrums,
+    FileRole::StemBass,
+    FileRole::StemVocals,
+    FileRole::StemOther,
+    FileRole::Lyrics,
 ];
 
 pub fn media_type_name(media: MediaType) -> &'static str {
@@ -179,6 +189,7 @@ pub fn media_type_name(media: MediaType) -> &'static str {
         MediaType::Text => "text",
         MediaType::Ply => "ply",
         MediaType::Mp3 => "mp3",
+        MediaType::Json => "json",
     }
 }
 
@@ -194,6 +205,7 @@ pub fn media_type_parse(s: &str) -> Option<MediaType> {
         MediaType::Text,
         MediaType::Ply,
         MediaType::Mp3,
+        MediaType::Json,
     ]
     .into_iter()
     .find(|m| media_type_name(*m) == s)
