@@ -81,114 +81,21 @@ pub fn display_offset_secs() -> f64 {
 }
 
 
-/// How long a word takes to fill green once its moment arrives. Long enough
-/// to read as a hop rather than a pop, short enough that the fill is never
-/// what the eye is tracking — the WORD is.
-pub const WORD_HOP_SECS: f64 = 0.08;
+/// The karaoke fill contract lives in the shared widget family now (the
+/// asset UI preview and the VJ surfaces paint the same fill); the VJ keeps
+/// its `LyricLine`-shaped entry point.
+pub use makepad_asset_widgets::lyric_reader::WORD_HOP_SECS;
 
 /// How far across a line's characters the green has reached at `secs`.
-///
-/// With word times this is a staircase: the word whose moment has come fills
-/// over `WORD_HOP_SECS` and then holds until the next one, so the fill hops
-/// the way a karaoke bouncing ball does and STOPS through the breath or the
-/// instrumental beat in the middle of a line. Without them it degrades to the
-/// old linear sweep, which is what an older cache entry gets.
 pub fn sung_fraction(line: &LyricLine, secs: f64) -> f32 {
-    if secs <= line.start_secs {
-        return 0.0;
-    }
-    if !line.hops() {
-        let span = (line.end_secs - line.start_secs).max(1e-3);
-        return (((secs - line.start_secs) / span).clamp(0.0, 1.0)) as f32;
-    }
-    let at = line.words.partition_point(|start| *start <= secs);
-    let Some(index) = at.checked_sub(1) else {
-        return 0.0;
-    };
-    // Character offsets measured on the REAL string, not on a reconstruction
-    // of it: the renderers colour `text[..n]` and split the line by character
-    // count, so the fraction has to be in exactly those units or the boundary
-    // drifts a character per word.
-    let (before, width, total) = word_span(&line.text, index);
-    if total == 0 {
-        return 0.0;
-    }
-    // A word normally fills in one quick hop and then holds until the next
-    // one is due. A SUSTAINED word cannot: a singer holding a note for two
-    // seconds would leave the line frozen and looking broken, when what the
-    // ear hears is a word still going. So a word held well past this line's
-    // own pace fills across its whole interval instead — slowly, still
-    // ending exactly where the hop would have, so nothing jumps.
-    let ends = line
-        .words
-        .get(index + 1)
-        .copied()
-        .unwrap_or(line.end_secs)
-        .max(line.words[index]);
-    let span = ends - line.words[index];
-    let fill = if span > sustain_threshold(line) {
-        span
-    } else {
-        WORD_HOP_SECS.min(span.max(1e-3))
-    };
-    let hop = ((secs - line.words[index]) / fill.max(1e-3)).clamp(0.0, 1.0);
-    (((before as f64 + hop * width as f64) / total as f64).clamp(0.0, 1.0)) as f32
-}
-
-/// How long a word has to last before it counts as held rather than sung at
-/// this line's pace. The reference is the line's own median interval, so a
-/// slow ballad is not treated as one long sustain and a fast verse is not
-/// judged against somebody else's tempo.
-fn sustain_threshold(line: &LyricLine) -> f64 {
-    if line.words.len() < 2 {
-        return f64::INFINITY;
-    }
-    let mut spans: Vec<f64> = Vec::with_capacity(line.words.len());
-    for index in 0..line.words.len() {
-        let ends = line
-            .words
-            .get(index + 1)
-            .copied()
-            .unwrap_or(line.end_secs)
-            .max(line.words[index]);
-        spans.push(ends - line.words[index]);
-    }
-    spans.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    // The lower quartile, not the median: the sustains themselves drag a
-    // median up until the line's own held notes no longer look held. What
-    // "this line's pace" means is how fast its QUICK words go.
-    let pace = spans[spans.len() / 4];
-    (pace * 1.2).max(WORD_HOP_SECS * 3.0)
-}
-
-/// `(chars before word `index`, chars the word covers, chars in the line)`.
-/// The covered width includes the space after the word, so a filled word
-/// leaves no unpainted gap before the next one.
-fn word_span(text: &str, index: usize) -> (usize, usize, usize) {
-    let mut at = 0usize;
-    let mut word = 0usize;
-    let mut start: Option<usize> = None;
-    let mut found: Option<(usize, usize)> = None;
-    for character in text.chars() {
-        if character.is_whitespace() {
-            if let Some(from) = start.take() {
-                if word == index {
-                    found = Some((from, at - from + 1));
-                }
-                word += 1;
-            }
-        } else if start.is_none() {
-            start = Some(at);
-        }
-        at += 1;
-    }
-    if let Some(from) = start {
-        if word == index {
-            found = Some((from, at - from));
-        }
-    }
-    let (before, width) = found.unwrap_or((at, 0));
-    (before, width, at)
+    makepad_asset_widgets::lyric_reader::sung_fraction(
+        line.start_secs,
+        line.end_secs,
+        &line.text,
+        &line.words,
+        line.confident,
+        secs,
+    )
 }
 
 

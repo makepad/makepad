@@ -47,6 +47,7 @@ use makepad_widgets::*;
 
 pub mod audio_view;
 pub mod clip;
+pub mod lyric_reader;
 pub mod preview;
 #[cfg(feature = "renderer")]
 pub mod scene_view;
@@ -56,6 +57,10 @@ pub mod walk_world;
 
 pub use audio_view::{AudioAction, AudioView, ClipUpdate};
 pub use clip::{ClipFace, ClipFormat};
+pub use lyric_reader::{
+    current_line, float_index, lyric_stamp, sung_fraction, LyricEvent, LyricReader, LyricRow,
+    LYRIC_FOLLOW_RESUME_SECS, WORD_HOP_SECS,
+};
 pub use preview::{ContentPreview, PreviewContent};
 pub use thumb::{
     cut_plan_bgra, plan_views, thumb_pixels_from_bgra, AssetThumb, ThumbMedia, ThumbPixels,
@@ -71,6 +76,7 @@ pub use walk_world::{build_level, WalkMoment, WalkPrep, WalkWorld};
 pub fn script_mod(vm: &mut ScriptVm) {
     crate::thumb::script_mod(vm);
     crate::audio_view::script_mod(vm);
+    crate::lyric_reader::script_mod(vm);
     #[cfg(feature = "renderer")]
     crate::scene_view::script_mod(vm);
     #[cfg(not(feature = "renderer"))]

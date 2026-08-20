@@ -10375,6 +10375,7 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
+        makepad_asset_widgets::script_mod(vm);
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::music_view::script_mod(vm);
