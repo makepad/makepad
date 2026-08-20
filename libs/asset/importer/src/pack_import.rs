@@ -2177,8 +2177,13 @@ fn skip_entry(name: &str) -> bool {
             | "thumbs.db"
             | ".ds_store"
     ) || matches!(
+        // `.place` is NOT here any more: it used to be a local-only
+        // artifact and this list dropped it during the WALK, before
+        // anything could classify it — which is why wiring `MediaKind::Place`
+        // everywhere else still published no placements. `.skinao` stays
+        // local.
         ext_of(&lower).as_deref(),
-        Some("txt" | "md" | "html" | "htm" | "url" | "pdf" | "place" | "skinao")
+        Some("txt" | "md" | "html" | "htm" | "url" | "pdf" | "skinao")
     ) || lower.ends_with(".glb.shadowsdf")
 }
 
@@ -2497,6 +2502,17 @@ fn build_manifest(
         }
         if let Some(sdf) = find(MediaKind::ShadowSdf) {
             attached.push(sdf);
+        }
+        // The placements sidecar rides the same lane, as a Source-role text
+        // blob on the world's own asset — this is the line that makes
+        // `.place` reach the catalog at all. Everything else about it was
+        // already wired (extension, `is_sidecar`, media type, the
+        // skip-as-its-own-asset arm, the role mapping, the parse on
+        // measure), so a `.place` was read, validated, and then silently
+        // dropped: 70 Doom worlds published with no placements and no
+        // complaint, and a game streaming a map got an empty level.
+        if let Some(place) = find(MediaKind::Place) {
+            attached.push(place);
         }
         // The spawn sidecar becomes anchors, never a file: it is metadata
         // the manifest already has room for.
@@ -7880,6 +7896,72 @@ mod tests {
                 .unwrap();
         let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, ["good-a", "good-b"], "the skipped model is not published");
+    }
+
+    /// A world's `.place` placements must REACH the catalog. Every other
+    /// part of that lane was wired — the extension, `is_sidecar`, the media
+    /// type, the skip-as-its-own-asset arm, the Source role, the parse on
+    /// measure — but nothing attached it to the world GLB, so a `.place`
+    /// was read, validated and dropped without a word. Seventy Doom worlds
+    /// published that way: no placements, no error, an empty level for
+    /// anything streaming the map.
+    #[test]
+    fn a_world_publishes_its_place_sidecar() {
+        let pack = test_root("placesidecar");
+        let out = test_bundle("placesidecar_out");
+        fs::create_dir_all(pack.join("worlds")).unwrap();
+        fs::write(pack.join("worlds/e1m1.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("worlds/e1m1.png"), valid_png(512, 512)).unwrap();
+        fs::write(
+            pack.join("worlds/e1m1.place"),
+            "world-place 1\nsource doom\nworld e1m1\n\
+             place t0 character billboards/doom1/poss 1.0000 0.0000 2.0000 0.00000\n",
+        )
+        .unwrap();
+
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false).expect("compile");
+        assert_eq!(report.assets, 1, "the world is one asset, not two");
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let asset = &manifest.assets[0];
+        assert_eq!(asset.key.as_str(), "worlds/e1m1");
+        let paths: Vec<&str> = asset.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with(".place")),
+            "the placements sidecar must ride on the world's own asset: {paths:?}"
+        );
+        // Source role, as the lane declares until a typed role can land.
+        let place = asset
+            .files
+            .iter()
+            .find(|f| f.path.as_str().ends_with(".place"))
+            .expect("place file");
+        assert_eq!(place.file.role, FileRole::Source);
+    }
+
+    /// An unreadable placements sidecar is left behind and the world still
+    /// publishes — the same convenience contract `.spawn` has.
+    #[test]
+    fn an_unreadable_place_sidecar_does_not_cost_the_world() {
+        let pack = test_root("badplace");
+        let out = test_bundle("badplace_out");
+        fs::create_dir_all(pack.join("worlds")).unwrap();
+        fs::write(pack.join("worlds/e1m1.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("worlds/e1m1.png"), valid_png(512, 512)).unwrap();
+        fs::write(pack.join("worlds/e1m1.place"), "not a place sidecar at all").unwrap();
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect("a bad sidecar must not refuse the world");
+        assert_eq!(report.assets, 1);
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let paths: Vec<&str> = manifest.assets[0]
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(!paths.iter().any(|p| p.ends_with(".place")), "{paths:?}");
     }
 
     /// brick-kit ships `square-lq-brick-slope-corner-outside-inverted-2x2`
