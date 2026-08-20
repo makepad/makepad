@@ -138,6 +138,12 @@ impl Cx {
             if SignalToUI::check_and_clear_action_signal() {
                 self.handle_action_receiver();
             }
+            // The `--remote` HTTP control surface and the studio control
+            // channel: every windowed backend services them from its event
+            // loop; the bounded headless loop must too, or a headless
+            // `--remote` session answers its metadata routes and then times
+            // out on anything that needs the app (snap, click, grab).
+            self.poll_control_channel();
             self.dispatch_network_runtime_events();
 
             let timer_events = self.os.stdin_timers.get_dispatch();

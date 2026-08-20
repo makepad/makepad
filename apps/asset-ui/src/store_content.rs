@@ -194,7 +194,20 @@ pub fn default_viewable_roles() -> Vec<FileRole> {
 pub fn connect(session: &crate::import::ServerSession, cache: &std::path::Path) -> Option<AssetClient> {
     let mut config = ClientConfig::new(cache.to_path_buf());
     config.token = Some(session.token.clone());
-    AssetClient::connect(config, session.endpoints, Some(session.server_id)).ok()
+    match AssetClient::connect(config, session.endpoints, Some(session.server_id)) {
+        Ok(client) => Some(client),
+        Err(error) => {
+            // The callers' one-line refusal ("cannot reach the asset
+            // server") is the right UI surface, but the log must carry the
+            // REASON — a held cache lock, a health mismatch and a dead
+            // endpoint all look identical without it.
+            makepad_widgets::log!(
+                "store connect to {} failed: {error}",
+                session.endpoints.control
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
