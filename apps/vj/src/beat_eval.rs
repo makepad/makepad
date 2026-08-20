@@ -1324,8 +1324,13 @@ pub fn piecewise_fit(
                 points.push((index as f64, time, strength as f64));
             }
         }
-        // Fit period only; the phase is pinned to the segment start so the
-        // map stays continuous.
+        // Fit period AND phase, then pull the phase back toward where the
+        // previous segment left off. Pinning the phase outright is what a
+        // naive chained fit does and it is why one does not work: a segment
+        // that starts a few milliseconds out can never say so, so the error
+        // rides forward into every segment after it. Letting the phase move
+        // and then constraining it keeps the map continuous without making
+        // it deaf.
         if points.len() >= 4 {
             let (mut sum_w, mut sum_b, mut sum_t, mut sum_bb, mut sum_bt) =
                 (0.0, 0.0, 0.0, 0.0, 0.0);
@@ -1338,10 +1343,16 @@ pub fn piecewise_fit(
             }
             let denominator = sum_w * sum_bb - sum_b * sum_b;
             if denominator.abs() > 1e-9 {
-                let fitted = (sum_w * sum_bt - sum_b * sum_t) / denominator;
+                let fitted_period = (sum_w * sum_bt - sum_b * sum_t) / denominator;
+                let fitted_start = (sum_t - fitted_period * sum_b) / sum_w;
                 // A segment refines a tempo; it does not get to change it.
-                if fitted.is_finite() && (fitted / period - 1.0).abs() < 0.10 {
-                    period = fitted;
+                if fitted_period.is_finite()
+                    && (fitted_period / period - 1.0).abs() < 0.10
+                    && fitted_start.is_finite()
+                    && (fitted_start - at).abs() < 0.25 * period
+                {
+                    period = fitted_period;
+                    at = fitted_start;
                 }
             }
         }
@@ -1863,6 +1874,120 @@ fn mean(values: &[f64]) -> f64 {
         return f64::NAN;
     }
     values.iter().sum::<f64>() / values.len() as f64
+}
+
+/// Read a separated stem out of the VJ's stem cache: `header` for the shape,
+/// `<stem>.pcm` for interleaved 16-bit stereo on the track's own timeline.
+pub fn read_stem(dir: &Path, stem: &str) -> Option<TrackPcm> {
+    let header = std::fs::read_to_string(dir.join("header")).ok()?;
+    let field = |name: &str| -> Option<u64> {
+        header.lines().find_map(|line| {
+            line.strip_prefix(&format!("{name}="))
+                .and_then(|value| value.trim().parse().ok())
+        })
+    };
+    let sample_rate = field("sample_rate")? as u32;
+    let frames = field("frames")? as usize;
+    let bytes = std::fs::read(dir.join(format!("{stem}.pcm"))).ok()?;
+    if bytes.len() < frames * 4 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(frames);
+    for frame in bytes[..frames * 4].chunks_exact(4) {
+        out.push([
+            i16::from_le_bytes([frame[0], frame[1]]),
+            i16::from_le_bytes([frame[2], frame[3]]),
+        ]);
+    }
+    Some(TrackPcm { frames: out, sample_rate })
+}
+
+/// Does re-gridding from the ISOLATED DRUMS beat gridding from the mix?
+///
+/// The app separates stems already, and caches them by digest, so once a
+/// track has been demixed its drums are sitting on disk for nothing. On this
+/// library it should not matter — a house record's kick is the loudest thing
+/// in it and nothing masks it — but on a record with a band playing over the
+/// drums it is exactly the masking that makes the mix hard to read.
+///
+/// Both grids are judged against a reference built from the DRUMS, which is
+/// as close to an unarguable beat annotation as recorded music gets.
+///
+/// ```text
+/// VJ_BEAT_STEMS=/path/to/stem-cache/<digest> \
+/// VJ_BEAT_TRACK=/path/to/the/same/track.mp3 \
+///     cargo test -p makepad-vj --release -- --nocapture --ignored beat_eval::drums
+/// ```
+#[test]
+#[ignore = "opt-in: needs a separated track in the stem cache"]
+fn drums_stem_regrid() {
+    let (Ok(stems), Ok(track)) =
+        (std::env::var("VJ_BEAT_STEMS"), std::env::var("VJ_BEAT_TRACK"))
+    else {
+        eprintln!("VJ_BEAT_STEMS / VJ_BEAT_TRACK not set");
+        return;
+    };
+    let stems = PathBuf::from(stems);
+    let track = PathBuf::from(track);
+    let Some(drums) = read_stem(&stems, "drums") else {
+        eprintln!("no drums stem in {}", stems.display());
+        return;
+    };
+    let mix = decode_audio_file(&track).expect("decode the mix");
+    let seconds = drums.seconds();
+    assert!(
+        (mix.seconds() - seconds).abs() < 1.0,
+        "the stem ({seconds:.1}s) and the track ({:.1}s) are not the same recording",
+        mix.seconds()
+    );
+
+    // The reference: the drums, read by the same machinery, where nothing is
+    // masking the kick.
+    let front = onset_front(&drums);
+    let reference = kick_reference(&drums, &front);
+    let truth = trim_to_spans(&reference.beats, &reference.spans);
+
+    let from_mix = analyze(&mix).grid;
+    let from_drums = analyze(&drums).grid;
+    let score_of = |grid: &TrackGrid| -> (f64, f64, f64) {
+        let beats = trim_to_spans(&grid_beats(grid, seconds), &reference.spans);
+        let scores = score(&beats, &truth);
+        (scores.f, scores.continuity.cmlt, grid.bpm)
+    };
+    let (mix_f, mix_cmlt, mix_bpm) = score_of(&from_mix);
+    let (drums_f, drums_cmlt, drums_bpm) = score_of(&from_drums);
+    // And the same least-squares fit allowed to bend every four bars, over
+    // the drums. A tempo map needs dense evidence in every segment, which is
+    // the thing an isolated drum track actually supplies.
+    let (fine, fine_hop) = fine_onset_envelope(&drums);
+    let detected = pick_peaks_strength(&front.flux, front.hop_secs, 1.2, 0.030);
+    let times: Vec<f64> = detected.iter().map(|(t, _)| *t).collect();
+    let mut onsets: Vec<(f64, f32)> = snap_to_fine(&times, &fine, fine_hop, 0.035)
+        .into_iter()
+        .zip(detected.iter().map(|(_, s)| *s))
+        .collect();
+    onsets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let piecewise = piecewise_fit(
+        &onsets,
+        seconds,
+        from_drums.beat_secs,
+        from_drums.first_beat_secs.rem_euclid(from_drums.beat_secs),
+        16,
+    );
+    let piecewise_scores =
+        score(&trim_to_spans(&piecewise.beats, &reference.spans), &truth);
+    eprintln!(
+        "{}\n  from the mix:      {mix_bpm:8.3} BPM  F {mix_f:.3}  CMLt {mix_cmlt:.3}\n  \
+         from the drums:    {drums_bpm:8.3} BPM  F {drums_f:.3}  CMLt {drums_cmlt:.3}\n  \
+         drums, segmented:  {} segments  F {:.3}  CMLt {:.3}\n  \
+         reference {} beats over {:.0}% of the track",
+        track.file_name().unwrap_or_default().to_string_lossy(),
+        piecewise.segments.len(),
+        piecewise_scores.f,
+        piecewise_scores.continuity.cmlt,
+        truth.len(),
+        reference.coverage * 100.0,
+    );
 }
 
 /// One track, everything the judge sees, for when a corpus number looks
@@ -2566,11 +2691,22 @@ mod judge_tests {
             "the fixture does not actually defeat a fixed grid (fixed {fixed_f:.3}, \
              free {free_f:.3}); it is not drifting enough to be evidence"
         );
+        // This says a bending grid CAN hold a drifting tempo. It does not
+        // say that fitting one segment at a time is how to get there, and
+        // the same prototype on real records says it is not: over ABBA's
+        // isolated drums — a drifting band, clean evidence, 98 % coverage —
+        // one straight line scores 0.858 and these same sixteen-beat
+        // segments score 0.266. Sixteen beats is too few to pin a tempo
+        // against real onsets, so each segment slides and the slide rides
+        // forward. A tempo map has to come from decoding a beat SEQUENCE
+        // under a tempo-continuity model and summarizing that, which is what
+        // the reference tracker above does and what it scores 0.998 here
+        // doing.
         assert!(
             piecewise_f > fixed_f + 0.1,
-            "segmenting the SAME fit does not recover a drifting tempo (fixed \
-             {fixed_f:.3}, piecewise {piecewise_f:.3}) — the recommendation to build a \
-             tempo map rests on this and would be wrong"
+            "a bending grid does not recover a drifting tempo even on clean \
+             evidence (fixed {fixed_f:.3}, piecewise {piecewise_f:.3}) — the tempo-map \
+             recommendation rests on this and would be wrong"
         );
     }
 
