@@ -225,6 +225,7 @@ impl LlamaModel {
         max_sequences: u32,
         attention_k_type: TensorType,
         attention_v_type: TensorType,
+        restricted_head: bool,
     ) -> Result<Option<HybridDecodeSpec>> {
         match self.architecture {
             LlamaArchitecture::Qwen35 => qwen35_mtp_decode_spec(
@@ -233,6 +234,7 @@ impl LlamaModel {
                 max_sequences,
                 attention_k_type,
                 attention_v_type,
+                restricted_head,
             ),
             _ => Ok(None),
         }

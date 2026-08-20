@@ -5,6 +5,7 @@ use crate::{ggml_row_size_for_type, TensorType};
 
 use crate::error::{LlamaError, Result};
 use crate::exec::{CompiledHybridDecode, ExecContextBuffers, ExecRuntime};
+use crate::draft_vocab::DraftVocab;
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
 use crate::runtime::{
@@ -138,6 +139,87 @@ impl SessionGraphParams {
     fn token_generation(max_context: usize) -> Self {
         Self::greedy(1, max_context)
     }
+}
+
+/// Build the row-compacted draft LM head: gather the draft vocabulary's rows
+/// out of the full `output.weight` into a new `[n_embd, draft_vocab]` tensor of
+/// the same quantised type.
+///
+/// Rows of a ggml matrix are contiguous byte runs, so this is a gather of
+/// fixed-size slices and the kept rows stay **bit-identical** to the full
+/// head's — a draft logit for a kept token is exactly the logit the full head
+/// would have produced. Must run before the context buffers are created: the
+/// resident prefix of the arena is what gets uploaded.
+fn build_restricted_draft_head(
+    weights: &mut LoadedGgufWeights,
+    model: &LlamaModel,
+    vocab: &DraftVocab,
+) -> Result<()> {
+    let tensors = model.qwen35_tensors()?;
+    let source_name = tensors
+        .mtp
+        .as_ref()
+        .and_then(|mtp| mtp.shared_head.as_ref())
+        .unwrap_or(&tensors.globals.output)
+        .name
+        .clone();
+    let source_id = weights.require_tensor_id(&source_name)?;
+    let source = weights
+        .ctx
+        .tensor(source_id)
+        .ok_or_else(|| LlamaError::format("draft head source tensor is invalid"))?;
+    let n_embd = source.ne[0];
+    let rows = source.ne[1];
+    let ty = source.desc.ty;
+    if u32::try_from(rows).unwrap_or(u32::MAX) != vocab.vocab_size {
+        return Err(LlamaError::format(format!(
+            "draft vocabulary was built for {} rows, '{source_name}' has {rows}",
+            vocab.vocab_size
+        )));
+    }
+    let row_bytes = ggml_row_size_for_type(ty, n_embd).map_err(LlamaError::format)?;
+
+    // Gather host-side first: with a mapped gguf the source lives in the
+    // read-only region and the destination in the dirty one, so they cannot be
+    // borrowed at once.
+    let mut gathered = Vec::with_capacity(row_bytes * vocab.len());
+    {
+        let source_bytes = weights
+            .ctx
+            .tensor_data(source_id)
+            .map_err(LlamaError::format)?;
+        for &token in &vocab.ids {
+            let start = (token as usize)
+                .checked_mul(row_bytes)
+                .ok_or_else(|| LlamaError::format("draft head row offset overflow"))?;
+            let end = start
+                .checked_add(row_bytes)
+                .ok_or_else(|| LlamaError::format("draft head row offset overflow"))?;
+            let row = source_bytes.get(start..end).ok_or_else(|| {
+                LlamaError::format(format!("draft head row {token} is outside '{source_name}'"))
+            })?;
+            gathered.extend_from_slice(row);
+        }
+    }
+
+    let head = weights
+        .ctx
+        .new_named_tensor(
+            crate::qwen35_runtime::MTP_DRAFT_HEAD_TENSOR,
+            ty,
+            2,
+            &[n_embd, vocab.len() as i64],
+            crate::BufferUsage::Weights,
+        )
+        .map_err(LlamaError::format)?;
+    weights
+        .ctx
+        .write_tensor_data(head, &gathered)
+        .map_err(LlamaError::format)?;
+    weights
+        .tensor_ids
+        .insert(crate::qwen35_runtime::MTP_DRAFT_HEAD_TENSOR.to_string(), head);
+    Ok(())
 }
 
 /// Rows in the hidden-carry ring. Sized well above a prefill chunk so the MTP
@@ -290,6 +372,9 @@ pub struct LlamaSession {
     /// The MTP draft head.
     spec_mtp: Option<HybridDecodeSpec>,
     mtp: Option<MtpRuntime>,
+    /// Present when the draft head's rows were restricted to a sidecar
+    /// vocabulary; maps the head's dense output index back to a token id.
+    draft_vocab: Option<DraftVocab>,
     config: LlamaSessionConfig,
     max_context: usize,
     context_extra_bytes: usize,
@@ -737,12 +822,33 @@ impl LlamaSession {
         } else {
             cache_shape.n_seq_max
         };
+        // MKLLM_MTP_FULL_DRAFT_VOCAB=1 keeps the full 248320-row draft head
+        // (the A/B for the restricted-head win).
+        let draft_vocab = if draft_max > 0 && std::env::var_os("MKLLM_MTP_FULL_DRAFT_VOCAB").is_none()
+        {
+            DraftVocab::load_for_model(
+                &model.gguf.path,
+                u32::try_from(vocab.len())
+                    .map_err(|_| LlamaError::format("vocabulary size does not fit in u32"))?,
+            )?
+        } else {
+            None
+        };
+        if let Some(loaded) = draft_vocab.as_ref() {
+            eprintln!(
+                "llama: mtp draft head restricted to {} of {} tokens ({:.1}% corpus coverage)",
+                loaded.len(),
+                loaded.vocab_size,
+                loaded.coverage() * 100.0
+            );
+        }
         let mut spec_mtp = if draft_max > 0 {
             model.mtp_decode_spec(
                 cache_shape.n_ctx_seq,
                 cache_shape.n_seq_max,
                 config.attention_k_type,
                 config.attention_v_type,
+                draft_vocab.is_some(),
             )?
         } else {
             None
@@ -813,6 +919,7 @@ impl LlamaSession {
             &plan,
             &spec,
             spec_mtp.as_ref(),
+            draft_vocab.as_ref(),
             carry_ring,
             context_extra_bytes,
             prompt_batch_capacity(config.prefill_batch_size, max_context_usize),
@@ -841,6 +948,7 @@ impl LlamaSession {
             spec_verify,
             spec_mtp,
             mtp,
+            draft_vocab,
             config,
             max_context: max_context_usize,
             context_extra_bytes,
@@ -1135,6 +1243,7 @@ impl LlamaSession {
                         &self.plan,
                         &self.spec,
                         self.spec_mtp.as_ref(),
+                        self.draft_vocab.as_ref(),
                         self.mtp.map(|mtp| mtp.carry_ring).unwrap_or(0),
                         self.context_extra_bytes,
                         prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
@@ -1162,19 +1271,22 @@ fn speculative_acceptance(target: f32, draft: f32) -> f32 {
     }
 }
 
-/// The normalised residual `max(0, p - q)` a rejected draft is replaced from.
+/// The normalised residual `max(0, p - q)` a rejected draft is replaced from,
+/// with the proposal `q` given sparsely as `(token, probability)` over real
+/// token ids — the draft head may cover only part of the vocabulary.
 /// Together with `speculative_acceptance` this makes the emitted token exactly
 /// `p`-distributed (Leviathan et al. / Chen et al. speculative sampling).
 /// Degenerate case: when `q == p` everywhere the residual is empty, and the
 /// only way to get there is `p(x)/q(x) == 1` for the drafted token, i.e. the
 /// draft was already accepted — so falling back to `p` is unreachable in
 /// practice and merely keeps the function total.
-fn speculative_residual(target: &[f32], draft: &[f32]) -> Vec<f32> {
-    let mut residual: Vec<f32> = target
-        .iter()
-        .zip(draft.iter())
-        .map(|(p, q)| (p - q).max(0.0))
-        .collect();
+fn speculative_residual(target: &[f32], draft: &[(u32, f32)]) -> Vec<f32> {
+    let mut residual: Vec<f32> = target.to_vec();
+    for &(token, q) in draft {
+        if let Some(slot) = residual.get_mut(token as usize) {
+            *slot = (*slot - q).max(0.0);
+        }
+    }
     let total: f32 = residual.iter().sum();
     if total > 0.0 {
         for value in residual.iter_mut() {
@@ -1488,7 +1600,7 @@ impl LlamaSession {
         // acceptance ratio `p/q` is the standard one and the residual is a
         // valid distribution.
         let mut drafts = Vec::with_capacity(draft_max);
-        let mut draft_probs: Vec<Vec<f32>> = Vec::with_capacity(draft_max);
+        let mut draft_probs: Vec<Vec<(u32, f32)>> = Vec::with_capacity(draft_max);
         let mut token = first;
         for step in 0..draft_max {
             let position = start + step;
@@ -1506,10 +1618,10 @@ impl LlamaSession {
             if let Some(mtp) = self.mtp.as_mut() {
                 mtp.draft_nanos += started.elapsed().as_nanos() as u64;
             }
-            let probs = sampling_probabilities(&logits, params)?;
-            token = sample_from(&probs, rng)?;
+            let (drafted, proposal) = self.draft_proposal(&logits, params, rng)?;
+            token = drafted;
             drafts.push(token);
-            draft_probs.push(probs);
+            draft_probs.push(proposal);
         }
 
         let mut batch = Vec::with_capacity(drafts.len() + 1);
@@ -1539,7 +1651,11 @@ impl LlamaSession {
                 params,
             )?;
             let drafted = drafts[index] as usize;
-            let q = draft_probs[index][drafted];
+            let q = draft_probs[index]
+                .iter()
+                .find(|(token, _)| *token as usize == drafted)
+                .map(|(_, probability)| *probability)
+                .unwrap_or(0.0);
             let p = target[drafted];
             let ratio = speculative_acceptance(p, q);
             if rng.next_f32() < ratio {
@@ -1752,7 +1868,44 @@ impl LlamaSession {
     /// One autoregressive draft step through the nextn block, greedy.
     fn run_mtp_draft_step(&mut self, token: i32, position: usize, read_row: i32) -> Result<i32> {
         let logits = self.run_mtp_draft_logits(token, position, read_row)?;
-        argmax_token_id(&logits)
+        let drafted = argmax_token_id(&logits)?;
+        self.draft_token(drafted)
+    }
+
+    /// Map a draft head output index to a real token id. With a restricted
+    /// head the two differ; without one they are the same number.
+    fn draft_token(&self, draft_id: i32) -> Result<i32> {
+        match self.draft_vocab.as_ref() {
+            Some(vocab) => {
+                let index = usize::try_from(draft_id).map_err(|_| {
+                    LlamaError::format("draft head index does not fit in usize")
+                })?;
+                vocab.real_token(index)
+            }
+            None => Ok(draft_id),
+        }
+    }
+
+    /// The draft proposal as a sparse distribution over REAL token ids. Only
+    /// the nucleus is non-zero, so this stays small whether or not the head is
+    /// restricted, and the rejection-sampling residual can subtract it from a
+    /// full-vocabulary target without materialising a second full vector.
+    fn draft_proposal(
+        &self,
+        logits: &[f32],
+        params: LlamaSamplingParams,
+        rng: &mut Xorshift64,
+    ) -> Result<(i32, Vec<(u32, f32)>)> {
+        let probs = sampling_probabilities(logits, params)?;
+        let drafted = sample_from(&probs, rng)?;
+        let mut sparse = Vec::new();
+        for (index, &probability) in probs.iter().enumerate() {
+            if probability > 0.0 {
+                let token = self.draft_token(index as i32)?;
+                sparse.push((token as u32, probability));
+            }
+        }
+        Ok((self.draft_token(drafted)?, sparse))
     }
 
     /// One autoregressive draft step, returning the draft head's logits.
@@ -1964,6 +2117,7 @@ fn build_runtime_state(
     plan: &ModelExecutionPlan,
     spec: &HybridDecodeSpec,
     spec_mtp: Option<&HybridDecodeSpec>,
+    draft_vocab: Option<&DraftVocab>,
     carry_ring: usize,
     context_extra_bytes: usize,
     prompt_batch_capacity: usize,
@@ -2023,6 +2177,9 @@ fn build_runtime_state(
                 .tensor_ids
                 .insert(carry_spec.tensor_name.clone(), carry);
             hidden_carry = Some(carry);
+            if let Some(vocab) = draft_vocab {
+                build_restricted_draft_head(&mut weights, model, vocab)?;
+            }
         }
         let prompt_batch_capacity = prompt_batch_capacity.max(1);
         let mut required_main_buffer_size = shared_runtime
@@ -2366,7 +2523,12 @@ mod tests {
             [0.05, 0.05, 0.05, 0.85],
             [0.5, 0.3, 0.15, 0.05],
         ] {
-            let residual = speculative_residual(&target, &draft);
+            let sparse: Vec<(u32, f32)> = draft
+                .iter()
+                .enumerate()
+                .map(|(token, probability)| (token as u32, *probability))
+                .collect();
+            let residual = speculative_residual(&target, &sparse);
             let accept_total: f32 = (0..4)
                 .map(|token| draft[token] * speculative_acceptance(target[token], draft[token]))
                 .sum();
@@ -2376,6 +2538,41 @@ mod tests {
                 assert!(
                     (emitted - target[token]).abs() < 1e-5,
                     "draft {draft:?} token {token}: emitted {emitted} vs target {}",
+                    target[token]
+                );
+            }
+        }
+    }
+
+    /// A draft head that can only propose PART of the vocabulary must still
+    /// leave the emitted distribution equal to the target — that is what makes
+    /// the restricted draft head free of quality cost.
+    #[test]
+    fn a_partial_draft_vocabulary_still_preserves_the_target() {
+        let target = [0.5f32, 0.3, 0.15, 0.05];
+        // The draft head covers only tokens 0 and 1; 2 and 3 are unreachable
+        // to it and must arrive entirely through the residual.
+        for draft in [
+            vec![(0u32, 0.5f32), (1, 0.5)],
+            vec![(0u32, 1.0f32)],
+            vec![(1u32, 0.9f32), (0, 0.1)],
+        ] {
+            let residual = speculative_residual(&target, &draft);
+            let accept_total: f32 = draft
+                .iter()
+                .map(|(token, q)| q * speculative_acceptance(target[*token as usize], *q))
+                .sum();
+            for token in 0..4 {
+                let proposed = draft
+                    .iter()
+                    .find(|(id, _)| *id as usize == token)
+                    .map(|(_, q)| *q)
+                    .unwrap_or(0.0);
+                let emitted = proposed * speculative_acceptance(target[token], proposed)
+                    + (1.0 - accept_total) * residual[token];
+                assert!(
+                    (emitted - target[token]).abs() < 1e-5,
+                    "draft {draft:?} token {token}: emitted {emitted} vs {}",
                     target[token]
                 );
             }
