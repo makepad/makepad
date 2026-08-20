@@ -456,12 +456,31 @@ fn call_once<'a>(
             )
             .map_err(io_err("http connect"))?;
             s.set_nodelay(true).map_err(io_err("http nodelay"))?;
+            // Set once, here, so the common request path does not have to
+            // touch the socket options of a socket it has not written to
+            // yet — and so a pooled socket that has gone bad announces it
+            // through the setup below rather than mid-conversation.
+            s.set_write_timeout(Some(Duration::from_millis(limits.write_timeout_ms.max(1))))
+                .map_err(io_err("http set write timeout"))?;
             s
         }
     };
-    stream
-        .set_write_timeout(Some(Duration::from_millis(limits.write_timeout_ms.max(1))))
-        .map_err(io_err("http set write timeout"))?;
+    // The whole SETUP phase — socket options and the request write — happens
+    // before a single byte reaches the server, so a failure here on a POOLED
+    // socket is provably unprocessed: the socket died while it was idle (the
+    // server closed it, or the fd was invalidated) and the request can be
+    // replayed on a fresh connection exactly once. Only the same failure on
+    // a FRESH connection is a real error the caller must see. Before this,
+    // a dead pooled socket surfaced as "io failure during http set write
+    // timeout" the moment a user changed a filter.
+    if from_pool {
+        if let Err(e) = stream
+            .set_write_timeout(Some(Duration::from_millis(limits.write_timeout_ms.max(1))))
+        {
+            let _ = e;
+            return Err(HttpAttemptError::StaleIdle);
+        }
+    }
 
     // ---- request bytes ----
     let mut out = Vec::with_capacity(256 + req.body.map_or(0, <[u8]>::len));
@@ -519,9 +538,14 @@ fn call_once<'a>(
             return Err(ClientError::Timeout { op: "http response head" }.into());
         }
         let timeout = (head_deadline - now).min(read_timeout).max(Duration::from_millis(1));
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(io_err("http set head timeout"))?;
+        if let Err(e) = stream.set_read_timeout(Some(timeout)) {
+            // Same rule as an EOF here: on a pooled socket that has said
+            // nothing yet, the socket is the problem, not the request.
+            if from_pool && buf.is_empty() {
+                return Err(HttpAttemptError::StaleIdle);
+            }
+            return Err(io_err("http set head timeout")(e).into());
+        }
         let len = buf.len();
         buf.resize(len + 8 * 1024, 0);
         match stream.read(&mut buf[len..]) {
@@ -855,6 +879,155 @@ mod tests {
 
     fn head_of(raw: &[u8]) -> ClientResult<ResponseHead> {
         parse_response_head(raw, false, false)
+    }
+
+    // ---- keep-alive pool recovery -----------------------------------------
+
+    /// A one-request-at-a-time HTTP/1.1 server for the pool tests: it speaks
+    /// keep-alive, and `close_idle` makes it hang up on the socket it is
+    /// holding, exactly like a real server whose idle timeout expired.
+    struct MiniServer {
+        addr: SocketAddr,
+        served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MiniServer {
+        fn start() -> MiniServer {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (count, halt) = (served.clone(), stop.clone());
+            let join = std::thread::spawn(move || {
+                listener.set_nonblocking(false).ok();
+                for conn in listener.incoming() {
+                    if halt.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(mut conn) = conn else { return };
+                    conn.set_read_timeout(Some(Duration::from_millis(250))).ok();
+                    loop {
+                        let mut buf = Vec::new();
+                        let mut byte = [0u8; 1];
+                        let head = loop {
+                            match conn.read(&mut byte) {
+                                Ok(0) => break false,
+                                Ok(_) => {
+                                    buf.push(byte[0]);
+                                    if buf.ends_with(b"\r\n\r\n") {
+                                        break true;
+                                    }
+                                }
+                                Err(_) => break false,
+                            }
+                        };
+                        if !head {
+                            break;
+                        }
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let body = b"ok";
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                            body.len()
+                        );
+                        if conn.write_all(resp.as_bytes()).is_err()
+                            || conn.write_all(body).is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+            MiniServer { addr, served, stop, join: Some(join) }
+        }
+
+        fn served(&self) -> usize {
+            self.served.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for MiniServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::net::TcpStream::connect(self.addr);
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    fn get(addr: SocketAddr, pool: &ConnPool) -> ClientResult<Vec<u8>> {
+        let req = Request::get("/x");
+        let resp = http_call_pooled(addr, &req, &HttpLimits::default_v1(), Some(pool))?;
+        resp.read_full(1024)
+    }
+
+    /// The keep-alive socket the pool is holding dies while it is idle —
+    /// the server hung up, or the fd went bad. Nothing of the next request
+    /// has reached the server, so it is replayed once on a fresh connection
+    /// and the caller never sees the failure.
+    #[test]
+    fn a_dead_pooled_socket_is_replaced_and_the_request_still_succeeds() {
+        let server = MiniServer::start();
+        let pool = ConnPool::new(4);
+        assert_eq!(get(server.addr, &pool).unwrap(), b"ok");
+        assert_eq!(pool.idle_len(), 1, "the socket was kept for reuse");
+        assert_eq!(get(server.addr, &pool).unwrap(), b"ok", "reuse works");
+
+        // Kill the pooled socket the way an idle timeout does: take it out,
+        // shut it down, and put it back for the next request to trip over.
+        let dead = pool.take(server.addr).expect("a pooled socket");
+        dead.shutdown(std::net::Shutdown::Both).ok();
+        pool.put(server.addr, dead);
+        assert_eq!(pool.idle_len(), 1);
+        let before = server.served();
+        assert_eq!(
+            get(server.addr, &pool).unwrap(),
+            b"ok",
+            "the dead socket is retried on a fresh connection, transparently"
+        );
+        assert_eq!(server.served(), before + 1, "the request ran exactly once");
+    }
+
+    /// The exact failure a user hit changing a Library filter: the pooled
+    /// socket's fd is no longer a socket, so `set_write_timeout` fails
+    /// before a single byte is written. That is provably unprocessed, so it
+    /// must be replayed rather than reported as "io failure during http set
+    /// write timeout".
+    #[cfg(unix)]
+    #[test]
+    fn a_pooled_fd_that_is_not_a_socket_is_replaced_not_reported() {
+        use std::os::fd::{FromRawFd, IntoRawFd};
+
+        let server = MiniServer::start();
+        let pool = ConnPool::new(4);
+        assert_eq!(get(server.addr, &pool).unwrap(), b"ok");
+        drop(pool.take(server.addr).expect("a pooled socket"));
+
+        // A file descriptor that is NOT a socket: every socket option on it
+        // fails with ENOTSOCK, which is what an invalidated/recycled fd
+        // looks like from here. Ownership moves cleanly into the TcpStream,
+        // which closes it on drop — no double close.
+        let path = std::env::temp_dir().join(format!("mp-pool-notasocket-{}", std::process::id()));
+        std::fs::write(&path, b"not a socket").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let not_a_socket = unsafe { TcpStream::from_raw_fd(file.into_raw_fd()) };
+        assert!(
+            not_a_socket.set_write_timeout(Some(Duration::from_millis(10))).is_err(),
+            "the fixture must actually fail the option this test is about"
+        );
+        pool.put(server.addr, not_a_socket);
+
+        let before = server.served();
+        assert_eq!(
+            get(server.addr, &pool).unwrap(),
+            b"ok",
+            "a bad pooled fd is dropped and the request replayed fresh"
+        );
+        assert_eq!(server.served(), before + 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
