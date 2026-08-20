@@ -1032,7 +1032,7 @@ impl Widget for RunTray {
 /// width lands near it, and then the cards STRETCH to fill the row exactly —
 /// a fixed-size card leaves a gutter down the right that grows with every
 /// pixel of window the layout refuses to use.
-pub const GRID_CARD_W: f64 = 168.0;
+pub const GRID_CARD_W: f64 = 148.0;
 /// THE gap of the lattice — between columns AND between rows, one number,
 /// so the grid reads as an even grid instead of tight stacks in loose
 /// columns. Applied to each Row at draw time (spacing for the columns,
@@ -1041,9 +1041,14 @@ pub const GRID_CARD_W: f64 = 168.0;
 /// this constant once.
 pub const GRID_GAP: f64 = 10.0;
 /// Inner padding of a card, and the gap between its picture and its title.
-/// A card is a picture with a caption; both need room to be either.
-pub const GRID_CARD_PAD: f64 = 9.0;
-pub const GRID_CARD_SPACING: f64 = 6.0;
+/// Kept tight: a library holds a LOT of tiles, so the picture gets the
+/// room and the chrome stays minimal. The SAME inset on all four sides —
+/// the picture sits in its own visible well, so aspect letterboxing lands
+/// inside the well instead of reading as accidental card padding, and the
+/// well's left edge is the title's left edge. MUST match the CatalogCell
+/// DSL literals (padding/spacing) — the card-height math here assumes them.
+pub const GRID_CARD_PAD: f64 = 6.0;
+pub const GRID_CARD_SPACING: f64 = 4.0;
 /// Height of the title zone: exactly two lines at the card's text size,
 /// reserved whether a title needs them or not. Cards in a row are then the
 /// same height, and no card's second line straddles its own bottom edge.
@@ -1058,8 +1063,9 @@ pub const GRID_CARD_SPACING: f64 = 6.0;
 /// from the card-height math.
 pub const GRID_TITLE_H: f64 = 30.0;
 /// Picture aspect inside a card (the shape a rendered icon and a spectrogram
-/// tile both read well at).
-pub const GRID_THUMB_ASPECT: f64 = 0.62;
+/// tile both read well at). Nearer square than the old 0.62: rendered icons
+/// are square-ish, so a wide box put its slack into dead side gutters.
+pub const GRID_THUMB_ASPECT: f64 = 0.68;
 /// Card slots available in the Row template (c1..c8); extra width on very
 /// wide windows becomes margin instead of a ninth column.
 pub const GRID_MAX_COLS: usize = 8;
