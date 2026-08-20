@@ -461,6 +461,50 @@ script_mod! {
             }
         }
     }
+    // The tile says "your click landed and I am working on it".
+    //
+    // A cue is a fetch, a decode and an upload — a second or more for a
+    // world — and until this existed the only sign a click had registered
+    // was that eventually the picture changed. It sits ON TOP of the
+    // thumbnail (last child of the overlay stack), scrims it so the ring
+    // reads over any picture, and turns into a still red ring when the load
+    // failed. `spin` is fed from the app clock at draw time, like the beat
+    // LED's `since`, so nothing here holds animation state.
+    let TileBusy = SolidView{
+        width: Fill
+        height: Fill
+        visible: false
+        draw_bg +: {
+            spin: instance(0.0)
+            failed: instance(0.0)
+            color_ring: uniform(#x3ee0b0)
+            color_fail: uniform(#xff5c5c)
+            pixel: fn() {
+                let p = (self.pos - vec2(0.5, 0.5)) * self.rect_size
+                let radius = min(self.rect_size.x, self.rect_size.y) * 0.17
+                let width = max(radius * 0.34, 1.5)
+                let ring = 1.0 - smoothstep(
+                    width * 0.5 - 0.75,
+                    width * 0.5 + 0.75,
+                    abs(length(p) - radius)
+                )
+                let tau = 6.283185307179586
+                // A comet head that fades round the circle reads as motion
+                // from one frame alone; a FAILED load lights the whole ring
+                // instead, so a stopped spinner can never be mistaken for a
+                // slow one.
+                let sweep = fract((atan2(p.y, p.x) - self.spin) / tau)
+                let comet = (1.0 - sweep) * (1.0 - sweep)
+                let mask = ring * mix(comet, 1.0, self.failed)
+                let tint = self.color_ring.mix(self.color_fail, self.failed)
+                let scrim = 0.42
+                return Pal.premul(vec4(
+                    vec3(0.0, 0.0, 0.0).mix(tint.rgb, mask),
+                    max(mask, scrim)
+                ))
+            }
+        }
+    }
     let TileCell = RoundedView{
         width: 164
         height: 104
@@ -537,6 +581,7 @@ script_mod! {
                     }
                 }
             }
+            grid_busy := TileBusy{}
         }
     }
 
@@ -730,6 +775,7 @@ script_mod! {
                     text: ""
                 }
             }
+            grid_busy := TileBusy{}
         }
     }
 
@@ -1499,6 +1545,13 @@ pub struct GridEntry {
     /// single-frame actor there is no second frame to give the game away.
     /// Straight off the manifest, never measured.
     pub cells: bool,
+    /// This tile's cue is being prepared right now — fetching, decoding,
+    /// uploading. It wears the spinner until the media is ready (an ARMED
+    /// cue is ready: it is only waiting for its beat).
+    pub loading: bool,
+    /// This tile's load failed; it wears a still red ring until the next
+    /// click.
+    pub failed: bool,
     /// The one marked tile: on the clip grid the last one CLICKED (green
     /// ring, nothing else), on the SFX bank a pad with voices playing.
     pub active: bool,
@@ -1507,6 +1560,17 @@ pub struct GridEntry {
     /// its full height from the moment it opens so that filling it never
     /// moves a tile the operator is already reaching for.
     pub placeholder: bool,
+}
+
+/// A tile that has to keep redrawing: a cycling sheet, or a spinner.
+fn entry_animates(entry: &GridEntry) -> bool {
+    entry.frames.len() > 1 || entry.loading
+}
+
+/// Spinner phase (radians) at `time`, ~0.45 turns a second.
+fn busy_spin(time: f64) -> f32 {
+    const TAU: f64 = std::f64::consts::TAU;
+    (time * 2.8).rem_euclid(TAU) as f32
 }
 
 fn entry_frame(entry: &GridEntry, time: f64) -> Option<Texture> {
@@ -1619,6 +1683,42 @@ mod tile_fit_tests {
         // What cropping would have cost: a quarter of the sprite's height.
         let (_, ch) = cover_scale(164.0 / 104.0, 1.0);
         assert!(ch > 1.5, "cover would grow the vertical axis past 1.5: {ch}");
+    }
+
+    #[test]
+    /// The spinner's phase: a real angle that keeps turning and never
+    /// leaves [0, tau), whatever the app clock says.
+    fn the_busy_spinner_turns_and_stays_in_range() {
+        let tau = std::f32::consts::TAU;
+        for t in [0.0, 0.37, 5.0, 1234.5, 86_400.0] {
+            let a = busy_spin(t);
+            assert!((0.0..tau).contains(&a), "phase out of range at {t}: {a}");
+        }
+        // Turning, and slow enough to read: well under a turn in a frame.
+        let step = busy_spin(1.0 / 60.0) - busy_spin(0.0);
+        assert!(step > 0.0 && step < 0.2, "one frame of spin: {step}");
+        // A tile that is loading has to keep redrawing; a still one need not.
+        let mut entry = GridEntry {
+            asset: AssetId::from_bytes([0; 16]),
+            title: String::new(),
+            sub: String::new(),
+            state: String::new(),
+            pad: String::new(),
+            texture: None,
+            frames: Vec::new(),
+            fps: 0.0,
+            cells: false,
+            loading: false,
+            failed: false,
+            active: false,
+            placeholder: false,
+        };
+        assert!(!entry_animates(&entry));
+        entry.loading = true;
+        assert!(entry_animates(&entry), "a spinner needs frames");
+        entry.loading = false;
+        entry.failed = true;
+        assert!(!entry_animates(&entry), "a failed ring is still");
     }
 
     #[test]
@@ -2045,6 +2145,26 @@ impl VjTileGrid {
         self.view.redraw(cx);
     }
 
+    /// Mark which tile is loading and which one failed, from the cue engine
+    /// (or the pad loader) — pushed every pump rather than waiting for the
+    /// next grid rebuild, because a click has to answer NOW and a rebuild
+    /// only happens when the catalog changes.
+    pub fn set_busy(&mut self, cx: &mut Cx, loading: Option<AssetId>, failed: Option<AssetId>) {
+        let mut changed = false;
+        for entry in &mut self.entries {
+            let is_loading = loading == Some(entry.asset);
+            let has_failed = failed == Some(entry.asset);
+            if entry.loading != is_loading || entry.failed != has_failed {
+                entry.loading = is_loading;
+                entry.failed = has_failed;
+                changed = true;
+            }
+        }
+        if changed {
+            self.view.redraw(cx);
+        }
+    }
+
     pub fn set_thumb(&mut self, cx: &mut Cx, asset: AssetId, texture: Texture) {
         self.set_thumb_anim(cx, asset, vec![texture], 0.0);
     }
@@ -2081,7 +2201,7 @@ impl Widget for VjTileGrid {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
         if self.anim_frame.is_event(event).is_some()
-            && self.entries.iter().any(|e| e.frames.len() > 1)
+            && self.entries.iter().any(entry_animates)
         {
             self.view.redraw(cx);
             self.anim_frame = cx.new_next_frame();
@@ -2089,7 +2209,7 @@ impl Widget for VjTileGrid {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.entries.iter().any(|e| e.frames.len() > 1) {
+        if self.entries.iter().any(entry_animates) {
             self.anim_frame = cx.new_next_frame();
         }
         let width = self.view.area().rect(cx).size.x;
@@ -2162,6 +2282,17 @@ impl Widget for VjTileGrid {
                     script_apply_eval!(cx, thumb, {
                         draw_bg +: { fill: #(fill) img_aspect: #(aspect) }
                     });
+                    // The click's own feedback: spinner while the cue loads,
+                    // a still red ring if it failed.
+                    let mut busy = cell.view(cx, ids!(grid_busy));
+                    busy.set_visible(cx, entry.loading || entry.failed);
+                    if entry.loading || entry.failed {
+                        let spin = busy_spin(now);
+                        let failed = f32::from(u8::from(entry.failed));
+                        script_apply_eval!(cx, busy, {
+                            draw_bg +: { spin: #(spin) failed: #(failed) }
+                        });
+                    }
                     let selected = f32::from(u8::from(entry.active));
                     script_apply_eval!(cx, cell, {
                         draw_bg +: { selected: #(selected) }
@@ -2348,6 +2479,26 @@ impl VjPadMatrix {
         self.view.redraw(cx);
     }
 
+    /// Mark which tile is loading and which one failed, from the cue engine
+    /// (or the pad loader) — pushed every pump rather than waiting for the
+    /// next grid rebuild, because a click has to answer NOW and a rebuild
+    /// only happens when the catalog changes.
+    pub fn set_busy(&mut self, cx: &mut Cx, loading: Option<AssetId>, failed: Option<AssetId>) {
+        let mut changed = false;
+        for entry in &mut self.entries {
+            let is_loading = loading == Some(entry.asset);
+            let has_failed = failed == Some(entry.asset);
+            if entry.loading != is_loading || entry.failed != has_failed {
+                entry.loading = is_loading;
+                entry.failed = has_failed;
+                changed = true;
+            }
+        }
+        if changed {
+            self.view.redraw(cx);
+        }
+    }
+
     pub fn set_thumb(&mut self, cx: &mut Cx, asset: AssetId, texture: Texture) {
         self.set_thumb_anim(cx, asset, vec![texture], 0.0);
     }
@@ -2443,6 +2594,17 @@ impl VjPadMatrix {
                     // last clicked. LIVE / CUE / HOLD live in the program
                     // strip's labels, not on forty tiles at once.
                     let selected = f32::from(u8::from(entry.active));
+                    // The click's own feedback: spinner while this pad's cue
+                    // loads, a still red ring if it failed.
+                    let mut busy = cell.view(cx, ids!(grid_busy));
+                    busy.set_visible(cx, entry.loading || entry.failed);
+                    if entry.loading || entry.failed {
+                        let spin = busy_spin(now);
+                        let failed = f32::from(u8::from(entry.failed));
+                        script_apply_eval!(cx, busy, {
+                            draw_bg +: { spin: #(spin) failed: #(failed) }
+                        });
+                    }
                     (selected, 0.0, fill, aspect)
                 } else {
                     // No content: a quiet, greyed placeholder, not a black pad.
@@ -2451,6 +2613,7 @@ impl VjPadMatrix {
                     let image = cell.image(cx, ids!(grid_thumb));
                     image.set_visible(cx, false);
                     image.set_texture(cx, None);
+                    cell.view(cx, ids!(grid_busy)).set_visible(cx, false);
                     (0.0, 1.0, 1.0, 1.0)
                 };
                 if self.cell_state.len() <= pad {
@@ -2481,7 +2644,7 @@ impl Widget for VjPadMatrix {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
         if self.anim_frame.is_event(event).is_some()
-            && self.entries.iter().any(|e| e.frames.len() > 1)
+            && self.entries.iter().any(entry_animates)
         {
             self.view.redraw(cx);
             self.anim_frame = cx.new_next_frame();
@@ -2566,7 +2729,7 @@ impl Widget for VjPadMatrix {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.entries.iter().any(|e| e.frames.len() > 1) {
+        if self.entries.iter().any(entry_animates) {
             self.anim_frame = cx.new_next_frame();
         }
         self.bind_pads(cx);

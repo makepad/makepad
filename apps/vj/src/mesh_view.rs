@@ -416,6 +416,10 @@ impl VjMeshView {
 
     fn load_pending(&mut self, cx: &mut Cx) {
         let Some(prepared) = self.pending.take() else { return };
+        let step = crate::media::UiStep::new(match *prepared {
+            PreparedMesh::Skinned { .. } => "mesh upload (skinned)",
+            PreparedMesh::Statue { .. } => "mesh upload (static/world)",
+        });
         self.load_count += 1;
         match *prepared {
             PreparedMesh::Skinned { model, rest, clip, scale, lift, base_color } => {
@@ -444,12 +448,17 @@ impl VjMeshView {
                     lift,
                 });
             }
-            PreparedMesh::Statue { glb, base_color, level, nav, start } => {
-                // Unskinned fallback: the renderer's own loader still parses
-                // on this thread, over worker-capped bytes.
+            PreparedMesh::Statue { model, base_color, level, nav, start } => {
+                // GPU-only: the GLB was parsed on the decode worker (30ms of
+                // a 35ms Doom level), so this is the buffer/texture upload.
                 let name = format!("vj/statue-{}", self.load_count);
                 let png = base_color;
-                match self.renderer.load_model(cx, &name, &glb, png.as_deref()) {
+                let parse = crate::media::UiStep::new("renderer.load_model_parsed (upload)");
+                let loaded = self
+                    .renderer
+                    .load_model_parsed(cx, &name, *model, png.as_deref(), None);
+                parse.done(cx);
+                match loaded {
                     Ok(_tris) => {
                         let (min, max) = self
                             .renderer
@@ -481,6 +490,7 @@ impl VjMeshView {
                 }
             }
         }
+        step.done(cx);
         self.area.redraw(cx);
     }
 

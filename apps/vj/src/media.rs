@@ -859,6 +859,59 @@ pub fn waveform_bgra(
 }
 
 // ---------------------------------------------------------------------------
+// UI-thread load budget
+// ---------------------------------------------------------------------------
+
+/// Anything the UI thread does for longer than this in one go is a dropped
+/// frame the operator sees as a hitch — half a 60Hz frame, so the rest of
+/// the frame still has room to draw.
+pub const UI_STEP_BUDGET_MS: f32 = 8.0;
+
+/// One UI-thread step of a content load, timed.
+///
+/// Everything expensive about loading is supposed to happen on the decode
+/// pool; what is left on this thread is GPU work (buffer/texture creation)
+/// that cannot happen anywhere else. This says whether that is still true:
+/// the cost is folded into the F3 perf graph's own `load` channel, and a
+/// step over [`UI_STEP_BUDGET_MS`] names itself in the log, so a hitch is
+/// attributable from `/log` without the graph being open.
+/// `VJ_TRACE_LOAD=1` also logs the steps that stayed INSIDE the budget —
+/// how a before/after is measured once the hitches are gone.
+fn trace_load() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("VJ_TRACE_LOAD").is_some())
+}
+
+#[must_use = "a step that is never `done` is never measured"]
+pub struct UiStep {
+    t0: Instant,
+    what: &'static str,
+}
+
+impl UiStep {
+    pub fn new(what: &'static str) -> Self {
+        Self { t0: Instant::now(), what }
+    }
+
+    /// Close the step; returns its cost in milliseconds.
+    pub fn done(self, cx: &mut makepad_widgets::Cx) -> f32 {
+        let us = self.t0.elapsed().as_micros() as u64;
+        let channel = cx.perf_monitor.channel("load", 0xff_b4_54);
+        cx.perf_monitor.add(channel, us);
+        let ms = us as f32 / 1000.0;
+        if ms > UI_STEP_BUDGET_MS {
+            makepad_widgets::log!(
+                "ui-hitch: {} took {ms:.1}ms on the UI thread (budget {UI_STEP_BUDGET_MS:.1}ms)",
+                self.what
+            );
+        } else if trace_load() {
+            makepad_widgets::log!("ui-step: {} {ms:.2}ms", self.what);
+        }
+        ms
+    }
+}
+
+// ---------------------------------------------------------------------------
 // decode worker pool
 // ---------------------------------------------------------------------------
 
@@ -932,12 +985,13 @@ pub enum PreparedMesh {
         /// Embedded base-color image bytes (PNG/JPEG), when present.
         base_color: Option<Vec<u8>>,
     },
-    /// Unskinned fallback: the statue path still needs the renderer's own
-    /// loader (a UI-side parse of capped bytes). A walkable level also
-    /// carries its triangle collision, built here so the UI thread never
-    /// pays for the BVH.
+    /// Unskinned fallback: a static prop or a walkable level. PARSED here —
+    /// the GLB parse is 30ms of a 35ms Doom-level load and needs no `Cx`, so
+    /// the UI thread is left with the GPU upload alone
+    /// (`Renderer::load_model_parsed`). The level's triangle collision and
+    /// nav grid are built here for the same reason.
     Statue {
-        glb: Vec<u8>,
+        model: Box<makepad_render::StaticModel>,
         base_color: Option<Vec<u8>>,
         level: Option<Box<makepad_render::level::LevelCollision>>,
         /// Walkable-cell graph over the whole map, so the tour plans routes
@@ -1111,14 +1165,24 @@ fn prepare_mesh(path: &PathBuf, world: bool) -> Result<Box<PreparedMesh>, String
                 true => build_level(&static_model, &glb),
                 false => (None, None, None),
             };
-            return Ok(Box::new(PreparedMesh::Statue { glb, base_color, level, nav, start }));
+            // The SAME parse the renderer would have done on the UI thread:
+            // it travels instead of the bytes.
+            return Ok(Box::new(PreparedMesh::Statue {
+                model: Box::new(static_model),
+                base_color,
+                level,
+                nav,
+                start,
+            }));
         }
     };
     let playable =
         model.joint_count() > 0 && model.joint_count() <= MAX_MESH_JOINTS && !model.clips.is_empty();
     if !playable {
+        let static_model = makepad_render::StaticModel::parse_glb(&glb)
+            .map_err(|e| format!("mesh parse failed: {e}"))?;
         return Ok(Box::new(PreparedMesh::Statue {
-            glb,
+            model: Box::new(static_model),
             base_color,
             level: None,
             nav: None,
@@ -1187,8 +1251,18 @@ pub struct ThumbPixels {
     pub fps: f32,
 }
 
+/// Largest thumbnail a tile ever needs. A grid card is 164x104 layout
+/// points, so 512 still has pixels to spare on a 2x display.
+///
+/// Measured: uploading 1024² stills whole cost 4-6ms of UI thread EACH, and
+/// a grid filling with 105 of them spent 254ms hitching (12 batches over the
+/// 8ms budget) for detail no tile can show. A quarter of the pixels is a
+/// quarter of the upload.
+pub const MAX_TILE_TEX_DIM: usize = 512;
+
 /// Read + decode a thumbnail into BGRA, refusing oversized or malformed
-/// images before any pixel reaches the UI thread.
+/// images before any pixel reaches the UI thread, and shrinking anything
+/// bigger than a tile can draw ([`MAX_TILE_TEX_DIM`]) while still off it.
 ///
 /// A picture that DECLARED its cell layout is cut at that layout, exactly:
 /// the frames the producer wrote, at the rate it wrote them, with the clear
@@ -1198,6 +1272,85 @@ pub struct ThumbPixels {
 /// it is old enough to predate the declaration, which is what
 /// `legacy_may_be_sheet` is for.
 fn decode_thumb(
+    path: &PathBuf,
+    sheet: Option<(ThumbnailCells, f32)>,
+    legacy_may_be_sheet: bool,
+) -> Result<ThumbPixels, String> {
+    let mut pixels = decode_thumb_full(path, sheet, legacy_may_be_sheet)?;
+    fit_thumb_for_tiles(&mut pixels);
+    Ok(pixels)
+}
+
+/// Whole-integer box shrink so `w`x`h` fits [`MAX_TILE_TEX_DIM`]; 1 = leave
+/// it alone. Integer factors keep the filter exact (every destination pixel
+/// averages the same number of sources) and every sprite cell — 128² — at
+/// its authored size.
+fn shrink_factor(w: usize, h: usize) -> usize {
+    let long = w.max(h);
+    if long <= MAX_TILE_TEX_DIM {
+        return 1;
+    }
+    long.div_ceil(MAX_TILE_TEX_DIM)
+}
+
+/// Average `factor`x`factor` blocks of BGRA into one pixel, over PREMULTIPLIED
+/// colour so a keyed sprite's transparent pixels do not darken its edges.
+/// Trailing pixels that do not fill a whole block are dropped rather than
+/// weighted differently — at most `factor - 1` of them.
+fn box_shrink(src: &[u32], w: usize, h: usize, factor: usize) -> (Vec<u32>, usize, usize) {
+    let (dw, dh) = (w / factor, h / factor);
+    if dw == 0 || dh == 0 || src.len() < w * h {
+        return (src.to_vec(), w, h);
+    }
+    let mut out = vec![0u32; dw * dh];
+    for y in 0..dh {
+        for x in 0..dw {
+            let (mut a, mut r, mut g, mut b) = (0u32, 0u32, 0u32, 0u32);
+            for sy in 0..factor {
+                let row = (y * factor + sy) * w + x * factor;
+                for sx in 0..factor {
+                    let px = src[row + sx];
+                    let pa = (px >> 24) & 0xff;
+                    a += pa;
+                    r += ((px >> 16) & 0xff) * pa;
+                    g += ((px >> 8) & 0xff) * pa;
+                    b += (px & 0xff) * pa;
+                }
+            }
+            out[y * dw + x] = if a == 0 {
+                0
+            } else {
+                let n = (factor * factor) as u32;
+                ((a / n) << 24) | ((r / a) << 16) | ((g / a) << 8) | (b / a)
+            };
+        }
+    }
+    (out, dw, dh)
+}
+
+/// Shrink a decoded thumbnail — still frame and animation frames alike — to
+/// what a tile can draw. A no-op for everything already small (every sprite
+/// cell, every 128² strip tile), which is why it can be unconditional.
+fn fit_thumb_for_tiles(pixels: &mut ThumbPixels) {
+    let factor = shrink_factor(pixels.width, pixels.height);
+    if factor > 1 {
+        let (data, w, h) = box_shrink(&pixels.bgra, pixels.width, pixels.height, factor);
+        pixels.bgra = data;
+        pixels.width = w;
+        pixels.height = h;
+    }
+    for (data, w, h) in pixels.frames.iter_mut() {
+        let factor = shrink_factor(*w, *h);
+        if factor > 1 {
+            let (shrunk, sw, sh) = box_shrink(data, *w, *h, factor);
+            *data = shrunk;
+            *w = sw;
+            *h = sh;
+        }
+    }
+}
+
+fn decode_thumb_full(
     path: &PathBuf,
     sheet: Option<(ThumbnailCells, f32)>,
     legacy_may_be_sheet: bool,
@@ -2320,6 +2473,82 @@ mod tests {
         // cell lies outside, so nothing is cut and nothing is guessed.
         let stale = ThumbnailCells { cols: 8, cell_w: 512, cell_h: 512, first: 0, count: 4 };
         assert!(declared_thumb(w, h, &data, stale, 8.0).is_none());
+    }
+
+    #[test]
+    /// A thumbnail bigger than a tile can draw is shrunk BEFORE it reaches
+    /// the UI thread, by whole-integer box averaging: a 1024² still becomes
+    /// 512² (a quarter of the upload), while every sprite cell and 128²
+    /// strip tile is already small and passes through untouched.
+    fn oversized_thumbnails_shrink_and_small_ones_are_left_alone() {
+        assert_eq!(shrink_factor(128, 128), 1);
+        assert_eq!(shrink_factor(512, 512), 1);
+        assert_eq!(shrink_factor(1024, 1024), 2);
+        assert_eq!(shrink_factor(2048, 256), 4);
+        assert_eq!(shrink_factor(1024, 256), 2, "the long axis decides");
+
+        // Two shades in a checker: every 2x2 block averages to their mean,
+        // so a correct box filter lands exactly halfway.
+        let (w, h) = (8usize, 4usize);
+        let mut src = vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                src[y * w + x] = if (x + y) % 2 == 0 { 0xFF00_0000 } else { 0xFF40_4040 };
+            }
+        }
+        let (out, ow, oh) = box_shrink(&src, w, h, 2);
+        assert_eq!((ow, oh), (4, 2));
+        assert!(out.iter().all(|p| *p == 0xFF20_2020), "block average: {:08x}", out[0]);
+
+        // Fully transparent stays transparent (and never divides by zero).
+        let clear = vec![0u32; w * h];
+        let (out, _, _) = box_shrink(&clear, w, h, 2);
+        assert!(out.iter().all(|p| *p == 0));
+
+        // A keyed sprite's transparent pixels must not darken what is left:
+        // one opaque red among three clear ones is still red, at a quarter
+        // of the coverage.
+        let mut keyed = vec![0u32; 2 * 2];
+        keyed[0] = 0xFFFF_0000;
+        let (out, _, _) = box_shrink(&keyed, 2, 2, 2);
+        assert_eq!(out[0] & 0x00FF_FFFF, 0x00FF_0000, "colour survives the alpha average");
+        assert_eq!((out[0] >> 24) & 0xff, 63, "coverage is a quarter");
+    }
+
+    #[test]
+    /// The shrink runs over the whole `ThumbPixels`, frames included, and a
+    /// declared cell layout (already tile-sized) comes through unchanged.
+    fn fitting_a_thumb_shrinks_the_still_and_every_frame() {
+        let mut big = ThumbPixels {
+            bgra: vec![0xFF10_2030; 1024 * 1024],
+            width: 1024,
+            height: 1024,
+            frames: vec![(vec![0xFF10_2030; 1024 * 512], 1024, 512)],
+            fps: 8.0,
+        };
+        fit_thumb_for_tiles(&mut big);
+        assert_eq!((big.width, big.height), (512, 512));
+        assert_eq!(big.bgra.len(), 512 * 512);
+        assert_eq!((big.frames[0].1, big.frames[0].2), (512, 256));
+        assert!(big.bgra.iter().all(|p| *p == 0xFF10_2030), "a flat picture stays flat");
+
+        let cells = ThumbPixels {
+            bgra: vec![0xFF44_AA66; 128 * 128],
+            width: 128,
+            height: 128,
+            frames: vec![(vec![0xFF44_AA66; 128 * 128], 128, 128)],
+            fps: 8.0,
+        };
+        let mut same = ThumbPixels {
+            bgra: cells.bgra.clone(),
+            width: 128,
+            height: 128,
+            frames: cells.frames.clone(),
+            fps: 8.0,
+        };
+        fit_thumb_for_tiles(&mut same);
+        assert_eq!((same.width, same.height), (128, 128));
+        assert_eq!(same.frames[0].1, 128);
     }
 
     #[test]
