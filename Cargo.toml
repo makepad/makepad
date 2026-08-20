@@ -56,6 +56,8 @@ workspace.members = [
     "libs/sqlite_query",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
+    # === own Ogg Vorbis encoder (stem side-channels) ===
+    "libs/audio_encode",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
     # === necessary tools ===
