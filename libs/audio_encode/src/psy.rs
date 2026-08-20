@@ -83,8 +83,6 @@ pub struct TuningTables {
 const CUTOFF_HZ: f32 = 20_000.0;
 
 pub struct Psy {
-    /// Band index per bin, `HALF` entries.
-    band_of_bin: Vec<u16>,
     /// Contiguous bin range of each band (band indices rise monotonically).
     band_range: Vec<(u32, u32)>,
     n_bands: usize,
@@ -175,7 +173,6 @@ impl Psy {
         }
         band_range[band_of_bin[0] as usize].0 = 0;
         Psy {
-            band_of_bin,
             band_range,
             n_bands,
             band_of_point,
@@ -296,13 +293,17 @@ mod tests {
     }
 
     #[test]
-    fn bands_cover_the_spectrum_monotonically() {
+    fn bands_cover_the_spectrum_contiguously() {
         for rate in [44_100u32, 48_000, 22_050] {
             let p = Psy::new(rate);
-            assert_eq!(p.band_of_bin.len(), HALF);
-            for pair in p.band_of_bin.windows(2) {
-                assert!(pair[0] <= pair[1] && pair[1] - pair[0] <= 1);
+            // Ranges tile [0, HALF) exactly, in order, none empty.
+            let mut at = 0u32;
+            for &(lo, hi) in &p.band_range {
+                assert_eq!(lo, at, "{rate}: band starts where the last ended");
+                assert!(hi > lo, "{rate}: empty band");
+                at = hi;
             }
+            assert_eq!(at as usize, HALF);
             assert!(p.n_bands >= 12 && p.n_bands <= 27, "{} bands", p.n_bands);
         }
     }
