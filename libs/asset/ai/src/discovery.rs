@@ -131,13 +131,15 @@ impl Discovered {
 }
 
 /// Client side: listen for beacons on [`DISCOVERY_PORT`]. Returns the shared
-/// set; poll it from the fleet timer. Bind failure (port taken by another
-/// client on this machine) logs and returns an empty set that never fills.
+/// set; poll it from the fleet timer. The bind joins the reuse group, so the
+/// VJ, the Asset UI and a game on one machine all see the fleet (an
+/// exclusive bind left every app but the first with an empty set that never
+/// filled); a bind failure still logs and returns that empty set.
 pub fn start_listener() -> Discovered {
     let discovered = Discovered::default();
     let nodes = discovered.nodes.clone();
     std::thread::spawn(move || {
-        let socket = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) {
+        let socket = match makepad_asset_client::bind_reuse_udp(DISCOVERY_PORT) {
             Ok(socket) => socket,
             Err(e) => {
                 eprintln!(

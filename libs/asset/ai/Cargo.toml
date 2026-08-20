@@ -90,6 +90,9 @@ rig-native = ["dep:makepad-ai-rig", "dep:makepad-ai-common", "dep:makepad-gltf"]
 makepad-micro-serde = { path = "../../micro_serde" }
 makepad-base64 = { path = "../../base64" }
 makepad-network = { path = "../../../platform/network" }
+# Reuse-group UDP bind for the fleet beacon listener (several apps on one
+# machine listen at once); the client crate owns that socket helper.
+makepad-asset-client = { path = "../client" }
 makepad-zune-core = { path = "../../zune/zune-core" }
 makepad-zune-png = { path = "../../zune/zune-png" }
 makepad-zip-file = { path = "../../zip_file" }
