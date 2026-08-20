@@ -133,8 +133,8 @@ script_mod! {
         }
 
         draw_item +: {
-            hover: instance(0.0)
-            active: instance(0.0)
+            hover: 0.0
+            active: 0.0
             color: uniform(theme.color_u_hidden)
             color_hover: uniform(theme.color_outset_hover)
             color_active: uniform(theme.color_outset_active)
@@ -151,8 +151,8 @@ script_mod! {
         }
 
         draw_item_text +: {
-            hover: instance(0.0)
-            active: instance(0.0)
+            hover: 0.0
+            active: 0.0
             color: theme.color_label_inner
             color_hover: uniform(theme.color_label_inner_hover)
             color_active: uniform(theme.color_label_inner_active)
@@ -163,8 +163,8 @@ script_mod! {
         }
 
         draw_scroll_arrow +: {
-            up: instance(0.0)
-            enabled: instance(1.0)
+            up: 0.0
+            enabled: 1.0
             color: uniform(theme.color_label_inner)
             color_disabled: uniform(theme.color_label_inner_disabled)
             pixel: fn() {
