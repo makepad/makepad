@@ -132,9 +132,11 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         } else {
             self.dead_until.push((base.to_string(), until));
         }
-        if self.cached.as_ref().is_some_and(|c| c.base == base) {
-            self.cached = None;
-        }
+        // Deliberately KEEP the cached pick even when it names this base:
+        // the dead-list already stops its EARLY reuse (the TTL fast path
+        // checks is_dead), while the scan's last-resort stale fallback
+        // needs it — clearing it here turned one flaky probe into a dead
+        // turn on a single-node fleet, mid-burst.
     }
 
     fn remember(&mut self, base: String, model: String, text_fallback: bool) {
