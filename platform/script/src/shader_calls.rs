@@ -1470,6 +1470,16 @@ impl ShaderFnCompiler {
                         || id == id!(cos)
                         || id == id!(step)
                         || id == id!(smoothstep)
+                        // exp/log/pow family: the analytic sky is exp(vec3)
+                        // and pow(vec3, s) — unsuffixed they hit the scalar
+                        // preamble fns and the whole shader fails the JIT.
+                        || id == id!(exp)
+                        || id == id!(exp2)
+                        || id == id!(log)
+                        || id == id!(log2)
+                        || id == id!(pow)
+                        || id == id!(tan)
+                        || id == id!(modf)
                 );
                 if needs_suffix && !concrete_args.is_empty() {
                     let first_ty = concrete_args[0];

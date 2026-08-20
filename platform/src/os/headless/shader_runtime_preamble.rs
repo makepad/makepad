@@ -1164,6 +1164,140 @@ pub fn round(x: f32) -> f32 {
 
 // ─── Vec-overloaded math builtins ───
 
+// exp/log/pow family — the analytic sky (robobo1221 recipe) is all
+// exp(vec3) and pow(vec3, f32); without these the whole sky shader
+// failed the JIT and a headless run died at the first game.sky.
+pub fn exp_2f(v: Vec2f) -> Vec2f {
+    vec2(v.x.exp(), v.y.exp())
+}
+pub fn exp_3f(v: Vec3f) -> Vec3f {
+    vec3(v.x.exp(), v.y.exp(), v.z.exp())
+}
+pub fn exp_4f(v: Vec4f) -> Vec4f {
+    vec4(v.x.exp(), v.y.exp(), v.z.exp(), v.w.exp())
+}
+pub fn exp2_2f(v: Vec2f) -> Vec2f {
+    vec2(exp2(v.x), exp2(v.y))
+}
+pub fn exp2_3f(v: Vec3f) -> Vec3f {
+    vec3(exp2(v.x), exp2(v.y), exp2(v.z))
+}
+pub fn exp2_4f(v: Vec4f) -> Vec4f {
+    vec4(exp2(v.x), exp2(v.y), exp2(v.z), exp2(v.w))
+}
+pub fn log_2f(v: Vec2f) -> Vec2f {
+    vec2(v.x.ln(), v.y.ln())
+}
+pub fn log_3f(v: Vec3f) -> Vec3f {
+    vec3(v.x.ln(), v.y.ln(), v.z.ln())
+}
+pub fn log_4f(v: Vec4f) -> Vec4f {
+    vec4(v.x.ln(), v.y.ln(), v.z.ln(), v.w.ln())
+}
+pub fn log2_2f(v: Vec2f) -> Vec2f {
+    vec2(v.x.log2(), v.y.log2())
+}
+pub fn log2_3f(v: Vec3f) -> Vec3f {
+    vec3(v.x.log2(), v.y.log2(), v.z.log2())
+}
+pub fn log2_4f(v: Vec4f) -> Vec4f {
+    vec4(v.x.log2(), v.y.log2(), v.z.log2(), v.w.log2())
+}
+pub fn tan_2f(v: Vec2f) -> Vec2f {
+    vec2(v.x.tan(), v.y.tan())
+}
+pub fn tan_3f(v: Vec3f) -> Vec3f {
+    vec3(v.x.tan(), v.y.tan(), v.z.tan())
+}
+pub fn tan_4f(v: Vec4f) -> Vec4f {
+    vec4(v.x.tan(), v.y.tan(), v.z.tan(), v.w.tan())
+}
+
+/// The exponent of a vector `pow` may be the matching vector or a scalar
+/// (both spellings appear in shipped shaders); monomorphized per call.
+pub trait PowRhs2 {
+    fn powv(self, base: Vec2f) -> Vec2f;
+}
+impl PowRhs2 for f32 {
+    fn powv(self, b: Vec2f) -> Vec2f {
+        vec2(b.x.powf(self), b.y.powf(self))
+    }
+}
+impl PowRhs2 for Vec2f {
+    fn powv(self, b: Vec2f) -> Vec2f {
+        vec2(b.x.powf(self.x), b.y.powf(self.y))
+    }
+}
+pub trait PowRhs3 {
+    fn powv(self, base: Vec3f) -> Vec3f;
+}
+impl PowRhs3 for f32 {
+    fn powv(self, b: Vec3f) -> Vec3f {
+        vec3(b.x.powf(self), b.y.powf(self), b.z.powf(self))
+    }
+}
+impl PowRhs3 for Vec3f {
+    fn powv(self, b: Vec3f) -> Vec3f {
+        vec3(b.x.powf(self.x), b.y.powf(self.y), b.z.powf(self.z))
+    }
+}
+pub trait PowRhs4 {
+    fn powv(self, base: Vec4f) -> Vec4f;
+}
+impl PowRhs4 for f32 {
+    fn powv(self, b: Vec4f) -> Vec4f {
+        vec4(b.x.powf(self), b.y.powf(self), b.z.powf(self), b.w.powf(self))
+    }
+}
+impl PowRhs4 for Vec4f {
+    fn powv(self, b: Vec4f) -> Vec4f {
+        vec4(b.x.powf(self.x), b.y.powf(self.y), b.z.powf(self.z), b.w.powf(self.w))
+    }
+}
+pub fn pow_2f<E: PowRhs2>(base: Vec2f, e: E) -> Vec2f {
+    e.powv(base)
+}
+pub fn pow_3f<E: PowRhs3>(base: Vec3f, e: E) -> Vec3f {
+    e.powv(base)
+}
+pub fn pow_4f<E: PowRhs4>(base: Vec4f, e: E) -> Vec4f {
+    e.powv(base)
+}
+
+/// Same shape for float modulo: `modf(vecN, f32)` and `modf(vecN, vecN)`.
+pub trait ModRhs2 {
+    fn modv(self, a: Vec2f) -> Vec2f;
+}
+impl ModRhs2 for f32 {
+    fn modv(self, a: Vec2f) -> Vec2f {
+        vec2(modf(a.x, self), modf(a.y, self))
+    }
+}
+impl ModRhs2 for Vec2f {
+    fn modv(self, a: Vec2f) -> Vec2f {
+        vec2(modf(a.x, self.x), modf(a.y, self.y))
+    }
+}
+pub trait ModRhs3 {
+    fn modv(self, a: Vec3f) -> Vec3f;
+}
+impl ModRhs3 for f32 {
+    fn modv(self, a: Vec3f) -> Vec3f {
+        vec3(modf(a.x, self), modf(a.y, self), modf(a.z, self))
+    }
+}
+impl ModRhs3 for Vec3f {
+    fn modv(self, a: Vec3f) -> Vec3f {
+        vec3(modf(a.x, self.x), modf(a.y, self.y), modf(a.z, self.z))
+    }
+}
+pub fn modf_2f<E: ModRhs2>(a: Vec2f, e: E) -> Vec2f {
+    e.modv(a)
+}
+pub fn modf_3f<E: ModRhs3>(a: Vec3f, e: E) -> Vec3f {
+    e.modv(a)
+}
+
 pub fn floor_2f(v: Vec2f) -> Vec2f {
     vec2(v.x.floor(), v.y.floor())
 }

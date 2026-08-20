@@ -3901,6 +3901,38 @@ pub fn main() {
         shader.test_compile_draw(gpu_stage_4l)
         assert(shader.test_compile_draw_rust_contains(gpu_stage_4l, "c.x, c.y, c.z"))
 
+        println("GPU stage 4m: transcendental vec builtins suffix on the Rust backend")
+        let gpu_stage_4m = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            tint: shader.uniform(vec3f)
+
+            probe: fn() {
+                // The analytic-sky recipe: exp of a vec3, pow of a vec3 by a
+                // scalar. Unsuffixed these hit the scalar preamble fns and
+                // the whole shader fails the headless JIT (found live: a
+                // headless sweep died at the first game.sky).
+                let absorbed = exp(self.tint * -0.5)
+                let shaped = pow(absorbed, 0.75)
+                let leveled = log(absorbed + vec3(1.0, 1.0, 1.0))
+                return vec4(shaped + leveled, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe()
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4m)
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "exp_3f("))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "pow_3f("))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "log_3f("))
+
         println("Runtime vector methods + lerp + TAU (value-level, not shader)")
         assert(vec3(3.0, 4.0, 0.0).length() == 5.0)
         let n = vec3(0.0, 2.0, 0.0).normalized()
