@@ -1666,6 +1666,8 @@ struct SearchParams {
     live_only: bool,
     page_size: u32,
     cursor: Option<Vec<u8>>,
+    /// Facet rows to return with the page; 0 (the default) asks for none.
+    facets: u32,
 }
 
 fn parse_kind(t: &str) -> RouteResult<AssetKind> {
@@ -1715,6 +1717,14 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
         live_only: head.query_get("live").map(parse_flag).transpose()?.unwrap_or(false),
         page_size,
         cursor: head.query_get("cursor").map(parse_cursor).transpose()?,
+        facets: match head.query_get("facets") {
+            None => 0,
+            Some(_) => parse_limit(
+                head.query_get("facets"),
+                0,
+                rc.cfg.budgets.max_search_facets as u64,
+            )? as u32,
+        },
     })
 }
 
@@ -1759,6 +1769,13 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
         },
         page_size,
         cursor: field("cursor")?.as_deref().map(parse_cursor).transpose()?,
+        facets: match body.get("facets") {
+            None => 0,
+            Some(v) => {
+                let n = v.as_u64().ok_or(Fail::Http(400, "malformed facets"))?;
+                n.min(rc.cfg.budgets.max_search_facets as u64) as u32
+            }
+        },
     })
 }
 
@@ -1784,6 +1801,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
             text: &params.text,
             filters,
             page_size: params.page_size,
+            facets: params.facets,
         };
         // Read policy: every authenticated principal browses the whole
         // catalog; private annotation fields are still owner-only via the
@@ -1822,6 +1840,20 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
                 Some(c) => s(to_hex(c)),
                 None => Value::Null,
             }),
+            // Absent unless asked for: an older client parses the page it
+            // knows and a newer one reads the labels it asked to count.
+            ("facets", Value::Arr(
+                page.facets
+                    .iter()
+                    .map(|facet| {
+                        obj(vec![
+                            ("kind", s(facet.kind.as_str())),
+                            ("label", s(facet.label.clone())),
+                            ("count", Value::Int(facet.count as i64)),
+                        ])
+                    })
+                    .collect(),
+            )),
         ]),
     )))
 }

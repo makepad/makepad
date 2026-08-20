@@ -213,6 +213,7 @@ pub fn media_name(media: makepad_asset_data::MediaType) -> &'static str {
         M::Bin => "bin",
         M::Text => "text",
         M::Ply => "ply",
+        M::Mp3 => "mp3",
     }
 }
 
@@ -271,6 +272,22 @@ pub struct CatalogHit {
     pub alias: Option<AssetAlias>,
 }
 
+/// Which vocabulary a facet label came from — the two label filters a
+/// catalog query understands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FacetKind {
+    Category,
+    Tag,
+}
+
+/// One label of the result set and how many of its assets carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogFacet {
+    pub kind: FacetKind,
+    pub label: String,
+    pub count: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogPageDto {
     pub hits: Vec<CatalogHit>,
@@ -278,6 +295,10 @@ pub struct CatalogPageDto {
     pub total: u64,
     /// Opaque continuation token; present iff more results exist.
     pub cursor: Option<String>,
+    /// Label counts over the WHOLE result set, most used first. Empty when
+    /// the query did not ask for facets, and empty from a server too old to
+    /// count them — never a parse failure.
+    pub facets: Vec<CatalogFacet>,
 }
 
 pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
@@ -323,7 +344,37 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
     }
     let total = need_u64(v, "total", "catalog total")?;
     let cursor = parse_cursor_field(v)?;
-    Ok(CatalogPageDto { hits, total, cursor })
+    let facets = parse_facets(v)?;
+    Ok(CatalogPageDto { hits, total, cursor, facets })
+}
+
+/// Facets are optional on the wire (absent from a server that does not count
+/// them, and from every response that was not asked to), but a facet that IS
+/// present is typed strictly: an unknown kind is a protocol error, not a
+/// label to guess at.
+fn parse_facets(v: &Value) -> ClientResult<Vec<CatalogFacet>> {
+    let Some(list) = v.get("facets") else {
+        return Ok(Vec::new());
+    };
+    if matches!(list, Value::Null) {
+        return Ok(Vec::new());
+    }
+    let list = list.as_arr().ok_or(ClientError::Protocol { what: "catalog facets" })?;
+    if list.len() > MAX_PAGE_ENTRIES {
+        return Err(ClientError::Protocol { what: "catalog facets too many" });
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for f in list {
+        let kind = match need_str(f, "kind", 16, "facet kind")? {
+            "category" => FacetKind::Category,
+            "tag" => FacetKind::Tag,
+            _ => return Err(ClientError::Protocol { what: "facet kind" }),
+        };
+        let label = need_str(f, "label", crate::wire::MAX_FILTER_VALUE_BYTES, "facet label")?.to_string();
+        check_display(&label, "facet label")?;
+        out.push(CatalogFacet { kind, label, count: need_u64(f, "count", "facet count")? });
+    }
+    Ok(out)
 }
 
 /// A cursor out of a response: absent/null = end of results; a string must
@@ -2448,6 +2499,46 @@ mod tests {
         assert!(parse_catalog_page(&json::parse(bad_title.as_bytes()).unwrap()).is_err());
         let no_total = body.replace(",\"total\":1", "");
         assert!(parse_catalog_page(&json::parse(no_total.as_bytes()).unwrap()).is_err());
+    }
+
+    /// Facets are optional on the wire — a server that does not count them
+    /// (or a query that did not ask) leaves the field out, and that is not
+    /// an error. What IS present is typed strictly.
+    #[test]
+    fn facet_shapes() {
+        let with = |f: &str| format!(r#"{{"hits":[],"total":0,"cursor":null,"facets":{f}}}"#);
+        let none = r#"{"hits":[],"total":0,"cursor":null}"#;
+        assert!(parse_catalog_page(&json::parse(none.as_bytes()).unwrap())
+            .unwrap()
+            .facets
+            .is_empty());
+        assert!(parse_catalog_page(&json::parse(with("null").as_bytes()).unwrap())
+            .unwrap()
+            .facets
+            .is_empty());
+        let good = r#"[{"kind":"category","label":"doom","count":12},
+                       {"kind":"tag","label":"prop","count":3}]"#;
+        let page =
+            parse_catalog_page(&json::parse(with(good).as_bytes()).unwrap()).unwrap();
+        assert_eq!(
+            page.facets,
+            vec![
+                CatalogFacet { kind: FacetKind::Category, label: "doom".into(), count: 12 },
+                CatalogFacet { kind: FacetKind::Tag, label: "prop".into(), count: 3 },
+            ]
+        );
+        for bad in [
+            r#"[{"kind":"colour","label":"doom","count":1}]"#,
+            r#"[{"label":"doom","count":1}]"#,
+            r#"[{"kind":"tag","count":1}]"#,
+            r#"[{"kind":"tag","label":"doom"}]"#,
+            r#"7"#,
+        ] {
+            assert!(
+                parse_catalog_page(&json::parse(with(bad).as_bytes()).unwrap()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

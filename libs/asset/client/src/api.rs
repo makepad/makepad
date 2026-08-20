@@ -135,6 +135,11 @@ pub struct CatalogQuery {
     pub live_only: bool,
     /// 1..=[`MAX_SEARCH_LIMIT`].
     pub page_size: u32,
+    /// Ask the server to count the labels of this result set and return the
+    /// top `facets` of them with the page; 0 (the default) asks for none.
+    /// The counts come out of the SAME snapshot as the hits, so a facet
+    /// list can never describe a different generation than the rows.
+    pub facets: u32,
 }
 
 impl CatalogQuery {
@@ -195,6 +200,9 @@ impl CatalogQuery {
             pairs.push(("live", Value::Bool(true)));
         }
         pairs.push(("limit", Value::Int(self.page_size as i64)));
+        if self.facets > 0 {
+            pairs.push(("facets", Value::Int(self.facets as i64)));
+        }
         if let Some(c) = cursor {
             pairs.push(("cursor", json::s(c)));
         }

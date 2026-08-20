@@ -31,7 +31,8 @@
 //!   `local/asset-ui`.
 
 use makepad_asset_client::{
-    ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogHit, CatalogQuery,
+    ApiEndpoints, AssetDetailDto, CatalogEventDto, CatalogFacet, CatalogHit, CatalogQuery,
+    FacetKind,
     CatalogSubscriptionEvent, ClientEvent, ClientOutput, ClientRequest, GcRequest, GcStatusDto,
     JobProfileDto, PageCursor, RequestId, RetireDto, SessionConfig, SessionConnector,
     SessionHandles, SessionMsg, SessionStatus,
@@ -49,6 +50,10 @@ pub const EVENT_LOG_CAP: usize = 200;
 /// One search page. The server caps at MAX_SEARCH_LIMIT (100); more rows
 /// exist server-side when `SearchResults::more` is set.
 pub const SEARCH_PAGE_SIZE: u32 = 60;
+
+/// Facet rows the Library asks for. The dropdown shows the most-used labels
+/// first and a long tail helps nobody find anything.
+pub const SEARCH_FACETS: u32 = 24;
 
 /// The full content-contract kind vocabulary, for the server kind filter.
 pub const SERVER_KINDS: [AssetKind; 13] = [
@@ -129,6 +134,10 @@ pub struct SearchResults {
     pub total: u64,
     /// A further page exists server-side (cursor held, not yet fetched).
     pub more: bool,
+    /// Label counts for the WHOLE result set, most used first — the Library
+    /// facets. Counted by the server in the same snapshot as the hits, so
+    /// they always describe the rows on screen.
+    pub facets: Vec<CatalogFacet>,
 }
 
 /// Session-backed store state. All `pub` fields are render inputs; mutation
@@ -353,6 +362,9 @@ impl AssetStore {
     /// browse mode. The previous in-flight request is cancelled.
     pub fn submit_search(&mut self) {
         let query = CatalogQuery {
+            // The Library's facet row is the catalog's own label counts, so
+            // every search asks for them; nothing else in the app does.
+            facets: SEARCH_FACETS,
             text: self.filters.text.trim().to_string(),
             namespace: None,
             kind: self.filters.kind,
@@ -593,6 +605,7 @@ impl AssetStore {
                             more: page.next.is_some(),
                             hits: page.hits,
                             total: page.total,
+                            facets: page.facets,
                         });
                         // A vanished selection stays selected but its detail
                         // panel reloads honestly on the next click.
@@ -1055,13 +1068,16 @@ pub fn hex16_string(id: &[u8; 16]) -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LocalLibraryFilters {
+pub struct LibraryFilters {
     /// Free text, straight onto the catalog query. The server's text index
-    /// covers titles, categories and tags, so this is how a user reaches a
-    /// label without a dropdown for it.
+    /// covers titles, categories and tags, so this reaches a label even
+    /// before the facet row offers it.
     pub query: String,
     /// Selected `AssetKind` label, or None for "all kinds".
     pub kind: Option<String>,
+    /// Picked facet: which vocabulary it came from (the server filters
+    /// `category` and `tag` separately) and the label itself.
+    pub label: Option<(FacetKind, String)>,
 }
 
 /// One Library shelf name. Worlds (old `world` domain and new `map`) show
@@ -1241,6 +1257,7 @@ mod tests {
             hits: vec![test_hit(keep, "Keep"), test_hit(gone, "Gone")],
             total: 2,
             more: false,
+            facets: Vec::new(),
         });
         store.on_retired(RetireDto {
             asset_id: gone,
@@ -1264,6 +1281,7 @@ mod tests {
             hits: vec![test_hit(keep, "Keep")],
             total: 1,
             more: false,
+            facets: Vec::new(),
         });
         store.on_retired(RetireDto {
             asset_id: AssetId::from_bytes([9; 16]),
@@ -1289,6 +1307,7 @@ mod tests {
             hits: vec![test_hit(keep, "Keep"), test_hit(gone, "Gone")],
             total: 2,
             more: false,
+            facets: Vec::new(),
         });
         store.append_feed_events(vec![CatalogEventDto {
             seq: 1,
@@ -1311,6 +1330,7 @@ mod tests {
             hits: vec![test_hit(gone, "Gone")],
             total: 1,
             more: false,
+            facets: Vec::new(),
         });
         store2.append_feed_events(vec![CatalogEventDto {
             seq: 2,
@@ -1335,6 +1355,7 @@ mod tests {
             hits: vec![test_hit(target, "Target")],
             total: 1,
             more: false,
+            facets: Vec::new(),
         });
         store.retire_reqs.push(42);
         let handled = store.on_catalog_event(ClientEvent::Done {

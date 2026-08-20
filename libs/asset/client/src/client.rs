@@ -99,6 +99,9 @@ pub struct CatalogPage {
     pub hits: Vec<CatalogHit>,
     pub total: u64,
     pub next: Option<PageCursor>,
+    /// Label counts over the whole result set when the query asked for
+    /// facets (`CatalogQuery::facets`), most used first; otherwise empty.
+    pub facets: Vec<crate::dto::CatalogFacet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -398,6 +401,7 @@ impl AssetClient {
             hits: page.hits,
             total: page.total,
             next: self.wrap_cursor(page.cursor),
+            facets: page.facets,
         })
     }
 
