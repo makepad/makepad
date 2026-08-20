@@ -1,5 +1,9 @@
-//! Temporary diagnosis harness (deleted when the encoder settles): where does
-//! the round-trip error live?
+//! Alignment canary: the whole-chain round trip must land at shift ZERO.
+//!
+//! This is the test that caught the single-page granule bug (the decoder
+//! read end-truncation as encoder delay and the whole stream came back 376
+//! samples early). It cross-correlates the decoded signal against the
+//! input over a wide window and asserts the best alignment is exactly 0.
 
 use makepad_audio_decode::vorbis;
 use makepad_audio_encode::{encode_vorbis, EncodeOptions};
@@ -72,5 +76,6 @@ fn error_profile_by_quality() {
             best.0,
             best.1
         );
+        assert_eq!(best.0, 0, "decoded stream is time-shifted by {} samples", best.0);
     }
 }
