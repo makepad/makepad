@@ -395,6 +395,7 @@ fn sample_greedy(
         }
     }
 
+    crate::record_token(best_id as i32);
     TokenData { id: best_id as i32 }
 }
 

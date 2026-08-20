@@ -644,7 +644,7 @@ impl Tensor {
 
     /// out = a + b (broadcasting b if it's smaller)
     pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
-        if let Some(out) = crate::metal_backend::try_add_f32(&a.data, &a.shape, &b.data, &b.shape) {
+        if let Some(out) = crate::accel::try_add_f32(&a.data, &a.shape, &b.data, &b.shape) {
             return Tensor {
                 data: out,
                 shape: a.shape.clone(),
@@ -682,7 +682,7 @@ impl Tensor {
 
     /// out = a * b element-wise (broadcasting b)
     pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
-        if let Some(out) = crate::metal_backend::try_mul_f32(&a.data, &a.shape, &b.data, &b.shape) {
+        if let Some(out) = crate::accel::try_mul_f32(&a.data, &a.shape, &b.data, &b.shape) {
             return Tensor {
                 data: out,
                 shape: a.shape.clone(),
@@ -726,7 +726,7 @@ impl Tensor {
 
     /// GELU activation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     pub fn gelu(a: &Tensor) -> Tensor {
-        if let Some(out) = crate::metal_backend::try_gelu_f32(&a.data, &a.shape) {
+        if let Some(out) = crate::accel::try_gelu_f32(&a.data, &a.shape) {
             return Tensor {
                 data: out,
                 shape: a.shape.clone(),
@@ -751,7 +751,7 @@ impl Tensor {
     /// Layer normalization along the last dimension.
     /// out[i] = (x[i] - mean) / sqrt(var + eps)
     pub fn layer_norm(x: &Tensor, eps: f32) -> Tensor {
-        if let Some(out) = crate::metal_backend::try_layer_norm_f32(&x.data, &x.shape, eps) {
+        if let Some(out) = crate::accel::try_layer_norm_f32(&x.data, &x.shape, eps) {
             return Tensor {
                 data: out,
                 shape: x.shape.clone(),
@@ -784,7 +784,7 @@ impl Tensor {
     /// Layer normalization followed by affine transform.
     /// out = layer_norm(x, eps) * mul + add
     pub fn layer_norm_mul_add(x: &Tensor, mul: &Tensor, add: &Tensor, eps: f32) -> Tensor {
-        if let Some(out) = crate::metal_backend::try_layer_norm_mul_add_f32(
+        if let Some(out) = crate::accel::try_layer_norm_mul_add_f32(
             &x.data, &x.shape, &mul.data, &mul.shape, &add.data, &add.shape, eps,
         ) {
             return Tensor {
@@ -928,7 +928,7 @@ impl Tensor {
         assert_eq!(b.shape[0], k);
         let n = b.shape[1];
 
-        if let Some(out) = crate::metal_backend::try_matmul_nn_f32(&a.data, &b.data, m, k, n) {
+        if let Some(out) = crate::accel::try_matmul_nn_f32(&a.data, &b.data, m, k, n) {
             return Tensor {
                 data: out,
                 shape: vec![m, n],
@@ -968,7 +968,7 @@ impl Tensor {
         let batch = x.numel() / in_features;
         assert_eq!(x.numel(), batch * in_features, "matmul_t: x size mismatch");
 
-        if let Some(out) = crate::metal_backend::try_matmul_nt_f32(
+        if let Some(out) = crate::accel::try_matmul_nt_f32(
             &x.data,
             &w.data,
             batch,
@@ -1071,7 +1071,7 @@ impl Tensor {
         );
 
         if bias.numel() == out_features {
-            if let Some(out) = crate::metal_backend::try_matmul_nt_ggml_bytes_add_bias(
+            if let Some(out) = crate::accel::try_matmul_nt_ggml_bytes_add_bias(
                 &x.data,
                 &weight.data,
                 weight.ggml_type,
@@ -1107,7 +1107,7 @@ impl Tensor {
         );
 
         if bias.numel() == out_features {
-            if let Some(out) = crate::metal_backend::try_matmul_nt_ggml_bytes_add_bias(
+            if let Some(out) = crate::accel::try_matmul_nt_ggml_bytes_add_bias(
                 &x.data,
                 &weight.data,
                 weight.ggml_type,
@@ -1144,7 +1144,7 @@ impl Tensor {
         );
 
         if weight.ggml_type == GGML_TYPE_F32 {
-            if let Some(out) = crate::metal_backend::try_matmul_nt_f32_bytes(
+            if let Some(out) = crate::accel::try_matmul_nt_f32_bytes(
                 &x.data,
                 &weight.data,
                 batch,
@@ -1162,7 +1162,7 @@ impl Tensor {
                 };
             }
         } else if weight.ggml_type == GGML_TYPE_F16 {
-            if let Some(out) = crate::metal_backend::try_matmul_nt_f16_bytes(
+            if let Some(out) = crate::accel::try_matmul_nt_f16_bytes(
                 &x.data,
                 &weight.data,
                 batch,
@@ -1183,7 +1183,7 @@ impl Tensor {
             match weight.ggml_type {
                 GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1
                 | GGML_TYPE_Q8_0 => {
-                    if let Some(out) = crate::metal_backend::try_matmul_nt_ggml_bytes(
+                    if let Some(out) = crate::accel::try_matmul_nt_ggml_bytes(
                         &x.data,
                         &weight.data,
                         weight.ggml_type,
@@ -1633,11 +1633,11 @@ impl Tensor {
         let out_len = (in_len + 2 * pad - ksize) / stride + 1;
 
         if let Some(im2col) =
-            crate::metal_backend::try_im2col_1d_f32(&input.data, ch_in, in_len, ksize, stride, pad)
+            crate::accel::try_im2col_1d_f32(&input.data, ch_in, in_len, ksize, stride, pad)
         {
             let k = ch_in * ksize;
             if let Some(mm_out) =
-                crate::metal_backend::try_matmul_nt_f32(&im2col, &weight.data, out_len, k, ch_out)
+                crate::accel::try_matmul_nt_f32(&im2col, &weight.data, out_len, k, ch_out)
             {
                 let mut out = vec![0.0f32; ch_out * out_len];
                 let out_ptr = SendPtr::new(out.as_mut_ptr());
@@ -1702,7 +1702,7 @@ impl Tensor {
             let pad = ksize / 2;
             let out_len = (in_len + 2 * pad - ksize) / stride + 1;
 
-            if let Some(im2col) = crate::metal_backend::try_im2col_1d_f32(
+            if let Some(im2col) = crate::accel::try_im2col_1d_f32(
                 &input.data,
                 ch_in,
                 in_len,
@@ -1712,14 +1712,14 @@ impl Tensor {
             ) {
                 let k = ch_in * ksize;
                 let mm_out = match weight.ggml_type {
-                    GGML_TYPE_F32 => crate::metal_backend::try_matmul_nt_f32_bytes(
+                    GGML_TYPE_F32 => crate::accel::try_matmul_nt_f32_bytes(
                         &im2col,
                         &weight.data,
                         out_len,
                         k,
                         ch_out,
                     ),
-                    GGML_TYPE_F16 => crate::metal_backend::try_matmul_nt_f16_bytes(
+                    GGML_TYPE_F16 => crate::accel::try_matmul_nt_f16_bytes(
                         &im2col,
                         &weight.data,
                         out_len,
@@ -1730,7 +1730,7 @@ impl Tensor {
                     | GGML_TYPE_Q8_0
                         if quant_gpu_enabled() =>
                     {
-                        crate::metal_backend::try_matmul_nt_ggml_bytes(
+                        crate::accel::try_matmul_nt_ggml_bytes(
                             &im2col,
                             &weight.data,
                             weight.ggml_type,
