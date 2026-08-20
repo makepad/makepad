@@ -10,6 +10,7 @@ use makepad_render::{
     DrawSceneScreen, DrawSceneShadow, DrawSceneSkinned, DrawSceneSky, DrawSceneTerrain, DrawSceneTexture,
     PreviewLook, PreviewStage, SceneDraws, Renderer,
 };
+use makepad_asset_importer::stateful_billboard::{SpriteFrame, StatefulBillboard};
 use makepad_widgets::*;
 use std::path::Path;
 
@@ -194,24 +195,87 @@ fn frame_world_size(w: u32, h: u32, px: f32) -> (f32, f32) {
     ((w as f32 * px).max(0.04), (h as f32 * px).max(0.04))
 }
 
-fn decode_sprite_texture(cx: &mut Cx, png: &[u8]) -> Option<(Texture, u32, u32)> {
-    let image = ImageBuffer::from_png(png).ok()?;
-    let w = image.width.max(1) as u32;
-    let h = image.height.max(1) as u32;
-    Some((image.into_new_texture(cx), w, h))
+/// Frame pixels of a stateful billboard, decoded once per source file.
+///
+/// A packed-sheet manifest (`sheet <cols> <cell_w> <cell_h>` + `cell <n>`
+/// per frame) names ONE PNG for every frame: it is decoded once and each
+/// frame is cut out of its cell at the authored size. A legacy manifest
+/// still reads one PNG per frame. Both hand back the same pixels, so every
+/// viewer plays a sheet-backed actor exactly as it played loose frames.
+pub struct BillboardFrames<'a> {
+    manifest: &'a Path,
+    bb: &'a StatefulBillboard,
+    decoded: Vec<(String, Option<ImageBuffer>)>,
+}
+
+impl<'a> BillboardFrames<'a> {
+    pub fn new(manifest: &'a Path, bb: &'a StatefulBillboard) -> Self {
+        Self {
+            manifest,
+            bb,
+            decoded: Vec::new(),
+        }
+    }
+
+    /// Decoded pixels of one frame, or `None` when its file is missing.
+    pub fn image(&mut self, frame: &SpriteFrame) -> Option<ImageBuffer> {
+        if !self.decoded.iter().any(|(f, _)| *f == frame.file) {
+            let path = self.bb.resolve_frame(self.manifest, frame);
+            let image = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| ImageBuffer::from_png(&bytes).ok());
+            self.decoded.push((frame.file.clone(), image));
+        }
+        let source = self
+            .decoded
+            .iter()
+            .find(|(f, _)| *f == frame.file)
+            .and_then(|(_, i)| i.as_ref())?;
+        match self.bb.frame_rect(frame) {
+            Some(rect) => cut_cell(source, rect),
+            None => Some(source.clone()),
+        }
+    }
+}
+
+/// Copy `(x, y, w, h)` out of a decoded sheet. Refuses a rect that leaves
+/// the sheet rather than smearing whatever follows it in memory.
+fn cut_cell(sheet: &ImageBuffer, rect: (u32, u32, u32, u32)) -> Option<ImageBuffer> {
+    let (x, y, w, h) = (
+        rect.0 as usize,
+        rect.1 as usize,
+        rect.2 as usize,
+        rect.3 as usize,
+    );
+    if w == 0 || h == 0 || x + w > sheet.width || y + h > sheet.height {
+        return None;
+    }
+    if sheet.data.len() < sheet.width * sheet.height {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for row in 0..h {
+        let start = (y + row) * sheet.width + x;
+        for &p in &sheet.data[start..start + w] {
+            rgba.push(((p >> 16) & 0xFF) as u8);
+            rgba.push(((p >> 8) & 0xFF) as u8);
+            rgba.push((p & 0xFF) as u8);
+            rgba.push(((p >> 24) & 0xFF) as u8);
+        }
+    }
+    ImageBuffer::new(&rgba, w, h).ok()
 }
 
 impl BillboardView {
     pub fn load_manifest(&mut self, cx: &mut Cx, path: &Path) {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        let Ok(bb) =
-            makepad_asset_importer::stateful_billboard::StatefulBillboard::parse(&text)
-        else {
+        let Ok(bb) = StatefulBillboard::parse(&text) else {
             self.states.clear();
             self.status = "not a stateful billboard".into();
             self.area.redraw(cx);
             return;
         };
+        let mut pixels = BillboardFrames::new(path, &bb);
         self.facings = bb.resolved_facings();
         let mut states = Vec::new();
         let names: Vec<String> = if bb.states.is_empty() {
@@ -227,16 +291,15 @@ impl BillboardView {
             let mut by_rot = vec![Vec::new(); nrot + 1];
             for rot in 0..=self.facings {
                 for faced in bb.frames_for_state_facing(&name, rot) {
-                    let file = bb.resolve_frame(path, faced.frame);
-                    if let Ok(png) = std::fs::read(&file) {
-                        if let Some((texture, w, h)) = decode_sprite_texture(cx, &png) {
-                            by_rot[rot as usize].push(BbFrame {
-                                texture,
-                                w: faced.frame.w.max(w).max(1),
-                                h: faced.frame.h.max(h).max(1),
-                                flip: faced.flip,
-                            });
-                        }
+                    if let Some(image) = pixels.image(faced.frame) {
+                        let w = image.width.max(1) as u32;
+                        let h = image.height.max(1) as u32;
+                        by_rot[rot as usize].push(BbFrame {
+                            texture: image.into_new_texture(cx),
+                            w: faced.frame.w.max(w).max(1),
+                            h: faced.frame.h.max(h).max(1),
+                            flip: faced.flip,
+                        });
                     }
                 }
             }
@@ -588,5 +651,112 @@ mod tests {
         assert!(dw > sw);
         assert!(dh < sh * 0.5);
         assert!(dh < STAND_HEIGHT * 0.5);
+    }
+
+    fn sheet_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mp-bbview-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 2 cells of 4x6, cell 0 red, cell 1 green, padding transparent.
+    fn write_two_cell_sheet(path: &std::path::Path) {
+        let (w, h) = (8usize, 6usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let color = match (x < 4, x >= 4) {
+                    (true, _) => [255u8, 0, 0, 255],
+                    (_, true) => [0, 255, 0, 255],
+                    _ => [0, 0, 0, 0],
+                };
+                rgba[i..i + 4].copy_from_slice(&color);
+            }
+        }
+        let png =
+            makepad_asset_importer::classic_import::encode_png_rgba(&rgba, w as u32, h as u32)
+                .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+
+    #[test]
+    fn sheet_frames_are_cut_out_of_their_cells() {
+        let dir = sheet_scratch("cells");
+        write_two_cell_sheet(&dir.join("troo.png"));
+        let manifest = dir.join("troo.billboard");
+        std::fs::write(
+            &manifest,
+            "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             sheet 2 4 6\n\
+             state walk 0 2 1 8\n\
+             frame 0 A 1 4 6 troo.png cell 0\n\
+             frame 1 B 1 3 5 troo.png cell 1\n",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let bb = StatefulBillboard::parse(&text).unwrap();
+        let mut pixels = BillboardFrames::new(&manifest, &bb);
+        let a = pixels.image(&bb.frames[0]).expect("cell 0");
+        assert_eq!((a.width, a.height), (4, 6));
+        assert_eq!(a.data[0] & 0x00ff_ffff, 0x00ff_0000, "cell 0 is red");
+        // A frame smaller than its cell keeps its authored size, top-left.
+        let b = pixels.image(&bb.frames[1]).expect("cell 1");
+        assert_eq!((b.width, b.height), (3, 5));
+        assert_eq!(b.data[0] & 0x00ff_ffff, 0x0000_ff00, "cell 1 is green");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_frames_still_decode_whole_files() {
+        let dir = sheet_scratch("legacy");
+        write_two_cell_sheet(&dir.join("trooa1.png"));
+        let manifest = dir.join("troo.billboard");
+        std::fs::write(
+            &manifest,
+            "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             state walk 0 1 1 8\n\
+             frame 0 A 1 8 6 trooa1.png\n",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let bb = StatefulBillboard::parse(&text).unwrap();
+        let mut pixels = BillboardFrames::new(&manifest, &bb);
+        let a = pixels.image(&bb.frames[0]).expect("whole png");
+        assert_eq!((a.width, a.height), (8, 6), "no sheet header, no cropping");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cell_outside_the_sheet_is_refused() {
+        let dir = sheet_scratch("outside");
+        write_two_cell_sheet(&dir.join("troo.png"));
+        let manifest = dir.join("troo.billboard");
+        std::fs::write(
+            &manifest,
+            "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             sheet 2 4 6\n\
+             state walk 0 1 1 8\n\
+             frame 0 A 1 4 6 troo.png cell 9\n",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let bb = StatefulBillboard::parse(&text).unwrap();
+        let mut pixels = BillboardFrames::new(&manifest, &bb);
+        assert!(
+            pixels.image(&bb.frames[0]).is_none(),
+            "smeared pixels are worse than a missing frame"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
