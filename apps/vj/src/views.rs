@@ -359,6 +359,13 @@ script_mod! {
     mod.widgets.VideoProgram = set_type_default() do mod.widgets.VideoProgramBase{
         width: Fill
         height: Fill
+        // Karaoke subtitles. The size is set per draw from the picture's
+        // height (the same widget is a 200px console preview and a 4K
+        // projector output), so this is only the family and a sane default.
+        draw_lyric +: {
+            color: #xf2f6fa
+            text_style: theme.font_bold{font_size: 24}
+        }
     }
 
     // Same as asset-ui SpriteFitImage's rotation-aware, nearest-filtered
@@ -879,6 +886,16 @@ pub struct DrawProgram {
     pub fx_phase2: f32,
 }
 
+/// One frame of karaoke, as the program should draw it: the line being sung,
+/// the line after it, and how far the sweep has crossed the current one.
+/// Text, not indices — the widget knows nothing about decks or transcripts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KaraokeOverlay {
+    pub current: Option<String>,
+    pub next: Option<String>,
+    pub progress: f32,
+}
+
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
 pub struct VideoProgram {
     #[uid]
@@ -891,12 +908,20 @@ pub struct VideoProgram {
     layout: Layout,
     #[live]
     draw_program: DrawProgram,
+    /// Karaoke subtitles, drawn over the composited program. They live in the
+    /// program widget rather than as a sibling overlay so that EVERY surface
+    /// showing the program — the output window on the projector and the
+    /// console's preview — carries the same words with no extra layout.
+    #[live]
+    draw_lyric: DrawText,
     #[rust]
     area: Area,
     #[rust]
     tex_a: Option<Texture>,
     #[rust]
     tex_b: Option<Texture>,
+    #[rust]
+    karaoke: Option<KaraokeOverlay>,
 }
 
 impl VideoProgram {
@@ -931,6 +956,17 @@ impl VideoProgram {
         self.draw_program.mix_p1 = mix.p1.clamp(0.0, 1.0);
         self.draw_program.mix_p2 = mix.p2.clamp(0.0, 1.0);
         self.draw_program.fx_bus = mix.bus.as_f32();
+        self.area.redraw(cx);
+    }
+
+    /// Bind (or clear) the karaoke subtitle. Only a CHANGE redraws: the
+    /// overlay is pushed every frame the program is pumped and the words
+    /// change a few times a minute.
+    pub fn set_karaoke(&mut self, cx: &mut Cx, overlay: Option<KaraokeOverlay>) {
+        if self.karaoke == overlay {
+            return;
+        }
+        self.karaoke = overlay;
         self.area.redraw(cx);
     }
 
@@ -985,7 +1021,214 @@ impl Widget for VideoProgram {
         }
         self.draw_program.draw_abs(cx, rect);
         self.area = self.draw_program.area();
+        self.draw_karaoke(cx, rect);
         DrawStep::done()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// karaoke subtitles
+// ---------------------------------------------------------------------------
+
+/// Words not yet sung: near-white, because it has to read over anything.
+const LYRIC_AHEAD: Vec4f = Vec4f { x: 0.95, y: 0.97, z: 1.0, w: 1.0 };
+/// Words already sung: the console's accent, sweeping left to right.
+const LYRIC_SUNG: Vec4f = Vec4f { x: 0.243, y: 0.878, z: 0.690, w: 1.0 };
+/// The line after this one, dimmed — always on screen, always one ahead.
+const LYRIC_NEXT: Vec4f = Vec4f { x: 0.78, y: 0.84, z: 0.90, w: 0.72 };
+/// The outline. Video is not a background you can choose, so the text carries
+/// its own: a ring of near-black stamped under the WHOLE line, so the sung
+/// half and the unsung half are equally legible over anything.
+const LYRIC_OUTLINE: Vec4f = Vec4f { x: 0.0, y: 0.0, z: 0.0, w: 0.92 };
+/// Depth granted to each text pass. Comfortably above the 1e-6 a glyph index
+/// contributes and far below the 10.0 the dock's overlays use.
+const LYRIC_DEPTH_STEP: f32 = 0.01;
+
+/// The eight directions the outline is stamped in.
+const OUTLINE_RING: [(f64, f64); 8] = [
+    (-1.0, 0.0),
+    (1.0, 0.0),
+    (0.0, -1.0),
+    (0.0, 1.0),
+    (-0.7, -0.7),
+    (0.7, -0.7),
+    (-0.7, 0.7),
+    (0.7, 0.7),
+];
+
+impl VideoProgram {
+    fn measure(&self, cx: &mut Cx2d, text: &str) -> (f64, f64) {
+        let laid = self
+            .draw_lyric
+            .layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        let scale = self.draw_lyric.font_scale;
+        (
+            (laid.size_in_lpxs.width * scale) as f64,
+            (laid.size_in_lpxs.height * scale) as f64,
+        )
+    }
+
+    /// Greedy word wrap against a measured width. Lyric lines are phrases, so
+    /// this almost never fires; when a run-on segment does arrive it breaks
+    /// rather than running off the projector.
+    fn wrap_rows(&self, cx: &mut Cx2d, text: &str, max_width: f64) -> Vec<String> {
+        if max_width <= 0.0 || self.measure(cx, text).0 <= max_width {
+            return vec![text.to_string()];
+        }
+        let mut rows: Vec<String> = Vec::new();
+        let mut row = String::new();
+        for word in text.split_whitespace() {
+            if row.is_empty() {
+                row.push_str(word);
+                continue;
+            }
+            let candidate = format!("{row} {word}");
+            if self.measure(cx, &candidate).0 > max_width {
+                rows.push(std::mem::take(&mut row));
+                row.push_str(word);
+            } else {
+                row = candidate;
+            }
+        }
+        if !row.is_empty() {
+            rows.push(row);
+        }
+        if rows.is_empty() {
+            rows.push(text.to_string());
+        }
+        rows
+    }
+
+    /// One centred row.
+    ///
+    /// The WHOLE line is drawn first, always: karaoke never reveals text a
+    /// letter at a time — a singer has to be able to read the line before
+    /// singing it. Then the part already sung is drawn again over the top in
+    /// the accent colour, so the green boundary sweeps across letters that
+    /// were legible all along. Text and progress are independent.
+    ///
+    /// Every pass takes its own `draw_depth` slice. Glyph quads carry their
+    /// index as depth, so two passes over the same string land their k-th
+    /// glyphs at exactly the same depth and the second one loses the depth
+    /// test — which is a line that draws its outline and then silently drops
+    /// half its letters. Stepping the depth per pass is what makes the
+    /// overdraw legal.
+    fn draw_lyric_row(
+        &mut self,
+        cx: &mut Cx2d,
+        row: &str,
+        centre_x: f64,
+        top: f64,
+        fill: Vec4f,
+        sung_chars: usize,
+        depth: &mut f32,
+    ) {
+        let (width, _) = self.measure(cx, row);
+        let left = centre_x - width * 0.5;
+        let ring = (self.draw_lyric.text_style.font_size as f64 * 0.075).max(1.25);
+        self.draw_lyric.color = LYRIC_OUTLINE;
+        for (dx, dy) in OUTLINE_RING {
+            self.draw_lyric.draw_depth = *depth;
+            *depth += LYRIC_DEPTH_STEP;
+            self.draw_lyric
+                .draw_abs(cx, dvec2(left + dx * ring, top + dy * ring), row);
+        }
+        self.draw_lyric.draw_depth = *depth;
+        *depth += LYRIC_DEPTH_STEP;
+        self.draw_lyric.color = fill;
+        self.draw_lyric.draw_abs(cx, dvec2(left, top), row);
+        let split = row
+            .char_indices()
+            .nth(sung_chars)
+            .map(|(at, _)| at)
+            .unwrap_or(row.len());
+        let sung = &row[..split];
+        if !sung.is_empty() {
+            self.draw_lyric.draw_depth = *depth;
+            *depth += LYRIC_DEPTH_STEP;
+            self.draw_lyric.color = LYRIC_SUNG;
+            self.draw_lyric.draw_abs(cx, dvec2(left, top), sung);
+        }
+    }
+
+    /// The two-row karaoke block, anchored to the bottom of the picture:
+    /// the line being sung on top with the sweep across it, the line after it
+    /// dim below. The lower row is the whole point — a singer always has the
+    /// next words in view before they are needed.
+    fn draw_karaoke(&mut self, cx: &mut Cx2d, rect: Rect) {
+        let Some(overlay) = self.karaoke.clone() else { return };
+        if overlay.current.is_none() && overlay.next.is_none() {
+            return;
+        }
+        if rect.size.x < 40.0 || rect.size.y < 30.0 {
+            return;
+        }
+        // The subtitle scales with the picture, so the console preview and a
+        // projector-sized output window read the same.
+        let base = (rect.size.y as f32 * 0.052).clamp(9.0, 40.0);
+        let max_width = rect.size.x * 0.90;
+        let centre_x = rect.pos.x + rect.size.x * 0.5;
+
+        self.draw_lyric.text_style.font_size = base;
+        let current = overlay
+            .current
+            .as_ref()
+            .map(|text| self.wrap_rows(cx, text, max_width))
+            .unwrap_or_default();
+        let current_height = if current.is_empty() {
+            0.0
+        } else {
+            self.measure(cx, "Hg").1
+        };
+
+        self.draw_lyric.text_style.font_size = base * 0.72;
+        let next = overlay
+            .next
+            .as_ref()
+            .map(|text| self.wrap_rows(cx, text, max_width))
+            .unwrap_or_default();
+        let next_height = if next.is_empty() {
+            0.0
+        } else {
+            self.measure(cx, "Hg").1
+        };
+
+        let gap = if current.is_empty() || next.is_empty() {
+            0.0
+        } else {
+            current_height * 0.22
+        };
+        let block = current.len() as f64 * current_height
+            + gap
+            + next.len() as f64 * next_height;
+        let margin = (rect.size.y * 0.06).max(6.0);
+        let mut y = rect.pos.y + rect.size.y - margin - block;
+        // A block taller than the picture is pinned to the top rather than
+        // pushed off it.
+        y = y.max(rect.pos.y + 2.0);
+
+        let mut depth = 0.0f32;
+        if !current.is_empty() {
+            self.draw_lyric.text_style.font_size = base;
+            let total: usize = current.iter().map(|row| row.chars().count()).sum();
+            let mut sung = (overlay.progress.clamp(0.0, 1.0) as f64 * total as f64).round() as usize;
+            for row in &current {
+                let count = row.chars().count();
+                let take = sung.min(count);
+                sung -= take;
+                self.draw_lyric_row(cx, row, centre_x, y, LYRIC_AHEAD, take, &mut depth);
+                y += current_height;
+            }
+            y += gap;
+        }
+        if !next.is_empty() {
+            self.draw_lyric.text_style.font_size = base * 0.72;
+            for row in &next {
+                self.draw_lyric_row(cx, row, centre_x, y, LYRIC_NEXT, 0, &mut depth);
+                y += next_height;
+            }
+        }
+        self.draw_lyric.draw_depth = 0.0;
     }
 }
 

@@ -19,6 +19,8 @@ makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-audio-decode = { path = "../../libs/audio_decode" }
 # Four-stem source separation for the music decks' stem mix.
 makepad-ai-stems = { path = "../../libs/ai/models/stems" }
+# Whisper transcription of the separated vocals stem: karaoke subtitles.
+makepad-voice = { path = "../../libs/voice" }
 makepad-asset-client = { path = "../../libs/asset/client" }
 # 3D program lane: skinned-GLB playback via the renderer.
 makepad-render = { path = "../../libs/render" }

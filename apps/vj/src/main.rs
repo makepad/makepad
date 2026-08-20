@@ -1393,6 +1393,8 @@ struct DeckRefs {
     stem_knobs: Vec<SliderRef>,
     stem_kills: Vec<ButtonRef>,
     stem_labels: Vec<LabelRef>,
+    /// The transcript panel filling the bottom of the deck column.
+    lyrics: WidgetRef,
 }
 
 impl DeckRefs {
@@ -1426,6 +1428,7 @@ impl DeckRefs {
             stem_knobs: ids.stem_knobs.iter().map(|p| ui.slider(cx, p)).collect(),
             stem_kills: ids.stem_kills.iter().map(|p| ui.button(cx, p)).collect(),
             stem_labels: ids.stem_labels.iter().map(|p| ui.label(cx, p)).collect(),
+            lyrics: ui.widget(cx, ids.lyrics),
         }
     }
 }
@@ -1503,6 +1506,7 @@ struct MusicDeckIds {
     /// Vocals, drums, bass, other — engine stem order.
     stem_knobs: [&'static [LiveId]; 4],
     stem_kills: [&'static [LiveId]; 4],
+    lyrics: &'static [LiveId],
     /// The legends over those knobs, tinted to match the waveform.
     stem_labels: [&'static [LiveId]; 4],
 }
@@ -1561,6 +1565,7 @@ impl MusicDeckIds {
                     ids!(deck_a_label_bass),
                     ids!(deck_a_label_other),
                 ],
+                lyrics: ids!(deck_a_lyrics),
             },
             DeckId::B => MusicDeckIds {
                 title: ids!(deck_b_title),
@@ -1613,6 +1618,7 @@ impl MusicDeckIds {
                     ids!(deck_b_label_bass),
                     ids!(deck_b_label_other),
                 ],
+                lyrics: ids!(deck_b_lyrics),
             },
         }
     }
@@ -7280,7 +7286,7 @@ impl App {
             self.push_deck_wave(cx, done.deck);
             // The grid is what quantizes the karaoke display to the music;
             // a transcript that landed before it must be re-scheduled now.
-            self.rebuild_karaoke(done.deck);
+            self.rebuild_karaoke(cx, done.deck);
             self.music_rows.clear();
         }
     }
@@ -7419,7 +7425,7 @@ impl App {
                         continue;
                     }
                     self.deck_lyrics[deck.index()] = Some(lyrics);
-                    self.rebuild_karaoke(deck);
+                    self.rebuild_karaoke(cx, deck);
                     if self.karaoke_on {
                         self.video_pump = cx.new_next_frame();
                     }
@@ -7432,18 +7438,57 @@ impl App {
     /// the grid decides where the appear/leave moments land, so this runs
     /// whenever EITHER arrives — they land in either order, and a track whose
     /// analysis is still running would otherwise keep an ungridded schedule.
-    fn rebuild_karaoke(&mut self, deck: DeckId) {
+    fn rebuild_karaoke(&mut self, cx: &mut Cx, deck: DeckId) {
         let index = deck.index();
-        let Some(lyrics) = self.deck_lyrics[index].as_ref() else {
-            self.deck_karaoke[index] = None;
-            return;
+        match self.deck_lyrics[index].as_ref() {
+            Some(lyrics) => {
+                let grid = self.deck_analysis[index].as_ref().map(|a| &a.grid);
+                let timing = KaraokeTiming::from_grid(grid);
+                self.deck_karaoke[index] = Some(Arc::new(KaraokeSchedule::build(
+                    lyrics.lines.clone(),
+                    timing,
+                )));
+            }
+            None => self.deck_karaoke[index] = None,
+        }
+        self.push_deck_lyrics(cx, deck);
+    }
+
+    /// Hand the deck's transcript to its reader panel. Only when it changes:
+    /// the playhead goes in every frame, the lines a few times a session.
+    fn push_deck_lyrics(&mut self, cx: &mut Cx, deck: DeckId) {
+        let index = deck.index();
+        let rows: Vec<crate::music_view::LyricRow> = self.deck_lyrics[index]
+            .as_ref()
+            .map(|lyrics| {
+                lyrics
+                    .lines
+                    .iter()
+                    .map(|line| crate::music_view::LyricRow {
+                        start_secs: line.start_secs,
+                        end_secs: line.end_secs,
+                        text: line.text.clone(),
+                        stamp: crate::music_view::lyric_stamp(line.start_secs),
+                        words: line.words.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hint = if !self.deck_lyrics_status[index].is_empty() {
+            self.deck_lyrics_status[index].clone()
+        } else if self.decks.deck(deck).is_loaded() {
+            "lyrics: waiting for separation".to_string()
+        } else {
+            String::new()
         };
-        let grid = self.deck_analysis[index].as_ref().map(|a| &a.grid);
-        let timing = KaraokeTiming::from_grid(grid);
-        self.deck_karaoke[index] = Some(Arc::new(KaraokeSchedule::build(
-            lyrics.lines.clone(),
-            timing,
-        )));
+        let widget = self.music_refs.decks[index].lyrics.clone();
+        {
+            if let Some(mut reader) = widget.borrow_mut::<crate::music_view::VjLyricReader>() {
+                reader.set_lines(cx, rows);
+                reader.set_placeholder(cx, &hint);
+            }
+        }
+        drop(widget);
     }
 
     /// What the program should be showing right now: the live deck's current
@@ -7457,7 +7502,7 @@ impl App {
         let deck = crate::lyrics::live_deck(self.decks.crossfader, playing_a, playing_b);
         let schedule = self.deck_karaoke[deck.index()].as_ref()?;
         let (position, _, _) = self.mixer.deck_position(deck);
-        let frame = schedule.at(position);
+        let frame = schedule.at(position + crate::lyrics::display_offset_secs());
         if frame.current.is_none() && frame.next.is_none() {
             return None;
         }
@@ -8419,12 +8464,32 @@ impl App {
         });
         if moving {
             self.music_pump = cx.new_next_frame();
+            // Karaoke lives on the PROGRAM, which normally only redraws when
+            // there is video to redraw. A DJ set over a black program is the
+            // usual case, so a playing deck has to keep the program's pump
+            // alive too or the words would never advance.
+            if self.karaoke_on {
+                self.video_pump = cx.new_next_frame();
+            }
         }
     }
 
     /// Fresh playheads into the lanes, and nothing else: this runs at
     /// display cadence during a scratch, so it stays uniform-only work.
     fn push_wave_positions(&mut self, cx: &mut Cx) {
+        for deck in [DeckId::A, DeckId::B] {
+            let (position, _, _, _) = self.mixer.deck_snapshot(deck);
+            let position = position + crate::lyrics::display_offset_secs();
+            let widget = self.music_refs.decks[deck.index()].lyrics.clone();
+            {
+                if let Some(mut reader) =
+                    widget.borrow_mut::<crate::music_view::VjLyricReader>()
+                {
+                    reader.set_position(cx, position);
+                }
+            }
+            drop(widget);
+        }
         let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() else {
             return;
         };
@@ -8471,6 +8536,20 @@ impl App {
             for OverviewEvent::Seek { fraction } in events {
                 let duration = self.decks.deck(deck).duration_secs;
                 let cmds = self.decks.seek_secs(deck, fraction * duration);
+                self.run_deck_cmds(cx, cmds);
+            }
+            // Click a lyric line to put the needle on it — the shortest way
+            // there is to check whether a line's timing is right.
+            let widget = self.music_refs.decks[deck.index()].lyrics.clone();
+            let events = {
+                match widget.borrow_mut::<crate::music_view::VjLyricReader>() {
+                    Some(mut reader) => reader.take_events(),
+                    None => Vec::new(),
+                }
+            };
+            drop(widget);
+            for crate::music_view::LyricEvent::Seek { secs } in events {
+                let cmds = self.decks.seek_secs(deck, secs);
                 self.run_deck_cmds(cx, cmds);
             }
         }
