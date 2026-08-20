@@ -861,7 +861,26 @@ impl AssetClient {
         if prev.revision == *new_revision {
             return Ok(());
         }
-        let previous = self.fetch_asset_manifest(&prev.revision)?;
+        let previous = match self.fetch_asset_manifest(&prev.revision) {
+            Ok(previous) => previous,
+            // The predecessor cannot be read under today's contract — a
+            // schema bump. The guard exists to stop a SILENT downgrade, and
+            // a schema bump is not a silent anything: it is a deliberate,
+            // announced, whole-catalog event, and the re-import that carries
+            // the catalog across it is the only way the head becomes legible
+            // again. Refusing here would make the catalog permanently
+            // un-migratable, which is a worse failure than not being able to
+            // compare one field. It is said out loud rather than passed over.
+            Err(error) if error.is_unreadable_stored_document() => {
+                eprintln!(
+                    "[publish] rights guard: the published head of this asset cannot be read \
+                     under content schema v{} ({error}) — republishing without comparing terms",
+                    makepad_asset_data::CONTENT_SCHEMA_VERSION
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if previous.rights != *new_rights {
             return Err(ClientError::RightsConflict {
                 what: "published asset rights would change",
