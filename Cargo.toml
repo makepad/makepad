@@ -51,6 +51,8 @@ workspace.members = [
     # === studio ===
     "studio/hub",
     "studio/desktop",
+    # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
+    "libs/sqlite_query",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
     # === necessary tools ===
