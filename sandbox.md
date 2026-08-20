@@ -69,16 +69,26 @@ source directly** (no external AI — don't hammer grok). The source goes
 through the authoring/publish path as a game revision; the sandbox
 hot-reloads it; assets stream from the server.
 
-**The two canonical benchmark prompts** (run cold, every iteration):
+**The two canonical benchmark prompts** (run cold, every iteration; the
+wording is FROZEN so runs stay comparable):
 
-1. `make me a little village with driveable cars` — the kit-composition
-   test: kenney buildings/roads snapping on the grid, car-kit vehicles
-   wired as *driveable* entities via the race/drive mode.
+1. `make me a little village with driveable cars and people walking
+   around, and let me walk around in it` — the villa test (the
+   template.splash starting world is the quality/feel bar): kit pieces on
+   the grid, car-kit vehicles as *driveable* entities (walk up, interact,
+   drive, get out), rigged villagers wandering
+   (`game.character` + `game.wander`), and the player as a VISIBLE
+   third-person character (`game.player_character({model})`) — the
+   visible-body default is TAUGHT, the prompt never has to ask for it.
 2. `build me a playable doom with available assets` — the anchor-assembly
    test: a doom world as the fps-mode level, billboard actors placed at
    their spawn anchors, player_start honored, doors as bound states.
 
-"Great" = both prompts, cold, produce something you'd actually play.
+Scored per run: geometric integrity (§4 — grounded, on-grid, no loose
+pieces, no interpenetration), player-is-a-visible-character, cars
+enterable, villagers wandering, tokens + wallclock. "Great" = both
+prompts, cold, produce something you'd actually play — and survive the
+iteration benchmark's follow-up edits (§4.5).
 
 ## 4. The iteration doctrine — fix at the cheapest layer
 
@@ -107,12 +117,90 @@ bounds, orderd by cheapness:
    An optional, versioned, idempotent enrichment pass, routed through the
    server like all AI. Built when the transcripts show it's needed.
 
-A **validation tool** (overlap/gap/fit report) feeds results back into the
-chat so the model self-corrects instead of shipping floating houses.
+**GEOMETRIC INTEGRITY is a requirement, not a style preference** (added
+after the first rendered village put wall panels in the sky): things SIT
+ON THE GROUND — a placement lands at its footprint's ground offset on the
+ground plane unless explicitly elevated onto something; kit pieces are
+never free-floating; tiles meet on the kit's grid module without gaps;
+no interpenetrating placements. Enforced at every layer that can carry
+it: metadata (declared ground offset + footprint), splash defaults
+(placement verbs ground-snap by construction — floating must be asked
+for, not defended against), context (teach it), and the validator.
+
+A **validation tool** (overlap/gap/fit + ground-contact report) feeds
+results back into the chat so the model self-corrects instead of
+shipping floating houses — and the eval harness asserts the integrity
+invariants on every benchmark run, creation and iteration alike.
 
 The iteration log (`local/agent_state/sandbox-llm/loop.md`) records, per
 iteration: prompt, what Qwen did, screenshot, verdict, which layer was
 fixed. That log is the map of what a local 27B needs to be a level designer.
+
+## 4.5 Iterating a live world — base + addon scripts
+
+"Make a little town" is turn ONE. The design requirement is turn two:
+"add an ambulance" — and it must not regenerate 700 tokens or reset the
+world. Iteration is a first-class capability, taught in the context and
+scored in the benchmarks, not an afterthought.
+
+**The mechanism: a level = BASE source + an ordered set of named ADDONS.**
+
+- An addon is a small self-contained splash unit that evals in its own
+  scope against the LIVE world. Every entity it creates is tagged with the
+  addon's identity (the placed.rs marker mechanism, generalized from
+  single placements to script units).
+- Tools: `world.add_addon(name, src)` · `replace_addon(name, src)` ·
+  `remove_addon(name)` · `list_addons()`. `world.place` remains the
+  degenerate single-object addon.
+- **The state law**: the base NEVER re-evals on an addon op — so player
+  transform, score, and entity state survive every edit structurally, not
+  by carefulness. Replace despawns exactly that addon's entities and
+  evals the new version; remove is undo for free.
+- Persistence: the level's source of truth is base + addon list.
+  Flattening to one source is an explicit "bake", never implicit.
+- Addons are also the STREAMING unit (an addon appears the moment its
+  script closes) and the natural unit of the model's edit turn: 30-300
+  tokens instead of a full re-emit.
+
+**Two verbs in the taught context.** Part B teaches CREATE (set_source,
+for a new level or an asked-for rewrite) and ITERATE (emit ONE addon)
+as distinct patterns, with a worked multi-turn example:
+
+1. "make a little town" → base: road grid, houses, two cars (kit-scoped).
+2. "add an ambulance" → query catalog (car-kit has one) → addon
+   `ambulance`: one vehicle spawned NEAR A ROAD read from the base's
+   grid. ~50 tokens. Nothing else changes.
+3. "make it drive around the block" → `replace_addon("ambulance", …)`
+   with a waypoint loop. Only the ambulance blinks.
+4. "make the ambulance driveable" → `replace_addon("ambulance", …)`
+   wiring the vehicle rig / drive-mode entity (same verb the base's cars
+   use) — an addon can change WHAT something is, not just add things.
+5. "remove it" → `remove_addon("ambulance")`.
+
+**Why executable chunks, not diffs.** Two ways a background model can
+return an edit: a DIFF against the current source, or a self-contained
+EXECUTABLE CHUNK that concatenates into the final world. Chunks win for
+a local 27B: a diff must hit exact lines in a source the model saw one
+turn ago (fragile, and a mis-anchored hunk corrupts silently), while a
+chunk either evals or it doesn't — and the eval error is teachable
+feedback the loop already routes. The flattened level IS the
+concatenation of base + addons in order, so "bake" is trivial and the
+addon list doubles as an edit history.
+
+**The knobs law**: bases declare their tunables as NAMED constants
+(car_speed, tree_count, sky preset) — taught style, validated by the
+loop. Then "make the cars slower" is a parameter-override addon touching
+one name, not a base rewrite.
+
+**The iteration benchmark** (beside the two creation benchmarks, replayed
+cold as a scripted conversation): create village → add an ambulance →
+add a fire station near it (spatial reference to a prior addon) → make
+the cars slower (knob override) → remove the ambulance. Scored per turn:
+delta-shaped (any set_source after turn 1 = fail even if the world looks
+right), correct target, state preserved (harness asserts player/score
+untouched on additive edits), tokens per edit, wallclock. Sessions are
+judged, not turns — a model that creates well but trashes the world on
+turn two fails the requirement.
 
 ## 5. Phase 2 — delegation (later)
 
