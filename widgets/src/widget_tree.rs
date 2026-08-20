@@ -69,6 +69,30 @@ fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
     widget_type_names
 }
 
+/// The screen rect a viewer actually sees for `area`, or `None` when the area
+/// is stale or clipped away entirely.
+///
+/// Always the *clipped* rect. `Area::rect` is unclipped, and a widget can be
+/// drawn well outside its container's clip: a `PortalList` deliberately draws
+/// recycled rows past both viewport edges (at least one every frame, more
+/// after a scroll) and relies on the clip to hide them, and every scroll view
+/// does the same at its margins. Reporting those unclipped rects makes the
+/// tree describe rows at coordinates where they are invisible and where a
+/// *different*, genuinely visible widget is drawn — so anything that turns a
+/// reported rect into a click (the `--remote` `/snap` + `/click` loop, a
+/// `makepad_test` locator, an accessibility reader) aims at the wrong widget.
+/// Event hit-testing uses `Area::clipped_rect`; the tree must agree with it.
+fn widget_screen_rect(area: &Area, cx: &Cx) -> Option<Rect> {
+    if !area.is_valid(cx) {
+        return None;
+    }
+    let rect = area.clipped_rect(cx);
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return None;
+    }
+    Some(rect)
+}
+
 // ============================================================================
 // WidgetTree: persistent graph + dense query index
 // ============================================================================
@@ -2009,18 +2033,19 @@ impl WidgetTree {
             let ty_token = live_id_token(ty);
             let area = widget.area();
             if area.is_valid(cx) {
-                let rect = area.rect(cx);
-                let x = rect.pos.x.round() as i64;
-                let y = rect.pos.y.round() as i64;
-                let w = rect.size.x.round() as i64;
-                let h = rect.size.y.round() as i64;
-                if w > 0 && h > 0 && matches_query(mode, needle, &id_token, &ty_token) {
-                    rects.push(format!(
-                        "{} {} {} {} {} {} {}",
-                        dump_index, id_token, ty_token, x, y, w, h
-                    ));
-                    if rects.len() >= 256 {
-                        break;
+                if let Some(rect) = widget_screen_rect(&area, cx) {
+                    let x = rect.pos.x.round() as i64;
+                    let y = rect.pos.y.round() as i64;
+                    let w = rect.size.x.round() as i64;
+                    let h = rect.size.y.round() as i64;
+                    if w > 0 && h > 0 && matches_query(mode, needle, &id_token, &ty_token) {
+                        rects.push(format!(
+                            "{} {} {} {} {} {} {}",
+                            dump_index, id_token, ty_token, x, y, w, h
+                        ));
+                        if rects.len() >= 256 {
+                            break;
+                        }
                     }
                 }
                 dump_index += 1;
@@ -2154,17 +2179,17 @@ impl WidgetTree {
                 .unwrap_or_else(|| "-".to_string());
             let window_context = resolve_window_context(index);
             let (mut x, mut y, width, height) = {
-                let area = widget.area();
-                if area.is_valid(cx) {
-                    let rect = area.rect(cx);
-                    (
+                // Clipped geometry only — a row a `PortalList` drew past its
+                // viewport edge reports nothing rather than a full-size rect
+                // sitting on top of whatever really is drawn there.
+                match widget_screen_rect(&widget.area(), cx) {
+                    Some(rect) => (
                         rect.pos.x.round() as i64,
                         rect.pos.y.round() as i64,
                         rect.size.x.round() as i64,
                         rect.size.y.round() as i64,
-                    )
-                } else {
-                    (0, 0, 0, 0)
+                    ),
+                    None => (0, 0, 0, 0),
                 }
             };
             if let Some(context) = &window_context {
@@ -2421,9 +2446,7 @@ impl WidgetTree {
                 .widget_type_id()
                 .and_then(|type_id| widget_type_names.get(&type_id).copied())
                 .unwrap_or(LiveId(0));
-            let area = widget.area();
-            if area.is_valid(cx) {
-                let rect = area.rect(cx);
+            if let Some(rect) = widget_screen_rect(&widget.area(), cx) {
                 let x = rect.pos.x.round() as i64;
                 let y = rect.pos.y.round() as i64;
                 let w = rect.size.x.round() as i64;
