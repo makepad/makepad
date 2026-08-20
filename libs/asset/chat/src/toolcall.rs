@@ -207,42 +207,61 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
     );
     out.push_str(TOOL_MARKER);
     out.push_str("{\"name\": \"<tool>\", \"args\": {...}}\n");
-    out.push_str(
-        "Then STOP. You will receive a tool result and can continue.\n\
-         Extract a complete prompt from casual speech \
-         (\"hey make me an image of a rusty trawler at dawn\" → \
-         prompt \"rusty fishing trawler at dawn, misty harbor, cinematic lighting\").\n\
-         Pick the tool that matches the content type:\n\
-         image → image.generate; video/clip/movie → video.generate; \
-         sfx/sound effect → audio.generate; spoken words → speech.generate; \
-         song/music → music.generate; 3D model/GLB → mesh.generate; \
-         splat/environment/world → world.generate; \
-         playable character/avatar → character.generate.\n\
-         Image follow-ons use image.generate then=mesh|video|world|character|matte|depth.\n\
-         Generation defaults (model, width, height, steps, then) persist on this session.\n\
-         When the user says change the default model/resolution/steps, call defaults.set.\n\
-         When they ask what the defaults are, call defaults.get.\n\
-         When they ask what models, sizes, or backends exist, call fleet.introspect.\n\
-         Never invent asset or revision ids: use only ids from bound inputs, \
-         tool results, or catalog search.\n\n\
-         Examples:\n",
-    );
-    out.push_str(TOOL_MARKER);
-    out.push_str(
-        "{\"name\":\"image.generate\",\"args\":{\"prompt\":\"rusty fishing trawler at dawn, misty harbor\"}}\n",
-    );
-    out.push_str(TOOL_MARKER);
-    out.push_str(
-        "{\"name\":\"video.generate\",\"args\":{\"prompt\":\"trawler cutting through fog at dawn\"}}\n",
-    );
-    out.push_str(TOOL_MARKER);
-    out.push_str(
-        "{\"name\":\"audio.generate\",\"args\":{\"prompt\":\"heavy steel hatch slam\"}}\n",
-    );
-    out.push_str(TOOL_MARKER);
-    out.push_str(
-        "{\"name\":\"mesh.generate\",\"args\":{\"prompt\":\"low-poly sci-fi crate, studio lighting\"}}\n\n",
-    );
+    out.push_str("Then STOP. You will receive a tool result and can continue.\n");
+    // Guidance and examples follow the ADVERTISED surface: teaching a
+    // generation-tool routing table to a session that has no generation
+    // tools both misleads the model and wastes its (local, small) context.
+    let generation = defs.iter().any(|d| d.name == "image.generate");
+    if generation {
+        out.push_str(
+            "Extract a complete prompt from casual speech \
+             (\"hey make me an image of a rusty trawler at dawn\" → \
+             prompt \"rusty fishing trawler at dawn, misty harbor, cinematic lighting\").\n\
+             Pick the tool that matches the content type:\n\
+             image → image.generate; video/clip/movie → video.generate; \
+             sfx/sound effect → audio.generate; spoken words → speech.generate; \
+             song/music → music.generate; 3D model/GLB → mesh.generate; \
+             splat/environment/world → world.generate; \
+             playable character/avatar → character.generate.\n\
+             Image follow-ons use image.generate then=mesh|video|world|character|matte|depth.\n\
+             Generation defaults (model, width, height, steps, then) persist on this session.\n\
+             When the user says change the default model/resolution/steps, call defaults.set.\n\
+             When they ask what the defaults are, call defaults.get.\n\
+             When they ask what models, sizes, or backends exist, call fleet.introspect.\n\
+             Never invent asset or revision ids: use only ids from bound inputs, \
+             tool results, or catalog search.\n\n\
+             Examples:\n",
+        );
+        out.push_str(TOOL_MARKER);
+        out.push_str(
+            "{\"name\":\"image.generate\",\"args\":{\"prompt\":\"rusty fishing trawler at dawn, misty harbor\"}}\n",
+        );
+        out.push_str(TOOL_MARKER);
+        out.push_str(
+            "{\"name\":\"video.generate\",\"args\":{\"prompt\":\"trawler cutting through fog at dawn\"}}\n",
+        );
+        out.push_str(TOOL_MARKER);
+        out.push_str(
+            "{\"name\":\"audio.generate\",\"args\":{\"prompt\":\"heavy steel hatch slam\"}}\n",
+        );
+        out.push_str(TOOL_MARKER);
+        out.push_str(
+            "{\"name\":\"mesh.generate\",\"args\":{\"prompt\":\"low-poly sci-fi crate, studio lighting\"}}\n\n",
+        );
+    } else {
+        out.push_str(
+            "Never invent asset or revision ids: use only ids from tool results \
+             or catalog queries.\n\nExamples:\n",
+        );
+        out.push_str(TOOL_MARKER);
+        out.push_str(
+            "{\"name\":\"assets.query\",\"args\":{\"sql\":\"SELECT canon_alias, kind FROM search_annotations WHERE live=1 AND kind='mesh' LIMIT 20\"}}\n",
+        );
+        out.push_str(TOOL_MARKER);
+        out.push_str(
+            "{\"name\":\"world.set_source\",\"args\":{\"source\":\"game.sky({})\\n...complete level...\"}}\n\n",
+        );
+    }
     out.push_str("Tools:\n");
     for d in defs {
         out.push_str("- ");

@@ -844,9 +844,11 @@ fn json_obj(pairs: Vec<(&str, JsonValue)>) -> JsonValue {
     json_obj_pairs(pairs)
 }
 
-/// The tool-result wire caps one outcome at 16 KiB; keep the rendered
-/// table comfortably inside it by showing fewer rows when needed.
-const MAX_TABLE_BYTES: usize = 12_000;
+/// Rendered-table budget per query result. Well under the 16 KiB outcome
+/// cap on purpose: results live in the model's HISTORY for the rest of the
+/// session, and the serving tier is a local model with a bounded context —
+/// a narrower query beats a bigger table (the truncation footer says so).
+const MAX_TABLE_BYTES: usize = 6_000;
 
 fn run_catalog_query(catalog: &mut CatalogReader, sql: &str) -> ToolOutcome {
     match catalog.query(sql) {
