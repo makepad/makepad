@@ -34,6 +34,13 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 
+/// The independent judge of the grid this file publishes: a second onset
+/// front end, a second tracker, and the standard beat-tracking metrics.
+/// Test-only, and deliberately shares no code with the analysis below.
+#[cfg(test)]
+#[path = "beat_eval.rs"]
+mod beat_eval;
+
 /// Zoomed-waveform resolution. 100 columns/second is one column per 10 ms —
 /// the same hop the onset envelope uses, and fine enough that a kick reads
 /// as a distinct spike at the usual few-seconds-across zoom.
@@ -417,6 +424,20 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
     // Octave check: half and double time are both real peaks in any
     // autocorrelation. Prefer the one the musical prior likes, and let a
     // streaming prior from the live detector break a genuine tie.
+    //
+    // Only the duple relatives are considered, and not for want of trying
+    // the triple ones. A rhythm whose kicks fall a beat and a half apart
+    // peaks hardest at a beat and a half, and no amount of halving or
+    // doubling reaches a tempo two thirds of the real one — so scoring the
+    // 2/3 and 3/2 relatives as well, the way Ellis's tempo estimator scores
+    // duple and triple candidate functions, looks like the obvious fix. It
+    // changes nothing here. On the fixture built to provoke it the relative
+    // never wins the tie at any threshold, because the streaming detector
+    // independently prefers the same wrong pulse and its opinion is part of
+    // the weighting; and across twenty house and techno records the tempo
+    // already matches the tags five times in five, so there is nothing for
+    // it to fix. It is written down rather than left in, because a branch
+    // that never fires is worse than no branch.
     for octave in [best_lag / 2, best_lag.saturating_mul(2)] {
         if octave < min_lag || octave > max_lag {
             continue;
@@ -471,20 +492,10 @@ fn estimate_grid(envelopes: &Envelopes, prior_bpm: Option<f64>) -> TrackGrid {
     // in hop coordinates.
     let comb_offset = offset - HOP_CENTRE;
 
-    // Downbeat: the bar phase whose beats carry the most low-band onset.
-    let mut downbeat_phase = 0u32;
-    let mut best_low = f64::NEG_INFINITY;
-    for phase in 0..4u32 {
-        let energy = comb_energy(
-            &envelopes.low_onset,
-            period * 4.0,
-            comb_offset + phase as f64 * period,
-        );
-        if energy > best_low {
-            best_low = energy;
-            downbeat_phase = (4 - phase) % 4;
-        }
-    }
+    // Downbeat: where the arrangement changes, falling back to the loudest
+    // kick of the bar when the arrangement does not say.
+    let downbeat_phase = phrase_downbeat(envelopes, period, comb_offset)
+        .unwrap_or_else(|| kick_downbeat(envelopes, period, comb_offset));
 
     // Confidence: how much better the comb does than a random phase, times
     // the correlation strength.
@@ -568,18 +579,209 @@ fn onset_peak_near(onset: &[f32], centre: f64, radius: f64) -> Option<(f64, f64)
     Some((best as f64 + HOP_CENTRE, onset[best] as f64))
 }
 
+/// Which beat of the bar starts it, from the loudest kick.
+///
+/// This is the obvious rule and it is nearly worthless on the music this app
+/// plays: four-to-the-floor puts a kick on all four beats deliberately, and
+/// mostly the SAME kick. Measured against the arrangement changes of twenty
+/// house and techno records it named the right beat 31 % of the time, where
+/// guessing names it 25 %. It stays as the fallback because it is better
+/// than nothing on the tracks the phrase evidence cannot read.
+fn kick_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> u32 {
+    let mut downbeat_phase = 0u32;
+    let mut best = f64::NEG_INFINITY;
+    for phase in 0..4u32 {
+        let energy = comb_energy(
+            &envelopes.low_onset,
+            period * 4.0,
+            comb_offset + phase as f64 * period,
+        );
+        if energy > best {
+            best = energy;
+            downbeat_phase = (4 - phase) % 4;
+        }
+    }
+    downbeat_phase
+}
+
+/// How many of the track's biggest arrangement changes to take, and how far
+/// apart to keep them so one drop does not fill the list.
+const PHRASE_BOUNDARIES: usize = 24;
+const PHRASE_SPACING_SECS: f64 = 4.0;
+/// How much of the vote the winning bar position needs over the runner-up
+/// before it is believed rather than the kick rule.
+const PHRASE_MARGIN: f64 = 1.5;
+
+/// Which beat of the bar starts it, from where the track's ARRANGEMENT
+/// changes.
+///
+/// A record does not tell you which of four identical kicks is the one. What
+/// it does tell you is where its phrases are: this music is built in four-,
+/// eight- and sixteen-bar blocks, and the moments it changes — the drop, the
+/// break, the bar the hats arrive, the bar the bass leaves — land on the
+/// first beat of a block essentially always. So the two-second loudness
+/// envelope is differenced, its two dozen largest jumps are taken, and the
+/// bar position they agree on is the downbeat.
+///
+/// Returns `None` when too few of those jumps land near a beat at all, or
+/// when they do not agree — a track whose arrangement is a slow wash has
+/// nothing to say here and should not be made to guess.
+fn phrase_downbeat(envelopes: &Envelopes, period: f64, comb_offset: f64) -> Option<u32> {
+    let loudness: Vec<f32> = envelopes
+        .band_rms
+        .iter()
+        .map(|rms| {
+            ((rms[0] * rms[0] + rms[1] * rms[1] + rms[2] * rms[2]).sqrt() + 1e-6).ln()
+        })
+        .collect();
+    // Two seconds either side: a single bar of silence must not register,
+    // an arrangement change must.
+    let window = (2.0 / HOP_SECS) as usize;
+    if loudness.len() < 3 * window {
+        return None;
+    }
+    let mut prefix = vec![0.0f64; loudness.len() + 1];
+    for index in 0..loudness.len() {
+        prefix[index + 1] = prefix[index] + loudness[index] as f64;
+    }
+    let mean = |from: usize, to: usize| (prefix[to] - prefix[from]) / (to - from).max(1) as f64;
+    let mut change = vec![0.0f64; loudness.len()];
+    for index in window..loudness.len() - window {
+        change[index] = (mean(index, index + window) - mean(index - window, index)).abs();
+    }
+    let mut order: Vec<usize> = (window..loudness.len() - window).collect();
+    order.sort_by(|a, b| {
+        change[*b].partial_cmp(&change[*a]).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let spacing = PHRASE_SPACING_SECS / HOP_SECS;
+    let mut taken: Vec<f64> = Vec::new();
+    for index in order {
+        let at = index as f64;
+        if taken.iter().all(|other| (other - at).abs() > spacing) {
+            taken.push(at);
+        }
+        if taken.len() >= PHRASE_BOUNDARIES {
+            break;
+        }
+    }
+
+    let mut votes = [0usize; 4];
+    let mut counted = 0usize;
+    for at in &taken {
+        let beat = (at - comb_offset) / period;
+        // A change that falls between beats says nothing about which beat
+        // starts the bar.
+        if (beat - beat.round()).abs() > 0.25 {
+            continue;
+        }
+        votes[(beat.round() as i64).rem_euclid(4) as usize] += 1;
+        counted += 1;
+    }
+    if counted < 8 {
+        return None;
+    }
+    let mut order = [0usize, 1, 2, 3];
+    order.sort_by_key(|phase| std::cmp::Reverse(votes[*phase]));
+    let (best, runner_up) = (votes[order[0]], votes[order[1]].max(1));
+    if (best as f64) < PHRASE_MARGIN * runner_up as f64 {
+        return None;
+    }
+    Some(((4 - order[0]) % 4) as u32)
+}
+
+/// One weighted least-squares pass over the beats numbered `from..=to`:
+/// take the onset each predicted beat lands nearest, drop the worst fifth of
+/// the residuals so a bar with no drum on it cannot drag the fit, and return
+/// the line through what is left.
+fn fit_beats(
+    onset: &[f32],
+    period: f64,
+    offset: f64,
+    from: f64,
+    to: f64,
+    radius: f64,
+) -> Option<(f64, f64)> {
+    let mut points: Vec<(f64, f64, f64)> = Vec::new();
+    let mut beat = from.ceil() as i64;
+    let last = to.floor() as i64;
+    while beat <= last {
+        let predicted = offset + beat as f64 * period;
+        if predicted >= 0.0 && predicted - radius < onset.len() as f64 {
+            if let Some((position, weight)) = onset_peak_near(onset, predicted, radius) {
+                points.push((beat as f64, position, weight));
+            }
+        }
+        beat += 1;
+    }
+    if points.len() < 8 {
+        return None;
+    }
+    let mut residuals: Vec<f64> = points
+        .iter()
+        .map(|(beat, at, _)| (at - (offset + beat * period)).abs())
+        .collect();
+    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cut = residuals[(residuals.len() * 4) / 5].max(HOP_CENTRE);
+
+    let (mut sum_w, mut sum_b, mut sum_t, mut sum_bb, mut sum_bt) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (beat, at, weight) in &points {
+        if (at - (offset + beat * period)).abs() > cut {
+            continue;
+        }
+        sum_w += weight;
+        sum_b += weight * beat;
+        sum_t += weight * at;
+        sum_bb += weight * beat * beat;
+        sum_bt += weight * beat * at;
+    }
+    let denominator = sum_w * sum_bb - sum_b * sum_b;
+    if denominator.abs() < 1e-9 {
+        return None;
+    }
+    let next_period = (sum_w * sum_bt - sum_b * sum_t) / denominator;
+    let next_offset = (sum_t - next_period * sum_b) / sum_w;
+    if !next_period.is_finite() || !next_offset.is_finite() || next_period <= 1.0 {
+        return None;
+    }
+    Some((next_period, next_offset))
+}
+
+/// How many beats the first fit looks at.
+///
+/// Short enough that a seed period an eighth of a percent out has walked the
+/// grid less than a tenth of a beat across the window, so every ruling still
+/// finds its own onset. Long enough that the line through them is a tempo
+/// and not a groove: thirty-two beats is eight bars, and eight bars of a
+/// shuffled or syncopated passage fit a line that is a quarter of a percent
+/// off the track's real tempo — measured, on three of eight tracks — which
+/// the doubling then carries outward instead of correcting. A hundred and
+/// twenty-eight beats is thirty-two bars; no groove is that long, and the
+/// walk across it is still under a tenth of a beat.
+const REFIT_FIRST_BEATS: f64 = 128.0;
+
 /// Refit the grid against the onsets it predicts.
 ///
-/// The comb pins the period to about a hundredth of a hop, because that is
-/// as fine as its 48-step sweep goes. A hundredth of a hop is a tenth of a
-/// millisecond per beat, which sounds harmless and is not: over the nine
-/// hundred beats of a seven-minute track it walks the grid the better part
-/// of a tenth of a second, so the rulings sit visibly between the drum hits
-/// everywhere except wherever the comb happened to be anchored. Fitting a
-/// straight line through the onset the grid lands nearest — every beat of
-/// the track, weighted by how strong that onset is, with the worst fifth
-/// dropped so a bar with no drum on it cannot drag the fit — pins the period
-/// to a part in a million and the phase to about a millisecond.
+/// Fitting a straight line through the onset each ruling lands nearest —
+/// weighted by how strong that onset is — pins the period to a part in a
+/// million and the phase to about a millisecond. What it cannot do is find
+/// those onsets in the first place if the seed is bad, and the seed IS bad:
+/// the comb sweeps its period in 48 steps across ±3 %, so one step is an
+/// eighth of a percent, and an eighth of a percent walks the grid most of
+/// half a second across a seven-minute track. Predict every beat from one
+/// end with a seed like that and the far half of the track associates each
+/// ruling with the wrong onset — or with none — and the fit is fitting
+/// noise. Measured against an exhaustive search for the best fixed grid,
+/// that is exactly what was happening: the published tempo sat a twentieth
+/// of a percent off the best one, which is a hundred and seventy
+/// milliseconds of walk, and the rulings drifted visibly off the kicks over
+/// the length of a track.
+///
+/// So the fit starts in the MIDDLE and grows. Thirty-two beats either side of
+/// centre, a seed period a tenth of a percent out has walked less than a
+/// twentieth of a beat and every ruling still finds its own onset. That fit
+/// makes the period good enough to associate a window twice as long, which
+/// makes it good enough for one twice as long again, until the window is the
+/// whole track. Each doubling costs one more pass over the onsets.
 ///
 /// Returns `None` when the track has too few onsets to fit, or when the fit
 /// runs away from the period the comb found; the caller keeps the comb's.
@@ -589,62 +791,53 @@ fn refine_grid(onset: &[f32], seed_period: f64, seed_offset: f64) -> Option<(f64
     }
     let mut period = seed_period;
     let mut offset = seed_offset;
-    for pass in 0..4 {
-        // A wide first look (a fifth of a beat either way) so a seed that is
-        // a few hops out still finds its onsets; tight after that.
-        let radius = period * if pass == 0 { 0.22 } else { 0.10 };
-        let mut points: Vec<(f64, f64, f64)> = Vec::new();
-        let mut beat = 0i64;
-        loop {
-            let predicted = offset + beat as f64 * period;
-            if predicted - radius >= onset.len() as f64 {
+    let mut fitted = false;
+    let mut span = REFIT_FIRST_BEATS;
+    loop {
+        let total = ((onset.len() as f64 - offset) / period).floor();
+        if total < 16.0 {
+            return None;
+        }
+        let window = span.min(total);
+        let centre = total * 0.5;
+        let from = (centre - window * 0.5).max(0.0);
+        let to = (centre + window * 0.5).min(total);
+        // A wide first look so a seed that is a few hops out still finds its
+        // onsets, tight after that.
+        for pass in 0..3 {
+            let radius = period * if pass == 0 { 0.22 } else { 0.10 };
+            // A window that lands on a breakdown has nothing to fit; the
+            // next, longer one will, so carry on rather than give up.
+            let Some((next_period, next_offset)) =
+                fit_beats(onset, period, offset, from, to, radius)
+            else {
                 break;
+            };
+            // The fit refines a tempo; it does not get to choose a different
+            // one.
+            if (next_period / seed_period - 1.0).abs() > 0.05 {
+                return None;
             }
-            if predicted >= 0.0 {
-                if let Some((position, weight)) = onset_peak_near(onset, predicted, radius) {
-                    points.push((beat as f64, position, weight));
-                }
-            }
-            beat += 1;
+            period = next_period;
+            offset = next_offset;
+            fitted = true;
         }
-        if points.len() < 8 {
-            return None;
+        if window >= total {
+            break;
         }
-        let mut residuals: Vec<f64> = points
-            .iter()
-            .map(|(beat, at, _)| (at - (offset + beat * period)).abs())
-            .collect();
-        residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let cut = residuals[(residuals.len() * 4) / 5].max(HOP_CENTRE);
-
-        let (mut sum_w, mut sum_b, mut sum_t, mut sum_bb, mut sum_bt) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        for (beat, at, weight) in &points {
-            if (at - (offset + beat * period)).abs() > cut {
-                continue;
-            }
-            sum_w += weight;
-            sum_b += weight * beat;
-            sum_t += weight * at;
-            sum_bb += weight * beat * beat;
-            sum_bt += weight * beat * at;
-        }
-        let denominator = sum_w * sum_bb - sum_b * sum_b;
-        if denominator.abs() < 1e-9 {
-            return None;
-        }
-        let next_period = (sum_w * sum_bt - sum_b * sum_t) / denominator;
-        let next_offset = (sum_t - next_period * sum_b) / sum_w;
-        if !next_period.is_finite() || !next_offset.is_finite() || next_period <= 1.0 {
-            return None;
-        }
-        // The fit refines a tempo; it does not get to choose a different one.
-        if (next_period / seed_period - 1.0).abs() > 0.05 {
-            return None;
-        }
-        period = next_period;
-        offset = next_offset;
+        span = window * 2.0;
     }
-    Some((period, offset))
+    if !fitted {
+        return None;
+    }
+    // The refit only gets to publish a grid that is better than the one it
+    // was given. Everything above is a search, and a search over real music
+    // can land somewhere worse than where it started; the comb energy over
+    // the whole track — every beat, a ten-millisecond window either side —
+    // is the same measure for both, so it can simply be checked.
+    let seed = comb_energy(onset, seed_period, seed_offset - HOP_CENTRE);
+    let fit = comb_energy(onset, period, offset - HOP_CENTRE);
+    (fit >= seed).then_some((period, offset))
 }
 
 /// The scale that maps a track's own loudness onto the display: one over a
@@ -1385,6 +1578,76 @@ mod tests {
         // …and four beats later too, but not one beat later.
         assert!(grid.is_downbeat(beat_of_first_kick + 4));
         assert!(!grid.is_downbeat(beat_of_first_kick + 1));
+    }
+
+    /// Four-to-the-floor, where the kick rule is blind by construction: the
+    /// same kick on all four beats of every bar, so no bar position carries
+    /// more low end than any other. What DOES say where the bar starts is
+    /// the arrangement — a hat layer that switches on and off every eight
+    /// bars — and it is deliberately put on a bar whose first beat is beat 2
+    /// of the fixture, so the answer is not the default.
+    #[test]
+    fn the_downbeat_comes_from_the_arrangement_when_every_beat_has_a_kick() {
+        let rate = 44_100u32;
+        let bpm = 128.0f64;
+        let seconds = 200.0;
+        let period = 60.0 / bpm;
+        let len = (rate as f64 * seconds) as usize;
+        let mut frames = vec![[0i16; 2]; len];
+        // The arrangement changes every 32 beats, starting at beat 2.
+        let change_beat = |beat: usize| beat >= 2 && (beat - 2) % 32 == 0;
+        let mut hats_on = false;
+        let mut beat = 0usize;
+        let mut changes: Vec<f64> = Vec::new();
+        loop {
+            let at = beat as f64 * period + 0.2;
+            if at >= seconds {
+                break;
+            }
+            if change_beat(beat) {
+                hats_on = !hats_on;
+                changes.push(at);
+            }
+            let mut put = |offset: f64, gain: f64, hz: f64, decay: f64| {
+                let start = ((at + offset) * rate as f64) as usize;
+                for index in 0..(rate as f64 * 0.07) as usize {
+                    if start + index >= len {
+                        break;
+                    }
+                    let time = index as f64 / rate as f64;
+                    let value = gain
+                        * (-decay * time).exp()
+                        * (2.0 * std::f64::consts::PI * hz * time).sin();
+                    let sample = (value * 18_000.0) as i16;
+                    frames[start + index] = [
+                        frames[start + index][0].saturating_add(sample),
+                        frames[start + index][1].saturating_add(sample),
+                    ];
+                }
+            };
+            // The identical kick, every beat.
+            put(0.0, 1.0, 55.0, 38.0);
+            if hats_on {
+                put(period * 0.5, 0.5, 7_000.0, 220.0);
+                put(period * 0.25, 0.3, 7_000.0, 220.0);
+            }
+            beat += 1;
+        }
+        let pcm = TrackPcm { frames, sample_rate: rate };
+        let grid = analyze(&pcm).grid;
+        assert!((grid.bpm - bpm).abs() < 0.5, "bpm {:.2}", grid.bpm);
+        assert!(changes.len() >= 8, "{} arrangement changes", changes.len());
+        let on_the_one = changes
+            .iter()
+            .filter(|at| grid.is_downbeat(grid.beat_at(**at).round() as i64))
+            .count();
+        assert!(
+            on_the_one * 2 > changes.len(),
+            "only {on_the_one} of {} arrangement changes land on a downbeat \
+             (phase {})",
+            changes.len(),
+            grid.downbeat_phase,
+        );
     }
 
     #[test]
