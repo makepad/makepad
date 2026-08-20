@@ -113,11 +113,13 @@ pub(crate) fn convert_wad(
                                     // Doors travel in the GLB; the sidecar
                                     // (and through it the catalog anchors)
                                     // names them and their two heights.
-                                    let as_nav = |d: &DoorMeta| crate::world_nav::NavDoor {
-                                        name: d.name.clone(),
-                                        pos: d.centre,
-                                        closed_y: d.closed_y,
-                                        open_y: d.open_y,
+                                    let as_nav = |d: &DoorMeta| {
+                                        crate::world_nav::NavDoor::vertical(
+                                            d.name.clone(),
+                                            d.centre,
+                                            d.closed_y,
+                                            d.open_y,
+                                        )
                                     };
                                     nav.doors = mesh.doors.iter().map(as_nav).collect();
                                     nav.lifts = mesh.lifts.iter().map(as_nav).collect();
