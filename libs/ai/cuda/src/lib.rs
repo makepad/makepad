@@ -10,6 +10,8 @@ pub mod launch;
 pub mod llm_ops;
 pub mod prof;
 pub mod quant;
+pub mod quant_iq;
+pub mod quant_iq_tables;
 
 pub use driver::*;
 pub use launch::*;
