@@ -49,7 +49,32 @@ const MAX_SOURCE_CONFIG_BYTES: u64 = MAX_DOCUMENT_BYTES as u64;
 const MAX_WALK_DEPTH: usize = 16;
 const MAX_WALK_DIRS: usize = 4096;
 const MAX_WALK_ENTRIES: usize = 8192;
-const MAX_DIR_ENTRIES: usize = 1024;
+/// Entries the walk will collect from ONE directory. A defensive bound on
+/// `list_dir_bounded`'s `names` vector — the whole tree is already bounded
+/// by `MAX_WALK_ENTRIES`, so this only decides how flat a pack may be.
+///
+/// It is NOT a content-contract number: nothing here is encoded, digested,
+/// or compared against a golden. The contract's own shape is much wider —
+/// `MAX_IMPORT_ASSETS` (1024) assets per pack at up to
+/// `MAX_IMPORT_FILES_PER_ASSET` (32) files each.
+///
+/// At 1024 this bound contradicted the packs it serves. Vendors ship flat
+/// kits — every model in one folder — and a STAGED model is five directory
+/// entries that all share one entry key: payload, thumbnail, and the
+/// `.aomesh` / `.ao.png` / `.shadowsdf` the AO bake writes beside it. So
+/// 1024 entries meant ~204 models, and Kenney's brick-kit (296 models,
+/// 1480 entries) and nature-kit (329, ~1645) could not be imported at all.
+///
+/// Sharding such a pack into subdirectories is NOT the alternative: a
+/// directory segment is part of the entry key, and the key is the published
+/// alias (`{source_id}/{pack_name}/{key}`), so sharding renames every asset
+/// in the pack — see
+/// `a_directory_segment_becomes_part_of_the_entry_key_and_the_alias`.
+///
+/// 4096 matches `MAX_WALK_DIRS`, clears the largest real kit better than
+/// twice over, and stays strictly under `MAX_WALK_ENTRIES` so a pack that
+/// is flat AND huge still meets a per-directory refusal it can read.
+const MAX_DIR_ENTRIES: usize = 4096;
 const MAX_GLB_CHUNKS: usize = 8;
 const MAX_GLB_NODES: usize = 4096;
 const MAX_GLB_MESHES: usize = 1024;
@@ -1122,7 +1147,7 @@ fn walk_dir(
     unix::bind_resolved(dir, &root.path, rel)?;
     let names = unix::list_dir_bounded(dir, rel, entries)?;
     let meta = dir.metadata().map_err(|e| {
-        PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {rel}: {e}"))
+        PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {}: {e}", dir_label(rel)))
     })?;
     snaps.push(DirSnapshot {
         rel: rel.to_string(),
@@ -1769,7 +1794,7 @@ mod unix {
         entries: &mut usize,
     ) -> Result<Vec<String>, PackImportError> {
         let before = dir.metadata().map_err(|e| {
-            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {rel}: {e}"))
+            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {}: {e}", dir_label(rel)))
         })?;
         // Reopen from this descriptor via "." so each pass gets a new file
         // description (dup() shares the directory offset and the second
@@ -1779,16 +1804,16 @@ mod unix {
         if names != again {
             return Err(PackImportError::new(
                 PackImportErrorKind::Changed,
-                format!("directory {rel} mutated during listing"),
+                format!("directory {} mutated during listing", dir_label(rel)),
             ));
         }
         let after = dir.metadata().map_err(|e| {
-            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {rel}: {e}"))
+            PackImportError::new(PackImportErrorKind::Io, format!("fstat dir {}: {e}", dir_label(rel)))
         })?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
             return Err(PackImportError::new(
                 PackImportErrorKind::Changed,
-                format!("directory {rel} identity changed during listing"),
+                format!("directory {} identity changed during listing", dir_label(rel)),
             ));
         }
         Ok(names)
@@ -1806,7 +1831,7 @@ mod unix {
             unsafe { close(fd) };
             return Err(PackImportError::new(
                 PackImportErrorKind::Io,
-                format!("fdopendir {rel}: {}", std::io::Error::last_os_error()),
+                format!("fdopendir {}: {}", dir_label(rel), std::io::Error::last_os_error()),
             ));
         }
         let result = collect_dir_names(dp, rel, entries);
@@ -1848,7 +1873,7 @@ mod unix {
                 if err != 0 {
                     return Err(PackImportError::new(
                         PackImportErrorKind::Io,
-                        format!("readdir {rel}: {}", std::io::Error::from_raw_os_error(err)),
+                        format!("readdir {}: {}", dir_label(rel), std::io::Error::from_raw_os_error(err)),
                     ));
                 }
                 break;
@@ -1857,7 +1882,7 @@ mod unix {
             let name = name.to_str().map_err(|_| {
                 PackImportError::new(
                     PackImportErrorKind::Malformed,
-                    format!("non-utf8 name under {rel}"),
+                    format!("non-utf8 name under {}", dir_label(rel)),
                 )
             })?;
             if name == "." || name == ".." {
@@ -1875,7 +1900,10 @@ mod unix {
             if names.len() >= MAX_DIR_ENTRIES {
                 return Err(PackImportError::new(
                     PackImportErrorKind::Content,
-                    format!("directory {rel} exceeds {MAX_DIR_ENTRIES} entries"),
+                    format!(
+                        "directory {} exceeds {MAX_DIR_ENTRIES} entries",
+                        dir_label(rel)
+                    ),
                 ));
             }
             names.push(name.to_string());
@@ -2098,6 +2126,18 @@ mod unix {
                 format!("{what}: path contains NUL"),
             )
         })
+    }
+}
+
+/// A directory's relative path as a person can read it. The pack root's
+/// `rel` is the empty string, which turned every message about it into a
+/// blank ("directory  exceeds 1024 entries") — the one directory every pack
+/// has, and the one a reader most needs named.
+fn dir_label(rel: &str) -> &str {
+    if rel.is_empty() {
+        "<pack root>"
+    } else {
+        rel
     }
 }
 
@@ -7297,6 +7337,123 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, PackImportErrorKind::Content);
         assert!(err.to_string().contains("entries"), "{err}");
+    }
+
+    /// The per-directory bound still exists and still refuses readably —
+    /// expressed against the constant, so it holds at whatever the bound is.
+    #[test]
+    fn a_flat_kit_of_multi_file_models_is_refused_by_the_per_dir_cap() {
+        let pack = test_root("flatkit");
+        // Comfortably over the cap at five entries per model, and well
+        // under MAX_WALK_ENTRIES so the per-directory bound is what bites.
+        let models = MAX_DIR_ENTRIES / 4;
+        for i in 0..models {
+            let stem = format!("brick-{i:04}");
+            fs::write(pack.join(format!("{stem}.png")), valid_png(4, 4)).unwrap();
+            fs::write(pack.join(format!("{stem}.ao.png")), valid_png(4, 4)).unwrap();
+            fs::write(pack.join(format!("{stem}.aomesh")), b"aomesh").unwrap();
+            fs::write(pack.join(format!("{stem}.shadowsdf")), b"sdf").unwrap();
+            fs::write(pack.join(format!("{stem}.jpg")), b"jpeg").unwrap();
+        }
+        let err = compile_pack(&pack, &test_bundle("flatkit_out"), licensed_spec(), None, false)
+            .unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Content);
+        assert!(
+            err.to_string().contains(&format!("exceeds {MAX_DIR_ENTRIES} entries")),
+            "{err}"
+        );
+        // The pack root is the one directory every pack has; it must not
+        // print as a blank ("directory  exceeds 1024 entries").
+        assert!(err.to_string().contains("<pack root>"), "{err}");
+        assert!(
+            !err.to_string().contains("directory  "),
+            "the pack root printed as an empty name: {err}"
+        );
+    }
+
+    /// The bound must admit a real flat vendor kit. Kenney ships every
+    /// model of a kit in one folder, and a STAGED model is five directory
+    /// entries sharing one entry key — `.glb`, `.png`, and the `.aomesh` /
+    /// `.ao.png` / `.shadowsdf` the AO bake writes beside it (pinned by
+    /// `baked_sidecars_attach_to_their_glb_as_derived_roles`).
+    ///
+    /// At `MAX_DIR_ENTRIES = 1024` that meant ~204 models, and brick-kit
+    /// (296) and nature-kit (329) were refused outright: "content:
+    /// directory <pack root> exceeds 1024 entries". This is the arithmetic
+    /// that refusal was, so the bound cannot quietly drift back under it.
+    #[test]
+    fn the_per_dir_cap_admits_a_real_flat_vendor_kit() {
+        /// Kenney's nature-kit, the largest kit on the LOAD surface.
+        const LARGEST_KIT_MODELS: usize = 329;
+        /// glb + thumbnail + aomesh + ao.png + shadowsdf.
+        const STAGED_ENTRIES_PER_MODEL: usize = 5;
+        let needed = LARGEST_KIT_MODELS * STAGED_ENTRIES_PER_MODEL;
+        assert!(
+            MAX_DIR_ENTRIES >= needed,
+            "a flat {LARGEST_KIT_MODELS}-model kit stages {needed} entries in the pack root, \
+             but one directory is capped at {MAX_DIR_ENTRIES}"
+        );
+        // Strictly under the whole-tree bound, so a pack that is flat AND
+        // huge still meets the per-directory refusal rather than the total.
+        assert!(MAX_DIR_ENTRIES < MAX_WALK_ENTRIES);
+        // And the bound stays a bound: it is not quietly wider than the
+        // shape the content contract itself permits.
+        assert!(
+            MAX_DIR_ENTRIES
+                <= makepad_asset_data::limits::MAX_IMPORT_ASSETS
+                    * makepad_asset_data::limits::MAX_IMPORT_FILES_PER_ASSET
+        );
+    }
+
+    /// A directory segment IS part of the entry key, and the key IS the
+    /// catalog alias (`{source_id}/{pack_name}/{key}` — `alias_for`).
+    ///
+    /// So "shard a big flat pack into subdirectories to fit the per-dir
+    /// cap" is not a layout detail: it renames every asset in the pack and
+    /// breaks re-import-as-a-new-revision for all of them. Pinned so the
+    /// cost of that idea shows up as a failing test, not as a silently
+    /// re-identified catalog.
+    #[test]
+    fn a_directory_segment_becomes_part_of_the_entry_key_and_the_alias() {
+        let (flat_path, flat_key, _) = classify_rel("brick-a.png").unwrap();
+        assert_eq!(flat_path, "brick-a.png");
+        assert_eq!(flat_key, "brick-a");
+
+        let (sharded_path, sharded_key, _) = classify_rel("shard-00/brick-a.png").unwrap();
+        assert_eq!(sharded_path, "shard-00/brick-a.png");
+        assert_eq!(
+            sharded_key, "shard-00/brick-a",
+            "sharding changes the entry key, and the key is the asset's identity"
+        );
+        assert_ne!(flat_key, sharded_key);
+
+        // …and that difference reaches the PUBLISHED alias verbatim, through
+        // the real compile — `alias_for` is `{source_id}/{pack_name}/{key}`.
+        let alias_of = |rel: &str, name: &str| -> String {
+            let pack = test_root(name);
+            let path = pack.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, tiny_glb()).unwrap();
+            fs::write(path.with_extension("png"), valid_png(512, 512)).unwrap();
+            let report =
+                compile_pack(&pack, &test_bundle(name), licensed_spec(), None, false).unwrap();
+            let manifest =
+                ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                    .unwrap();
+            manifest
+                .alias_for(&manifest.assets[0].key)
+                .unwrap()
+                .as_str()
+                .to_string()
+        };
+        let flat_alias = alias_of("brick-a.glb", "alias_flat");
+        let sharded_alias = alias_of("shard-00/brick-a.glb", "alias_sharded");
+        assert!(flat_alias.ends_with("/brick-a"), "{flat_alias}");
+        assert!(
+            sharded_alias.ends_with("/shard-00/brick-a"),
+            "a shard directory lands in the catalog alias: {sharded_alias}"
+        );
+        assert_ne!(flat_alias, sharded_alias);
     }
 
     #[test]
