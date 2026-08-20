@@ -3548,41 +3548,6 @@ fn state_write_rows_all(
         .map_err(LlamaError::format)
 }
 
-/// The state-cache row indices one checkpoint writes: the whole input vector
-/// when checkpointing is off (the classic single live row), otherwise element
-/// `checkpoint + 1` of the `[resume_row, w_0..w_n]` vector.
-fn state_write_rows(
-    ctx: &mut Context,
-    input_state_rows: TensorId,
-    recurrent_checkpoints: bool,
-    checkpoint: usize,
-) -> Result<TensorId> {
-    if !recurrent_checkpoints {
-        return Ok(input_state_rows);
-    }
-    let offset = row_size(
-        TensorType::I32,
-        i64::try_from(checkpoint)
-            .map_err(|_| LlamaError::format("state checkpoint index does not fit in i64"))?
-            + 1,
-    )?;
-    ctx.view_1d(input_state_rows, 1, offset)
-        .map_err(LlamaError::format)
-}
-
-/// Slice one token out of a delta-net `[.., .., n_tokens, n_seqs]` tensor,
-/// keeping the source strides so views over `conv_output` stay valid.
-fn view_delta_net_token(ctx: &mut Context, src: TensorId, token: usize) -> Result<TensorId> {
-    let t = require_tensor(ctx, src)?.clone();
-    let offset = t
-        .nb[2]
-        .checked_mul(token)
-        .ok_or_else(|| LlamaError::format("overflow computing delta-net token view offset"))?;
-    ctx.view_4d(
-        src, t.ne[0], t.ne[1], 1, t.ne[3], t.nb[1], t.nb[2], t.nb[3], offset,
-    )
-    .map_err(LlamaError::format)
-}
 
 fn build_delta_net_chunking(
     ctx: &mut Context,
@@ -4690,109 +4655,22 @@ fn build_delta_net_recurrent_decode_from_hidden(
             .map_err(LlamaError::format)?;
     }
 
-    // Speculative verify batches run the scan one token at a time so the state
-    // after every token lands in its own cache row. The scan is inherently
-    // sequential, so this costs only one extra state read+write per extra
-    // token (the projections above still run once for the whole batch); in
-    // exchange, rejecting a draft never needs a second forward pass.
-    let (output, new_state, checkpoint_s_updates) = if use_fused_delta_net && recurrent_checkpoints
-    {
-        let value_head_dim = i64::from(block.value_head_dim);
-        let value_head_count = i64::from(block.value_head_count);
-        let mut state_in = state;
-        let mut flat_outputs = Vec::with_capacity(n_tokens);
-        let mut s_updates = Vec::with_capacity(n_tokens);
-        for token in 0..n_tokens {
-            let q_t = view_delta_net_token(ctx, q_conv, token)?;
-            let k_t = view_delta_net_token(ctx, k_conv, token)?;
-            let v_t = view_delta_net_token(ctx, v_conv, token)?;
-            let gate_t = view_delta_net_token(ctx, gate, token)?;
-            let beta_t = view_delta_net_token(ctx, beta, token)?;
-            let gated_delta = ctx
-                .gated_delta_net(
-                    q_t,
-                    k_t,
-                    v_t,
-                    gate_t,
-                    beta_t,
-                    state_in,
-                    BufferUsage::Activations,
-                )
-                .map_err(LlamaError::format)?;
-            ctx.set_tensor_name(gated_delta, format!("{prefix}.fgdn_ckpt{token}"))
-                .map_err(LlamaError::format)?;
-            // The token's output is the leading, contiguous slice of its own
-            // gated_delta result, so a flat view is enough — no copy needed
-            // before the concat below.
-            let flat = ctx
-                .view_2d(
-                    gated_delta,
-                    value_hidden_size,
-                    n_seqs,
-                    row_size(TensorType::F32, value_hidden_size)?,
-                    0,
-                )
-                .map_err(LlamaError::format)?;
-            ctx.set_tensor_name(flat, format!("{prefix}.output_flat{token}"))
-                .map_err(LlamaError::format)?;
-            flat_outputs.push(flat);
-
-            let new_state_t = ctx
-                .view_4d(
-                    gated_delta,
-                    value_head_dim,
-                    value_head_dim,
-                    value_head_count,
-                    n_seqs,
-                    row_size(TensorType::F32, value_head_dim)?,
-                    row_size(TensorType::F32, value_head_dim * value_head_dim)?,
-                    row_size(
-                        TensorType::F32,
-                        value_head_dim * value_head_dim * value_head_count,
-                    )?,
-                    row_size(TensorType::F32, value_hidden_size * n_seqs)?,
-                )
-                .map_err(LlamaError::format)?;
-            ctx.set_tensor_name(new_state_t, format!("{prefix}.output_state{token}"))
-                .map_err(LlamaError::format)?;
-            let new_state_nb3 = require_tensor(ctx, new_state_t)?.nb[3];
-            let new_state_rows = ctx
-                .view_2d(new_state_t, s_width, n_seqs, new_state_nb3, 0)
-                .map_err(LlamaError::format)?;
-            let write_rows = state_write_rows(ctx, input_state_rows, true, token)?;
-            s_updates.push(
-                ctx.set_rows(s_cache, new_state_rows, write_rows, BufferUsage::State)
-                    .map_err(LlamaError::format)?,
-            );
-            state_in = new_state_t;
-        }
-        // Token outputs are `[value_hidden_size, 1]` columns; a dim-0 concat
-        // then reshape rebuilds the `[vhd, vhc, n_tokens, n_seqs]` layout the
-        // rest of the layer expects, without a strided scatter.
-        let mut assembled = flat_outputs[0];
-        for &flat in &flat_outputs[1..] {
-            assembled = ctx
-                .concat(assembled, flat, 0, BufferUsage::Activations)
-                .map_err(LlamaError::format)?;
-        }
-        let output = ctx
-            .reshape(
-                assembled,
-                &[value_head_dim, value_head_count, n_seq_tokens, n_seqs],
-            )
-            .map_err(LlamaError::format)?;
-        ctx.set_tensor_name(output, format!("{prefix}.output_view"))
-            .map_err(LlamaError::format)?;
-        (output, state_in, s_updates)
-    } else if use_fused_delta_net {
+    // Speculative verify batches need the recurrent state after EVERY token,
+    // not just the last one, so a rejected draft can be undone by resuming the
+    // next step from an earlier cache row instead of re-running the forward.
+    // The fused kernel emits them from the same single call, so the
+    // checkpointed graph costs one extra state store per token and keeps the
+    // node count of an ordinary decode.
+    let (output, new_state, checkpoint_s_updates) = if use_fused_delta_net {
         let gated_delta = ctx
-            .gated_delta_net(
+            .gated_delta_net_with_checkpoints(
                 q_conv,
                 k_conv,
                 v_conv,
                 gate,
                 beta,
                 state,
+                recurrent_checkpoints,
                 BufferUsage::Activations,
             )
             .map_err(LlamaError::format)?;
@@ -4840,12 +4718,41 @@ fn build_delta_net_recurrent_decode_from_hidden(
                         * i64::from(block.value_head_dim)
                         * i64::from(block.value_head_count),
                 )?,
-                row_size(TensorType::F32, value_hidden_size * n_seq_tokens * n_seqs)?,
+                row_size(
+                    TensorType::F32,
+                    value_hidden_size * n_seq_tokens * n_seqs
+                        + if recurrent_checkpoints {
+                            s_width * n_seqs * (n_seq_tokens - 1)
+                        } else {
+                            0
+                        },
+                )?,
             )
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(new_state, format!("{prefix}.output_state"))
             .map_err(LlamaError::format)?;
-        (output, new_state, Vec::new())
+        let checkpoint_updates = if recurrent_checkpoints {
+            // The n state planes are contiguous right after the outputs, so
+            // they are one `[s_width, n_tokens]` view and one `set_rows`.
+            let planes = ctx
+                .view_2d(
+                    gated_delta,
+                    s_width,
+                    n_seq_tokens,
+                    row_size(TensorType::F32, s_width)?,
+                    row_size(TensorType::F32, value_hidden_size * n_seq_tokens * n_seqs)?,
+                )
+                .map_err(LlamaError::format)?;
+            ctx.set_tensor_name(planes, format!("{prefix}.state_checkpoints"))
+                .map_err(LlamaError::format)?;
+            let write_rows = state_write_rows_all(ctx, input_state_rows, true)?;
+            vec![ctx
+                .set_rows(s_cache, planes, write_rows, BufferUsage::State)
+                .map_err(LlamaError::format)?]
+        } else {
+            Vec::new()
+        };
+        (output, new_state, checkpoint_updates)
     } else if n_seq_tokens == 1 {
         let q_scaled = ctx
             .scale(

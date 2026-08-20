@@ -2211,6 +2211,25 @@ impl Context {
         state: TensorId,
         usage: BufferUsage,
     ) -> Result<TensorId, String> {
+        self.gated_delta_net_with_checkpoints(q, k, v, g, beta, state, false, usage)
+    }
+
+    /// `state_checkpoints` makes the op emit the recurrent state after EVERY
+    /// token instead of only the last one — what speculative verification
+    /// needs to undo a rejected draft by resuming from an earlier row. The
+    /// output then carries `n_tokens` state planes instead of one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gated_delta_net_with_checkpoints(
+        &mut self,
+        q: TensorId,
+        k: TensorId,
+        v: TensorId,
+        g: TensorId,
+        beta: TensorId,
+        state: TensorId,
+        state_checkpoints: bool,
+        usage: BufferUsage,
+    ) -> Result<TensorId, String> {
         let v_tensor = self
             .tensor(v)
             .ok_or_else(|| format!("invalid tensor id {}", v))?;
@@ -2233,15 +2252,22 @@ impl Context {
                 expected_state
             ));
         }
+        let state_planes = if state_checkpoints { n_tokens } else { 1 };
         let layout = TensorLayout::for_ggml(
             TensorType::F32,
-            &[sv * h, n_tokens * n_seqs + sv * n_seqs, 1, 1],
+            &[sv * h, n_tokens * n_seqs + sv * n_seqs * state_planes, 1, 1],
         )?;
-        self.new_op_tensor(
+        let id = self.new_op_tensor(
             TensorDesc::new(TensorType::F32, layout, usage),
             Op::GatedDeltaNet,
             &[q, k, v, g, beta, state],
-        )
+        )?;
+        if state_checkpoints {
+            self.tensor_mut(id)
+                .ok_or_else(|| "gated_delta_net tensor vanished".to_string())?
+                .set_op_param_i32(0, 1);
+        }
+        Ok(id)
     }
 
     fn push_tensor(&mut self, mut tensor: Tensor, alloc_data: bool) -> Result<TensorId, String> {

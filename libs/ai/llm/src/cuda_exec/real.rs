@@ -3323,6 +3323,7 @@ impl ExecView<'_> {
                             v.nb[1] / 4,
                             v.nb[2] / 4,
                             v.nb[3] / 4,
+                            t.op_param_i32(0),
                             stream,
                         )
                     },

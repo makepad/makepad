@@ -587,6 +587,7 @@ mod ffi {
             v_h_elems: usize,
             v_t_elems: usize,
             v_s_elems: usize,
+            state_checkpoints: i32,
             stream: Stream,
         ) -> CudaError;
     }
@@ -1168,6 +1169,7 @@ cuda_forward!(gated_delta_net(
     v_h_elems: usize,
     v_t_elems: usize,
     v_s_elems: usize,
+    state_checkpoints: i32,
     stream: Stream,
 ) -> CudaError { mkllm_gated_delta_net });
 
