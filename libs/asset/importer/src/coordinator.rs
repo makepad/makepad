@@ -28,8 +28,8 @@ use crate::gen_kinds::{kind_of, GenKind, InputNeed};
 use crate::glb::inspect_glb;
 use crate::import::{placeholder_thumb, usable_image_thumb};
 use crate::thumbs::{
-    decode_audio, encode_jpeg_bgra, jpeg_dims, placeholder_bgra_512, png_dims, waveform_bgra_512,
-    THUMB_DIM,
+    audio_thumbnail_jpeg, decode_audio, encode_jpeg_bgra, jpeg_dims, placeholder_bgra_512,
+    png_dims, THUMB_DIM,
 };
 use crate::videothumb::probe_video;
 use makepad_asset_client::json::{obj, s, Value};
@@ -595,12 +595,12 @@ fn build_product(
         MediaType::Wav | MediaType::Mp3 | MediaType::Ogg => {
             let pcm = decode_audio(&bytes, kind.media)?;
             let millis = pcm.millis();
-            let strip = waveform_bgra_512(&pcm);
+            let (jpeg, width, height) = audio_thumbnail_jpeg(&pcm)?;
             let thumbnail = PublishThumbnail {
-                bytes: encode_jpeg_bgra(&strip, THUMB_DIM, THUMB_DIM)?,
+                bytes: jpeg,
                 media: ThumbnailMedia::Jpeg,
-                width: THUMB_DIM as u32,
-                height: THUMB_DIM as u32,
+                width,
+                height,
             };
             (millis, None, thumbnail)
         }
