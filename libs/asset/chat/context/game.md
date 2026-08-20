@@ -138,9 +138,20 @@ Query the annotated set like this (ONE query answers it):
   Two or three huts (door side toward the road) make the village.
 - KEEP THINKING SHORT (a few sentences, never geometry derivations); the
   level goes in the world.set_source call, not in your reasoning.
-- Driveable cars: game.car({pos: <on the road>, model:
-  "kenney/car-kit/sedan"}) — also suv, taxi, van, police. Two is plenty.
-- Finish with a playable character near the fountain and a label or two.
+- Driveable cars: game.car({pos: vec3(x, 1.2, z), model:
+  "kenney/car-kit/sedan"}) — also suv, taxi, van, police. Spawn at
+  y 1.2 (the car drops onto its wheels). Two is plenty. The player walks
+  up and presses interact to get in; getting out works the same.
+- THE PLAYER IS A VISIBLE CHARACTER (always, unless first-person is
+  asked): game.player_character({pos, model:
+  "kenney/mini-characters/character-male-a"}) — a rigged body with the
+  follow camera and car enter/exit built in. Rigged people are kind
+  'character' in the catalog (kenney/mini-characters/character-male-a…f,
+  character-female-a…f and more — query them).
+- PEOPLE make it alive: two or three villagers —
+  let v = game.character({pos, model: "kenney/mini-characters/character-female-b", tag: "villager"})
+  game.wander(v, {home: <their spot>, range: 12, speed: 2})
+- Finish with a label on the player and a short hint text.
 
 WORKFLOW EXAMPLE for "make me a small village":
 1. world.get_source (see the running world)
