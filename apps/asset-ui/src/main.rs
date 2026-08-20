@@ -171,7 +171,13 @@ fn import_thumb_frames(cx: &mut Cx, png: &[u8]) -> Option<(Vec<Texture>, f32)> {
 /// Which container a track's bytes are in. The well does not sniff — the
 /// host is the one that knows what it fetched, from the catalog's own
 /// content type, with the file name as a second opinion.
-fn clip_format(path: &std::path::Path, content_type: &str) -> Option<ClipFormat> {
+///
+/// And the bytes themselves as the last word, because the first two can both
+/// be wrong at once: a store payload is a digest-named cache object with no
+/// extension, and the content type is only as good as what put it there. A
+/// clip handed to the wrong decoder does not error — it produces no picture,
+/// which looks exactly like a well that was never given the file.
+fn clip_format(path: &std::path::Path, content_type: &str, bytes: &[u8]) -> Option<ClipFormat> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -180,11 +186,28 @@ fn clip_format(path: &std::path::Path, content_type: &str) -> Option<ClipFormat>
     match (content_type, ext.as_str()) {
         (t, _) if t.contains("mpeg") || t.contains("mp3") => Some(ClipFormat::Mp3),
         (t, _) if t.contains("ogg") || t.contains("vorbis") => Some(ClipFormat::Ogg),
-        (t, _) if t.contains("wav") => Some(ClipFormat::Wav),
+        (t, _) if t.contains("wav") && is_riff_wave(bytes) => Some(ClipFormat::Wav),
         (_, "mp3") => Some(ClipFormat::Mp3),
         (_, "ogg") => Some(ClipFormat::Ogg),
-        (_, "wav") => Some(ClipFormat::Wav),
-        _ => None,
+        (_, "wav") if is_riff_wave(bytes) => Some(ClipFormat::Wav),
+        _ => sniff_clip_format(bytes),
+    }
+}
+
+fn is_riff_wave(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
+/// The container from the bytes. `makepad_audio_decode::sniff` tolerates a
+/// leading ID3 tag and junk before the first frame sync, which real files
+/// have plenty of.
+fn sniff_clip_format(bytes: &[u8]) -> Option<ClipFormat> {
+    if is_riff_wave(bytes) {
+        return Some(ClipFormat::Wav);
+    }
+    match makepad_audio_decode::sniff(bytes)? {
+        makepad_audio_decode::AudioFormat::Mp3 => Some(ClipFormat::Mp3),
+        makepad_audio_decode::AudioFormat::OggVorbis => Some(ClipFormat::Ogg),
     }
 }
 use crate::store_views::{
@@ -2546,12 +2569,20 @@ script_mod! {
                                             // Library: a mesh orbits here, a picture
                                             // shows itself, audio shows its waveform.
                                             PanelHeading{ text: "Preview" }
+                                            // The well is as tall as what it
+                                            // is SHOWING wants to be: a track
+                                            // is a band and a transport row,
+                                            // a mesh earns the tall panel.
+                                            // The policy lives in the shared
+                                            // widget (ContentPreview::
+                                            // natural_height); this asks for
+                                            // it by fitting.
                                             detail_preview := SolidView{
-                                                width: Fill height: 300
+                                                width: Fill height: Fit
                                                 flow: Overlay
                                                 draw_bg +: { color: #x0d0d10 }
                                                 detail_preview_pages := PageFlip{
-                                                    width: Fill height: Fill
+                                                    width: Fill height: Fit
                                                     active_page: @detail_preview_shared
                                                     // Stills, cycling sheets
                                                     // and audio come from the
@@ -2560,11 +2591,15 @@ script_mod! {
                                                     // viewer until it moves
                                                     // into the same crate.
                                                     detail_preview_shared := View{
-                                                        width: Fill height: Fill
+                                                        width: Fill height: Fit
                                                         detail_content := mod.widgets.ContentPreview{}
                                                     }
+                                                    // This app's mesh viewer
+                                                    // has no natural height
+                                                    // of its own; a turntable
+                                                    // wants the tall panel.
                                                     detail_preview_mesh := View{
-                                                        width: Fill height: Fill
+                                                        width: Fill height: 300
                                                         detail_mesh_view := MeshView{}
                                                     }
                                                 }
@@ -8177,6 +8212,7 @@ impl App {
                     file,
                     payload,
                     role,
+                    media,
                     revision,
                     path,
                     views,
@@ -8187,10 +8223,12 @@ impl App {
                             // A catalog asset now has bytes on disk that the
                             // local tools can open. Its kind comes from the
                             // ROLE the manifest gave it, never from guessing
-                            // at the file name.
+                            // at the file name — and its container from the
+                            // MEDIA the same manifest declares, because the
+                            // role does not say which one an audio file is in.
                             if let Some(item) = self.catalog_work.items.get_mut(&file) {
                                 if let Some(role) = role {
-                                    let (domain, content_type) = role_media(role);
+                                    let (domain, content_type) = role_media(role, media);
                                     item.meta.domain = domain.to_string();
                                     item.meta.content_type = content_type.to_string();
                                 }
@@ -9749,22 +9787,38 @@ impl App {
             .map(|item| item.meta.content_type.starts_with("audio/"))
             .unwrap_or(false);
         if is_audio {
+            // The bytes go out exactly ONCE per track. This well is
+            // refreshed constantly — every store tick, every thumbnail that
+            // lands, every playhead update — and re-reading a six-minute
+            // file on each of those would restart both workers forever.
+            //
+            // The guard is recorded when the BYTES WERE READ: not on a
+            // successful mixer load (the mixer used to take WAV only, so an
+            // MP3 looked like a fresh track every refresh), and not before
+            // the read either (this well is first drawn while the payload is
+            // still being fetched, and marking the track done then means the
+            // refresh that finally HAS the bytes decides it has nothing to
+            // send). The well is told the track's NAME every time regardless,
+            // which is what lets it tell "still this one" from "a new one".
             let mut clip = None;
             if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
                 if self.library_audio_file.as_deref() != Some(file.as_str()) {
-                    let bytes = std::fs::read(&path).ok();
-                    let loaded = bytes
-                        .as_deref()
-                        .and_then(|bytes| crate::audio::parse_wav(bytes).ok())
-                        .map(crate::audio::load)
-                        .unwrap_or(false);
-                    if loaded {
-                        self.library_audio_file = Some(file.clone());
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            self.library_audio_file = Some(file.clone());
+                            // The transport: decoded off the frame thread and
+                            // installed when it lands.
+                            crate::audio::load_clip_async(bytes.clone());
+                            // The picture: the same bytes, drawn by the well.
+                            let content_type = &item.as_ref().unwrap().meta.content_type;
+                            clip = clip_format(&path, content_type, &bytes)
+                                .map(|format| (bytes, format));
+                            if clip.is_none() {
+                                log!("library preview: {file} is not a container this app can draw ({content_type})");
+                            }
+                        }
+                        Err(error) => log!("library preview: {file} unreadable: {error}"),
                     }
-                    // The same bytes the mixer got, handed to the well to
-                    // draw. Only on a CHANGE of track: re-sending them every
-                    // playhead tick would restart the decode worker forever.
-                    clip = bytes.zip(clip_format(&path, &item.as_ref().unwrap().meta.content_type));
                 }
             }
             let picture = self.preview_texture(cx, &asset_key);
@@ -9772,6 +9826,7 @@ impl App {
             self.show_preview(
                 cx,
                 PreviewContent::Audio {
+                    track: file.clone(),
                     picture,
                     clip,
                     fraction: crate::audio::playhead_fraction(),
@@ -11196,17 +11251,39 @@ const MAX_FINISHED_RUNS_SHOWN: usize = 3;
 /// What a manifest file role means to the Create surface: the domain and
 /// content type its tools switch on. The role is authoritative — it is what
 /// the publisher measured — where a file extension is a guess.
-fn role_media(role: makepad_asset_data::FileRole) -> (&'static str, &'static str) {
+///
+/// A role says what a file is FOR, and for most roles that settles the
+/// container too. `Audio` is the exception: WAV, Ogg and MP3 are all legal
+/// under it (`FileRole::allows`), the store's paths are digest-named so
+/// there is no extension to consult, and a decoder handed the wrong
+/// container fails SILENTLY — it just produces nothing to draw. So where the
+/// manifest declares the media, that is what the content type says.
+fn role_media(
+    role: makepad_asset_data::FileRole,
+    media: Option<makepad_asset_data::MediaType>,
+) -> (&'static str, &'static str) {
     use makepad_asset_data::FileRole;
     match role {
         FileRole::RenderGlb | FileRole::Lod1Glb | FileRole::Lod2Glb | FileRole::AoMesh => {
             ("mesh", "model/gltf-binary")
         }
         FileRole::Splat => ("splat", "application/x-ply"),
-        FileRole::Audio => ("sfx", "audio/wav"),
+        FileRole::Audio => ("sfx", audio_content_type(media)),
         FileRole::Video => ("video", "video/mp4"),
         FileRole::Source => ("billboard", "application/x-stateful-billboard"),
         _ => ("image", "image/png"),
+    }
+}
+
+/// The container of an `Audio` file. Unknown media keeps the historical
+/// answer: WAV is what every audio role carried before MP3 was admitted,
+/// and a wrong guess here is a well that shows no waveform.
+fn audio_content_type(media: Option<makepad_asset_data::MediaType>) -> &'static str {
+    use makepad_asset_data::MediaType;
+    match media {
+        Some(MediaType::Mp3) => "audio/mpeg",
+        Some(MediaType::Ogg) => "audio/ogg",
+        _ => "audio/wav",
     }
 }
 
@@ -13429,16 +13506,70 @@ mod catalog_work_tests {
     /// no extension to guess from.
     #[test]
     fn a_file_role_decides_what_the_tools_see() {
-        assert_eq!(role_media(FileRole::RenderGlb), ("mesh", "model/gltf-binary"));
-        assert_eq!(role_media(FileRole::Lod1Glb), ("mesh", "model/gltf-binary"));
-        assert_eq!(role_media(FileRole::Splat), ("splat", "application/x-ply"));
-        assert_eq!(role_media(FileRole::Audio), ("sfx", "audio/wav"));
-        assert_eq!(role_media(FileRole::Video), ("video", "video/mp4"));
+        let no_media = None;
+        assert_eq!(role_media(FileRole::RenderGlb, no_media), ("mesh", "model/gltf-binary"));
+        assert_eq!(role_media(FileRole::Lod1Glb, no_media), ("mesh", "model/gltf-binary"));
+        assert_eq!(role_media(FileRole::Splat, no_media), ("splat", "application/x-ply"));
+        assert_eq!(role_media(FileRole::Audio, no_media), ("sfx", "audio/wav"));
+        assert_eq!(role_media(FileRole::Video, no_media), ("video", "video/mp4"));
         assert_eq!(
-            role_media(FileRole::Source),
+            role_media(FileRole::Source, no_media),
             ("billboard", "application/x-stateful-billboard")
         );
-        assert_eq!(role_media(FileRole::Albedo), ("image", "image/png"));
+        assert_eq!(role_media(FileRole::Albedo, no_media), ("image", "image/png"));
+    }
+
+    /// …but the role does NOT decide the CONTAINER. `FileRole::Audio` admits
+    /// WAV, Ogg and MP3 alike, and announcing all three as `audio/wav` is
+    /// how a music library of 241 MP3s ended up handed to a RIFF parser: it
+    /// returns nothing, the well draws no waveform, and there is no error
+    /// anywhere to notice.
+    #[test]
+    fn the_manifest_media_decides_the_container() {
+        use makepad_asset_data::MediaType;
+        assert_eq!(role_media(FileRole::Audio, Some(MediaType::Mp3)), ("sfx", "audio/mpeg"));
+        assert_eq!(role_media(FileRole::Audio, Some(MediaType::Ogg)), ("sfx", "audio/ogg"));
+        assert_eq!(role_media(FileRole::Audio, Some(MediaType::Wav)), ("sfx", "audio/wav"));
+        // Every one of them is still audio to the surfaces that switch on
+        // the domain half of the answer.
+        for media in [MediaType::Mp3, MediaType::Ogg, MediaType::Wav] {
+            let (domain, content_type) = role_media(FileRole::Audio, Some(media));
+            assert_eq!(domain, "sfx");
+            assert!(content_type.starts_with("audio/"));
+        }
+    }
+
+    /// And what the well is handed to DECODE follows the content type, the
+    /// name, then the bytes — because a store payload is a digest-named
+    /// cache object with no extension at all.
+    #[test]
+    fn a_clip_container_is_read_not_assumed() {
+        use std::path::Path;
+        let mp3 = {
+            // ID3v2 tag then a Layer III frame sync, which is what a tagged
+            // MP3 from a music library actually starts with.
+            let mut bytes = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+            bytes.extend_from_slice(&[0u8; 10]);
+            bytes.extend_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+            bytes.extend_from_slice(&[0u8; 400]);
+            bytes
+        };
+        let wav = b"RIFF....WAVEfmt ".to_vec();
+        let object = Path::new("/cache/objects/9f2c1ab3");
+
+        // The catalog's own answer, when it is the truth.
+        assert_eq!(clip_format(object, "audio/mpeg", &mp3), Some(ClipFormat::Mp3));
+        assert_eq!(clip_format(object, "audio/wav", &wav), Some(ClipFormat::Wav));
+        // A stale "audio/wav" over MP3 bytes: the bytes win, because a WAV
+        // parser handed an MP3 fails silently and shows nothing.
+        assert_eq!(clip_format(object, "audio/wav", &mp3), Some(ClipFormat::Mp3));
+        // No content type at all, no extension: still readable.
+        assert_eq!(clip_format(object, "", &mp3), Some(ClipFormat::Mp3));
+        assert_eq!(clip_format(object, "", &wav), Some(ClipFormat::Wav));
+        // The file name as the second opinion.
+        assert_eq!(clip_format(Path::new("/t/x.mp3"), "", &mp3), Some(ClipFormat::Mp3));
+        // And nothing is invented for bytes that are not a track.
+        assert_eq!(clip_format(object, "audio/wav", b"not audio at all"), None);
     }
 }
 

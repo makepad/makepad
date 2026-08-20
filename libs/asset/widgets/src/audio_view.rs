@@ -28,6 +28,38 @@
 use crate::clip::{texture_from_rgba, ClipDecoder, ClipFace, ClipFormat};
 use makepad_widgets::*;
 
+/// What a refresh means for the clip a well is already holding.
+///
+/// A host redraws this well constantly — every store tick, every thumbnail
+/// that lands, every playhead update — and hands over a six-minute file
+/// exactly once. Those two facts have to be told apart, or "here is the
+/// track again, minus the bytes I already gave you" reads as "forget the
+/// track" and the decode is killed the frame after it starts.
+///
+/// So the host names the track EVERY time and sends the bytes ONCE, and this
+/// is the rule that reads the pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipUpdate {
+    /// Same track, no new bytes: leave the decode in flight — and the
+    /// pictures it produced — exactly alone.
+    Keep,
+    /// A different track and no bytes yet: the pictures on screen are of the
+    /// wrong song, so back to the placeholder until the payload arrives.
+    Drop,
+    /// Bytes in hand: decode them.
+    Start,
+}
+
+impl ClipUpdate {
+    pub fn decide(showing: &str, named: &str, has_bytes: bool) -> ClipUpdate {
+        match (showing == named, has_bytes) {
+            (_, true) => ClipUpdate::Start,
+            (true, false) => ClipUpdate::Keep,
+            (false, false) => ClipUpdate::Drop,
+        }
+    }
+}
+
 /// What the user did to the transport. The host carries it out against
 /// whatever it owns.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -57,23 +89,21 @@ script_mod! {
             height: Fill
             cursor: MouseCursor.Hand
             flow: Overlay
+            // A wave strip is 8:1 and a well is nearly square, so the
+            // picture is a band across the middle of the lane rather than
+            // something pinned to the top edge with all the air below it.
+            align: Align{x: 0.5 y: 0.5}
             picture := Image{
                 width: Fill
                 height: Fill
                 fit: ImageFit.Smallest
             }
-            playhead := View{
-                width: 2
-                height: Fill
-                abs_pos: vec2(0.0, 0.0)
-                show_bg: true
-                draw_bg +: {
-                    color: #xff5a4d
-                    pixel: fn() {
-                        return self.color
-                    }
-                }
-            }
+        }
+        // The scrub line. Drawn over the picture rather than laid out beside
+        // it: it moves every frame a track plays, and a child that moves
+        // every frame is a layout pass every frame.
+        draw_playhead +: {
+            color: #xff5a4d
         }
         controls := View{
             width: Fill height: Fit
@@ -133,11 +163,17 @@ script_mod! {
     }
 }
 
+/// How wide the scrub line is, in layout points.
+const PLAYHEAD_W: f64 = 2.0;
+
 /// A track's picture with a draggable playhead.
 #[derive(Script, ScriptHook, Widget)]
 pub struct AudioView {
     #[deref]
     view: View,
+    /// The scrub line over the picture.
+    #[live]
+    draw_playhead: DrawColor,
     /// Where the host says the playhead is, 0..=1.
     #[rust]
     fraction: f64,
@@ -151,6 +187,11 @@ pub struct AudioView {
     /// real file never arrives or has nothing to show.
     #[rust]
     placeholder: Option<Texture>,
+    /// Which track the pictures below belong to — the host's own name for
+    /// it, whatever that is. This is what separates "refresh" from "new
+    /// track"; see [`ClipUpdate`].
+    #[rust]
+    track: String,
     /// The pictures of the actual clip, once its bytes have been decoded.
     #[rust]
     fft: Option<Texture>,
@@ -169,6 +210,28 @@ impl AudioView {
     pub fn set_picture(&mut self, cx: &mut Cx, texture: Option<Texture>) {
         self.placeholder = texture;
         self.show_face(cx);
+    }
+
+    /// Which track the well is showing, and its bytes if the host has them
+    /// yet. THE entry point for content: naming the track every refresh and
+    /// sending the bytes once is what lets a host redraw a playing well
+    /// without restarting — or worse, cancelling — the decode it is waiting
+    /// for. See [`ClipUpdate`].
+    pub fn show_track(
+        &mut self,
+        cx: &mut Cx,
+        track: &str,
+        clip: Option<(Vec<u8>, ClipFormat)>,
+    ) {
+        match ClipUpdate::decide(&self.track, track, clip.is_some()) {
+            ClipUpdate::Keep => {}
+            ClipUpdate::Drop => self.clear_clip(cx),
+            ClipUpdate::Start => {
+                let (bytes, format) = clip.expect("Start means bytes are in hand");
+                self.set_clip(cx, bytes, format);
+            }
+        }
+        self.track = track.to_string();
     }
 
     /// The real file. Decoded on a worker this widget owns; when it lands,
@@ -259,13 +322,43 @@ impl AudioView {
         self.scrubbing
     }
 
-    /// Move the playhead to where the finger is and tell the host.
-    fn seek_to(&mut self, cx: &mut Cx, uid: WidgetUid, x: f64, area: Area) {
-        let rect = area.rect(cx);
-        if rect.size.x <= 1.0 {
-            return;
+    /// The band the picture actually occupies. The picture is letterboxed
+    /// inside the lane, so the lane's own rectangle has void above and below
+    /// it: a playhead drawn down the whole lane is a line through nothing,
+    /// and a fraction measured against a band that is narrower than the lane
+    /// points at the wrong second.
+    ///
+    /// Falls back to the lane while there is no picture yet, so a press
+    /// before the first decode still means something.
+    fn band(&self, cx: &mut Cx) -> Rect {
+        let picture = self.view.image(cx, ids!(picture)).area().rect(cx);
+        match picture.size.x > 1.0 {
+            true => picture,
+            false => self.lane(cx),
         }
-        self.fraction = ((x - rect.pos.x) / rect.size.x).clamp(0.0, 1.0);
+    }
+
+    /// The whole audio lane: what a finger is hit-tested against. Wider than
+    /// the band on purpose — a press in the letterbox void is a press on the
+    /// same second of the track, and the lane is the area this widget's own
+    /// `wave` View already captures the finger with. Hit-testing anything
+    /// else means the capture is held elsewhere and the drag never arrives.
+    fn lane(&self, cx: &mut Cx) -> Rect {
+        self.view.view(cx, ids!(wave)).area().rect(cx)
+    }
+
+    /// Where in the clip a press at `x` points.
+    fn fraction_at(x: f64, band: Rect) -> Option<f64> {
+        (band.size.x > 1.0).then(|| ((x - band.pos.x) / band.size.x).clamp(0.0, 1.0))
+    }
+
+    /// Move the playhead to where the finger is and tell the host.
+    fn seek_to(&mut self, cx: &mut Cx, uid: WidgetUid, x: f64) {
+        let band = self.band(cx);
+        let Some(fraction) = Self::fraction_at(x, band) else {
+            return;
+        };
+        self.fraction = fraction;
         cx.widget_action(uid, AudioAction::Seek(self.fraction));
         self.view.redraw(cx);
     }
@@ -274,8 +367,21 @@ impl AudioView {
 impl Widget for AudioView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         while self.view.draw_walk(cx, scope, walk).is_step() {}
-        // The playhead is positioned after the wave area is known, so it
-        // tracks a resize without the host doing anything.
+        // The playhead goes on last, over the picture, from the wave area as
+        // it was just laid out — so it tracks a resize, a splitter drag or a
+        // changed picture without the host doing anything, and it is exactly
+        // the rectangle a drag is measured against (`seek_to`).
+        let rect = self.band(cx);
+        if rect.size.x > PLAYHEAD_W {
+            let x = rect.pos.x + (rect.size.x - PLAYHEAD_W) * self.fraction;
+            self.draw_playhead.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x, rect.pos.y),
+                    size: dvec2(PLAYHEAD_W, rect.size.y),
+                },
+            );
+        }
         DrawStep::done()
     }
 
@@ -289,21 +395,28 @@ impl Widget for AudioView {
             }
         }
         let uid = self.widget_uid();
-        // Press, drag, release anywhere on the picture: the playhead follows
-        // the finger and the host is told where it landed. A click without a
-        // drag is the same gesture with one sample.
-        let wave_area = self.view.view(cx, ids!(wave)).area();
-        match event.hits(cx, wave_area) {
+        // Press, drag, release anywhere on the lane: the playhead follows the
+        // finger and the host is told where it landed. A click without a drag
+        // is the same gesture with one sample.
+        //
+        // The hit area is the LANE, not the picture inside it, and that is
+        // load-bearing: the `wave` View has a cursor, so it captures the
+        // press against its own area first. Hit-testing any other area sees
+        // a finger already captured elsewhere and the whole drag disappears.
+        // WHERE in the clip the press points is still measured against the
+        // band (`seek_to`).
+        let lane = self.view.view(cx, ids!(wave)).area();
+        match event.hits(cx, lane) {
             Hit::FingerDown(fe) => {
                 self.scrubbing = true;
-                self.seek_to(cx, uid, fe.abs.x, wave_area);
+                self.seek_to(cx, uid, fe.abs.x);
             }
             Hit::FingerMove(fe) if self.scrubbing => {
-                self.seek_to(cx, uid, fe.abs.x, wave_area);
+                self.seek_to(cx, uid, fe.abs.x);
             }
             Hit::FingerUp(fe) => {
                 if self.scrubbing {
-                    self.seek_to(cx, uid, fe.abs.x, wave_area);
+                    self.seek_to(cx, uid, fe.abs.x);
                 }
                 self.scrubbing = false;
             }
@@ -327,6 +440,12 @@ impl AudioViewRef {
     pub fn set_picture(&self, cx: &mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_picture(cx, texture);
+        }
+    }
+
+    pub fn show_track(&self, cx: &mut Cx, track: &str, clip: Option<(Vec<u8>, ClipFormat)>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.show_track(cx, track, clip);
         }
     }
 
@@ -368,6 +487,50 @@ impl AudioViewRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The law that keeps a decode alive: a host refreshes this well many
+    /// times a second and hands over the file once, so "the same track, no
+    /// bytes" must mean NOTHING HAPPENS. Reading it as "clear the clip" is
+    /// how the well ends up showing the catalog thumbnail forever — the
+    /// worker is cancelled a frame or two after it starts, every time.
+    #[test]
+    fn a_refresh_is_not_a_new_track() {
+        // The first sight of a track, bytes not fetched yet: a well that was
+        // empty stays empty, showing the placeholder.
+        assert_eq!(ClipUpdate::decide("", "ast_a", false), ClipUpdate::Drop);
+        // The payload lands: decode it.
+        assert_eq!(ClipUpdate::decide("ast_a", "ast_a", true), ClipUpdate::Start);
+        // …and every refresh after that leaves it strictly alone.
+        assert_eq!(ClipUpdate::decide("ast_a", "ast_a", false), ClipUpdate::Keep);
+        // Another track, no bytes yet: what is on screen is the wrong song.
+        assert_eq!(ClipUpdate::decide("ast_a", "ast_b", false), ClipUpdate::Drop);
+        // Clicking down a list with the payloads already cached.
+        assert_eq!(ClipUpdate::decide("ast_a", "ast_b", true), ClipUpdate::Start);
+    }
+
+    /// A press is a seek to the second under it, measured against the
+    /// PICTURE — the band — never the lane it is letterboxed in, and clamped
+    /// so a drag that runs off the end stops at the end.
+    #[test]
+    fn a_press_seeks_to_the_second_under_it() {
+        let band = Rect {
+            pos: dvec2(100.0, 40.0),
+            size: dvec2(300.0, 38.0),
+        };
+        assert_eq!(AudioView::fraction_at(100.0, band), Some(0.0));
+        assert_eq!(AudioView::fraction_at(250.0, band), Some(0.5));
+        assert_eq!(AudioView::fraction_at(400.0, band), Some(1.0));
+        // A drag that leaves the picture holds at the ends rather than
+        // asking the host to seek past them.
+        assert_eq!(AudioView::fraction_at(-500.0, band), Some(0.0));
+        assert_eq!(AudioView::fraction_at(9000.0, band), Some(1.0));
+        // Nothing drawn yet: a press means nothing rather than 0:00.
+        let unlaid = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(0.0, 0.0),
+        };
+        assert_eq!(AudioView::fraction_at(10.0, unlaid), None);
+    }
 
     /// The seam: the widget reports what the user wants, never does it. A
     /// host that ignores the action keeps playing exactly as before.

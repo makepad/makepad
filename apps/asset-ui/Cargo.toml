@@ -35,3 +35,8 @@ makepad-asset-store = { path = "../../libs/asset/store" }
 # Local licensed-pack compiler (Kenney Import). Same fail-closed walk as
 # `makepad-asset-importer --import-pack`; no network fetch.
 makepad-asset-importer = { path = "../../libs/asset/importer" }
+# The library is 241 MP3s and 4 WAVs: the transport has to be able to play
+# what the catalog actually holds, and the container has to be knowable from
+# the bytes when a digest-named cache object has no name to read. Zero
+# dependencies, and the same decoder the preview well draws with.
+makepad-audio-decode = { path = "../../libs/audio_decode" }

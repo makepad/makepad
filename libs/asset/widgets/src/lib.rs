@@ -54,7 +54,7 @@ pub mod thumb;
 #[cfg(feature = "renderer")]
 pub mod walk_world;
 
-pub use audio_view::{AudioAction, AudioView};
+pub use audio_view::{AudioAction, AudioView, ClipUpdate};
 pub use clip::{ClipFace, ClipFormat};
 pub use preview::{ContentPreview, PreviewContent};
 pub use thumb::{

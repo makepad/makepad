@@ -17,7 +17,7 @@
 //! cache of its own — a second copy is a second thing to go wrong.
 
 use makepad_asset_client::{dto::AssetDetailDto, AssetClient, ClientConfig};
-use makepad_asset_data::{AssetId, BlobId, FileRole};
+use makepad_asset_data::{AssetId, BlobId, FileRole, MediaType};
 
 /// What a viewer needs to draw one store asset: which blob it came from
 /// (the cache key and the staleness proof) and its bytes.
@@ -88,6 +88,11 @@ pub struct StoreFile {
     pub blob: BlobId,
     pub path: std::path::PathBuf,
     pub role: FileRole,
+    /// The CONTAINER the manifest declares, which the role does not say: an
+    /// `Audio` file is WAV, Ogg or MP3 with equal right, and the path is
+    /// digest-named so there is no extension to fall back on. Handing a
+    /// decoder the wrong container is silent — it simply produces nothing.
+    pub media: MediaType,
     pub revision: String,
     /// The manifest's declared thumbnail views ([`ThumbnailMeta::views`]) —
     /// what the picture IS, carried WITH the picture so no consumer ever
@@ -118,7 +123,14 @@ pub fn materialize(
     let path = client
         .blob_path(&file.blob, Some(file.byte_len).filter(|n| *n > 0))
         .map_err(|e| format!("blob {}: {e}", file.blob))?;
-    Ok(StoreFile { blob: file.blob, path, role: file.role, revision: head, views: Vec::new() })
+    Ok(StoreFile {
+        blob: file.blob,
+        path,
+        role: file.role,
+        media: file.media,
+        revision: head,
+        views: Vec::new(),
+    })
 }
 
 /// The asset's own thumbnail, materialised the same way. Small, and the
@@ -139,6 +151,10 @@ pub fn materialize_thumbnail(
         blob: thumbnail.blob,
         path,
         role: FileRole::Texture,
+        media: match thumbnail.media {
+            makepad_asset_data::ThumbnailMedia::Png => MediaType::Png,
+            makepad_asset_data::ThumbnailMedia::Jpeg => MediaType::Jpeg,
+        },
         revision: head,
         views: thumbnail.views,
     })
