@@ -106,7 +106,9 @@ impl BtreePage {
         if data.len() < hdr + 12 {
             return Err(Error::corrupt("page shorter than its b-tree header"));
         }
-        let page_type = PageType::from_byte(data[hdr])?;
+        let page_type = PageType::from_byte(data[hdr]).map_err(|_| {
+            Error::corrupt(format!("page {pgno}: b-tree page type byte {}", data[hdr]))
+        })?;
         let n_cells = be_u16(&data, hdr + 3)? as usize;
         let right_child = if page_type.is_interior() {
             Some(be_u32(&data, hdr + 8)?)

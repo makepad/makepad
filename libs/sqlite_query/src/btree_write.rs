@@ -30,6 +30,11 @@ const HDR_FREELIST_COUNT: usize = 36;
 
 pub struct BtreeWriter<'p> {
     pub pager: &'p mut Pager,
+    /// The index b-tree currently being modified. Unlinking an emptied index
+    /// page drops a cell from its parent, and in an index b-tree that cell is
+    /// a real entry, not just a separator: it has to go back into the same
+    /// tree, so the unlink needs to know which tree that is.
+    index: Option<(u32, Vec<Collation>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +301,7 @@ fn cells_fit(pgno: u32, page_type: PageType, cells: &[Cell], usable: usize) -> b
 
 impl<'p> BtreeWriter<'p> {
     pub fn new(pager: &'p mut Pager) -> BtreeWriter<'p> {
-        BtreeWriter { pager }
+        BtreeWriter { pager, index: None }
     }
 
     fn header(&mut self) -> Result<Vec<u8>> {
@@ -549,6 +554,7 @@ impl<'p> BtreeWriter<'p> {
 
     /// Insert one index entry (key record including the trailing rowid).
     pub fn insert_index(&mut self, root: u32, key: &[u8], colls: &[Collation]) -> Result<()> {
+        self.index = Some((root, colls.to_vec()));
         let target = parse_record(key, self.pager.text_encoding(), TextMode::Strict)?;
         let path = self.descend_index(root, &target, colls)?;
         let (leaf_no, _) = *path.last().expect("a leaf on the path");
@@ -572,61 +578,91 @@ impl<'p> BtreeWriter<'p> {
 
     /// Delete one index entry; returns whether it existed.
     pub fn delete_index(&mut self, root: u32, key: &[u8], colls: &[Collation]) -> Result<bool> {
+        self.index = Some((root, colls.to_vec()));
         let target = parse_record(key, self.pager.text_encoding(), TextMode::Strict)?;
         // The entry may sit on an interior page; walk every page on the path.
         let path = self.descend_index(root, &target, colls)?;
+        let Some((depth, i)) = self.find_index_entry(&path, &target, colls)? else {
+            return Ok(false);
+        };
+        let (pgno, _) = path[depth];
+        let page = BtreePage::load(self.pager, pgno)?;
+        let usable = self.pager.usable_size();
+        if page.page_type == PageType::IndexInterior {
+            // Removing a separator would orphan a subtree; this engine only
+            // deletes from leaves, so pull the successor up first.
+            return self.delete_index_interior(root, &path[..=depth], i, colls);
+        }
+        let mut cells = read_cells(&page, usable)?;
+        let old = cells[i].bytes.clone();
+        free_cell_overflow(self, PageType::IndexLeaf, &old)?;
+        cells.remove(i);
+        self.store_cells(&path[..=depth], PageType::IndexLeaf, cells, page.right_child)?;
+        Ok(true)
+    }
+
+    /// Where `target` sits on a descent path: the deepest page holding it and
+    /// the cell index within that page. An index b-tree stores real entries on
+    /// interior pages too, so the search runs from the leaf back up.
+    fn find_index_entry(
+        &mut self,
+        path: &[(u32, usize)],
+        target: &[Value],
+        colls: &[Collation],
+    ) -> Result<Option<(usize, usize)>> {
         for depth in (0..path.len()).rev() {
             let (pgno, _) = path[depth];
             let page = BtreePage::load(self.pager, pgno)?;
-            let usable = self.pager.usable_size();
-            let mut found = None;
             for i in 0..page.n_cells {
                 let (_, payload) = index_cell(&page, i)?;
                 let vals = payload.values(self.pager, TextMode::Strict)?;
-                if compare_records(&vals, &target, colls) == Ordering::Equal
+                if compare_records(&vals, target, colls) == Ordering::Equal
                     && vals.len() == target.len()
                 {
-                    found = Some(i);
-                    break;
+                    return Ok(Some((depth, i)));
                 }
             }
-            let Some(i) = found else { continue };
-            if page.page_type == PageType::IndexInterior {
-                // Removing a separator would orphan a subtree; this engine only
-                // deletes from leaves, so pull the successor up first.
-                return self.delete_index_interior(root, &path[..=depth], i, colls);
-            }
-            let mut cells = read_cells(&page, usable)?;
-            let old = cells[i].bytes.clone();
-            free_cell_overflow(self, PageType::IndexLeaf, &old)?;
-            cells.remove(i);
-            self.store_cells(&path[..=depth], PageType::IndexLeaf, cells, page.right_child)?;
-            return Ok(true);
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Replace an interior separator with the smallest key of its right
     /// subtree, then delete that key from the leaf it came from.
     fn delete_index_interior(
         &mut self,
-        _root: u32,
+        root: u32,
         path: &[(u32, usize)],
         cell_index: usize,
         colls: &[Collation],
     ) -> Result<bool> {
         let (pgno, _) = *path.last().expect("a page");
         let page = BtreePage::load(self.pager, pgno)?;
+        let target = {
+            let (_, payload) = index_cell(&page, cell_index)?;
+            payload.values(self.pager, TextMode::Strict)?
+        };
         // Walk to the leftmost leaf of the subtree to the right of the cell.
-        let right_child = if cell_index + 1 < page.n_cells {
-            index_cell(&page, cell_index + 1)?
-                .0
-                .ok_or_else(|| Error::corrupt("interior cell without a child"))?
+        // That subtree hangs off the *next* slot: the descent recorded the
+        // slot of the separator itself, and a path that names the wrong slot
+        // makes a later unlink cut the wrong cell out of this page.
+        let (right_child, right_slot) = if cell_index + 1 < page.n_cells {
+            (
+                index_cell(&page, cell_index + 1)?
+                    .0
+                    .ok_or_else(|| Error::corrupt("interior cell without a child"))?,
+                cell_index + 1,
+            )
         } else {
-            page.right_child
-                .ok_or_else(|| Error::corrupt("interior page without a right child"))?
+            (
+                page.right_child
+                    .ok_or_else(|| Error::corrupt("interior page without a right child"))?,
+                usize::MAX,
+            )
         };
         let mut leaf_path: Vec<(u32, usize)> = path.to_vec();
+        if let Some(last) = leaf_path.last_mut() {
+            last.1 = right_slot;
+        }
         let mut pgno_walk = right_child;
         loop {
             let p = BtreePage::load(self.pager, pgno_walk)?;
@@ -647,20 +683,47 @@ impl<'p> BtreeWriter<'p> {
         let usable = self.pager.usable_size();
         let mut leaf_cells = read_cells(&leaf, usable)?;
         let successor = leaf_cells.remove(0);
-        // Overwrite the separator with the successor key.
-        let mut cells = read_cells(&page, usable)?;
-        let old = cells[cell_index].bytes.clone();
-        free_cell_overflow(self, PageType::IndexInterior, &old)?;
-        let child = be_u32(&old, 0)?;
-        // The successor came from a leaf: re-encode it with that child pointer.
-        cells[cell_index] = Cell {
-            bytes: index_cell_with_child(&successor.bytes, PageType::IndexLeaf, usable, child)?,
-            rowid: 0,
+        // The whole record, for the rare case where it has to be re-inserted
+        // rather than moved cell-for-cell (which keeps its overflow chain).
+        let successor_key = {
+            let (_, payload) = index_cell(&leaf, 0)?;
+            payload.read(self.pager)?
         };
-        self.store_cells(path, PageType::IndexInterior, cells, page.right_child)?;
-        // And remove it from the leaf.
+        // Take the successor out of its leaf first: `leaf_path` is only valid
+        // until something restructures the tree, and storing the separator can
+        // split this page and move the leaf's parent out from under it.
         self.store_cells(&leaf_path, PageType::IndexLeaf, leaf_cells, leaf.right_child)?;
-        let _ = colls;
+        // Then put the successor where the deleted key was. The write above
+        // may have moved that key to another page, so find it again instead of
+        // trusting the path it was found on.
+        let path = self.descend_index(root, &target, colls)?;
+        let Some((depth, i)) = self.find_index_entry(&path, &target, colls)? else {
+            return Err(Error::corrupt(
+                "the index entry being deleted vanished from its own tree",
+            ));
+        };
+        let (pgno, _) = path[depth];
+        let page = BtreePage::load(self.pager, pgno)?;
+        let mut cells = read_cells(&page, usable)?;
+        let old = cells[i].bytes.clone();
+        free_cell_overflow(self, page.page_type, &old)?;
+        if page.page_type == PageType::IndexInterior {
+            // The successor came from a leaf: re-encode it with the child
+            // pointer the separator it replaces was carrying.
+            let child = be_u32(&old, 0)?;
+            cells[i] = Cell {
+                bytes: index_cell_with_child(&successor.bytes, PageType::IndexLeaf, usable, child)?,
+                rowid: 0,
+            };
+            self.store_cells(&path[..=depth], PageType::IndexInterior, cells, page.right_child)?;
+        } else {
+            // The restructuring pushed the key down onto a leaf: delete it
+            // there, and the successor simply goes back into the tree.
+            cells.remove(i);
+            self.store_cells(&path[..=depth], PageType::IndexLeaf, cells, page.right_child)?;
+            free_cell_overflow(self, PageType::IndexLeaf, &successor.bytes)?;
+            self.insert_index(root, &successor_key, colls)?;
+        }
         Ok(true)
     }
 
@@ -835,18 +898,48 @@ impl<'p> BtreeWriter<'p> {
         let usable = self.pager.usable_size();
         let mut cells = read_cells(&parent, usable)?;
         let mut right = parent.right_child;
+        // On an index b-tree the cell that goes with the child pointer is a
+        // real entry of the index, not just a boundary the way a table
+        // interior cell's rowid is: dropping it here would silently lose a row
+        // from the index, so it is re-homed once the parent is written.
+        let is_index = parent.page_type == PageType::IndexInterior;
+        let mut dropped: Option<usize> = None;
         if ci == usize::MAX || ci >= cells.len() {
             // The page was the rightmost child: the last separator's child
-            // takes its place, and that separator disappears with it.
-            match cells.pop() {
-                Some(last) => right = Some(be_u32(&last.bytes, 0)?),
+            // takes its place, and that separator goes with it.
+            match cells.len().checked_sub(1) {
+                Some(last) => {
+                    right = Some(be_u32(&cells[last].bytes, 0)?);
+                    dropped = Some(last);
+                }
                 None => right = None,
             }
         } else {
-            cells.remove(ci);
+            dropped = Some(ci);
+        }
+        let orphan = match (is_index, dropped) {
+            (true, Some(at)) => {
+                let (_, payload) = index_cell(&parent, at)?;
+                let key = payload.read(self.pager)?;
+                free_cell_overflow(self, PageType::IndexInterior, &cells[at].bytes)?;
+                Some(key)
+            }
+            _ => None,
+        };
+        if let Some(at) = dropped {
+            cells.remove(at);
         }
         self.free_page(pgno)?;
-        self.store_cells(&path[..path.len() - 1], parent.page_type, cells, right)
+        self.store_cells(&path[..path.len() - 1], parent.page_type, cells, right)?;
+        if let Some(key) = orphan {
+            let Some((root, colls)) = self.index.clone() else {
+                return Err(Error::corrupt(
+                    "an index page was unlinked outside an index operation",
+                ));
+            };
+            self.insert_index(root, &key, &colls)?;
+        }
+        Ok(())
     }
 
     /// Split one page into two and push a separator into its parent.
