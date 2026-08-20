@@ -77,7 +77,7 @@ use crate::billboard_view::BillboardView;
 use crate::mesh_view::MeshView;
 use crate::thumbnail_renderer::ThumbnailRenderer;
 use crate::asset_store_state::{
-    server_kind_label, session_config_from_env, AssetStoreState, LibraryFilters,
+    server_kind_label, session_config_from_env, AssetStoreState, KindChoice, LibraryFilters,
     MAX_CATALOG_ROWS,
     Remote, SERVER_KINDS,
 };
@@ -423,6 +423,37 @@ script_mod! {
     }
 
     // Quiet control: queue reorder, transport, sample loaders.
+    // The clear glyph that lives INSIDE the search box: same flat weight
+    // as the dropdown chevrons beside it, visible only while there is text.
+    // `×` and not `✕`: the theme font has no U+2715 and draws tofu, and the
+    // rest of this app already says × (see "× Retire shown").
+    let SearchClearChip = ButtonFlat{
+        width: 16 height: 16
+        margin: 0
+        padding: 0
+        visible: false
+        text: "×"
+        draw_text +: {
+            color: #x6a7178
+            color_hover: #xe6ebf0
+            color_down: #xffffff
+            color_focus: #x6a7178
+            text_style: theme.font_regular{font_size: 7.5}
+        }
+        draw_bg +: {
+            border_radius: 2.0
+            border_size: 0.0
+            color: #x00000000
+            color_hover: #xffffff14
+            color_down: #xffffff20
+            color_focus: #x00000000
+            border_color: #x00000000
+            border_color_hover: #x00000000
+            border_color_down: #x00000000
+            border_color_focus: #x00000000
+        }
+    }
+
     let GhostButton = ChipButton{
         padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
         draw_text +: {
@@ -2490,7 +2521,25 @@ script_mod! {
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 6
                                     align: Align{y: 0.5}
-                                    lib_search := FilterInput{ width: 250 empty_text: "Search the catalog: title, alias, #tag…" }
+                                    // The box and its own ×: a search you
+                                    // can undo where you typed it, rather
+                                    // than by hunting for a button that
+                                    // also resets the two dropdowns.
+                                    View{
+                                        width: 250 height: Fit
+                                        flow: Overlay
+                                        lib_search := FilterInput{
+                                            width: Fill
+                                            padding: Inset{left: 8 right: 26 top: 5 bottom: 5}
+                                            empty_text: "Search the catalog: title, alias, #tag…"
+                                        }
+                                        View{
+                                            width: Fill height: 28
+                                            align: Align{x: 1.0 y: 0.5}
+                                            padding: Inset{right: 5}
+                                            lib_search_clear := SearchClearChip{}
+                                        }
+                                    }
                                     FieldCaption{ text: "Kind" }
                                     lib_kind_drop := FieldDrop{ width: 150 }
                                     FieldCaption{ text: "Tags" }
@@ -3635,11 +3684,17 @@ pub struct App {
     #[rust]
     catalog_thumb_pending: HashSet<String>,
     #[rust]
-    lib_kind_options: Vec<String>,
-    /// Facets behind the label dropdown, same row offset: the catalog's own
-    /// category/tag counts for the current result set, most used first.
+    lib_kind_options: Vec<KindChoice>,
+    /// Rows behind the tag dropdown, same row offset: the catalog's own
+    /// labels for the current result set, merged into one vocabulary and
+    /// most used first.
     #[rust]
-    lib_label_options: Vec<makepad_asset_client::CatalogFacet>,
+    lib_label_options: Vec<TagFacet>,
+    /// The counted facets exactly as the server sent them, kept because
+    /// building a query still has to know which wire vocabulary carries a
+    /// name — the one thing the merged list deliberately forgets.
+    #[rust]
+    lib_facets: Vec<makepad_asset_client::CatalogFacet>,
     /// The filter state the Library list was last drawn for. When it changes
     /// the RESULT SET changes, so both list viewports go back to the top —
     /// a filter that shrinks the results under a scrolled viewport otherwise
@@ -8980,17 +9035,11 @@ impl App {
         if !query.is_empty() {
             parts.push(format!("'{query}'"));
         }
-        if let Some(kind) = &self.lib_filters.kind {
-            parts.push(format!("kind {kind}"));
+        if !self.lib_filters.kind.is_any() {
+            parts.push(format!("kind {}", self.lib_filters.kind.row_text()));
         }
-        // Name the vocabulary the pick came from: a category and a tag can
-        // carry the same word, and a delete confirmation must say which one
-        // it is about.
-        if let Some((kind, label)) = &self.lib_filters.label {
-            parts.push(match kind {
-                makepad_asset_client::FacetKind::Category => format!("category {label}"),
-                makepad_asset_client::FacetKind::Tag => format!("tag #{label}"),
-            });
+        if let Some(label) = &self.lib_filters.label {
+            parts.push(format!("tag {label}"));
         }
         if parts.is_empty() {
             "the current filter".to_string()
@@ -9323,20 +9372,20 @@ impl App {
     /// replaces its in-flight search; presentation-only refreshes do not.
     fn read_filters_from_ui(&mut self, cx: &mut Cx) {
         let query = self.ui.text_input(cx, ids!(lib_search)).text();
-        // The kind dropdown is the only structured filter; categories and
-        // tags reach the same rows through the text index, which the server
-        // builds from them.
-        let kind = self.lib_filters.kind.clone();
-        let server_kind = kind.as_deref().and_then(|label| {
-            SERVER_KINDS
-                .into_iter()
-                .find(|candidate| server_kind_label(*candidate) == label)
-        });
-        // The search box speaks both vocabularies: `#word` is a tag filter,
-        // everything else is free text. A picked facet is the filter its own
-        // vocabulary uses — the server matches categories and tags through
-        // separate label rows.
-        let terms = catalog_filter_terms(&query, self.lib_filters.label.as_ref());
+        // The Kind picker carries the structural filter: a content-contract
+        // kind, and for audio the music/sfx shelf every publisher writes as
+        // the asset's category.
+        let (server_kind, structural) = self.lib_filters.kind.query();
+        // The search box and the tag picker both name TAGS — one vocabulary
+        // — and which of the store's two label kinds carries a given name is
+        // worked out from the counted facets, not from anything the user has
+        // to know.
+        let terms = catalog_filter_terms(
+            &query,
+            self.lib_filters.label.as_ref(),
+            structural,
+            &self.lib_facets,
+        );
         let CatalogFilterTerms { category, tag, text } = terms;
         let server_changed = self.store.filters.text != text
             || self.store.filters.kind != server_kind
@@ -9362,40 +9411,44 @@ impl App {
         // filters on: the content-contract kind vocabulary. Nothing here is
         // derived from a local index, and no option is offered that the
         // catalog cannot answer.
-        let kinds: Vec<String> = SERVER_KINDS
-            .into_iter()
-            .map(|kind| server_kind_label(kind).to_string())
-            .collect();
-        let mut labels = vec!["all kinds".to_string()];
-        labels.extend(kinds.iter().cloned());
-        let selected_row = self
-            .lib_filters
-            .kind
-            .as_ref()
-            .and_then(|want| kinds.iter().position(|have| have == want))
-            .map_or(0, |index| index + 1);
+        let kinds = KindChoice::rows();
+        let labels: Vec<String> = kinds.iter().map(KindChoice::row_text).collect();
+        let selected_row = kinds
+            .iter()
+            .position(|row| *row == self.lib_filters.kind)
+            .unwrap_or(0);
         let drop = self.ui.drop_down2(cx, ids!(lib_kind_drop));
         drop.set_labels(cx, labels);
         drop.set_selected_item(cx, selected_row);
         self.lib_kind_options = kinds;
 
-        // Labels: the catalog's own categories and tags, counted server-side
-        // over the whole result set (not this page) in the same snapshot as
-        // the rows. An empty catalog offers nothing rather than a made-up
-        // vocabulary.
+        // Tags: the catalog's own labels, counted server-side over the whole
+        // result set (not this page) in the same snapshot as the rows, and
+        // merged into ONE vocabulary — the store's two label kinds are a
+        // wire fact, not a user-facing idea. The structural names live in the
+        // Kind picker and are not repeated here. An empty catalog offers
+        // nothing rather than a made-up vocabulary.
         let facets: Vec<makepad_asset_client::CatalogFacet> = self
             .store
             .search
             .ready()
             .map(|results| results.facets.clone())
             .unwrap_or_default();
+        let merged = merge_facets(&facets);
         let mut label_rows = vec!["all tags".to_string()];
-        label_rows.extend(facets.iter().map(facet_row_text));
-        let label_row = facet_row(&facets, self.lib_filters.label.as_ref());
+        label_rows.extend(merged.iter().map(facet_row_text));
+        let label_row = facet_row(&merged, self.lib_filters.label.as_ref());
         let label_drop = self.ui.drop_down2(cx, ids!(lib_label_drop));
         label_drop.set_labels(cx, label_rows);
         label_drop.set_selected_item(cx, label_row);
-        self.lib_label_options = facets;
+        self.lib_label_options = merged;
+        self.lib_facets = facets;
+
+        // The inline clear only exists while there is something to clear.
+        let typed = !self.ui.text_input(cx, ids!(lib_search)).text().is_empty();
+        self.ui
+            .widget(cx, ids!(lib_search_clear))
+            .set_visible(cx, typed);
 
         self.read_filters_from_ui(cx);
 
@@ -9433,7 +9486,7 @@ impl App {
         // filter actually narrows the catalog to something.
         let shown = self.shown_catalog_assets().len();
         let filter_active = !self.lib_filters.query.trim().is_empty()
-            || self.lib_filters.kind.is_some()
+            || !self.lib_filters.kind.is_any()
             || self.lib_filters.label.is_some();
         let retire_btn = self.ui.button(cx, ids!(lib_retire_shown_btn));
         retire_btn.set_text(cx, &format!("× Retire {shown} shown"));
@@ -11652,29 +11705,37 @@ impl MatchEvent for App {
             .changed(actions)
             .is_some();
         if let Some(index) = self.ui.drop_down2(cx, ids!(lib_kind_drop)).changed(actions) {
-            // Row 0 is "all kinds"; every other row is one server kind.
-            let picked = index
-                .checked_sub(1)
-                .and_then(|kind_index| self.lib_kind_options.get(kind_index).cloned());
+            // Row 0 is "all kinds"; every other row is one picker choice.
+            let picked = self
+                .lib_kind_options
+                .get(index)
+                .cloned()
+                .unwrap_or(KindChoice::Any);
             if picked != self.lib_filters.kind {
                 self.lib_filters.kind = picked;
                 filters_changed = true;
             }
         }
         if let Some(index) = self.ui.drop_down2(cx, ids!(lib_label_drop)).changed(actions) {
-            // Row 0 is "all tags"; every other row is one counted facet.
+            // Row 0 is "all tags"; every other row is one counted name.
             let picked = facet_at(&self.lib_label_options, index);
             if picked != self.lib_filters.label {
                 self.lib_filters.label = picked;
                 filters_changed = true;
             }
         }
+        // The × inside the search box clears the TEXT and nothing else — the
+        // dropdowns are their own filters with their own way back to "all".
+        if self.ui.button(cx, ids!(lib_search_clear)).clicked(actions) {
+            self.ui.text_input(cx, ids!(lib_search)).set_text(cx, "");
+            filters_changed = true;
+        }
         if filters_changed {
             self.refresh_library_ui(cx);
         }
         if self.ui.button(cx, ids!(lib_clear_btn)).clicked(actions) {
             self.ui.text_input(cx, ids!(lib_search)).set_text(cx, "");
-            self.lib_filters.kind = None;
+            self.lib_filters.kind = KindChoice::Any;
             self.lib_filters.label = None;
             self.ui
                 .drop_down2(cx, ids!(lib_kind_drop))
@@ -13125,48 +13186,81 @@ fn library_view_signature(filters: &LibraryFilters) -> String {
     )
 }
 
-/// The Library's tag dropdown: row 0 is "all tags", row `n + 1` is
-/// facet `n`. Reading and writing that offset lives here so the render and
-/// the click can never disagree about it.
-fn facet_at(
-    facets: &[makepad_asset_client::CatalogFacet],
-    row: usize,
-) -> Option<(makepad_asset_client::FacetKind, String)> {
-    row.checked_sub(1)
-        .and_then(|index| facets.get(index))
-        .map(|facet| (facet.kind, facet.label.clone()))
+/// ONE tag, as the UI sees it.
+///
+/// The store keeps two label kinds on the wire — `category` and `tag` — and
+/// its publishers write BOTH for the same name: this catalog answers
+/// `category music 245` AND `tag music 245`, `category doom 70` AND
+/// `tag doom 70`, describing the same rows twice. Shown as two dropdown
+/// entries that reads as a glitch, and there is no user-facing idea that
+/// tells the two apart. So the UI has one vocabulary: a NAME, its count, and
+/// which wire kinds happen to carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TagFacet {
+    name: String,
+    /// How many assets carry it. The MAX of the two kinds' counts, never the
+    /// sum: a track labelled `music` in both vocabularies is one track.
+    count: u64,
+    /// True when the free `tag` vocabulary carries this name — which is the
+    /// filter the query prefers, because it is the one every publisher
+    /// writes for a free label.
+    as_tag: bool,
 }
 
-/// Which row shows a picked facet, or 0 when the pick is not in this result
+/// Merge the server's two label vocabularies into the one the UI shows.
+///
+/// Structural names are dropped: `music` and `sfx` moved into the Kind
+/// picker ([`KindChoice`]), and leaving them here too would recreate exactly
+/// the duplicate this merge exists to remove.
+fn merge_facets(facets: &[makepad_asset_client::CatalogFacet]) -> Vec<TagFacet> {
+    let mut merged: Vec<TagFacet> = Vec::with_capacity(facets.len());
+    for facet in facets {
+        if crate::asset_store_state::AUDIO_SHELVES.contains(&facet.label.as_str()) {
+            continue;
+        }
+        let as_tag = facet.kind == makepad_asset_client::FacetKind::Tag;
+        match merged.iter_mut().find(|have| have.name == facet.label) {
+            Some(have) => {
+                have.count = have.count.max(facet.count);
+                have.as_tag |= as_tag;
+            }
+            None => merged.push(TagFacet {
+                name: facet.label.clone(),
+                count: facet.count,
+                as_tag,
+            }),
+        }
+    }
+    merged
+}
+
+/// The Library's tag dropdown: row 0 is "all tags", row `n + 1` is merged
+/// facet `n`. Reading and writing that offset lives here so the render and
+/// the click can never disagree about it.
+fn facet_at(facets: &[TagFacet], row: usize) -> Option<String> {
+    row.checked_sub(1)
+        .and_then(|index| facets.get(index))
+        .map(|facet| facet.name.clone())
+}
+
+/// Which row shows a picked tag, or 0 when the pick is not in this result
 /// set (a filter can narrow it away) — the dropdown then reads "all tags"
 /// rather than pointing at some other label.
-fn facet_row(
-    facets: &[makepad_asset_client::CatalogFacet],
-    picked: Option<&(makepad_asset_client::FacetKind, String)>,
-) -> usize {
-    let Some((kind, label)) = picked else {
+fn facet_row(facets: &[TagFacet], picked: Option<&String>) -> usize {
+    let Some(name) = picked else {
         return 0;
     };
     facets
         .iter()
-        .position(|facet| facet.kind == *kind && &facet.label == label)
+        .position(|facet| &facet.name == name)
         .map_or(0, |index| index + 1)
 }
 
-/// One dropdown row: a `#` marks the tag vocabulary (categories carry no
-/// prefix) and the server's count follows the label. The prefix is the same
-/// notation the search box accepts — see [`parse_search_box`] — so reading
-/// the dropdown teaches typing the filter.
-fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
-    format!(
-        "{}{}   {}",
-        match facet.kind {
-            makepad_asset_client::FacetKind::Category => "",
-            makepad_asset_client::FacetKind::Tag => "#",
-        },
-        facet.label,
-        facet.count
-    )
+/// One dropdown row: the name and the server's count. No prefix — with one
+/// vocabulary there is nothing for a prefix to distinguish. `#` stays as the
+/// search box's own notation.
+fn facet_row_text(facet: &TagFacet) -> String {
+    format!("{}   {}", facet.name, facet.count)
 }
 
 /// What one Library search box means: the `#tag` filters it names, and the
@@ -13216,7 +13310,16 @@ struct CatalogFilterTerms {
     text: String,
 }
 
-/// Fold the search box and the picked facet into one catalog query.
+/// Fold the search box, the picked tag and the Kind picker's structural
+/// refinement into one catalog query.
+///
+/// The wire has two label filters — `category` and `tag` — and they AND, so
+/// a name is asked for in the vocabulary that actually carries it: the
+/// counted facets say which, and the free `tag` vocabulary wins when both
+/// do (this catalog writes both for the same rows, so either answers the
+/// same set). `structural` — music/sfx from the Kind picker — always takes
+/// the `category` slot, because that is the one every audio publisher
+/// writes.
 ///
 /// The catalog query holds exactly ONE structured tag, so the first typed
 /// tag with no other home takes it and the rest ride the lexical index —
@@ -13225,19 +13328,43 @@ struct CatalogFilterTerms {
 /// a discarded tag would silently WIDEN the result set.
 fn catalog_filter_terms(
     input: &str,
-    picked: Option<&(makepad_asset_client::FacetKind, String)>,
+    picked: Option<&String>,
+    structural: Option<&str>,
+    vocabulary: &[makepad_asset_client::CatalogFacet],
 ) -> CatalogFilterTerms {
     let parsed = parse_search_box(input);
-    let (category, picked_tag) = match picked {
-        Some((makepad_asset_client::FacetKind::Category, label)) => (Some(label.clone()), None),
-        Some((makepad_asset_client::FacetKind::Tag, label)) => (None, Some(label.clone())),
-        None => (None, None),
+    // Which vocabulary carries a name: the free tag list unless only the
+    // category list has it. Unknown names (a facet narrowed out of this
+    // result set, a half-typed `#wor`) go to the tag filter, which is what
+    // the box has always meant by `#`.
+    let carried_as_tag = |name: &String| {
+        let seen = |kind| {
+            vocabulary
+                .iter()
+                .any(|facet| facet.kind == kind && &facet.label == name)
+        };
+        !seen(makepad_asset_client::FacetKind::Category)
+            || seen(makepad_asset_client::FacetKind::Tag)
     };
+    let mut category = structural.map(str::to_string);
+    let mut picked_tag = None;
+    // The picked row and any typed `#word` are the same kind of thing now:
+    // a name to be placed in whichever vocabulary holds it.
     let mut typed = parsed.tags.iter();
-    let tag = match picked_tag {
-        Some(picked) => Some(picked),
-        None => typed.next().cloned(),
-    };
+    let named = picked.cloned().or_else(|| typed.next().cloned());
+    if let Some(name) = named {
+        if carried_as_tag(&name) {
+            picked_tag = Some(name);
+        } else if category.is_none() {
+            category = Some(name);
+        } else {
+            // The Kind picker already holds the one category slot. The name
+            // still narrows through the lexical index rather than being
+            // dropped, which would widen the result set behind the user.
+            picked_tag = Some(name);
+        }
+    }
+    let tag = picked_tag;
     let mut text = parsed.text;
     for extra in typed {
         // The one already carried by the structured filter adds nothing.
@@ -13263,10 +13390,31 @@ fn catalog_filter_terms(
 #[cfg(test)]
 mod search_box_tests {
     use super::*;
-    use makepad_asset_client::FacetKind;
+    use makepad_asset_client::{CatalogFacet, FacetKind};
+
+    /// The real vocabulary this catalog answers with: every publisher writes
+    /// the same name into BOTH label kinds, so `music` and `doom` are a
+    /// category AND a tag over the same rows, while an artist is a tag only.
+    fn vocabulary() -> Vec<CatalogFacet> {
+        let facet = |kind, label: &str, count| CatalogFacet {
+            kind,
+            label: label.to_string(),
+            count,
+        };
+        vec![
+            facet(FacetKind::Category, "music", 245),
+            facet(FacetKind::Tag, "music", 245),
+            facet(FacetKind::Category, "doom", 70),
+            facet(FacetKind::Tag, "doom", 70),
+            facet(FacetKind::Category, "sfx", 12),
+            facet(FacetKind::Tag, "bicep", 2),
+            // A name only the category vocabulary carries.
+            facet(FacetKind::Category, "derived", 9),
+        ]
+    }
 
     fn terms(input: &str) -> CatalogFilterTerms {
-        catalog_filter_terms(input, None)
+        catalog_filter_terms(input, None, None, &vocabulary())
     }
 
     #[test]
@@ -13364,26 +13512,97 @@ mod search_box_tests {
         assert_eq!(terms("#AMBIENT").tag.as_deref(), Some("ambient"));
     }
 
+    /// `#word` reaches a name in EITHER wire vocabulary. There is one tag
+    /// system as far as anyone using this app is concerned; which of the
+    /// store's two label kinds happens to carry a name is not something a
+    /// person should have to know, or could find out.
     #[test]
-    fn a_hash_picks_the_tag_when_a_category_shares_the_name() {
-        // `doom` exists in BOTH vocabularies. Typing `#doom` is the tag one.
+    fn a_hash_reaches_a_name_in_either_vocabulary() {
+        // Carried by both: the free tag filter answers, and it is exact.
         let query = terms("#doom");
         assert_eq!(query.tag.as_deref(), Some("doom"));
-        assert_eq!(query.category, None, "`#` is never a category filter");
-        // The dropdown is how a category is picked, and the two compose.
-        let picked = (FacetKind::Category, "doom".to_string());
-        let both = catalog_filter_terms("#prop", Some(&picked));
-        assert_eq!(both.category.as_deref(), Some("doom"));
-        assert_eq!(both.tag.as_deref(), Some("prop"));
+        assert_eq!(query.category, None);
+        // Carried ONLY as a category: the category filter answers. Before
+        // one system, this typed as `#derived` and found nothing.
+        let query = terms("#derived");
+        assert_eq!(query.category.as_deref(), Some("derived"));
+        assert_eq!(query.tag, None);
+        // A name this result set does not offer at all still means what `#`
+        // has always meant, rather than silently filtering nothing.
+        let query = terms("#halfTyped");
+        assert_eq!(query.tag.as_deref(), Some("halftyped"));
     }
 
+    /// The Kind picker's music/sfx refinement owns the category slot; a
+    /// picked tag and typed tags compose around it.
+    #[test]
+    fn the_kind_refinement_and_a_picked_tag_compose() {
+        let vocab = vocabulary();
+        let music = catalog_filter_terms("", None, Some("music"), &vocab);
+        assert_eq!(music.category.as_deref(), Some("music"));
+        assert_eq!(music.tag, None);
+
+        let picked = "bicep".to_string();
+        let both = catalog_filter_terms("#ambient german", Some(&picked), Some("music"), &vocab);
+        assert_eq!(both.category.as_deref(), Some("music"), "the kind picker");
+        assert_eq!(both.tag.as_deref(), Some("bicep"), "the picked tag");
+        assert_eq!(both.text, "german ambient", "the typed tag still narrows");
+    }
+
+    /// A picked tag owns the structured slot; typed tags still narrow.
     #[test]
     fn a_picked_tag_keeps_the_structured_slot_and_typed_tags_still_narrow() {
-        let picked = (FacetKind::Tag, "music".to_string());
-        let query = catalog_filter_terms("#ambient german", Some(&picked));
+        let picked = "music".to_string();
+        let query = catalog_filter_terms("#ambient german", Some(&picked), None, &vocabulary());
         assert_eq!(query.tag.as_deref(), Some("music"), "the pick owns the slot");
         assert_eq!(query.text, "german ambient", "the typed tag still applies");
         assert_eq!(query.category, None);
+    }
+
+    /// One vocabulary: the same name in both wire kinds is ONE row, counted
+    /// once (they describe the same rows — adding them counts every track
+    /// twice), and the structural names are not in this list at all because
+    /// they moved to the Kind picker.
+    #[test]
+    fn the_tag_list_is_one_vocabulary_without_the_structural_names() {
+        let merged = merge_facets(&vocabulary());
+        let names: Vec<&str> = merged.iter().map(|facet| facet.name.as_str()).collect();
+        assert_eq!(names, vec!["doom", "bicep", "derived"]);
+        assert!(!names.contains(&"music"), "music is a Kind now");
+        assert!(!names.contains(&"sfx"), "and so is sfx");
+        let doom = &merged[0];
+        assert_eq!(doom.count, 70, "one count, not 70 + 70");
+        assert!(doom.as_tag, "the free vocabulary carries it, so the tag filter answers");
+        assert!(!merged[2].as_tag, "`derived` is a category-only name");
+        // And the row says the name, with no vocabulary prefix to decode.
+        assert_eq!(facet_row_text(doom), "doom   70");
+        assert_eq!(facet_at(&merged, 1).as_deref(), Some("doom"));
+        assert_eq!(facet_at(&merged, 0), None, "row 0 is `all tags`");
+        assert_eq!(facet_row(&merged, Some(&"bicep".to_string())), 2);
+        assert_eq!(facet_row(&merged, Some(&"gone".to_string())), 0);
+    }
+
+    /// The Kind picker offers the contract's kinds, with audio split into
+    /// the two shelves that are worth going to separately — and audio itself
+    /// still there, so an unlabelled track is not lost.
+    #[test]
+    fn the_kind_picker_splits_audio_into_music_and_sfx() {
+        let rows = KindChoice::rows();
+        let text: Vec<String> = rows.iter().map(KindChoice::row_text).collect();
+        assert_eq!(text[0], "all kinds");
+        let audio = text.iter().position(|row| row == "audio").expect("audio row");
+        assert_eq!(text[audio + 1], "audio · music");
+        assert_eq!(text[audio + 2], "audio · sfx");
+        assert_eq!(
+            rows[audio + 1].query(),
+            (Some(makepad_asset_data::AssetKind::Audio), Some("music"))
+        );
+        assert_eq!(
+            rows[audio + 2].query(),
+            (Some(makepad_asset_data::AssetKind::Audio), Some("sfx"))
+        );
+        assert_eq!(rows[0].query(), (None, None));
+        assert!(rows[0].is_any());
     }
 }
 
@@ -13419,22 +13638,21 @@ mod library_view_tests {
         assert_eq!(library_view_signature(&padded), library_view_signature(&typed));
 
         let mut kinded = base.clone();
-        kinded.kind = Some("prop".into());
+        kinded.kind = KindChoice::Kind(makepad_asset_data::AssetKind::Prop);
         assert_ne!(library_view_signature(&kinded), sig, "kind facet");
 
-        let mut labelled = base.clone();
-        labelled.label = Some((FacetKind::Category, "doom".into()));
-        assert_ne!(library_view_signature(&labelled), sig, "label facet");
+        // The audio refinements are their own result sets, and not each
+        // other's: music and sfx are both `audio` underneath.
+        let mut music = base.clone();
+        music.kind = KindChoice::AudioShelf("music");
+        let mut sfx = base.clone();
+        sfx.kind = KindChoice::AudioShelf("sfx");
+        assert_ne!(library_view_signature(&music), sig);
+        assert_ne!(library_view_signature(&music), library_view_signature(&sfx));
 
-        // The two vocabularies are separate filters: the same word in each
-        // is a different result set.
-        let mut tagged = base.clone();
-        tagged.label = Some((FacetKind::Tag, "doom".into()));
-        assert_ne!(
-            library_view_signature(&tagged),
-            library_view_signature(&labelled),
-            "a category is not a tag"
-        );
+        let mut labelled = base.clone();
+        labelled.label = Some("doom".into());
+        assert_ne!(library_view_signature(&labelled), sig, "tag facet");
     }
 }
 
@@ -13625,50 +13843,51 @@ mod facet_tests {
         CatalogFacet { kind, label: label.to_string(), count }
     }
 
-    /// The dropdown's first row is "all tags", so every facet sits one row
-    /// down. Reading a row and showing a pick have to agree about that, or
-    /// picking "doom" silently filters by "kenney".
+    /// The dropdown's first row is "all tags", so every merged name sits
+    /// one row down. Reading a row and showing a pick have to agree about
+    /// that, or picking "doom" silently filters by "kenney".
     #[test]
-    fn the_label_dropdown_row_maps_back_to_the_facet_it_shows() {
-        let facets = vec![
+    fn the_tag_dropdown_row_maps_back_to_the_name_it_shows() {
+        let rows = merge_facets(&[
             facet(FacetKind::Category, "doom", 102),
             facet(FacetKind::Tag, "prop", 40),
             facet(FacetKind::Category, "kenney", 7),
-        ];
-        assert_eq!(facet_at(&facets, 0), None, "row 0 clears the filter");
-        for (row, want) in [
-            (1, (FacetKind::Category, "doom")),
-            (2, (FacetKind::Tag, "prop")),
-            (3, (FacetKind::Category, "kenney")),
-        ] {
-            let picked = facet_at(&facets, row).expect("a facet row");
-            assert_eq!((picked.0, picked.1.as_str()), want);
-            assert_eq!(facet_row(&facets, Some(&picked)), row, "round trip");
+        ]);
+        assert_eq!(facet_at(&rows, 0), None, "row 0 clears the filter");
+        for (row, want) in [(1, "doom"), (2, "prop"), (3, "kenney")] {
+            let picked = facet_at(&rows, row).expect("a tag row");
+            assert_eq!(picked, want);
+            assert_eq!(facet_row(&rows, Some(&picked)), row, "round trip");
         }
-        assert_eq!(facet_at(&facets, 4), None, "past the end selects nothing");
+        assert_eq!(facet_at(&rows, 4), None, "past the end selects nothing");
 
-        // Same label, different vocabulary: they are separate filters and
-        // must not be confused for one another.
-        let both = vec![
-            facet(FacetKind::Category, "doom", 2),
-            facet(FacetKind::Tag, "doom", 1),
-        ];
-        assert_eq!(facet_at(&both, 1).unwrap().0, FacetKind::Category);
-        assert_eq!(facet_at(&both, 2).unwrap().0, FacetKind::Tag);
-        assert_eq!(facet_row(&both, Some(&(FacetKind::Tag, "doom".into()))), 2);
+        // The SAME name in both wire vocabularies is ONE row. It described
+        // the same assets twice and read as a glitch in the dropdown.
+        let both = merge_facets(&[
+            facet(FacetKind::Category, "doom", 70),
+            facet(FacetKind::Tag, "doom", 70),
+        ]);
+        assert_eq!(both.len(), 1, "one name, one row");
+        assert_eq!(both[0].count, 70, "one count, not 140");
+        assert_eq!(facet_at(&both, 2), None, "and no second row to pick");
 
         // A pick the current result set no longer contains reads as "all
-        // labels" rather than pointing at whatever sits in its old row.
-        assert_eq!(facet_row(&facets, Some(&(FacetKind::Tag, "gone".into()))), 0);
-        assert_eq!(facet_row(&facets, None), 0);
+        // tags" rather than pointing at whatever sits in its old row.
+        assert_eq!(facet_row(&rows, Some(&"gone".to_string())), 0);
+        assert_eq!(facet_row(&rows, None), 0);
     }
 
-    /// The row text is the label, its count, and a `#` that says which of
-    /// the two server-side filters a pick would use.
+    /// The row text is the name and its count. Nothing else: with one
+    /// vocabulary there is no second thing for a prefix to distinguish, and
+    /// the `#` that used to mark tags now belongs to the search box alone.
     #[test]
-    fn a_facet_row_shows_its_vocabulary_and_its_count() {
-        assert_eq!(facet_row_text(&facet(FacetKind::Category, "doom", 102)), "doom   102");
-        assert_eq!(facet_row_text(&facet(FacetKind::Tag, "prop", 40)), "#prop   40");
+    fn a_tag_row_shows_its_name_and_its_count() {
+        let rows = merge_facets(&[
+            facet(FacetKind::Category, "doom", 102),
+            facet(FacetKind::Tag, "prop", 40),
+        ]);
+        assert_eq!(facet_row_text(&rows[0]), "doom   102");
+        assert_eq!(facet_row_text(&rows[1]), "prop   40");
     }
 }
 
