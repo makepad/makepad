@@ -644,7 +644,11 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
         if let Some(handler) = self.on_change.as_object() {
             let text = self.text.clone();
-            let vm_id = cx.script_ref_vm_id(&self.source);
+            // Nothing to call into if the isolate that minted this input is
+            // already gone.
+            let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+                return;
+            };
             cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
                 vm.with_instruction_limit(
@@ -661,7 +665,11 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
         if let Some(handler) = self.on_return.as_object() {
             let text = self.text.clone();
-            let vm_id = cx.script_ref_vm_id(&self.source);
+            // Nothing to call into if the isolate that minted this input is
+            // already gone.
+            let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+                return;
+            };
             cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
                 vm.with_instruction_limit(
