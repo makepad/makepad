@@ -379,8 +379,12 @@ fn cancel_mid_stream_emits_cancelled_and_idles() {
 }
 
 #[test]
-fn tool_round_budget_terminates_runaway_loops() {
-    // A provider that answers EVERY turn with another tool call.
+fn tool_round_budget_degrades_gracefully_on_the_textual_lane() {
+    // A provider that answers EVERY turn with another tool call. The
+    // textual lane must NOT hard-kill the turn at the budget: the model
+    // gets one final completion round (with a nudge in history) and any
+    // tool line it emits there is cut off, not executed — the turn ends
+    // in Done, never a dead session.
     let scripts: Vec<Vec<ProviderEvent>> = (0..MAX_TOOL_ROUNDS + 2)
         .map(|_| {
             vec![ProviderEvent::Done {
@@ -389,22 +393,31 @@ fn tool_round_budget_terminates_runaway_loops() {
         })
         .collect();
     let provider = Scripted::new(scripts);
+    let turns = provider.turns.clone();
     let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
     let mut session = Session::new("prin_test", Box::new(provider));
 
     session.send("loop forever", &[], &mut exec).unwrap();
-    for _ in 0..MAX_TOOL_ROUNDS + 2 {
+    for _ in 0..MAX_TOOL_ROUNDS + 4 {
         session.pump(&mut exec);
     }
     let events = session.drain_events();
     let last = events.last().unwrap();
     assert!(
-        matches!(&last.body, ChatEventBody::Error { code, .. } if code == "tool_budget"),
-        "expected tool_budget error, got {:?}",
+        matches!(&last.body, ChatEventBody::Done),
+        "the budget must end the turn gracefully, got {:?}",
         last.body
     );
     assert!(session.is_idle());
+    assert!(!session.is_sealed(), "a budgeted turn is not a dead session");
+    // Exactly the budget executed; the final round's tool line did not.
     assert_eq!(exec.calls.borrow().len(), MAX_TOOL_ROUNDS as usize);
+    // The final provider turn saw the nudge in its history.
+    let final_input = turns.borrow().last().cloned().unwrap();
+    assert!(
+        final_input.messages.iter().any(|m| m.text.contains("tool budget reached")),
+        "the final round must carry the budget nudge"
+    );
 }
 
 /// Qwen keeps the textual marker contract; native providers do not.

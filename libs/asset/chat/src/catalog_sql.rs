@@ -278,6 +278,59 @@ impl CatalogReader {
     }
 }
 
+impl CatalogReader {
+    /// One line per model "kit" (the first two alias path segments):
+    /// `kenney/car-kit 50 · kenney/building-kit 62 · …`. Fed into the game
+    /// session's dynamic context so the model SEES the inventory up front
+    /// instead of paging the catalog 20 rows per tool call (iteration 5
+    /// burned its whole tool budget browsing).
+    pub fn kit_summary(&mut self) -> Result<String, String> {
+        let limits = self.limits;
+        let db = self.database()?;
+        db.limits_mut().max_rows = usize::MAX;
+        db.limits_mut().max_steps = limits.max_steps;
+        let stmt = db
+            .prepare(
+                "SELECT canon_alias FROM search_annotations \
+                 WHERE live=1 AND kind='mesh' AND canon_alias <> ''",
+            )
+            .map_err(|e| refusal_text(&e))?;
+        let mut counts: Vec<(String, u32)> = Vec::new();
+        let mut scanned = 0usize;
+        stmt.for_each(db, &[], |row| {
+            scanned += 1;
+            if scanned > 50_000 {
+                return Ok(false);
+            }
+            if let Some(Value::Text(alias)) = row.first() {
+                let kit = match alias.match_indices('/').nth(1) {
+                    Some((i, _)) => &alias[..i],
+                    None => alias.as_str(),
+                };
+                match counts.iter_mut().find(|(k, _)| k == kit) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((kit.to_string(), 1)),
+                }
+            }
+            Ok(true)
+        })
+        .map_err(|e| failure_text(&e))?;
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts.truncate(48);
+        let mut out = String::from("Model kits in the store (alias-prefix count):\n");
+        for (i, (kit, n)) in counts.iter().enumerate() {
+            if i > 0 {
+                out.push_str(" · ");
+            }
+            out.push_str(kit);
+            out.push(' ');
+            out.push_str(&n.to_string());
+        }
+        out.push('\n');
+        Ok(out)
+    }
+}
+
 /// Advisory notes the model gets with the generated schema. They describe
 /// the well-known catalog tables; the generated part above is the truth.
 const SCHEMA_NOTES: &str = "\nNotes:\n\
