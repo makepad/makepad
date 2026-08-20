@@ -912,6 +912,13 @@ enum MediaKind {
     /// never as a blob — a walker must not have to fetch a second file to
     /// know it is standing on the floor.
     Spawn,
+    /// `<stem>.place`: the world's actor/item placements (`world-place 1`
+    /// text, self-identifying) — every THING with a billboard actor key,
+    /// position and yaw. Published as a Source-role text blob beside the
+    /// world GLB so a game can populate the map; a typed FileRole waits
+    /// for the next schema bump (a new canon_enum tag hard-errors every
+    /// deployed client).
+    Place,
 }
 
 impl MediaKind {
@@ -926,6 +933,7 @@ impl MediaKind {
             "shadowsdf" => Some(Self::ShadowSdf),
             "billboard" => Some(Self::Billboard),
             "spawn" => Some(Self::Spawn),
+            "place" => Some(Self::Place),
             _ => None,
         }
     }
@@ -933,7 +941,10 @@ impl MediaKind {
     /// Derived companion of a same-stem GLB (published as extra file roles
     /// on that mesh asset, skipped when no such GLB exists).
     fn is_sidecar(self) -> bool {
-        matches!(self, Self::AoMesh | Self::AoPng | Self::ShadowSdf | Self::Spawn)
+        matches!(
+            self,
+            Self::AoMesh | Self::AoPng | Self::ShadowSdf | Self::Spawn | Self::Place
+        )
     }
 
     fn media_type(self) -> MediaType {
@@ -945,7 +956,7 @@ impl MediaKind {
             Self::Glb => MediaType::Glb,
             Self::AoMesh | Self::ShadowSdf => MediaType::Bin,
             Self::AoPng => MediaType::Png,
-            Self::Billboard | Self::Spawn => MediaType::Text,
+            Self::Billboard | Self::Spawn | Self::Place => MediaType::Text,
         }
     }
 
@@ -961,6 +972,7 @@ impl MediaKind {
             Self::ShadowSdf => "shadowsdf",
             Self::Billboard => "billboard",
             Self::Spawn => "spawn",
+            Self::Place => "place",
         }
     }
 }
@@ -2679,9 +2691,11 @@ fn build_manifest(
                     .and_then(|&i| hashed[i].nav.as_ref());
                 mesh_asset(file, &hashed[thumb_idx], albedo, &sidecars, nav)?
             }
-            MediaKind::AoMesh | MediaKind::AoPng | MediaKind::ShadowSdf | MediaKind::Spawn => {
-                continue
-            }
+            MediaKind::AoMesh
+            | MediaKind::AoPng
+            | MediaKind::ShadowSdf
+            | MediaKind::Spawn
+            | MediaKind::Place => continue,
         };
         if !seen_keys.insert(asset.key.as_str().to_string()) {
             return Err(PackImportError::new(
@@ -2827,7 +2841,7 @@ fn role_of(file: &HashedFile) -> FileRole {
         MediaKind::AoMesh => FileRole::AoMesh,
         MediaKind::AoPng => FileRole::AoTexture,
         MediaKind::ShadowSdf => FileRole::ShadowSdf,
-        MediaKind::Billboard | MediaKind::Spawn => FileRole::Source,
+        MediaKind::Billboard | MediaKind::Spawn | MediaKind::Place => FileRole::Source,
     }
 }
 
@@ -3780,6 +3794,16 @@ fn measure_handle(
                 nav,
                 ..Measured::default()
             })
+        }
+        // Same convenience contract as Spawn: an unreadable placement
+        // sidecar is left behind, the world still publishes.
+        MediaKind::Place => {
+            let bytes = read_all_from(handle, identity.len, &file.pack_path)?;
+            let ok = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| crate::world_place::WorldPlace::parse(text).ok())
+                .is_some();
+            Ok(Measured { sidecar_ok: ok, ..Measured::default() })
         }
         // A manifest that cannot be read is refused, never published as a
         // mystery blob: its frame list is what keeps the per-frame PNGs out
@@ -6457,6 +6481,20 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// The `.place` placements sidecar (world-place 1 text) rides the same
+    /// sidecar lane as `.spawn`: recognized by extension, attached to the
+    /// same-stem GLB, published as a Source-role TEXT blob (a typed role
+    /// waits for the next schema bump — new canon_enum tags hard-error
+    /// deployed clients). Consumers pick it out of the Source files by its
+    /// self-identifying first line.
+    #[test]
+    fn place_sidecar_recognized_and_text_typed() {
+        assert_eq!(MediaKind::from_ext("place"), Some(MediaKind::Place));
+        assert!(MediaKind::Place.is_sidecar());
+        assert_eq!(MediaKind::Place.media_type(), MediaType::Text);
+        assert_eq!(MediaKind::Place.name(), "place");
+    }
 
     fn test_root(name: &str) -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
