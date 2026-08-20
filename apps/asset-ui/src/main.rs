@@ -1253,9 +1253,10 @@ script_mod! {
         }
     }
 
-    // Scrolling DropDown2 popup: selected row stays under the field, list
-    // clamps to the window, ▲/▼ arrows scroll. Used for every select in
-    // this app (preset lists are long enough that DropDownFlat clips).
+    // Filtering ComboBox: a text field with a disclosure arrow. Typing
+    // filters the closed set live, Enter commits the highlighted match, Esc
+    // restores the previous pick; past 12 rows the popup scrolls on a real
+    // scrollbar. Used for every select in this app.
     let FieldCaption = HintLabel{
         width: 92
         height: Fit
@@ -1269,26 +1270,39 @@ script_mod! {
         align: Align{y: 0.5}
     }
 
-    let FieldDrop = DropDown2Flat{
+    let FieldDrop = ComboBox{
         width: Fill
         margin: 0
         padding: Inset{left: 8 right: 24 top: 5 bottom: 5}
         item_height: 22.0
-        arrow_height: 16.0
+        max_visible_items: 12
         popup_margin: 8.0
-        draw_text +: {
-            color: #xaab3bd
-            color_hover: #xe6ebf0
-            color_focus: #xc6cfd8
-            color_down: #xe6ebf0
-            text_style: theme.font_regular{font_size: 8.5}
+        popup_font_px: 8.5
+        input +: {
+            draw_text +: {
+                color: #xaab3bd
+                color_hover: #xe6ebf0
+                color_focus: #xe6ebf0
+                color_down: #xe6ebf0
+                color_empty: #x5a616a
+                color_empty_hover: #x6a7178
+                color_empty_focus: #x6a7178
+                text_style: theme.font_regular{font_size: 8.5}
+            }
+        }
+        scroll_bar +: {
+            draw_bg +: {
+                color: #xffffff1e
+                color_hover: #xffffff38
+                color_drag: #xffffff50
+            }
         }
         draw_item_text +: {
-            hover: instance(0.0)
-            active: instance(0.0)
             color: #xc6cfd8
             color_hover: #xe6ebf0
             color_active: #xe6ebf0
+            color_match: #x3d9bf0
+            color_dim: #x6a7178
             text_style: theme.font_regular{font_size: 8.5}
         }
         draw_bg +: {
@@ -1340,17 +1354,9 @@ script_mod! {
             border_color: #xffffff22
         }
         draw_item +: {
-            hover: instance(0.0)
-            active: instance(0.0)
             color: #x00000000
             color_hover: #x2a2a32
             color_active: #x243044
-        }
-        draw_scroll_arrow +: {
-            up: instance(0.0)
-            enabled: instance(1.0)
-            color: #xc6cfd8
-            color_disabled: #x4a5158
         }
     }
     let FieldDrop2 = FieldDrop{}
@@ -2651,6 +2657,15 @@ script_mod! {
                                                         width: Fill height: 300
                                                         detail_mesh_view := MeshView{}
                                                     }
+                                                    // An actor PLAYS here:
+                                                    // the same viewer the
+                                                    // Create surface mounts,
+                                                    // with its state list and
+                                                    // its eight rotations.
+                                                    detail_preview_billboard := View{
+                                                        width: Fill height: 300
+                                                        detail_billboard_view := BillboardView{}
+                                                    }
                                                 }
                                             }
                                             View{
@@ -3683,6 +3698,10 @@ pub struct App {
     /// Assets whose thumbnail is being materialised right now.
     #[rust]
     catalog_thumb_pending: HashSet<String>,
+    /// Assets whose SOURCE-role file is being materialised right now — the
+    /// second blob a stateful billboard needs before it can be played.
+    #[rust]
+    catalog_source_pending: HashSet<String>,
     #[rust]
     lib_kind_options: Vec<KindChoice>,
     /// Rows behind the tag dropdown, same row offset: the catalog's own
@@ -3763,18 +3782,18 @@ impl App {
             .map(|&i| PRESETS[i].name.to_string())
             .collect();
         self.ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .set_labels(cx, labels);
         self.ui
-            .drop_down2(cx, ids!(box_drop))
+            .combo_box(cx, ids!(box_drop))
             .set_labels(cx, vec!["auto (affinity)".to_string()]);
-        self.ui.drop_down2(cx, ids!(voice_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(voice_drop)).set_labels(
             cx,
             std::iter::once(format!("default ({})", VOICES[0]))
                 .chain(VOICES[1..].iter().map(|v| (*v).to_string()))
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(size_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(size_drop)).set_labels(
             cx,
             IMAGE_SIZES
                 .iter()
@@ -3788,30 +3807,30 @@ impl App {
                 })
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(steps_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(steps_drop)).set_labels(
             cx,
             std::iter::once("model default".to_string())
                 .chain(IMAGE_STEPS.iter().map(|s| s.to_string()))
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(lora_strength_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(lora_strength_drop)).set_labels(
             cx,
             LORA_STRENGTHS.iter().map(|s| format!("{s:.1}")).collect(),
         );
-        self.ui.drop_down2(cx, ids!(lora_drop)).set_labels(cx, vec!["none".to_string()]);
-        self.ui.drop_down2(cx, ids!(vid_interp_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(lora_drop)).set_labels(cx, vec!["none".to_string()]);
+        self.ui.combo_box(cx, ids!(vid_interp_drop)).set_labels(
             cx,
             VIDEO_INTERPOLATE
                 .iter()
                 .map(|f| if *f <= 1 { "off (native 24 fps)".to_string() } else { format!("RIFE ×{f} ({} fps)", 24 * f) })
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(mask_brush_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(mask_brush_drop)).set_labels(
             cx,
             MASK_BRUSH_SIZES.iter().map(|r| format!("brush {r:.0}px")).collect(),
         );
-        self.ui.drop_down2(cx, ids!(mask_brush_drop)).set_selected_item(cx, 1);
-        self.ui.drop_down2(cx, ids!(edit_strength_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(mask_brush_drop)).set_selected_item(cx, 1);
+        self.ui.combo_box(cx, ids!(edit_strength_drop)).set_labels(
             cx,
             EDIT_STRENGTHS
                 .iter()
@@ -3825,7 +3844,7 @@ impl App {
                 .collect(),
         );
         self.ui
-            .drop_down2(cx, ids!(texture_size_drop))
+            .combo_box(cx, ids!(texture_size_drop))
             .set_labels(
                 cx,
                 MESH_TEXTURE_SIZES
@@ -3838,14 +3857,14 @@ impl App {
                     })
                     .collect(),
             );
-        self.ui.drop_down2(cx, ids!(pbr_view_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(pbr_view_drop)).set_labels(
             cx,
             crate::mesh_view::pbr_preview::PbrViewMode::ALL
                 .iter()
                 .map(|mode| mode.label().to_string())
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(mesh_faces_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(mesh_faces_drop)).set_labels(
             cx,
             MESH_FACE_COUNTS
                 .iter()
@@ -3855,7 +3874,7 @@ impl App {
                 })
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(vid_size_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(vid_size_drop)).set_labels(
             cx,
             VIDEO_SIZES
                 .iter()
@@ -3869,7 +3888,7 @@ impl App {
                 })
                 .collect(),
         );
-        self.ui.drop_down2(cx, ids!(vid_len_drop)).set_labels(
+        self.ui.combo_box(cx, ids!(vid_len_drop)).set_labels(
             cx,
             VIDEO_LENGTHS
                 .iter()
@@ -3888,7 +3907,7 @@ impl App {
             .iter()
             .position(|seconds| *seconds == MUSIC_DEFAULT_SECONDS)
             .expect("default music duration must be a UI preset");
-        let music_len_drop = self.ui.drop_down2(cx, ids!(music_len_drop));
+        let music_len_drop = self.ui.combo_box(cx, ids!(music_len_drop));
         music_len_drop.set_labels(
             cx,
             MUSIC_LENGTHS
@@ -4645,7 +4664,7 @@ impl App {
             boxes.push(snap.base_url.clone());
         }
         if boxes != self.box_choices {
-            self.ui.drop_down2(cx, ids!(box_drop)).set_labels(cx, box_labels);
+            self.ui.combo_box(cx, ids!(box_drop)).set_labels(cx, box_labels);
         }
         self.box_choices = boxes;
         self.refresh_model_ui(cx, false);
@@ -4656,7 +4675,7 @@ impl App {
         let order = crate::pipeline::presets_sorted_order();
         let row = self
             .ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .selected_item()
             .min(order.len() - 1);
         order[row]
@@ -4666,25 +4685,25 @@ impl App {
 
     fn selected_stage_model(&self, cx: &mut Cx, domain: &str) -> Option<String> {
         let drop = match domain {
-            "text" => self.ui.drop_down2(cx, ids!(md_text)),
-            "image" => self.ui.drop_down2(cx, ids!(md_image)),
-            "audio" => self.ui.drop_down2(cx, ids!(md_audio)),
-            "speech" => self.ui.drop_down2(cx, ids!(md_speech)),
-            "music" => self.ui.drop_down2(cx, ids!(md_music)),
-            "video" => self.ui.drop_down2(cx, ids!(md_video)),
-            "mesh" => self.ui.drop_down2(cx, ids!(md_mesh)),
-            "matte" => self.ui.drop_down2(cx, ids!(md_matte)),
-            "depth" => self.ui.drop_down2(cx, ids!(md_depth)),
-            "segment" => self.ui.drop_down2(cx, ids!(md_segment)),
-            "paint" => self.ui.drop_down2(cx, ids!(md_paint)),
-            "world" => self.ui.drop_down2(cx, ids!(md_world)),
-            "rig" => self.ui.drop_down2(cx, ids!(md_rig)),
-            "motion" => self.ui.drop_down2(cx, ids!(md_motion)),
-            "edit" => self.ui.drop_down2(cx, ids!(md_edit)),
-            "upscale" => self.ui.drop_down2(cx, ids!(md_upscale)),
-            "control" => self.ui.drop_down2(cx, ids!(md_control)),
-            "inpaint" => self.ui.drop_down2(cx, ids!(md_inpaint)),
-            "splat" => self.ui.drop_down2(cx, ids!(md_splat)),
+            "text" => self.ui.combo_box(cx, ids!(md_text)),
+            "image" => self.ui.combo_box(cx, ids!(md_image)),
+            "audio" => self.ui.combo_box(cx, ids!(md_audio)),
+            "speech" => self.ui.combo_box(cx, ids!(md_speech)),
+            "music" => self.ui.combo_box(cx, ids!(md_music)),
+            "video" => self.ui.combo_box(cx, ids!(md_video)),
+            "mesh" => self.ui.combo_box(cx, ids!(md_mesh)),
+            "matte" => self.ui.combo_box(cx, ids!(md_matte)),
+            "depth" => self.ui.combo_box(cx, ids!(md_depth)),
+            "segment" => self.ui.combo_box(cx, ids!(md_segment)),
+            "paint" => self.ui.combo_box(cx, ids!(md_paint)),
+            "world" => self.ui.combo_box(cx, ids!(md_world)),
+            "rig" => self.ui.combo_box(cx, ids!(md_rig)),
+            "motion" => self.ui.combo_box(cx, ids!(md_motion)),
+            "edit" => self.ui.combo_box(cx, ids!(md_edit)),
+            "upscale" => self.ui.combo_box(cx, ids!(md_upscale)),
+            "control" => self.ui.combo_box(cx, ids!(md_control)),
+            "inpaint" => self.ui.combo_box(cx, ids!(md_inpaint)),
+            "splat" => self.ui.combo_box(cx, ids!(md_splat)),
             _ => return None,
         };
         let index = drop.selected_item().checked_sub(1)?;
@@ -4745,13 +4764,13 @@ impl App {
             None => true,
         };
         if changed {
-            self.ui.drop_down2(cx, drop).set_labels(cx, labels);
+            self.ui.combo_box(cx, drop).set_labels(cx, labels);
             match slot {
                 Some(index) => self.model_choices[index].1 = ids,
                 None => self.model_choices.push((domain.to_string(), ids)),
             }
         }
-        self.ui.drop_down2(cx, drop).set_selected_item(cx, select);
+        self.ui.combo_box(cx, drop).set_selected_item(cx, select);
     }
 
     /// Show a model dropdown for each step in the selected pipeline, the
@@ -4877,37 +4896,37 @@ impl App {
     fn current_panel_gen(&self, cx: &mut Cx) -> GenParams {
         let size = IMAGE_SIZES[self
             .ui
-            .drop_down2(cx, ids!(size_drop))
+            .combo_box(cx, ids!(size_drop))
             .selected_item()
             .min(IMAGE_SIZES.len() - 1)];
-        let steps_index = self.ui.drop_down2(cx, ids!(steps_drop)).selected_item();
+        let steps_index = self.ui.combo_box(cx, ids!(steps_drop)).selected_item();
         let image_steps = steps_index
             .checked_sub(1)
             .and_then(|i| IMAGE_STEPS.get(i).copied());
         let mesh_texture_size = MESH_TEXTURE_SIZES[self
             .ui
-            .drop_down2(cx, ids!(texture_size_drop))
+            .combo_box(cx, ids!(texture_size_drop))
             .selected_item()
             .min(MESH_TEXTURE_SIZES.len() - 1)];
         let mesh_faces_n = MESH_FACE_COUNTS[self
             .ui
-            .drop_down2(cx, ids!(mesh_faces_drop))
+            .combo_box(cx, ids!(mesh_faces_drop))
             .selected_item()
             .min(MESH_FACE_COUNTS.len() - 1)];
         let mesh_faces = (mesh_faces_n != 0).then_some(mesh_faces_n);
         let vid_size = VIDEO_SIZES[self
             .ui
-            .drop_down2(cx, ids!(vid_size_drop))
+            .combo_box(cx, ids!(vid_size_drop))
             .selected_item()
             .min(VIDEO_SIZES.len() - 1)];
         let (video_frames, video_steps) = VIDEO_LENGTHS[self
             .ui
-            .drop_down2(cx, ids!(vid_len_drop))
+            .combo_box(cx, ids!(vid_len_drop))
             .selected_item()
             .min(VIDEO_LENGTHS.len() - 1)];
         let music_seconds = MUSIC_LENGTHS[self
             .ui
-            .drop_down2(cx, ids!(music_len_drop))
+            .combo_box(cx, ids!(music_len_drop))
             .selected_item()
             .min(MUSIC_LENGTHS.len() - 1)];
         GenParams {
@@ -4919,7 +4938,7 @@ impl App {
             motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
             edit_strength: EDIT_STRENGTHS[self
                 .ui
-                .drop_down2(cx, ids!(edit_strength_drop))
+                .combo_box(cx, ids!(edit_strength_drop))
                 .selected_item()
                 .min(EDIT_STRENGTHS.len() - 1)],
             video_size: vid_size,
@@ -4928,7 +4947,7 @@ impl App {
             video_audio: self.ui.check_box(cx, ids!(video_audio_toggle)).active(cx),
             video_interpolate: VIDEO_INTERPOLATE[self
                 .ui
-                .drop_down2(cx, ids!(vid_interp_drop))
+                .combo_box(cx, ids!(vid_interp_drop))
                 .selected_item()
                 .min(VIDEO_INTERPOLATE.len() - 1)],
             image_lora: self.selected_lora(cx),
@@ -4990,7 +5009,7 @@ impl App {
                 trimmed.to_string()
             }
         };
-        let voice_index = self.ui.drop_down2(cx, ids!(voice_drop)).selected_item();
+        let voice_index = self.ui.combo_box(cx, ids!(voice_drop)).selected_item();
         let voice = if voice_index == 0 || !self.voice_drop_is_kokoro {
             None
         } else {
@@ -5017,7 +5036,7 @@ impl App {
             return;
         };
         self.ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .set_selected_item(cx, crate::pipeline::preset_row_for_index(preset));
         self.refresh_model_ui(cx, false);
         for pin in &saved.models {
@@ -5025,23 +5044,23 @@ impl App {
             if let Some(pos) = ids.iter().position(|id| id == &pin.model) {
                 if let Some(drop) = Self::stage_model_drop_id(&pin.domain) {
                     self.ui
-                        .drop_down2(cx, drop)
+                        .combo_box(cx, drop)
                         .set_selected_item(cx, pos + 1);
                 }
             }
         }
         self.ui
-            .drop_down2(cx, ids!(size_drop))
+            .combo_box(cx, ids!(size_drop))
             .set_selected_item(cx, fast_presets::nearest_image_size(saved.image_w, saved.image_h));
-        self.ui.drop_down2(cx, ids!(steps_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(steps_drop)).set_selected_item(
             cx,
             fast_presets::nearest_image_steps(saved.image_steps),
         );
-        self.ui.drop_down2(cx, ids!(texture_size_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(texture_size_drop)).set_selected_item(
             cx,
             fast_presets::nearest_mesh_texture(saved.mesh_texture),
         );
-        self.ui.drop_down2(cx, ids!(mesh_faces_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(mesh_faces_drop)).set_selected_item(
             cx,
             fast_presets::nearest_mesh_faces(saved.mesh_faces),
         );
@@ -5051,22 +5070,22 @@ impl App {
         self.ui
             .text_input(cx, ids!(motion_prompt_input))
             .set_text(cx, saved.motion_prompt.as_deref().unwrap_or(""));
-        self.ui.drop_down2(cx, ids!(vid_size_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(vid_size_drop)).set_selected_item(
             cx,
             fast_presets::nearest_video_size(saved.video_w, saved.video_h),
         );
-        self.ui.drop_down2(cx, ids!(vid_len_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(vid_len_drop)).set_selected_item(
             cx,
             fast_presets::nearest_video_len(saved.video_frames, saved.video_steps),
         );
         self.ui
             .check_box(cx, ids!(video_audio_toggle))
             .set_active(cx, saved.video_audio.unwrap_or(true), Animate::No);
-        self.ui.drop_down2(cx, ids!(edit_strength_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(edit_strength_drop)).set_selected_item(
             cx,
             fast_presets::nearest_edit_strength(saved.edit_strength.unwrap_or(1.0)),
         );
-        self.ui.drop_down2(cx, ids!(vid_interp_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(vid_interp_drop)).set_selected_item(
             cx,
             fast_presets::nearest_video_interpolate(saved.video_interpolate.unwrap_or(1)),
         );
@@ -5077,16 +5096,16 @@ impl App {
             .and_then(|name| self.lora_names.iter().position(|n| n == name))
             .map(|i| i + 1)
             .unwrap_or(0);
-        self.ui.drop_down2(cx, ids!(lora_drop)).set_selected_item(cx, lora_index);
+        self.ui.combo_box(cx, ids!(lora_drop)).set_selected_item(cx, lora_index);
         let strength = saved.image_lora_strength.unwrap_or(1.0);
         let strength_index = LORA_STRENGTHS
             .iter()
             .position(|s| (*s - strength).abs() < 0.05)
             .unwrap_or(0);
         self.ui
-            .drop_down2(cx, ids!(lora_strength_drop))
+            .combo_box(cx, ids!(lora_strength_drop))
             .set_selected_item(cx, strength_index);
-        self.ui.drop_down2(cx, ids!(music_len_drop)).set_selected_item(
+        self.ui.combo_box(cx, ids!(music_len_drop)).set_selected_item(
             cx,
             fast_presets::nearest_music_len(saved.music_seconds),
         );
@@ -5141,7 +5160,7 @@ impl App {
             return;
         }
         self.voice_drop_is_kokoro = kokoro;
-        let drop = self.ui.drop_down2(cx, ids!(voice_drop));
+        let drop = self.ui.combo_box(cx, ids!(voice_drop));
         if kokoro {
             drop.set_labels(
                 cx,
@@ -5190,7 +5209,7 @@ impl App {
                 .set_text(cx, prompt);
         }
         self.ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .set_selected_item(cx, crate::pipeline::preset_row_for_index(preset_index));
         self.refresh_model_ui(cx, true);
         // Extra queued runs, to exercise the run queue. Each is its own
@@ -5238,13 +5257,13 @@ impl App {
         let preset = self.current_preset_index(cx);
         let model_overrides =
             self.collected_stage_models(cx, PRESETS[preset].domains);
-        let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();
+        let box_index = self.ui.combo_box(cx, ids!(box_drop)).selected_item();
         let box_override = if box_index == 0 {
             None
         } else {
             self.box_choices.get(box_index - 1).cloned()
         };
-        let voice_index = self.ui.drop_down2(cx, ids!(voice_drop)).selected_item();
+        let voice_index = self.ui.combo_box(cx, ids!(voice_drop)).selected_item();
         // No pack when the dropdown is in its non-Kokoro (n/a) state.
         let voice = if voice_index == 0 || !self.voice_drop_is_kokoro {
             None
@@ -5252,35 +5271,35 @@ impl App {
             VOICES.get(voice_index).map(|v| v.to_string())
         };
         let size = IMAGE_SIZES
-            [self.ui.drop_down2(cx, ids!(size_drop)).selected_item().min(IMAGE_SIZES.len() - 1)];
-        let steps_index = self.ui.drop_down2(cx, ids!(steps_drop)).selected_item();
+            [self.ui.combo_box(cx, ids!(size_drop)).selected_item().min(IMAGE_SIZES.len() - 1)];
+        let steps_index = self.ui.combo_box(cx, ids!(steps_drop)).selected_item();
         let image_steps = steps_index
             .checked_sub(1)
             .and_then(|i| IMAGE_STEPS.get(i).copied());
         let mesh_texture_size = MESH_TEXTURE_SIZES[self
             .ui
-            .drop_down2(cx, ids!(texture_size_drop))
+            .combo_box(cx, ids!(texture_size_drop))
             .selected_item()
             .min(MESH_TEXTURE_SIZES.len() - 1)];
         let mesh_faces_n = MESH_FACE_COUNTS[self
             .ui
-            .drop_down2(cx, ids!(mesh_faces_drop))
+            .combo_box(cx, ids!(mesh_faces_drop))
             .selected_item()
             .min(MESH_FACE_COUNTS.len() - 1)];
         let mesh_faces = (mesh_faces_n != 0).then_some(mesh_faces_n);
         let vid_size = VIDEO_SIZES[self
             .ui
-            .drop_down2(cx, ids!(vid_size_drop))
+            .combo_box(cx, ids!(vid_size_drop))
             .selected_item()
             .min(VIDEO_SIZES.len() - 1)];
         let (video_frames, video_steps) = VIDEO_LENGTHS[self
             .ui
-            .drop_down2(cx, ids!(vid_len_drop))
+            .combo_box(cx, ids!(vid_len_drop))
             .selected_item()
             .min(VIDEO_LENGTHS.len() - 1)];
         let music_seconds = MUSIC_LENGTHS[self
             .ui
-            .drop_down2(cx, ids!(music_len_drop))
+            .combo_box(cx, ids!(music_len_drop))
             .selected_item()
             .min(MUSIC_LENGTHS.len() - 1)];
         // Seeded transform: a compatible pinned input becomes the run's
@@ -5422,7 +5441,7 @@ impl App {
                 motion_prompt: self.ui.text_input(cx, ids!(motion_prompt_input)).text(),
                 edit_strength: EDIT_STRENGTHS[self
                     .ui
-                    .drop_down2(cx, ids!(edit_strength_drop))
+                    .combo_box(cx, ids!(edit_strength_drop))
                     .selected_item()
                     .min(EDIT_STRENGTHS.len() - 1)],
                 video_size: vid_size,
@@ -5431,7 +5450,7 @@ impl App {
                 video_audio: self.ui.check_box(cx, ids!(video_audio_toggle)).active(cx),
                 video_interpolate: VIDEO_INTERPOLATE[self
                     .ui
-                    .drop_down2(cx, ids!(vid_interp_drop))
+                    .combo_box(cx, ids!(vid_interp_drop))
                     .selected_item()
                     .min(VIDEO_INTERPOLATE.len() - 1)],
                 image_lora: self.selected_lora(cx),
@@ -5455,7 +5474,7 @@ impl App {
             self.set_caption(cx, "PULL", "pick a model in a stage dropdown first");
             return;
         };
-        let box_index = self.ui.drop_down2(cx, ids!(box_drop)).selected_item();
+        let box_index = self.ui.combo_box(cx, ids!(box_drop)).selected_item();
         let Some(box_url) = box_index
             .checked_sub(1)
             .and_then(|i| self.box_choices.get(i))
@@ -7412,20 +7431,20 @@ impl App {
         let labels: Vec<String> = std::iter::once("none".to_string())
             .chain(self.lora_names.iter().cloned())
             .collect();
-        self.ui.drop_down2(cx, ids!(lora_drop)).set_labels(cx, labels);
+        self.ui.combo_box(cx, ids!(lora_drop)).set_labels(cx, labels);
         let select = previous
             .and_then(|name| self.lora_names.iter().position(|n| *n == name))
             .map(|i| i + 1)
             .unwrap_or(0);
-        self.ui.drop_down2(cx, ids!(lora_drop)).set_selected_item(cx, select);
+        self.ui.combo_box(cx, ids!(lora_drop)).set_selected_item(cx, select);
     }
 
     fn selected_lora(&self, cx: &mut Cx) -> Option<(String, f32)> {
-        let index = self.ui.drop_down2(cx, ids!(lora_drop)).selected_item().checked_sub(1)?;
+        let index = self.ui.combo_box(cx, ids!(lora_drop)).selected_item().checked_sub(1)?;
         let name = self.lora_names.get(index)?.clone();
         let strength = LORA_STRENGTHS[self
             .ui
-            .drop_down2(cx, ids!(lora_strength_drop))
+            .combo_box(cx, ids!(lora_strength_drop))
             .selected_item()
             .min(LORA_STRENGTHS.len() - 1)];
         Some((name, strength))
@@ -8263,6 +8282,20 @@ impl App {
             .unwrap_or_default();
         for done in completed {
             match done {
+                IoDone::CatalogSource { file, path } => {
+                    self.catalog_source_pending.remove(&file);
+                    match path {
+                        Ok(path) => {
+                            self.catalog_work.set_source(&file, path);
+                            // The well is waiting for exactly this to play
+                            // the actor instead of cycling its picture.
+                            self.refresh_library_preview(cx);
+                        }
+                        Err(error) => {
+                            log!("catalog: {file} has no source file: {error}")
+                        }
+                    }
+                }
                 IoDone::CatalogFile {
                     file,
                     payload,
@@ -9417,7 +9450,7 @@ impl App {
             .iter()
             .position(|row| *row == self.lib_filters.kind)
             .unwrap_or(0);
-        let drop = self.ui.drop_down2(cx, ids!(lib_kind_drop));
+        let drop = self.ui.combo_box(cx, ids!(lib_kind_drop));
         drop.set_labels(cx, labels);
         drop.set_selected_item(cx, selected_row);
         self.lib_kind_options = kinds;
@@ -9438,7 +9471,7 @@ impl App {
         let mut label_rows = vec!["all tags".to_string()];
         label_rows.extend(merged.iter().map(facet_row_text));
         let label_row = facet_row(&merged, self.lib_filters.label.as_ref());
-        let label_drop = self.ui.drop_down2(cx, ids!(lib_label_drop));
+        let label_drop = self.ui.combo_box(cx, ids!(lib_label_drop));
         label_drop.set_labels(cx, label_rows);
         label_drop.set_selected_item(cx, label_row);
         self.lib_label_options = merged;
@@ -9813,6 +9846,50 @@ impl App {
             return;
         }
 
+        // A BILLBOARD is an actor, not a picture: walk/attack/pain/death and
+        // eight viewing angles per state. The well plays it with the SAME
+        // widget the Create surface uses — one viewer, two mount points —
+        // fed the two blobs the asset carries: the packed sheet (its
+        // payload) and the `.billboard` manifest (its source file) that says
+        // which cells are which state and which rotation. The thumbnail
+        // cycles underneath while the second blob is fetched.
+        if kind == Some(makepad_asset_data::AssetKind::Billboard) {
+            let sheet = item.as_ref().and_then(|item| item.payload.clone());
+            let manifest = item.as_ref().and_then(|item| item.source.clone());
+            match (sheet, manifest) {
+                (Some(sheet), Some(manifest)) => {
+                    if self.library_preview_file.as_deref() != Some(file.as_str()) {
+                        match (std::fs::read_to_string(&manifest), std::fs::read(&sheet)) {
+                            (Ok(text), Ok(png)) => {
+                                if let Some(mut view) = self
+                                    .ui
+                                    .widget(cx, ids!(detail_billboard_view))
+                                    .borrow_mut::<BillboardView>()
+                                {
+                                    view.show_sheet(cx, &text, &png);
+                                }
+                                self.library_preview_file = Some(file.clone());
+                            }
+                            _ => log!("library preview: {file} billboard files unreadable"),
+                        }
+                    }
+                    self.set_library_preview(cx, id!(detail_preview_billboard));
+                    return;
+                }
+                (sheet, manifest) => {
+                    // Ask for the manifest once, then fall through to the
+                    // picture so the well is never blank while it arrives.
+                    if manifest.is_none() {
+                        self.request_catalog_source(&asset, &file);
+                    }
+                    if sheet.is_none() {
+                        self.show_preview(cx, PreviewContent::Empty("Loading the actor…".into()));
+                        return;
+                    }
+                }
+            }
+        }
+
         // A mesh: hand this app's viewer the payload once it is on disk.
         if let Some(item) = &item {
             if item.meta.content_type.contains("gltf") {
@@ -9917,6 +9994,35 @@ impl App {
         match self.preview_texture(cx, &asset_key) {
             Some(texture) => self.show_preview(cx, PreviewContent::Still(texture)),
             None => self.show_preview(cx, PreviewContent::Empty("Fetching the preview…".into())),
+        }
+    }
+
+    /// Ask the store for an asset's SOURCE-role file — the second blob a
+    /// stateful billboard needs before it can be played. Once per asset:
+    /// the well is refreshed constantly and a fetch per refresh would be a
+    /// fetch per frame.
+    fn request_catalog_source(&mut self, asset: &makepad_asset_data::AssetId, file: &str) {
+        if self.catalog_work.get(file).is_none_or(|item| item.source.is_some()) {
+            return;
+        }
+        if !self.catalog_source_pending.insert(file.to_string()) {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            self.catalog_source_pending.remove(file);
+            return;
+        };
+        if let Some(io) = &self.artifact_io {
+            io.request(IoRequest {
+                file: file.to_string(),
+                path: PathBuf::new(),
+                purpose: IoPurpose::CatalogSource,
+                store: Some(crate::artifact_io::StoreSource {
+                    asset: *asset,
+                    prefer: vec![makepad_asset_data::FileRole::Source],
+                    session,
+                }),
+            });
         }
     }
 
@@ -10128,7 +10234,7 @@ impl App {
     fn refresh_import_ui(&mut self, cx: &mut Cx) {
         let _modules = crate::import_classic::PACK_MODULES_WITH_CLASSIC;
         let labels = crate::import::kenney_pack_labels();
-        let drop = self.ui.drop_down2(cx, ids!(kenney_pack_drop));
+        let drop = self.ui.combo_box(cx, ids!(kenney_pack_drop));
         drop.set_labels(cx, labels);
         drop.set_selected_item(cx, self.import_page.kenney_pack_index);
         self.refresh_import_grid(cx);
@@ -11510,11 +11616,11 @@ impl MatchEvent for App {
         }
         if self
             .ui
-            .drop_down2(cx, ids!(kenney_pack_drop))
+            .combo_box(cx, ids!(kenney_pack_drop))
             .changed(actions)
             .is_some()
         {
-            let index = self.ui.drop_down2(cx, ids!(kenney_pack_drop)).selected_item();
+            let index = self.ui.combo_box(cx, ids!(kenney_pack_drop)).selected_item();
             self.import_page.set_pack_index(index);
             if self.surface == Surface::Import {
                 self.refresh_import_ui(cx);
@@ -11714,7 +11820,7 @@ impl MatchEvent for App {
             .text_input(cx, ids!(lib_search))
             .changed(actions)
             .is_some();
-        if let Some(index) = self.ui.drop_down2(cx, ids!(lib_kind_drop)).changed(actions) {
+        if let Some(index) = self.ui.combo_box(cx, ids!(lib_kind_drop)).changed(actions) {
             // Row 0 is "all kinds"; every other row is one picker choice.
             let picked = self
                 .lib_kind_options
@@ -11726,7 +11832,7 @@ impl MatchEvent for App {
                 filters_changed = true;
             }
         }
-        if let Some(index) = self.ui.drop_down2(cx, ids!(lib_label_drop)).changed(actions) {
+        if let Some(index) = self.ui.combo_box(cx, ids!(lib_label_drop)).changed(actions) {
             // Row 0 is "all tags"; every other row is one counted name.
             let picked = facet_at(&self.lib_label_options, index);
             if picked != self.lib_filters.label {
@@ -11748,10 +11854,10 @@ impl MatchEvent for App {
             self.lib_filters.kind = KindChoice::Any;
             self.lib_filters.label = None;
             self.ui
-                .drop_down2(cx, ids!(lib_kind_drop))
+                .combo_box(cx, ids!(lib_kind_drop))
                 .set_selected_item(cx, 0);
             self.ui
-                .drop_down2(cx, ids!(lib_label_drop))
+                .combo_box(cx, ids!(lib_label_drop))
                 .set_selected_item(cx, 0);
             self.refresh_library_ui(cx);
         }
@@ -12024,7 +12130,7 @@ impl MatchEvent for App {
         }
         if self
             .ui
-            .drop_down2(cx, ids!(preset_drop))
+            .combo_box(cx, ids!(preset_drop))
             .changed(actions)
             .is_some()
         {
@@ -12033,13 +12139,13 @@ impl MatchEvent for App {
             self.sync_preset_name_box(cx);
             self.sync_mask_mode(cx);
         }
-        if self.ui.drop_down2(cx, ids!(lora_drop)).changed(actions).is_some() {
+        if self.ui.combo_box(cx, ids!(lora_drop)).changed(actions).is_some() {
             let on = self.selected_lora(cx).is_some();
             self.ui.widget(cx, ids!(lora_strength_row)).set_visible(cx, on);
             self.ui.redraw(cx);
         }
         // Inpaint mask tools.
-        if let Some(index) = self.ui.drop_down2(cx, ids!(mask_brush_drop)).changed(actions) {
+        if let Some(index) = self.ui.combo_box(cx, ids!(mask_brush_drop)).changed(actions) {
             let radius = MASK_BRUSH_SIZES.get(index).copied().unwrap_or(24.0);
             if let Some(mut paint) = self.ui.widget(cx, ids!(mask_paint)).borrow_mut::<MaskPaint>() {
                 paint.set_brush_radius(radius);
@@ -12119,7 +12225,7 @@ impl MatchEvent for App {
         ];
         if stage_drops
             .iter()
-            .any(|id| self.ui.drop_down2(cx, *id).changed(actions).is_some())
+            .any(|id| self.ui.combo_box(cx, *id).changed(actions).is_some())
         {
             self.refresh_voice_ui(cx);
             self.sync_preset_name_box(cx);
@@ -12229,7 +12335,7 @@ impl MatchEvent for App {
                 mesh.set_pbr_speculars(cx, on);
             }
         }
-        if let Some(index) = self.ui.drop_down2(cx, ids!(pbr_view_drop)).changed(actions) {
+        if let Some(index) = self.ui.combo_box(cx, ids!(pbr_view_drop)).changed(actions) {
             let mode = crate::mesh_view::pbr_preview::PbrViewMode::ALL
                 .get(index)
                 .copied()
@@ -12842,7 +12948,7 @@ impl AppMain for App {
             }
             // ASSET_UI_OPEN_VIEW_DROP=1: open the View popup (popup placement captures).
             if crate::asset_store_state::env_alias(&["ASSET_UI_OPEN_VIEW_DROP", "AI_CONTENT_OPEN_VIEW_DROP"]).is_some() {
-                if let Some(mut drop) = self.ui.drop_down2(cx, ids!(pbr_view_drop)).borrow_mut() {
+                if let Some(mut drop) = self.ui.combo_box(cx, ids!(pbr_view_drop)).borrow_mut() {
                     drop.set_active(cx);
                 }
             }
@@ -12857,7 +12963,7 @@ impl AppMain for App {
                     .or_else(|| view.parse::<usize>().ok())
                     .unwrap_or(0);
                 self.ui
-                    .drop_down2(cx, ids!(pbr_view_drop))
+                    .combo_box(cx, ids!(pbr_view_drop))
                     .set_selected_item(cx, index);
                 if let Some(mut mesh) = self
                     .ui
@@ -12931,7 +13037,7 @@ impl AppMain for App {
             if let Some(png) = crate::asset_store_state::env_alias(&["ASSET_UI_MASK_SMOKE"]) {
                 if let Some(index) = PRESETS.iter().position(|p| p.domains.contains(&"inpaint")) {
                     self.ui
-                        .drop_down2(cx, ids!(preset_drop))
+                        .combo_box(cx, ids!(preset_drop))
                         .set_selected_item(cx, crate::pipeline::preset_row_for_index(index));
                     self.refresh_model_ui(cx, true);
                 }
@@ -13112,6 +13218,10 @@ struct CatalogItem {
     payload: Option<PathBuf>,
     /// Verified cache path of the asset's thumbnail, once materialised.
     thumbnail: Option<PathBuf>,
+    /// Verified cache path of the asset's SOURCE-role file, once asked for.
+    /// A stateful billboard's `.billboard` manifest lives here beside its
+    /// sheet in `payload` — one asset, two blobs, both needed to PLAY it.
+    source: Option<PathBuf>,
     /// Revision the payload belongs to — what makes staleness impossible.
     revision: Option<String>,
 }
@@ -13137,7 +13247,7 @@ impl CatalogWork {
         }
         self.items.insert(
             file.to_string(),
-            CatalogItem { meta, payload: None, thumbnail: None, revision: None },
+            CatalogItem { meta, payload: None, thumbnail: None, source: None, revision: None },
         );
         self.order.retain(|have| have != file);
         self.order.insert(0, file.to_string());
@@ -13154,6 +13264,12 @@ impl CatalogWork {
     fn set_thumbnail(&mut self, file: &str, path: PathBuf) {
         if let Some(item) = self.items.get_mut(file) {
             item.thumbnail = Some(path);
+        }
+    }
+
+    fn set_source(&mut self, file: &str, path: PathBuf) {
+        if let Some(item) = self.items.get_mut(file) {
+            item.source = Some(path);
         }
     }
 
