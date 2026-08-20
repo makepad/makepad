@@ -1914,13 +1914,13 @@ fn run_kaykit_import(
             message: "stopped while rendering icons".into(),
         };
     }
-    if let Err(error) = assign_staged_thumbnails(&glbs, &images, pack_dir) {
+    if let Err(error) = assign_staged_thumbnails(&glbs, &images, pack_dir, &staged) {
         return ImportPhase::Failed {
             pack: "kaykit".into(),
             message: error,
         };
     }
-    if let Some(stem) = first_placeholder_stem(&glbs, &images) {
+    if let Some(stem) = first_placeholder_stem(&glbs, &images, &staged) {
         return ImportPhase::Failed {
             pack: "kaykit".into(),
             message: format!("icon for {stem} never rendered — refusing to publish a placeholder"),
@@ -2199,7 +2199,7 @@ fn run_kenney_import(
             message: "stopped while rendering icons".into(),
         };
     }
-    if let Err(error) = assign_staged_thumbnails(&glbs, &images, pack_dir) {
+    if let Err(error) = assign_staged_thumbnails(&glbs, &images, pack_dir, &staged) {
         return ImportPhase::Failed {
             pack: pack_name,
             message: error,
@@ -2208,7 +2208,7 @@ fn run_kenney_import(
     // Last guard: never publish a placeholder. A render that silently
     // failed, or a fingerprint cache miss that fell through, still shows up
     // here as a black `<stem>.png` — fail the pack loudly instead.
-    if let Some(stem) = first_placeholder_stem(&glbs, &images) {
+    if let Some(stem) = first_placeholder_stem(&glbs, &images, &staged) {
         return ImportPhase::Failed {
             pack: pack_name,
             message: format!("icon for {stem} never rendered — refusing to publish a placeholder"),
@@ -2503,7 +2503,7 @@ pub fn staging_dirs_to_clear(publish_succeeded: bool) -> &'static [&'static str]
 fn copy_pack_source_files(
     src: &Path,
     dest: &Path,
-) -> Result<(Vec<PathBuf>, std::collections::BTreeSet<std::ffi::OsString>), String> {
+) -> Result<(Vec<PathBuf>, std::collections::BTreeSet<String>), String> {
     if dest.exists() {
         std::fs::remove_dir_all(dest).map_err(|e| format!("clear staging {}: {e}", dest.display()))?;
     }
@@ -2571,8 +2571,16 @@ fn copy_pack_source_files(
             std::fs::copy(&path, &target)
                 .map_err(|e| format!("copy {} → {}: {e}", path.display(), target.display()))?;
             if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
-                if let Some(stem) = target.with_extension("").file_name() {
-                    images.insert(stem.to_os_string());
+                // Keyed by the staged-RELATIVE stem, the same shape the
+                // pack key has. Keying by bare file name made a texture
+                // shadow a model of the same name from another directory:
+                // `Textures/fence.png` convinced the thumbnail pass that
+                // `fence.glb` already shipped its own preview, so no icon
+                // was written and compile refused the whole kit for a
+                // missing thumbnail. Five models across the two retro kits
+                // (fence/roof/water, grass/planks) were exactly that.
+                if let Some(stem) = staged_stem_key(dest, &target) {
+                    images.insert(stem);
                 }
             }
             if ext == "glb" {
@@ -2617,18 +2625,35 @@ fn copy_pack_source_files(
 /// `run_kenney_import`/`run_kaykit_import`) — it only ever (re)writes
 /// `<stem>.png`, never touches AO/shadow sidecars, the GLBs, or a stem that
 /// already has a real (non-placeholder) icon on disk.
+/// A staged file's identity for thumbnail matching: its path relative to
+/// the staging root, without the extension — the same shape the pack entry
+/// key has (`classify_rel`). A bare file name is NOT that: two files with
+/// the same name in different directories are different entries, and
+/// treating them as one is how a texture atlas came to stand in for a
+/// model's missing preview.
+fn staged_stem_key(staged_root: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(staged_root).ok()?;
+    let mut key = rel.with_extension("").to_string_lossy().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    key = key.replace('\\', "/").to_ascii_lowercase();
+    Some(key)
+}
+
 fn assign_staged_thumbnails(
     glbs: &[PathBuf],
-    images: &std::collections::BTreeSet<std::ffi::OsString>,
+    images: &std::collections::BTreeSet<String>,
     source_pack_dir: &Path,
+    staged_root: &Path,
 ) -> Result<(), String> {
     let rendered = rendered_pack_icons(source_pack_dir);
     let placeholder = placeholder_png_512();
     for glb in glbs {
-        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
-        if images.contains(&stem) {
+        if staged_stem_key(staged_root, glb).is_some_and(|k| images.contains(&k)) {
             continue;
         }
+        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
         let thumb = glb.with_extension("png");
         let already_real = std::fs::read(&thumb).is_ok_and(|bytes| !is_blank_preview_png(&bytes));
         if already_real {
@@ -2660,13 +2685,14 @@ fn assign_staged_thumbnails(
 /// site, tracked with the importer worker doing classic-pack parity).
 fn first_placeholder_stem(
     glbs: &[PathBuf],
-    images: &std::collections::BTreeSet<std::ffi::OsString>,
+    images: &std::collections::BTreeSet<String>,
+    staged_root: &Path,
 ) -> Option<String> {
     for glb in glbs {
-        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
-        if images.contains(&stem) {
+        if staged_stem_key(staged_root, glb).is_some_and(|k| images.contains(&k)) {
             continue;
         }
+        let stem = glb.file_stem().map(|s| s.to_os_string()).unwrap_or_default();
         let thumb = glb.with_extension("png");
         // Missing/unreadable is exactly as bad as a placeholder: refuse.
         // `thumbnail_is_placeholder` is the SAME decode-and-check
@@ -2692,7 +2718,7 @@ fn first_placeholder_stem(
 /// import never compiles/publishes before real icons exist.
 fn stage_source_pack(src: &Path, dest: &Path) -> Result<(), String> {
     let (glbs, images) = copy_pack_source_files(src, dest)?;
-    assign_staged_thumbnails(&glbs, &images, src)
+    assign_staged_thumbnails(&glbs, &images, src, dest)
 }
 
 /// Icons already rendered for this pack, by model stem — read from the
@@ -3960,33 +3986,92 @@ mod tests {
 
         // No cache yet: every stem gets the placeholder; the guard flags
         // the first one (deterministic order from `glbs`).
-        assign_staged_thumbnails(&glbs, &images, &source_pack_dir).unwrap();
-        assert_eq!(first_placeholder_stem(&glbs, &images).as_deref(), Some("cached"));
+        assign_staged_thumbnails(&glbs, &images, &source_pack_dir, &tmp).unwrap();
+        assert_eq!(first_placeholder_stem(&glbs, &images, &tmp).as_deref(), Some("cached"));
 
         // Persist a real (non-512×512, non-blank) icon for "cached" only.
         std::fs::create_dir_all(&icons_dir).unwrap();
         let real_icon = fake_valid_png(300, 300);
         std::fs::write(icons_dir.join("cached.png"), &real_icon).unwrap();
 
-        assign_staged_thumbnails(&glbs, &images, &source_pack_dir).unwrap();
+        assign_staged_thumbnails(&glbs, &images, &source_pack_dir, &tmp).unwrap();
         assert_eq!(
             std::fs::read(glb_cached.with_extension("png")).unwrap(),
             real_icon,
             "the cached icon must be reused for the matching stem"
         );
         assert_eq!(
-            first_placeholder_stem(&glbs, &images).as_deref(),
+            first_placeholder_stem(&glbs, &images, &tmp).as_deref(),
             Some("fresh"),
             "the stem with no cached icon still guards as a placeholder"
         );
 
         // Persist "fresh" too: the guard now passes every staged GLB.
         std::fs::write(icons_dir.join("fresh.png"), fake_valid_png(300, 300)).unwrap();
-        assign_staged_thumbnails(&glbs, &images, &source_pack_dir).unwrap();
-        assert_eq!(first_placeholder_stem(&glbs, &images), None);
+        assign_staged_thumbnails(&glbs, &images, &source_pack_dir, &tmp).unwrap();
+        assert_eq!(first_placeholder_stem(&glbs, &images, &tmp), None);
 
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&icons_dir);
+    }
+
+    /// A texture named like a model must not stand in for that model's
+    /// preview. Kenney's retro kits ship `Textures/fence.png` (the atlas)
+    /// beside a `fence.glb` that has NO `fence.png` of its own; keying the
+    /// staged image index by bare file name made the thumbnail pass skip
+    /// `fence.glb` as "already has its own picture", so it reached compile
+    /// with no thumbnail and refused the whole kit:
+    ///
+    ///     fence.glb: mesh-bearing import needs a pack PNG/JPEG thumbnail ≥ 256px
+    ///
+    /// Five models across the two retro kits were exactly that shape
+    /// (fence / roof / water, grass / planks).
+    #[test]
+    fn a_texture_named_like_a_model_does_not_shadow_its_thumbnail() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(2);
+        let tmp = std::env::temp_dir().join(format!("mp_shadow_thumb_{nonce}"));
+        let src = tmp.join("src");
+        let staged = tmp.join("staged");
+        std::fs::create_dir_all(src.join("Textures")).unwrap();
+        // The model, with no sibling preview of its own.
+        std::fs::write(src.join("fence.glb"), b"glTF fence").unwrap();
+        // The material atlas, same NAME, different directory.
+        std::fs::write(src.join("Textures/fence.png"), fake_valid_png(64, 64)).unwrap();
+        // A model that really does ship its own preview: still skipped.
+        std::fs::write(src.join("wall.glb"), b"glTF wall").unwrap();
+        std::fs::write(src.join("wall.png"), fake_valid_png(300, 300)).unwrap();
+
+        let (glbs, images) = copy_pack_source_files(&src, &staged).unwrap();
+        assert!(
+            images.contains("textures/fence"),
+            "the atlas is indexed by its own path, not a bare name: {images:?}"
+        );
+        assert!(!images.contains("fence"), "{images:?}");
+        assert!(images.contains("wall"), "{images:?}");
+
+        assign_staged_thumbnails(&glbs, &images, &src, &staged).unwrap();
+        // fence.glb got a thumbnail written (the placeholder here, since no
+        // rendered icon is cached) rather than being passed over.
+        assert!(
+            staged.join("fence.png").is_file(),
+            "fence.glb must be given a thumbnail, not shadowed by Textures/fence.png"
+        );
+        // wall.glb kept the preview it shipped.
+        assert_eq!(
+            std::fs::read(staged.join("wall.png")).unwrap(),
+            fake_valid_png(300, 300)
+        );
+        // And the pre-publish guard now SEES fence as needing a real icon,
+        // instead of skipping it and letting compile refuse the kit.
+        assert_eq!(
+            first_placeholder_stem(&glbs, &images, &staged).as_deref(),
+            Some("fence")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -4007,9 +4092,9 @@ mod tests {
         let already_real = fake_valid_png(300, 300);
         std::fs::write(glb.with_extension("png"), &already_real).unwrap();
 
-        assign_staged_thumbnails(&[glb.clone()], &Default::default(), &source_pack_dir).unwrap();
+        assign_staged_thumbnails(&[glb.clone()], &Default::default(), &source_pack_dir, &tmp).unwrap();
         assert_eq!(std::fs::read(glb.with_extension("png")).unwrap(), already_real);
-        assert_eq!(first_placeholder_stem(&[glb], &Default::default()), None);
+        assert_eq!(first_placeholder_stem(&[glb], &Default::default(), &tmp), None);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
