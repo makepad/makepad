@@ -908,6 +908,9 @@ impl Cx {
         }
 
         let () = unsafe { msg_send![encoder, endEncoding] };
+        // Which window this pass presents to, so a `--remote` grab can target one
+        // window in a multi-window app instead of whichever pass presents first.
+        let pass_window_id = self.get_pass_window_id(draw_pass_id).map(|w| w.id());
         let gpu_frame_group_key = self.get_pass_window_id(draw_pass_id).map(|window_id| {
             // Group GPU timing by (window, repaint_id) so we don't merge ranges
             // across multiple frames that happen to complete out-of-order.
@@ -947,6 +950,7 @@ impl Cx {
                     pass_height as usize,
                     first_texture,
                     None,
+                    pass_window_id,
                 );
                 self.commit_command_buffer(
                     screenshot,
@@ -996,6 +1000,7 @@ impl Cx {
                         pass_height as usize,
                         texture.as_id(),
                         tex.alloc.clone(),
+                        pass_window_id,
                     )
                 } else {
                     None
@@ -1021,6 +1026,7 @@ impl Cx {
                     pass_height as usize,
                     first_texture,
                     None,
+                    pass_window_id,
                 );
                 self.commit_command_buffer(
                     screenshot,
@@ -1042,6 +1048,7 @@ impl Cx {
                     pass_height as usize,
                     first_texture,
                     None,
+                    pass_window_id,
                 );
                 self.commit_command_buffer(
                     screenshot,
@@ -1075,8 +1082,10 @@ impl Cx {
         height: usize,
         in_texture: ObjcId,
         alloc: Option<TextureAlloc>,
+        window_id: Option<usize>,
     ) -> Option<ScreenshotInfo> {
-        let request_ids = self.take_studio_screenshot_request_ids(kind_id as u32);
+        let request_ids =
+            self.take_studio_screenshot_request_ids_for_window(kind_id as u32, window_id);
         let (tex_width, tex_height) = if let Some(alloc) = alloc {
             (alloc.width, alloc.height)
         } else {
