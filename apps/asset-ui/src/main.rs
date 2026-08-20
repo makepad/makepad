@@ -6596,6 +6596,16 @@ impl App {
             Some(library) => {
                 let entries = library
                     .newest_items()
+                    // This strip is the GENERATOR's own output rail: what
+                    // this app made, plus what the user handed it directly
+                    // (drops, webcam). Imported packs are catalog content —
+                    // they land in the store, are browsed on the Library
+                    // surface, and the thousands of historical `import:`
+                    // rows an older pipeline left in the local index are
+                    // not what anyone is looking for here. Same rule the
+                    // publisher uses, so the rail and the catalog agree
+                    // about what "generated" means.
+                    .filter(|item| rail_shows(item))
                     .filter_map(|item| {
                         let path = library.payload_path(&item.file).ok()?;
                         let ct = item.content_type.to_ascii_lowercase();
@@ -6616,7 +6626,8 @@ impl App {
                         })
                     })
                     .collect::<Vec<_>>();
-                (entries, library.len())
+                let count = entries.len();
+                (entries, count)
             }
             None => (Vec::new(), 0),
         };
@@ -6630,7 +6641,7 @@ impl App {
         self.ui.label(cx, ids!(library_hint)).set_text(
             cx,
             &format!(
-                "{count} resources · one tile per run · click to view · double-click = use as input · drag audio/video by DRAG · × removes the whole run"
+                "{count} generated · one tile per run · click to view · double-click = use as input · drag audio/video by DRAG · × removes the whole run · imports live in LIBRARY"
             ),
         );
         // The Library surface browses the same disk-backed store; keep its
@@ -11893,6 +11904,22 @@ fn dropped_file_kind(path: &Path) -> Option<(&'static str, &'static str, bool)> 
     })
 }
 
+/// Does the Create surface's History strip show this row? It is the
+/// GENERATOR's own output rail: what this app made, plus what the user
+/// handed it directly (drops, webcam snaps). Imported packs are catalog
+/// content — they land in the store and are browsed on the Library surface,
+/// and the thousands of historical `import:` rows an older pipeline left in
+/// the local index are not what anyone is looking for here.
+///
+/// It asks exactly the question the publisher asks (`is_generated_row`), so
+/// the rail and the catalog agree about what "generated" means.
+fn rail_shows(item: &crate::library::LibraryMeta) -> bool {
+    makepad_asset_importer::import::is_generated_row(
+        item.import_tags(),
+        item.group_id.as_deref(),
+    )
+}
+
 /// The Library's label dropdown: row 0 is "all labels", row `n + 1` is
 /// facet `n`. Reading and writing that offset lives here so the render and
 /// the click can never disagree about it.
@@ -11933,6 +11960,49 @@ fn facet_row_text(facet: &makepad_asset_client::CatalogFacet) -> String {
         facet.label,
         facet.count
     )
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+    use crate::library::LibraryMeta;
+
+    fn row(group: Option<&str>, tags: &[&str]) -> LibraryMeta {
+        LibraryMeta {
+            file: "lib-1.glb".into(),
+            label: "thing".into(),
+            domain: "mesh".into(),
+            content_type: "model/gltf-binary".into(),
+            prompt: String::new(),
+            group_id: group.map(Into::into),
+            group_label: None,
+            tags: (!tags.is_empty())
+                .then(|| tags.iter().map(|t| (*t).to_string()).collect()),
+            enhanced_tags: None,
+            product: Some(true),
+        }
+    }
+
+    /// The History strip is the generator's own output: pipeline runs, and
+    /// what the user handed the app directly. Pack and classic imports are
+    /// catalog content and must not come back into this rail — a library
+    /// that has accumulated thousands of `import:` rows would otherwise bury
+    /// the thing that was just generated.
+    #[test]
+    fn the_history_rail_shows_generated_work_and_not_imported_packs() {
+        assert!(rail_shows(&row(Some("run-12"), &[])), "a pipeline run");
+        assert!(rail_shows(&row(Some("drop-3"), &[])), "a dropped file");
+        assert!(rail_shows(&row(Some("webcam-1"), &[])), "a webcam snap");
+        assert!(rail_shows(&row(None, &["generated"])), "the explicit tag");
+        assert!(
+            rail_shows(&row(Some("import:kenney"), &["generated"])),
+            "the tag wins: whatever wrote it, it says it was generated"
+        );
+
+        assert!(!rail_shows(&row(Some("import:kenney"), &["kenney"])), "a pack row");
+        assert!(!rail_shows(&row(Some("import:doom"), &["maps"])), "a classic map");
+        assert!(!rail_shows(&row(None, &[])), "an unlabelled orphan");
+    }
 }
 
 #[cfg(test)]
