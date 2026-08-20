@@ -376,6 +376,11 @@ pub struct VisionTower {
     weights: LoadedGgufWeights,
     runtime: VisionRuntime,
     graphs: BTreeMap<(usize, usize), VisionGraph>,
+    /// Kept so the context can be rebuilt when a new image shape does not fit
+    /// the arena — see `encode`.
+    path: String,
+    /// Largest patch count the current arena was sized for.
+    arena_patches: usize,
 }
 
 impl VisionTower {
@@ -397,7 +402,24 @@ impl VisionTower {
             weights,
             runtime,
             graphs: BTreeMap::new(),
+            path: path.to_string(),
+            arena_patches: max_patches,
         })
+    }
+
+    /// Re-open the mmproj into a fresh context sized for `max_patches`,
+    /// dropping every cached graph. The ggml context is a bump arena: caching
+    /// a graph per image shape grows it monotonically and nothing can be
+    /// handed back, so a batch of mixed-size images eventually runs it dry.
+    /// Rather than make callers pre-declare every shape, reset and re-reserve.
+    fn rebuild_context(&mut self, max_patches: usize) -> Result<()> {
+        let gguf = GgufFile::open(&self.path)?;
+        let layout = GgufWeightLayout::from_tensors(gguf.tensors.iter().cloned())?;
+        let extra = Self::activation_bytes_estimate(&self.config, max_patches);
+        self.graphs.clear();
+        self.weights = layout.allocate_and_load_with_extra(&gguf, extra)?;
+        self.arena_patches = max_patches;
+        Ok(())
     }
 
     fn select_runtime() -> Result<VisionRuntime> {
@@ -450,11 +472,27 @@ impl VisionTower {
     }
 
     /// Encode a preprocessed image; returns [n_tokens * proj_dim] f32.
+    ///
+    /// Images of any size may be interleaved: each distinct patch grid gets its
+    /// own compiled graph, and if adding one exhausts the context arena the
+    /// tower rebuilds itself (sized for the largest shape seen) and retries
+    /// once. Feeding one size is still cheapest — a rebuild reloads the mmproj.
     pub fn encode(&mut self, image: &PreparedImage) -> Result<Vec<f32>> {
         let key = (image.grid_w, image.grid_h);
         if !self.graphs.contains_key(&key) {
-            let graph = self.build_graph(image.grid_w, image.grid_h)?;
-            self.graphs.insert(key, graph);
+            match self.build_graph(image.grid_w, image.grid_h) {
+                Ok(graph) => {
+                    self.graphs.insert(key, graph);
+                }
+                Err(first) => {
+                    // Out of arena: reset and re-reserve for the biggest shape
+                    // we have been asked for, then build this graph alone.
+                    let want = self.arena_patches.max(image.n_patches());
+                    self.rebuild_context(want).map_err(|_| first)?;
+                    let graph = self.build_graph(image.grid_w, image.grid_h)?;
+                    self.graphs.insert(key, graph);
+                }
+            }
         }
         let graph = self.graphs.get(&key).unwrap();
 
