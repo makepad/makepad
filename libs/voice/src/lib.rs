@@ -1,4 +1,6 @@
 mod accel;
+#[path = "cpu/align.rs"]
+mod align;
 #[path = "cuda/backend.rs"]
 mod cuda_backend;
 #[path = "cpu/decode_loop.rs"]
@@ -26,7 +28,8 @@ mod vad;
 pub mod apple_speech;
 
 pub use accel::{backend_name as accel_backend_name, set_enabled as set_accel_enabled};
-pub use decode_loop::{Segment, WhisperParams, WhisperState};
+pub use align::{AlignmentHeads, WordSpan, AUDIO_FRAME_MS};
+pub use decode_loop::{AlignedSegment, Segment, WhisperParams, WhisperState};
 pub use model::WhisperModel;
 pub use transcriber::{
     NativeAppleTranscriber, VoiceBackendKind, VoiceTranscribeError, VoiceTranscribeParams,
