@@ -95,12 +95,27 @@ static __device__ __forceinline__ float mkllm_deq_q6k_at(const uint8_t * b, int 
     return d * (float) sc[is + 2 * group] * (float) q;
 }
 
+// `kind` values crossing the Rust FFI. 0..3 are the "legacy" kinds that the
+// hand-written kernels in this file template over; 4..7 are served only by the
+// vendored official llama.cpp templates (mmq.cuh / mmvq.cuh) plus the row
+// dequant in iq_convert.cuh. Keep in sync with QUANT_* in
+// libs/ai/cuda/src/llm_ops.rs and `quant_kind` in
+// libs/ai/llm/src/cuda_exec/real.rs.
 #define MKLLM_QUANT_Q4K 0
 #define MKLLM_QUANT_Q5K 1
 #define MKLLM_QUANT_Q6K 2
 // q8_0 uses 32-value/34-byte blocks; the executor addresses quants in
 // 256-value units, so treat 8 packed q8_0 blocks (272 bytes) as one unit.
 #define MKLLM_QUANT_Q80 3
+#define MKLLM_QUANT_LEGACY_LAST MKLLM_QUANT_Q80
+// unsloth Dynamic (UD-) GGUFs mix these into otherwise-K-quant files.
+#define MKLLM_QUANT_Q3K   4
+#define MKLLM_QUANT_IQ4XS 5
+// iq4_nl is a 32-value/18-byte block; like q8_0 above, eight of them are
+// addressed as one 256-value unit (144 bytes).
+#define MKLLM_QUANT_IQ4NL 6
+#define MKLLM_QUANT_IQ3S  7
+#define MKLLM_QUANT_COUNT 8
 
 static __device__ __forceinline__ float mkllm_deq_q80_at(const uint8_t * b, int l) {
     const uint8_t * blk = b + (l >> 5) * 34;
@@ -108,12 +123,18 @@ static __device__ __forceinline__ float mkllm_deq_q80_at(const uint8_t * b, int 
     return d * (float) ((const int8_t *) (blk + 2))[l & 31];
 }
 
+// Legacy-kind selectors. These are reached with a compile-time KIND from the
+// hand-written kernels only, so an unknown kind is a programming error, not a
+// runtime input: return a NaN / zero-size sentinel rather than silently
+// decoding the bytes as some other type. (House rule from the reclaimed-
+// readback fix: a contract violation must be loud, never plausible.)
 static __device__ __forceinline__ float mkllm_deq_at(int kind, const uint8_t * b, int l) {
     switch (kind) {
         case MKLLM_QUANT_Q4K: return mkllm_deq_q4k_at(b, l);
         case MKLLM_QUANT_Q5K: return mkllm_deq_q5k_at(b, l);
+        case MKLLM_QUANT_Q6K: return mkllm_deq_q6k_at(b, l);
         case MKLLM_QUANT_Q80: return mkllm_deq_q80_at(b, l);
-        default:              return mkllm_deq_q6k_at(b, l);
+        default:              return __int_as_float(0x7fffffff); // NaN
     }
 }
 
@@ -121,8 +142,9 @@ static __device__ __forceinline__ int mkllm_quant_block_bytes_dev(int kind) {
     switch (kind) {
         case MKLLM_QUANT_Q4K: return 144;
         case MKLLM_QUANT_Q5K: return 176;
+        case MKLLM_QUANT_Q6K: return 210;
         case MKLLM_QUANT_Q80: return 272;
-        default:              return 210;
+        default:              return 0;
     }
 }
 
@@ -354,10 +376,15 @@ extern "C" cudaError_t mkllm_mmv_quant(
             mkllm_launch_mmv_quant<MKLLM_QUANT_Q80>(
                 src0, src1, dst, K, N, M, src0_row_bytes, src1_col_elems, dst_col_elems, stream);
             break;
-        default:
+        case MKLLM_QUANT_Q6K:
             mkllm_launch_mmv_quant<MKLLM_QUANT_Q6K>(
                 src0, src1, dst, K, N, M, src0_row_bytes, src1_col_elems, dst_col_elems, stream);
             break;
+        default:
+            // This hand-written mat-vec only templates over the legacy kinds.
+            // Falling back to Q6_K here would silently decode e.g. iq4_xs
+            // bytes as q6_K and return plausible garbage.
+            return cudaErrorInvalidValue;
     }
     return cudaGetLastError();
 }
@@ -487,6 +514,9 @@ extern "C" cudaError_t mkllm_quantize_q81(
 #include "fattn/mmvq.cuh"
 #include "fattn/mmq.cuh"
 #include "fattn/norm.cuh"
+// Needs ggml-common.h's block structs + codebook tables, which arrive with
+// mmvq.cuh above.
+#include "iq_convert.cuh"
 
 // llama.cpp ggml-cuda.cu:4000 ggml_cuda_op_rms_norm_fused /
 // ggml-cuda.cu:3994 ggml_cuda_op_rms_norm_fused_add. Strides are BYTES.
@@ -520,20 +550,120 @@ extern "C" cudaError_t mkllm_rms_norm_mul(
     return cudaGetLastError();
 }
 
+// kind -> ggml_type for the vendored official templates. GGML_TYPE_COUNT is
+// the "no such kind" sentinel; every caller must reject it rather than
+// defaulting, or a new kind added to only some of these switches would decode
+// as Q4_K and return plausible-but-wrong numbers.
 static ggml_type mkllm_kind_to_ggml(int kind) {
     switch (kind) {
-        case MKLLM_QUANT_Q5K: return GGML_TYPE_Q5_K;
-        case MKLLM_QUANT_Q6K: return GGML_TYPE_Q6_K;
-        default:              return GGML_TYPE_Q4_K;
+        case MKLLM_QUANT_Q4K:   return GGML_TYPE_Q4_K;
+        case MKLLM_QUANT_Q5K:   return GGML_TYPE_Q5_K;
+        case MKLLM_QUANT_Q6K:   return GGML_TYPE_Q6_K;
+        case MKLLM_QUANT_Q80:   return GGML_TYPE_Q8_0;
+        case MKLLM_QUANT_Q3K:   return GGML_TYPE_Q3_K;
+        case MKLLM_QUANT_IQ4XS: return GGML_TYPE_IQ4_XS;
+        case MKLLM_QUANT_IQ4NL: return GGML_TYPE_IQ4_NL;
+        case MKLLM_QUANT_IQ3S:  return GGML_TYPE_IQ3_S;
+        default:                return GGML_TYPE_COUNT;
     }
 }
 
+// Bytes per ggml storage block (NOT per 256 values: iq4_nl and q8_0 are
+// 32-value blocks). Returns 0 for an unknown kind; callers must reject it.
 static int mkllm_kind_block_bytes(int kind) {
     switch (kind) {
-        case MKLLM_QUANT_Q5K: return (int) sizeof(block_q5_K);
-        case MKLLM_QUANT_Q6K: return (int) sizeof(block_q6_K);
-        default:              return (int) sizeof(block_q4_K);
+        case MKLLM_QUANT_Q4K:   return (int) sizeof(block_q4_K);
+        case MKLLM_QUANT_Q5K:   return (int) sizeof(block_q5_K);
+        case MKLLM_QUANT_Q6K:   return (int) sizeof(block_q6_K);
+        case MKLLM_QUANT_Q80:   return (int) sizeof(block_q8_0);
+        case MKLLM_QUANT_Q3K:   return (int) sizeof(block_q3_K);
+        case MKLLM_QUANT_IQ4XS: return (int) sizeof(block_iq4_xs);
+        case MKLLM_QUANT_IQ4NL: return (int) sizeof(block_iq4_nl);
+        case MKLLM_QUANT_IQ3S:  return (int) sizeof(block_iq3_s);
+        default:                return 0;
     }
+}
+
+// The MMQ path quantizes activations to block_q8_1_mmq in one of two scale
+// layouts; picking the wrong one silently corrupts the result. Mirrors
+// mmq_get_q8_1_ds_layout() in fattn/mmq.cuh. Returns -1 for an unknown kind.
+static int mkllm_kind_mmq_ds4(int kind) {
+    switch (kind) {
+        case MKLLM_QUANT_Q4K:
+        case MKLLM_QUANT_Q5K:   return 1; // MMQ_Q8_1_DS_LAYOUT_DS4
+        case MKLLM_QUANT_Q6K:
+        case MKLLM_QUANT_Q3K:
+        case MKLLM_QUANT_IQ4XS:
+        case MKLLM_QUANT_IQ4NL:
+        case MKLLM_QUANT_IQ3S:  return 0; // MMQ_Q8_1_DS_LAYOUT_D4
+        default:                return -1;
+    }
+}
+
+// Bytes the FFI caller must reserve per (row-of-256-values) unit when it
+// addresses a weight row in 256-value units. Returns 0 for an unknown kind.
+static int mkllm_kind_bytes_per_256(int kind) {
+    const int blk = mkllm_kind_block_bytes(kind);
+    if (blk == 0) {
+        return 0;
+    }
+    switch (kind) {
+        case MKLLM_QUANT_Q80:
+        case MKLLM_QUANT_IQ4NL: return blk * 8; // 32-value blocks
+        default:                return blk;     // 256-value super-blocks
+    }
+}
+
+// Which quantized-matmul routes a kind is VERIFIED on, bit 0 = official MMVQ
+// (decode), bit 1 = official J=128 MMQ (prefill). A kind may always fall back
+// to `mkllm_dequant_rows_bf16` + cuBLAS, which is checked separately and is
+// exact up to bf16 rounding, so clearing a bit costs speed, never support.
+//
+// IQ3_S is cleared on both: `llama-cuda-canary opcheck` shows its tiles
+// disagreeing with the dequant by ~1e-2 of the summed term magnitude on
+// sm_120, where every other kind lands near 3e-5 — while `getrows_iq3s`
+// proves the dequant itself is bit-exact against the scalar reference (which
+// is in turn pinned to llama.cpp's gguf-py dequantizers). The vendored
+// vec_dot_iq3_s_q8_1 / load_tiles_iq3_s are byte-identical to upstream and the
+// iq3s_grid table matches, so this is an open upstream-kernel question, not a
+// porting slip — parked with the evidence rather than shipped with a route
+// that returns plausible-but-wrong numbers. IQ3_S is 4 tensors of 866 in
+// Qwen3.8-27B-UD-Q4_K_M, so the cost of the dequant fallback is noise.
+// Re-enable by flipping a bit here and re-running the canary.
+#define MKLLM_ROUTE_MMVQ 1
+#define MKLLM_ROUTE_MMQ  2
+
+static int mkllm_kind_route_mask(int kind) {
+    switch (kind) {
+        case MKLLM_QUANT_Q4K:
+        case MKLLM_QUANT_Q5K:
+        case MKLLM_QUANT_Q6K:
+        case MKLLM_QUANT_Q3K:
+        case MKLLM_QUANT_IQ4NL:
+        case MKLLM_QUANT_IQ4XS: return MKLLM_ROUTE_MMVQ | MKLLM_ROUTE_MMQ;
+        case MKLLM_QUANT_IQ3S:  return 0;
+        // q8_0 decode is the hand-written mmv_quant kernel, not official MMVQ.
+        case MKLLM_QUANT_Q80:   return 0;
+        default:                return -1;
+    }
+}
+
+extern "C" int mkllm_quant_kind_routes(int kind) {
+    return mkllm_kind_route_mask(kind);
+}
+
+extern "C" int mkllm_quant_kind_block_bytes(int kind) {
+    return mkllm_kind_block_bytes(kind);
+}
+
+// Exposed so the Rust dispatcher picks the activation layout from the same
+// table the kernels use, instead of keeping a second copy that can drift.
+extern "C" int mkllm_quant_kind_mmq_ds4(int kind) {
+    return mkllm_kind_mmq_ds4(kind);
+}
+
+extern "C" int mkllm_quant_kind_bytes_per_256(int kind) {
+    return mkllm_kind_bytes_per_256(kind);
 }
 
 // llama.cpp mmvq.cu ggml_cuda_mul_mat_vec_q: ONE weight read serves up to
@@ -955,14 +1085,20 @@ static cudaError_t mkllm_launch_mmvq_q81(
     if (K <= 0 || N <= 0 || (K % QK_K) != 0 || M < 1 || M > MMVQ_MAX_BATCH_SIZE) {
         return cudaErrorInvalidValue;
     }
-    if (kind < MKLLM_QUANT_Q4K || kind > MKLLM_QUANT_Q80) {
-        return cudaErrorInvalidValue;
-    }
     if (fuse && (gate == nullptr || gate_row_bytes == 0)) {
         return cudaErrorInvalidValue;
     }
+    // Bytes per ggml block (34 for q8_0, 18 for iq4_nl, 256-value super-block
+    // otherwise) — mul_mat_vec_q's stride_row_x counts BLOCKS of src0's type.
     const int blk_bytes = mkllm_kind_block_bytes(kind);
-    if (src0_row_bytes < (size_t) (K / QK_K) * (size_t) blk_bytes
+    const int per_256 = mkllm_kind_bytes_per_256(kind);
+    if (blk_bytes == 0 || per_256 == 0) {
+        return cudaErrorInvalidValue;
+    }
+    if ((mkllm_kind_route_mask(kind) & MKLLM_ROUTE_MMVQ) == 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (src0_row_bytes < (size_t) (K / QK_K) * (size_t) per_256
             || (src0_row_bytes % (size_t) blk_bytes) != 0) {
         return cudaErrorInvalidValue;
     }
@@ -971,29 +1107,28 @@ static cudaError_t mkllm_launch_mmvq_q81(
     }
     const int stride_row_x = (int) (src0_row_bytes / (size_t) blk_bytes);
     cudaError_t launch_err = cudaSuccess;
+    // One arm per kind, no permissive default: a kind added here but not to
+    // the other switches must fail loudly instead of decoding as Q4_K.
+#define MKLLM_MMVQ_KIND(KIND, TYPE)                                            \
+    case KIND:                                                                 \
+        launch_err = fuse                                                      \
+            ? mkllm_launch_mmvq_official<TYPE, true>(                          \
+                src0, gate, y, dst, K, N, M, stride_row_x, stream)             \
+            : mkllm_launch_mmvq_official<TYPE, false>(                         \
+                src0, nullptr, y, dst, K, N, M, stride_row_x, stream);         \
+        break;
     switch (kind) {
-        case MKLLM_QUANT_Q5K:
-            launch_err = fuse
-                ? mkllm_launch_mmvq_official<GGML_TYPE_Q5_K, true>(
-                    src0, gate, y, dst, K, N, M, stride_row_x, stream)
-                : mkllm_launch_mmvq_official<GGML_TYPE_Q5_K, false>(
-                    src0, nullptr, y, dst, K, N, M, stride_row_x, stream);
-            break;
-        case MKLLM_QUANT_Q6K:
-            launch_err = fuse
-                ? mkllm_launch_mmvq_official<GGML_TYPE_Q6_K, true>(
-                    src0, gate, y, dst, K, N, M, stride_row_x, stream)
-                : mkllm_launch_mmvq_official<GGML_TYPE_Q6_K, false>(
-                    src0, nullptr, y, dst, K, N, M, stride_row_x, stream);
-            break;
-        default:
-            launch_err = fuse
-                ? mkllm_launch_mmvq_official<GGML_TYPE_Q4_K, true>(
-                    src0, gate, y, dst, K, N, M, stride_row_x, stream)
-                : mkllm_launch_mmvq_official<GGML_TYPE_Q4_K, false>(
-                    src0, nullptr, y, dst, K, N, M, stride_row_x, stream);
-            break;
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_Q4K,   GGML_TYPE_Q4_K)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_Q5K,   GGML_TYPE_Q5_K)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_Q6K,   GGML_TYPE_Q6_K)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_Q80,   GGML_TYPE_Q8_0)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_Q3K,   GGML_TYPE_Q3_K)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_IQ4XS, GGML_TYPE_IQ4_XS)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_IQ4NL, GGML_TYPE_IQ4_NL)
+        MKLLM_MMVQ_KIND(MKLLM_QUANT_IQ3S,  GGML_TYPE_IQ3_S)
+        default: return cudaErrorInvalidValue;
     }
+#undef MKLLM_MMVQ_KIND
     if (launch_err != cudaSuccess) {
         return launch_err;
     }
@@ -1192,10 +1327,12 @@ extern "C" cudaError_t mkllm_mmv_quant_q81(
             mkllm_mmv_qk_q81_kernel<MKLLM_QUANT_Q80><<<grid, block, 0, stream>>>(
                 (const uint8_t *) src0, q8, d8, dst, K, N, src0_row_bytes, dst_col_elems);
             break;
-        default:
+        case MKLLM_QUANT_Q6K:
             mkllm_mmv_qk_q81_kernel<MKLLM_QUANT_Q6K><<<grid, block, 0, stream>>>(
                 (const uint8_t *) src0, q8, d8, dst, K, N, src0_row_bytes, dst_col_elems);
             break;
+        default:
+            return cudaErrorInvalidValue;
     }
     return cudaGetLastError();
 }
@@ -1365,10 +1502,12 @@ extern "C" cudaError_t mkllm_mmq_quant_q81(
             mkllm_mmq_q81_kernel<MKLLM_QUANT_Q80><<<grid, block, 0, stream>>>(
                 (const uint8_t *) src0, q8, d8, dst, K, N, M, src0_row_bytes, dst_col_elems);
             break;
-        default:
+        case MKLLM_QUANT_Q6K:
             mkllm_mmq_q81_kernel<MKLLM_QUANT_Q6K><<<grid, block, 0, stream>>>(
                 (const uint8_t *) src0, q8, d8, dst, K, N, M, src0_row_bytes, dst_col_elems);
             break;
+        default:
+            return cudaErrorInvalidValue;
     }
     return cudaGetLastError();
 }
@@ -1628,10 +1767,20 @@ extern "C" cudaError_t mkllm_dequant_rows_bf16(
             mkllm_dequant_q80_rows_bf16_kernel<<<grid, 256, 0, stream>>>(
                 (const uint8_t *) src, (__nv_bfloat16 *) dst, rows, K, src_row_bytes);
             break;
-        default:
+        case MKLLM_QUANT_Q6K:
             mkllm_dequant_q6k_rows_bf16_kernel<<<grid, 64, 0, stream>>>(
                 (const uint8_t *) src, (__nv_bfloat16 *) dst, rows, K, src_row_bytes);
             break;
+        // Q3_K and the IQ codebook kinds: the ported llama.cpp convert.cu
+        // kernels in iq_convert.cuh, adapted to this row-strided layout.
+        case MKLLM_QUANT_Q3K:
+        case MKLLM_QUANT_IQ4XS:
+        case MKLLM_QUANT_IQ4NL:
+        case MKLLM_QUANT_IQ3S:
+            return mkllm_dequant_iq_rows_bf16(
+                kind, src, dst, rows, K, src_row_bytes, stream);
+        default:
+            return cudaErrorInvalidValue;
     }
     return cudaGetLastError();
 }
@@ -1867,11 +2016,13 @@ extern "C" cudaError_t mkllm_mmq_quant(
                 (const uint8_t *) src0, src1, dst, K, N, M,
                 src0_row_bytes, src1_col_elems, dst_col_elems);
             break;
-        default:
+        case MKLLM_QUANT_Q6K:
             mkllm_mmq_qk_kernel<MKLLM_QUANT_Q6K><<<grid, block, shared, stream>>>(
                 (const uint8_t *) src0, src1, dst, K, N, M,
                 src0_row_bytes, src1_col_elems, dst_col_elems);
             break;
+        default:
+            return cudaErrorInvalidValue;
     }
     return cudaGetLastError();
 }
@@ -2334,28 +2485,53 @@ extern "C" cudaError_t mkllm_quantize_mmq_ds4(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t mkllm_mmq_q4k_j128(
-        const void * x, const void * y, float * dst,
+// llama.cpp J=128 MMQ for every kind the executor can hand us. Replaces the
+// old per-type mkllm_mmq_q{4,5,6}k_j128 entry points: the launcher was already
+// templated on ggml_type, so one dispatch covers Q4_K/Q5_K/Q6_K and the
+// UD- kinds (Q3_K, IQ4_XS, IQ4_NL, IQ3_S) alike.
+//
+// `stride_row_x` counts BLOCKS of x's type, so the lower bound depends on the
+// kind's block length (32 values for iq4_nl, 256 otherwise).
+extern "C" cudaError_t mkllm_mmq_kind_j128(
+        int kind, const void * x, const void * y, float * dst,
         int k, int n, int m, int stride_row_x, int stride_col_dst,
         int nsm, float * tmp_fixup, cudaStream_t stream) {
     if (k <= 0 || n <= 0 || m <= 0 || (k % QK_K) != 0 || (m % 128) != 0
-            || stride_row_x < (k / QK_K) || stride_col_dst < n) {
+            || stride_col_dst < n) {
         return cudaErrorInvalidValue;
     }
-    return mkllm_launch_mul_mat_q<GGML_TYPE_Q4_K>(
-        x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
-}
-
-extern "C" cudaError_t mkllm_mmq_q5k_j128(
-        const void * x, const void * y, float * dst,
-        int k, int n, int m, int stride_row_x, int stride_col_dst,
-        int nsm, float * tmp_fixup, cudaStream_t stream) {
-    if (k <= 0 || n <= 0 || m <= 0 || (k % QK_K) != 0 || (m % 128) != 0
-            || stride_row_x < (k / QK_K) || stride_col_dst < n) {
+    const int blk_elems = (kind == MKLLM_QUANT_IQ4NL) ? QK4_NL : QK_K;
+    if (stride_row_x < k / blk_elems) {
         return cudaErrorInvalidValue;
     }
-    return mkllm_launch_mul_mat_q<GGML_TYPE_Q5_K>(
-        x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+    if ((mkllm_kind_route_mask(kind) & MKLLM_ROUTE_MMQ) == 0) {
+        return cudaErrorInvalidValue;
+    }
+    switch (kind) {
+        case MKLLM_QUANT_Q4K:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_Q4_K>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        case MKLLM_QUANT_Q5K:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_Q5_K>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        case MKLLM_QUANT_Q6K:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_Q6_K>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        case MKLLM_QUANT_Q3K:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_Q3_K>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        case MKLLM_QUANT_IQ4XS:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_IQ4_XS>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        case MKLLM_QUANT_IQ4NL:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_IQ4_NL>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        case MKLLM_QUANT_IQ3S:
+            return mkllm_launch_mul_mat_q<GGML_TYPE_IQ3_S>(
+                x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
+        default:
+            return cudaErrorInvalidValue;
+    }
 }
 
 // Q5_K J=128: llama.cpp load_tiles_q5_K + the same q8_1 MMA vec_dot as Q4_K.
@@ -2865,18 +3041,6 @@ extern "C" cudaError_t mkllm_quantize_mmq_d4(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t mkllm_mmq_q6k_j128(
-        const void * x, const void * y, float * dst,
-        int k, int n, int m, int stride_row_x, int stride_col_dst,
-        int nsm, float * tmp_fixup, cudaStream_t stream) {
-    if (k <= 0 || n <= 0 || m <= 0 || (k % QK_K) != 0 || (m % 128) != 0
-            || stride_row_x < (k / QK_K) || stride_col_dst < n) {
-        return cudaErrorInvalidValue;
-    }
-    return mkllm_launch_mul_mat_q<GGML_TYPE_Q6_K>(
-        x, y, dst, k, n, m, stride_row_x, stride_col_dst, nsm, tmp_fixup, stream);
-}
-
 // Strided f32 -> contiguous bf16 (activation cast for GEMM), 2D [K, M].
 static __global__ void mkllm_cast_f32_bf16_kernel(
         const uint8_t * __restrict__ src, __nv_bfloat16 * __restrict__ dst,
@@ -3022,10 +3186,20 @@ extern "C" cudaError_t mkllm_get_rows_quant(
             mkllm_get_rows_quant_kernel<MKLLM_QUANT_Q80><<<grid, block, 0, stream>>>(
                 (const uint8_t *) src, rows, (float *) dst, ne0, nrows, src_nb1, dst_nb1);
             break;
-        default:
+        case MKLLM_QUANT_Q6K:
             mkllm_get_rows_quant_kernel<MKLLM_QUANT_Q6K><<<grid, block, 0, stream>>>(
                 (const uint8_t *) src, rows, (float *) dst, ne0, nrows, src_nb1, dst_nb1);
             break;
+        // The IQ/Q3_K kinds route through the shared row-dequant in
+        // iq_convert.cuh instead of the legacy per-element selector.
+        case MKLLM_QUANT_Q3K:
+        case MKLLM_QUANT_IQ4XS:
+        case MKLLM_QUANT_IQ4NL:
+        case MKLLM_QUANT_IQ3S:
+            return mkllm_get_rows_iq_f32(
+                kind, src, rows, dst, ne0, nrows, src_nb1, dst_nb1, stream);
+        default:
+            return cudaErrorInvalidValue;
     }
     return cudaGetLastError();
 }

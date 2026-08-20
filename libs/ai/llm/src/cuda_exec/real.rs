@@ -28,11 +28,15 @@ use makepad_ai_cuda::{
 use makepad_ai_cuda::llm_ops::{
     binary, cast_f32_bf16, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
     fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
-    get_rows_f32, get_rows_quant, glu, mmq_q4k, mmq_q5k, mmq_q6k, mmq_quant, mmq_quant_q81,
-    mmv_f32, mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm,
+    get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
+    mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
+    quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
     quantize_mmq_d4, quantize_mmq_ds4, quantize_q81, quantize_q81_batched, rms_norm_mul,
-    rope_multi, set_rows, softmax_mask, ssm_conv, unary, unary_mul, QUANT_Q4K as MKLLM_QUANT_Q4K,
-    QUANT_Q5K as MKLLM_QUANT_Q5K, QUANT_Q6K as MKLLM_QUANT_Q6K, QUANT_Q80 as MKLLM_QUANT_Q80,
+    rope_multi, set_rows, softmax_mask, ssm_conv, unary, unary_mul,
+    QUANT_IQ3S as MKLLM_QUANT_IQ3S, QUANT_IQ4NL as MKLLM_QUANT_IQ4NL,
+    QUANT_IQ4XS as MKLLM_QUANT_IQ4XS, QUANT_Q3K as MKLLM_QUANT_Q3K,
+    QUANT_Q4K as MKLLM_QUANT_Q4K, QUANT_Q5K as MKLLM_QUANT_Q5K, QUANT_Q6K as MKLLM_QUANT_Q6K,
+    QUANT_Q80 as MKLLM_QUANT_Q80, ROUTE_MMQ, ROUTE_MMVQ,
 };
 use crate::{
     ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
@@ -976,12 +980,23 @@ fn resolve_root(tensors: &[Tensor], id: TensorId) -> Result<(TensorId, usize)> {
     }
 }
 
+/// GGUF tensor type -> CUDA `kind`. The four `MKLLM_QUANT_{Q3K,IQ4XS,IQ4NL,
+/// IQ3S}` kinds are what unsloth's Dynamic (UD-) conversions sprinkle into
+/// otherwise-K-quant files; without them a UD- GGUF fails graph planning with
+/// "matmul with iq4_xs weights" before a single token is produced. They run on
+/// the vendored official llama.cpp MMQ/MMVQ templates plus the ported row
+/// dequant, never on the hand-written legacy kernels — see
+/// `quant_kind_is_official_only`.
 fn quant_kind(ty: TensorType) -> Option<i32> {
     match ty {
         TensorType::Q4K => Some(MKLLM_QUANT_Q4K),
         TensorType::Q5K => Some(MKLLM_QUANT_Q5K),
         TensorType::Q6K => Some(MKLLM_QUANT_Q6K),
         TensorType::Q8_0 => Some(MKLLM_QUANT_Q80),
+        TensorType::Q3K => Some(MKLLM_QUANT_Q3K),
+        TensorType::IQ4Xs => Some(MKLLM_QUANT_IQ4XS),
+        TensorType::IQ4Nl => Some(MKLLM_QUANT_IQ4NL),
+        TensorType::IQ3S => Some(MKLLM_QUANT_IQ3S),
         _ => None,
     }
 }
@@ -1278,7 +1293,20 @@ fn mmvq_q81_shape_ok(t: &Tensor, act: &Tensor, dst: &Tensor, kind: i32) -> bool 
         && act.ne[2] == 1
         && act.ne[3] == 1
         && act.nb[0] == 4
-        && (kind == MKLLM_QUANT_Q4K || kind == MKLLM_QUANT_Q5K || kind == MKLLM_QUANT_Q6K)
+        && mmvq_q81_kind_ok(kind)
+}
+
+/// Kinds the official `mul_mat_vec_q` route is *verified* for. The table lives
+/// on the CUDA side (`mkllm_kind_route_mask`) next to the kernels it describes,
+/// so enabling a route is a one-line change in one file. Q8_0 is absent here
+/// because its decode runs the hand-written `mmv_quant` kernel instead.
+fn mmvq_q81_kind_ok(kind: i32) -> bool {
+    unsafe { quant_kind_routes(kind) & ROUTE_MMVQ != 0 }
+}
+
+/// Same for the J=128 MMQ prefill tiles.
+fn mmq_kind_ok(kind: i32) -> bool {
+    unsafe { quant_kind_routes(kind) & ROUTE_MMQ != 0 }
 }
 
 fn tensor_used_elsewhere(tensors: &[Tensor], nodes: &[TensorId], id: TensorId, except: TensorId) -> bool {
@@ -2327,6 +2355,19 @@ impl ExecView<'_> {
     }
 
     fn dispatch_all(&self, mut quant_profile: Option<&mut QuantTimeline>) -> Result<()> {
+        // The q8_1 activation reuse below is keyed on a raw DEVICE ADDRESS plus
+        // (k, m). That is exactly right inside one graph — the fused gate/up
+        // pair reads the same activations twice — but across graph executions
+        // the allocator hands out the same address again with the same shape
+        // while the contents have changed, and the stale quantization is then
+        // reused. (Found by the IQ canary: two weight types whose row byte
+        // size happens to match put their activations at the same address, and
+        // the second matmul silently consumed the first one's activations.)
+        // The capture path already clears it at line ~2190; clear it here so
+        // the eager path cannot carry a hit across an execution boundary.
+        self.state.last_q81_src.set(std::ptr::null());
+        self.state.last_q81_k.set(0);
+        self.state.last_q81_m.set(0);
         for index in 0..self.plan.nodes.len() {
             self.dispatch_node(index, quant_profile.as_deref_mut())
                 .map_err(|err| LlamaError::format(format!("node {index}: {err:?}")))?;
@@ -3153,12 +3194,15 @@ impl ExecView<'_> {
                     && b.ne[2] == 1
                     && b.ne[3] == 1
                     && b.nb[0] == 4
-                    && (kind == MKLLM_QUANT_Q4K
-                        || kind == MKLLM_QUANT_Q5K
-                        || kind == MKLLM_QUANT_Q6K)
+                    && mmvq_q81_kind_ok(kind)
                     && (cc.0 > 6 || (cc.0 == 6 && cc.1 >= 1));
                 if q81_ok {
                     self.mmv_quant_q81(&t, kind, k, n, m, row_bytes, quant_profile.as_deref_mut())
+                } else if quant_kind_is_official_only(kind) {
+                    // The IQ / Q3_K kinds have no hand-written mat-vec kernel;
+                    // rather than hit `mmv_quant`'s hard error, fall back to
+                    // the dequant-slab + cuBLAS GEMM, which handles any M.
+                    self.gemm_quant(&t, kind, quant_profile.as_deref_mut())
                 } else {
                     check(
                         unsafe {
@@ -3687,7 +3731,12 @@ impl ExecView<'_> {
         Ok(())
     }
 
-    fn gemm_quant_q4k_j128(
+    // llama.cpp J=128 MMQ, one body for every kind. This replaces the three
+    // byte-identical gemm_quant_q{4,5,6}k_j128 copies: the only per-type facts
+    // are the block size (for the weight-row stride) and which activation
+    // scale layout the tiles expect, and both now come from the CUDA side's
+    // own tables so a new kind cannot drift between the two languages.
+    fn gemm_quant_mmq_j128(
         &self,
         t: &Tensor,
         kind: i32,
@@ -3707,63 +3756,71 @@ impl ExecView<'_> {
             .unwrap_or(true);
         let nsm = if stream_k {
             i32::try_from(self.state.features.sm_count.max(1))
-                .map_err(|_| LlamaError::format("q4k mmq nsm exceeds i32"))?
+                .map_err(|_| LlamaError::format("mmq nsm exceeds i32"))?
         } else {
             0
         };
         let fixup_elems = if nsm > 0 {
             (nsm as usize)
                 .checked_mul(128 * 128)
-                .ok_or_else(|| LlamaError::format("q4k mmq fixup overflow"))?
+                .ok_or_else(|| LlamaError::format("mmq fixup overflow"))?
         } else {
             0
         };
         let y_bytes = m
             .checked_mul(n_q8_blocks)
             .and_then(|bytes| bytes.checked_mul(144))
-            .ok_or_else(|| LlamaError::format("q4k mmq ds4 scratch overflow"))?;
+            .ok_or_else(|| LlamaError::format("mmq activation scratch overflow"))?;
         let scratch_bytes = y_bytes
             .checked_add(fixup_elems.saturating_mul(4))
-            .ok_or_else(|| LlamaError::format("q4k mmq scratch overflow"))?;
-        let k_i = i32::try_from(k).map_err(|_| LlamaError::format("q4k mmq k exceeds i32"))?;
-        let n_i = i32::try_from(n).map_err(|_| LlamaError::format("q4k mmq n exceeds i32"))?;
-        let m_i = i32::try_from(m).map_err(|_| LlamaError::format("q4k mmq m exceeds i32"))?;
+            .ok_or_else(|| LlamaError::format("mmq scratch overflow"))?;
+        let k_i = i32::try_from(k).map_err(|_| LlamaError::format("mmq k exceeds i32"))?;
+        let n_i = i32::try_from(n).map_err(|_| LlamaError::format("mmq n exceeds i32"))?;
+        let m_i = i32::try_from(m).map_err(|_| LlamaError::format("mmq m exceeds i32"))?;
         let stride_col = i32::try_from(act_stride_elems)
-            .map_err(|_| LlamaError::format("q4k mmq act stride exceeds i32"))?;
+            .map_err(|_| LlamaError::format("mmq act stride exceeds i32"))?;
         let stride_row_x_i = i32::try_from(stride_row_x)
-            .map_err(|_| LlamaError::format("q4k mmq weight stride exceeds i32"))?;
+            .map_err(|_| LlamaError::format("mmq weight stride exceeds i32"))?;
         let stride_col_dst = i32::try_from(t.nb[1] / 4)
-            .map_err(|_| LlamaError::format("q4k mmq dst stride exceeds i32"))?;
+            .map_err(|_| LlamaError::format("mmq dst stride exceeds i32"))?;
         let scratch = self
             .state
             .scratch_acts
             .borrow_mut()
-            .ensure(scratch_bytes, "q4k mmq ds4 scratch")?;
+            .ensure(scratch_bytes, "mmq activation scratch")?;
         let tmp_fixup = if nsm > 0 {
             unsafe { (scratch as *mut u8).add(y_bytes) as *mut f32 }
         } else {
             std::ptr::null_mut()
         };
+        // mmq_get_q8_1_ds_layout(): Q4_K/Q5_K want DS4 (half2 scale+sum per 32),
+        // Q6_K/Q3_K/IQ* want D4 (scale only). Getting this wrong is silent
+        // corruption, so ask the kernel side rather than re-deriving it.
+        let ds4 = unsafe { quant_kind_mmq_ds4(kind) };
+        let stage_label = match ds4 {
+            1 => "mmq_ds4",
+            0 => "mmq_d4",
+            _ => return Err(LlamaError::unsupported(format!("no MMQ layout for kind {kind}"))),
+        };
         let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
         check(
             unsafe {
-                quantize_mmq_ds4(
-                    self.ptr_of(b_id)? as *const f32,
-                    scratch,
-                    k_i,
-                    m_i,
-                    stride_col,
-                    stream,
-                )
+                let x = self.ptr_of(b_id)? as *const f32;
+                if ds4 == 1 {
+                    quantize_mmq_ds4(x, scratch, k_i, m_i, stride_col, stream)
+                } else {
+                    quantize_mmq_d4(x, scratch, k_i, m_i, stride_col, stream)
+                }
             },
-            "q4k mmq ds4",
+            stage_label,
         )?;
         if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            stage_start = Some(timeline.finish(start, kind, "q4k_ds4")?);
+            stage_start = Some(timeline.finish(start, kind, stage_label)?);
         }
         check(
             unsafe {
-                mmq_q4k(
+                mmq_kind_j128(
+                    kind,
                     self.ptr_of(a_id)?,
                     scratch,
                     self.ptr_of(t.id)? as *mut f32,
@@ -3777,206 +3834,10 @@ impl ExecView<'_> {
                     stream,
                 )
             },
-            "mmq_q4k_j128",
+            "mmq_kind_j128",
         )?;
         if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmq_q4k_j128")?;
-        }
-        Ok(())
-    }
-
-    fn gemm_quant_q5k_j128(
-        &self,
-        t: &Tensor,
-        kind: i32,
-        k: usize,
-        n: usize,
-        m: usize,
-        stride_row_x: usize,
-        act_stride_elems: usize,
-        mut profile: Option<&mut QuantTimeline>,
-    ) -> Result<()> {
-        let a_id = self.src_id(t, 0)?;
-        let b_id = self.src_id(t, 1)?;
-        let stream = self.state.stream;
-        let n_q8_blocks = k / 128;
-        let stream_k = std::env::var_os("MKLLM_DISABLE_STREAM_K")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        let nsm = if stream_k {
-            i32::try_from(self.state.features.sm_count.max(1))
-                .map_err(|_| LlamaError::format("q5k mmq nsm exceeds i32"))?
-        } else {
-            0
-        };
-        let fixup_elems = if nsm > 0 {
-            (nsm as usize)
-                .checked_mul(128 * 128)
-                .ok_or_else(|| LlamaError::format("q5k mmq fixup overflow"))?
-        } else {
-            0
-        };
-        let y_bytes = m
-            .checked_mul(n_q8_blocks)
-            .and_then(|bytes| bytes.checked_mul(144))
-            .ok_or_else(|| LlamaError::format("q5k mmq ds4 scratch overflow"))?;
-        let scratch_bytes = y_bytes
-            .checked_add(fixup_elems.saturating_mul(4))
-            .ok_or_else(|| LlamaError::format("q5k mmq scratch overflow"))?;
-        let k_i = i32::try_from(k).map_err(|_| LlamaError::format("q5k mmq k exceeds i32"))?;
-        let n_i = i32::try_from(n).map_err(|_| LlamaError::format("q5k mmq n exceeds i32"))?;
-        let m_i = i32::try_from(m).map_err(|_| LlamaError::format("q5k mmq m exceeds i32"))?;
-        let stride_col = i32::try_from(act_stride_elems)
-            .map_err(|_| LlamaError::format("q5k mmq act stride exceeds i32"))?;
-        let stride_row_x_i = i32::try_from(stride_row_x)
-            .map_err(|_| LlamaError::format("q5k mmq weight stride exceeds i32"))?;
-        let stride_col_dst = i32::try_from(t.nb[1] / 4)
-            .map_err(|_| LlamaError::format("q5k mmq dst stride exceeds i32"))?;
-        let scratch = self
-            .state
-            .scratch_acts
-            .borrow_mut()
-            .ensure(scratch_bytes, "q5k mmq ds4 scratch")?;
-        let tmp_fixup = if nsm > 0 {
-            unsafe { (scratch as *mut u8).add(y_bytes) as *mut f32 }
-        } else {
-            std::ptr::null_mut()
-        };
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
-        check(
-            unsafe {
-                quantize_mmq_ds4(
-                    self.ptr_of(b_id)? as *const f32,
-                    scratch,
-                    k_i,
-                    m_i,
-                    stride_col,
-                    stream,
-                )
-            },
-            "q5k mmq ds4",
-        )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            stage_start = Some(timeline.finish(start, kind, "q5k_ds4")?);
-        }
-        check(
-            unsafe {
-                mmq_q5k(
-                    self.ptr_of(a_id)?,
-                    scratch,
-                    self.ptr_of(t.id)? as *mut f32,
-                    k_i,
-                    n_i,
-                    m_i,
-                    stride_row_x_i,
-                    stride_col_dst,
-                    nsm,
-                    tmp_fixup,
-                    stream,
-                )
-            },
-            "mmq_q5k_j128",
-        )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmq_q5k_j128")?;
-        }
-        Ok(())
-    }
-
-    fn gemm_quant_q6k_j128(
-        &self,
-        t: &Tensor,
-        kind: i32,
-        k: usize,
-        n: usize,
-        m: usize,
-        stride_row_x: usize,
-        act_stride_elems: usize,
-        mut profile: Option<&mut QuantTimeline>,
-    ) -> Result<()> {
-        let a_id = self.src_id(t, 0)?;
-        let b_id = self.src_id(t, 1)?;
-        let stream = self.state.stream;
-        let n_q8_blocks = k / 128;
-        let stream_k = std::env::var_os("MKLLM_DISABLE_STREAM_K")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        let nsm = if stream_k {
-            i32::try_from(self.state.features.sm_count.max(1))
-                .map_err(|_| LlamaError::format("q6k mmq nsm exceeds i32"))?
-        } else {
-            0
-        };
-        let fixup_elems = if nsm > 0 {
-            (nsm as usize)
-                .checked_mul(128 * 128)
-                .ok_or_else(|| LlamaError::format("q6k mmq fixup overflow"))?
-        } else {
-            0
-        };
-        let y_bytes = m
-            .checked_mul(n_q8_blocks)
-            .and_then(|bytes| bytes.checked_mul(144))
-            .ok_or_else(|| LlamaError::format("q6k mmq d4 scratch overflow"))?;
-        let scratch_bytes = y_bytes
-            .checked_add(fixup_elems.saturating_mul(4))
-            .ok_or_else(|| LlamaError::format("q6k mmq scratch overflow"))?;
-        let k_i = i32::try_from(k).map_err(|_| LlamaError::format("q6k mmq k exceeds i32"))?;
-        let n_i = i32::try_from(n).map_err(|_| LlamaError::format("q6k mmq n exceeds i32"))?;
-        let m_i = i32::try_from(m).map_err(|_| LlamaError::format("q6k mmq m exceeds i32"))?;
-        let stride_col = i32::try_from(act_stride_elems)
-            .map_err(|_| LlamaError::format("q6k mmq act stride exceeds i32"))?;
-        let stride_row_x_i = i32::try_from(stride_row_x)
-            .map_err(|_| LlamaError::format("q6k mmq weight stride exceeds i32"))?;
-        let stride_col_dst = i32::try_from(t.nb[1] / 4)
-            .map_err(|_| LlamaError::format("q6k mmq dst stride exceeds i32"))?;
-        let scratch = self
-            .state
-            .scratch_acts
-            .borrow_mut()
-            .ensure(scratch_bytes, "q6k mmq d4 scratch")?;
-        let tmp_fixup = if nsm > 0 {
-            unsafe { (scratch as *mut u8).add(y_bytes) as *mut f32 }
-        } else {
-            std::ptr::null_mut()
-        };
-        let mut stage_start = profile.as_mut().map(|timeline| timeline.mark()).transpose()?;
-        check(
-            unsafe {
-                quantize_mmq_d4(
-                    self.ptr_of(b_id)? as *const f32,
-                    scratch,
-                    k_i,
-                    m_i,
-                    stride_col,
-                    stream,
-                )
-            },
-            "q6k mmq d4",
-        )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            stage_start = Some(timeline.finish(start, kind, "q6k_d4")?);
-        }
-        check(
-            unsafe {
-                mmq_q6k(
-                    self.ptr_of(a_id)?,
-                    scratch,
-                    self.ptr_of(t.id)? as *mut f32,
-                    k_i,
-                    n_i,
-                    m_i,
-                    stride_row_x_i,
-                    stride_col_dst,
-                    nsm,
-                    tmp_fixup,
-                    stream,
-                )
-            },
-            "mmq_q6k_j128",
-        )?;
-        if let (Some(timeline), Some(start)) = (profile.as_mut(), stage_start) {
-            timeline.finish(start, kind, "mmq_q6k_j128")?;
+            timeline.finish(start, kind, "mmq_kind_j128")?;
         }
         Ok(())
     }
@@ -4062,23 +3923,44 @@ impl ExecView<'_> {
             return Ok(());
         }
 
-        // llama.cpp Q4_K J=128 MMA. Default-on for full J tiles (M>=128,
-        // M%128==0). Does not touch the shared ggml CUDA backend used by
-        // diffusion / other models. MKLLM_DISABLE_Q4K_MMQ=1 restores slab.
+        // llama.cpp J=128 MMA MMQ. Default-on for full J tiles (M>=128,
+        // M%128==0) on Ampere+. Does not touch the shared ggml CUDA backend
+        // used by diffusion / other models. MKLLM_DISABLE_MMQ=1 restores the
+        // dequant-slab + cuBLAS path for every kind; the older per-type
+        // MKLLM_DISABLE_Q{4,5,6}K_MMQ switches still work for their own kind.
+        //
+        // The per-kind facts (weight block size, activation scale layout) come
+        // from the CUDA tables, so adding a kind in one place is enough.
         let cc = self.state.features.compute_capability;
         let act_stride = b.nb[1] / 4;
-        let q4k_mmq_disabled = std::env::var_os("MKLLM_DISABLE_Q4K_MMQ")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let q4_row_blocks = k / 256;
-        let q4_canonical = a.nb[0] == 144
-            && a.nb[1] == row_bytes
-            && row_bytes % 144 == 0
-            && row_bytes / 144 >= q4_row_blocks;
-        let q4_validated_stride =
-            a.nb[0] == 144 && a.nb[1] % 144 == 0 && a.nb[1] / 144 >= q4_row_blocks;
-        let q4k_mmq_ok = !q4k_mmq_disabled
-            && kind == MKLLM_QUANT_Q4K
+        let disabled = |name: &str| {
+            std::env::var_os(name).map(|v| v == "1").unwrap_or(false)
+        };
+        let kind_disabled = disabled("MKLLM_DISABLE_MMQ")
+            || match kind {
+                MKLLM_QUANT_Q4K => disabled("MKLLM_DISABLE_Q4K_MMQ"),
+                MKLLM_QUANT_Q5K => disabled("MKLLM_DISABLE_Q5K_MMQ"),
+                MKLLM_QUANT_Q6K => disabled("MKLLM_DISABLE_Q6K_MMQ"),
+                _ => false,
+            };
+        // Bytes per ggml block for this kind (18 for iq4_nl, 256-value
+        // super-block otherwise) and how many of them make up one K row.
+        let blk_bytes = usize::try_from(unsafe { quant_kind_block_bytes(kind) }).unwrap_or(0);
+        let per_256 = usize::try_from(unsafe { quant_kind_bytes_per_256(kind) }).unwrap_or(0);
+        let has_mmq = mmq_kind_ok(kind)
+            && unsafe { quant_kind_mmq_ds4(kind) } >= 0
+            && blk_bytes > 0
+            && per_256 > 0;
+        let row_blocks = if per_256 > 0 { (k / 256) * (per_256 / blk_bytes) } else { 0 };
+        // mmq's stride_row_x counts blocks, not bytes, so any row stride that
+        // is a whole number of blocks and long enough works — the canonical
+        // packing (nb[1] == row_bytes) is just the common case of that.
+        let layout_ok = has_mmq
+            && a.nb[0] == blk_bytes
+            && a.nb[1] % blk_bytes == 0
+            && a.nb[1] / blk_bytes >= row_blocks;
+        let mmq_ok = !kind_disabled
+            && has_mmq
             && cc.0 >= 8
             && (k % 256) == 0
             && m >= 128
@@ -4089,100 +3971,23 @@ impl ExecView<'_> {
             && b.ne[3] == 1
             && b.nb[0] == 4
             && act_stride == k
-            && (q4_canonical || q4_validated_stride)
+            && layout_ok
             && t.nb[1] / 4 >= n;
-        if q4k_mmq_ok {
-            return self.gemm_quant_q4k_j128(
+        if mmq_ok {
+            return self.gemm_quant_mmq_j128(
                 t,
                 kind,
                 k,
                 n,
                 m,
-                a.nb[1] / 144,
+                a.nb[1] / blk_bytes,
                 act_stride,
                 profile,
             );
         }
 
-        // llama.cpp Q5_K J=128: load_tiles_q5_K + the same q8_1 MMA as Q4_K.
-        // MKLLM_DISABLE_Q5K_MMQ=1 restores slab.
-        let q5k_mmq_disabled = std::env::var_os("MKLLM_DISABLE_Q5K_MMQ")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let q5_row_blocks = k / 256;
-        let q5_canonical = a.nb[0] == 176
-            && a.nb[1] == row_bytes
-            && row_bytes % 176 == 0
-            && row_bytes / 176 >= q5_row_blocks;
-        let q5_validated_stride =
-            a.nb[0] == 176 && a.nb[1] % 176 == 0 && a.nb[1] / 176 >= q5_row_blocks;
-        let q5k_mmq_ok = !q5k_mmq_disabled
-            && kind == MKLLM_QUANT_Q5K
-            && cc.0 >= 8
-            && (k % 256) == 0
-            && m >= 128
-            && (m % 128) == 0
-            && a.ne[2] == 1
-            && a.ne[3] == 1
-            && b.ne[2] == 1
-            && b.ne[3] == 1
-            && b.nb[0] == 4
-            && act_stride == k
-            && (q5_canonical || q5_validated_stride)
-            && t.nb[1] / 4 >= n;
-        if q5k_mmq_ok {
-            return self.gemm_quant_q5k_j128(
-                t,
-                kind,
-                k,
-                n,
-                m,
-                a.nb[1] / 176,
-                act_stride,
-                profile,
-            );
-        }
-
-        // llama.cpp Q6_K J=128 MMA (D4 activations, m16n8k16). Default-on
-        // for the same full J tiles as Q4. Lives only in this executor so
-        // Fable's shared ggml CUDA path is untouched.
-        // MKLLM_DISABLE_Q6K_MMQ=1 restores slab.
-        let q6k_mmq_disabled = std::env::var_os("MKLLM_DISABLE_Q6K_MMQ")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let q6_row_blocks = k / 256;
-        let q6_canonical = a.nb[0] == 210
-            && a.nb[1] == row_bytes
-            && row_bytes % 210 == 0
-            && row_bytes / 210 >= q6_row_blocks;
-        let q6_validated_stride =
-            a.nb[0] == 210 && a.nb[1] % 210 == 0 && a.nb[1] / 210 >= q6_row_blocks;
-        let q6k_mmq_ok = !q6k_mmq_disabled
-            && kind == MKLLM_QUANT_Q6K
-            && cc.0 >= 8
-            && (k % 256) == 0
-            && m >= 128
-            && (m % 128) == 0
-            && a.ne[2] == 1
-            && a.ne[3] == 1
-            && b.ne[2] == 1
-            && b.ne[3] == 1
-            && b.nb[0] == 4
-            && act_stride == k
-            && (q6_canonical || q6_validated_stride)
-            && t.nb[1] / 4 >= n;
-        if q6k_mmq_ok {
-            return self.gemm_quant_q6k_j128(
-                t,
-                kind,
-                k,
-                n,
-                m,
-                a.nb[1] / 210,
-                act_stride,
-                profile,
-            );
-        }
+        // Everything else falls through to dequant-slab + cuBLAS below, which
+        // now covers the IQ kinds too (mkllm_dequant_rows_bf16 -> iq_convert).
 
         // Activations f32 -> bf16 once.
         let act_bytes = k * m * 2;
