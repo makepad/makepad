@@ -42,6 +42,15 @@ pub enum IoPurpose {
     GalleryPreviewWav,
     /// Stateful billboard: decode the preview state's native-size frames.
     GalleryPreviewBillboard,
+    /// Materialise a catalog asset's THUMBNAIL into the client's verified
+    /// cache and hand back its path. One per rail card, so it must stay
+    /// small: a wall of cards never pulls payloads.
+    CatalogThumb,
+    /// Materialise a catalog asset's PAYLOAD into the client's verified
+    /// cache and hand back its path — what the tools that take a file (AO
+    /// bake, rig, drag-out) work from. Requested when an asset is actually
+    /// used, never per card.
+    CatalogPayload,
 }
 
 /// Decoded preview pixels, ready for a cheap UI-thread texture upload.
@@ -106,6 +115,17 @@ pub enum IoDone {
         pixels: Option<PreviewPixels>,
         sequence: Vec<PreviewPixels>,
         fps: f32,
+    },
+    /// A catalog asset materialised to a verified cache path. `payload` is
+    /// false for the thumbnail lane. The path is digest-named, so holding
+    /// it is not holding a copy: it is a pointer at content the revision
+    /// still names.
+    CatalogFile {
+        file: String,
+        payload: bool,
+        role: Option<makepad_asset_data::FileRole>,
+        revision: Option<String>,
+        path: Result<PathBuf, String>,
     },
 }
 
@@ -288,6 +308,12 @@ fn process_with_store(
     let Some(source) = request.store.clone() else {
         return process(request);
     };
+    if matches!(
+        request.purpose,
+        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload
+    ) {
+        return materialize_from_store(store, &request, &source);
+    }
     let bytes = fetch_from_store(store, &source);
     match request.purpose {
         IoPurpose::ViewerOpen { generation, copy_to } => {
@@ -309,12 +335,51 @@ fn process_with_store(
             bytes,
             file: request.file,
         },
+        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload => unreachable!(
+            "catalog materialisation never reads bytes first"
+        ),
         // Store-sourced reads only serve the viewer and the model
         // thumbnailer today; anything else falls back to the path.
         _ => process(IoRequest {
             store: None,
             ..request
         }),
+    }
+}
+
+/// Resolve the asset to its head revision and put the wanted file in the
+/// client's verified cache, returning the path. Nothing is copied into an
+/// app-owned location: the object is named by its digest and re-hashed
+/// before the path is handed out, so a tool reading it is reading exactly
+/// what the revision names.
+fn materialize_from_store(
+    store: &mut Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)>,
+    request: &IoRequest,
+    source: &StoreSource,
+) -> IoDone {
+    let payload = matches!(request.purpose, IoPurpose::CatalogPayload);
+    let outcome = client_for(store, source).and_then(|client| {
+        if payload {
+            crate::store_content::materialize(client, &source.asset, &source.prefer)
+        } else {
+            crate::store_content::materialize_thumbnail(client, &source.asset)
+        }
+    });
+    match outcome {
+        Ok(file) => IoDone::CatalogFile {
+            file: request.file.clone(),
+            payload,
+            role: Some(file.role),
+            revision: Some(file.revision),
+            path: Ok(file.path),
+        },
+        Err(error) => IoDone::CatalogFile {
+            file: request.file.clone(),
+            payload,
+            role: None,
+            revision: None,
+            path: Err(error),
+        },
     }
 }
 
@@ -325,6 +390,18 @@ fn fetch_from_store(
     store: &mut Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)>,
     source: &StoreSource,
 ) -> Result<Vec<u8>, String> {
+    let client = client_for(store, source)?;
+    crate::store_content::fetch_viewable(client, &source.asset, &source.prefer)
+        .map(|payload| payload.bytes)
+}
+
+/// The connected client for this request's session, reconnecting only when
+/// the session actually changed. One client owns the verified cache, so
+/// every lane above shares one set of on-disk objects.
+fn client_for<'a>(
+    store: &'a mut Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)>,
+    source: &StoreSource,
+) -> Result<&'a mut makepad_asset_client::AssetClient, String> {
     let fresh = match store {
         Some((session, _)) => session.endpoints != source.session.endpoints
             || session.server_id != source.session.server_id
@@ -340,13 +417,21 @@ fn fetch_from_store(
             .ok_or("cannot reach the asset server")?;
         *store = Some((source.session.clone(), client));
     }
-    let (_, client) = store.as_mut().expect("connected above");
-    crate::store_content::fetch_viewable(client, &source.asset, &source.prefer)
-        .map(|payload| payload.bytes)
+    Ok(&mut store.as_mut().expect("connected above").1)
 }
 
 fn process(request: IoRequest) -> IoDone {
     match request.purpose {
+        // Catalog materialisation has no local form: without a session
+        // there is no asset to resolve, and inventing a path would be
+        // exactly the stale local copy this lane exists to remove.
+        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload => IoDone::CatalogFile {
+            file: request.file,
+            payload: matches!(request.purpose, IoPurpose::CatalogPayload),
+            role: None,
+            revision: None,
+            path: Err("no asset store session".to_string()),
+        },
         IoPurpose::ViewerOpen { generation, copy_to } => {
             let bytes = std::fs::read(&request.path).map_err(|error| error.to_string());
             let copy_to = match (&bytes, copy_to) {

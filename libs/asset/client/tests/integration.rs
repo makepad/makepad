@@ -497,6 +497,42 @@ fn dependency_closure_bounded_and_verified() {
     assert!(matches!(err, ClientError::OverBudget { what: "closure depth", .. }), "{err:?}");
 }
 
+/// The bridge for tools that take a FILE rather than bytes (an AO bake, a
+/// rig pass, an OS drag-out): a verified on-disk path for catalog content.
+/// It stays thin-client-legal because the object is named by its digest and
+/// re-hashed before the path is handed out — a materialisation of the
+/// revision, never a second source of truth.
+#[test]
+fn blob_path_materialises_verified_content_and_re_fetches_a_corrupted_object() {
+    let mut store = FixtureStore::default();
+    let payload = vec![7u8; 60_000];
+    let blob = store.add_blob(payload.clone());
+    let other = store.add_blob(b"a second, different object".to_vec());
+    let fixture = FixtureServer::start(store, FixtureOptions::default());
+    let mut client = AssetClient::connect(config("blob_path"), fixture.endpoints(), None).unwrap();
+
+    let path = client.blob_path(&blob, Some(payload.len() as u64)).unwrap();
+    assert!(path.is_file(), "the object is on disk at {}", path.display());
+    assert_eq!(std::fs::read(&path).unwrap(), payload, "and it is the real payload");
+    // Digest-keyed: the same blob resolves to the same path, and a second
+    // call is served from the cache rather than the network.
+    assert_eq!(client.blob_path(&blob, None).unwrap(), path);
+    assert_ne!(client.blob_path(&other, None).unwrap(), path, "distinct objects, distinct paths");
+
+    // A path is only handed out for bytes that still hash to the digest: a
+    // corrupted object is removed and re-fetched, never returned.
+    std::fs::write(&path, b"tampered").unwrap();
+    let again = client.blob_path(&blob, Some(payload.len() as u64)).unwrap();
+    assert_eq!(std::fs::read(&again).unwrap(), payload, "corruption re-fetched, not served");
+
+    // Asking for a path does not spend the RAM budget on a file the caller
+    // is about to read from disk.
+    client.clear_ram_cache();
+    let cold = client.blob_path(&blob, None).unwrap();
+    assert_eq!(std::fs::read(cold).unwrap(), payload);
+    assert_eq!(client.ram_cache_bytes().0, 0, "a path fetch stays out of RAM");
+}
+
 #[test]
 fn ram_cache_evicts_under_its_budget_and_refetches_verified_after_forget() {
     // Five blobs, a budget that fits two: the client must stay inside it

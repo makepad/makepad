@@ -78,6 +78,83 @@ pub fn fetch_blob(client: &mut AssetClient, blob: &BlobId, byte_len: u64) -> Res
         .map_err(|e| format!("blob {blob}: {e}"))
 }
 
+/// What the Create surface needs to WORK with a catalog asset: the payload
+/// materialised as a file, plus what it is. The path is the client's
+/// verified cache object — digest-named, re-hashed before it is handed out
+/// — so the tools that take a file (AO bake, rig, drag-out, decoders) can
+/// keep taking one without the app ever owning a copy that could drift.
+#[derive(Clone, Debug)]
+pub struct StoreFile {
+    pub blob: BlobId,
+    pub path: std::path::PathBuf,
+    pub role: FileRole,
+    pub revision: String,
+}
+
+/// Same resolution as [`fetch_viewable`] — detail → newest PUBLISHED
+/// revision → manifest → preferred role — but materialised to a path
+/// instead of read into memory.
+pub fn materialize(
+    client: &mut AssetClient,
+    asset: &AssetId,
+    prefer: &[FileRole],
+) -> Result<StoreFile, String> {
+    let (head, manifest) = head_manifest(client, asset)?;
+    let file = prefer
+        .iter()
+        .find_map(|role| manifest.files.iter().find(|f| f.role == *role))
+        .ok_or_else(|| {
+            format!(
+                "revision has no {:?} file (has {:?})",
+                prefer,
+                manifest.files.iter().map(|f| f.role).collect::<Vec<_>>()
+            )
+        })?;
+    let path = client
+        .blob_path(&file.blob, Some(file.byte_len).filter(|n| *n > 0))
+        .map_err(|e| format!("blob {}: {e}", file.blob))?;
+    Ok(StoreFile { blob: file.blob, path, role: file.role, revision: head })
+}
+
+/// The asset's own thumbnail, materialised the same way. Small, and the
+/// only thing a gallery row needs before anyone clicks it — a rail must not
+/// pull whole payloads to draw a wall of cards.
+pub fn materialize_thumbnail(
+    client: &mut AssetClient,
+    asset: &AssetId,
+) -> Result<StoreFile, String> {
+    let (head, manifest) = head_manifest(client, asset)?;
+    let thumbnail = manifest
+        .thumbnail
+        .ok_or("revision has no thumbnail")?;
+    let path = client
+        .blob_path(&thumbnail.blob, Some(thumbnail.byte_len).filter(|n| *n > 0))
+        .map_err(|e| format!("thumbnail {}: {e}", thumbnail.blob))?;
+    Ok(StoreFile {
+        blob: thumbnail.blob,
+        path,
+        role: FileRole::Texture,
+        revision: head,
+    })
+}
+
+/// Detail → newest published revision → its verified manifest.
+fn head_manifest(
+    client: &mut AssetClient,
+    asset: &AssetId,
+) -> Result<(String, makepad_asset_data::AssetManifest), String> {
+    let detail: AssetDetailDto = client
+        .asset_detail(asset)
+        .map_err(|e| format!("asset detail: {e}"))?;
+    let head = detail
+        .latest_published()
+        .ok_or("asset has no published revision")?;
+    let manifest = client
+        .fetch_asset_manifest(&head.revision)
+        .map_err(|e| format!("revision manifest: {e}"))?;
+    Ok((head.revision.to_string(), manifest))
+}
+
 /// Roles a viewer can draw, best first.
 pub fn default_viewable_roles() -> Vec<FileRole> {
     vec![
