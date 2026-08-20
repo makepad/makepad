@@ -22,6 +22,7 @@ fn small_budgets() -> CacheBudgets {
         max_object_bytes: 4_000,
         max_partial_bytes: 8_000,
         stale_partial_ms: 1_000_000,
+        max_ram_bytes: 64_000,
     }
 }
 

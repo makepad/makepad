@@ -11,7 +11,6 @@
 //!   matches the wanted name (missing fleet on old beacons = `default`)
 
 use std::collections::HashMap;
-use std::net::UdpSocket;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -126,7 +125,11 @@ fn start_listener(shared: Arc<Mutex<Roster>>) {
     std::thread::Builder::new()
         .name("asset-ai-fleet-listen".into())
         .spawn(move || {
-            let socket = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) {
+            // Reuse-group bind: the VJ, the Asset UI and a game all listen
+            // for the same fleet beacons on one machine. An exclusive bind
+            // left every app but the first without a fleet (the asset-ui
+            // logged "listener bind :41830 failed: Address already in use").
+            let socket = match makepad_asset_client::bind_reuse_udp(DISCOVERY_PORT) {
                 Ok(s) => s,
                 Err(_) => return,
             };

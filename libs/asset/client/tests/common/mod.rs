@@ -131,6 +131,8 @@ pub struct FixtureAsset {
     pub revision: AssetRevisionId,
     pub manifest: AssetManifest,
     pub created_ms: u64,
+    /// Search labels, mirroring the server's `search_labels` tag rows.
+    pub tags: Vec<String>,
 }
 
 /// In-memory content store served by [`FixtureServer`]. All identities are
@@ -184,11 +186,22 @@ impl FixtureStore {
             revision,
             manifest,
             created_ms: 1_700_000_000_000 + id_byte as u64,
+            tags: Vec::new(),
         });
         // Keyset pages compare display strings, so keep the canonical order
         // in the same key (base32 byte order differs from ASCII order).
         self.assets.sort_by_key(|a| a.asset_id.to_string());
         AssetRevisionRef { asset_id, revision }
+    }
+
+    /// Attach search tags to an already-published fixture asset.
+    pub fn tag_asset(&mut self, asset: &AssetRevisionRef, tags: &[&str]) {
+        let row = self
+            .assets
+            .iter_mut()
+            .find(|a| a.asset_id == asset.asset_id)
+            .expect("fixture asset to tag");
+        row.tags = tags.iter().map(|t| (*t).to_string()).collect();
     }
 
     /// Publish a game revision whose splash/manifest/lock blobs are real.
@@ -790,9 +803,17 @@ fn catalog_route(store: &FixtureStore, req: &ParsedRequest, stream: &mut TcpStre
     };
     let q = body.get("q").and_then(Value::as_str).unwrap_or("").to_lowercase();
     let ns = body.get("ns").and_then(Value::as_str);
+    let tag = body.get("tag").and_then(Value::as_str);
+    let exclude_tag = body.get("exclude_tag").and_then(Value::as_str);
     let limit = body.get("limit").and_then(Value::as_u64).unwrap_or(25) as usize;
-    // Cursor binds to the query text so a cursor from another query refuses.
-    let fingerprint = format!("f{}", q.len() + ns.map_or(0, str::len) * 100);
+    // Cursor binds to the query shape so a cursor from another query refuses.
+    let fingerprint = format!(
+        "f{}",
+        q.len()
+            + ns.map_or(0, str::len) * 100
+            + tag.map_or(0, str::len) * 10_000
+            + exclude_tag.map_or(0, str::len) * 1_000_000
+    );
     let start = match body.get("cursor").and_then(Value::as_str) {
         None => 0usize,
         Some(c) => {
@@ -812,6 +833,10 @@ fn catalog_route(store: &FixtureStore, req: &ParsedRequest, stream: &mut TcpStre
         .iter()
         .filter(|a| q.is_empty() || a.title.to_lowercase().contains(&q))
         .filter(|a| ns.is_none_or(|n| a.namespace == n))
+        .filter(|a| tag.is_none_or(|t| a.tags.iter().any(|x| x == t)))
+        // Like the server: exclusion runs after the positive tag, so a row
+        // carrying both drops. `total` is the length of this same list.
+        .filter(|a| exclude_tag.is_none_or(|t| !a.tags.iter().any(|x| x == t)))
         .collect();
     let page: Vec<Value> = matches
         .iter()

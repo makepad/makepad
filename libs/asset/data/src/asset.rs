@@ -34,6 +34,10 @@ pub enum AssetKind {
     /// keyed PNG frames with real alpha — not a mesh. The engine draws the
     /// facing quad; do not bake one into a GLB.
     Billboard,
+    /// A playable game: splash source text (`FileRole::Source`, `Text`)
+    /// that the sandbox runs. Everything it references (models, audio)
+    /// is resolved through the catalog — a game never embeds bytes.
+    Game,
 }
 
 canon_enum!(AssetKind {
@@ -50,6 +54,7 @@ canon_enum!(AssetKind {
     World = 10,
     Prefab = 11,
     Billboard = 12,
+    Game = 13,
 });
 
 impl AssetKind {
@@ -90,6 +95,13 @@ pub enum FileRole {
     Source,
     /// 16-bit grayscale PNG metric depth in millimeters (0 = invalid).
     Depth,
+    /// 3D Gaussian splat scene (PLY): the render payload of a splat
+    /// `World`. Drawn by the splat renderer, never meshed.
+    Splat,
+    /// Baked per-asset ambient-occlusion atlas (grayscale PNG) that the
+    /// `AoMesh` role's `ao_uv` lane samples. Published beside the render
+    /// GLB so a game streams the bake with the model instead of re-baking.
+    AoTexture,
 }
 
 canon_enum!(FileRole {
@@ -110,6 +122,8 @@ canon_enum!(FileRole {
     Video = 14,
     Source = 15,
     Depth = 16,
+    Splat = 17,
+    AoTexture = 18,
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,6 +138,10 @@ pub enum MediaType {
     Bin,
     /// Validated UTF-8 text (for retained sources only).
     Text,
+    /// Gaussian-splat point cloud (`ply` header; ascii or binary body).
+    Ply,
+    /// MPEG-1/2/2.5 Layer III audio (the music library's native container).
+    Mp3,
 }
 
 canon_enum!(MediaType {
@@ -135,6 +153,8 @@ canon_enum!(MediaType {
     Mp4 = 5,
     Bin = 6,
     Text = 7,
+    Ply = 8,
+    Mp3 = 9,
 });
 
 impl FileRole {
@@ -149,9 +169,11 @@ impl FileRole {
             Albedo | Normal | Orm | Texture => matches!(media, Png | Jpeg | Bin),
             PreviewFront | PreviewSide => matches!(media, Png | Jpeg),
             Turntable | Video => matches!(media, Mp4),
-            Audio => matches!(media, Wav | Ogg),
+            Audio => matches!(media, Wav | Ogg | Mp3),
             Source => true,
             Depth => matches!(media, Png),
+            Splat => matches!(media, Ply),
+            AoTexture => matches!(media, Png),
         }
     }
 }
@@ -724,12 +746,19 @@ pub enum Redistribution {
     AttributionRequired,
     /// May not be redistributed: never enters a public catalog or lock.
     Forbidden,
+    /// User-owned content that may be served on the owner's own LAN (this
+    /// asset server and the clients it discovers) but must never leave it:
+    /// no internet-facing catalog, no content-set lock shipped elsewhere,
+    /// no peer transfer beyond the LAN. Shareware game data the user holds
+    /// a copy of is the canonical case.
+    LanLocal,
 }
 
 canon_enum!(Redistribution {
     Allowed = 0,
     AttributionRequired = 1,
     Forbidden = 2,
+    LanLocal = 3,
 });
 
 /// Whether derivatives (AO bakes, LODs, transcodes, remixes) may be produced
@@ -741,12 +770,17 @@ pub enum DerivativePolicy {
     AttributionRequired,
     /// No derivative may be produced; derivation requests fail closed.
     Forbidden,
+    /// Derivatives only for local preview/use (thumbnails, AO, LODs,
+    /// transcodes served on the owner's LAN); nothing derived may leave
+    /// the LAN, same boundary as [`Redistribution::LanLocal`].
+    LocalPreview,
 }
 
 canon_enum!(DerivativePolicy {
     Allowed = 0,
     AttributionRequired = 1,
     Forbidden = 2,
+    LocalPreview = 3,
 });
 
 /// The complete rights record of one piece of content: exact license
@@ -1019,6 +1053,14 @@ impl AssetManifest {
         }
         if self.kind == AssetKind::Video && !self.files.iter().any(|f| f.role == FileRole::Video) {
             return Err(AssetDataError::Missing { what: "video role" });
+        }
+        if self.kind == AssetKind::Game
+            && !self
+                .files
+                .iter()
+                .any(|f| f.role == FileRole::Source && f.media == MediaType::Text)
+        {
+            return Err(AssetDataError::Missing { what: "game source role" });
         }
         if matches!(
             self.kind,
