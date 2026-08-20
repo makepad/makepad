@@ -381,6 +381,11 @@ pub struct PackCompileReport {
     pub source_path: PathBuf,
     pub manifest_path: PathBuf,
     pub plan_path: PathBuf,
+    /// Models the pack ships that this importer could not represent, each
+    /// with the reason. A compile SUCCEEDS with these present: one model a
+    /// vendor kit happens to ship in a shape we cannot read must not cost
+    /// the other three hundred. Never silent — the caller reports them.
+    pub skipped_models: Vec<(String, String)>,
 }
 
 /// Compile one local pack into canonical documents + an upload plan.
@@ -2340,6 +2345,10 @@ struct BuiltPack {
     collection: SourceCollection,
     manifest: ImportManifest,
     blobs: Vec<PlanBlob>,
+    /// Models the pack ships that this importer could not represent, each
+    /// with the reason it was left out. Never a silent drop: the compile
+    /// report carries these up so a caller can say what did not arrive.
+    skipped: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -2407,8 +2416,42 @@ fn build_manifest(
     dir_snaps: &[DirSnapshot],
 ) -> Result<BuiltPack, PackImportError> {
     let mut hashed = Vec::with_capacity(files.len());
+    let mut skipped: Vec<(String, String)> = Vec::new();
+    let mut skipped_keys: BTreeSet<String> = BTreeSet::new();
     for file in files {
-        hashed.push(hash_and_measure(root, file)?);
+        let pack_path = file.pack_path.clone();
+        let key = file.key.clone();
+        let is_model = file.kind == MediaKind::Glb;
+        match hash_and_measure(root, file) {
+            Ok(h) => hashed.push(h),
+            // ONE unusable model must not cost the other three hundred.
+            // A pack is a vendor's folder, not a curated set: a model in a
+            // shape this importer declares it does not SUPPORT is named and
+            // left out, and the rest of the kit imports.
+            //
+            // `Unsupported` and nothing else. `Malformed` is not a synonym
+            // for it: a truncated GLB, or one pointing a texture at
+            // `file:///…` (`refuse_external_uri`), means the pack is broken
+            // or trying something — those still refuse the pack whole, as do
+            // Io/Changed/Traversal/Special, which say the tree is moving or
+            // hostile underneath us and the re-verify contract depends on
+            // nothing being quietly dropped.
+            Err(error) if is_model && error.kind == PackImportErrorKind::Unsupported =>
+            {
+                skipped.push((pack_path, error.to_string()));
+                skipped_keys.insert(key);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // A skipped model takes its companions with it. The thumbnail and the
+    // AO/shadow sidecars beside a mesh exist to SERVE that mesh; left on
+    // their own they would publish as a stray image asset — a picture of a
+    // model the catalog does not have.
+    if !skipped_keys.is_empty() {
+        hashed.retain(|h| {
+            h.discovered.kind == MediaKind::Glb || !skipped_keys.contains(&h.discovered.key)
+        });
     }
 
     let mut thumb_for_glb: BTreeMap<String, usize> = BTreeMap::new();
@@ -2707,6 +2750,7 @@ fn build_manifest(
         collection,
         manifest,
         blobs,
+        skipped,
     })
 }
 
@@ -5536,13 +5580,36 @@ fn preflight_glb_uris_from_json(
             }
         }
     }
-    // The one-texture rule is about the MESH. A sky node paints itself from
-    // its own picture and a prelit marker points back at an existing one:
-    // neither makes the level a multi-texture mesh.
+    // The one-atlas rule is about texture FILES this pack must publish as
+    // their own blobs: a mesh asset carries a single `FileRole::Texture`
+    // (`mesh_asset`'s `albedo`), so a GLB pointing at two pack images has
+    // nowhere to put the second.
+    //
+    // An EMBEDDED image is not that. It already lives in the BIN chunk of
+    // the mesh blob, costs the manifest nothing, and both render lanes draw
+    // it: `StaticModel::split_draw_layers` emits one draw layer per
+    // embedded base-color image, and `GltfRenderer::apply_material` binds
+    // per-material textures for one draw per primitive.
+    //
+    // Counting embedded images here refused every multi-material model a
+    // vendor ships — 157 of them across Kenney's two retro kits, whole kits
+    // lost for it — AND every level this repo's own
+    // `write_glb_mesh_textured_parts` writes, which is one image per
+    // surface by construction.
+    //
+    // A sky node paints itself from its own picture and a prelit marker
+    // points back at an existing one: neither makes a level's ONE atlas
+    // into two, which is what `annexed` still discounts for the mixed case.
     let annexed = annexed_images(value);
     let embedded = embedded.saturating_sub(annexed);
-    if image_uris.len() > 1 || (image_uris.len() == 1 && embedded > 0) || embedded > 1 {
-        return Err(glb_err(pack_path, "unsupported multi-texture glb"));
+    if image_uris.len() > 1 || (image_uris.len() == 1 && embedded > 0) {
+        // `Unsupported`, not `Malformed`: the file is fine, this importer
+        // just has one albedo slot to put it in. That kind is what lets a
+        // single such model be skipped instead of costing the whole pack.
+        return Err(PackImportError::new(
+            PackImportErrorKind::Unsupported,
+            format!("{pack_path}: unsupported multi-texture glb"),
+        ));
     }
     Ok(image_uris)
 }
@@ -5955,6 +6022,7 @@ fn write_outputs(
         source_path: out_dir.join(SOURCE_COLLECTION_FILE),
         manifest_path: out_dir.join(IMPORT_MANIFEST_FILE),
         plan_path: out_dir.join(UPLOAD_PLAN_FILE),
+        skipped_models: built.skipped.clone(),
     })
 }
 
@@ -7517,6 +7585,278 @@ mod tests {
             "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{}}}],
             "buffers":[{{"byteLength":{}}}],
             "images":[{{"uri":"{escaped}"}}]}}"#,
+            bin.len(),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// The shape Kenney's retro kits ship: ONE mesh whose primitives each
+    /// carry their own material, each material its own EMBEDDED picture.
+    /// `barrels.glb` is barrel+planks, `cliff-corner.glb` is rock+grass;
+    /// across the two kits there are 157 of these, up to four ways.
+    ///
+    /// Nothing here points outside the file — there is no external texture
+    /// to publish as a separate blob, which is what the one-atlas rule is
+    /// actually about.
+    fn multi_texture_glb(images: usize) -> Vec<u8> {
+        assert!((1..=4).contains(&images));
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let uvs: [f32; 6] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let uv_off = bin.len();
+        for f in uvs {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        // Each material's own picture, embedded in the BIN chunk.
+        let mut views = vec![
+            format!(
+                r#"{{"buffer":0,"byteOffset":0,"byteLength":{}}}"#,
+                uv_off
+            ),
+            format!(
+                r#"{{"buffer":0,"byteOffset":{uv_off},"byteLength":{}}}"#,
+                bin.len() - uv_off
+            ),
+        ];
+        let mut image_defs = Vec::new();
+        for i in 0..images {
+            while bin.len() % 4 != 0 {
+                bin.push(0);
+            }
+            let off = bin.len();
+            let png = valid_png(8 + i as u32, 8);
+            bin.extend_from_slice(&png);
+            views.push(format!(
+                r#"{{"buffer":0,"byteOffset":{off},"byteLength":{}}}"#,
+                png.len()
+            ));
+            image_defs.push(format!(
+                r#"{{"bufferView":{},"mimeType":"image/png","name":"mat{i}"}}"#,
+                views.len() - 1
+            ));
+        }
+        let prims: Vec<String> = (0..images)
+            .map(|i| {
+                format!(
+                    r#"{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"material":{i}}}"#
+                )
+            })
+            .collect();
+        let materials: Vec<String> = (0..images)
+            .map(|i| {
+                format!(
+                    r#"{{"name":"mat{i}","pbrMetallicRoughness":{{"baseColorTexture":{{"index":{i}}}}}}}"#
+                )
+            })
+            .collect();
+        let textures: Vec<String> = (0..images)
+            .map(|i| format!(r#"{{"source":{i}}}"#))
+            .collect();
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{}]}}],
+            "materials":[{}],
+            "textures":[{}],
+            "images":[{}],
+            "accessors":[
+                {{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}},
+                {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}}],
+            "bufferViews":[{}],
+            "buffers":[{{"byteLength":{}}}]}}"#,
+            prims.join(","),
+            materials.join(","),
+            textures.join(","),
+            image_defs.join(","),
+            views.join(","),
+            bin.len()
+        );
+        let mut json_bytes = json.into_bytes();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// The refusal that killed retro-fantasy-kit and retro-urban-kit whole:
+    /// 157 of their 229 models bind more than one texture. Every one is
+    /// SELF-CONTAINED — the pictures are embedded in the BIN chunk, there
+    /// is no second pack file to publish — so nothing about the manifest
+    /// was ever ambiguous, and both render lanes draw one call per image.
+    #[test]
+    fn a_multi_material_embedded_glb_imports_as_one_asset() {
+        for images in [2usize, 4] {
+            let pack = test_root(&format!("multitex{images}"));
+            let out = test_bundle(&format!("multitex{images}_out"));
+            fs::write(pack.join("barrels.glb"), multi_texture_glb(images)).unwrap();
+            fs::write(pack.join("barrels.png"), valid_png(512, 512)).unwrap();
+            let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+                .unwrap_or_else(|e| panic!("{images}-texture glb must import: {e}"));
+            assert_eq!(report.assets, 1, "{images} textures is still one asset");
+            assert!(report.skipped_models.is_empty(), "{:?}", report.skipped_models);
+            let manifest =
+                ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                    .unwrap();
+            let roles: Vec<FileRole> =
+                manifest.assets[0].files.iter().map(|f| f.file.role).collect();
+            // The embedded pictures ride inside the mesh blob: no extra
+            // Texture blob is published, whatever the material count.
+            assert_eq!(roles, [FileRole::RenderGlb], "{roles:?}");
+        }
+    }
+
+    /// The same rule refused every level this repo's OWN world writer
+    /// produces — `write_glb_mesh_textured_parts` is one image per surface
+    /// by construction, and it is what the Duke / Quake 2 / Quake 3 / Doom
+    /// level importers call. A pack importer that cannot read our own
+    /// output is not enforcing a contract, it is a bug.
+    #[test]
+    fn a_level_from_our_own_world_writer_passes_preflight() {
+        let png_a = valid_png(8, 8);
+        let png_b = valid_png(9, 8);
+        let png_c = valid_png(10, 8);
+        let pos = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let idx = [0u32, 1, 2];
+        let uvs = [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        fn part<'a>(
+            png: &'a [u8],
+            pos: &'a [[f32; 3]],
+            idx: &'a [u32],
+            uvs: &'a [[f32; 2]],
+        ) -> makepad_gltf::GlbTexturedPart<'a> {
+            makepad_gltf::GlbTexturedPart {
+                positions: pos,
+                indices: idx,
+                uvs,
+                normals: None,
+                colors: None,
+                base_color_png: png,
+                base_color_factor: None,
+                lightmap_png: None,
+                lightmap_uvs: None,
+                detail_png: None,
+                detail_scale: [1.0, 1.0],
+            }
+        }
+        let glb = makepad_gltf::write_glb_mesh_textured_parts(
+            &[
+                part(&png_a, &pos, &idx, &uvs),
+                part(&png_b, &pos, &idx, &uvs),
+                part(&png_c, &pos, &idx, &uvs),
+            ],
+            true,
+        );
+        let uris = super::preflight_glb(&glb, "worlds/e1l1.glb")
+            .expect("our own multi-surface level must preflight");
+        assert!(uris.is_empty(), "a level embeds its surfaces: {uris:?}");
+    }
+
+    /// One texture FILE is still the limit, because a mesh asset carries
+    /// exactly one `FileRole::Texture` blob and a second has nowhere to go.
+    #[test]
+    fn two_external_texture_files_are_still_refused() {
+        let two = tiny_glb_with_two_uris("a.png", "b.png");
+        let err = super::preflight_glb(&two, "twin.glb").unwrap_err();
+        assert_eq!(err.kind, PackImportErrorKind::Unsupported);
+        assert!(err.to_string().contains("multi-texture"), "{err}");
+    }
+
+    /// A model the importer cannot represent costs that model, not the kit.
+    #[test]
+    fn one_unreadable_model_is_named_and_the_rest_of_the_pack_imports() {
+        let pack = test_root("skipmodel");
+        let out = test_bundle("skipmodel_out");
+        for stem in ["good-a", "good-b"] {
+            fs::write(pack.join(format!("{stem}.glb")), tiny_glb()).unwrap();
+            fs::write(pack.join(format!("{stem}.png")), valid_png(512, 512)).unwrap();
+        }
+        // Two pack images for one mesh: representable in the pack, not in a
+        // mesh asset's single Texture blob — a content refusal, per model.
+        fs::write(pack.join("twin.glb"), tiny_glb_with_two_uris("a.png", "b.png")).unwrap();
+        fs::write(pack.join("twin.png"), valid_png(512, 512)).unwrap();
+
+        let report = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect("one bad model must not refuse the pack");
+        assert_eq!(report.assets, 2, "both good models imported");
+        assert_eq!(report.skipped_models.len(), 1);
+        let (path, why) = &report.skipped_models[0];
+        assert_eq!(path, "twin.glb");
+        assert!(why.contains("multi-texture"), "{why}");
+
+        let manifest =
+            ImportManifest::from_canonical_bytes(&fs::read(&report.manifest_path).unwrap())
+                .unwrap();
+        let keys: Vec<&str> = manifest.assets.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, ["good-a", "good-b"], "the skipped model is not published");
+    }
+
+    /// The per-model escape hatch is for shapes we do not SUPPORT, never
+    /// for a pack that is broken or trying something. A model pointing its
+    /// texture outside the pack refuses the whole pack, even standing
+    /// beside models that are perfectly fine — being skippable would turn
+    /// a security refusal into a line in a summary nobody reads.
+    #[test]
+    fn a_malformed_model_still_refuses_the_whole_pack() {
+        let pack = test_root("hostile");
+        let out = test_bundle("hostile_out");
+        fs::write(pack.join("good.glb"), tiny_glb()).unwrap();
+        fs::write(pack.join("good.png"), valid_png(512, 512)).unwrap();
+        fs::write(
+            pack.join("evil.glb"),
+            tiny_glb_with_uri("file:///etc/passwd"),
+        )
+        .unwrap();
+        fs::write(pack.join("evil.png"), valid_png(512, 512)).unwrap();
+        let err = compile_pack(&pack, &out, licensed_spec(), None, false)
+            .expect_err("an external texture uri must refuse the pack, not skip one model");
+        assert_eq!(err.kind, PackImportErrorKind::Malformed);
+        assert!(err.to_string().contains("external"), "{err}");
+    }
+
+    fn tiny_glb_with_two_uris(a: &str, b: &str) -> Vec<u8> {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut bin: Vec<u8> = Vec::new();
+        for f in positions {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+            "nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{}}}],
+            "buffers":[{{"byteLength":{}}}],
+            "images":[{{"uri":"{a}"}},{{"uri":"{b}"}}]}}"#,
             bin.len(),
             bin.len()
         );
