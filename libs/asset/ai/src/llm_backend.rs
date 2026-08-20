@@ -530,9 +530,12 @@ mod llama_worker {
     use std::path::PathBuf;
     use std::sync::mpsc;
 
-    /// Prompt + expansion both fit comfortably; keeps the KV cache small
-    /// instead of sized for the model's native 262k window.
-    const MAX_CONTEXT: u32 = 8192;
+    /// Big enough for the chat lane's taught context + tool-round history
+    /// (8192 was the wall the sandbox-LLM doom benchmark died on at 9064
+    /// tokens); still far under the model's native 262k window so the KV
+    /// cache stays modest. Long-context decode is safe since the FlashMma
+    /// gate fix (the 16k cliff is gone fleet-wide).
+    const MAX_CONTEXT: u32 = 32768;
     /// Batched prefill: measured 350-600 tok/s vs ~28 tok/s at batch 1 on
     /// the 9B (see libs/converse qwen_filter.rs).
     const PREFILL_BATCH: usize = 64;
@@ -574,6 +577,15 @@ mod llama_worker {
                     let config = LlamaSessionConfig {
                         max_context: Some(MAX_CONTEXT),
                         prefill_batch_size: PREFILL_BATCH,
+                        // MTP speculative decoding (nextn draft head). 5 is
+                        // the measured sweet spot — 8 crosses the MMVQ
+                        // column cliff (see qwen38-mtp campaign). Models
+                        // without an MTP block load exactly as before
+                        // (draft head only loads when the gguf carries one),
+                        // and the .draftvocab sidecar is picked up when it
+                        // sits beside the gguf (full head otherwise — still
+                        // a ~1.7-2x decode win, sidecar makes it 2.25x).
+                        spec_draft_max: 5,
                         ..LlamaSessionConfig::default()
                     };
                     let mut session = match LlamaSession::load_with_progress(
