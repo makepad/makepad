@@ -610,11 +610,19 @@ script_mod! {
         spacing: 6
 
         // ---- deck headers: art, title, tempo, key slot, elapsed ----
+        //
+        // Every panel of this page carries `new_batch: true`, which gives it
+        // its own draw list. The lanes repaint at the display's rate while a
+        // deck plays; without the split, each of those frames re-walked and
+        // re-drew the whole console — the panels below, the track lists, and
+        // (through the status bar) the offscreen 3D passes. A panel now
+        // redraws only when its own contents change.
         View{
             width: Fill
             height: Fit
             flow: Right
             spacing: 10
+            new_batch: true
             View{
                 width: Fill
                 height: Fit
@@ -701,6 +709,7 @@ script_mod! {
             height: 46
             flow: Right
             spacing: 10
+            new_batch: true
             DeckWell{
                 width: Fill
                 deck_a_overview := mod.widgets.VjWaveOverview{height: Fill}
@@ -723,6 +732,7 @@ script_mod! {
                 height: Fill
                 flow: Down
                 spacing: 5
+                new_batch: true
                 View{
                     width: Fill
                     height: Fit
@@ -855,6 +865,7 @@ script_mod! {
                 height: Fill
                 flow: Down
                 spacing: 5
+                new_batch: true
                 View{
                     width: Fill
                     height: Fit
@@ -975,6 +986,7 @@ script_mod! {
             height: Fit
             flow: Right
             spacing: 8
+            new_batch: true
             align: Align{x: 0.0, y: 0.5}
             View{
                 width: 316
@@ -1060,6 +1072,7 @@ script_mod! {
             height: 236
             flow: Right
             spacing: 8
+            new_batch: true
             View{
                 width: Fill
                 height: Fill
@@ -1501,7 +1514,7 @@ impl FrameProbe {
         }
     }
 
-    fn note(&mut self, now: f64) -> Option<String> {
+    fn note(&mut self, cx: &mut Cx, now: f64) -> Option<String> {
         let delta = (now - self.last).max(0.0);
         self.last = now;
         if delta > 0.0 {
@@ -1522,7 +1535,7 @@ impl FrameProbe {
             return None;
         }
         let report = format!(
-            "wave frames {} (ticks {}) in {:.2}s · <8.3ms {} · <16.7ms {} · <33ms {} · slower {} · worst {:.1}ms",
+            "wave frames {} (ticks {}) in {:.2}s · <8.3ms {} · <16.7ms {} · <33ms {} · slower {} · worst {:.1}ms{}",
             self.frames,
             self.ticks,
             now - self.window_start,
@@ -1530,7 +1543,8 @@ impl FrameProbe {
             self.buckets[1],
             self.buckets[2],
             self.buckets[3],
-            self.worst * 1000.0
+            self.worst * 1000.0,
+            self.cpu_report(cx),
         );
         self.window_start = now;
         self.frames = 0;
@@ -1538,6 +1552,45 @@ impl FrameProbe {
         self.worst = 0.0;
         self.buckets = [0; 4];
         Some(report)
+    }
+
+    /// Where a frame's time went, from the platform's own frame ring: the
+    /// widget-tree walk (`cpu`, the whole event dispatch including the draw
+    /// event), the Metal pass encode (`enc`), and the wait for a drawable.
+    /// A wave frame that costs more than its slice of the refresh period
+    /// shows up here as CPU, not as pacing.
+    fn cpu_report(&self, cx: &mut Cx) -> String {
+        use makepad_widgets::makepad_platform::perf_monitor::{
+            PERF_CHANNEL_DRAW, PERF_CHANNEL_DRAWABLE_WAIT, PERF_CHANNEL_EVENT,
+        };
+        if !cx.perf_monitor.enabled() {
+            return String::new();
+        }
+        let mut frames = Vec::new();
+        cx.perf_monitor.read(&mut frames);
+        // The ring holds 240 frames; a second at display cadence is the tail.
+        let tail = frames.len().saturating_sub(self.frames.max(1) as usize);
+        let frames = &frames[tail..];
+        let live: Vec<&makepad_widgets::makepad_platform::perf_monitor::PerfMonitorFrame> =
+            frames.iter().filter(|f| f.gap_ms > 0.0).collect();
+        if live.is_empty() {
+            return String::new();
+        }
+        let mean = |pick: fn(&makepad_widgets::makepad_platform::perf_monitor::PerfMonitorFrame) -> u32| {
+            live.iter().map(|f| pick(f) as f64).sum::<f64>() / live.len() as f64 / 1000.0
+        };
+        let worst = |pick: fn(&makepad_widgets::makepad_platform::perf_monitor::PerfMonitorFrame) -> u32| {
+            live.iter().map(|f| pick(f)).max().unwrap_or(0) as f64 / 1000.0
+        };
+        format!(
+            " · cpu {:.1}/{:.1}ms · enc {:.1}/{:.1}ms · wait {:.1}/{:.1}ms",
+            mean(|f| f.channel_us[PERF_CHANNEL_EVENT.0]),
+            worst(|f| f.channel_us[PERF_CHANNEL_EVENT.0]),
+            mean(|f| f.channel_us[PERF_CHANNEL_DRAW.0]),
+            worst(|f| f.channel_us[PERF_CHANNEL_DRAW.0]),
+            mean(|f| f.channel_us[PERF_CHANNEL_DRAWABLE_WAIT.0]),
+            worst(|f| f.channel_us[PERF_CHANNEL_DRAWABLE_WAIT.0]),
+        )
     }
 }
 
@@ -1619,18 +1672,21 @@ impl VjWaveScroll {
     }
 
     /// One draw happened: bucket the interval and report once a second.
-    fn note_frame(&mut self, now: f64) {
+    fn note_frame(&mut self, cx: &mut Cx, now: f64) {
         if self.frame_probe.is_none() {
             if std::env::var("VJ_DEBUG_FRAMETIME").is_err() {
                 return;
             }
+            // The platform frame ring answers "where did the frame go"; it
+            // only collects while something asks for it.
+            cx.perf_monitor.set_enabled(true);
             self.frame_probe = Some(Box::new(FrameProbe::new(now)));
             return;
         }
         let report = self
             .frame_probe
             .as_mut()
-            .and_then(|probe| probe.note(now));
+            .and_then(|probe| probe.note(cx, now));
         if let Some(report) = report {
             log!("{}", report);
         }
@@ -1762,7 +1818,7 @@ impl Widget for VjWaveScroll {
         if self.lanes.iter().any(|lane| lane.playing) {
             self.next_frame = cx.new_next_frame();
         }
-        self.note_frame(now);
+        self.note_frame(cx.cx, now);
         // Two lanes with a ruler gutter between them.
         let gutter = 14.0f64;
         let lane_h = ((rect.size.y - gutter) * 0.5).max(8.0);

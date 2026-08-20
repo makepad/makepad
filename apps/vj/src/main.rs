@@ -3340,6 +3340,10 @@ pub struct App {
     // demand instead of leaving its WindowHandle permanently closed.
     #[rust(OutputWindowLifecycle::default())]
     output_window_lifecycle: OutputWindowLifecycle,
+    /// One-shot: close the output window on the first pump tick unless
+    /// `VJ_OUTPUT=1` (default-closed is cleaner while testing).
+    #[rust(true)]
+    output_close_on_start: bool,
     /// Which console page and which output page are up. A walked level
     /// raycasts its collision mesh sixty times a second and re-renders a
     /// full pass; `sync_mesh_liveness` uses these to stop that for a picture
@@ -5418,7 +5422,8 @@ impl App {
                             .as_deref()
                         {
                             Some("wav") => MediaType::Wav,
-                            Some("ogg") => MediaType::Ogg,
+                            Some("ogg") | Some("oga") => MediaType::Ogg,
+                            Some("mp3") => MediaType::Mp3,
                             _ => MediaType::Mp4,
                         };
                         self.decode.submit(DecodeJob::Deck { deck, gen, path, media });
@@ -5598,6 +5603,20 @@ impl App {
     // ---- polling ------------------------------------------------------------
 
     fn pump(&mut self, cx: &mut Cx) {
+        // The output window starts CLOSED (cleaner for testing; the OUTPUT
+        // button reopens it). Done here, not in Startup, because the native
+        // window may not exist yet at Startup; `VJ_OUTPUT=1` keeps the old
+        // open-at-launch behaviour. One-shot.
+        if self.output_close_on_start {
+            let wanted_open = std::env::var("VJ_OUTPUT").is_ok_and(|v| v == "1");
+            let output = self.ui.window(cx, ids!(output_window));
+            if wanted_open {
+                self.output_close_on_start = false;
+            } else if output.window_id().is_some() {
+                self.close_output_window(cx);
+                self.output_close_on_start = false;
+            }
+        }
         self.retry_lighting_if_due();
         // Refresh the worker watchdog and, only while the physical button is
         // held, its shorter hazardous-output heartbeat.

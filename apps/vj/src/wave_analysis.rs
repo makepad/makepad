@@ -967,11 +967,12 @@ impl AnalysisPool {
 // ---------------------------------------------------------------------------
 
 /// Audio extensions the local explorer lane will offer.
-pub const LOCAL_AUDIO_EXTENSIONS: [&str; 7] =
-    ["wav", "mp3", "m4a", "aac", "flac", "aiff", "mp4"];
+pub const LOCAL_AUDIO_EXTENSIONS: [&str; 9] =
+    ["wav", "mp3", "ogg", "oga", "m4a", "aac", "flac", "aiff", "mp4"];
 
-/// Decode a local audio file. WAV parses directly; everything else goes
-/// through the platform media decoder that already backs the video lane.
+/// Decode a local audio file. WAV, MP3 and Ogg Vorbis parse in-process
+/// (`makepad-audio-decode`); everything else goes through the platform media
+/// decoder that already backs the video lane.
 pub fn decode_audio_file(path: &Path) -> Result<TrackPcm, String> {
     let extension = path
         .extension()
@@ -980,7 +981,8 @@ pub fn decode_audio_file(path: &Path) -> Result<TrackPcm, String> {
         .unwrap_or_default();
     let media = match extension.as_str() {
         "wav" => MediaType::Wav,
-        "ogg" => MediaType::Ogg,
+        "ogg" | "oga" => MediaType::Ogg,
+        "mp3" => MediaType::Mp3,
         _ => MediaType::Mp4,
     };
     crate::media::decode_audio_clip(&path.to_path_buf(), media, MAX_LOCAL_TRACK_FRAMES)
@@ -1014,6 +1016,43 @@ pub fn list_local_audio(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end deck load over a real file on this machine, which is the
+    /// only way to exercise the compressed formats without committing audio:
+    ///
+    /// ```text
+    /// VJ_AUDIO_SAMPLE=/path/to/track.mp3 cargo test -p makepad-vj --release \
+    ///     -- --nocapture local_audio_file
+    /// ```
+    ///
+    /// It decodes through the same path the LOCAL FILES browser uses and then
+    /// runs the analysis a deck would run, so a regression in either the
+    /// decoder wiring or the PCM shape it hands over shows up here.
+    #[test]
+    fn local_audio_file_decodes_and_analyses() {
+        let Ok(sample) = std::env::var("VJ_AUDIO_SAMPLE") else {
+            eprintln!("VJ_AUDIO_SAMPLE not set; skipping the real-file deck load");
+            return;
+        };
+        for path in sample.split(':').filter(|p| !p.is_empty()) {
+            let pcm = decode_audio_file(Path::new(path)).expect("deck decode");
+            assert!(pcm.sample_rate >= 8_000, "{path}: rate {}", pcm.sample_rate);
+            assert!(!pcm.frames.is_empty(), "{path}: no frames");
+            let peak = pcm.frames.iter().fold(0i32, |m, f| m.max(f[0].abs() as i32));
+            assert!(peak > 1_000, "{path}: peak {peak} is not audio");
+            let analysis = analyze(&pcm);
+            let seconds = pcm.frames.len() as f64 / pcm.sample_rate as f64;
+            eprintln!(
+                "{path}: {seconds:.1}s {} Hz, {:.1} BPM, {} overview columns",
+                pcm.sample_rate,
+                analysis.grid.bpm,
+                analysis.tiles.overview.len(),
+            );
+            assert!(analysis.grid.bpm > 40.0 && analysis.grid.bpm < 220.0, "{path}: bpm");
+            assert!(!analysis.tiles.overview.is_empty(), "{path}: no waveform");
+            assert!(!analysis.tiles.zoom.is_empty(), "{path}: no zoom waveform");
+        }
+    }
 
     /// Exactly when a click fixture puts its hits down, in source seconds.
     /// The grid the analysis publishes has to land on THESE, which is a
