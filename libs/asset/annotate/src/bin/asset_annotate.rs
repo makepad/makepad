@@ -45,6 +45,10 @@ struct Config {
     executor: Vec<String>,
     all: bool,
     dry_run: bool,
+    /// Curation: rewrite ONLY the catalog kind of the selected assets (no
+    /// VLM, everything else carried). `quake3 rig fragments published as
+    /// kind=character` is the shape this exists for.
+    set_kind: Option<String>,
     verify: bool,
     wipe: bool,
 }
@@ -90,6 +94,7 @@ fn parse_config() -> Config {
         executor: Vec::new(),
         all: false,
         dry_run: false,
+        set_kind: None,
         verify: false,
         wipe: false,
     };
@@ -117,6 +122,7 @@ fn parse_config() -> Config {
             "--model-tag" => c.model_tag = next(&mut i),
             "--all" => c.all = true,
             "--dry-run" => c.dry_run = true,
+            "--set-kind" => c.set_kind = Some(next(&mut i)),
             "--verify-nondestructive" => c.verify = true,
             "--wipe" => c.wipe = true,
             "--executor" => {
@@ -320,6 +326,9 @@ fn run() -> Result<(), String> {
     }
 
     let candidates = load_candidates(&mut db, &cfg)?;
+    if let Some(kind) = &cfg.set_kind {
+        return set_kind(&api, &candidates, kind, cfg.dry_run);
+    }
     if cfg.wipe {
         return wipe(&api, &candidates, cfg.dry_run);
     }
@@ -569,6 +578,55 @@ fn unescape(s: &str) -> String {
 /// Clear the pass's own footprint: drop every `vlm-` tag and blank the
 /// description it wrote. Used by `--verify-nondestructive` and available on
 /// its own when an experimental prompt run should leave nothing behind.
+/// Curation: rewrite ONLY the catalog kind of every selected asset —
+/// everything else on the record is carried through untouched. Built for
+/// the quake3 rig fragments (head/upper/lower + `_N` splits published as
+/// kind=character; a 'zombie' ask wore a severed head): with
+/// `--alias …/sarge-head --set-kind mesh` they become plain meshes,
+/// invisible to character queries, statues for game.model.
+fn set_kind(
+    api: &Api,
+    candidates: &[Candidate],
+    kind: &str,
+    dry_run: bool,
+) -> Result<(), String> {
+    if kind_parse(kind).is_none() {
+        return Err(format!("--set-kind: unknown kind '{kind}'"));
+    }
+    let mut n = 0;
+    for c in candidates {
+        if c.base.kind.as_deref() == Some(kind) {
+            continue;
+        }
+        let up = makepad_asset_annotate::Upload {
+            title: c.base.title.clone(),
+            description: c.base.description.clone(),
+            kind: Some(kind.to_string()),
+            categories: c.base.categories.clone(),
+            tags: c.base.tags.clone(),
+            creator: c.base.creator.clone(),
+            generator: c.base.generator.clone(),
+            backend: c.base.backend.clone(),
+            model: c.base.model.clone(),
+            prompt: c.base.prompt.clone(),
+            provenance: c.base.provenance.clone(),
+            private: c.base.private,
+        };
+        println!(
+            "  {} {} -> {kind}{}",
+            c.alias,
+            c.base.kind.as_deref().unwrap_or("-"),
+            if dry_run { " (dry run)" } else { "" }
+        );
+        if !dry_run {
+            put(api, &c.asset_hex, &up)?;
+        }
+        n += 1;
+    }
+    println!("set-kind: {n} rewritten{}", if dry_run { " (dry run)" } else { "" });
+    Ok(())
+}
+
 fn wipe(api: &Api, candidates: &[Candidate], dry_run: bool) -> Result<(), String> {
     let mut n = 0;
     for c in candidates {
