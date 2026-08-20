@@ -2870,6 +2870,145 @@ mod judge_tests {
         );
     }
 
+    /// The LIVE detector, judged the same way as the offline one.
+    ///
+    /// The offline path had to be taught that a tracker cannot be decoded
+    /// over a raw windowed flux: a smeared peak costs less onset strength to
+    /// move across than the tempo penalty costs to bend, so the tracker
+    /// settles on whatever period its estimate rounded to and walks off the
+    /// music — 70 ms in thirty seconds, measured. The obvious next move is to
+    /// carry that lesson into `beat_sync`.
+    ///
+    /// It is already there, and this test is what establishes that rather
+    /// than a reading of the code. The live path autocorrelates its envelope
+    /// only to pick a coarse lag; the period is then refitted against
+    /// PAIRWISE INTERVALS BETWEEN DETECTED ONSETS, and the phase is chosen by
+    /// scoring candidate origins — each one an actual onset sample — with a
+    /// Gaussian kernel over the other onsets. Both stages already work on
+    /// discrete events, which is precisely what spiking the activation
+    /// achieves offline. So there is nothing to port, and this stands guard
+    /// over that: if the live path is ever rebuilt on a continuous envelope,
+    /// the drift comes back and this test fails.
+    ///
+    /// Four-to-the-floor with nothing between the kicks, deliberately — put a
+    /// hat on the offbeat and this same detector publishes 124.80 BPM for a
+    /// 128 BPM click. That is a real defect and it is characterised next
+    /// door, in `the_live_detector_is_dragged_by_an_offbeat_hat`.
+    #[test]
+    fn the_live_detector_does_not_walk_off_a_click_track() {
+        let rate = 44_100u32;
+        let bpm = 128.0f64;
+        let seconds = 40.0;
+        let period = 60.0 / bpm;
+        let (mut hits, mut beats) = (Vec::new(), Vec::new());
+        let mut at = 0.3;
+        while at < seconds {
+            beats.push(at);
+            hits.push((at, 1.0, KICK.0, KICK.1));
+            at += period;
+        }
+        let pcm = render(rate, seconds, &hits);
+        let mut analyzer = crate::beat_sync::BeatSyncAnalyzer::new(rate as f64);
+        let mut scratch: Vec<f32> = Vec::with_capacity(512);
+        // Callback-sized chunks, exactly as the audio thread feeds it.
+        for chunk in pcm.frames.chunks(512) {
+            scratch.clear();
+            scratch.extend(
+                chunk.iter().map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0),
+            );
+            analyzer.push_mono(&scratch);
+        }
+        let snapshot = analyzer.snapshot();
+        assert!(snapshot.has_grid(), "the live detector found no grid at all");
+        assert!(
+            (snapshot.bpm - bpm).abs() < 1.0,
+            "the live detector says {:.2} BPM for a {bpm} click",
+            snapshot.bpm
+        );
+        // Where the published grid puts the beat at the END of the run, which
+        // is where any walk has had the longest to accumulate.
+        let phase = snapshot.phase_sample / rate as f64;
+        let nearest = beats
+            .iter()
+            .map(|beat| {
+                let offset = (phase - beat) / period;
+                ((offset - offset.round()) * period).abs()
+            })
+            .fold(f64::INFINITY, f64::min);
+        eprintln!(
+            "live: {:.3} BPM, published beat sits {:.1} ms off the clicks after \
+             {seconds:.0}s, state {:?}",
+            snapshot.bpm,
+            nearest * 1000.0,
+            snapshot.state,
+        );
+        assert!(
+            nearest < 0.025,
+            "the live grid has walked {:.0} ms off the clicks",
+            nearest * 1000.0
+        );
+    }
+
+    /// A live-path defect, characterised but NOT fixed here.
+    ///
+    /// The same click track with a hat on every offbeat makes the live
+    /// detector publish 124.80 BPM instead of 128 — a 2.5 % tempo error from
+    /// nothing but an offbeat. The mechanism is `refine_period`, which votes
+    /// on pairwise intervals between detected onsets and accepts one when
+    /// `|estimate/period - 1| <= 0.105`. That is a tolerance of a tenth of a
+    /// beat times the MULTIPLE, so the window widens as the interval
+    /// lengthens: by nine beats it is nearly a whole beat wide, and an
+    /// interval that is really eight and a half beats — a kick to an offbeat
+    /// hat — passes as if it were nine and drags the period with it.
+    ///
+    /// Holding the deviation to a constant tenth of a beat fixes the tempo
+    /// exactly (127.999). It is not landed because it also breaks
+    /// `reacquires_abrupt_compressed_music_tempo_changes_quickly`: after a
+    /// tempo change the seed period is the OLD one, so large multiples
+    /// legitimately deviate a long way, and that is what reacquisition
+    /// rides on. Capping the relative window at a quarter beat — below the
+    /// half beat that is the only thing a half-beat offset could be
+    /// mistaken for — does not save it either. The repair has to be made
+    /// with the reacquisition and flywheel tests in view, which is the
+    /// beat-clock lane's, not this one's.
+    #[test]
+    #[ignore = "characterises an unfixed live-path defect; see the doc comment"]
+    fn the_live_detector_is_dragged_by_an_offbeat_hat() {
+        let rate = 44_100u32;
+        let bpm = 128.0f64;
+        let seconds = 40.0;
+        let period = 60.0 / bpm;
+        let mut hits = Vec::new();
+        let mut at = 0.3;
+        while at < seconds {
+            hits.push((at, 1.0, KICK.0, KICK.1));
+            hits.push((at + period * 0.5, 0.35, HAT.0, HAT.1));
+            at += period;
+        }
+        let pcm = render(rate, seconds, &hits);
+        let mut analyzer = crate::beat_sync::BeatSyncAnalyzer::new(rate as f64);
+        let mut scratch: Vec<f32> = Vec::with_capacity(512);
+        for chunk in pcm.frames.chunks(512) {
+            scratch.clear();
+            scratch.extend(
+                chunk.iter().map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0),
+            );
+            analyzer.push_mono(&scratch);
+        }
+        let snapshot = analyzer.snapshot();
+        eprintln!(
+            "live with an offbeat hat: {:.3} BPM for a {bpm} click (kick alone gives \
+             127.999)",
+            snapshot.bpm
+        );
+        assert!(
+            (snapshot.bpm - bpm).abs() < 1.0,
+            "KNOWN DEFECT: the live detector says {:.2} BPM for a {bpm} click with a \
+             hat on the offbeat",
+            snapshot.bpm
+        );
+    }
+
     /// The reference tracker has to be free enough to follow a tempo that
     /// moves, or it is just another fixed grid and cannot be used to ask
     /// whether a fixed grid is enough. A DJ ramping one record into another
