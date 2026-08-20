@@ -6,3 +6,7 @@ description = "Backend-neutral model-weight disk layer: safetensors/GGUF/torch/n
 
 [dependencies]
 makepad-micro-serde = { path = "../../micro_serde" }
+
+[[bin]]
+name = "storage-bench"
+path = "src/bin/storage_bench.rs"

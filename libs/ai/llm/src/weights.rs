@@ -5,6 +5,8 @@ use crate::{
     ggml_pad, BufferUsage, Context, InitParams, MappedRegion, TensorId, GGML_MEM_ALIGN,
 };
 
+use makepad_ai_loader::{read_placed, Placement};
+
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufFile, GgufTensorInfo};
 
@@ -81,16 +83,48 @@ impl GgufWeightLayout {
         extra_bytes: usize,
     ) -> Result<LoadedGgufWeights> {
         let mut loaded = self.allocate_context_with_extra(extra_bytes)?;
+
+        // One bulk read for the whole arena instead of a seek+read per
+        // tensor: a per-tensor request stream keeps only one I/O in flight
+        // and leaves most of an NVMe's bandwidth unused (measured 2.0 GB/s
+        // vs 5.3 GB/s for the same 16 GB gguf).
+        let mut placed = Vec::with_capacity(self.tensors.len());
         for tensor in &self.tensors {
             let tensor_id = loaded.tensor_id(&tensor.name).ok_or_else(|| {
                 LlamaError::format(format!("missing loaded tensor '{}'", tensor.name))
             })?;
-            let dst = loaded
+            let entry = loaded
                 .ctx
-                .tensor_data_mut(tensor_id)
-                .map_err(LlamaError::format)?;
-            gguf.read_tensor_into(&tensor.name, dst)?;
+                .tensor(tensor_id)
+                .ok_or_else(|| LlamaError::format("loaded tensor id is invalid"))?;
+            let dst_offset = entry.data_offset.ok_or_else(|| {
+                LlamaError::format(format!("tensor '{}' has no arena offset", tensor.name))
+            })?;
+            let nbytes = entry.nbytes();
+            let size_bytes = usize::try_from(tensor.size_bytes).map_err(|_| {
+                LlamaError::format(format!(
+                    "tensor '{}' size {} does not fit in usize",
+                    tensor.name, tensor.size_bytes
+                ))
+            })?;
+            if nbytes != size_bytes {
+                return Err(LlamaError::format(format!(
+                    "tensor '{}' size {} does not match gguf size {}",
+                    tensor.name, nbytes, size_bytes
+                )));
+            }
+            placed.push(Placement {
+                file_offset: tensor.absolute_offset(gguf.data_offset)?,
+                dst_offset: dst_offset as u64,
+                len: tensor.size_bytes,
+            });
         }
+
+        // Single-arena contexts place tensors at plain `mem_buffer` indices;
+        // the mapped two-region context never reaches this path.
+        debug_assert_eq!(loaded.ctx.ro_split(), 0);
+        read_placed(&gguf.path, loaded.ctx.mem_buffer_mut(), &placed)
+            .map_err(LlamaError::format)?;
         Ok(loaded)
     }
 

@@ -7,6 +7,7 @@
 //! Populated by the restructure lanes: formats/ (safetensors, gguf, torch,
 //! npy), mmap.rs, weight_set.rs.
 
+pub mod bulk_read;
 pub mod formats;
 pub mod mmap;
 pub mod quant;
@@ -20,4 +21,5 @@ pub use formats::safetensors::{MlxDType, MlxRtError, MlxSafetensorsHeader, MlxTe
 /// until lane T3 renames call sites; both paths name the same type.
 pub use formats::safetensors::MlxRtError as LoaderError;
 
+pub use bulk_read::{read_placed, Placement};
 pub use mmap::MappedRegion;
