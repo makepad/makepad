@@ -264,6 +264,11 @@ pub struct GpuBakeJob {
     /// Parallel to `scene.meshes`: the placed-model index each region maps
     /// back to (for the renderer's lm_remaps).
     pub mesh_map: Vec<usize>,
+    /// Static instances WITHOUT a lightmap layout of their own (no AO
+    /// bake): they own no region — they light analytically — but they still
+    /// stand in the sun, so they join every sun-depth pass as casters. A
+    /// fence without a bake used to throw no shadow at all.
+    pub casters_only: Vec<GpuBakeMesh>,
     /// World xz rect of the ground region (x0, z0, span, span).
     pub terrain_world: Option<Vec4f>,
 }
@@ -845,6 +850,19 @@ impl GpuLightmapBaker {
                 transform: m.transform,
                 min: lo,
                 max: hi,
+            });
+        }
+        // Caster-only statics come AFTER the regioned meshes, so the
+        // `RegionKind::Mesh(i)` indices above stay valid; every depth loop
+        // walks `state.meshes` whole and so shadows from them.
+        for m in &job.casters_only {
+            scene_min = min3(scene_min, m.min);
+            scene_max = max3(scene_max, m.max);
+            meshes.push(GpuBakeMesh {
+                geometry: m.geometry,
+                transform: m.transform,
+                min: m.min,
+                max: m.max,
             });
         }
         for (bmin, bmax) in &job.scene.boxes {

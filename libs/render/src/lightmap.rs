@@ -293,7 +293,7 @@ fn pack_regions(want: &[(usize, usize)]) -> (usize, Vec<LmRect>) {
 }
 
 /// World AABB of a model box under a transform (8 transformed corners).
-fn world_bounds(t: &Mat4f, (min, max): (Vec3f, Vec3f)) -> (Vec3f, Vec3f) {
+pub fn world_bounds(t: &Mat4f, (min, max): (Vec3f, Vec3f)) -> (Vec3f, Vec3f) {
     let mut lo = Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX };
     let mut hi = Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN };
     for i in 0..8 {

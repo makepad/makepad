@@ -68,6 +68,10 @@ pub struct FoldHeader {
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
     rect_size: f64,
+    /// Set by the header step when the body is drawn unconstrained (fully
+    /// open or first draw) — the only draw whose used height is the truth.
+    #[rust]
+    measure_body: bool,
     #[rust]
     area: Area,
     #[find]
@@ -128,13 +132,14 @@ impl Widget for FoldHeader {
             let walk = self.header.walk(cx);
             self.header.draw_walk(cx, scope, walk)?;
 
-            // On first render (rect_size == 0), use the original body_walk to measure content
-            // After that, use fixed height based on opened * rect_size
-            let (body_walk, scroll_y) = if self.rect_size == 0.0 {
-                // First render - use original walk, no scroll constraint
+            // Fully open (or never measured): draw the body with its own walk,
+            // so a Fill body keeps tracking the window and we can measure its
+            // unconstrained height. While folding/unfolding, clamp the body to
+            // `opened * rect_size` and scroll the hidden part away.
+            let unconstrained = self.rect_size == 0.0 || self.opened >= 1.0;
+            let (body_walk, scroll_y) = if unconstrained {
                 (self.body_walk, 0.0)
             } else {
-                // Subsequent renders - apply animation
                 let body_walk = Walk {
                     height: Size::Fixed(self.rect_size * self.opened),
                     ..self.body_walk
@@ -148,14 +153,22 @@ impl Widget for FoldHeader {
                 Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)),
             );
             self.draw_state.set(DrawState::DrawBody);
+            self.measure_body = unconstrained;
         }
         if let Some(DrawState::DrawBody) = self.draw_state.get() {
             let walk = self.body.walk(cx);
             self.body.draw_walk(cx, scope, walk)?;
-            // Update rect_size to the actual content height for next frame
-            let used_y = cx.turtle().used().y;
-            if used_y > 0.0 {
-                self.rect_size = used_y;
+            // Remember the content height ONLY from an unconstrained draw. A
+            // folded or animating body is drawn into a shorter turtle, and
+            // measuring it there would shrink the remembered size: a Fill body
+            // collapses to its Fit children while closed, and re-opening then
+            // gave the body that collapsed height (the chat text box never
+            // came back).
+            if self.measure_body {
+                let used_y = cx.turtle().used().y;
+                if used_y > 0.0 {
+                    self.rect_size = used_y;
+                }
             }
             cx.end_turtle();
             cx.end_turtle_with_area(&mut self.area);
