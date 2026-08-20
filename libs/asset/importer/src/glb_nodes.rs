@@ -57,6 +57,37 @@ pub struct ExtraNode {
     /// atlas). More than one image is a layered sky: the node's `extras`
     /// gain a `layers` array of glTF TEXTURE indices in layer order.
     pub images: Vec<Vec<u8>>,
+    /// Further primitives of the SAME node, each painted by a material the
+    /// file already has.
+    ///
+    /// A single-atlas exporter (Doom, Quake) never fills this: all its
+    /// geometry shares material 0, so one primitive says everything. A Build
+    /// exporter keeps ONE MATERIAL PER TILE rather than an atlas — BUILD
+    /// walls tile their texture along the wall and an atlas cannot wrap — so
+    /// a door leaf that crosses two tiles cannot be one primitive without
+    /// repainting half of it. Those go here, and the node stays one node
+    /// with one name, one `extras` and one clip.
+    pub parts: Vec<ExtraPart>,
+}
+
+/// One further primitive of an [`ExtraNode`], with the material that paints
+/// it. Positions are in the same space as the node's own geometry.
+#[derive(Clone, Debug, Default)]
+pub struct ExtraPart {
+    pub positions: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+    pub colors: Vec<[f32; 3]>,
+    /// Index into the GLB's EXISTING `materials` array. Out-of-range is
+    /// treated as "the level's own material", never written as a dangling
+    /// index.
+    pub material: usize,
+}
+
+impl ExtraPart {
+    pub fn is_empty(&self) -> bool {
+        self.indices.len() < 3 || self.positions.is_empty()
+    }
 }
 
 impl ExtraNode {
@@ -99,6 +130,7 @@ impl ExtraNode {
             .collect(),
             animation: Some((DOOR_SECONDS, [0.0, travel, 0.0])),
             images: Vec::new(),
+            parts: Vec::new(),
         }
     }
 
@@ -141,6 +173,7 @@ impl ExtraNode {
             ],
             animation: Some((DOOR_SECONDS, travel)),
             images: Vec::new(),
+            parts: Vec::new(),
         }
     }
 
@@ -181,6 +214,7 @@ impl ExtraNode {
             ],
             animation: Some((DOOR_SECONDS, [0.0, travel, 0.0])),
             images: Vec::new(),
+            parts: Vec::new(),
         }
     }
 
@@ -229,6 +263,7 @@ impl ExtraNode {
             extras,
             animation: None,
             images,
+            parts: Vec::new(),
         }
     }
 
@@ -260,6 +295,7 @@ impl ExtraNode {
             ],
             animation: None,
             images: Vec::new(),
+            parts: Vec::new(),
         }
     }
 }
@@ -289,73 +325,113 @@ pub fn inject_nodes(glb: &[u8], doors: &[ExtraNode]) -> Result<Vec<u8>, String> 
     // materials (untextured test fixture) gets the glTF default instead of
     // an out-of-bounds index.
     let level_material = (!materials.is_empty()).then_some(0i64);
+    // Materials that were in the file before this pass. An `ExtraPart` may
+    // only name one of these: the ones added below belong to the nodes that
+    // brought their own image.
+    let level_material_count = materials.len();
 
     for door in doors {
-        if door.indices.len() < 3 || door.positions.is_empty() {
-            continue;
+        // A node with its own image (the sky) gets its own material; the
+        // rest paint with the level's atlas. Built before the geometry
+        // because every primitive of this node needs to know it.
+        let mut layer_textures: Vec<i64> = Vec::new();
+        for png in &door.images {
+            while bin.len() % 4 != 0 {
+                bin.push(0);
+            }
+            let offset = bin.len();
+            bin.extend_from_slice(png);
+            let view_index = views.len();
+            views.push(json::obj(vec![
+                ("buffer", Value::Int(0)),
+                ("byteOffset", Value::Int(offset as i64)),
+                ("byteLength", Value::Int(png.len() as i64)),
+            ]));
+            let image_index = images.len();
+            images.push(json::obj(vec![
+                ("bufferView", Value::Int(view_index as i64)),
+                ("mimeType", json::s("image/png")),
+            ]));
+            if samplers.is_empty() {
+                samplers.push(json::obj(vec![("wrapS", Value::Int(10497))]));
+            }
+            layer_textures.push(textures.len() as i64);
+            textures.push(json::obj(vec![
+                ("source", Value::Int(image_index as i64)),
+                ("sampler", Value::Int(0)),
+            ]));
         }
-        if door.uvs.len() != door.positions.len() {
-            return Err(format!("{}: uvs must match positions", door.name));
-        }
-        let normals = compute_vertex_normals(&door.positions, &door.indices);
-        let idx = push_accessor(
-            &mut bin,
-            &mut views,
-            &mut accessors,
-            &u32_bytes(&door.indices),
-            5125,
-            door.indices.len(),
-            "SCALAR",
-            Some(34963),
-            None,
-        );
-        let pos = push_accessor(
-            &mut bin,
-            &mut views,
-            &mut accessors,
-            &f32_bytes(&flatten3(&door.positions)),
-            5126,
-            door.positions.len(),
-            "VEC3",
-            Some(34962),
-            Some(bounds3(&door.positions)),
-        );
-        let nrm = push_accessor(
-            &mut bin,
-            &mut views,
-            &mut accessors,
-            &f32_bytes(&flatten3(&normals)),
-            5126,
-            normals.len(),
-            "VEC3",
-            Some(34962),
-            None,
-        );
-        let uv = push_accessor(
-            &mut bin,
-            &mut views,
-            &mut accessors,
-            &f32_bytes(&flatten2(&door.uvs)),
-            5126,
-            door.uvs.len(),
-            "VEC2",
-            Some(34962),
-            None,
-        );
-        // Baked light travels with the geometry, like the level mesh's.
-        let color = (door.colors.len() == door.positions.len()).then(|| {
-            push_accessor(
+        let own_material = match layer_textures.first() {
+            Some(&texture_index) => {
+                let material_index = materials.len();
+                materials.push(json::obj(vec![
+                    (
+                        "pbrMetallicRoughness",
+                        json::obj(vec![
+                            (
+                                "baseColorTexture",
+                                json::obj(vec![("index", Value::Int(texture_index))]),
+                            ),
+                            ("metallicFactor", Value::F64(0.0)),
+                            ("roughnessFactor", Value::F64(1.0)),
+                        ]),
+                    ),
+                    ("doubleSided", Value::Bool(true)),
+                ]));
+                Some(material_index as i64)
+            }
+            None => level_material,
+        };
+
+        // One primitive per material: the node's own geometry first, then
+        // any `parts`. A node whose image is its own paints every primitive
+        // with it — a layered sky is one surface, not several materials.
+        let mut primitives: Vec<Value> = Vec::new();
+        if door.indices.len() >= 3 && !door.positions.is_empty() {
+            if door.uvs.len() != door.positions.len() {
+                return Err(format!("{}: uvs must match positions", door.name));
+            }
+            primitives.push(push_primitive(
                 &mut bin,
                 &mut views,
                 &mut accessors,
-                &f32_bytes(&flatten3(&door.colors)),
-                5126,
-                door.colors.len(),
-                "VEC3",
-                Some(34962),
-                None,
-            )
-        });
+                &door.positions,
+                &door.uvs,
+                &door.indices,
+                &door.colors,
+                own_material,
+            ));
+        }
+        for part in &door.parts {
+            if part.is_empty() {
+                continue;
+            }
+            if part.uvs.len() != part.positions.len() {
+                return Err(format!("{}: uvs must match positions", door.name));
+            }
+            let material = if layer_textures.is_empty() {
+                if part.material < level_material_count {
+                    Some(part.material as i64)
+                } else {
+                    level_material
+                }
+            } else {
+                own_material
+            };
+            primitives.push(push_primitive(
+                &mut bin,
+                &mut views,
+                &mut accessors,
+                &part.positions,
+                &part.uvs,
+                &part.indices,
+                &part.colors,
+                material,
+            ));
+        }
+        if primitives.is_empty() {
+            continue;
+        }
         // Animation samplers read from the buffer without a target.
         let clip = door.animation.map(|(seconds, far)| {
             let times = [0.0f32, seconds];
@@ -385,84 +461,10 @@ pub fn inject_nodes(glb: &[u8], doors: &[ExtraNode]) -> Result<Vec<u8>, String> 
             (input, output)
         });
 
-        // A node with its own image (the sky) gets its own material; the
-        // rest paint with the level's atlas.
-        let mut layer_textures: Vec<i64> = Vec::new();
-        for png in &door.images {
-            while bin.len() % 4 != 0 {
-                bin.push(0);
-            }
-            let offset = bin.len();
-            bin.extend_from_slice(png);
-            let view_index = views.len();
-            views.push(json::obj(vec![
-                ("buffer", Value::Int(0)),
-                ("byteOffset", Value::Int(offset as i64)),
-                ("byteLength", Value::Int(png.len() as i64)),
-            ]));
-            let image_index = images.len();
-            images.push(json::obj(vec![
-                ("bufferView", Value::Int(view_index as i64)),
-                ("mimeType", json::s("image/png")),
-            ]));
-            if samplers.is_empty() {
-                samplers.push(json::obj(vec![("wrapS", Value::Int(10497))]));
-            }
-            layer_textures.push(textures.len() as i64);
-            textures.push(json::obj(vec![
-                ("source", Value::Int(image_index as i64)),
-                ("sampler", Value::Int(0)),
-            ]));
-        }
-        let material = match layer_textures.first() {
-            Some(&texture_index) => {
-                let material_index = materials.len();
-                materials.push(json::obj(vec![
-                    (
-                        "pbrMetallicRoughness",
-                        json::obj(vec![
-                            (
-                                "baseColorTexture",
-                                json::obj(vec![("index", Value::Int(texture_index))]),
-                            ),
-                            ("metallicFactor", Value::F64(0.0)),
-                            ("roughnessFactor", Value::F64(1.0)),
-                        ]),
-                    ),
-                    ("doubleSided", Value::Bool(true)),
-                ]));
-                Some(material_index as i64)
-            }
-            None => level_material,
-        };
         let mesh_index = meshes.len();
         meshes.push(json::obj(vec![
             ("name", json::s(door.name.clone())),
-            (
-                "primitives",
-                Value::Arr(vec![json::obj(vec![
-                    (
-                        "attributes",
-                        Value::Obj(
-                            vec![
-                                ("POSITION".to_string(), Value::Int(pos as i64)),
-                                ("NORMAL".to_string(), Value::Int(nrm as i64)),
-                                ("TEXCOORD_0".to_string(), Value::Int(uv as i64)),
-                            ]
-                            .into_iter()
-                            .chain(
-                                color.map(|c| ("COLOR_0".to_string(), Value::Int(c as i64))),
-                            )
-                            .collect(),
-                        ),
-                    ),
-                    ("indices", Value::Int(idx as i64)),
-                    ("mode", Value::Int(4)),
-                ]
-                .into_iter()
-                .chain(material.map(|m| ("material", Value::Int(m))))
-                .collect::<Vec<_>>())]),
-            ),
+            ("primitives", Value::Arr(primitives)),
         ]));
 
         let node_index = nodes.len();
@@ -543,6 +545,104 @@ pub fn inject_nodes(glb: &[u8], doors: &[ExtraNode]) -> Result<Vec<u8>, String> 
     }
     set_buffer_length(&mut root, bin.len());
     Ok(assemble_glb(&root.to_json(), &bin))
+}
+
+/// One glTF primitive: its accessors written into `bin`, its JSON returned.
+/// Normals are computed here rather than carried, because every emitter that
+/// feeds this file works in positions/uvs and a wrong normal is invisible
+/// until a light hits it.
+#[allow(clippy::too_many_arguments)]
+fn push_primitive(
+    bin: &mut Vec<u8>,
+    views: &mut Vec<Value>,
+    accessors: &mut Vec<Value>,
+    positions: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+    colors: &[[f32; 3]],
+    material: Option<i64>,
+) -> Value {
+    let normals = compute_vertex_normals(positions, indices);
+    let idx = push_accessor(
+        bin,
+        views,
+        accessors,
+        &u32_bytes(indices),
+        5125,
+        indices.len(),
+        "SCALAR",
+        Some(34963),
+        None,
+    );
+    let pos = push_accessor(
+        bin,
+        views,
+        accessors,
+        &f32_bytes(&flatten3(positions)),
+        5126,
+        positions.len(),
+        "VEC3",
+        Some(34962),
+        Some(bounds3(positions)),
+    );
+    let nrm = push_accessor(
+        bin,
+        views,
+        accessors,
+        &f32_bytes(&flatten3(&normals)),
+        5126,
+        normals.len(),
+        "VEC3",
+        Some(34962),
+        None,
+    );
+    let uv = push_accessor(
+        bin,
+        views,
+        accessors,
+        &f32_bytes(&flatten2(uvs)),
+        5126,
+        uvs.len(),
+        "VEC2",
+        Some(34962),
+        None,
+    );
+    // Baked light travels with the geometry, like the level mesh's.
+    let color = (colors.len() == positions.len()).then(|| {
+        push_accessor(
+            bin,
+            views,
+            accessors,
+            &f32_bytes(&flatten3(colors)),
+            5126,
+            colors.len(),
+            "VEC3",
+            Some(34962),
+            None,
+        )
+    });
+    Value::Obj(
+        vec![
+            (
+                "attributes".to_string(),
+                Value::Obj(
+                    vec![
+                        ("POSITION".to_string(), Value::Int(pos as i64)),
+                        ("NORMAL".to_string(), Value::Int(nrm as i64)),
+                        ("TEXCOORD_0".to_string(), Value::Int(uv as i64)),
+                    ]
+                    .into_iter()
+                    .chain(color.map(|c| ("COLOR_0".to_string(), Value::Int(c as i64))))
+                    .collect(),
+                ),
+            ),
+            ("indices".to_string(), Value::Int(idx as i64)),
+            ("mode".to_string(), Value::Int(4)),
+        ]
+        .into_iter()
+        .chain(material.map(|m| ("material".to_string(), Value::Int(m))))
+        .collect::<Vec<_>>(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +951,115 @@ mod tests {
     fn no_doors_leaves_the_glb_byte_identical() {
         let base = base_glb();
         assert_eq!(inject_nodes(&base, &[]).unwrap(), base);
+    }
+
+    /// A Build door leaf crosses several tiles, and a Build exporter keeps
+    /// one material per tile. The node stays ONE node — one name, one
+    /// `extras`, one clip — with one primitive per material.
+    #[test]
+    fn a_door_that_crosses_two_tiles_is_one_node_with_two_primitives() {
+        // Two materials in the file, so a part may name either.
+        let base = makepad_gltf::write_glb_mesh_textured_parts(
+            &[
+                makepad_gltf::GlbTexturedPart {
+                    positions: &[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 4.0]],
+                    uvs: &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    indices: &[0, 1, 2],
+                    base_color_png: &tiny_png([200, 30, 30]),
+                    normals: None,
+                    base_color_factor: None,
+                    colors: None,
+                    lightmap_png: None,
+                    lightmap_uvs: None,
+                    detail_png: None,
+                    detail_scale: [0.0, 0.0],
+                },
+                makepad_gltf::GlbTexturedPart {
+                    positions: &[[4.0, 0.0, 0.0], [8.0, 0.0, 0.0], [4.0, 0.0, 4.0]],
+                    uvs: &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    indices: &[0, 1, 2],
+                    base_color_png: &tiny_png([30, 30, 200]),
+                    normals: None,
+                    base_color_factor: None,
+                    colors: None,
+                    lightmap_png: None,
+                    lightmap_uvs: None,
+                    detail_png: None,
+                    detail_scale: [0.0, 0.0],
+                },
+            ],
+            true,
+        );
+        let materials_before = split_glb(&base)
+            .unwrap()
+            .0
+            .get("materials")
+            .and_then(Value::as_arr)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert_eq!(materials_before, 2, "fixture must have two materials");
+
+        let mut door = quad_door(1.5);
+        // Second half of the leaf, painted by the file's OTHER material, plus
+        // one part naming a material that does not exist — which must fall
+        // back to the level's, never be written as a dangling index.
+        door.parts = vec![
+            ExtraPart {
+                positions: vec![
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [2.0, 2.0, 0.0],
+                    [1.0, 2.0, 0.0],
+                ],
+                uvs: vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                colors: Vec::new(),
+                material: 1,
+            },
+            ExtraPart {
+                positions: vec![[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [3.0, 2.0, 0.0]],
+                uvs: vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+                indices: vec![0, 1, 2],
+                colors: Vec::new(),
+                material: 99,
+            },
+        ];
+        let glb = inject_nodes(&base, &[door]).unwrap();
+        let (root, _bin) = split_glb(&glb).unwrap();
+
+        let nodes = root.get("nodes").unwrap().as_arr().unwrap();
+        let named: Vec<&str> = nodes.iter().filter_map(|n| n.get("name").and_then(Value::as_str)).collect();
+        assert_eq!(named.iter().filter(|n| **n == "door_1").count(), 1, "one node: {named:?}");
+
+        let meshes = root.get("meshes").unwrap().as_arr().unwrap();
+        let mesh = meshes
+            .iter()
+            .find(|m| m.get("name").and_then(Value::as_str) == Some("door_1"))
+            .expect("door mesh");
+        let prims = mesh.get("primitives").unwrap().as_arr().unwrap();
+        assert_eq!(prims.len(), 3, "one primitive per part");
+        let mats: Vec<i64> = prims
+            .iter()
+            .map(|p| p.get("material").and_then(Value::as_i64).unwrap())
+            .collect();
+        assert_eq!(mats, vec![0, 1, 0], "own geometry, part 1, and the fallback");
+        // No new material was invented: a part paints with what is there.
+        assert_eq!(
+            root.get("materials").and_then(Value::as_arr).map(|m| m.len()),
+            Some(materials_before)
+        );
+        // One clip for the whole node, still driving it.
+        let anims = root.get("animations").unwrap().as_arr().unwrap();
+        assert_eq!(anims.len(), 1);
+        assert_eq!(anims[0].get("name").and_then(Value::as_str), Some("door_1"));
+        makepad_gltf::load_gltf_from_bytes(&glb, None).expect("valid glb");
+    }
+
+    fn tiny_png(rgb: [u8; 3]) -> Vec<u8> {
+        let rgba: Vec<u8> = (0..4 * 4)
+            .flat_map(|_| [rgb[0], rgb[1], rgb[2], 255])
+            .collect();
+        crate::classic_import::encode_png_rgba(&rgba, 4, 4).unwrap()
     }
 
     fn as_f64(v: &Value) -> f64 {
