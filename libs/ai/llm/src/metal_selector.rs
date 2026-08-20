@@ -765,6 +765,12 @@ fn program_rwkv(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProgram, Strin
 }
 
 fn program_gated_delta_net(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProgram, String> {
+    if op.op_param_i32(0) != 0 {
+        // Per-token state checkpoints (speculative verification) are a CUDA
+        // kernel feature; the Metal kernel writes only the final state, so it
+        // would leave the checkpoint rows unwritten. Fail closed.
+        return Err("gated_delta_net state checkpoints are not implemented on Metal".to_string());
+    }
     let src0 = src(tensors, op, 0)?;
     let src2 = src(tensors, op, 2)?;
     let src3 = src(tensors, op, 3)?;
