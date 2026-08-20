@@ -52,6 +52,12 @@ path = "src/bin/vlm_vision_probe.rs"
 name = "vlm-probe"
 path = "src/bin/vlm_probe.rs"
 
+# Batch executor for the asset-annotation pass (libs/asset/annotate): one
+# resident model, many sheets, line-oriented job/result files.
+[[bin]]
+name = "vlm-annotate"
+path = "src/bin/vlm_annotate.rs"
+
 [[bin]]
 name = "llama-reset-probe"
 path = "src/bin/llama_reset_probe.rs"
