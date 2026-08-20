@@ -820,6 +820,11 @@ pub struct ImportPage {
     /// an "Import all" run (one `armed()` per `start_*` call, `arm()` per
     /// pack's `IconsPending` message).
     icon_resume: IconResumeGate,
+    /// (packs finished, packs in run) while an "Import all" run is active,
+    /// else None. Drives the overall progress bar and the "pack x/y"
+    /// status prefix — without it the bar restarted per pack, which over a
+    /// 38-pack run read as noise.
+    all_run: Option<(usize, usize)>,
 }
 
 impl Default for ImportPage {
@@ -838,6 +843,7 @@ impl Default for ImportPage {
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
             icon_resume: IconResumeGate::default(),
+            all_run: None,
         }
     }
 }
@@ -884,7 +890,7 @@ impl ImportPage {
             };
             return format!("{pack}: stopping…");
         }
-        match &self.kenney_phase {
+        let line = match &self.kenney_phase {
             ImportPhase::Downloading {
                 pack,
                 loaded,
@@ -1101,7 +1107,25 @@ impl ImportPage {
                     format!("not provisioned · {}", probe.line())
                 }
             }
+        };
+        // Inside an "Import all" run, in-pack lines lead with which pack of
+        // how many this is (pack-boundary lines already carry their own
+        // "import all d/t").
+        if let Some((done, total)) = self.all_run {
+            let in_pack = !matches!(
+                &self.kenney_phase,
+                ImportPhase::PackFinished { .. }
+                    | ImportPhase::PackFailed { .. }
+                    | ImportPhase::AllDone { .. }
+                    | ImportPhase::Idle
+                    | ImportPhase::Failed { .. }
+                    | ImportPhase::Cancelled { .. }
+            );
+            if in_pack && total > 0 {
+                return format!("pack {}/{total} · {line}", (done + 1).min(total));
+            }
         }
+        line
     }
 
     fn icon_status_fragment(&self) -> String {
@@ -1132,9 +1156,29 @@ impl ImportPage {
     }
 
     /// Honest 0..1 progress from stage counts — no fake ETAs.
-    /// Compile/publish/AO are a short prefix; icon renders own most of the bar
-    /// because that is the slow, visible work (one GLB at a time).
+    /// During an "Import all" run the bar is the OVERALL run — finished
+    /// packs plus the current pack's own fraction, packs weighted equally —
+    /// because a per-pack bar restarting 38 times reads as a broken bar.
     pub fn progress_fraction(&self) -> f32 {
+        if let Some((done, total)) = self.all_run {
+            if total > 0 {
+                // A finished pack is already counted in `done`; its
+                // cumulative-icon fraction would double-count and make the
+                // bar dip when the next pack starts.
+                let pack = match &self.kenney_phase {
+                    ImportPhase::PackFinished { .. } | ImportPhase::PackFailed { .. } => 0.0,
+                    _ => self.pack_fraction().clamp(0.0, 1.0),
+                };
+                return ((done as f32 + pack) / total as f32).min(1.0);
+            }
+        }
+        self.pack_fraction()
+    }
+
+    /// The CURRENT pack's 0..1 fraction. Compile/publish/AO are a short
+    /// prefix; icon renders own most of the bar because that is the slow,
+    /// visible work (one GLB at a time).
+    fn pack_fraction(&self) -> f32 {
         match &self.kenney_phase {
             ImportPhase::Idle
             | ImportPhase::Failed { .. }
@@ -1341,6 +1385,7 @@ impl ImportPage {
         self.icon_current.clear();
         self.preview_thumbs.clear();
         self.preview_dirty = true;
+        self.all_run = None;
     }
 
     fn ingest_phase(&mut self, phase: ImportPhase) {
@@ -1363,6 +1408,18 @@ impl ImportPage {
             }
             ImportPhase::CompiledLocal { library, .. } => {
                 self.pending_landings.extend(library.iter().cloned());
+            }
+            _ => {}
+        }
+        match &phase {
+            ImportPhase::PackFinished { done, total, .. }
+            | ImportPhase::PackFailed { done, total, .. } => {
+                self.all_run = Some((*done, *total));
+            }
+            ImportPhase::AllDone { .. }
+            | ImportPhase::Failed { .. }
+            | ImportPhase::Cancelled { .. } => {
+                self.all_run = None;
             }
             _ => {}
         }
@@ -1550,6 +1607,7 @@ impl ImportPage {
         let (icon_resume, icon_resume_rx) = IconResumeGate::armed();
         self.icon_resume = icon_resume;
         self.kenney_phase = ImportPhase::compiling("all");
+        self.all_run = Some((0, present.len()));
         let cancel = self.cancel.clone();
         thread::Builder::new()
             .name("asset-ui-kenney-import-all".into())
@@ -2156,9 +2214,10 @@ fn run_kenney_import(
             message: format!("icon for {stem} never rendered — refusing to publish a placeholder"),
         };
     }
-    // Catalog compile is fail-closed and refuses some real Kenney kits
-    // (multi-texture GLBs). The Asset UI library still lands those GLBs
-    // so icons and the viewer work; the status line keeps the compiler error.
+    // Catalog compile is fail-closed about the PACK; a single model in a
+    // shape it does not support is named in `report.skipped_models` and
+    // left out rather than costing the kit. A pack-level refusal still
+    // keeps the compiler error in the status line.
     let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
         Ok(report) => report,
         Err(error) => {
@@ -2173,6 +2232,12 @@ fn run_kenney_import(
             };
         }
     };
+    // A model left out is not a silent drop: name each one and why, at
+    // warning level, so "34 packs imported" can never hide content that
+    // did not arrive.
+    for (path, why) in &report.skipped_models {
+        log!("import: {pack_name}: SKIPPED {path} — {why}");
+    }
     if cancel.load(Ordering::SeqCst) {
         return ImportPhase::Cancelled {
             pack: pack_name,
@@ -3999,8 +4064,14 @@ mod tests {
         );
     }
 
+    /// retro-fantasy-kit's `barrels.glb` is barrel+planks — the shape that
+    /// used to refuse the whole kit. It stages, lands, and now COMPILES;
+    /// the only thing left between it and the catalog is the same rendered
+    /// icon every mesh needs (`stage_source_pack` writes placeholders, so
+    /// the placeholder guard is what this stops at, exactly as the
+    /// single-texture kits do in `compile_sandbox_space_kit`).
     #[test]
-    fn multi_texture_kit_still_lands_library() {
+    fn multi_texture_kit_lands_library_and_compiles() {
         let dir = resolve_kenney_dir("retro-fantasy-kit", "");
         if !dir.is_dir() {
             return;
@@ -4036,12 +4107,27 @@ mod tests {
             "staged multi-texture Kenney GLB must still produce a library landing"
         );
         let spec = kenney_spec("retro-fantasy-kit").expect("spec");
-        let err = pack_import::compile_pack(&staged, &dest.join("bundle"), spec, None, false)
-            .expect_err("pack_import must refuse multi-texture Kenney GLBs");
-        assert!(
-            err.to_string().contains("multi-texture") || err.to_string().contains("unsupported"),
-            "{err}"
-        );
+        match pack_import::compile_pack(&staged, &dest.join("bundle"), spec, None, false) {
+            Ok(report) => {
+                assert_eq!(report.assets, 1, "the multi-material barrel is one asset");
+                assert!(
+                    report.skipped_models.is_empty(),
+                    "nothing skipped: {:?}",
+                    report.skipped_models
+                );
+            }
+            // No GPU render is cached in this environment, so the
+            // fail-closed thumbnail guard is the honest stopping point —
+            // the multi-texture refusal is gone, which is what this covers.
+            Err(error) => {
+                let text = error.to_string();
+                assert!(
+                    text.contains("placeholder"),
+                    "multi-texture must no longer refuse the kit: {error}"
+                );
+                assert!(!text.contains("multi-texture"), "{error}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -4235,6 +4321,37 @@ mod tests {
         assert!(!bad.with_extension("aomesh").exists());
         assert!(!bad.with_extension("ao.png").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_all_bar_is_overall_and_status_leads_with_the_pack() {
+        let mut page = ImportPage::default();
+        page.all_run = Some((10, 38));
+        page.kenney_phase = ImportPhase::compiling("marble-kit");
+        let f = page.progress_fraction();
+        assert!(
+            f >= 10.0 / 38.0 && f <= 11.0 / 38.0,
+            "mid-run bar must sit between finished-packs and next-pack: {f}"
+        );
+        assert!(
+            page.kenney_status_line(true).starts_with("pack 11/38 · "),
+            "in-pack status must lead with which pack of how many"
+        );
+        // A pack boundary must not dip the bar: the finished pack is in
+        // `done`, so its own fraction counts as zero.
+        page.ingest_phase(ImportPhase::PackFailed {
+            pack: "brick-kit".into(),
+            message: "refused".into(),
+            done: 11,
+            total: 38,
+            more: true,
+        });
+        let boundary = page.progress_fraction();
+        assert!(boundary >= f && boundary <= 11.0 / 38.0 + 1e-6);
+        // Single-pack imports keep the per-pack bar exactly as before.
+        page.all_run = None;
+        page.kenney_phase = ImportPhase::compiling("space-kit");
+        assert!(page.progress_fraction() < 0.1);
     }
 
     #[test]
