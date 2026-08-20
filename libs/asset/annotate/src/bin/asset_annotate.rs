@@ -448,12 +448,24 @@ fn run_executor(
         // how it connects — which is the whole point of the pass.
         let (kit, name) = c.alias.rsplit_once('/').unwrap_or(("", c.alias.as_str()));
         let kit = kit.rsplit('/').next().unwrap_or("");
+        // Kit-level context beside the piece name: without the frame a wall
+        // panel reads as "a book"; with it the model knows pieces snap on a
+        // grid and names them in kit terms. The images still decide
+        // everything the name cannot say.
+        let kit_frame = if kit.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " It is a game asset from the Kenney \"{kit}\" set, a low-poly \
+                 modular construction kit whose pieces snap together on a grid."
+            )
+        };
         jobs.push_str(&format!(
-            "{}\t{}\tThe kit calls this piece \"{}\"{}. Trust the images over the name where they disagree.\n",
+            "{}\t{}\tThe kit calls this piece \"{}\".{} Trust the images over the name where they disagree.\n",
             c.asset_hex,
             path.display(),
             name,
-            if kit.is_empty() { String::new() } else { format!(", from the {kit}") },
+            kit_frame,
         ));
     }
     let jobs_path = cfg.work.join("jobs.tsv");

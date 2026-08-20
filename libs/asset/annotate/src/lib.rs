@@ -38,7 +38,13 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 
 /// Bump when the prompt or the output contract changes: every asset tagged
 /// with an older version is re-annotated and its owned fields replaced.
-pub const ANNOTATOR_VERSION: u32 = 2;
+///
+/// v3: annotator moves from the local Metal Qwen3.5-9B tower to the
+/// Qwen3.8-27B vision pipe on the 5090 (arch-identical tower, projection
+/// 4096→5120), and the per-job context now frames the KIT (Kenney set,
+/// low-poly construction kit, grid-snapping pieces) alongside the piece
+/// name.
+pub const ANNOTATOR_VERSION: u32 = 3;
 
 /// The question put to the vision model about one turntable sheet.
 ///
