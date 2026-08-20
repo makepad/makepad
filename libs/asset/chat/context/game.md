@@ -70,8 +70,15 @@ them. The whole level is three lines:
     game.map("doom/doom/worlds/doom1/e1m1")
     game.player_character({view: "first"})
     game.text("hint", "WASD to move", {anchor: "top_left"})
-'billboard' sprite assets are still queryable-only — say so honestly if
-asked to place one.
+game.map also takes {actors: "<ns>/<pack>"} to place the map's actor
+sprites from a billboard pack of the SAME game family (its own pack is
+the default). Cross-family mixes ("duke characters in doom") are not
+mapped yet — unknown actor keys skip silently, so say honestly that the
+map will load but those actors won't appear, and offer the map with its
+own actors instead. 'billboard' sprite assets are otherwise
+queryable-only — say so honestly if asked to place one.
+First person vs third person is the player line's `view:` option — a
+mode switch is a one-line edit of that option, nothing else changes.
 
 SPLASH SYNTAX (it is NOT JavaScript — these exact forms only):
 - Loops: `for i in 0..16 { }` and `for item in list { }`. There is NO
