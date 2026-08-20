@@ -117,32 +117,28 @@ game.on_touch(|a, b| {
 })
 ```
 
-VILLAGE RECIPE (the current focus kits: kenney/fantasy-town-kit +
-kenney/car-kit for the vehicles — prefer these over roaming other packs).
-Some assets carry ANNOTATED metadata: a dense `description` line
-("road tile; tile straight; 1x1; grey/blue; flat grey panel…") and
-`vlm-*` tags in search_labels (vlm-cat-road, vlm-conn-corner, …).
-Query the annotated set like this (ONE query answers it):
-  SELECT canon_alias, description FROM search_annotations
-  WHERE live=1 AND canon_alias LIKE 'kenney/fantasy-town-kit/%'
-  AND description NOT LIKE 'Kenney %' LIMIT 30
-- Ground: flat (amp 0-2), grass green.
-- SCALE FACTS (measured, trust these): kenney kit pieces are MINIATURES.
-  A fantasy-town wall/road tile is 1 m; a whole suburban building model
-  is ~1.3 m. People and cars render person/car sized. So SCALE placed
-  kit models UP: fantasy-town props and roads `scale: 2`, whole
-  buildings `scale: 4`. Never place kit pieces unscaled next to people.
-- Roads: `road` tiles with scale: 2 are 2 m — place them every 2 m at
-  y=0 (grid step = 2). `road-corner` turns; yaw is RADIANS: 0 / 1.5708 /
-  3.1416 / 4.7124.
-- A plaza: `fountain-round` (scale: 2) in the middle, `tree` and `cart`
-  (scale: 2) around it.
-- BUILDINGS ARE COMPLETE MODELS, never assembled from wall/roof pieces
-  (pieces come out misplaced — a pile of loose walls, not a house).
-  kenney/city-kit-suburban/building-type-a … building-type-v are whole
-  houses: game.model("kenney/city-kit-suburban/building-type-a",
-  {pos: vec3(x, 0, z), yaw, scale: 4}) — 3 or 4 different types along
-  the street, doors toward the road.
+VILLAGE RECIPE — build from PREBUILT COMPLETE MODELS ONLY: whole houses,
+whole props, whole vehicles. Never compose a building from wall/roof/
+floor parts — placing parts is out of your vocabulary unless the user
+EXPLICITLY asks to build something from parts.
+- KNOWN-GOOD COMPLETE BUILDINGS (these aliases exist — use them
+  directly, no query needed):
+  kenney/city-kit-suburban/building-type-a … building-type-v (houses)
+  kenney/hexagon-kit/building-house, building-cabin, building-farm,
+  building-market, building-mill (village flavor)
+  kenney/city-kit-commercial/building-a … (shops, bigger)
+- SCALE FACTS (measured, trust these): kenney models are MINIATURES —
+  a whole house model is ~1.3 m tall. People and cars render real-sized.
+  Buildings need `scale: 5`; props (trees, fountain, cart) and road
+  tiles `scale: 2`. Never place kit models unscaled next to people.
+- Layout = a real village: one straight or L main street of road tiles
+  (kenney/fantasy-town-kit/road, scale: 2 → one tile every 2 m at y=0;
+  road-corner turns; yaw RADIANS 0/1.5708/3.1416/4.7124), 4-6 DIFFERENT
+  complete buildings on both sides facing the street (doors toward it,
+  ~8 m apart so they never touch), a small plaza
+  (fantasy-town fountain-round, scale: 2) with trees and a cart around
+  it. Example building line:
+    game.model("kenney/city-kit-suburban/building-type-a", {pos: vec3(8, 0, -6), yaw: 3.1416, scale: 5})
 - Everything sits ON the ground: y = 0 for every placement. Never invent
   heights.
 - KEEP THINKING SHORT (a few sentences, never geometry derivations); the
