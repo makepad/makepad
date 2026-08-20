@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use makepad_sqlite::{Connection, Database, Value};
+use makepad_sqlite::{Connection, Database, Error, Value};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -228,5 +228,132 @@ fn sqlite_can_read_a_wal_database_between_our_transactions() {
     assert_eq!(
         db.query("SELECT v FROM t ORDER BY id", &[]).unwrap().rows[2][0].as_text(),
         Some("theirs")
+    );
+}
+/// A commit that fails partway leaves its frames in the log with no commit
+/// frame behind them, so the file is longer than its committed content. The
+/// next transaction writes over exactly those offsets: same salts, same file
+/// length, different content. A reader that takes an unchanged length as proof
+/// that nothing happened stays parked on the older snapshot for as long as the
+/// log does not grow past that mark.
+#[test]
+fn a_reader_sees_a_commit_that_reuses_abandoned_frames() {
+    let scratch = Scratch::new("live-reader-abandoned");
+    let path = scratch.path("r.db");
+    let mut w = Connection::open(&path, Duration::from_secs(5)).unwrap();
+    w.execute("PRAGMA journal_mode=WAL", &[]).unwrap();
+    w.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)", &[])
+        .unwrap();
+    w.execute("INSERT INTO t(v) VALUES('seed')", &[]).unwrap();
+
+    let mut reader = Database::open(&path).unwrap();
+    assert_eq!(
+        reader.query("SELECT COUNT(*) FROM t", &[]).unwrap().rows[0][0].as_integer(),
+        Some(1)
+    );
+    let page_size = reader.pager().page_size();
+
+    // Frames appended and never committed, exactly what a commit interrupted
+    // between its first frame and its sync leaves behind.
+    {
+        let mut wal = makepad_sqlite::wal::Wal::open(&path, page_size as u32, true)
+            .unwrap()
+            .expect("the database is in WAL mode");
+        let filler = vec![0x5au8; page_size];
+        for _ in 0..40 {
+            wal.append(2, &filler, 0).unwrap();
+        }
+        // No commit(): the frames are in the file and belong to nothing.
+    }
+
+    // The reader looks while those abandoned frames are still in the file.
+    reader.refresh().unwrap();
+    assert_eq!(
+        reader.query("SELECT COUNT(*) FROM t", &[]).unwrap().rows[0][0].as_integer(),
+        Some(1),
+        "frames without a commit frame must not be visible"
+    );
+
+    // A small commit now lands on the very offsets those frames used, leaving
+    // the log exactly as long as it already was.
+    w.execute("INSERT INTO t(v) VALUES('after')", &[]).unwrap();
+    reader.refresh().unwrap();
+    let rows = reader.query("SELECT v FROM t ORDER BY id", &[]).unwrap();
+    assert_eq!(
+        rows.rows.len(),
+        2,
+        "the reader missed a commit that reused the abandoned frames"
+    );
+    assert_eq!(rows.rows[1][0].as_text(), Some("after"));
+}
+
+/// A checkpoint truncates the log, bumps its salts and starts writing fresh
+/// frames from the top — over the exact byte offsets an open snapshot's index
+/// still points at, now holding entirely different pages. Reading through that
+/// index must never hand out whatever page happens to sit there: a b-tree page
+/// of some other tree decodes perfectly well, and an index scan that walks into
+/// one produces rowids that satisfy no predicate at all.
+#[test]
+fn a_checkpointed_away_snapshot_never_answers_with_another_page() {
+    let scratch = Scratch::new("live-reader-checkpoint");
+    let path = scratch.path("c.db");
+    let mut w = Connection::open(&path, Duration::from_secs(5)).unwrap();
+    w.execute("PRAGMA journal_mode=WAL", &[]).unwrap();
+    w.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)", &[])
+        .unwrap();
+    let filler = "y".repeat(500);
+    let fill = |w: &mut Connection, from: usize, to: usize| {
+        w.execute("BEGIN", &[]).unwrap();
+        for i in from..to {
+            w.execute(
+                "INSERT INTO t(v) VALUES(?1)",
+                &[Value::text(format!("{filler}{i}"))],
+            )
+            .unwrap();
+        }
+        w.execute("COMMIT", &[]).unwrap();
+    };
+    fill(&mut w, 0, 900);
+
+    // A small cache, so the snapshot's answers really do come off the log
+    // rather than out of pages this handle happens to still hold.
+    let mut reader = Database::open_with_cache(&path, 4).unwrap();
+    assert_eq!(
+        reader
+            .query("SELECT v FROM t WHERE id = 1", &[])
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    let pages = reader.pager().page_count();
+    assert!(pages > 40, "the fixture needs a multi-page table");
+    // A page from the middle of the log the reader is holding open: early
+    // enough that the next generation of frames covers its offset.
+    let probe = 20;
+
+    // The log is folded away and a new generation is written over it, long
+    // enough to reach the offsets the reader's snapshot still names.
+    w.execute("PRAGMA wal_checkpoint", &[]).unwrap();
+    fill(&mut w, 900, 1800);
+
+    let truth = Database::open(&path).unwrap().pager().page(probe).unwrap();
+    match reader.pager().page(probe) {
+        // Refusing is the right answer: the snapshot this offset belonged to
+        // is gone.
+        Err(Error::Busy(_)) => {}
+        Ok(bytes) => assert_eq!(
+            &bytes[..],
+            &truth[..],
+            "the reader answered page {probe} with the bytes of a different page"
+        ),
+        Err(e) => panic!("unexpected error reading page {probe}: {e}"),
+    }
+
+    // And the handle recovers: refreshing moves it onto the new snapshot.
+    reader.refresh().unwrap();
+    assert_eq!(
+        reader.query("SELECT COUNT(*) FROM t", &[]).unwrap().rows[0][0].as_integer(),
+        Some(1800)
     );
 }
