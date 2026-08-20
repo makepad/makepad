@@ -3465,6 +3465,74 @@ extern "C" cudaError_t mkllm_norm(
 }
 
 // ---------------------------------------------------------------------------
+// LayerNorm (ggml GGML_OP_NORM): mean/variance over dim0, no affine.
+//
+// `mkllm_norm` above is RMS/L2 math (sum of squares, no centring) and is NOT a
+// substitute. Transcribed from llama.cpp norm.cu:12-52 norm_f32: one pass
+// accumulating (sum, sum of squares), var = E[x^2] - E[x]^2.
+// ---------------------------------------------------------------------------
+
+static __global__ void mkllm_layer_norm_kernel(
+        const uint8_t * __restrict__ x, uint8_t * __restrict__ dst,
+        int ne0, int ne1, int ne2, float eps,
+        size_t x_nb1, size_t x_nb2, size_t x_nb3,
+        size_t d_nb1, size_t d_nb2, size_t d_nb3) {
+    const int i1 = blockIdx.x % ne1;
+    const int i23 = blockIdx.x / ne1;
+    const int i2 = i23 % ne2;
+    const int i3 = i23 / ne2;
+    const int lane = threadIdx.x;
+    const float * xr = (const float *) (x + (size_t) i3 * x_nb3 + (size_t) i2 * x_nb2
+        + (size_t) i1 * x_nb1);
+    float * dr = (float *) (dst + (size_t) i3 * d_nb3 + (size_t) i2 * d_nb2
+        + (size_t) i1 * d_nb1);
+
+    extern __shared__ float lnrm_red[];
+    float * red_sum = lnrm_red;
+    float * red_sqr = lnrm_red + blockDim.x;
+
+    float sum = 0.0f;
+    float sqr = 0.0f;
+    for (int c = lane; c < ne0; c += blockDim.x) {
+        const float v = xr[c];
+        sum += v;
+        sqr += v * v;
+    }
+    red_sum[lane] = sum;
+    red_sqr[lane] = sqr;
+    __syncthreads();
+    for (int off = blockDim.x >> 1; off > 0; off >>= 1) {
+        if (lane < off) {
+            red_sum[lane] += red_sum[lane + off];
+            red_sqr[lane] += red_sqr[lane + off];
+        }
+        __syncthreads();
+    }
+    const float mean = red_sum[0] / (float) ne0;
+    const float var = red_sqr[0] / (float) ne0 - mean * mean;
+    const float inv_std = rsqrtf(var + eps);
+    for (int c = lane; c < ne0; c += blockDim.x) {
+        dr[c] = (xr[c] - mean) * inv_std;
+    }
+}
+
+extern "C" cudaError_t mkllm_layer_norm(
+        const void * x, void * dst,
+        int ne0, int ne1, int ne2, int ne3, float eps,
+        size_t x_nb1, size_t x_nb2, size_t x_nb3,
+        size_t d_nb1, size_t d_nb2, size_t d_nb3, cudaStream_t stream) {
+    // llama.cpp norm.cu:297-307: 256 threads if ncols<1024, else 1024.
+    const int nthreads = ne0 >= 1024 ? 1024 : 256;
+    dim3 block((unsigned) nthreads);
+    dim3 grid(ne1 * ne2 * ne3);
+    const size_t shared = (size_t) nthreads * 2 * sizeof(float);
+    mkllm_layer_norm_kernel<<<grid, block, shared, stream>>>(
+        (const uint8_t *) x, (uint8_t *) dst, ne0, ne1, ne2, eps,
+        x_nb1, x_nb2, x_nb3, d_nb1, d_nb2, d_nb3);
+    return cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
 // rope multi (MROPE/IMROPE), f32, transcribed from kernel_rope_multi.
 // src [ne0, ne1, ne2, ne3] (dim0 = head_dim, ne2 = tokens), pos i32 with 4
 // planes of ne2 entries.
@@ -3563,6 +3631,192 @@ extern "C" cudaError_t mkllm_rope_multi(
         ne0, ne1, ne2, is_imrope, n_dims, sect_0, sect_1, sect_2, sect_3,
         freq_base, freq_scale, ext_factor, attn_factor, corr_dim0, corr_dim1,
         s_nb0, s_nb1, s_nb2, s_nb3, d_nb0, d_nb1, d_nb2, d_nb3);
+    return cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
+// rope vision (GGML_ROPE_TYPE_VISION = 24), f32.
+//
+// NOT a flag on rope_multi: it uses TWO sections (not four), the pair split is
+// at `n_dims` (not `n_dims/2`), the loop covers `2*n_dims` (not `n_dims`), and
+// theta uses `pow(freq_base, 2*inv_ndims*p)` on the sector index `p` rather
+// than `pow(freq_base, inv_ndims*i0)`. Routing VISION into rope_multi is
+// silently wrong, not fatal. Transcribed from kernel_rope_vision
+// (ggml-metal.metal:4363-4427), the Metal oracle for this graph.
+// ---------------------------------------------------------------------------
+
+static __global__ void mkllm_rope_vision_kernel(
+        const uint8_t * __restrict__ src, const int32_t * __restrict__ pos,
+        uint8_t * __restrict__ dst,
+        int ne0, int ne1, int ne2,
+        int n_dims, int sect_0, int sect_1,
+        float freq_base, float freq_scale, float ext_factor, float attn_factor,
+        float corr_dim0, float corr_dim1,
+        size_t s_nb0, size_t s_nb1, size_t s_nb2, size_t s_nb3,
+        size_t d_nb0, size_t d_nb1, size_t d_nb2, size_t d_nb3) {
+    const int i1 = blockIdx.x;
+    const int i2 = blockIdx.y;
+    const int i3 = blockIdx.z;
+    const float inv_ndims = -1.0f / (float) n_dims;
+
+    for (int i0 = 2 * threadIdx.x; i0 < ne0; i0 += 2 * blockDim.x) {
+        if (i0 < 2 * n_dims) {
+            const int ic = i0 / 2;
+            const int sect_dims = sect_0 + sect_1;
+            const int sector = ic % sect_dims;
+
+            float p;
+            float theta_base;
+            if (sector < sect_1) {
+                p = (float) sector;
+                theta_base = (float) pos[i2];
+            } else {
+                p = (float) (sector - sect_0);
+                theta_base = (float) pos[i2 + ne2];
+            }
+
+            const float theta_extrap = theta_base * powf(freq_base, 2.0f * inv_ndims * p);
+            float mscale = attn_factor;
+            float theta = freq_scale * theta_extrap;
+            if (ext_factor != 0.0f) {
+                const float ramp = mkllm_rope_yarn_ramp(corr_dim0, corr_dim1, i0) * ext_factor;
+                theta = theta * (1.0f - ramp) + theta_extrap * ramp;
+                mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+            }
+            const float cos_t = cosf(theta) * mscale;
+            const float sin_t = sinf(theta) * mscale;
+
+            const float * sp = (const float *) (src + (size_t) i3 * s_nb3
+                + (size_t) i2 * s_nb2 + (size_t) i1 * s_nb1 + (size_t) ic * s_nb0);
+            float * dp = (float *) (dst + (size_t) i3 * d_nb3
+                + (size_t) i2 * d_nb2 + (size_t) i1 * d_nb1 + (size_t) ic * d_nb0);
+
+            const float x0 = sp[0];
+            const float x1 = sp[n_dims];
+
+            dp[0]      = x0 * cos_t - x1 * sin_t;
+            dp[n_dims] = x0 * sin_t + x1 * cos_t;
+        } else {
+            const float * sp = (const float *) (src + (size_t) i3 * s_nb3
+                + (size_t) i2 * s_nb2 + (size_t) i1 * s_nb1 + (size_t) i0 * s_nb0);
+            float * dp = (float *) (dst + (size_t) i3 * d_nb3
+                + (size_t) i2 * d_nb2 + (size_t) i1 * d_nb1 + (size_t) i0 * d_nb0);
+            dp[0] = sp[0];
+            dp[1] = sp[1];
+        }
+    }
+}
+
+extern "C" cudaError_t mkllm_rope_vision(
+        const void * src, const int32_t * pos, void * dst,
+        int ne0, int ne1, int ne2, int ne3,
+        int n_dims, int sect_0, int sect_1,
+        float freq_base, float freq_scale, float ext_factor, float attn_factor,
+        float corr_dim0, float corr_dim1,
+        size_t s_nb0, size_t s_nb1, size_t s_nb2, size_t s_nb3,
+        size_t d_nb0, size_t d_nb1, size_t d_nb2, size_t d_nb3,
+        cudaStream_t stream) {
+    dim3 block(64);
+    dim3 grid(ne1, ne2, ne3);
+    mkllm_rope_vision_kernel<<<grid, block, 0, stream>>>(
+        (const uint8_t *) src, pos, (uint8_t *) dst,
+        ne0, ne1, ne2, n_dims, sect_0, sect_1,
+        freq_base, freq_scale, ext_factor, attn_factor, corr_dim0, corr_dim1,
+        s_nb0, s_nb1, s_nb2, s_nb3, d_nb0, d_nb1, d_nb2, d_nb3);
+    return cudaGetLastError();
+}
+
+// ---------------------------------------------------------------------------
+// upscale / interpolate (ggml GGML_OP_UPSCALE), f32, bilinear with the
+// optional antialias triangle filter. Transcribed from
+// kernel_upscale_bilinear_f32 (ggml-metal.metal:4854-4933).
+// ---------------------------------------------------------------------------
+
+static __global__ void mkllm_upscale_bilinear_kernel(
+        const uint8_t * __restrict__ src, uint8_t * __restrict__ dst,
+        int ne00, int ne01, int ne0, int ne1,
+        float sf2, float sf3, float sfx, float sfy, float poffs, int aa,
+        size_t s_nb00, size_t s_nb01, size_t s_nb02, size_t s_nb03,
+        size_t d_nb1, size_t d_nb2, size_t d_nb3) {
+    const int i1 = blockIdx.x;
+    const int i2 = blockIdx.y;
+    const int i3 = blockIdx.z;
+
+    // Metal divides the int index by a float scale and truncates on assign.
+    const int i03 = (int) ((float) i3 / sf3);
+    const int i02 = (int) ((float) i2 / sf2);
+
+    const float f01 = ((float) i1 + poffs) / sfy - poffs;
+    const int i01 = max(0, min(ne01 - 1, (int) floorf(f01)));
+    const int i01p = max(0, min(ne01 - 1, i01 + 1));
+    const float fd1 = fmaxf(0.0f, fminf(1.0f, f01 - (float) i01));
+
+    const uint8_t * s0 = src + (size_t) i03 * s_nb03 + (size_t) i02 * s_nb02;
+    float * dp = (float *) (dst + (size_t) i3 * d_nb3 + (size_t) i2 * d_nb2
+        + (size_t) i1 * d_nb1);
+
+    if (aa) {
+        const float support0 = fmaxf(1.0f, 1.0f / sfx);
+        const float invscale0 = 1.0f / support0;
+        const float support1 = fmaxf(1.0f, 1.0f / sfy);
+        const float invscale1 = 1.0f / support1;
+
+        for (int i0 = threadIdx.x; i0 < ne0; i0 += blockDim.x) {
+            const float f00 = ((float) i0 + poffs) / sfx - poffs;
+
+            const int x_min = max(0, (int) floorf(f00 - support0 + poffs));
+            const int x_max = min(ne00, (int) ceilf(f00 + support0 + poffs));
+            const int y_min = max(0, (int) floorf(f01 - support1 + poffs));
+            const int y_max = min(ne01, (int) ceilf(f01 + support1 + poffs));
+
+            float sum = 0.0f;
+            float wsum = 0.0f;
+            for (int sy = y_min; sy < y_max; ++sy) {
+                const float wy = fmaxf(0.0f, 1.0f - fabsf((float) sy - f01) * invscale1);
+                for (int sx = x_min; sx < x_max; ++sx) {
+                    const float wx = fmaxf(0.0f, 1.0f - fabsf((float) sx - f00) * invscale0);
+                    const float w = wx * wy;
+                    const float * sp = (const float *) (s0 + (size_t) sy * s_nb01
+                        + (size_t) sx * s_nb00);
+                    sum += (*sp) * w;
+                    wsum += w;
+                }
+            }
+            dp[i0] = wsum > 0.0f ? sum / wsum : 0.0f;
+        }
+    } else {
+        for (int i0 = threadIdx.x; i0 < ne0; i0 += blockDim.x) {
+            const float f00 = ((float) i0 + poffs) / sfx - poffs;
+            const int i00 = max(0, min(ne00 - 1, (int) floorf(f00)));
+            const int i00p = max(0, min(ne00 - 1, i00 + 1));
+            const float fd0 = fmaxf(0.0f, fminf(1.0f, f00 - (float) i00));
+
+            const float s00 = *(const float *) (s0 + (size_t) i01 * s_nb01 + (size_t) i00 * s_nb00);
+            const float s10 = *(const float *) (s0 + (size_t) i01 * s_nb01 + (size_t) i00p * s_nb00);
+            const float s01 = *(const float *) (s0 + (size_t) i01p * s_nb01 + (size_t) i00 * s_nb00);
+            const float s11 = *(const float *) (s0 + (size_t) i01p * s_nb01 + (size_t) i00p * s_nb00);
+
+            dp[i0] = s00 * (1.0f - fd0) * (1.0f - fd1)
+                   + s10 * fd0 * (1.0f - fd1)
+                   + s01 * (1.0f - fd0) * fd1
+                   + s11 * fd0 * fd1;
+        }
+    }
+}
+
+extern "C" cudaError_t mkllm_upscale_bilinear(
+        const void * src, void * dst,
+        int ne00, int ne01, int ne0, int ne1, int ne2, int ne3,
+        float sf2, float sf3, float sfx, float sfy, float poffs, int aa,
+        size_t s_nb00, size_t s_nb01, size_t s_nb02, size_t s_nb03,
+        size_t d_nb1, size_t d_nb2, size_t d_nb3,
+        cudaStream_t stream) {
+    dim3 block(64);
+    dim3 grid(ne1, ne2, ne3);
+    mkllm_upscale_bilinear_kernel<<<grid, block, 0, stream>>>(
+        (const uint8_t *) src, (uint8_t *) dst,
+        ne00, ne01, ne0, ne1, sf2, sf3, sfx, sfy, poffs, aa,
+        s_nb00, s_nb01, s_nb02, s_nb03, d_nb1, d_nb2, d_nb3);
     return cudaGetLastError();
 }
 
