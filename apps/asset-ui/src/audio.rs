@@ -295,6 +295,24 @@ pub const WAVEFORM_THUMB_H: usize = 116;
 /// Persisting this at accept/backfill time lets gallery refreshes decode a
 /// small PNG instead of rereading and min/max-scanning the whole WAV.
 pub fn waveform_thumbnail_png(pcm: &WavPcm) -> Option<Vec<u8>> {
+    // A SPECTROGRAM is the picture of a track: a waveform strip of any
+    // mastered audio is the same filled rectangle. Same renderer the
+    // importer publishes with, so the card in this app and the thumbnail
+    // in the catalog are the same picture.
+    let mono: Vec<f32> = pcm.frames.iter().map(|(l, r)| (l + r) * 0.5).collect();
+    if let Some(rgba) = makepad_asset_importer::spectrogram::spectrogram_rgba(
+        &mono,
+        pcm.sample_rate,
+        WAVEFORM_THUMB_W,
+        WAVEFORM_THUMB_H,
+    ) {
+        return makepad_asset_ai::testpattern::encode_png_rgba(
+            &rgba,
+            WAVEFORM_THUMB_W,
+            WAVEFORM_THUMB_H,
+        )
+        .ok();
+    }
     let bgra = waveform_bgra(pcm, WAVEFORM_THUMB_W, WAVEFORM_THUMB_H);
     let mut rgba = Vec::with_capacity(bgra.len() * 4);
     for pixel in bgra {
