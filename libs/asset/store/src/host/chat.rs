@@ -86,6 +86,9 @@ enum ChatCmd {
     ListProviders { reply: Sender<Vec<ProviderStatus>> },
     Create(CreateReq),
     Get { owner: PrincipalId, id: SessionId, reply: Sender<Result<SessionView, ChatFail>> },
+    /// Every live session this owner may see — the fold-back loop's way to
+    /// find a play session's transcript without knowing its id.
+    List { owner: PrincipalId, reply: Sender<Vec<SessionView>> },
     Send(SendReq),
     Events {
         owner: PrincipalId,
@@ -231,6 +234,13 @@ impl ChatHandle {
         rx.recv_timeout(Duration::from_secs(5)).map_err(|_| ChatFail::Down)?
     }
 
+    /// Every live session the owner may see (id-sorted).
+    pub fn list(&self, owner: PrincipalId) -> Result<Vec<SessionView>, ChatFail> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(ChatCmd::List { owner, reply: tx }).map_err(|_| ChatFail::Down)?;
+        rx.recv_timeout(Duration::from_secs(5)).map_err(|_| ChatFail::Down)
+    }
+
     pub fn send(
         &self,
         owner: PrincipalId,
@@ -318,6 +328,16 @@ impl Actor {
             }
             ChatCmd::Get { owner, id, reply } => {
                 let _ = reply.send(self.view_of(&owner, &id));
+            }
+            ChatCmd::List { owner, reply } => {
+                let mut views: Vec<SessionView> = self
+                    .sessions
+                    .values_mut()
+                    .filter(|live| live.owner == owner)
+                    .map(|live| view_from(live))
+                    .collect();
+                views.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+                let _ = reply.send(views);
             }
             ChatCmd::Send(req) => {
                 let _ = req.reply.send(self.send(req.owner, req.id, req.text, req.attachments));

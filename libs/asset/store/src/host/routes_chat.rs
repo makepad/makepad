@@ -63,6 +63,7 @@ pub fn dispatch(
                 method_not_allowed()
             }
         }
+        ["v1", "chat", "sessions"] if is_read(m) => sessions_list(head, rc),
         ["v1", "chat", "sessions"] if m == Method::Post => session_create(conn, head, rc),
         ["v1", "chat", "sessions", id] if is_read(m) => session_get(head, rc, id),
         ["v1", "chat", "sessions", id] if m == Method::Delete => session_retire(head, rc, id),
@@ -195,6 +196,18 @@ fn session_tool_result(
         Ok(()) => Ok(Outcome::Resp(Resp::json(200, &obj(vec![("accepted", Value::Bool(true))])))),
         Err(e) => Ok(chat_outcome(e)),
     }
+}
+
+/// Every live session this principal owns — how an observer finds a play
+/// session's transcript (GET the ids here, then each session's /events).
+fn sessions_list(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+    let (owner, _) = auth_owner(head, rc, None)?;
+    let views = match chat_of(rc)?.list(owner) {
+        Ok(v) => v,
+        Err(e) => return Ok(chat_outcome(e)),
+    };
+    let rows: Vec<Value> = views.iter().map(session_value).collect();
+    Ok(Outcome::Resp(Resp::json(200, &obj(vec![("sessions", Value::Arr(rows))]))))
 }
 
 fn session_get(head: &Head, rc: &RouteCtx, id: &str) -> RouteResult<Outcome> {

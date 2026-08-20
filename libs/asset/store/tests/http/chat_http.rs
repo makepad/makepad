@@ -417,3 +417,54 @@ fn unauthenticated_chat_is_uniform_401() {
     );
     assert_eq!(r.status, 401);
 }
+
+#[test]
+fn sessions_list_is_owner_scoped() {
+    let ts = start_server_with("chat_list", scripted_cfg());
+    let admin = ts.admin_token();
+    let mut c = ts.control(Some(&admin));
+    let player = principal_with(&mut c, &[("chat", "gen")]);
+    c.set_token(Some(&player));
+
+    // No sessions yet: an empty list, not an error.
+    let r = c.get("/v1/chat/sessions");
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let rows = r.json().get("sessions").and_then(Value::as_arr).unwrap().len();
+    assert_eq!(rows, 0);
+
+    let mut made = Vec::new();
+    for _ in 0..2 {
+        let r = c.post_json(
+            "/v1/chat/sessions",
+            &jobj(vec![
+                ("api_version", Value::Int(1)),
+                ("namespace", jstr("gen")),
+                ("provider", jstr("fleet-qwen")),
+            ]),
+        );
+        assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+        made.push(r.str_field("session").to_string());
+    }
+
+    // The owner's list names exactly the sessions they created.
+    let r = c.get("/v1/chat/sessions");
+    assert_eq!(r.status, 200);
+    let body = r.json();
+    let rows = body.get("sessions").and_then(Value::as_arr).unwrap();
+    let ids: Vec<&str> =
+        rows.iter().filter_map(|v| v.get("session").and_then(Value::as_str)).collect();
+    assert_eq!(rows.len(), 2, "{ids:?}");
+    for id in &made {
+        assert!(ids.contains(&id.as_str()), "{ids:?} missing {id}");
+    }
+
+    // A DIFFERENT principal sees none of them — the list never leaks
+    // another owner's transcripts.
+    c.set_token(Some(&admin));
+    let other = principal_with(&mut c, &[("chat", "gen")]);
+    c.set_token(Some(&other));
+    let r = c.get("/v1/chat/sessions");
+    assert_eq!(r.status, 200);
+    let rows = r.json().get("sessions").and_then(Value::as_arr).unwrap().len();
+    assert_eq!(rows, 0);
+}
