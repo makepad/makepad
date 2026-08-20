@@ -50,6 +50,13 @@ pub fn checksum(buf: &[u8], seed: (u32, u32), big_endian: bool) -> (u32, u32) {
     (s0, s1)
 }
 
+/// The log moved on while this snapshot was in use. Retrying after a
+/// `refresh()` picks up the newest committed content; guessing is the one
+/// thing a reader must not do.
+fn snapshot_gone() -> Error {
+    Error::Busy("the write-ahead log was reset while this snapshot was in use".into())
+}
+
 pub fn wal_path(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_os_string();
     s.push("-wal");
@@ -288,7 +295,15 @@ impl Wal {
         let salt = (be_u32(&hdr, 16)?, be_u32(&hdr, 20)?);
         let seq = be_u32(&hdr, 12)?;
         let generation_changed = salt != self.salt || seq != self.checkpoint_seq;
-        if !generation_changed && len == self.scanned_len {
+        // The length is only a safe "nothing happened" signal when the last
+        // scan ended on a commit. A transaction that rolled back leaves its
+        // frames in the file, and the next transaction writes over exactly
+        // those offsets: same salts, same length, entirely different content.
+        // Trusting the length there leaves the reader parked on the snapshot
+        // before the rollback for as long as the log does not grow.
+        let frame_size = WAL_FRAME_HEADER_SIZE as u64 + self.page_size as u64;
+        let committed_len = WAL_HEADER_SIZE as u64 + self.frames as u64 * frame_size;
+        if !generation_changed && len == self.scanned_len && self.scanned_len == committed_len {
             return Ok(());
         }
         if generation_changed {
@@ -390,8 +405,33 @@ impl Wal {
             Some(o) => o,
             None => return Ok(false),
         };
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(out)?;
+        // An offset only means anything within the generation it was scanned
+        // in. A checkpoint truncates the log, bumps the salts and starts
+        // writing fresh frames over exactly these offsets, so the frame header
+        // is re-read and matched before its page is handed out: without it a
+        // reader whose snapshot has been checkpointed away silently returns
+        // the content of whatever page now sits there — a different b-tree's
+        // page, decoded as this one.
+        let header_at = offset.saturating_sub(WAL_FRAME_HEADER_SIZE as u64);
+        let mut hdr = [0u8; WAL_FRAME_HEADER_SIZE];
+        self.file.seek(SeekFrom::Start(header_at))?;
+        match self.file.read_exact(&mut hdr) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(snapshot_gone()),
+            Err(e) => return Err(Error::Io(e)),
+        }
+        if be_u32(&hdr, 0)? != pgno
+            || (be_u32(&hdr, 8)?, be_u32(&hdr, 12)?) != self.salt
+            || header_at + WAL_FRAME_HEADER_SIZE as u64 != offset
+        {
+            return Err(snapshot_gone());
+        }
+        // The header read left the cursor exactly on the frame's page data.
+        match self.file.read_exact(out) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(snapshot_gone()),
+            Err(e) => return Err(Error::Io(e)),
+        }
         Ok(true)
     }
 
