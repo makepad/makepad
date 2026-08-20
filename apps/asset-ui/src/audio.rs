@@ -287,20 +287,22 @@ pub fn mix_into(output: &mut AudioBuffer, device_rate: f64) {
 // (displayed via Image.set_texture, same texture path as video frames).
 // ---------------------------------------------------------------------------
 
-/// Persisted waveform sidecar dimensions (history-card-scaled strip).
-pub const WAVEFORM_THUMB_W: usize = 188;
-pub const WAVEFORM_THUMB_H: usize = 116;
+/// Persisted audio sidecar dimensions. SQUARE, because a card is: a wide
+/// strip letterboxes into a tile with dead bands above and below, and the
+/// detail you can read off it at full width is exactly what a card throws
+/// away.
+pub const WAVEFORM_THUMB_W: usize = 192;
+pub const WAVEFORM_THUMB_H: usize = 192;
 
-/// Encode the History waveform strip as an encoded-PNG sidecar payload.
+/// Encode the card picture of a track as an encoded-PNG sidecar payload.
 /// Persisting this at accept/backfill time lets gallery refreshes decode a
-/// small PNG instead of rereading and min/max-scanning the whole WAV.
+/// small PNG instead of rereading and scanning the whole WAV.
 pub fn waveform_thumbnail_png(pcm: &WavPcm) -> Option<Vec<u8>> {
-    // A SPECTROGRAM is the picture of a track: a waveform strip of any
-    // mastered audio is the same filled rectangle. Same renderer the
-    // importer publishes with, so the card in this app and the thumbnail
-    // in the catalog are the same picture.
+    // The SAME composite the importer publishes — spectrogram with a wave
+    // strip along its bottom edge — so the card in this app and the
+    // thumbnail in the catalog are one picture, not two.
     let mono: Vec<f32> = pcm.frames.iter().map(|(l, r)| (l + r) * 0.5).collect();
-    if let Some(rgba) = makepad_asset_importer::spectrogram::spectrogram_rgba(
+    if let Some((rgba, _regions)) = makepad_asset_importer::spectrogram::composite_rgba(
         &mono,
         pcm.sample_rate,
         WAVEFORM_THUMB_W,

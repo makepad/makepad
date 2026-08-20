@@ -94,6 +94,62 @@ use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 // The shared preview widgets: the same set the VJ and DJ surfaces adopt.
 use makepad_asset_widgets::{AudioAction, ClipFormat, ContentPreview, PreviewContent};
 
+/// The readable name of an imported item: the last segment of its stable
+/// file id, which is the thing a person recognises.
+fn import_item_name(file: &str) -> String {
+    let tail = file
+        .rsplit(|c| c == ':' || c == '/')
+        .next()
+        .unwrap_or(file);
+    if tail.is_empty() { file.to_string() } else { tail.to_string() }
+}
+
+/// Where it came from: the segment before the name (the pack, the wad, the
+/// folder), so a grid of imports says what is arriving from where.
+fn import_item_source(file: &str) -> String {
+    let mut parts: Vec<&str> = file.split(|c| c == ':' || c == '/').filter(|s| !s.is_empty()).collect();
+    parts.pop();
+    parts.pop().unwrap_or("").to_string()
+}
+
+/// An import preview PNG as the frames a card draws: the cells the picture
+/// DECLARED when it is a packed sheet (a sprite actor, a model turntable),
+/// otherwise the one picture it is. No dimension guessing — an import
+/// preview that says nothing about itself is a still.
+fn import_thumb_frames(cx: &mut Cx, png: &[u8]) -> Option<(Vec<Texture>, f32)> {
+    let image = ImageBuffer::from_png(png).ok()?;
+    let (w, h) = (image.width, image.height);
+    let level0 = w.saturating_mul(h);
+    let pixels = if image.data.len() >= level0 { &image.data[..level0] } else { &image.data[..] };
+    match makepad_asset_importer::anim_icon::read_layout(png) {
+        Some((cells, fps)) => {
+            let frames = makepad_asset_importer::anim_icon::cut_cells_bgra(
+                w, h, pixels, cells.cell_w, cells.cols, cells.first, cells.count,
+            );
+            if frames.is_empty() {
+                return Some((vec![image.into_new_texture(cx)], 0.0));
+            }
+            let (cw, ch) = (cells.cell_w as usize, cells.cell_h as usize);
+            let textures = frames
+                .into_iter()
+                .map(|data| {
+                    Texture::new_with_format(
+                        cx,
+                        TextureFormat::VecBGRAu8_32 {
+                            width: cw,
+                            height: ch,
+                            data: Some(data),
+                            updated: TextureUpdated::Full,
+                        },
+                    )
+                })
+                .collect();
+            Some((textures, fps))
+        }
+        None => Some((vec![image.into_new_texture(cx)], 0.0)),
+    }
+}
+
 /// Which container a track's bytes are in. The well does not sniff — the
 /// host is the one that knows what it fetched, from the catalog's own
 /// content type, with the file name as a second opinion.
@@ -118,7 +174,7 @@ use crate::store_views::{
     runs_rows,
     short_digest, truncate,
     should_start_file_drag, upstream_preview_allowed, CandidateSheet, GalleryEntry, InputAsset,
-    CatalogGrid, InputTray, LibraryGallery, PreviewWork, RowAction, RunTray,
+    CatalogGrid, CatalogTile, InputTray, LibraryGallery, PreviewWork, RowAction, RunTray,
     RunTrayMember,
     StoreListPanel, StoreRow,
     TileDelete,
@@ -2559,50 +2615,15 @@ script_mod! {
                                         width: Fill
                                         height: 40
                                     }
-                                    import_preview := View{
-                                        width: Fill height: 72
+                                    // The SAME card the Library grid draws,
+                                    // fed by the import queue: a row of
+                                    // imports leads with its pictures, and
+                                    // every improvement to the catalog card
+                                    // lands here too.
+                                    import_grid := mod.widgets.CatalogGrid{
+                                        width: Fill
+                                        height: 260
                                         visible: false
-                                        flow: Right spacing: 4
-                                        it0 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t0 := ThumbFitImage{}
-                                        }
-                                        it1 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t1 := ThumbFitImage{}
-                                        }
-                                        it2 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t2 := ThumbFitImage{}
-                                        }
-                                        it3 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t3 := ThumbFitImage{}
-                                        }
-                                        it4 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t4 := ThumbFitImage{}
-                                        }
-                                        it5 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t5 := ThumbFitImage{}
-                                        }
-                                        it6 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t6 := ThumbFitImage{}
-                                        }
-                                        it7 := View{
-                                            width: 72 height: 72
-                                            align: Align{x: 0.5 y: 0.5}
-                                            import_t7 := ThumbFitImage{}
-                                        }
                                     }
                                 }
                                 import_scroll := QuietScrollY{
@@ -9603,6 +9624,40 @@ impl App {
         let item = self.catalog_work.get(&file).cloned();
         let asset_key = asset.to_string();
 
+        // A WORLD walks itself: the shared well runs the same autonomous
+        // walkthrough the VJ does — build the level's collision and
+        // navigation off the frame thread, then tour it, opening doors on
+        // approach. A map turned on a turntable tells you nothing about
+        // what it is like to be inside it.
+        let kind = self
+            .store
+            .search
+            .ready()
+            .and_then(|results| results.hits.iter().find(|hit| hit.asset_id == asset))
+            .and_then(|hit| hit.kind);
+        let is_world = kind == Some(makepad_asset_data::AssetKind::World);
+        if is_world {
+            if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
+                if self.library_preview_file.as_deref() != Some(file.as_str()) {
+                    match std::fs::read(&path) {
+                        Ok(glb) => {
+                            self.library_preview_file = Some(file.clone());
+                            self.show_preview(
+                                cx,
+                                PreviewContent::World { glb, texture_png: None },
+                            );
+                            return;
+                        }
+                        Err(error) => log!("library preview: {file} unreadable: {error}"),
+                    }
+                }
+                // Already walking this one: leave the tour alone.
+                return;
+            }
+            self.show_preview(cx, PreviewContent::Empty("Loading the world…".into()));
+            return;
+        }
+
         // A mesh: hand this app's viewer the payload once it is on disk.
         if let Some(item) = &item {
             if item.meta.content_type.contains("gltf") {
@@ -9904,7 +9959,7 @@ impl App {
         let drop = self.ui.drop_down2(cx, ids!(kenney_pack_drop));
         drop.set_labels(cx, labels);
         drop.set_selected_item(cx, self.import_page.kenney_pack_index);
-        self.refresh_import_preview_strip(cx);
+        self.refresh_import_grid(cx);
         self.refresh_import_queue_list(cx);
         let show_preview = !self.import_page.preview_thumbs.is_empty()
             && (self.import_busy()
@@ -9912,7 +9967,7 @@ impl App {
                 || !self.import_landings.is_empty()
                 || self.import_page.icons_busy());
         self.ui
-            .view(cx, ids!(import_preview))
+            .widget(cx, ids!(import_grid))
             .set_visible(cx, show_preview);
         self.ui
             .button(cx, ids!(queue_clear_btn))
@@ -10258,32 +10313,48 @@ impl App {
         script_apply_eval!(cx, list, { height: #(height) });
     }
 
-    fn refresh_import_preview_strip(&mut self, cx: &mut Cx) {
+    /// The LOAD grid: every import that has a picture yet, drawn with the
+    /// SAME card the Library uses. One component, so a card improvement is
+    /// never made twice.
+    fn refresh_import_grid(&mut self, cx: &mut Cx) {
         if !self.import_page.preview_dirty {
             return;
         }
         self.import_page.preview_dirty = false;
-        let slots = [
-            ids!(import_t0),
-            ids!(import_t1),
-            ids!(import_t2),
-            ids!(import_t3),
-            ids!(import_t4),
-            ids!(import_t5),
-            ids!(import_t6),
-            ids!(import_t7),
-        ];
-        for (i, slot) in slots.iter().enumerate() {
-            match self.import_page.preview_thumbs.get(i) {
-                Some((_, png)) => {
-                    if let Err(error) = self.ui.image(cx, *slot).load_png_from_data(cx, png) {
-                        log!("import preview decode failed: {error:?}");
-                        self.ui.image(cx, *slot).set_texture(cx, None);
+        let tiles: Vec<CatalogTile> = self
+            .import_page
+            .preview_thumbs
+            .iter()
+            .map(|(file, _)| CatalogTile {
+                asset: file.clone(),
+                title: import_item_name(file),
+                meta: import_item_source(file),
+                alias: file.clone(),
+                when: String::new(),
+                selected: false,
+            })
+            .collect();
+        let pictures: Vec<(String, Vec<u8>)> = self.import_page.preview_thumbs.clone();
+        let widget = self.ui.widget(cx, ids!(import_grid));
+        let Some(mut grid) = widget.borrow_mut::<CatalogGrid>() else {
+            return;
+        };
+        let total = tiles.len();
+        grid.set_tiles(cx, tiles, total, crate::store_views::CatalogLayout::Tiles);
+        for (file, png) in pictures {
+            if grid.has_thumb(&file) {
+                continue;
+            }
+            match import_thumb_frames(cx, &png) {
+                Some((frames, fps)) if frames.len() > 1 => {
+                    grid.install_anim(cx, file, frames, fps)
+                }
+                Some((mut frames, _)) => {
+                    if let Some(texture) = frames.pop() {
+                        grid.install_thumb(cx, file, texture);
                     }
                 }
-                None => {
-                    self.ui.image(cx, *slot).set_texture(cx, None);
-                }
+                None => {}
             }
         }
     }
