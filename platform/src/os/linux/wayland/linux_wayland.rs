@@ -659,6 +659,9 @@ impl WaylandCx {
                     if cx.windows[window_id].backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();
                     }
+                    let cx_window = &mut cx.windows[window_id];
+                    cx_window.window_geom = window.window_geom.clone();
+                    cx_window.is_created = true;
                     state.windows.push(window);
                 }
                 CxOsOp::CreatePopupWindow {
@@ -695,6 +698,9 @@ impl WaylandCx {
                         cx.windows[window_id].popup_position = Some(position);
                         cx.windows[window_id].popup_size = Some(size);
                         cx.windows[window_id].popup_grab_keyboard = grab_keyboard;
+                        let cx_window = &mut cx.windows[window_id];
+                        cx_window.window_geom = popup.window_geom.clone();
+                        cx_window.is_created = true;
                         state.popups.push(popup);
                     }
                 }
