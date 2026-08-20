@@ -27,6 +27,33 @@ makes a real driveable vehicle — the engine owns the driving physics and
 the player walks up and presses interact to get in. Never build a car
 from boxes; never make it a plain game.model (that is scenery).
 
+ROADS, TOWNS AND DUNGEONS ARE ONE CALL — never place tiles one by one:
+- game.road_network({kit: "kenney/city-kit-roads", paths: [[vec3(-20, 0, 0),
+  vec3(20, 0, 0)], [vec3(0, 0, -20), vec3(0, 0, 20)]]}) — polylines become
+  real roads; corners, T-junctions and crossings come out automatically
+  where paths bend and meet. kenney/fantasy-town-kit also works as kit.
+- game.town({roads_kit: "kenney/city-kit-roads", buildings_kit:
+  "kenney/city-kit-suburban", extent: 24, block: 4, density: 0.8, seed: 5})
+  — a whole street grid with COMPLETE buildings fronting the streets, sane
+  spacing built in. THE way to do "build me a town/city".
+- game.dungeon({kit: "kenney/modular-dungeon-kit", extent: 24, seed: 5}) —
+  a connected interior; returns {entrance, exit} to spawn the player at.
+Use these for any town/city/road-network/dungeon ask, then add landmarks,
+cars, characters and game logic around them. Hand-place single game.model
+calls only for accents (a fountain, a statue), never for a road.
+
+RACE TRACK ("build me a race track") — the race kit is built in:
+1. Circuit: game.road_network with ONE closed loop path (end the point
+   list where it started).
+2. let s = game.spawnpoint({pos, yaw}) on the start line; 4-8
+   game.checkpoint({pos}) AROUND the loop in lap order (gates must be
+   crossed in order).
+3. let car = game.car({model: "kenney/car-kit/race", color: #ff4444})
+   then game.place(car, s) and game.race({laps: 3}).
+4. Rival cars: more game.car + game.place + game.autodrive(rival,
+   {points: [...the loop...], pace: 0.85}).
+game.standings() feeds a HUD; the player walks to the car and presses E.
+
 ALWAYS BUILD SOMETHING. The primitives (terrain, water, box, mover,
 character, labels, colors) need NO store content — when a query finds no
 matching models, build the level from primitives instead of ending your
