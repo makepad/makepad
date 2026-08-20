@@ -23,6 +23,13 @@
 //! the measured vocals stem of the test fixture hits 1.12. Each span is
 //! therefore normalized by its own peak and the peak stored beside it, which
 //! also buys back precision on quiet spans.
+//!
+//! That trade costs about 700 KB per second of track — a quarter of a gigabyte
+//! for a six-minute one — so the root is BOUNDED: [`prune`] drops whole track
+//! entries, least recently USED first, until the root fits a byte budget. An
+//! entry is "used" when it is opened, which is when a track lands on a deck,
+//! and the caller pins whatever is on a deck right now so a set in progress is
+//! never evicted out from under itself.
 
 use crate::config::*;
 use crate::model::StemSet;
@@ -30,9 +37,20 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bytes one frame occupies in a stem file (stereo i16).
 const FRAME_BYTES: u64 = 4;
+
+/// Last-used stamp, seconds since the epoch, little-endian. Its own file so a
+/// read of the cache never rewrites anything the audio depends on.
+const USED_FILE: &str = "used";
+
+/// An entry being deleted is RENAMED under this prefix first, so a prune that
+/// is interrupted can never leave a half-deleted entry that still claims to
+/// hold spans. The prefix starts with a dot, which [`StemCache::open`] refuses
+/// as a digest, so a leftover can never be mistaken for a track.
+const EVICTING_PREFIX: &str = ".evicting-";
 
 #[derive(Debug)]
 pub enum CacheError {
@@ -234,6 +252,10 @@ impl StemCache {
             files.push(file);
         }
 
+        // Opening IS using: the LRU order the budget prunes by is the order
+        // tracks were last put on a deck, not the order they were separated.
+        touch_used(&dir);
+
         Ok(StemCache {
             dir,
             header,
@@ -382,6 +404,167 @@ impl StemCache {
         }
         Ok(out)
     }
+}
+
+// ---------------------------------------------------------------------------
+// keeping the root inside a budget
+// ---------------------------------------------------------------------------
+
+/// Default ceiling for the whole cache root.
+///
+/// A track costs about 700 KB of separated audio per second, so this is
+/// roughly six hours of separated music: a working DJ set several times over,
+/// and small enough that a laptop does not quietly lose a tenth of its disk to
+/// a directory nobody looks at. The number is the caller's to choose —
+/// [`prune`] takes it as an argument — but this is the one the client uses.
+pub const DEFAULT_BUDGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+
+/// What one [`prune`] did. `before`/`after` are the whole root's footprint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub before: u64,
+    pub after: u64,
+    /// `(digest, bytes)` per evicted entry, in the order they went.
+    pub removed: Vec<(String, u64)>,
+}
+
+impl PruneReport {
+    pub fn freed(&self) -> u64 {
+        self.before.saturating_sub(self.after)
+    }
+}
+
+/// Bring the cache root inside `budget_bytes` by dropping whole track entries,
+/// least recently used first.
+///
+/// `keep` names digests that must survive whatever the budget says — the
+/// tracks on the decks right now. Their bytes still COUNT toward the total, so
+/// a budget smaller than what is pinned simply evicts everything else and
+/// stops; the alternative (evicting the track under the needle) is not an
+/// improvement anyone would thank us for.
+///
+/// Whole entries, never spans: a track is either cached or it is not, and half
+/// an entry would mean re-separating the gaps at exactly the moment the
+/// operator is playing them. Eviction renames before it deletes, so an
+/// interrupted prune leaves nothing that could be read back as audio; the
+/// leftover is finished off by the next prune.
+pub fn prune(root: impl AsRef<Path>, budget_bytes: u64, keep: &[&str]) -> Result<PruneReport> {
+    let root = root.as_ref();
+    let mut report = PruneReport::default();
+    let Ok(listing) = std::fs::read_dir(root) else {
+        return Ok(report);
+    };
+    // `(used, digest, bytes)`, entries that MAY go.
+    let mut candidates: Vec<(u64, String, u64)> = Vec::new();
+    let mut total = 0u64;
+    for entry in listing.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with(EVICTING_PREFIX) {
+            // A prune that died halfway. Finish it and do not count it.
+            let _ = std::fs::remove_dir_all(&path);
+            continue;
+        }
+        if name.starts_with('.') {
+            continue;
+        }
+        let bytes = entry_bytes(&path);
+        total += bytes;
+        if keep.contains(&name) {
+            continue;
+        }
+        candidates.push((used_stamp(&path), name.to_string(), bytes));
+    }
+    report.before = total;
+    report.after = total;
+    if total <= budget_bytes {
+        return Ok(report);
+    }
+    // Oldest use first; the digest breaks ties so a prune is deterministic.
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, digest, bytes) in candidates {
+        if report.after <= budget_bytes {
+            break;
+        }
+        if evict(root, &digest).is_err() {
+            continue;
+        }
+        report.after = report.after.saturating_sub(bytes);
+        report.removed.push((digest, bytes));
+    }
+    Ok(report)
+}
+
+/// Bytes one entry occupies. Stem files are pre-sized and filled span by span,
+/// so on a filesystem with holes the logical length is an overstatement of
+/// what is actually on the disk; count blocks where the platform reports them.
+fn entry_bytes(dir: &Path) -> u64 {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in listing.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            total += meta.blocks() * 512;
+        }
+        #[cfg(not(unix))]
+        {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Stamp an entry as used now. Best effort: a cache that cannot record its own
+/// LRU order is still a cache, it just prunes in digest order.
+fn touch_used(dir: &Path) {
+    let _ = std::fs::write(dir.join(USED_FILE), now_secs().to_le_bytes());
+}
+
+/// When this entry was last opened. An entry written by an older build has no
+/// stamp; its directory time is the honest fallback, and zero (evict first) is
+/// the fallback for that.
+fn used_stamp(dir: &Path) -> u64 {
+    if let Ok(bytes) = std::fs::read(dir.join(USED_FILE)) {
+        if let Ok(eight) = <[u8; 8]>::try_from(bytes.as_slice()) {
+            return u64::from_le_bytes(eight);
+        }
+    }
+    std::fs::metadata(dir)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Rename out of the way, then delete. The rename is the atomic part: after it
+/// the entry cannot be opened as a track, so a crash before the delete lands
+/// costs disk and nothing else.
+fn evict(root: &Path, digest: &str) -> std::io::Result<()> {
+    let from = root.join(digest);
+    let to = root.join(format!("{EVICTING_PREFIX}{digest}"));
+    let _ = std::fs::remove_dir_all(&to);
+    std::fs::rename(&from, &to)?;
+    std::fs::remove_dir_all(&to)
 }
 
 fn quantize(sample: f32) -> i16 {
@@ -545,6 +728,121 @@ mod tests {
                 "{bad:?} should be refused"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- the budget -------------------------------------------------------
+
+    /// One entry of `spans` spans, fully written, stamped as used at `used`.
+    fn filled_entry(root: &Path, digest: &str, spans: usize, used: u64) -> u64 {
+        let frames = spans * CHUNK_STEP;
+        let mut cache =
+            StemCache::open(root, digest, CacheHeader::for_track(frames as u64)).unwrap();
+        for span in 0..spans {
+            cache
+                .write_span(span * CHUNK_STEP, &ramp_stems(CHUNK_STEP, span as f32 * 0.1))
+                .unwrap();
+        }
+        drop(cache);
+        std::fs::write(root.join(digest).join(USED_FILE), used.to_le_bytes()).unwrap();
+        entry_bytes(&root.join(digest))
+    }
+
+    #[test]
+    fn a_root_inside_its_budget_is_left_alone() {
+        let root = temp_root("budget-idle");
+        let bytes = filled_entry(&root, "aaaa1111", 1, 100);
+        let report = prune(&root, bytes * 4, &[]).unwrap();
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert_eq!(report.before, report.after);
+        assert!(root.join("aaaa1111").is_dir());
+        // …and an unopened entry still knows when it was last used.
+        assert_eq!(used_stamp(&root.join("aaaa1111")), 100);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_least_recently_used_track_goes_first() {
+        let root = temp_root("budget-lru");
+        // Same size, different last-used stamps.
+        let one = filled_entry(&root, "aaaa1111", 1, 300);
+        filled_entry(&root, "bbbb2222", 1, 100);
+        filled_entry(&root, "cccc3333", 1, 200);
+        assert!(one > 0, "an entry with a span in it occupies disk");
+
+        // Room for one entry: the two oldest go, oldest first.
+        let report = prune(&root, one, &[]).unwrap();
+        assert_eq!(
+            report.removed.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>(),
+            vec!["bbbb2222", "cccc3333"],
+            "{report:?}"
+        );
+        assert!(report.after <= one, "{report:?}");
+        assert_eq!(report.freed(), report.before - report.after);
+        assert!(root.join("aaaa1111").is_dir(), "the newest use survives");
+        assert!(!root.join("bbbb2222").exists());
+        assert!(!root.join("cccc3333").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_track_on_a_deck_is_never_evicted() {
+        let root = temp_root("budget-pinned");
+        // The pinned one is BOTH the oldest and the biggest: nothing but the
+        // pin can save it.
+        filled_entry(&root, "aaaa1111", 3, 10);
+        let young = filled_entry(&root, "bbbb2222", 1, 900);
+        // A budget of nothing: everything unpinned has to go, and the pinned
+        // entry stays even though the root is still over.
+        let report = prune(&root, 0, &["aaaa1111"]).unwrap();
+        assert_eq!(
+            report.removed.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>(),
+            vec!["bbbb2222"],
+            "{report:?}"
+        );
+        assert_eq!(report.freed(), young);
+        assert!(root.join("aaaa1111").is_dir(), "the deck's own track survives");
+        // The spans of the survivor are untouched — a pin is not a rewrite.
+        let cache =
+            StemCache::open(&root, "aaaa1111", CacheHeader::for_track(3 * CHUNK_STEP as u64))
+                .unwrap();
+        assert!(cache.is_complete());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_interrupted_eviction_leaves_nothing_readable_behind() {
+        let root = temp_root("budget-crash");
+        filled_entry(&root, "aaaa1111", 1, 100);
+        // Exactly what a crash between the rename and the delete leaves.
+        std::fs::rename(
+            root.join("aaaa1111"),
+            root.join(format!("{EVICTING_PREFIX}aaaa1111")),
+        )
+        .unwrap();
+        // The half-deleted entry is not a track: it does not count toward the
+        // budget, and the next prune finishes the job.
+        let report = prune(&root, u64::MAX, &[]).unwrap();
+        assert_eq!(report.before, 0, "{report:?}");
+        assert!(!root.join(format!("{EVICTING_PREFIX}aaaa1111")).exists());
+        // And the digest it came from opens as a fresh, empty entry rather
+        // than one that claims spans it no longer has.
+        let cache =
+            StemCache::open(&root, "aaaa1111", CacheHeader::for_track(CHUNK_STEP as u64)).unwrap();
+        assert!(!cache.has_span(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn opening_an_entry_is_what_marks_it_used() {
+        let root = temp_root("budget-touch");
+        filled_entry(&root, "aaaa1111", 1, 100);
+        let before = used_stamp(&root.join("aaaa1111"));
+        assert_eq!(before, 100);
+        let _ = StemCache::open(&root, "aaaa1111", CacheHeader::for_track(CHUNK_STEP as u64))
+            .unwrap();
+        let after = used_stamp(&root.join("aaaa1111"));
+        assert!(after >= now_secs() - 5 && after > before, "{before} -> {after}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
