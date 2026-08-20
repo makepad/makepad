@@ -1,9 +1,18 @@
 # Makepad Agent Runbook
 
+> **Driving a running app: use `--remote`.** Every makepad app started with
+> `--remote` serves a tiny localhost HTTP control surface: window list, PNG
+> grabs, real mouse/key/text injection, widget rects, log tail, graceful quit.
+> It replaces `screencapture -l`, `winid.swift`, CGEvent scripting and the
+> studio websocket bridge for all agent work. Full spec: [App Remote Control](#app-remote-control---remote).
+
 ## Execution Policy
 - Launch UI programs as standalone release binaries from this checkout. Do
   not use the Studio remote bridge, `ObserveMount`, `RunItem`, or any
   `cargo-makepad studio` websocket client.
+- Launch with `--remote` whenever you intend to look at or drive the app,
+  and finish with `GET /gq`. **Nothing of yours may outlive your task** —
+  never leave a test window on the user's screen.
 - Always use release builds for runtime validation, profiling, benchmarks,
   timing checks, or any performance-sensitive command. Use `--release`
   unless the user explicitly asks for a debug build.
@@ -28,8 +37,137 @@
 ## Standalone Launch
 1. `cargo build --release -p <package>` from this checkout.
 2. Kill any older process of that same executable.
-3. Run `target/release/<bin>` from the repo root (so resource paths resolve).
+3. Run `target/release/<bin> --remote` from the repo root (so resource paths
+   resolve), parse the port from the startup line, drive it over HTTP.
 4. After code changes, repeat 1–3 before drawing conclusions.
+5. `GET /gq` when you are done. Always.
+
+## App Remote Control (`--remote`)
+
+Any makepad app launched with `--remote` runs a localhost HTTP server inside
+the process and prints one line before the UI appears:
+
+```
+[makepad-remote] listening on 127.0.0.1:53412 pid=9931 app=makepad-example-splash grabs=/var/folders/…/T/makepad-remote/makepad-example-splash-9931
+```
+
+Port, pid, app name and the grab directory — everything needed to drive and
+clean up the instance, with no discovery step. `--remote=PORT` pins the port;
+`MAKEPAD_REMOTE=1` (or `=PORT`) does the same via the environment. No app code
+is involved: it lives in `app_main!`, so every app gets it for free.
+
+### Cheat sheet
+
+Every route is a plain `GET`. Every answer is **one line of JSON** with short
+keys and real numbers. Errors are `{"err":"..."}` with HTTP 404.
+`GET /` returns this table as plain text, so an agent that finds the port
+learns the whole API in one request.
+
+| Route | Answer | Notes |
+|---|---|---|
+| `/` `/help` | plain-text cheat sheet | self-describing; read this first |
+| `/s` `?w=ID` | `{"app":…,"pid":…,"w":[{"i":0,"t":"Title","sz":[w,h],"px":[w,h],"dpi":2,"pos":[x,y]}]}` | `sz` = layout points, `px` = physical pixels |
+| `/g` `?w=&scale=&raw=` | `{"png":"/abs/path.png","w":0,"sz":[w,h]}` | writes a file and returns the **path** (agents read images as files). `raw=1` sends `image/png` bytes instead. `scale=0.5` halves it |
+| `/gq` `?w=&scale=` | `{"png":[paths…],"quit":1}` | **grab every window, then quit.** The canonical last call of a session |
+| `/m` `?k=&x=&y=&w=&b=&dx=&dy=&wait=` | `{"ok":1,"f":frame}` | `k=move\|down\|up\|click\|scroll`; `b=0` left, `1` right, `2` middle |
+| `/click` `?x=&y=&w=&wait=` | `{"ok":1}` | alias for `/m?k=click` (move + down + up) |
+| `/k` `?t=TEXT` or `?k=down\|up\|press&c=CODE` | `{"ok":1}` | `t=` goes through the IME text path; `c=` takes `KeyA`/`a`/`enter`/`Escape`/`ArrowLeft`/`F1`/`Key1`… plus `&shift=1&ctrl=1&alt=1&cmd=1` |
+| `/t` `?t=TEXT` | `{"ok":1}` | same as `/k?t=` |
+| `/snap` `?q=&w=&all=` | `{"s":[{"i":"id","ty":"Button","r":[x,y,w,h],"w":0,"t":"Click me"}]}` | **how you find things to click.** `q=` filters id/type/text; rects are window-local, ready to feed to `/click` |
+| `/d` `/dump` | plain text widget tree | one indented line per widget, ending `x y w h` |
+| `/log` `?n=50&since=N` | `{"n":lastseq,"l":["[E] …"]}` | ring buffer of the app's own log output — see errors without owning stdout |
+| `/close` `?w=ID` | `{"ok":1}` | closes one window the normal way |
+| `/quit` | `{"ok":1}` | graceful shutdown, no final grab |
+
+Add `&wait=1` to any input route to have it answer only **after the next frame
+is drawn**, so a following `/g` sees the result with no `sleep`.
+Add `&w=ID` to target a window; omit it for the first one.
+`POST` the same routes with a flat JSON body (`{"x":10,"y":20}`) when quoting a
+query string is painful; the key names are the long ones (`window`, `kind`,
+`button`, `text`, `code`).
+
+### The standard pattern
+
+```bash
+cargo build --release -p makepad-example-splash
+./target/release/makepad-example-splash --remote > /tmp/app.log 2>&1 &
+sleep 4
+P=$(grep -o 'listening on 127.0.0.1:[0-9]*' /tmp/app.log | grep -o '[0-9]*$')
+
+curl -s "http://127.0.0.1:$P/s"                      # {"app":…,"w":[{"i":0,…}]}
+curl -s "http://127.0.0.1:$P/snap?q=press_demo"      # find the button's rect
+curl -s "http://127.0.0.1:$P/click?x=352&y=472&wait=1"
+curl -s "http://127.0.0.1:$P/snap?q=press_status"    # assert the app reacted
+curl -s "http://127.0.0.1:$P/log?n=20"               # any errors?
+curl -s "http://127.0.0.1:$P/gq?scale=0.5"           # final PNGs + quit
+```
+
+Read the returned `png` path with your image tool. `tools/remote_smoke.sh` is
+this pattern as an executable end-to-end test across three example apps.
+
+### Rules
+
+- **Close what you open.** When you are done with an instance you launched,
+  `GET /gq` (or `/close` each window, then `/quit`). Never leave test windows
+  on the user's screen, and never `pkill` when the protocol is available.
+- **Never touch an instance the user is running.** Launch your own.
+- **A vanished window or app with `[makepad-remote] user closed …` in the log
+  means the human dismissed it — it was in their way.** Do **not** treat that
+  as a crash and do **not** relaunch it. The app prints
+  `[makepad-remote] user closed window 1 ("Inspector Panel")` and, when that
+  was the last window, `[makepad-remote] app exit: user closed the last
+  window`. Both lines go to stdout with or without `--remote`, and into the
+  `/log` ring. While the app lives, `/s?w=1` on such a window answers
+  `{"err":"window 1 closed by user"}` rather than "no window 1".
+- **`--remote` windows are tagged.** Their title gets a ` [remote]` suffix
+  (both the OS title bar and makepad's own caption bar) so a human who finds
+  one lingering knows it is an agent instance and can close it guilt-free.
+  `--remote-title-tag=NAME` changes the tag; `--remote-title-tag=off` removes
+  it.
+
+### Semantics worth knowing
+
+- **Coordinates** are layout points, window-local, y down — the same space
+  `MouseDownEvent.abs` uses, and the same space `/snap` reports rects in. No
+  dpi maths: a rect from `/snap` goes straight into `/click`.
+- **Window ids** are stable `usize` slots (`/s` `"i"`). Every window-targeting
+  route takes `w=`; omitting it means the first created window. A request for
+  a window that never existed 404s with `{"err":"no window 3"}`.
+- **Input takes the real path.** Events are injected through
+  `Cx::dispatch_studio_msg`, the same function the studio bridge uses, with
+  the same `fingers` bookkeeping — so hits, capture, tap counts and gestures
+  behave exactly as they do for a human. `/click` sends move + down + up so
+  hover-dependent widgets see what they expect.
+- **Grabs are real frames**, read back from the window's own presented
+  drawable on the frame after the request (the studio screenshot pipeline,
+  extended with per-window targeting). The UI thread is never blocked; the
+  HTTP thread waits. Grabs are written to
+  `$TMPDIR/makepad-remote/<app>-<pid>/grab-w<window>-<seq>.png`, monotonically
+  numbered, with the last 32 per window retained.
+- **Backends:** macOS/Metal is fully supported. Linux GL and Vulkan support
+  grabs too. Windows/D3D11 has no screenshot readback yet, so `/g` there times
+  out with `{"err":"grab timeout …"}` while every other route works. Android,
+  OHOS and wasm compile to a no-op.
+- **Cost when idle is zero.** The event loop only upshifts its paint clock
+  while a remote request is in flight.
+
+### Studio remote bridge (the older path)
+
+The studio (`studio/desktop` + `studio/hub`) drives a hosted app over a
+websocket with the `StudioToApp` / `AppToStudio` protocol
+(`platform/studio/src/studio.rs`): `MouseDown/Up/Move/Scroll`, `KeyDown/Up`,
+`TextInput`, `TextCopy/Cut`, `GameInput`, `Screenshot`, `RunViewFrameRequest`,
+`WidgetTreeDump`, `WidgetQuery`, `WidgetSnapshot`, `LiveChange`, `Custom`,
+`Kill`, plus the shared-swapchain messages `Swapchain` / `WindowGeomChange` /
+`Tick`. `libs/makepad_test` is the programmatic client for it
+(`TestApp::try_click_center`, `try_type_text`, `try_screenshot`, …) and
+`examples/*/tests/ui.rs` are its test suites.
+
+`--remote` reuses that vocabulary — the same message types, the same injection
+function, the same screenshot pipeline — but exposes it as HTTP on the app
+itself, with no studio, no hub, no build ids, and with per-window targeting
+that the studio path lacks. Use `--remote` for agent work; the studio bridge
+remains for the studio and for `libs/makepad_test`.
 
 ## CLAUDE.md Body
 The following is the current body of CLAUDE.md included verbatim for agent guidance parity.
@@ -62,6 +200,19 @@ For one-shot visual smoke of a small example:
 
 ```bash
 RUST_BACKTRACE=1 cargo run -p makepad-example-splash --release & PID=$!; sleep 15; kill $PID 2>/dev/null; echo "Process $PID killed"
+```
+
+To look at or drive a running app, add `--remote`: the app serves a localhost
+HTTP control surface (window list, PNG grabs, real mouse/key/text injection,
+widget rects, log tail) and prints its port on startup. Finish every session
+with `GET /gq`, which grabs each window and quits — never leave a test window
+on screen. Full protocol: repo-root `AGENTS.md`.
+
+```bash
+./target/release/makepad-example-splash --remote > /tmp/app.log 2>&1 &
+P=$(grep -o 'listening on 127.0.0.1:[0-9]*' /tmp/app.log | grep -o '[0-9]*$')
+curl -s "http://127.0.0.1:$P/"          # cheat sheet
+curl -s "http://127.0.0.1:$P/gq"        # final grab + quit
 ```
 
 When measuring runtime or performance, prefer `--release`.
