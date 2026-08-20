@@ -76,6 +76,7 @@ pub mod loading_spinner;
 pub mod bare_step;
 pub mod turtle_step;
 
+pub mod data_grid;
 pub mod portal_list;
 pub mod text_flow;
 
@@ -175,6 +176,7 @@ pub use crate::{
     page_flip::*,
     popup_menu::*,
     popup_notification::*,
+    data_grid::*,
     portal_list::*,
     radio_button::*,
     root::*,
@@ -569,6 +571,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
 
+    crate::data_grid::script_mod(vm);
     crate::portal_list::script_mod(vm);
     crate::text_flow::script_mod(vm);
 
