@@ -878,6 +878,9 @@ pub struct TrackReport {
     /// the published phase. Above one says the backbeat is landing between
     /// the rulings.
     pub mid_ratio: f64,
+    /// Segments in the published tempo map: zero means the track got one
+    /// straight line, which is the right answer for nearly all of them.
+    pub tempo_segments: usize,
     /// Fraction of the track's structural boundaries that land on bar
     /// position zero under our grid, and how many were counted. Chance is
     /// 0.25.
@@ -1529,7 +1532,8 @@ pub fn evaluate(path: &Path, pcm: &TrackPcm) -> TrackReport {
         Vec::new()
     };
 
-    let ours = grid_beats(&grid, seconds);
+    // The published beats — from the tempo map when the track has one.
+    let ours = analysis.beats();
     // The ceiling is measured on the KICKS, not on every onset in the mix.
     // A broadband support objective picks the offbeat on plenty of house
     // records — the hats between the kicks carry more spectral novelty than
@@ -1700,6 +1704,7 @@ pub fn evaluate(path: &Path, pcm: &TrackPcm) -> TrackReport {
         downbeat_structure,
         pulse_alignment,
         mid_ratio,
+        tempo_segments: analysis.tempo_map.segments.len(),
         drift_ms,
     }
 }
@@ -2014,15 +2019,22 @@ fn drums_stem_regrid() {
     let reference = kick_reference(&drums, &front);
     let truth = trim_to_spans(&reference.beats, &reference.spans);
 
-    let from_mix = analyze(&mix).grid;
-    let from_drums = analyze(&drums).grid;
-    let score_of = |grid: &TrackGrid| -> (f64, f64, f64) {
-        let beats = trim_to_spans(&grid_beats(grid, seconds), &reference.spans);
+    let mix_analysis = analyze(&mix);
+    let drums_analysis = analyze(&drums);
+    let from_mix = mix_analysis.grid;
+    let from_drums = drums_analysis.grid;
+    let score_of = |analysis: &super::TrackAnalysis| -> (f64, f64, f64, usize) {
+        let beats = trim_to_spans(&analysis.beats(), &reference.spans);
         let scores = score(&beats, &truth);
-        (scores.f, scores.continuity.cmlt, grid.bpm)
+        (
+            scores.f,
+            scores.continuity.cmlt,
+            analysis.grid.bpm,
+            analysis.tempo_map.segments.len(),
+        )
     };
-    let (mix_f, mix_cmlt, mix_bpm) = score_of(&from_mix);
-    let (drums_f, drums_cmlt, drums_bpm) = score_of(&from_drums);
+    let (mix_f, mix_cmlt, mix_bpm, mix_segments) = score_of(&mix_analysis);
+    let (drums_f, drums_cmlt, drums_bpm, drums_segments) = score_of(&drums_analysis);
     // And the same least-squares fit allowed to bend every four bars, over
     // the drums. A tempo map needs dense evidence in every segment, which is
     // the thing an isolated drum track actually supplies.
@@ -2044,9 +2056,11 @@ fn drums_stem_regrid() {
     let piecewise_scores =
         score(&trim_to_spans(&piecewise.beats, &reference.spans), &truth);
     eprintln!(
-        "{}\n  from the mix:      {mix_bpm:8.3} BPM  F {mix_f:.3}  CMLt {mix_cmlt:.3}\n  \
-         from the drums:    {drums_bpm:8.3} BPM  F {drums_f:.3}  CMLt {drums_cmlt:.3}\n  \
-         drums, segmented:  {} segments  F {:.3}  CMLt {:.3}\n  \
+        "{}\n  from the mix:      {mix_bpm:8.3} BPM  F {mix_f:.3}  CMLt {mix_cmlt:.3}  \
+         ({mix_segments} tempo segments)\n  \
+         from the drums:    {drums_bpm:8.3} BPM  F {drums_f:.3}  CMLt {drums_cmlt:.3}  \
+         ({drums_segments} tempo segments)\n  \
+         naive segmented:   {} segments  F {:.3}  CMLt {:.3}\n  \
          reference {} beats over {:.0}% of the track",
         track.file_name().unwrap_or_default().to_string_lossy(),
         piecewise.segments.len(),
@@ -2228,7 +2242,7 @@ pub fn print_track(report: &TrackReport, took: f64) {
          phase {:+.3} (rephased F {:.3})\n             oracle F {:.3} CMLt {:.3} bias {:+.1}/jit {:.1} ms\n    \
          support  ours/oracle {:.4}  ref/oracle {:.4} | \
          ours bias {:+5.1} ms jitter {:4.1} ms | downbeat x{:.2} halves {:.2}/{:.2} \
-         structure {:.2} of {} align {:+.2} mid {:.2} | drift {:3.0} ms | {:.1}s",
+         structure {:.2} of {} align {:+.2} mid {:.2} segs {} | drift {:3.0} ms | {:.1}s",
         report.name.chars().take(38).collect::<String>(),
         report.seconds,
         report.tagged_bpm.map(|b| format!("{b:.0}")).unwrap_or("-".into()),
@@ -2263,6 +2277,7 @@ pub fn print_track(report: &TrackReport, took: f64) {
         report.downbeat_structure.1,
         report.pulse_alignment,
         report.mid_ratio,
+        report.tempo_segments,
         report.drift_ms,
         took,
     );
@@ -2451,6 +2466,11 @@ pub fn summarize(reports: &[TrackReport]) {
         bad_fit.len(),
         mean(&bad_pulse),
         bad_pulse.len(),
+    );
+    let mapped = reports.iter().filter(|r| r.tempo_segments > 0).count();
+    eprintln!(
+        "  tempo map: {mapped}/{} tracks bent; the rest got one straight line",
+        reports.len()
     );
     let offbeat = reports
         .iter()
@@ -2659,8 +2679,9 @@ mod judge_tests {
                 at += period;
             }
             let pcm = render(rate, seconds, &hits);
-            let grid = analyze(&pcm).grid;
-            let ours = grid_beats(&grid, seconds);
+            let analysis = analyze(&pcm);
+            let grid = analysis.grid;
+            let ours = analysis.beats();
             let (f, _, _) = f_measure(&ours, &beats, 0.070);
             let section = |from: f64, to: f64| {
                 let want: Vec<f64> =
@@ -2670,13 +2691,26 @@ mod judge_tests {
                 f_measure(&got, &want, 0.070).0
             };
             eprintln!(
-                "dj transition: {:.3} BPM, F {f:.3} overall — before {:.3}, \
-                 during {:.3}, after {:.3}",
+                "dj transition: {:.3} BPM, {} tempo segments, F {f:.3} overall — \
+                 before {:.3}, during {:.3}, after {:.3}",
                 grid.bpm,
+                analysis.tempo_map.segments.len(),
                 section(0.0, 90.0),
                 section(90.0, 120.0),
                 section(120.0, seconds),
             );
+            // The tempo map does NOT fire here, and the measurement says
+            // why. Its gate asks whether a decoded beat sequence explains
+            // the onsets better than the straight line does: over a
+            // drifting drummer that ratio is 2.2, and here it is 1.08,
+            // because the decoder itself only reaches 0.59 alignment across
+            // a continuous ride where it reaches 0.85 on steady music. The
+            // decoder runs on the analysis's 10 ms hop; the judge's, on a
+            // 5 ms hop with the same algorithm, tracks the same ramp at F
+            // 0.999. So the limit is decode resolution and not the gate —
+            // lowering the gate to 1.05 lets this through and admits ten of
+            // forty house records with it, for a worse median.
+            //
             // A fixed grid gets at most one side of a transition. What must
             // not happen is that it gets NEITHER — a tempo averaged across
             // the ride, fitting nothing.
@@ -2742,7 +2776,13 @@ mod judge_tests {
             beat += 1;
         }
         let pcm = render(rate, seconds, &hits);
-        let grid = analyze(&pcm).grid;
+        let analysis = analyze(&pcm);
+        let grid = analysis.grid;
+        // What the PUBLISHED grid gets — with its tempo map, if the track
+        // earned one.
+        let published = analysis.beats();
+        let (published_f, _, _) = f_measure(&published, &beats, 0.070);
+        // …and what one straight line alone would have got.
         let ours = grid_beats(&grid, seconds);
         let (fixed_f, _, _) = f_measure(&ours, &beats, 0.070);
 
@@ -2775,15 +2815,37 @@ mod judge_tests {
             .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         eprintln!(
             "human drummer: tempo rides {:.2}..{:.2} BPM ({:.1} % of a beat per bar at \
-             the worst); published grid {:.3} BPM scores F {fixed_f:.3}, a free tracker \
-             scores F {free_f:.3}, the same fit in sixteen-beat segments scores F \
+             the worst)\n  one straight line at {:.3} BPM scores F {fixed_f:.3}\n  \
+             the PUBLISHED grid scores F {published_f:.3} over {} tempo segments\n  \
+             a free tracker scores F {free_f:.3}\n  a naive segmented fit scores F \
              {piecewise_f:.3} over {} segments",
             drift.0,
             drift.1,
             100.0 * (drift.1 - drift.0) / nominal,
             grid.bpm,
+            analysis.tempo_map.segments.len(),
             piecewise.segments.len(),
         );
+        // The whole point: the app must actually publish the bending grid.
+        assert!(
+            published_f > fixed_f + 0.2,
+            "the published grid did not bend for a drifting drummer (straight line \
+             {fixed_f:.3}, published {published_f:.3}, {} segments)",
+            analysis.tempo_map.segments.len()
+        );
+        // …and it must do so without a jump. Position is continuous when
+        // every segment starts where the last one ended.
+        let map = &analysis.tempo_map;
+        for pair in map.segments.windows(2) {
+            let predicted = pair[0].start_secs
+                + (pair[1].start_beat - pair[0].start_beat) * pair[0].period_secs;
+            assert!(
+                (predicted - pair[1].start_secs).abs() < 1e-6,
+                "the tempo map jumps {:.1} ms at beat {}",
+                (predicted - pair[1].start_secs) * 1000.0,
+                pair[1].start_beat
+            );
+        }
         assert!(
             free_f > fixed_f + 0.1,
             "the fixture does not actually defeat a fixed grid (fixed {fixed_f:.3}, \
