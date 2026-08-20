@@ -62,6 +62,12 @@ pub enum IoPurpose {
     /// bake, rig, drag-out) work from. Requested when an asset is actually
     /// used, never per card.
     CatalogPayload,
+    /// Materialise a catalog asset's SOURCE-role file. A stateful billboard
+    /// is one asset carrying two blobs — the packed sheet (`Texture`, which
+    /// is the payload) and the `.billboard` manifest that says which cells
+    /// are which state and which rotation. A viewer that wants to PLAY the
+    /// actor needs both; a viewer that only draws its picture never asks.
+    CatalogSource,
 }
 
 /// Decoded preview pixels, ready for a cheap UI-thread texture upload.
@@ -144,6 +150,14 @@ pub enum IoDone {
         /// The manifest's declared thumbnail views, carried with the path so
         /// the decode that follows obeys the declaration.
         views: Vec<makepad_asset_data::ThumbnailView>,
+    },
+    /// A catalog asset's SOURCE-role file, materialised the same way. Its
+    /// own variant rather than a flag on `CatalogFile`: it is a SECOND file
+    /// of the same asset, and the payload slot must not be overwritten by
+    /// it — the sheet and the manifest are both needed at once.
+    CatalogSource {
+        file: String,
+        path: Result<PathBuf, String>,
     },
 }
 
@@ -328,7 +342,7 @@ fn process_with_store(
     };
     if matches!(
         request.purpose,
-        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload
+        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload | IoPurpose::CatalogSource
     ) {
         return materialize_from_store(store, &request, &source);
     }
@@ -353,9 +367,9 @@ fn process_with_store(
             bytes,
             file: request.file,
         },
-        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload => unreachable!(
-            "catalog materialisation never reads bytes first"
-        ),
+        IoPurpose::CatalogThumb | IoPurpose::CatalogPayload | IoPurpose::CatalogSource => {
+            unreachable!("catalog materialisation never reads bytes first")
+        }
         // Store-sourced reads only serve the viewer and the model
         // thumbnailer today; anything else falls back to the path.
         _ => process(IoRequest {
@@ -376,13 +390,26 @@ fn materialize_from_store(
     source: &StoreSource,
 ) -> IoDone {
     let payload = matches!(request.purpose, IoPurpose::CatalogPayload);
+    let want_source = matches!(request.purpose, IoPurpose::CatalogSource);
     let outcome = client_for(store, source).and_then(|client| {
-        if payload {
+        if want_source {
+            crate::store_content::materialize(
+                client,
+                &source.asset,
+                &[makepad_asset_data::FileRole::Source],
+            )
+        } else if payload {
             crate::store_content::materialize(client, &source.asset, &source.prefer)
         } else {
             crate::store_content::materialize_thumbnail(client, &source.asset)
         }
     });
+    if want_source {
+        return IoDone::CatalogSource {
+            file: request.file.clone(),
+            path: outcome.map(|file| file.path),
+        };
+    }
     match outcome {
         Ok(file) => IoDone::CatalogFile {
             file: request.file.clone(),
@@ -447,6 +474,10 @@ fn process(request: IoRequest) -> IoDone {
         // Catalog materialisation has no local form: without a session
         // there is no asset to resolve, and inventing a path would be
         // exactly the stale local copy this lane exists to remove.
+        IoPurpose::CatalogSource => IoDone::CatalogSource {
+            file: request.file,
+            path: Err("no asset store session".to_string()),
+        },
         IoPurpose::CatalogThumb | IoPurpose::CatalogPayload => IoDone::CatalogFile {
             file: request.file,
             payload: matches!(request.purpose, IoPurpose::CatalogPayload),

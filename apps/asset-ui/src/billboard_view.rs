@@ -203,36 +203,65 @@ fn frame_world_size(w: u32, h: u32, px: f32) -> (f32, f32) {
 /// still reads one PNG per frame. Both hand back the same pixels, so every
 /// viewer plays a sheet-backed actor exactly as it played loose frames.
 pub struct BillboardFrames<'a> {
-    manifest: &'a Path,
+    /// Where the frame files sit, for a manifest that came off disk with its
+    /// pictures beside it. `None` when the caller handed over the ONE sheet
+    /// in memory — which is how a catalog asset arrives: its manifest and
+    /// its sheet are two blobs of one asset, named by digest, with no
+    /// directory to be siblings in.
+    manifest: Option<&'a Path>,
     bb: &'a StatefulBillboard,
     decoded: Vec<(String, Option<ImageBuffer>)>,
+    /// The single decoded sheet, when there is one.
+    sheet: Option<ImageBuffer>,
 }
 
 impl<'a> BillboardFrames<'a> {
     pub fn new(manifest: &'a Path, bb: &'a StatefulBillboard) -> Self {
         Self {
-            manifest,
+            manifest: Some(manifest),
             bb,
             decoded: Vec::new(),
+            sheet: None,
         }
     }
 
-    /// Decoded pixels of one frame, or `None` when its file is missing.
-    pub fn image(&mut self, frame: &SpriteFrame) -> Option<ImageBuffer> {
-        if !self.decoded.iter().any(|(f, _)| *f == frame.file) {
-            let path = self.bb.resolve_frame(self.manifest, frame);
-            let image = std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| ImageBuffer::from_png(&bytes).ok());
-            self.decoded.push((frame.file.clone(), image));
+    /// Every frame cut out of ONE sheet already in memory. The packed form
+    /// names one PNG for all frames and gives each a cell, so nothing needs
+    /// to be resolved against a directory.
+    pub fn from_sheet(bb: &'a StatefulBillboard, sheet_png: &[u8]) -> Self {
+        Self {
+            manifest: None,
+            bb,
+            decoded: Vec::new(),
+            sheet: ImageBuffer::from_png(sheet_png).ok(),
         }
-        let source = self
-            .decoded
-            .iter()
-            .find(|(f, _)| *f == frame.file)
-            .and_then(|(_, i)| i.as_ref())?;
+    }
+
+    /// Decoded pixels of one frame, or `None` when its picture is missing.
+    pub fn image(&mut self, frame: &SpriteFrame) -> Option<ImageBuffer> {
+        let source = match (&self.sheet, self.manifest) {
+            (Some(sheet), _) => sheet,
+            (None, Some(manifest)) => {
+                if !self.decoded.iter().any(|(f, _)| *f == frame.file) {
+                    let path = self.bb.resolve_frame(manifest, frame);
+                    let image = std::fs::read(&path)
+                        .ok()
+                        .and_then(|bytes| ImageBuffer::from_png(&bytes).ok());
+                    self.decoded.push((frame.file.clone(), image));
+                }
+                self.decoded
+                    .iter()
+                    .find(|(f, _)| *f == frame.file)
+                    .and_then(|(_, i)| i.as_ref())?
+            }
+            (None, None) => return None,
+        };
         match self.bb.frame_rect(frame) {
             Some(rect) => cut_cell(source, rect),
+            // A loose-frame manifest handed only a sheet cannot say which
+            // pixels are this frame's: better nothing than the whole sheet
+            // drawn as if it were one sprite.
+            None if self.sheet.is_some() => None,
             None => Some(source.clone()),
         }
     }
@@ -270,12 +299,37 @@ impl BillboardView {
     pub fn load_manifest(&mut self, cx: &mut Cx, path: &Path) {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let Ok(bb) = StatefulBillboard::parse(&text) else {
-            self.states.clear();
-            self.status = "not a stateful billboard".into();
-            self.area.redraw(cx);
+            self.no_billboard(cx, "not a stateful billboard");
             return;
         };
-        let mut pixels = BillboardFrames::new(path, &bb);
+        let pixels = BillboardFrames::new(path, &bb);
+        self.build(cx, &bb, pixels);
+    }
+
+    /// The same actor, from BYTES: a catalog asset's manifest text and the
+    /// one packed sheet its frames are cut from. The store names both by
+    /// digest — there is no directory for them to be siblings in — so the
+    /// well hands them over instead of a path to walk.
+    ///
+    /// This is the SAME widget the Create surface uses, with the same state
+    /// list, the same 8 rotations and the same clock; only where the pixels
+    /// came from differs.
+    pub fn show_sheet(&mut self, cx: &mut Cx, manifest: &str, sheet_png: &[u8]) {
+        let Ok(bb) = StatefulBillboard::parse(manifest) else {
+            self.no_billboard(cx, "not a stateful billboard");
+            return;
+        };
+        let pixels = BillboardFrames::from_sheet(&bb, sheet_png);
+        self.build(cx, &bb, pixels);
+    }
+
+    fn no_billboard(&mut self, cx: &mut Cx, why: &str) {
+        self.states.clear();
+        self.status = why.to_string();
+        self.area.redraw(cx);
+    }
+
+    fn build(&mut self, cx: &mut Cx, bb: &StatefulBillboard, mut pixels: BillboardFrames<'_>) {
         self.facings = bb.resolved_facings();
         let mut states = Vec::new();
         let names: Vec<String> = if bb.states.is_empty() {
@@ -708,6 +762,56 @@ mod tests {
         let b = pixels.image(&bb.frames[1]).expect("cell 1");
         assert_eq!((b.width, b.height), (3, 5));
         assert_eq!(b.data[0] & 0x00ff_ffff, 0x0000_ff00, "cell 1 is green");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The catalog hands over BYTES, not a directory: a stateful billboard
+    /// is one asset carrying two blobs, both named by digest, so nothing can
+    /// be resolved as a sibling file. The same cells come out either way —
+    /// the Library well and the Create viewer play the same actor.
+    #[test]
+    fn a_sheet_in_memory_cuts_the_same_cells_as_one_on_disk() {
+        let dir = sheet_scratch("bytes");
+        let sheet_path = dir.join("troo.png");
+        write_two_cell_sheet(&sheet_path);
+        let manifest = "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             sheet 2 4 6\n\
+             state walk 0 2 1 8\n\
+             frame 0 A 1 4 6 troo.png cell 0\n\
+             frame 1 B 1 3 5 troo.png cell 1\n";
+        let bb = StatefulBillboard::parse(manifest).unwrap();
+        let png = std::fs::read(&sheet_path).unwrap();
+        let mut pixels = BillboardFrames::from_sheet(&bb, &png);
+        let a = pixels.image(&bb.frames[0]).expect("cell 0");
+        assert_eq!((a.width, a.height), (4, 6));
+        assert_eq!(a.data[0] & 0x00ff_ffff, 0x00ff_0000, "cell 0 is red");
+        let b = pixels.image(&bb.frames[1]).expect("cell 1");
+        assert_eq!((b.width, b.height), (3, 5));
+        assert_eq!(b.data[0] & 0x00ff_ffff, 0x0000_ff00, "cell 1 is green");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A loose-frame manifest names one PNG per frame and gives no cells, so
+    /// a single sheet cannot say which pixels are whose. It draws nothing
+    /// rather than showing the whole sheet as if it were one sprite.
+    #[test]
+    fn loose_frames_cannot_be_cut_out_of_one_sheet() {
+        let dir = sheet_scratch("loose-bytes");
+        let sheet_path = dir.join("trooa1.png");
+        write_two_cell_sheet(&sheet_path);
+        let manifest = "stateful-billboard 1\n\
+             prefix troo\n\
+             role character\n\
+             preview walk\n\
+             state walk 0 1 1 8\n\
+             frame 0 A 1 8 6 trooa1.png\n";
+        let bb = StatefulBillboard::parse(manifest).unwrap();
+        let png = std::fs::read(&sheet_path).unwrap();
+        let mut pixels = BillboardFrames::from_sheet(&bb, &png);
+        assert!(pixels.image(&bb.frames[0]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
