@@ -42,7 +42,7 @@ impl KvCache {
             v.clear();
         }
         self.n_past = 0;
-        crate::metal_backend::clear_decoder_kv_cache();
+        crate::accel::clear_decoder_kv_cache();
     }
 
     /// Append K, V rows for a layer
@@ -90,9 +90,9 @@ pub fn decode(
         let residual = cur.clone();
 
         // Q, K, V projections.
-        let (q, k_new, v_new) = if crate::metal_backend::is_requested() && n_tokens == 1 {
+        let (q, k_new, v_new) = if crate::accel::is_requested() && n_tokens == 1 {
             if let Some((q_data, k_data, v_data)) =
-                crate::metal_backend::try_decoder_self_qkv_step_f32(
+                crate::accel::try_decoder_self_qkv_step_f32(
                     &cur.data,
                     n_state,
                     &layer.attn_ln_0_w.data,
@@ -149,15 +149,15 @@ pub fn decode(
 
         let (ref k_cross, ref v_cross) = cross_kv[il];
         let n_audio_ctx = k_cross.shape[0];
-        let n_audio_ctx_flash = if crate::metal_backend::is_requested() && n_tokens == 1 {
+        let n_audio_ctx_flash = if crate::accel::is_requested() && n_tokens == 1 {
             pad_to(n_audio_ctx, 256)
         } else {
             n_audio_ctx
         };
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
-        if crate::metal_backend::is_requested() && n_tokens == 1 {
-            if let Some(out) = crate::metal_backend::try_decoder_self_cross_ffn_step_f32(
+        if crate::accel::is_requested() && n_tokens == 1 {
+            if let Some(out) = crate::accel::try_decoder_self_cross_ffn_step_f32(
                 il,
                 &residual.data,
                 &q.data,
@@ -179,8 +179,8 @@ pub fn decode(
             }
         }
 
-        let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
-            crate::metal_backend::try_flash_attn_f32_self_kv_cache(
+        let attn_out = if crate::accel::is_requested() && n_tokens == 1 {
+            crate::accel::try_flash_attn_f32_self_kv_cache(
                 il,
                 &q.data,
                 k_all,
@@ -191,7 +191,7 @@ pub fn decode(
                 scale,
             )
             .or_else(|| {
-                crate::metal_backend::try_flash_attn_f32_packed(
+                crate::accel::try_flash_attn_f32_packed(
                     &q.data,
                     k_all,
                     v_all,
@@ -365,8 +365,8 @@ pub fn decode(
         let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
         cur = Tensor::add(&projected, &residual);
 
-        if crate::metal_backend::is_requested() && n_tokens == 1 {
-            if let Some(out) = crate::metal_backend::try_decoder_cross_ffn_step_f32(
+        if crate::accel::is_requested() && n_tokens == 1 {
+            if let Some(out) = crate::accel::try_decoder_cross_ffn_step_f32(
                 il,
                 &cur.data,
                 n_state,
@@ -398,8 +398,8 @@ pub fn decode(
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
 
-        let attn_out = if crate::metal_backend::is_requested() && n_tokens == 1 {
-            crate::metal_backend::try_flash_attn_f32_cross_kv_cache(
+        let attn_out = if crate::accel::is_requested() && n_tokens == 1 {
+            crate::accel::try_flash_attn_f32_cross_kv_cache(
                 il,
                 &q.data,
                 &k_cross.data,
@@ -411,7 +411,7 @@ pub fn decode(
                 scale,
             )
             .or_else(|| {
-                crate::metal_backend::try_flash_attn_f32_packed(
+                crate::accel::try_flash_attn_f32_packed(
                     &q.data,
                     &k_cross.data,
                     &v_cross.data,
