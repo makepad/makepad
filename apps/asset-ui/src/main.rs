@@ -40,6 +40,7 @@
 
 pub use makepad_widgets;
 
+mod analysis;
 mod artifact_io;
 mod asset_store_state;
 mod audio;
@@ -93,6 +94,11 @@ use crate::pipeline::{
 use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 // The shared preview widgets: the same set the VJ and DJ surfaces adopt.
 use makepad_asset_widgets::{AudioAction, ClipFormat, ContentPreview, PreviewContent};
+// The transcript panel over an analysed track: typed rows in, seek events
+// out. The host owns the transport; the widget only draws and reports.
+use makepad_asset_widgets::lyric_reader::{LyricEvent, LyricReader, LyricRow};
+// "Split audio layers": the bake queue, and what a track already carries.
+use crate::analysis::{AnalysisQueue, SideChannels};
 
 /// The readable name of an imported item: the model's own stem.
 ///
@@ -1009,11 +1015,24 @@ script_mod! {
         width: 150 height: 150
         // spacing/padding MUST equal store_views::GRID_CARD_SPACING /
         // GRID_CARD_PAD — the per-draw card-height math assumes them.
-        flow: Down spacing: 3
-        padding: 4
-        grid_thumb_box := View{
+        flow: Down spacing: 4
+        padding: 6
+        // The picture WELL: a visible frame the thumbnail floats in, so an
+        // aspect-fitted picture's letterboxing reads as matting, not as
+        // stray card padding — and the well's left edge lines up with the
+        // title below it.
+        grid_thumb_box := RoundedView{
             width: Fill height: 88
             align: Align{x: 0.5 y: 0.5}
+            // Breathing room INSIDE the well: a picture that fills the
+            // well's height still keeps clear of its walls.
+            padding: 3
+            draw_bg +: {
+                color: #x101013
+                border_color: #xffffff08
+                border_size: 1.0
+                border_radius: 2.0
+            }
             // THE thumbnail widget — obeys the asset's declared views.
             grid_thumb := mod.widgets.AssetThumb{}
         }
@@ -1162,13 +1181,20 @@ script_mod! {
                 align: Align{y: 0.5}
                 stage_title := Label{
                     width: 190
+                    max_lines: 1
+                    text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
                         color: #xdfe6ec
                         text_style: theme.font_regular{font_size: 8.5}
                     }
                 }
+                // ONE line, always: a long status wrapping to two lines
+                // grew the row and made the whole Loading strip bounce
+                // while an import streamed status updates.
                 stage_meta := Label{
                     width: Fill
+                    max_lines: 1
+                    text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
                         color: #x8a939d
                         text_style: theme.font_regular{font_size: 8}
@@ -1275,6 +1301,16 @@ script_mod! {
         width: 92
         height: Fit
         align: Align{y: 0.5}
+    }
+    // One separated layer's audibility. Checked = audible, which is how the
+    // track arrives: the sum of all four IS the mixed song.
+    let LayerToggle = CheckBox{
+        active: true
+        padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+        draw_text +: {
+            color: #x828a93
+            text_style: theme.font_regular{font_size: 8.5}
+        }
     }
     let DropField = View{
         width: Fill
@@ -2569,6 +2605,7 @@ script_mod! {
                                     // a grid of squares, and stacked lines.
                                     lib_grid_btn := ViewGridChip{}
                                     lib_list_btn := ViewRowsChip{}
+                                    lib_analyse_shown_btn := GhostButton{ text: "Analyse shown" }
                                     lib_retire_shown_btn := DangerButton{ text: "× Retire shown" }
                                 }
                                 // Grid | rail split, user-adjustable: the
@@ -2682,6 +2719,36 @@ script_mod! {
                                                     }
                                                 }
                                             }
+                                            // The separated layers, when the
+                                            // asset carries them: four mute
+                                            // toggles over one shared
+                                            // playhead. Unchecking one is
+                                            // the whole gesture — the sum of
+                                            // all four IS the track.
+                                            detail_layers_row := View{
+                                                visible: false
+                                                width: Fill height: Fit flow: Right spacing: 6
+                                                align: Align{y: 0.5}
+                                                FieldCaption{ text: "layers" }
+                                                layer_drums_toggle := LayerToggle{ text: "drums" }
+                                                layer_bass_toggle := LayerToggle{ text: "bass" }
+                                                layer_vocals_toggle := LayerToggle{ text: "vocals" }
+                                                layer_other_toggle := LayerToggle{ text: "other" }
+                                            }
+                                            // The transcript, when the asset
+                                            // carries one: it follows the
+                                            // playhead and a click on a line
+                                            // seeks the transport to it.
+                                            detail_lyrics_panel := View{
+                                                visible: false
+                                                width: Fill height: 200
+                                                flow: Down
+                                                spacing: 4
+                                                PanelHeading{ text: "Lyrics" }
+                                                detail_lyrics := mod.widgets.LyricReader{
+                                                    width: Fill height: Fill
+                                                }
+                                            }
                                             View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 align: Align{y: 0.5}
@@ -2721,6 +2788,35 @@ script_mod! {
                                             detail_rev := MonoLabel{ text: "—" }
                                             PanelHeading{ text: "Publish" }
                                             detail_publish := MonoLabel{ text: "—" }
+                                            // "Split audio layers" for ONE
+                                            // track. Never automatic: it is
+                                            // minutes of GPU, so it is a
+                                            // button, and it says when the
+                                            // asset already carries the
+                                            // analysis instead of offering a
+                                            // click that only re-proves it.
+                                            detail_analysis_actions := View{
+                                                width: Fill height: Fit flow: Down spacing: 4
+                                                margin: Inset{top: 10}
+                                                visible: false
+                                                View{
+                                                    width: Fill height: Fit flow: Right spacing: 6
+                                                    align: Align{y: 0.5}
+                                                    detail_analyse_btn := GhostButton{ text: "Analyse stems" }
+                                                    detail_analyse_lyrics := CheckBox{
+                                                        text: "+ lyrics"
+                                                        active: false
+                                                        padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                        draw_text +: {
+                                                            color: #x828a93
+                                                            text_style: theme.font_regular{font_size: 8.5}
+                                                        }
+                                                    }
+                                                    View{ width: Fill height: Fit }
+                                                    detail_analyse_stop := ChipButton{ text: "Stop" visible: false }
+                                                }
+                                                detail_analysis_status := HintLabel{ width: Fill text: "" }
+                                            }
                                             detail_server_actions := View{
                                                 width: Fill height: Fit flow: Right spacing: 6
                                                 margin: Inset{top: 10}
@@ -2928,6 +3024,33 @@ script_mod! {
                                             View{ width: Fill height: Fit }
                                             music_status_label := BrightLabel{ text: "" width: 340 }
                                         }
+                                        // The analysis bake, OFF by default:
+                                        // minutes of GPU per track, so it is
+                                        // never something an import does on
+                                        // its own.
+                                        View{
+                                            width: Fill height: Fit flow: Right spacing: 10
+                                            align: Align{y: 0.5}
+                                            split_layers_toggle := CheckBox{
+                                                text: "split audio layers"
+                                                active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            lyrics_toggle := CheckBox{
+                                                text: "+ lyrics"
+                                                active: false
+                                                padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                                draw_text +: {
+                                                    color: #x828a93
+                                                    text_style: theme.font_regular{font_size: 8.5}
+                                                }
+                                            }
+                                            music_analysis_label := HintLabel{ width: Fill text: "" }
+                                        }
                                         HintLabel{ text: "Your own music directory. Every track becomes one audio asset; every folder name under the picked root becomes a searchable tag, beside the constant `music` tag. ID3/Vorbis title, artist and album name the row when the file carries them. mp3/ogg/wav publish; flac and m4a are listed as unsupported for now. Your library, your rights: all rights reserved, LAN-local, local-preview derivatives." }
                                     }
 
@@ -3016,6 +3139,53 @@ script_mod! {
                                     align: Align{x: 1.0 y: 0.5}
                                     license_decline := ChipButton{ text: "Decline" }
                                     license_accept := PrimaryButton{ text: "Accept and clear" }
+                                }
+                            }
+                        }
+                    }
+                    lib_analyse_shown_modal := Modal{
+                        can_dismiss: false
+                        content +: {
+                            width: 460
+                            height: Fit
+                            RoundedView{
+                                width: Fill
+                                height: Fit
+                                padding: 20
+                                spacing: 10
+                                flow: Down
+                                draw_bg +: {
+                                    color: #x16161b
+                                    border_color: #xffffff18
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                lib_analyse_shown_title := BrightLabel{
+                                    text: "Split the shown tracks into layers?"
+                                    draw_text +: { text_style: theme.font_bold{font_size: 12} }
+                                }
+                                lib_analyse_shown_body := DimLabel{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                }
+                                lib_analyse_shown_lyrics := CheckBox{
+                                    text: "+ lyrics (transcribe the vocals stem)"
+                                    active: false
+                                    padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+                                    draw_text +: {
+                                        color: #x828a93
+                                        text_style: theme.font_regular{font_size: 8.5}
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
+                                    lib_analyse_shown_cancel := ChipButton{ text: "Cancel" }
+                                    lib_analyse_shown_confirm := PrimaryButton{ text: "Analyse" }
                                 }
                             }
                         }
@@ -3703,6 +3873,35 @@ pub struct App {
     /// the same track twice does not restart it.
     #[rust]
     library_audio_file: Option<String>,
+    /// "Split audio layers": the serial stems/lyrics bake queue and the
+    /// side-channel fetch lane. Started on first use — an app that never
+    /// touches audio never spawns them.
+    #[rust]
+    analysis: Option<AnalysisQueue>,
+    /// What the SELECTED track's head revision carries, per the fetch lane.
+    /// Cleared on every new selection so the Analyse button can never
+    /// describe the previous track.
+    #[rust]
+    side_channels: SideChannels,
+    /// Which asset [`App::side_channels`] describes, and the fetch
+    /// generation that answered — latest-selection-wins over a slow fetch.
+    #[rust]
+    side_channels_asset: Option<makepad_asset_data::AssetId>,
+    #[rust]
+    side_channels_generation: u64,
+    /// The mixer clip generation the selected track's audio was requested
+    /// under. Handed to `audio::set_stems` so a fetch that finishes after
+    /// the user has moved on cannot play one track's layers over another.
+    #[rust]
+    audio_clip_generation: u64,
+    /// The rail is currently showing a transcript, so the follow pump is
+    /// worth running.
+    #[rust(false)]
+    lyrics_visible: bool,
+    /// Per-frame lyric-follow pump: alive only while a transcript is on the
+    /// Library rail and the track is audibly playing.
+    #[rust]
+    lyrics_pump: NextFrame,
     /// Materialised thumbnail objects for catalog tiles, keyed by asset id.
     /// The path is a digest-named cache object, so a tile can never show a
     /// picture that belongs to another revision. The manifest's declared
@@ -9597,6 +9796,7 @@ impl App {
         self.refresh_gc_ui(cx);
         self.refresh_library_detail(cx);
         self.refresh_library_preview(cx);
+        self.refresh_analysis_ui(cx);
         self.ui.redraw(cx);
     }
 
@@ -9971,7 +10171,14 @@ impl App {
                             self.library_audio_file = Some(file.clone());
                             // The transport: decoded off the frame thread and
                             // installed when it lands.
-                            crate::audio::load_clip_async(bytes.clone());
+                            let clip_gen = crate::audio::load_clip_async(bytes.clone());
+                            // And, exactly once per track, what the store
+                            // already holds BESIDE the mixed audio: the four
+                            // separated layers and the transcript. The clip
+                            // generation travels with it, so whichever of the
+                            // two workers lands second knows they belong to
+                            // the same track.
+                            self.request_side_channels(cx, asset, clip_gen);
                             // The picture: the same bytes, drawn by the well.
                             let content_type = &item.as_ref().unwrap().meta.content_type;
                             clip = clip_format(&path, content_type, &bytes)
@@ -10083,12 +10290,383 @@ impl App {
         {
             preview.set_transport(cx, fraction, playing, &position);
         }
+        // The transcript reads the SAME device-clocked playhead: the words
+        // cannot drift from what is coming out of the speakers.
+        if self.lyrics_visible {
+            let secs = crate::audio::playhead_secs();
+            if let Some(mut reader) = self
+                .ui
+                .widget(cx, ids!(detail_lyrics))
+                .borrow_mut::<LyricReader>()
+            {
+                reader.set_position(cx, secs);
+            }
+        }
     }
 
     fn set_library_preview(&mut self, cx: &mut Cx, page: LiveId) {
         self.ui
             .page_flip(cx, ids!(detail_preview_pages))
             .set_active_page(cx, page.into());
+    }
+
+    // -- "Split audio layers": the bake queue and its consumers -----------
+
+    /// The bake + fetch lanes, started on first use. Two threads parked on
+    /// a channel is the whole cost of having them.
+    fn analysis(&mut self) -> &mut analysis::AnalysisQueue {
+        self.analysis
+            .get_or_insert_with(analysis::AnalysisQueue::start)
+    }
+
+    /// The selected catalog hit when it is an AUDIO asset: id and title.
+    /// Everything on the analysis surface hangs off this — a mesh has no
+    /// stems and must not be offered any.
+    fn selected_audio(&self) -> Option<(makepad_asset_data::AssetId, String)> {
+        let selected = self.store.selected?;
+        let hit = self
+            .store
+            .search
+            .ready()?
+            .hits
+            .iter()
+            .find(|hit| hit.asset_id == selected)?;
+        (hit.kind == Some(makepad_asset_data::AssetKind::Audio))
+            .then(|| (selected, hit.title.clone()))
+    }
+
+    /// How many AUDIO assets the active filter shows. Counted, not
+    /// collected: the rail refreshes on every store tick and the result set
+    /// is thousands of rows.
+    fn shown_audio_count(&self) -> usize {
+        self.store
+            .search
+            .ready()
+            .map(|results| {
+                results
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.kind == Some(makepad_asset_data::AssetKind::Audio))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Every AUDIO asset the Library's active filter currently shows — the
+    /// exact set the bulk analyse acts on, from the same snapshot the count
+    /// beside the button is taken from.
+    fn shown_audio_assets(&self) -> Vec<(makepad_asset_data::AssetId, String)> {
+        self.store
+            .search
+            .ready()
+            .map(|results| {
+                results
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.kind == Some(makepad_asset_data::AssetKind::Audio))
+                    .map(|hit| (hit.asset_id, hit.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Ask the fetch lane what a newly selected track carries, and for the
+    /// bytes of whatever it does. Called once per track (from the preview's
+    /// own "this is a new track" gate), because the rail is refreshed on
+    /// every store tick and a fetch per refresh would be a fetch per frame.
+    fn request_side_channels(
+        &mut self,
+        cx: &mut Cx,
+        asset: makepad_asset_data::AssetId,
+        clip: u64,
+    ) {
+        // Whatever the previous track carried is not this one's.
+        self.side_channels = analysis::SideChannels::default();
+        self.side_channels_asset = None;
+        audio::clear_stems();
+        self.set_lyrics(cx, Vec::new());
+        let Some(session) = self.import_server_session() else {
+            return;
+        };
+        let generation = self.analysis().request_fetch(asset, session, true);
+        self.side_channels_generation = generation;
+        self.audio_clip_generation = clip;
+    }
+
+    /// Hand the reader a transcript (or none, which hides the panel).
+    fn set_lyrics(&mut self, cx: &mut Cx, rows: Vec<LyricRow>) {
+        let empty = rows.is_empty();
+        if let Some(mut reader) = self
+            .ui
+            .widget(cx, ids!(detail_lyrics))
+            .borrow_mut::<LyricReader>()
+        {
+            reader.set_lines(cx, rows);
+            reader.set_position(cx, crate::audio::playhead_secs());
+        }
+        self.lyrics_visible = !empty;
+        self.ui
+            .widget(cx, ids!(detail_lyrics_panel))
+            .set_visible(cx, !empty);
+        self.arm_lyrics_pump(cx);
+    }
+
+    /// The transcript follows the playhead per frame while it is visible and
+    /// the track is audibly playing; it parks otherwise (the 10 Hz transport
+    /// timer keeps it honest when parked).
+    fn arm_lyrics_pump(&mut self, cx: &mut Cx) {
+        if self.lyrics_visible && self.surface == Surface::Library && audio::is_playing() {
+            self.lyrics_pump = cx.new_next_frame();
+        }
+    }
+
+    /// Queue tracks for analysis. Refuses (loudly) without a server session:
+    /// the bake reads from and publishes to the store, it has no local half.
+    fn enqueue_analysis(
+        &mut self,
+        cx: &mut Cx,
+        targets: Vec<(analysis::BakeTarget, String)>,
+        lyrics: bool,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        let Some(session) = self.import_server_session() else {
+            log!("analysis: no Asset Server session — nothing to analyse against");
+            return;
+        };
+        let asked = targets.len();
+        let mut queued = 0usize;
+        {
+            let queue = self.analysis();
+            for (target, title) in targets {
+                if queue.enqueue(target, title, lyrics, session.clone()) {
+                    queued += 1;
+                }
+            }
+        }
+        log!(
+            "analysis: queued {queued} of {asked} track(s){}",
+            if lyrics { " · with lyrics" } else { "" }
+        );
+        self.refresh_analysis_ui(cx);
+    }
+
+    /// Drain both lanes. The fetch lane feeds the preview (layers + lyrics);
+    /// the bake lane feeds the queue line and the log.
+    fn drain_analysis(&mut self, cx: &mut Cx) {
+        let (fetched, mut changed, finished) = {
+            let Some(queue) = self.analysis.as_mut() else {
+                return;
+            };
+            let fetched = queue.drain_fetch();
+            let (changed, finished) = queue.drain_bake();
+            (fetched, changed, finished)
+        };
+        if !fetched.is_empty() {
+            changed = true;
+        }
+        for message in fetched {
+            match message {
+                analysis::FetchMsg::Roles {
+                    asset,
+                    generation,
+                    roles,
+                } => {
+                    if generation != self.side_channels_generation {
+                        continue;
+                    }
+                    self.side_channels = roles;
+                    self.side_channels_asset = Some(asset);
+                }
+                analysis::FetchMsg::Stems {
+                    asset,
+                    generation,
+                    lanes,
+                } => {
+                    if generation != self.side_channels_generation {
+                        continue;
+                    }
+                    // A fresh set arrives fully audible (the sum IS the
+                    // track); the toggles follow the mixer in
+                    // `refresh_analysis_ui`, which runs right after this.
+                    if audio::set_stems(*lanes, self.audio_clip_generation) {
+                        log!("layers: 4 separated stems now play instead of {asset}");
+                    }
+                }
+                analysis::FetchMsg::Lyrics {
+                    generation, rows, ..
+                } => {
+                    if generation != self.side_channels_generation {
+                        continue;
+                    }
+                    self.set_lyrics(cx, rows);
+                }
+                analysis::FetchMsg::Failed {
+                    generation,
+                    message,
+                    asset,
+                } => {
+                    if generation == self.side_channels_generation {
+                        log!("side-channels for {asset}: {message}");
+                    }
+                }
+            }
+        }
+        for (title, result) in finished {
+            match result {
+                Ok(done) => {
+                    log!("analysis: {title} · {}", done.summary());
+                    // The track on the rail just gained stems: pick them up
+                    // rather than leaving a preview that predates the bake.
+                    if self.store.selected == Some(done.asset) && !done.already {
+                        let clip = audio::clip_generation();
+                        self.request_side_channels(cx, done.asset, clip);
+                    }
+                }
+                Err(error) => error!("analysis: {title} FAILED — {error}"),
+            }
+        }
+        if changed {
+            self.refresh_analysis_ui(cx);
+            // The Loading panel draws the bake as its own queue row.
+            if self.surface == Surface::Import {
+                self.refresh_import_queue_list(cx);
+            }
+            self.ui.redraw(cx);
+        }
+    }
+
+    /// Everything the analysis owns on screen: the rail's button and its
+    /// state, the queue line (rail + Load card), and the bulk button.
+    fn refresh_analysis_ui(&mut self, cx: &mut Cx) {
+        let (busy, line) = self
+            .analysis
+            .as_ref()
+            .map(|queue| (queue.busy(), queue.status_line()))
+            .unwrap_or((false, String::new()));
+        let selected = self.selected_audio();
+        let connected = self.store.connected();
+
+        self.ui
+            .widget(cx, ids!(detail_analysis_actions))
+            .set_visible(cx, connected && selected.is_some());
+        let want_lyrics = self.ui.check_box(cx, ids!(detail_analyse_lyrics)).active(cx);
+        // The roles are only known once the fetch lane has answered FOR THIS
+        // asset; until then the button offers the analysis rather than
+        // claiming the track has none.
+        let known = selected
+            .as_ref()
+            .is_some_and(|(asset, _)| self.side_channels_asset == Some(*asset));
+        let need = analysis::BakeNeed::decide(self.side_channels, want_lyrics);
+        let (text, enabled) = if !known {
+            ("Analyse stems".to_string(), true)
+        } else if need.nothing() {
+            (
+                if self.side_channels.lyrics {
+                    "stems + lyrics analysed".to_string()
+                } else {
+                    "stems analysed".to_string()
+                },
+                false,
+            )
+        } else if !need.stems && need.lyrics {
+            ("Analyse lyrics".to_string(), true)
+        } else if want_lyrics {
+            ("Analyse stems + lyrics".to_string(), true)
+        } else {
+            ("Analyse stems".to_string(), true)
+        };
+        let queued = selected.as_ref().is_some_and(|(asset, _)| {
+            self.analysis
+                .as_ref()
+                .is_some_and(|queue| queue.queued_keys.contains(&asset.to_string()))
+        });
+        let button = self.ui.button(cx, ids!(detail_analyse_btn));
+        button.set_text(cx, if queued { "queued" } else { &text });
+        button.set_enabled(cx, enabled && !queued);
+        self.ui
+            .label(cx, ids!(detail_analysis_status))
+            .set_text(cx, &line);
+        self.ui
+            .button(cx, ids!(detail_analyse_stop))
+            .set_visible(cx, busy);
+        self.ui
+            .label(cx, ids!(music_analysis_label))
+            .set_text(cx, &line);
+
+        // The separated layers and the transcript belong to the SELECTED
+        // track: the transport keeps playing when the rail moves to a mesh,
+        // but neither panel may stay under something that is not a track.
+        let is_audio = selected.is_some();
+        let stems = audio::stems_ready();
+        self.ui
+            .widget(cx, ids!(detail_layers_row))
+            .set_visible(cx, is_audio && stems);
+        // The MIXER is the source of truth for which layers are audible:
+        // the toggles follow it (and heal themselves after a fresh set
+        // arrives unmuted), and only when they actually disagree — an
+        // unconditional re-apply is a redraw on every store tick.
+        if stems {
+            for (lane, id) in [
+                (0usize, ids!(layer_drums_toggle)),
+                (1, ids!(layer_bass_toggle)),
+                (2, ids!(layer_vocals_toggle)),
+                (3, ids!(layer_other_toggle)),
+            ] {
+                let audible = !audio::lane_muted(lane);
+                let toggle = self.ui.check_box(cx, id);
+                if toggle.active(cx) != audible {
+                    toggle.set_active(cx, audible, Animate::No);
+                }
+            }
+        }
+        self.ui
+            .widget(cx, ids!(detail_lyrics_panel))
+            .set_visible(cx, is_audio && self.lyrics_visible);
+
+        // Bulk: the count is the shown AUDIO hits, so the button and what it
+        // would do can never disagree.
+        let shown = self.shown_audio_count();
+        let bulk = self.ui.button(cx, ids!(lib_analyse_shown_btn));
+        bulk.set_text(cx, &format!("Analyse {shown} shown"));
+        bulk.set_enabled(cx, shown > 0 && connected);
+    }
+
+    fn open_analyse_shown_modal(&mut self, cx: &mut Cx) {
+        let shown = self.shown_audio_assets();
+        if shown.is_empty() {
+            return;
+        }
+        let filter_desc = self.library_filter_description();
+        self.ui.label(cx, ids!(lib_analyse_shown_body)).set_text(
+            cx,
+            &format!(
+                "Split {} audio asset{} matching {filter_desc} into drums, bass, vocals and other, and publish the stems back onto each track? Tracks that already carry stems are skipped. This is minutes of GPU per track and runs one track at a time.",
+                shown.len(),
+                if shown.len() == 1 { "" } else { "s" }
+            ),
+        );
+        self.ui.modal(cx, ids!(lib_analyse_shown_modal)).open(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn close_analyse_shown_modal(&mut self, cx: &mut Cx) {
+        self.ui.modal(cx, ids!(lib_analyse_shown_modal)).close(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn analyse_shown_assets(&mut self, cx: &mut Cx) {
+        let lyrics = self
+            .ui
+            .check_box(cx, ids!(lib_analyse_shown_lyrics))
+            .active(cx);
+        let targets: Vec<(analysis::BakeTarget, String)> = self
+            .shown_audio_assets()
+            .into_iter()
+            .map(|(asset, title)| (analysis::BakeTarget::Asset(asset), title))
+            .collect();
+        self.enqueue_analysis(cx, targets, lyrics);
     }
 
     fn open_store_delete_modal(&mut self, cx: &mut Cx, action: PendingStoreDelete) {
@@ -10443,6 +11021,13 @@ impl App {
         self.ui
             .label(cx, ids!(music_dir_label))
             .set_text(cx, &self.music_import_page.dir_label());
+        // "+ lyrics" only means anything on top of a separation (the
+        // transcript is baked FROM the vocals stem), so it is only offered
+        // once the layers switch is on.
+        let split = self.ui.check_box(cx, ids!(split_layers_toggle)).active(cx);
+        self.ui
+            .widget(cx, ids!(lyrics_toggle))
+            .set_visible(cx, split);
         // The queue row disappears the moment a job stops, so the card keeps
         // the verdict: a refusal, a cancel, or the counts of the last run.
         self.ui.label(cx, ids!(music_status_label)).set_text(
@@ -10595,6 +11180,21 @@ impl App {
                 title: format!("waiting · {}", item.job.title()),
                 cancel: RowAction::RemoveQueuedImport(item.id),
             });
+        }
+        // The analysis bake is its own lane beside the imports: it outlives
+        // the run that queued it (a 200-track import publishes long before
+        // the first track is separated), so it gets its own row with its own
+        // bar rather than sharing the import's.
+        if let Some(queue) = &self.analysis {
+            if queue.busy() {
+                rows.push(StoreRow::Stage {
+                    title: "Split audio layers".into(),
+                    meta: queue.status_line(),
+                    progress: queue.progress_fraction(),
+                    failed: false,
+                    cancel: None,
+                });
+            }
         }
         if rows.is_empty() {
             rows.push(StoreRow::Note(
@@ -11792,7 +12392,26 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(music_import_btn)).clicked(actions) {
             match self.music_import_page.job() {
                 Some(job) => {
-                    log!("import: queue {}", job.title());
+                    // The analysis switches are read HERE, when the run is
+                    // queued — a toggle flipped during a 200-track import
+                    // must not change what that run promised.
+                    let split = self.ui.check_box(cx, ids!(split_layers_toggle)).active(cx);
+                    let lyrics = split && self.ui.check_box(cx, ids!(lyrics_toggle)).active(cx);
+                    self.music_import_page.split_layers = split;
+                    self.music_import_page.bake_lyrics = lyrics;
+                    log!(
+                        "import: queue {}{}",
+                        job.title(),
+                        if split {
+                            if lyrics {
+                                " · split audio layers + lyrics"
+                            } else {
+                                " · split audio layers"
+                            }
+                        } else {
+                            ""
+                        }
+                    );
                     self.enqueue_import(cx, job);
                 }
                 None => {
@@ -11989,12 +12608,72 @@ impl MatchEvent for App {
                     crate::audio::play();
                 }
                 self.refresh_library_audio(cx);
+                // Playing again re-arms the transcript's per-frame follow.
+                self.arm_lyrics_pump(cx);
             }
             AudioAction::Seek(fraction) => {
                 crate::audio::seek_fraction(fraction);
                 self.refresh_library_audio(cx);
             }
             AudioAction::None => {}
+        }
+        // The separated layers: four mute toggles over one shared playhead.
+        for (lane, id) in [
+            (0usize, ids!(layer_drums_toggle)),
+            (1, ids!(layer_bass_toggle)),
+            (2, ids!(layer_vocals_toggle)),
+            (3, ids!(layer_other_toggle)),
+        ] {
+            if let Some(audible) = self.ui.check_box(cx, id).changed(actions) {
+                crate::audio::set_lane_muted(lane, !audible);
+            }
+        }
+        // A click on a lyric line is a seek request; this app owns the mixer
+        // and carries it out.
+        let lyric_events = self
+            .ui
+            .widget(cx, ids!(detail_lyrics))
+            .borrow_mut::<LyricReader>()
+            .map(|mut reader| reader.take_events())
+            .unwrap_or_default();
+        for event in lyric_events {
+            let LyricEvent::Seek { secs } = event;
+            let duration = crate::audio::duration_secs();
+            if duration > 0.0 {
+                crate::audio::seek_fraction(secs / duration);
+                self.refresh_library_audio(cx);
+            }
+        }
+        // "Split audio layers" for the selected track.
+        if self.ui.button(cx, ids!(detail_analyse_btn)).clicked(actions) {
+            let lyrics = self.ui.check_box(cx, ids!(detail_analyse_lyrics)).active(cx);
+            if let Some((asset, title)) = self.selected_audio() {
+                self.enqueue_analysis(cx, vec![(analysis::BakeTarget::Asset(asset), title)], lyrics);
+            }
+        }
+        if self
+            .ui
+            .check_box(cx, ids!(detail_analyse_lyrics))
+            .changed(actions)
+            .is_some()
+        {
+            self.refresh_analysis_ui(cx);
+        }
+        if self.ui.button(cx, ids!(detail_analyse_stop)).clicked(actions) {
+            if let Some(queue) = self.analysis.as_mut() {
+                queue.stop();
+            }
+            self.refresh_analysis_ui(cx);
+        }
+        if self.ui.button(cx, ids!(lib_analyse_shown_btn)).clicked(actions) {
+            self.open_analyse_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_analyse_shown_cancel)).clicked(actions) {
+            self.close_analyse_shown_modal(cx);
+        }
+        if self.ui.button(cx, ids!(lib_analyse_shown_confirm)).clicked(actions) {
+            self.close_analyse_shown_modal(cx);
+            self.analyse_shown_assets(cx);
         }
         if self.ui.button(cx, ids!(lib_retire_shown_btn)).clicked(actions) {
             self.open_retire_shown_modal(cx);
@@ -12809,6 +13488,27 @@ impl AppMain for App {
                 self.refresh_import_ui(cx);
             }
             self.drain_import_previews();
+            if music_poll {
+                // A finished music run with "split audio layers" on hands
+                // its tracks straight to the bake queue. Aliases, resolved
+                // on the bake lane — the UI thread never blocks on lookups.
+                let batch = self.music_import_page.take_pending_analysis();
+                if !batch.is_empty() {
+                    let lyrics = self.music_import_page.bake_lyrics;
+                    let targets = batch
+                        .into_iter()
+                        .map(|alias| {
+                            let title = alias
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&alias)
+                                .to_string();
+                            (analysis::BakeTarget::Alias(alias), title)
+                        })
+                        .collect();
+                    self.enqueue_analysis(cx, targets, lyrics);
+                }
+            }
             if kenney_poll || classic_poll || music_poll || !self.import_landings.is_empty() {
                 if music_poll {
                     log!(
@@ -12897,6 +13597,9 @@ impl AppMain for App {
             // The Library rail has its own transport over the same mixer.
             if self.surface == Surface::Library && self.library_audio_file.is_some() {
                 self.refresh_library_audio(cx);
+                // Playback that started from the transport re-arms the
+                // transcript's own per-frame follow.
+                self.arm_lyrics_pump(cx);
             }
         }
         if self.audio_timer.is_event(event).is_some() && self.webcam.capturing {
@@ -12907,6 +13610,14 @@ impl AppMain for App {
         // it is cheap enough that a spurious shared signal costs nothing).
         if let Event::Signal = event {
             self.drain_artifact_io(cx);
+            // The analysis lanes wake the loop the same way.
+            self.drain_analysis(cx);
+        }
+        if self.lyrics_pump.is_event(event).is_some() {
+            // Per-frame word fill while the transcript is up and the track
+            // is audible; parks itself otherwise.
+            self.refresh_library_audio(cx);
+            self.arm_lyrics_pump(cx);
         }
         if self.thumbnail_timer.is_event(event).is_some() {
             self.pump_thumbnail_backfill(cx);
