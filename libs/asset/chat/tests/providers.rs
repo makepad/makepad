@@ -285,6 +285,9 @@ fn qwen_probe_caches_and_skips_dead_nodes() {
     assert_eq!(
         first,
         vec![
+            // A failed idempotent GET retries once before the node is
+            // marked dead (a flaky LAN drop must not cost DEAD_TTL).
+            "http://dead:8765/health".to_string(),
             "http://dead:8765/health".to_string(),
             "http://n1:8765/health".to_string(),
             "http://n1:8765/models".to_string(),
