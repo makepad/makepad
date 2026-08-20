@@ -38,7 +38,7 @@ pub use plan::{needs_annotation, plan_upload, Annotator, BaseAnnotation, Upload,
 
 /// Bump when the prompt or the output contract changes: every asset tagged
 /// with an older version is re-annotated and its owned fields replaced.
-pub const ANNOTATOR_VERSION: u32 = 1;
+pub const ANNOTATOR_VERSION: u32 = 2;
 
 /// The question put to the vision model about one turntable sheet.
 ///

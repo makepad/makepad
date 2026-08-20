@@ -27,7 +27,7 @@ pub fn decode_png(bytes: &[u8]) -> Result<Rgb, String> {
         return Err(format!("png payload short: {} < {}", out.len(), w * h * channels));
     }
     // The renderer's background, used as the matte for transparent pixels.
-    const BG: [u8; 3] = [0x14, 0x18, 0x28];
+    const BG: [u8; 3] = SHEET_BG;
     let mut pixels = vec![0u8; w * h * 3];
     for i in 0..w * h {
         let s = &out[i * channels..];
@@ -83,6 +83,42 @@ pub fn downscale(src: &Rgb, target: usize) -> Rgb {
     Rgb { w: target, h: target, pixels }
 }
 
+/// The turntable renderer's flat background colour.
+pub const SHEET_BG: [u8; 3] = [0x14, 0x18, 0x28];
+
+/// Lift the subject out of the renders' shadows, leaving the background alone.
+///
+/// The sheets are lit dimly against a near-black navy field, and unlit faces
+/// land in the 20-60 range where hue is mostly quantisation noise. Read at
+/// that exposure the model names shadows rather than materials — a brown
+/// arched door came back "blue", a grey road's shading came back "dark blue
+/// edges". A gamma lift on subject pixels only fixes the naming without
+/// touching geometry, and the background is a known flat colour so "subject"
+/// is an exact test rather than a guess.
+pub fn lift_exposure(img: &mut Rgb, gamma: f32) {
+    if gamma <= 1.0 {
+        return;
+    }
+    // Lookup table: 256 powf calls instead of one per subpixel.
+    let mut lut = [0u8; 256];
+    for (i, v) in lut.iter_mut().enumerate() {
+        *v = (((i as f32 / 255.0).powf(1.0 / gamma)) * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    // Anything within this distance of the background is background. The
+    // renderer writes it flat, so a tight threshold cannot eat dark geometry
+    // that merely sits near it in colour.
+    const TOL: i32 = 6;
+    for px in img.pixels.chunks_exact_mut(3) {
+        let is_bg = (0..3).all(|c| (px[c] as i32 - SHEET_BG[c] as i32).abs() <= TOL);
+        if is_bg {
+            continue;
+        }
+        for c in 0..3 {
+            px[c] = lut[px[c] as usize];
+        }
+    }
+}
+
 /// Serialise as binary P6 PPM, the interchange format the batch executor
 /// reads. Deliberately the dumbest possible container: no compression, no
 /// dependency, and trivially reimplemented by any other executor.
@@ -134,6 +170,31 @@ mod tests {
         assert_eq!((out.w, out.h), (10, 10));
         let same = downscale(&src, 20);
         assert_eq!((same.w, same.h), (10, 10));
+    }
+
+    #[test]
+    fn exposure_lifts_the_subject_and_leaves_the_background() {
+        let mut img = solid(3, 1, SHEET_BG);
+        // one dark subject pixel and one already-bright one
+        img.pixels[3..6].copy_from_slice(&[40, 30, 20]);
+        img.pixels[6..9].copy_from_slice(&[250, 250, 250]);
+        lift_exposure(&mut img, 1.8);
+        // background untouched, so it cannot start reading as a colour
+        assert_eq!(&img.pixels[0..3], &SHEET_BG);
+        // shadowed subject lifted well clear of the noise floor
+        assert!(img.pixels[3] > 90, "{}", img.pixels[3]);
+        // highlights stay put instead of clipping
+        assert!(img.pixels[6] >= 250);
+        // hue order is preserved: r was brightest, it stays brightest
+        assert!(img.pixels[3] > img.pixels[4] && img.pixels[4] > img.pixels[5]);
+    }
+
+    #[test]
+    fn exposure_is_a_noop_at_unit_gamma() {
+        let mut img = solid(2, 1, [40, 30, 20]);
+        let before = img.pixels.clone();
+        lift_exposure(&mut img, 1.0);
+        assert_eq!(img.pixels, before);
     }
 
     #[test]
