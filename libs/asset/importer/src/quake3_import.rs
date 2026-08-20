@@ -1646,6 +1646,81 @@ fn bsp46_to_glb(bytes: &[u8], textures: &Q3TexBank) -> Result<Bsp46World, String
             }
         }
     }
+    // Weld the T-junctions this converter's own tessellation leaves behind.
+    //
+    // `q3map` fixes the ones between brush faces, which is why nothing
+    // welded here for a long time. But a Q3 map is not only brushwork: this
+    // converter subdivides every patch itself, and where a curve meets the
+    // flat wall it abuts, neither side knows where the other cut. q3dm1
+    // came out of a pre-welded BSP with 668 cracks. Merge first (a pair of
+    // corners a hair apart poisons each other's cuts, so the splitter
+    // declines them), then split, over the world parts, the sky, the
+    // liquids and every mover from one grid — the cracks that show up most
+    // are the ones BETWEEN parts.
+    {
+        let merge = {
+            let mut all: Vec<&[[f32; 3]]> = parts.values().map(|g| &g.positions[..]).collect();
+            all.push(&sky_geom.positions[..]);
+            all.extend(hazard_geom.values().map(|g| &g.positions[..]));
+            all.extend(mover_geom.iter().map(|m| &m.geom.positions[..]));
+            crate::classic_import::merge_near_corners(&all)
+        };
+        let mut weld_one = |geom: &mut PartGeom, pass: &dyn Fn(crate::classic_import::WeldSoup)| {
+            let n = geom.positions.len();
+            let mut normals = std::mem::take(&mut geom.normals);
+            let mut colors = std::mem::take(&mut geom.colors);
+            let has_normals = normals.len() == n;
+            let has_colors = colors.len() == n;
+            pass(crate::classic_import::WeldSoup {
+                positions: &mut geom.positions,
+                uvs: &mut geom.uvs,
+                normals: has_normals.then_some(&mut normals),
+                colors: has_colors.then_some(&mut colors),
+                indices: &mut geom.indices,
+            });
+            geom.normals = normals;
+            geom.colors = colors;
+            // The lightmap UVs are a second stream the weld does not know
+            // about; a split would leave them the wrong length, and a
+            // length mismatch is what the writer checks. Rebuild them to
+            // the marker form rather than ship a half-updated stream.
+            if geom.lm_uvs.len() != geom.positions.len() {
+                geom.lm_uvs = vec![[0.0, 0.0]; geom.positions.len()];
+                geom.own_marker = true;
+            }
+        };
+        if !merge.is_empty() {
+            let apply = |soup: crate::classic_import::WeldSoup| {
+                merge.apply(soup);
+            };
+            for geom in parts
+                .values_mut()
+                .chain(std::iter::once(&mut sky_geom))
+                .chain(hazard_geom.values_mut())
+                .chain(mover_geom.iter_mut().map(|m| &mut m.geom))
+            {
+                weld_one(geom, &apply);
+            }
+        }
+        let weld = {
+            let mut all: Vec<&[[f32; 3]]> = parts.values().map(|g| &g.positions[..]).collect();
+            all.push(&sky_geom.positions[..]);
+            all.extend(hazard_geom.values().map(|g| &g.positions[..]));
+            all.extend(mover_geom.iter().map(|m| &m.geom.positions[..]));
+            crate::classic_import::weld_parts(&all)
+        };
+        let split = |soup: crate::classic_import::WeldSoup| {
+            weld.split(soup);
+        };
+        for geom in parts
+            .values_mut()
+            .chain(std::iter::once(&mut sky_geom))
+            .chain(hazard_geom.values_mut())
+            .chain(mover_geom.iter_mut().map(|m| &mut m.geom))
+        {
+            weld_one(geom, &split);
+        }
+    }
     // A Q3 level is PRELIT: its light is already in COLOR_0, from the
     // lightmap atlas where there is one and from the drawvert colours where
     // there is not. The `lightmapTexture` marker is what tells the renderer
@@ -4888,17 +4963,19 @@ blendFunc GL_ONE GL_ONE
             parts.len(),
             soup.iter().map(|(_, i)| i.len() / 3).sum::<usize>()
         );
-        // Measured 668 over 12329 triangles in 86 parts. They are NOT brush
-        // seams — `q3map` really did weld those — they are where this
-        // converter's own patch tessellation meets the brushwork it abuts:
-        // `emit_patch` picks a subdivision level per patch and
-        // `collapse_patch_grid` drops chordal rows, neither of which the
-        // neighbouring polygon knows about. Adding a weld pass here would
-        // fight the one q3map already ran, so the number is a RATCHET: it may
-        // only fall.
+        // 668 before the weld, 2 after. They were never brush seams —
+        // `q3map` really did weld those — they are where this converter's
+        // own patch tessellation meets the brushwork it abuts: `emit_patch`
+        // picks a subdivision level per patch and `collapse_patch_grid`
+        // drops chordal rows, neither of which the neighbouring polygon
+        // knows about. Welding does not fight q3map, it finishes what this
+        // converter started. The two that survive are corner pairs further
+        // apart than the merge tolerance, which is a physical six
+        // millimetres and does not stretch for a coarser source grid. A
+        // ratchet: it may only fall.
         assert!(
-            left <= 700,
-            "q3dm1 T-junctions rose to {left} (ratchet 700, measured 668) — \
+            left <= 2,
+            "q3dm1 T-junctions rose to {left} (ratchet 2) — \
              surfaces crack where they meet"
         );
 
