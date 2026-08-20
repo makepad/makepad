@@ -23,6 +23,12 @@ pub(crate) fn weld_parts(parts: &[&[[f32; 3]]]) -> weld::Weld {
     weld::Weld::from_parts(parts)
 }
 
+/// The corner merge that closes what the splitter declines (see
+/// [`weld::Merge`]). Run BEFORE [`weld_parts`], on the same list of parts.
+pub(crate) fn merge_near_corners(parts: &[&[[f32; 3]]]) -> weld::Merge {
+    weld::Merge::from_parts(parts, weld::MERGE_TOLERANCE)
+}
+
 /// Test-only audit: T-junctions still present across a converted level's
 /// parts (see [`weld::t_junctions_left`]).
 #[cfg(test)]
