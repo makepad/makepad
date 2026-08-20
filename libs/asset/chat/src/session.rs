@@ -115,6 +115,28 @@ pub trait ToolExecutor {
     /// (advertised profiles, or why none are available).
     fn capability_doc(&mut self) -> String;
 
+    /// The tool vocabulary this executor supports, rendered into the system
+    /// prompt at every send. The default is the broker's content base list;
+    /// a game-client executor appends [`tools::sandbox_definitions`]. The
+    /// typed parser accepts the FULL vocabulary regardless — a call outside
+    /// this executor's list is answered with a typed `Unavailable`, never
+    /// executed by accident.
+    fn tool_definitions(&mut self) -> Vec<crate::tools::ToolDef> {
+        tools::definitions()
+    }
+
+    /// True when `call` must be executed by the session's CLIENT — the app
+    /// that owns the state the tool touches (the sandbox owns the game
+    /// world). The session then emits the ToolCall event as usual but PARKS
+    /// the turn instead of calling [`ToolExecutor::execute`]; the owner
+    /// feeds the client's answer back through
+    /// [`Session::provide_client_outcome`] (or times the wait out with a
+    /// `Failed` outcome). Default: nothing is client-executed.
+    fn client_executes(&mut self, call: &ContentToolCall) -> bool {
+        let _ = call;
+        false
+    }
+
     /// Execute one typed call. `progress` may be called with
     /// `(permille, note)` any number of times; `cancel` should be observed
     /// by long-running tools.
@@ -152,6 +174,9 @@ enum Phase {
     /// A provider turn is streaming; `collected` accumulates deltas as a
     /// fallback for providers that do not repeat full text in `Done`.
     Streaming { collected: String },
+    /// A client-executed tool call was emitted; the turn is parked until
+    /// the owner provides the client's outcome (or a timeout outcome).
+    AwaitingClientTool { call_id: String },
 }
 
 /// One conversation bound to one provider and one local [`Origin`].
@@ -171,6 +196,9 @@ pub struct Session {
     sealed: Option<String>,
     tool_executed_this_turn: bool,
     executed_mutation: bool,
+    /// Visible assistant text preceding a PARKED client tool call, kept for
+    /// the tool round once the client's outcome arrives.
+    pending_clean: String,
 }
 
 impl Session {
@@ -196,6 +224,7 @@ impl Session {
             sealed: None,
             tool_executed_this_turn: false,
             executed_mutation: false,
+            pending_clean: String::new(),
         }
     }
 
@@ -284,7 +313,7 @@ impl Session {
         self.push_history(ChatRole::User, user_text)
             .map_err(|_| SendRefusal::TooLarge { what: "message" })?;
 
-        let defs = tools::definitions();
+        let defs = tools_exec.tool_definitions();
         let cap = tools_exec.capability_doc();
         self.system = if self.provider.kind().uses_native_tools() {
             tools::render_native_system(&defs, &cap)
@@ -318,6 +347,7 @@ impl Session {
         if self.should_seal_after_tool() {
             self.seal("cancelled after a tool executed");
         }
+        self.pending_clean.clear();
         self.phase = Phase::Idle;
         self.emit(ChatEventBody::Cancelled);
     }
@@ -326,6 +356,11 @@ impl Session {
     /// round. Call from the owner's loop until `is_idle`.
     pub fn pump(&mut self, tools_exec: &mut dyn ToolExecutor) {
         if matches!(self.phase, Phase::Idle) {
+            return;
+        }
+        // A parked turn waits for provide_client_outcome (or the owner's
+        // timeout); the provider has nothing meaningful to say meanwhile.
+        if matches!(self.phase, Phase::AwaitingClientTool { .. }) {
             return;
         }
         for ev in self.provider.poll() {
@@ -357,7 +392,7 @@ impl Session {
                 ProviderEvent::FunctionCall { call_id, name, arguments } => {
                     let visible = match &self.phase {
                         Phase::Streaming { collected } => collected.clone(),
-                        Phase::Idle => String::new(),
+                        _ => String::new(),
                     };
                     self.finish_native_function(visible, call_id, name, arguments, tools_exec);
                     return;
@@ -377,7 +412,7 @@ impl Session {
                     let full = if text.is_empty() {
                         match &self.phase {
                             Phase::Streaming { collected } => collected.clone(),
-                            Phase::Idle => String::new(),
+                            _ => String::new(),
                         }
                     } else {
                         text
@@ -447,11 +482,58 @@ impl Session {
                 });
                 let outcome = match ContentToolCall::parse(&name, &args) {
                     Err(reason) => ToolOutcome::Refused { what: reason },
-                    Ok(call) => self.run_tool(&call_id, &call, tools_exec),
+                    Ok(call) => {
+                        if tools_exec.client_executes(&call) {
+                            self.park_for_client(clean, call_id, &call);
+                            return;
+                        }
+                        self.run_tool(&call_id, &call, tools_exec)
+                    }
                 };
                 self.tool_round(clean, Some(call_id), outcome, tools_exec);
             }
         }
+    }
+
+    /// Emit nothing further and wait for the session owner to feed the
+    /// CLIENT's outcome back. The ToolCall event was already emitted, so
+    /// the client sees exactly what to execute.
+    fn park_for_client(&mut self, clean: String, call_id: String, call: &ContentToolCall) {
+        self.tool_executed_this_turn = true;
+        if is_mutating(call) {
+            self.executed_mutation = true;
+        }
+        self.pending_clean = clean;
+        self.phase = Phase::AwaitingClientTool { call_id };
+    }
+
+    /// The call id of the client-executed tool this session is parked on.
+    pub fn awaiting_client_tool(&self) -> Option<&str> {
+        match &self.phase {
+            Phase::AwaitingClientTool { call_id } => Some(call_id),
+            _ => None,
+        }
+    }
+
+    /// Feed a parked client tool its outcome (from the wire, or a timeout
+    /// `Failed` from the owner) and resume the turn.
+    pub fn provide_client_outcome(
+        &mut self,
+        call_id: &str,
+        outcome: ToolOutcome,
+        tools_exec: &mut dyn ToolExecutor,
+    ) -> Result<(), &'static str> {
+        match &self.phase {
+            Phase::AwaitingClientTool { call_id: waiting } if waiting == call_id => {}
+            Phase::AwaitingClientTool { .. } => return Err("tool call id mismatch"),
+            _ => return Err("no client tool is awaiting a result"),
+        }
+        if let ToolOutcome::Ok { value } = &outcome {
+            harvest_revisions(value, &mut self.known);
+        }
+        let clean = std::mem::take(&mut self.pending_clean);
+        self.tool_round(clean, Some(call_id.to_string()), outcome, tools_exec);
+        Ok(())
     }
 
     fn finish_native_function(
@@ -525,7 +607,13 @@ impl Session {
             Some(o) => o,
             None => match ContentToolCall::parse(&canonical, &args) {
                 Err(reason) => ToolOutcome::Refused { what: reason },
-                Ok(call) => self.run_tool(&call_id, &call, tools_exec),
+                Ok(call) => {
+                    if tools_exec.client_executes(&call) {
+                        self.park_for_client(visible, call_id, &call);
+                        return;
+                    }
+                    self.run_tool(&call_id, &call, tools_exec)
+                }
             },
         };
         self.tool_round(visible, Some(call_id), outcome, tools_exec);
@@ -750,6 +838,10 @@ fn is_mutating(call: &ContentToolCall) -> bool {
             | ContentToolCall::OperationCreate { .. }
             | ContentToolCall::OperationCancel { .. }
             | ContentToolCall::OperationRetry { .. }
+            | ContentToolCall::WorldPlace { .. }
+            | ContentToolCall::WorldRemove { .. }
+            | ContentToolCall::WorldMove { .. }
+            | ContentToolCall::WorldSetSource { .. }
     )
 }
 

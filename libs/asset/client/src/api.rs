@@ -516,22 +516,37 @@ impl OperationFinalizeRequest {
 pub struct ChatCreateRequest {
     pub namespace: String,
     pub provider: crate::dto::ChatProviderKind,
+    /// Declared app profile ("game", "vj"); the broker selects the
+    /// session's taught context and tool surface from it. `None` = general.
+    pub client: Option<String>,
 }
 
 impl ChatCreateRequest {
     pub fn new(namespace: impl Into<String>, provider: crate::dto::ChatProviderKind) -> Self {
-        ChatCreateRequest { namespace: namespace.into(), provider }
+        ChatCreateRequest { namespace: namespace.into(), provider, client: None }
+    }
+
+    pub fn with_client(mut self, client: impl Into<String>) -> Self {
+        self.client = Some(client.into());
+        self
     }
 
     fn body(&self) -> ClientResult<Value> {
         if self.namespace.is_empty() || self.namespace.len() > wire::MAX_NAMESPACE_BYTES {
             return Err(ClientError::InvalidInput { what: "chat namespace" });
         }
-        Ok(json::obj(vec![
+        let mut pairs = vec![
             ("api_version", Value::Int(1)),
             ("namespace", json::s(self.namespace.clone())),
             ("provider", json::s(self.provider.as_str())),
-        ]))
+        ];
+        if let Some(client) = &self.client {
+            if client.is_empty() || client.len() > 32 {
+                return Err(ClientError::InvalidInput { what: "chat client profile" });
+            }
+            pairs.push(("client", json::s(client.clone())));
+        }
+        Ok(json::obj(pairs))
     }
 }
 
@@ -2031,6 +2046,37 @@ impl Api {
             return Err(ClientError::Protocol { what: "chat cancel id mismatch" });
         }
         Ok(session)
+    }
+
+    /// Answer a client-executed tool call (the game's world tools). `outcome`
+    /// is the encoded tool-outcome object (`{"outcome": "ok", "value": …}`);
+    /// the server validates it against the chat wire's own bounds.
+    pub fn chat_tool_result(
+        &self,
+        id: &crate::dto::ChatSessionId,
+        call_id: &str,
+        outcome: &Value,
+    ) -> ClientResult<()> {
+        if call_id.is_empty() || call_id.len() > 64 {
+            return Err(ClientError::InvalidInput { what: "chat tool call id" });
+        }
+        let body = json::obj(vec![
+            ("id", json::s(call_id)),
+            ("outcome", outcome.clone()),
+        ])
+        .to_json()
+        .into_bytes();
+        if body.len() > 24 * 1024 {
+            return Err(ClientError::InvalidInput { what: "chat tool outcome too large" });
+        }
+        let path = wire::path_chat_tool_result(&id.to_string());
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        match v.get("accepted").and_then(Value::as_bool) {
+            Some(true) => Ok(()),
+            _ => Err(ClientError::Protocol { what: "chat tool result echo" }),
+        }
     }
 
     pub fn chat_retire(&self, id: &crate::dto::ChatSessionId) -> ClientResult<bool> {

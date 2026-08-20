@@ -6271,6 +6271,11 @@ fn role_name(role: FileRole) -> &'static str {
         FileRole::Depth => "depth",
         FileRole::Splat => "splat",
         FileRole::AoTexture => "ao_texture",
+        FileRole::StemDrums => "stem_drums",
+        FileRole::StemBass => "stem_bass",
+        FileRole::StemVocals => "stem_vocals",
+        FileRole::StemOther => "stem_other",
+        FileRole::Lyrics => "lyrics",
     }
 }
 

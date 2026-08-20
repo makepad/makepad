@@ -85,7 +85,8 @@ pub use server::{AssetServerCore, RecoverReport, SERVER_SCHEMA_VERSION};
 /// HTTP/UDP host used by asset-ui / sandbox embed and the standalone bin.
 pub mod host;
 pub use host::{
-    AssetServer, ChatConfig, DiscoveryConfig, LISTEN_FILE, ServerConfig, DEFAULT_DISCOVERY_PORT,
+    AssetServer, ChatConfig, ChatScript, DiscoveryConfig, ScriptedLane, ScriptedTurn,
+    LISTEN_FILE, ServerConfig, DEFAULT_DISCOVERY_PORT,
 };
 pub use host::discovery;
 pub use host::json;
