@@ -8615,9 +8615,21 @@ impl App {
                     if let Some(asset) = file.strip_prefix("store:") {
                         let (domain, content_type) = store_media_of(&bytes);
                         let title = self.store_asset_title(asset);
+                        let is_music = self.store_asset_namespace(asset).as_deref() == Some("music");
                         if self.display_artifact(
                             cx, domain, content_type, &bytes, 0, copy_to.as_deref(), false,
                         ) {
+                            // A MUSIC row starts playing on click — a music
+                            // library where every track needs a second Play
+                            // click auditions like a filing cabinet. Only the
+                            // music namespace: sfx/speech reopens keep the
+                            // one-shot loop guard (see display_artifact).
+                            if is_music && audio::is_ready() && !audio::is_playing() {
+                                crate::video_player::stop_audio();
+                                audio::play();
+                                self.arm_audio_pump(cx);
+                                self.sync_audio_ui(cx);
+                            }
                             self.viewer = ViewerContent::Showing(file.clone());
                             self.set_caption(cx, kind_label(domain, content_type), &title);
                         } else {
@@ -8959,6 +8971,18 @@ impl App {
 
     /// The catalog row's title for a store open, so the caption says what
     /// the user clicked instead of a raw id.
+    /// Namespace of a catalog asset as the current search served it —
+    /// `None` when the asset is not in the loaded result page.
+    fn store_asset_namespace(&self, asset: &str) -> Option<String> {
+        self.store.search.ready().and_then(|results| {
+            results
+                .hits
+                .iter()
+                .find(|hit| hit.asset_id.to_string() == asset)
+                .map(|hit| hit.namespace.clone())
+        })
+    }
+
     fn store_asset_title(&self, asset: &str) -> String {
         self.store
             .search
