@@ -58,6 +58,7 @@ pub mod window_menu;
 #[cfg(feature = "voice")]
 mod window_voice_input;
 
+pub mod combo_box;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
@@ -145,6 +146,7 @@ pub use crate::{
     cached_widget::*,
     callout_tooltip::*,
     check_box::*,
+    combo_box::*,
     desktop_button::*,
     dock::*,
 
@@ -554,6 +556,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_down2::script_mod(vm);
     crate::text_input::script_mod(vm);
     crate::slider::script_mod(vm);
+    crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);
 
