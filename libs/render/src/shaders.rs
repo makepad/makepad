@@ -889,6 +889,104 @@ script_mod! {
         }
     }
 
+    // A MAP's own sky surfaces (model.rs SkyPart): the faces Doom, Quake and
+    // Q3 drew as "look through here", shaded by the view ray instead of by
+    // the world's light.
+    //
+    // A sibling of DrawSceneSkinned rather than a mode inside it, for the
+    // reason written above DrawSceneSkyAnalytic: that shader's pixel fn is
+    // already at the script-shader's capacity, and a sky branch there would
+    // also make every prop in the world pay for it. This one has no
+    // lighting, no AO, no lightmap, no CSM and no fog to execute — the sky
+    // is not lit, it IS the light — and it is drawn once per map.
+    //
+    // Depth is written normally: the faces sit where the level put them, so
+    // walls in front occlude them for free and the sky never covers the
+    // world.
+    mod.draw.DrawSceneSkyMap = mod.std.set_type_default() do #(DrawSceneSkyMap::script_shader(vm)){
+        alpha_blend: false
+        backface_culling: true
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        // The same packed stream the static models use, so a map's sky faces
+        // upload through exactly the same path as the rest of the map.
+        geom: vertex_buffer(geom.GameMeshVertexAo, geom.GameMeshAoGeom)
+        sky0: texture_2d(float)
+        sky1: texture_2d(float)
+        world: varying(vec4f)
+        // The TRUE world ray, camera to fragment. Interpolating the ray and
+        // normalizing per fragment is what makes the sky follow the camera's
+        // rotation exactly while staying pinned to real geometry.
+        v_ray: varying(vec3f)
+
+        vertex: fn() {
+            let pos = vec3(self.geom.px, self.geom.py, self.geom.pz)
+            let model_view = self.draw_list.view_transform * self.transform
+            self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
+            // Pre-stage world position: the ray is measured where the camera
+            // physically is, never in an MR diorama's shrunken space.
+            let wp = (self.transform * vec4(pos.x, pos.y, pos.z, 1.0)).xyz
+            self.v_ray = wp - self.eye.xyz
+            self.vertex_pos = self.draw_pass.camera_projection
+                * (self.draw_pass.camera_view * self.world)
+        }
+
+        // Every branch returns rather than assigning a shared colour: the
+        // three projections share no work, and one `if` per fragment with an
+        // early out is both the cheapest and the shape the other shaders in
+        // this file already use.
+        //
+        // Every result is unlit, unfogged and at full brightness — the
+        // prelit contract. A sky that takes fog goes grey at the horizon
+        // while the painted horizon in the image says otherwise, and a sky
+        // that takes sun goes black when you look away from it.
+        pixel: fn() {
+            let dir = normalize(self.v_ray)
+            if self.sky_p.x < 1.5 {
+                // CYLINDER (Doom/Duke). Yaw wraps `repeat` times round the
+                // compass — Doom's 256-wide strip goes round four times —
+                // and pitch covers a BAND, not the hemisphere: sky_q.x is
+                // how much of a half turn the image's height spans, and both
+                // ends clamp, which is what keeps the horizon row stretched
+                // under the player exactly as Doom drew it.
+                let u = atan2(dir.x, dir.z) * 0.15915494 * self.sky_p.y + self.sky_p.z
+                let pitch = asin(clamp(dir.y, 0.0 - 1.0, 1.0))
+                let v = clamp(0.5 - pitch * 0.31830989 / max(self.sky_q.x, 0.001), 0.0, 1.0)
+                let c = self.sky0.sample_as_bgra_repeat(vec2(u, v))
+                return vec4(c.xyz * self.brightness, 1.0)
+            }
+            if self.sky_p.x < 2.5 {
+                // QUAKE_SCROLL. Quake flattens the sphere by stretching the
+                // up axis 3x and rescaling the direction to a fixed radius
+                // (6*63 units), which is what gives the classic swirl toward
+                // the zenith; the two layers then slide across it at their
+                // own speeds and the front one keys the back one through.
+                let d = vec3(dir.x, dir.y * 3.0, dir.z)
+                let l = 378.0 / max(length(d), 0.0001)
+                let back = vec2(self.sky_p.z + d.x * l, self.sky_p.z + d.z * l) * 0.0078125
+                let front = vec2(self.sky_p.w + d.x * l, self.sky_p.w + d.z * l) * 0.0078125
+                let b = self.sky0.sample_as_bgra_repeat(back)
+                let f = self.sky1.sample_as_bgra_repeat(front)
+                let c = mix(b.xyz, f.xyz, f.w * self.sky_q.y)
+                return vec4(c * self.brightness, 1.0)
+            }
+            // CUBE, sampled as its equirect twin: longitude round, latitude
+            // down. v is held a hair off the poles because the wrap sampler
+            // would otherwise fetch the opposite pole's row in the last texel.
+            let u = atan2(dir.x, dir.z) * 0.15915494 + 0.5 + self.sky_p.z
+            let v = clamp(acos(clamp(dir.y, 0.0 - 1.0, 1.0)) * 0.31830989, 0.001, 0.999)
+            let c = self.sky0.sample_as_bgra_repeat(vec2(u, v))
+            return vec4(c.xyz * self.brightness, 1.0)
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+    }
+
     // Skinned character mesh: PbrVertex stream (CPU-skinned per frame, uv in
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
@@ -1295,6 +1393,153 @@ script_mod! {
             return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
         }
 
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+    }
+
+    // Static props whose glTF material actually carries SHININESS: a
+    // metallic-roughness texture, or a roughness the author narrowed below 1
+    // (model.rs PbrMaterial::is_shiny). Everything else keeps DrawSceneSkinned.
+    //
+    // A SIBLING, for the reason written above DrawSceneSkyAnalytic and
+    // DrawSceneSkyMap: DrawSceneSkinned's pixel fn already sits at the
+    // script-shader's capacity, and a specular branch inside it would make
+    // every Kenney wall in the world execute a GGX lobe it can never show.
+    // Which shader a model draws with is decided ONCE, at load, from its
+    // material (renderer.rs LoadedModel::pbr).
+    //
+    // It INHERITS the whole of DrawSceneSkinned — vertex stage, cascades,
+    // dynamic lights, octahedral decode — and replaces only `pixel`. That is
+    // what keeps the two lanes from drifting: a fix to the CSM receive path
+    // or the dl slot gate lands in both by construction. The replaced pixel
+    // fn drops what a generated PBR mesh provably never has, and those drops
+    // are what pays for the lobe:
+    //   * the Q3/Unreal detail overlay (detail maps come with prelit worlds,
+    //     which are excluded from this lane by definition),
+    //   * the prelit COLOR_0-is-a-lightmap mix (same reason: prelit maps are
+    //     the retro look and get no specular),
+    //   * the BUILD magenta punch-through key (a Duke overlay convention),
+    //   * the AO and lightmap DEBUG views (SANDBOX_AO_DEBUG / SANDBOX_LM_DEBUG
+    //     still work on every OTHER prop in the scene; a shiny generated mesh
+    //     simply keeps its lit look while they are on).
+    mod.draw.DrawScenePbr = mod.std.set_type_default() do #(DrawScenePbr::script_shader(vm)){
+        ..mod.draw.DrawSceneSkinned
+        // The glTF metallicRoughnessTexture: G = roughness, B = metallic,
+        // and the factors multiply what it says. Declared AFTER the whole
+        // inherited set, so it takes the slot past detail_map (slot 6).
+        orm_map: texture_2d(float)
+        // TRUE world camera position (w unused). A specular lobe is the one
+        // term in this file that needs the eye: everything else here is
+        // view-independent. TRUE world, not stage world, so it matches
+        // v_csm.xyz and v_csm_n — the same convention the cascades and the
+        // dynamic lights already use.
+        eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+        // x^5, the Schlick exponent. Written out rather than pow(x, 5.0):
+        // two multiplies and a square beat a transcendental on every tiler.
+        pow5: fn(x: float) -> float {
+            let x2 = x * x
+            return x2 * x2 * x
+        }
+
+        pixel: fn() {
+            let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
+            if tex.w < 0.5 {
+                discard()
+            }
+            let albedo = vec3(tex.x * self.v_tint.x, tex.y * self.v_tint.y, tex.z * self.v_tint.z)
+            // Occlusion, sun visibility and lamps: verbatim from
+            // DrawSceneSkinned, so a PBR prop sits in the same light as the
+            // wall behind it.
+            let baked = self.ao_map.sample(self.v_ao_uv).x
+            let hash = fract(
+                sin(dot(self.world.xy + self.world.zz, vec2(12.9898, 78.233))) * 43758.5453
+            )
+            let ao = clamp(
+                mix(self.v_tint.w, baked, self.ao_enabled) + (hash - 0.5) * 0.03,
+                0.0, 1.0
+            )
+            let ao_direct = mix(1.0, ao, 0.75)
+            let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+            let has_lm = step(0.000001, self.lm_rect.z)
+            let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
+            let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
+            let top_g = self.lm_top_decode.x
+                + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
+            let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
+            let sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
+            let sun_all = mix(
+                sun_vis * sun_vis_g,
+                self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
+                self.csm_p.x
+            )
+            let lamps = lm.xyz * (2.0 * has_lm)
+
+            // The material. Factor x map, per the glTF spec; orm_on is 0 for
+            // a factors-only material so the sample folds out to 1.
+            let orm = self.orm_map.sample_as_bgra_repeat(self.v_uv)
+            // Roughness floored at 0.045: a2 goes to zero below that and the
+            // GGX denominator collapses to a single blown-out pixel that
+            // aliases into a crawling white dot as the camera moves.
+            let rough = clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
+            let metal = clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0)
+
+            // TRUE world space for all three vectors.
+            let n = normalize(self.v_csm_n)
+            let l = normalize(self.light_dir)
+            let v = normalize(self.eye.xyz - self.v_csm.xyz)
+            let h = normalize(l + v)
+            let ndv = max(dot(n, v), 0.0001)
+            let ndl = max(dot(n, l), 0.0001)
+            let ndh = max(dot(n, h), 0.0001)
+            let vdh = max(dot(v, h), 0.0)
+
+            // Cook-Torrance: GGX distribution, Schlick-GGX geometry with the
+            // direct-lighting k, Schlick Fresnel off an F0 that a metal takes
+            // from its own albedo (that colour shift IS what reads as metal).
+            let f0 = mix(vec3(0.04, 0.04, 0.04), albedo, metal)
+            let f = f0 + (vec3(1.0, 1.0, 1.0) - f0) * self.pow5(1.0 - vdh)
+            let a2 = rough * rough * rough * rough
+            let den = ndh * ndh * (a2 - 1.0) + 1.0
+            let dist = a2 / max(3.14159265 * den * den, 0.0001)
+            let k = (rough + 1.0) * (rough + 1.0) * 0.125
+            let geo = (ndv / max(ndv * (1.0 - k) + k, 0.0001))
+                * (ndl / max(ndl * (1.0 - k) + k, 0.0001))
+            // v_direct is already sun_color * N.L, so the BRDF here carries
+            // no cosine of its own — the two compose to the standard
+            // radiance * BRDF * N.L. Shadowed exactly like the diffuse sun:
+            // a highlight surviving inside a shadow is the classic tell.
+            let sun_spec = self.v_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001))
+                * (sun_all * ao_direct)
+
+            // Ambient specular WITHOUT an environment map: the hemisphere
+            // ambient this renderer already computes, looked up along the
+            // reflected view ray instead of along the normal, gated by the
+            // roughness-aware Fresnel (Karis' EnvBRDF fallback). A polished
+            // surface therefore picks up sky above and ground below and the
+            // highlight slides as the camera orbits, which is the whole
+            // point; a rough one collapses back to the flat ambient.
+            let refl = n * (2.0 * ndv) - v
+            let env = mix(self.sun_ground, self.sun_sky, clamp(refl.y * 0.5 + 0.5, 0.0, 1.0))
+            let smooth3 = 1.0 - rough
+            let fr = max(vec3(smooth3, smooth3, smooth3), f0)
+            let f_env = f0 + (fr - f0) * self.pow5(1.0 - ndv)
+            let amb_spec = env * f_env * ao
+
+            // A metal has no diffuse lobe at all; a dielectric keeps all of
+            // it. (The (1 - F) half of the split is deliberately dropped:
+            // at grazing angles it only ever darkens, and without an
+            // environment probe there is nothing to hand the energy to.)
+            let analytic = self.v_ambient * ao
+                + self.v_direct * (ao_direct * sun_all)
+                + (lamps + self.v_dl) * ao_direct
+            let lit = albedo * ((1.0 - metal) * analytic) + sun_spec * f + amb_spec
+            return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
+        }
+
+        // Re-declared rather than inherited so the depth-clip wrapper is
+        // provably calling THIS pixel fn.
         fragment: fn() {
             self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
         }
@@ -3653,6 +3898,37 @@ pub struct DrawSceneSkyAnalytic {
     pub star_r2: Vec4f,
 }
 
+/// A map's own sky surfaces, shaded by view direction
+/// ([`crate::model::SkyPart`]). Packed model vertex stream, no lighting.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneSkyMap {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub transform: Mat4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    /// TRUE world camera position (w unused). The ray each fragment samples
+    /// by is `world_position - eye`, so this must be the physical camera,
+    /// not a stage-transformed one.
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub eye: Vec4f,
+    /// x = projection code ([`crate::model::SkyProjection::code`]),
+    /// y = horizontal repeats per 360 degrees, z = layer-0 scroll offset,
+    /// w = layer-1 scroll offset (both in texture units).
+    #[live(vec4(1.0, 1.0, 0.0, 0.0))]
+    pub sky_p: Vec4f,
+    /// x = vertical span as a fraction of a half turn (Doom's sky stretch),
+    /// y = second-layer alpha gain, zw spare.
+    #[live(vec4(0.5, 1.0, 0.0, 0.0))]
+    pub sky_q: Vec4f,
+    /// Flat multiplier on the sampled colour. 1.0 is the image as authored,
+    /// which is what "unlit, full brightness" means.
+    #[live(1.0)]
+    pub brightness: f32,
+}
+
 /// Skinned character mesh (PbrVertex layout, uv in ny_nz_uv.zw, textured).
 #[derive(Script, ScriptHook)]
 #[repr(C)]
@@ -3722,6 +3998,34 @@ pub struct DrawSceneSkinned {
     /// 1 = vertex COLOR_0 is baked lighting (do not multiply the sun).
     #[live(0.0)]
     pub prelit: f32,
+}
+
+/// [`DrawSceneSkinned`] plus a Cook-Torrance specular lobe, for static props
+/// whose glTF material carries real shininess
+/// ([`crate::model::PbrMaterial::is_shiny`]).
+///
+/// The deref chain is what makes the two lanes one code path: everything the
+/// renderer sets on a model draw — transform, lightmap window, dynamic-light
+/// gate, sun terms — is set through the inherited [`DrawSceneSkinned`], and
+/// only the three material lanes below are new. Instance-field rule as
+/// everywhere in this file: `#[live]` instance floats AFTER the deref only,
+/// so `DrawVars::as_slice` reads the base's lanes and then these.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawScenePbr {
+    #[deref]
+    pub skinned: DrawSceneSkinned,
+    /// glTF `metallicFactor`, multiplied by the ORM map's B channel.
+    #[live(0.0)]
+    pub metallic: f32,
+    /// glTF `roughnessFactor`, multiplied by the ORM map's G channel.
+    #[live(1.0)]
+    pub roughness: f32,
+    /// 1.0 when a metallicRoughness texture is bound on slot 6. Zero folds
+    /// the sample out of both products, so a factors-only material costs one
+    /// 1x1 fetch and nothing else.
+    #[live(0.0)]
+    pub orm_on: f32,
 }
 
 /// Minimal camera-space held-model shader. The transform is the only instance
