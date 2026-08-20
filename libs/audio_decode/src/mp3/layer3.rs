@@ -379,16 +379,31 @@ fn read_scalefactors_lsf(
 /// Walk one Huffman tree to a leaf. The trees are complete prefix codes, so
 /// this terminates within the table's longest codeword; the bound is a
 /// belt-and-braces guard against a malformed table, never a decode limit.
+///
+/// The walk is at most 24 bits, so the whole window is fetched once and the
+/// bits are shifted out of a register instead of being re-derived from the
+/// byte cursor one at a time. This is the same bit sequence, zero-filled past
+/// the end the same way, and the cursor lands on the same bit — including the
+/// malformed-table exit, which consumes only the bits actually descended.
+/// `overran` also agrees: `read_bit` raised it exactly when a bit was taken at
+/// or past `len_bits`, which is exactly when the final position exceeds it.
 #[inline]
 fn huff_leaf(r: &mut BitReader, tree: &[HuffNode]) -> Option<u16> {
+    let window = r.peek(24);
     let mut node = 0usize;
-    for _ in 0..24 {
-        let child = tree.get(node)?[r.read_bit() as usize];
+    for used in 0..24 {
+        let Some(entry) = tree.get(node) else {
+            r.skip(used);
+            return None;
+        };
+        let child = entry[((window >> (23 - used)) & 1) as usize];
         if child & LEAF != 0 {
+            r.skip(used + 1);
             return Some(child & 0x7fff);
         }
         node = child as usize;
     }
+    r.skip(24);
     None
 }
 
@@ -543,10 +558,9 @@ fn requantize(
         };
         let scale = (exponent as f32 * 0.25).exp2();
         let end = (line + width).min(LINES);
-        for i in line..end {
-            let q = quant[i];
+        for (o, &q) in out[line..end].iter_mut().zip(quant[line..end].iter()) {
             let magnitude = pow43[(q.unsigned_abs() as usize).min(MAX_QUANT)];
-            out[i] = if q < 0 { -magnitude * scale } else { magnitude * scale };
+            *o = if q < 0 { -magnitude * scale } else { magnitude * scale };
         }
         line += width;
     }
