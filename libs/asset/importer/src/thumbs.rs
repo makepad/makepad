@@ -198,32 +198,47 @@ pub fn audio_millis(bytes: &[u8], media: MediaType) -> Result<u32, String> {
     Ok((secs * 1000.0).clamp(0.0, u32::MAX as f64) as u32)
 }
 
-/// The canonical 512×512 picture of an audio asset, freshly rendered from
-/// PCM (never a stale sidecar), as BGRA pixels.
+/// The high-definition picture of an audio asset: a 2048×512 spectrogram,
+/// BGRA, with its dimensions.
 ///
 /// A SPECTROGRAM, not a waveform: every mastered track's waveform is the
-/// same filled rectangle, while a spectrogram shows what the thing is — a
-/// beat, a voice, a pad, a field recording — at icon size. Silence and
-/// scraps too short to transform fall back to the waveform, which at least
-/// says "there is nothing here" honestly.
-pub fn waveform_bgra_512(pcm: &WavPcm) -> Vec<u32> {
+/// same filled rectangle, while a spectrogram shows what the thing IS — the
+/// kick pattern along the bottom, hats ticking along the top, the drop where
+/// the picture fills. At this size a card downsamples it crisply and a
+/// preview panel can show it near-native.
+///
+/// `None` when the clip has no spectrum to show (silence, or shorter than
+/// one transform); the caller falls back to its own strip, which is the
+/// honest picture of that.
+pub fn audio_picture_hd(pcm: &WavPcm) -> Option<(Vec<u32>, usize, usize)> {
     let mono: Vec<f32> = pcm.frames.iter().map(|(l, r)| (l + r) * 0.5).collect();
-    if let Some(rgba) =
-        crate::spectrogram::spectrogram_rgba(&mono, pcm.sample_rate, THUMB_DIM, THUMB_DIM)
-    {
-        return rgba
-            .chunks_exact(4)
-            .map(|px| {
-                (px[3] as u32) << 24 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
-            })
-            .collect();
-    }
-    waveform_strip_bgra_512(pcm)
+    let rgba = crate::spectrogram::spectrogram_rgba(
+        &mono,
+        pcm.sample_rate,
+        crate::spectrogram::HD_W,
+        crate::spectrogram::HD_H,
+    )?;
+    let bgra = rgba
+        .chunks_exact(4)
+        .map(|px| {
+            (px[3] as u32) << 24 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | px[2] as u32
+        })
+        .collect();
+    Some((bgra, crate::spectrogram::HD_W, crate::spectrogram::HD_H))
 }
 
-/// The old min/max strip: the honest picture of something with no spectrum
-/// to show.
-fn waveform_strip_bgra_512(pcm: &WavPcm) -> Vec<u32> {
+/// The picture an audio asset publishes: the HD spectrogram when the track
+/// has one, else the 512² strip. JPEG, with the dimensions the manifest
+/// must declare.
+pub fn audio_thumbnail_jpeg(pcm: &WavPcm) -> Result<(Vec<u8>, u32, u32), String> {
+    let (pixels, w, h) = audio_picture_hd(pcm)
+        .unwrap_or_else(|| (waveform_bgra_512(pcm), THUMB_DIM, THUMB_DIM));
+    Ok((encode_jpeg_bgra(&pixels, w, h)?, w as u32, h as u32))
+}
+
+/// The min/max strip: the honest picture of something with no spectrum to
+/// show, and the fallback shape the non-PCM importers still draw.
+pub fn waveform_bgra_512(pcm: &WavPcm) -> Vec<u32> {
     const BG: u32 = 0xff14_181c;
     const FG: u32 = 0xff58_c4a0;
     const MID: u32 = 0xff2a_3238;
@@ -440,20 +455,40 @@ mod tests {
         assert_eq!(pcm.millis(), 2_000 * 1000 / 24_000);
         let strip = waveform_bgra_512(&pcm);
         assert_eq!(strip.len(), THUMB_DIM * THUMB_DIM);
-        // The fixture alternates every sample: a tone at Nyquist. Its
-        // picture is bright along the TOP (the highest band) and dark in
-        // the middle — which is exactly what a spectrogram should say
-        // about it, and what a waveform strip could never show.
-        let brightness = |y: usize| {
-            let p = strip[y * THUMB_DIM + THUMB_DIM / 2];
-            ((p >> 16) & 0xff) + ((p >> 8) & 0xff) + (p & 0xff)
-        };
+        assert!(strip.iter().any(|p| *p == 0xff58_c4a0), "the strip carries signal");
+        // Two thousand frames is shorter than one transform, so there is no
+        // spectrum to draw: the HD picture declines and the published
+        // thumbnail falls back to the strip, at the strip's size.
+        assert!(audio_picture_hd(&pcm).is_none(), "too short for a spectrogram");
+        let (jpeg, w, h) = audio_thumbnail_jpeg(&pcm).unwrap();
+        assert_eq!((w, h), (THUMB_DIM as u32, THUMB_DIM as u32));
+        assert_eq!(jpeg_dims(&jpeg), Some((w, h)));
+
+        // A real track's length: the picture is the HIGH-DEFINITION
+        // spectrogram, and the manifest declares its true size.
+        let long: Vec<(i16, i16)> = (0..44_100)
+            .map(|i| {
+                let t = i as f32 / 44_100.0;
+                let v = ((t * 220.0 * std::f32::consts::TAU).sin() * 12_000.0) as i16;
+                (v, v)
+            })
+            .collect();
+        let track = parse_wav(&wav_pcm16(&long, 44_100)).unwrap();
+        let (pixels, hw, hh) = audio_picture_hd(&track).expect("a track has a spectrum");
+        assert_eq!((hw, hh), (crate::spectrogram::HD_W, crate::spectrogram::HD_H));
+        assert_eq!(pixels.len(), hw * hh);
+        let (hd_jpeg, jw, jh) = audio_thumbnail_jpeg(&track).unwrap();
+        assert_eq!((jw, jh), (2048, 512), "published at high definition");
+        assert_eq!(jpeg_dims(&hd_jpeg), Some((jw, jh)));
         assert!(
-            brightness(0) > brightness(THUMB_DIM / 2),
-            "a Nyquist tone lights the top band: {} vs {}",
-            brightness(0),
-            brightness(THUMB_DIM / 2)
+            jw >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
+                && jw <= makepad_asset_data::limits::THUMBNAIL_MAX_DIM
+                && jh >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
+                && jh <= makepad_asset_data::limits::THUMBNAIL_MAX_DIM,
+            "inside the content contract's thumbnail bounds"
         );
+        eprintln!("hd audio thumbnail jpeg: {} bytes ({jw}x{jh})", hd_jpeg.len());
+
         // Silence has no spectrum, and falls back to the honest strip.
         let quiet = parse_wav(&wav_pcm16(&vec![(0, 0); 2_000], 24_000)).unwrap();
         let quiet_strip = waveform_bgra_512(&quiet);

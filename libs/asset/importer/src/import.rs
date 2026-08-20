@@ -74,8 +74,8 @@
 
 use crate::glb::inspect_glb;
 use crate::thumbs::{
-    encode_jpeg_bgra, jpeg_dims, parse_wav, placeholder_bgra_512, png_dims, waveform_bgra_512,
-    THUMB_DIM,
+    audio_thumbnail_jpeg, encode_jpeg_bgra, jpeg_dims, parse_wav, placeholder_bgra_512,
+    png_dims, THUMB_DIM,
 };
 use crate::videothumb::probe_video;
 use makepad_asset_client::json::{self, Value};
@@ -1326,13 +1326,13 @@ fn build_png(item: &IndexItem, bytes: Vec<u8>) -> Result<PublishRequest, String>
 
 fn build_wav(item: &IndexItem, bytes: Vec<u8>) -> Result<PublishRequest, String> {
     let pcm = parse_wav(&bytes)?;
-    // ALWAYS a fresh canonical waveform — the on-disk sidecars are stale.
-    let strip = waveform_bgra_512(&pcm);
+    // ALWAYS a fresh canonical picture — the on-disk sidecars are stale.
+    let (bytes_jpeg, width, height) = audio_thumbnail_jpeg(&pcm)?;
     let thumbnail = PublishThumbnail {
-        bytes: encode_jpeg_bgra(&strip, THUMB_DIM, THUMB_DIM)?,
+        bytes: bytes_jpeg,
         media: ThumbnailMedia::Jpeg,
-        width: THUMB_DIM as u32,
-        height: THUMB_DIM as u32,
+        width,
+        height,
     };
     let millis = pcm.millis();
     let mut request = PublishRequest::new(
