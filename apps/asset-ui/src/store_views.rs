@@ -16,6 +16,7 @@ use crate::pipeline::{
     format_clock, format_music_duration, stage_display_name, CandidateSet, Pipeline, StageState,
 };
 use makepad_asset_ai::fleet::BoxSnapshot;
+use makepad_asset_widgets::{AssetThumb, ThumbMedia};
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -78,9 +79,10 @@ pub fn should_start_file_drag(move_distance: f64, already_dragging: bool) -> boo
 
 pub struct CachedGalleryTexture {
     pub source: Option<PathBuf>,
-    pub texture: Texture,
-    pub frames: Vec<Texture>,
-    pub fps: f32,
+    /// What the card draws — the ONE thumbnail type
+    /// (`makepad_asset_widgets::ThumbMedia`): a still, or declared cells at
+    /// a declared rate. Badges are stills of a flat color.
+    pub media: ThumbMedia,
 }
 
 /// Which artifact kinds may inherit the nearest upstream pipeline image as
@@ -95,11 +97,15 @@ pub fn upstream_preview_allowed(content_type: &str) -> bool {
 /// The background work one card without a cached texture needs. Draw code
 /// never performs this work itself — it records the miss, shows the typed
 /// badge, and the app routes the read+decode through the IO worker.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// (`PartialEq` only: a declared view carries an `f32` rate.)
+#[derive(Clone, Debug, PartialEq)]
 pub enum PreviewWork {
     /// Read + decode an encoded image: the persisted sidecar, or an image
     /// payload that is its own preview.
     Encoded(PathBuf),
+    /// A catalog thumbnail object plus the manifest's DECLARED views — the
+    /// decode obeys the declaration (`makepad_asset_widgets::thumb`).
+    Declared(PathBuf, Vec<makepad_asset_data::ThumbnailView>),
     /// Legacy sidecarless WAV: read + parse + min/max scan the payload.
     WavPayload(PathBuf),
     /// `.billboard` manifest: decode the preview state's native-size frames.
@@ -166,18 +172,14 @@ impl PreviewCache {
         self.map.clear();
     }
 
-    /// The texture to draw NOW. On a cache miss with pending work the badge
+    /// The media to draw NOW. On a cache miss with pending work the badge
     /// shows and the miss is recorded (deduplicated) for the app's async
-    /// pump; badge-only kinds cache their badge permanently.
-    pub fn texture_for(&mut self, cx: &mut Cx, entry: &GalleryEntry, time: f64) -> Texture {
+    /// pump; badge-only kinds cache their badge permanently. The card's
+    /// `AssetThumb` picks the frame — this cache never touches a clock.
+    pub fn media_for(&mut self, cx: &mut Cx, entry: &GalleryEntry) -> ThumbMedia {
         if let Some(cached) = self.map.get(&entry.meta.file) {
             if cached.source == entry.preview_path {
-                if cached.frames.len() > 1 {
-                    let fps = cached.fps.max(1.0) as f64;
-                    let i = ((time * fps).floor() as usize) % cached.frames.len();
-                    return cached.frames[i].clone();
-                }
-                return cached.texture.clone();
+                return cached.media.clone();
             }
         }
         match preview_work(entry) {
@@ -186,20 +188,18 @@ impl PreviewCache {
                 // treats that as last-requested-first.
                 self.pending.retain(|(file, _)| file != &entry.meta.file);
                 self.pending.push((entry.meta.file.clone(), work));
-                self.badge(cx, &entry.meta.domain)
+                ThumbMedia::still(self.badge(cx, &entry.meta.domain))
             }
             None => {
-                let texture = self.badge(cx, &entry.meta.domain);
+                let media = ThumbMedia::still(self.badge(cx, &entry.meta.domain));
                 self.map.insert(
                     entry.meta.file.clone(),
                     CachedGalleryTexture {
                         source: None,
-                        texture: texture.clone(),
-                        frames: Vec::new(),
-                        fps: 0.0,
+                        media: media.clone(),
                     },
                 );
-                texture
+                media
             }
         }
     }
@@ -207,7 +207,7 @@ impl PreviewCache {
     /// The decoded still for `file` if this cache holds one (animated
     /// previews return their first frame; badges count as decoded).
     pub fn cached(&self, file: &str) -> Option<Texture> {
-        self.map.get(file).map(|cached| cached.texture.clone())
+        self.map.get(file).map(|cached| cached.media.first().clone())
     }
 
     /// Store a completed (or failure-pinned) texture under its validation
@@ -217,9 +217,7 @@ impl PreviewCache {
             file,
             CachedGalleryTexture {
                 source,
-                texture,
-                frames: Vec::new(),
-                fps: 0.0,
+                media: ThumbMedia::still(texture),
             },
         );
     }
@@ -231,22 +229,20 @@ impl PreviewCache {
         frames: Vec<Texture>,
         fps: f32,
     ) {
-        let Some(texture) = frames.first().cloned() else {
+        if frames.is_empty() {
             return;
-        };
+        }
         self.map.insert(
             file,
             CachedGalleryTexture {
                 source,
-                texture,
-                frames,
-                fps,
+                media: ThumbMedia::anim(frames, fps),
             },
         );
     }
 
     pub fn has_anims(&self) -> bool {
-        self.map.values().any(|c| c.frames.len() > 1)
+        self.map.values().any(|c| c.media.is_animated())
     }
 
     pub fn take_pending(&mut self) -> Vec<(String, PreviewWork)> {
@@ -865,10 +861,13 @@ impl Widget for LibraryGallery {
 
                 // Cache hit or typed badge — NEVER a synchronous file
                 // read/decode inside a draw.
-                let now = cx.time();
-                let texture = self.cache.texture_for(cx, &tile.entry, now);
-                item.image(cx, ids!(card.thumb))
-                    .set_texture(cx, Some(texture));
+                let media = self.cache.media_for(cx, &tile.entry);
+                if let Some(mut thumb) = item
+                    .widget(cx, ids!(card.thumb))
+                    .borrow_mut::<AssetThumb>()
+                {
+                    thumb.set_media(cx, Some(media));
+                }
                 // A preview that landed since this tile last rendered: the
                 // tile is a CachedView, so force its offscreen re-render or
                 // the new texture never shows (until a scroll moves it).
@@ -1003,9 +1002,10 @@ impl Widget for RunTray {
                 let selected = self.selected.as_deref() == Some(member.entry.meta.file.as_str());
                 item.as_view()
                     .toggle_state(cx, selected, Animate::No, ids!(select.on), ids!(select.off));
-                let now = cx.time();
-                let texture = self.cache.texture_for(cx, &member.entry, now);
-                item.image(cx, ids!(thumb)).set_texture(cx, Some(texture));
+                let media = self.cache.media_for(cx, &member.entry);
+                if let Some(mut thumb) = item.widget(cx, ids!(thumb)).borrow_mut::<AssetThumb>() {
+                    thumb.set_media(cx, Some(media));
+                }
                 self.stale_chips.remove(&member.entry.meta.file);
                 item.draw_all_unscoped(cx);
             }
@@ -1033,6 +1033,12 @@ impl Widget for RunTray {
 /// a fixed-size card leaves a gutter down the right that grows with every
 /// pixel of window the layout refuses to use.
 pub const GRID_CARD_W: f64 = 168.0;
+/// THE gap of the lattice — between columns AND between rows, one number,
+/// so the grid reads as an even grid instead of tight stacks in loose
+/// columns. Applied to each Row at draw time (spacing for the columns,
+/// bottom padding for the row below), because PortalList stacks its items
+/// with no spacing of its own and a DSL literal here already drifted from
+/// this constant once.
 pub const GRID_GAP: f64 = 10.0;
 /// Inner padding of a card, and the gap between its picture and its title.
 /// A card is a picture with a caption; both need room to be either.
@@ -1041,10 +1047,16 @@ pub const GRID_CARD_SPACING: f64 = 6.0;
 /// Height of the title zone: exactly two lines at the card's text size,
 /// reserved whether a title needs them or not. Cards in a row are then the
 /// same height, and no card's second line straddles its own bottom edge.
-/// 34: two lines of the card's 8pt text. font_size is POINTS — 8pt is
-/// ~10.7px, and a line box is ~1.6x that — so 26 was one line and a half,
-/// which is exactly what a clipped second line looks like.
-pub const GRID_TITLE_H: f64 = 34.0;
+/// The title Label is `max_lines: 2` + `text_overflow: Ellipsis`, so the
+/// layouter guarantees at most two rows ending in "…" — this constant only
+/// has to be tall enough for those two rows. From the real metrics (theme
+/// font_regular = IBM Plex, ascender 1.025-0.1 fudge, descender -0.275,
+/// line_spacing 1.2, and font_size in POINTS so 8pt = 10.67px): first line
+/// 12.8px + baseline advance 15.4px = 28.2px. 30 is that plus breathing
+/// room; 26 was one line and a half, which is exactly what a clipped second
+/// line looks like. Applied to the Label per draw, so the DSL cannot drift
+/// from the card-height math.
+pub const GRID_TITLE_H: f64 = 30.0;
 /// Picture aspect inside a card (the shape a rendered icon and a spectrogram
 /// tile both read well at).
 pub const GRID_THUMB_ASPECT: f64 = 0.62;
@@ -1063,11 +1075,8 @@ pub fn grid_card_size(width: f64, cols: usize) -> (f64, f64) {
     (card_w.round(), card_h.round())
 }
 
-/// Cadence of a cycling card when the picture did not say. Slow enough to
-/// read a sprite, fast enough to show what the animation IS — but only a
-/// fallback: a stamped sheet declares its own rate, and the actor's rate is
-/// the one the card should run at.
-pub const SHEET_FPS: f32 = 7.0;
+// A cycling card's fallback cadence lives with the ONE interpreter:
+// `makepad_asset_widgets::THUMB_FALLBACK_FPS`.
 
 pub fn grid_columns(width: f64) -> usize {
     (((width + GRID_GAP) / (GRID_CARD_W + GRID_GAP)) as usize).clamp(1, GRID_MAX_COLS)
@@ -1127,17 +1136,14 @@ pub struct CatalogGrid {
     /// truth about which one it is.
     #[rust]
     empty_note: String,
+    /// One [`ThumbMedia`] per asset — decoded once, textures uploaded once,
+    /// interpreted by the shared `makepad_asset_widgets::thumb` path. A
+    /// still card binds its texture; a declared animation cycles at its
+    /// declared rate. The cache lives HERE (not in the cards) because
+    /// PortalList recycles items: a card is re-bound to a different asset
+    /// every scroll.
     #[rust]
-    textures: HashMap<String, Texture>,
-    /// Sprite sheets that were cut into cells: a billboard's card CYCLES
-    /// them. The frames are uploaded once, at decode; drawing picks one by
-    /// the clock, so an animating wall costs a texture bind, not an upload.
-    #[rust]
-    anims: HashMap<String, Vec<Texture>>,
-    /// The rate each sheet DECLARED. A card runs at the rate its producer
-    /// wrote down, not at one number for the whole grid.
-    #[rust]
-    anim_fps: HashMap<String, f32>,
+    media: HashMap<String, ThumbMedia>,
     /// Set while the last draw actually had a cycling card ON SCREEN — an
     /// off-screen sprite must not keep the app awake.
     #[rust]
@@ -1193,9 +1199,7 @@ impl CatalogGrid {
     /// Drop every decoded thumbnail (a wipe, or a reconnect to another
     /// server): the digests behind them no longer describe this catalog.
     pub fn clear_thumbnails(&mut self, cx: &mut Cx) {
-        self.textures.clear();
-        self.anims.clear();
-        self.anim_fps.clear();
+        self.media.clear();
         self.wanted.clear();
         self.view.redraw(cx);
     }
@@ -1211,45 +1215,31 @@ impl CatalogGrid {
     }
 
     pub fn install_thumb(&mut self, cx: &mut Cx, asset: String, texture: Texture) {
-        self.textures.insert(asset, texture);
+        self.media.insert(asset, ThumbMedia::still(texture));
         self.view.redraw(cx);
     }
 
-    /// A sheet-backed thumbnail: every cell, in order. The first frame is
-    /// the still picture for anything that does not cycle.
+    /// A declared animation's cells, in declared order at the declared
+    /// rate. One frame is a still that happens to be packed.
     pub fn install_anim(&mut self, cx: &mut Cx, asset: String, frames: Vec<Texture>, fps: f32) {
-        if let Some(first) = frames.first() {
-            self.textures.insert(asset.clone(), first.clone());
+        if frames.is_empty() {
+            return;
         }
-        if frames.len() > 1 {
-            if fps > 0.0 {
-                self.anim_fps.insert(asset.clone(), fps);
-            }
-            self.anims.insert(asset, frames);
-        }
+        self.media.insert(asset, ThumbMedia::anim(frames, fps));
         self.view.redraw(cx);
         cx.new_next_frame();
     }
 
-    /// Which frame a cycling card shows right now. One CLOCK for the whole
-    /// grid — so a wall of sprites animates in step instead of shimmering —
-    /// but each card's own declared rate against it.
-    fn frame_at(&self, asset: &str, now: f64) -> Option<Texture> {
-        let frames = self.anims.get(asset)?;
-        let fps = self.anim_fps.get(asset).copied().unwrap_or(SHEET_FPS);
-        let index = ((now * fps as f64) as usize) % frames.len();
-        frames.get(index).cloned()
-    }
-
     pub fn has_thumb(&self, asset: &str) -> bool {
-        self.textures.contains_key(asset)
+        self.media.contains_key(asset)
     }
 
     /// The decoded picture for an asset, if the grid has it — the detail
     /// rail shows the same one at a size you can look at, rather than
-    /// decoding a second copy of the same object.
+    /// decoding a second copy of the same object. An animation's still is
+    /// its first frame.
     pub fn thumb_of(&self, asset: &str) -> Option<Texture> {
-        self.textures.get(asset).cloned()
+        self.media.get(asset).map(|media| media.first().clone())
     }
 
     pub fn tile_at(&self, index: usize) -> Option<CatalogTile> {
@@ -1280,7 +1270,6 @@ impl CatalogGrid {
     /// knows about it to the right. Same tiles and same textures as the
     /// tile wall — only the shape differs.
     fn draw_rows(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
-        let now = cx.time();
         let mut animating = false;
         if self.reset_scroll {
             self.reset_scroll = false;
@@ -1307,19 +1296,16 @@ impl CatalogGrid {
                         ids!(select.on),
                         ids!(select.off),
                     );
-                    match self
-                        .frame_at(&tile.asset, now)
-                        .inspect(|_| animating = true)
-                        .or_else(|| self.textures.get(&tile.asset).cloned())
+                    let media = self.media.get(&tile.asset).cloned();
+                    match &media {
+                        Some(media) => animating |= media.is_animated(),
+                        None => record_want(&mut self.wanted, &tile.asset),
+                    }
+                    if let Some(mut thumb) = item
+                        .widget(cx, ids!(lr_card.lr_thumb))
+                        .borrow_mut::<AssetThumb>()
                     {
-                        Some(texture) => {
-                            item.image(cx, ids!(lr_card.lr_thumb))
-                                .set_texture(cx, Some(texture));
-                        }
-                        None => {
-                            item.image(cx, ids!(lr_card.lr_thumb)).set_texture(cx, None);
-                            record_want(&mut self.wanted, &tile.asset);
-                        }
+                        thumb.set_media(cx, media);
                     }
                 }
                 None => {
@@ -1327,7 +1313,12 @@ impl CatalogGrid {
                     item.label(cx, ids!(lr_card.lr_meta)).set_text(cx, "");
                     item.label(cx, ids!(lr_card.lr_alias)).set_text(cx, "");
                     item.label(cx, ids!(lr_card.lr_when)).set_text(cx, "");
-                    item.image(cx, ids!(lr_card.lr_thumb)).set_texture(cx, None);
+                    if let Some(mut thumb) = item
+                        .widget(cx, ids!(lr_card.lr_thumb))
+                        .borrow_mut::<AssetThumb>()
+                    {
+                        thumb.set_media(cx, None);
+                    }
                 }
             }
             item.draw_all_unscoped(cx);
@@ -1360,10 +1351,9 @@ impl Widget for CatalogGrid {
         // a width of nothing is a card nobody can read.
         let (card_w, card_h) = grid_card_size(inner, cols);
         let thumb_h = card_h - GRID_CARD_PAD * 2.0 - GRID_CARD_SPACING - GRID_TITLE_H;
-        // One clock for the whole grid, so a wall of sprites animates in
-        // step; `animating` records whether a CYCLING card was actually on
-        // screen this pass.
-        let now = cx.time();
+        // `animating` records whether a CYCLING card was actually on screen
+        // this pass; the cards themselves pick frames against one shared
+        // clock inside AssetThumb.
         let mut animating = false;
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             let list_ref = step.as_portal_list();
@@ -1420,6 +1410,20 @@ impl Widget for CatalogGrid {
                     continue;
                 }
                 let item = list.item(cx, row_id, id!(Row));
+                // The lattice: the gap between columns is the gap between
+                // rows, from the same constant the card-width math used.
+                // PortalList stacks items with no spacing of its own, so the
+                // row gap is the row's own bottom padding.
+                if sized {
+                    let mut row_view = item.clone();
+                    // `Inset` by its full module path: the eval scope of
+                    // script_apply_eval! has `mod` but not the widget
+                    // prelude's aliases.
+                    script_apply_eval!(cx, row_view, {
+                        spacing: #(GRID_GAP)
+                        padding: mod.turtle.Inset{bottom: #(GRID_GAP)}
+                    });
+                }
                 for slot in 0..GRID_MAX_COLS {
                     let index = row_id * cols + slot;
                     let visible = slot < cols && index < self.total;
@@ -1439,6 +1443,13 @@ impl Widget for CatalogGrid {
                         script_apply_eval!(cx, picture, {
                             height: #(thumb_h)
                         });
+                        // The title zone is the same GRID_TITLE_H the card
+                        // height reserved — applied here so the two cannot
+                        // drift into a caption straddling the card's edge.
+                        let mut title = item.label(cx, titles[slot]);
+                        script_apply_eval!(cx, title, {
+                            height: #(GRID_TITLE_H)
+                        });
                     }
                     match self.tiles.get(index) {
                         Some(tile) => {
@@ -1450,21 +1461,18 @@ impl Widget for CatalogGrid {
                                 ids!(select.on),
                                 ids!(select.off),
                             );
-                            // A sheet-backed card cycles its cells; a still
-                            // one binds its single texture. Either way the
+                            // The card draws whatever its media DECLARES —
+                            // still, or cycling at its declared rate. The
                             // pixels were uploaded once, at decode.
-                            match self
-                                .frame_at(&tile.asset, now)
-                                .inspect(|_| animating = true)
-                                .or_else(|| self.textures.get(&tile.asset).cloned())
+                            let media = self.media.get(&tile.asset).cloned();
+                            match &media {
+                                Some(media) => animating |= media.is_animated(),
+                                None => record_want(&mut self.wanted, &tile.asset),
+                            }
+                            if let Some(mut thumb) =
+                                item.widget(cx, thumbs[slot]).borrow_mut::<AssetThumb>()
                             {
-                                Some(texture) => {
-                                    item.image(cx, thumbs[slot]).set_texture(cx, Some(texture));
-                                }
-                                None => {
-                                    item.image(cx, thumbs[slot]).set_texture(cx, None);
-                                    record_want(&mut self.wanted, &tile.asset);
-                                }
+                                thumb.set_media(cx, media);
                             }
                         }
                         // Reserved space for a row the walk has not reached
@@ -1472,7 +1480,11 @@ impl Widget for CatalogGrid {
                         // some other asset.
                         None => {
                             item.label(cx, titles[slot]).set_text(cx, "…");
-                            item.image(cx, thumbs[slot]).set_texture(cx, None);
+                            if let Some(mut thumb) =
+                                item.widget(cx, thumbs[slot]).borrow_mut::<AssetThumb>()
+                            {
+                                thumb.set_media(cx, None);
+                            }
                             item.view(cx, slots[slot]).toggle_state(
                                 cx,
                                 false,
