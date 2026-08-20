@@ -87,11 +87,20 @@ impl<'a> BitReader<'a> {
         }
         let byte = self.pos >> 3;
         let shift = self.pos & 7;
-        // Four bytes always cover 25 bits from any bit offset.
-        let mut acc = 0u32;
-        for i in 0..4 {
-            acc = (acc << 8) | *self.data.get(byte + i).unwrap_or(&0) as u32;
-        }
+        // Four bytes always cover 25 bits from any bit offset. In the interior
+        // of the stream — which is where all but the last few codewords of a
+        // granule live — that is one aligned-agnostic word load; only the last
+        // three bytes of the slice need the zero-filling byte-at-a-time walk.
+        let acc = match self.data.get(byte..byte + 4) {
+            Some(w) => u32::from_be_bytes([w[0], w[1], w[2], w[3]]),
+            None => {
+                let mut acc = 0u32;
+                for i in 0..4 {
+                    acc = (acc << 8) | *self.data.get(byte + i).unwrap_or(&0) as u32;
+                }
+                acc
+            }
+        };
         (acc << shift) >> (32 - n)
     }
 }
