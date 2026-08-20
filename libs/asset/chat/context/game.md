@@ -19,6 +19,11 @@ matching models, build the level from primitives instead of ending your
 turn with an apology. Query the store when you want real artwork; missing
 artwork never blocks a level.
 
+Only kind 'mesh' (and rigged 'character') assets place with game.model.
+Catalog 'world' maps (e.g. doom/doom/worlds/doom1/e1m1) and 'billboard'
+sprites are queryable but the game CANNOT load them yet — when asked for
+one, say so honestly and offer a themed level from primitives instead.
+
 SPLASH RULES (each one breaks the game if ignored):
 - Positions and sizes are `vec3(x, y, z)` (metres, y up, ground ≈ y 0).
   An array `[x, y, z]` is NOT a position — it becomes vec3(0,0,0).

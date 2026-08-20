@@ -215,11 +215,27 @@ impl CatalogReader {
 
     /// Table/column/index summary generated from the live `sqlite_master`,
     /// with usage notes for the catalog's model-facing tables.
+    ///
+    /// Only the CONTENT-facing tables are rendered: the catalog also holds
+    /// ~30 operational tables (jobs, leases, GC, auth) that cost the model
+    /// hundreds of tokens each and answer no content question. Token
+    /// economy is a design principle here — this text lands in a local
+    /// model's context on every schema call.
     pub fn schema_text(&mut self) -> Result<String, String> {
+        const CONTENT_TABLES: &[&str] = &[
+            "assets",
+            "asset_aliases",
+            "asset_revisions",
+            "search_annotations",
+            "search_labels",
+        ];
         let db = self.database()?;
         let mut out = String::from("Catalog tables (SELECT-only; single statement):\n");
         for t in &db.schema().tables {
             if t.name.starts_with("sqlite_") {
+                continue;
+            }
+            if !CONTENT_TABLES.contains(&t.name.as_str()) {
                 continue;
             }
             out.push_str("- ");
@@ -272,7 +288,9 @@ prompt, live (1 = current). Always filter live=1.\n\
 label is the value. Join on asset_id.\n\
 - asset_aliases maps alias -> asset_id/head_revision (canon_alias in \
 search_annotations is usually what you want).\n\
-- asset_id columns are 16-byte blobs; they render as 32 hex chars here.\n";
+- asset_id columns are 16-byte blobs; they render as 32 hex chars here.\n\
+- Operational tables (jobs, operations, gc, auth) exist but are omitted: \
+they answer no content question.\n";
 
 /// The engine's refusals for non-SELECT/multi-statement parse cleanly; keep
 /// their text but add the contract line so the model self-corrects.
