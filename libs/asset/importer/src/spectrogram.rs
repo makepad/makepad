@@ -1,40 +1,66 @@
-//! Spectrogram thumbnails for audio assets.
+//! Spectrogram pictures for audio assets.
 //!
 //! A waveform strip tells you almost nothing: every mastered track is a
 //! filled rectangle. A spectrogram tells you what the thing IS — a kick
-//! pattern, a vocal, a pad, a field recording — at a glance and at icon
-//! size. This is the picture an audio asset carries in the catalog, baked
-//! once by whoever imports or generates it (the icon law: the app is the
-//! icon factory, the server only stores what it is handed).
+//! pattern, a vocal, a pad, a field recording — and at high definition you
+//! can read the arrangement off it: kicks as bright columns along the
+//! bottom, hats as ticks along the top, a drop as the moment the whole
+//! picture fills.
 //!
-//! Dependency-free: an iterative radix-2 FFT, a log-frequency mapping, and
-//! a perceptual colour ramp, with the columns split across cores because a
-//! full track is a few thousand transforms and nobody should wait for them.
+//! This is the picture an audio asset carries in the catalog, baked once by
+//! whoever imports or generates it (the icon law: the app is the icon
+//! factory, the server only stores what it is handed).
+//!
+//! Dependency-free: an iterative radix-2 FFT, a musically weighted
+//! log-frequency mapping, and a perceptual colour ramp, with the columns
+//! split across cores because a full track at this resolution is tens of
+//! thousands of transforms.
 
 use std::f32::consts::PI;
 
-/// Thumbnail size. Wide enough that a bar of music is a few pixels, short
-/// enough to draw as a card.
-pub const THUMB_W: usize = 512;
-pub const THUMB_H: usize = 128;
+/// High-definition picture size. Wide enough that a bar of music is tens of
+/// pixels and a hi-hat is its own tick; 2048 is also exactly the VJ's
+/// `MAX_THUMB_DIM`, and both sides sit inside the content contract's
+/// 256..=4096 thumbnail bounds.
+pub const HD_W: usize = 2048;
+pub const HD_H: usize = 512;
 
-/// Transform size. 1024 samples is ~23 ms at 44.1 kHz: fine enough in time
-/// to see a beat, long enough in frequency to see a bass note.
-const N_FFT: usize = 1024;
-/// Lowest and highest frequency the picture spans. Below 30 Hz is rumble no
-/// speaker shows; the top is bounded by Nyquist per track.
-const F_MIN: f32 = 30.0;
-const F_MAX: f32 = 16_000.0;
+/// Transform size: 4096 samples is ~93 ms at 44.1 kHz, which resolves a
+/// bass note's pitch instead of smearing it into a band.
+const N_FFT: usize = 4096;
+/// Frames step a quarter of a window — 75% overlap — so a transient between
+/// two column centres still lands in a window that sees it whole.
+const HOP: usize = N_FFT / 4;
+/// Frames one column peak-holds at most.
+///
+/// ONE, for a picture you can read. At 2048 columns a 4096-sample window
+/// already overlaps its neighbour by ~90% on any track under three minutes,
+/// so the transform sees everything; peak-holding several frames into one
+/// column instead pushes every column toward the maximum and the
+/// arrangement washes out. Only a very long track strides past a window,
+/// and there the extra frames buy coverage rather than wash.
+const MAX_FRAMES_PER_COLUMN: usize = 2;
+
+/// The band a picture spans. Below 35 Hz is rumble no speaker shows; above
+/// 11 kHz is air that costs rows and says little.
+const F_MIN: f32 = 35.0;
+const F_MAX: f32 = 11_000.0;
+
 /// Dynamic range, in dB below the track's own peak. Everything quieter is
 /// floor: a per-track normalisation, so a quiet field recording reads as
 /// well as a loud master.
-const RANGE_DB: f32 = 78.0;
+const RANGE_DB: f32 = 72.0;
+
+/// Contrast shaping. Below 1 it lifts the midtones, which is what makes a
+/// kick column read as a column rather than a smudge — with no temporal
+/// smearing the floor stays dark on its own.
+const GAMMA: f32 = 0.85;
 
 /// Render mono PCM as a log-frequency spectrogram, RGBA8, `w` by `h`.
 ///
-/// Returns `None` for input too short to transform even once — silence has
-/// no picture worth showing, and a black rectangle would be a lie about the
-/// thumbnail having been rendered.
+/// Returns `None` for input too short to transform even once, or for
+/// digital silence — a black rectangle would be a lie about a thumbnail
+/// having been rendered.
 pub fn spectrogram_rgba(
     samples: &[f32],
     sample_rate: u32,
@@ -45,10 +71,14 @@ pub fn spectrogram_rgba(
         return None;
     }
     let window = hann(N_FFT);
-    // One column per output pixel, spread over the whole track: an icon
-    // shows the SHAPE of a piece, not its first two seconds.
+    // One column per output pixel, spread over the WHOLE track: an icon
+    // shows the shape of a piece, not its first two seconds.
     let span = samples.len().saturating_sub(N_FFT);
-    let hop = (span as f64 / (w.max(2) - 1) as f64).max(1.0);
+    let stride = (span as f64 / (w.max(2) - 1) as f64).max(1.0);
+    // Frames per column: enough to cover the stride at 75% overlap, so no
+    // music falls between two columns, bounded so a long track costs the
+    // same as a short one per pixel.
+    let frames = ((stride / (N_FFT as f64 * 0.75)).ceil() as usize).clamp(1, MAX_FRAMES_PER_COLUMN);
     let bins = bin_rows(sample_rate, h);
 
     let threads = std::thread::available_parallelism()
@@ -65,8 +95,8 @@ pub fn spectrogram_rgba(
                 let mut fft = Fft::new();
                 for (i, column) in chunk.iter_mut().enumerate() {
                     let x = chunk_index * per_thread + i;
-                    let start = (x as f64 * hop) as usize;
-                    *column = fft.column(samples, start, window, bins);
+                    let start = (x as f64 * stride) as usize;
+                    *column = fft.column(samples, start, frames, window, bins);
                 }
             });
         }
@@ -80,11 +110,25 @@ pub fn spectrogram_rgba(
     if peak <= 0.0 {
         return None;
     }
+
+    // Levels first, then the fall-off, then colour: the decay has to act on
+    // perceived loudness, not on raw magnitude, or a -60 dB tail is
+    // invisible anyway.
+    let levels: Vec<Vec<f32>> = columns
+        .iter()
+        .map(|column| {
+            column
+                .iter()
+                .map(|mag| {
+                    let db = 20.0 * (mag / peak).max(1e-9).log10();
+                    ((db + RANGE_DB) / RANGE_DB).clamp(0.0, 1.0).powf(GAMMA)
+                })
+                .collect()
+        })
+        .collect();
     let mut rgba = vec![0u8; w * h * 4];
-    for (x, column) in columns.iter().enumerate() {
-        for (row, mag) in column.iter().enumerate() {
-            let db = 20.0 * (mag / peak).max(1e-9).log10();
-            let level = ((db + RANGE_DB) / RANGE_DB).clamp(0.0, 1.0);
+    for (x, column) in levels.iter().enumerate() {
+        for (row, level) in column.iter().copied().enumerate() {
             // Row 0 is the lowest frequency, and pictures grow upward.
             let y = h - 1 - row.min(h - 1);
             let [r, g, b] = ramp(level);
@@ -98,15 +142,15 @@ pub fn spectrogram_rgba(
     Some(rgba)
 }
 
-/// The same picture, PNG-encoded, at the standard thumbnail size.
+/// The high-definition picture, PNG-encoded.
 pub fn spectrogram_png(samples: &[f32], sample_rate: u32) -> Option<Vec<u8>> {
-    let rgba = spectrogram_rgba(samples, sample_rate, THUMB_W, THUMB_H)?;
-    crate::classic_import::encode_png_rgba(&rgba, THUMB_W as u32, THUMB_H as u32).ok()
+    let rgba = spectrogram_rgba(samples, sample_rate, HD_W, HD_H)?;
+    crate::classic_import::encode_png_rgba(&rgba, HD_W as u32, HD_H as u32).ok()
 }
 
-/// Which FFT bins each output row averages, low frequency first. A log
-/// scale, so an octave takes the same space everywhere — which is how
-/// people hear.
+/// Which FFT bins each output row peak-holds, low frequency first: a plain
+/// log scale across the band, so an octave takes the same space wherever it
+/// sits — which is how people hear.
 fn bin_rows(sample_rate: u32, h: usize) -> Vec<(usize, usize)> {
     let nyquist = sample_rate as f32 / 2.0;
     let top = F_MAX.min(nyquist);
@@ -124,24 +168,31 @@ fn bin_rows(sample_rate: u32, h: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Dark → indigo → magenta → orange → white. A perceptual ramp: brightness
-/// rises monotonically, so loud reads as loud even in greyscale.
+/// Deep navy → indigo → magenta → crimson → orange → pale gold, at the
+/// positions that make a track readable: most of the range is spent getting
+/// from "floor" to "there is something here", and the top of the ramp is
+/// reserved for transients.
 fn ramp(level: f32) -> [u8; 3] {
-    const STOPS: [[f32; 3]; 6] = [
-        [0.02, 0.02, 0.08],
-        [0.18, 0.06, 0.36],
-        [0.48, 0.10, 0.48],
-        [0.78, 0.24, 0.30],
-        [0.96, 0.58, 0.16],
-        [1.00, 0.95, 0.85],
+    const STOPS: [(f32, [f32; 3]); 6] = [
+        (0.00, [6.0, 4.0, 20.0]),
+        (0.22, [38.0, 10.0, 74.0]),
+        (0.45, [122.0, 22.0, 124.0]),
+        (0.66, [219.0, 56.0, 88.0]),
+        (0.85, [250.0, 142.0, 52.0]),
+        (1.00, [254.0, 228.0, 180.0]),
     ];
-    let t = level.clamp(0.0, 1.0) * (STOPS.len() - 1) as f32;
-    let i = (t as usize).min(STOPS.len() - 2);
-    let f = t - i as f32;
+    let level = level.clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 2 < STOPS.len() && level > STOPS[i + 1].0 {
+        i += 1;
+    }
+    let (a_pos, a) = STOPS[i];
+    let (b_pos, b) = STOPS[i + 1];
+    let span = (b_pos - a_pos).max(1e-6);
+    let f = ((level - a_pos) / span).clamp(0.0, 1.0);
     let mut out = [0u8; 3];
     for c in 0..3 {
-        let v = STOPS[i][c] + (STOPS[i + 1][c] - STOPS[i][c]) * f;
-        out[c] = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        out[c] = (a[c] + (b[c] - a[c]) * f).clamp(0.0, 255.0) as u8;
     }
     out
 }
@@ -156,41 +207,53 @@ fn hann(n: usize) -> Vec<f32> {
 struct Fft {
     re: Vec<f32>,
     im: Vec<f32>,
+    band: Vec<f32>,
 }
 
 impl Fft {
     fn new() -> Self {
-        Self { re: vec![0.0; N_FFT], im: vec![0.0; N_FFT] }
+        Self { re: vec![0.0; N_FFT], im: vec![0.0; N_FFT], band: Vec::new() }
     }
 
-    /// One column: window a frame, transform it, and fold the magnitude
-    /// spectrum into the log-frequency rows.
+    /// One column: `frames` overlapping transforms starting at `start`,
+    /// peak-held per band, so a transient anywhere in the column's span
+    /// lights it.
     fn column(
         &mut self,
         samples: &[f32],
         start: usize,
+        frames: usize,
         window: &[f32],
         bins: &[(usize, usize)],
     ) -> Vec<f32> {
-        for i in 0..N_FFT {
-            let s = samples.get(start + i).copied().unwrap_or(0.0);
-            self.re[i] = s * window[i];
-            self.im[i] = 0.0;
-        }
-        self.transform();
-        bins.iter()
-            .map(|(lo, hi)| {
+        self.band.clear();
+        self.band.resize(bins.len(), 0.0);
+        for frame in 0..frames.max(1) {
+            let base = start + frame * HOP;
+            if base >= samples.len() {
+                break;
+            }
+            for i in 0..N_FFT {
+                let s = samples.get(base + i).copied().unwrap_or(0.0);
+                self.re[i] = s * window[i];
+                self.im[i] = 0.0;
+            }
+            self.transform();
+            for (row, (lo, hi)) in bins.iter().enumerate() {
                 let mut peak = 0.0f32;
                 for bin in *lo..*hi {
                     let (re, im) = (self.re[bin], self.im[bin]);
-                    // The loudest bin in the band, not the average: a
-                    // single strong partial must not be averaged away by
-                    // the silence around it.
+                    // The loudest bin in the band, not the average: one
+                    // strong partial must not be averaged away by the
+                    // silence around it.
                     peak = peak.max((re * re + im * im).sqrt());
                 }
-                peak
-            })
-            .collect()
+                if peak > self.band[row] {
+                    self.band[row] = peak;
+                }
+            }
+        }
+        self.band.clone()
     }
 
     fn transform(&mut self) {
@@ -246,9 +309,14 @@ mod tests {
             .collect()
     }
 
-    fn row_of(rgba: &[u8], w: usize, x: usize, y: usize) -> [u8; 3] {
+    fn pixel(rgba: &[u8], w: usize, x: usize, y: usize) -> [u8; 3] {
         let o = (y * w + x) * 4;
         [rgba[o], rgba[o + 1], rgba[o + 2]]
+    }
+
+    fn brightness(rgba: &[u8], w: usize, x: usize, y: usize) -> u32 {
+        let [r, g, b] = pixel(rgba, w, x, y);
+        r as u32 + g as u32 + b as u32
     }
 
     /// The brightest row of a pure tone's picture is the row whose band
@@ -256,35 +324,108 @@ mod tests {
     #[test]
     fn a_tone_lights_its_own_frequency_row() {
         let rate = 44_100;
-        let (w, h) = (64, 64);
+        let (w, h) = (64, 128);
         let brightest = |freq: f32| {
-            let rgba = spectrogram_rgba(&tone(freq, 1.0, rate), rate, w, h).expect("picture");
+            let rgba = spectrogram_rgba(&tone(freq, 3.0, rate), rate, w, h).expect("picture");
             (0..h)
-                .max_by_key(|y| {
-                    let [r, g, b] = row_of(&rgba, w, w / 2, *y);
-                    r as u32 + g as u32 + b as u32
-                })
+                .max_by_key(|y| brightness(&rgba, w, w / 2, *y))
                 .unwrap()
         };
         let low = brightest(110.0);
         let high = brightest(4_000.0);
-        // Pictures grow upward: a higher tone lights a row nearer the top.
         assert!(high < low, "4 kHz row {high} must sit above 110 Hz row {low}");
-        // And the same tone lands in the same place every time.
-        assert_eq!(brightest(110.0), low);
+        assert_eq!(brightest(110.0), low, "the same tone lands in the same place");
+    }
+
+    /// An octave is an octave: the log scale spends the same rows on
+    /// 100→200 Hz as on 2→4 kHz, which is how people hear, and the band
+    /// stops at 11 kHz rather than spending a quarter of the picture on
+    /// cymbal air.
+    #[test]
+    fn rows_are_a_plain_log_scale_across_the_band() {
+        let rate = 44_100;
+        let h = 512;
+        let rows = bin_rows(rate, h);
+        let bin_hz = rate as f32 / N_FFT as f32;
+        let row_of = |freq: f32| {
+            rows.iter()
+                .position(|(lo, hi)| {
+                    let bin = (freq / bin_hz) as usize;
+                    bin >= *lo && bin < *hi
+                })
+                .unwrap_or(h - 1)
+        };
+        let low_octave = row_of(200.0) as i32 - row_of(100.0) as i32;
+        let high_octave = row_of(4_000.0) as i32 - row_of(2_000.0) as i32;
+        assert!(
+            (low_octave - high_octave).abs() <= 8,
+            "octaves take the same room: {low_octave} vs {high_octave} rows"
+        );
+        assert!(row_of(35.0) < 4, "the band starts at its bottom");
+        assert!(row_of(11_000.0) > h - 8, "and ends at its top");
+    }
+
+    /// A kick every half second must read as bright columns at the bottom
+    /// with gaps between them — the arrangement, not a smear.
+    #[test]
+    fn a_beat_reads_as_separate_columns() {
+        let rate = 44_100;
+        let (w, h) = (256, 128);
+        let mut samples = vec![0.0f32; rate as usize * 4];
+        for beat in 0..8 {
+            let at = beat * rate as usize / 2;
+            for i in 0..(rate as usize / 20) {
+                let t = i as f32 / rate as f32;
+                let env = (-t * 40.0).exp();
+                if at + i < samples.len() {
+                    samples[at + i] = (2.0 * PI * 60.0 * t).sin() * env;
+                }
+            }
+        }
+        let rgba = spectrogram_rgba(&samples, rate, w, h).expect("picture");
+        // Bottom rows: the loudest columns are the beats, and there are
+        // clearly gaps between them.
+        let col_brightness: Vec<u32> = (0..w)
+            .map(|x| (h - 8..h).map(|y| brightness(&rgba, w, x, y)).sum())
+            .collect();
+        let peak = *col_brightness.iter().max().unwrap();
+        let quiet = col_brightness.iter().filter(|b| **b < peak / 3).count();
+        assert!(quiet > w / 3, "a beat has gaps: only {quiet}/{w} quiet columns");
+        let loud = col_brightness.iter().filter(|b| **b > peak / 2).count();
+        assert!((4..=64).contains(&loud), "eight kicks, not a smear: {loud} loud columns");
     }
 
     /// Normalisation is per track, so a quiet recording is as readable as a
-    /// loud one — the same signal at a tenth the amplitude draws the same
+    /// loud one — the same signal at a fiftieth the amplitude draws the same
     /// picture.
     #[test]
     fn the_picture_is_normalised_to_the_track_not_to_full_scale() {
         let rate = 22_050;
-        let loud = tone(440.0, 0.5, rate);
+        let loud = tone(440.0, 2.0, rate);
         let quiet: Vec<f32> = loud.iter().map(|s| s * 0.02).collect();
-        let a = spectrogram_rgba(&loud, rate, 32, 32).unwrap();
-        let b = spectrogram_rgba(&quiet, rate, 32, 32).unwrap();
-        assert_eq!(a, b, "amplitude alone must not change the picture");
+        let a = spectrogram_rgba(&loud, rate, 32, 64).unwrap();
+        let b = spectrogram_rgba(&quiet, rate, 32, 64).unwrap();
+        // The same picture, within the noise floor: at a fiftieth of the
+        // amplitude the leakage between bins reaches the dB floor a shade
+        // sooner, which is a pixel or two of the darkest colour and nothing
+        // a person could see.
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| x.abs_diff(*y) as u32)
+            .max()
+            .unwrap_or(0);
+        assert!(worst <= 6, "a quiet track draws the same picture (worst channel delta {worst})");
+        let bright_row = |rgba: &[u8]| {
+            (0..64)
+                .max_by_key(|y| brightness(rgba, 32, 16, *y))
+                .unwrap()
+        };
+        assert_eq!(
+            bright_row(&a),
+            bright_row(&b),
+            "and its tone lands in the same row"
+        );
     }
 
     /// Colour rises monotonically with level, so loud reads as loud.
@@ -297,12 +438,15 @@ mod tests {
             assert!(sum >= last, "ramp dipped at {step}: {sum} < {last}");
             last = sum;
         }
-        assert_eq!(ramp(0.0), [5, 5, 20], "the floor is near-black");
-        assert!(ramp(1.0).iter().all(|c| *c > 200), "the peak is near-white");
+        assert_eq!(ramp(0.0), [6, 4, 20], "the floor is deep navy");
+        assert_eq!(ramp(1.0), [254, 228, 180], "the peak is pale gold");
+        // The stops are where the recipe puts them.
+        assert_eq!(ramp(0.22), [38, 10, 74]);
+        assert_eq!(ramp(0.66), [219, 56, 88]);
     }
 
-    /// Too short to transform is not a picture. A caller must be able to
-    /// tell "no thumbnail" from "a black thumbnail".
+    /// Too short to transform is not a picture, and neither is silence. A
+    /// caller must be able to tell "no thumbnail" from "a black thumbnail".
     #[test]
     fn silence_and_scraps_have_no_picture() {
         assert!(spectrogram_rgba(&[0.0; 64], 44_100, 32, 32).is_none(), "too short");
@@ -313,13 +457,76 @@ mod tests {
         assert!(spectrogram_rgba(&tone(440.0, 1.0, 44_100), 0, 32, 32).is_none());
     }
 
-    /// The PNG a thumbnail actually ships as.
+    /// Render a real track to a PNG a human can look at. Skipped unless
+    /// `SPECTROGRAM_WAV` names one; writes `SPECTROGRAM_PNG` (or a temp
+    /// file) and prints the path. The same instrument the classic importer
+    /// uses to put a real map in front of someone.
     #[test]
-    fn the_thumbnail_encodes_at_its_standard_size() {
-        let png = spectrogram_png(&tone(220.0, 2.0, 44_100), 44_100).expect("png");
+    fn export_spectrogram_for_capture() {
+        let Ok(input) = std::env::var("SPECTROGRAM_WAV") else {
+            eprintln!("no SPECTROGRAM_WAV; skipped");
+            return;
+        };
+        let bytes = std::fs::read(&input).expect("wav");
+        // Any audio the catalog carries, not just RIFF PCM.
+        let media = match std::path::Path::new(&input)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("mp3") => makepad_asset_data::MediaType::Mp3,
+            Some("ogg") => makepad_asset_data::MediaType::Ogg,
+            _ => makepad_asset_data::MediaType::Wav,
+        };
+        let pcm = crate::thumbs::decode_audio(&bytes, media).expect("pcm");
+        let mono: Vec<f32> = pcm.frames.iter().map(|(l, r)| (l + r) * 0.5).collect();
+        let png = spectrogram_png(&mono, pcm.sample_rate).expect("picture");
+        let out = std::env::var("SPECTROGRAM_PNG")
+            .unwrap_or_else(|_| std::env::temp_dir().join("spectrogram.png").display().to_string());
+        std::fs::write(&out, &png).expect("write");
+        eprintln!(
+            "spectrogram: {} -> {out} ({} bytes, {}x{}, {:.1}s of audio)",
+            input,
+            png.len(),
+            HD_W,
+            HD_H,
+            pcm.frames.len() as f32 / pcm.sample_rate as f32
+        );
+    }
+
+    /// The picture a thumbnail actually ships as: high definition, inside
+    /// the content contract's thumbnail bounds, and small enough that the
+    /// VJ's 8 MB thumbnail budget is never in question.
+    #[test]
+    fn the_hd_thumbnail_encodes_within_every_budget() {
+        let rate = 44_100;
+        // Something busy: a sweep plus a beat, so the picture is not a
+        // compressible flat field.
+        let mut samples = vec![0.0f32; rate as usize * 20];
+        for (i, s) in samples.iter_mut().enumerate() {
+            let t = i as f32 / rate as f32;
+            let sweep = 80.0 * (1.0 + 40.0 * (t / 20.0));
+            *s = (2.0 * PI * sweep * t).sin() * 0.5
+                + (2.0 * PI * 7_000.0 * t).sin() * 0.1 * ((t * 8.0).fract() < 0.1) as u8 as f32;
+        }
+        let png = spectrogram_png(&samples, rate).expect("png");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
         let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
-        assert_eq!((w as usize, h as usize), (THUMB_W, THUMB_H));
+        assert_eq!((w as usize, h as usize), (HD_W, HD_H));
+        assert!(
+            w >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
+                && w <= makepad_asset_data::limits::THUMBNAIL_MAX_DIM
+                && h >= makepad_asset_data::limits::THUMBNAIL_MIN_DIM
+                && h <= makepad_asset_data::limits::THUMBNAIL_MAX_DIM,
+            "the content contract accepts 256..=4096 per side"
+        );
+        assert!(
+            png.len() < 8 * 1024 * 1024,
+            "a thumbnail must fit the VJ's 8 MB budget: {} bytes",
+            png.len()
+        );
+        eprintln!("hd spectrogram png: {} bytes ({w}x{h})", png.len());
     }
 }

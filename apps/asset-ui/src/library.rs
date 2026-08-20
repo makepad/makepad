@@ -157,7 +157,7 @@ const MODEL_PREVIEW_VERSION: &str = "12-center-yaw";
 /// audio v1: a WAV's preview is ALWAYS its own waveform strip. Earlier
 /// sidecars could be a byte-copy of an upstream pipeline image (provenance
 /// bug: lib-55.wav.thumb == lib-54.png) and are exactly what this discards.
-const AUDIO_PREVIEW_VERSION: &str = "2-spectrogram";
+const AUDIO_PREVIEW_VERSION: &str = "3-hd-spectrogram";
 const PREVIEW_VERSIONS_FILE: &str = ".preview-versions";
 /// Pre-split marker (model-only semantics); superseded and reaped on open.
 const LEGACY_MODEL_VERSION_FILE: &str = ".model-thumbnail-version";
