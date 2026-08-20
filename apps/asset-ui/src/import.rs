@@ -639,6 +639,14 @@ pub enum ImportPhase {
         assets: usize,
         blobs: usize,
         out: PathBuf,
+        /// Why the catalog did NOT get this pack, when that was a FAILURE
+        /// and not a choice. `None` — there was no server session, the
+        /// bundle is on disk and this is a clean local compile. `Some` —
+        /// the compiler or the publish REFUSED, and this pack did not
+        /// import; "Import all" counts it among the failures and the
+        /// status line leads with the reason instead of burying it in a
+        /// "catalog skipped (…)" aside.
+        error: Option<String>,
         library: Vec<LibraryLanding>,
         bake: BakeStats,
     },
@@ -665,6 +673,20 @@ pub enum ImportPhase {
         total: usize,
         more: bool,
     },
+    /// One pack FAILED during Import all — say why, right now, and keep
+    /// going. A multi-pack run used to collect these silently and report
+    /// nothing but a count at the end (`AllDone::failed`), which cost a
+    /// whole debugging session: 38 packs failed for one reason nobody could
+    /// read. This phase is transient (the next pack overwrites it) but it
+    /// is logged and drawn the moment it happens, and the reason also
+    /// survives into `AllDone::failed`.
+    PackFailed {
+        pack: String,
+        message: String,
+        done: usize,
+        total: usize,
+        more: bool,
+    },
     AllDone {
         ok: Vec<String>,
         failed: Vec<(String, String)>,
@@ -687,6 +709,31 @@ impl ImportPhase {
             done: 0,
             total: 0,
             current: String::new(),
+        }
+    }
+
+    /// Why this phase is a FAILURE, if it is one — the ONE place that
+    /// decides what "failed" means, shared by the card's failed flag, the
+    /// `[E]` log line and the run summary. Every phase that can carry a
+    /// refusal answers here, so a new failure shape cannot be added that
+    /// silently draws as success (which is exactly how a whole
+    /// 38-packs-failed run once shipped without a single reason anywhere).
+    ///
+    /// Always `<pack>: <reason>` — a reason that does not say WHICH pack is
+    /// half a diagnosis in a 46-kit run.
+    pub fn failure_reason(&self) -> Option<String> {
+        match self {
+            ImportPhase::Failed { pack, message }
+            | ImportPhase::PackFailed { pack, message, .. } => Some(format!("{pack}: {message}")),
+            ImportPhase::CompiledLocal {
+                pack,
+                error: Some(error),
+                ..
+            } => Some(format!("{pack}: {error}")),
+            ImportPhase::AllDone { failed, .. } if !failed.is_empty() => {
+                Some(failure_summary(failed))
+            }
+            _ => None,
         }
     }
 }
@@ -903,18 +950,41 @@ impl ImportPage {
                 }
                 line
             }
-            ImportPhase::IconsPending { pack, assets, .. } => format!(
-                "{pack}: {} before publish ({assets} staged)",
-                self.icon_status_fragment()
-            ),
+            ImportPhase::IconsPending {
+                pack,
+                assets,
+                library,
+                ..
+            } => {
+                // "icons ready" while NOTHING is registered yet is the lie
+                // that hid a 38-pack failure: an empty wait is a wait that
+                // has not started, never one that finished. Say which.
+                let meshes = library
+                    .iter()
+                    .filter(|landing| landing.content_type.contains("gltf"))
+                    .count();
+                if self.import_icon_files.is_empty() && meshes > 0 {
+                    format!("{pack}: queuing {meshes} icon renders before publish ({assets} staged)")
+                } else {
+                    format!(
+                        "{pack}: {} before publish ({assets} staged)",
+                        self.icon_status_fragment()
+                    )
+                }
+            }
             ImportPhase::CompiledLocal {
                 pack,
                 assets,
                 blobs,
                 bake,
                 out,
+                error,
                 ..
             } => {
+                if let Some(error) = error {
+                    // A refusal is not a "skip". Lead with it.
+                    return format!("{pack}: NOT imported — {error}");
+                }
                 let catalog = if out.is_file() || out.is_dir() {
                     "catalog skipped (server disconnected)".to_string()
                 } else {
@@ -981,6 +1051,20 @@ impl ImportPage {
                     bake_status_fragment(bake, &self.icon_status_fragment())
                 )
             }
+            ImportPhase::PackFailed {
+                pack,
+                message,
+                done,
+                total,
+                more,
+            } => {
+                let tail = if *more {
+                    "next pack…"
+                } else {
+                    "all packs done"
+                };
+                format!("import all {done}/{total} · {pack} FAILED — {message} · {tail}")
+            }
             ImportPhase::AllDone {
                 ok,
                 failed,
@@ -988,7 +1072,7 @@ impl ImportPage {
             } => {
                 let mut parts = vec![format!("{} packs imported", ok.len())];
                 if !failed.is_empty() {
-                    parts.push(format!("{} failed", failed.len()));
+                    parts.push(format!("{} failed — {}", failed.len(), failure_summary(failed)));
                 }
                 if !skipped.is_empty() {
                     parts.push(format!("{} not on disk", skipped.len()));
@@ -1104,6 +1188,7 @@ impl ImportPage {
             | ImportPhase::Published { .. }
             | ImportPhase::CompiledLocal { .. }
             | ImportPhase::PackFinished { .. }
+            | ImportPhase::PackFailed { .. }
             | ImportPhase::AllDone { .. } => {
                 let total = self.import_icon_files.len();
                 if total == 0 {
@@ -1129,6 +1214,7 @@ impl ImportPage {
                 | ImportPhase::Baking { .. }
                 | ImportPhase::IconsPending { .. }
                 | ImportPhase::PackFinished { more: true, .. }
+                | ImportPhase::PackFailed { more: true, .. }
         )
     }
 
@@ -1221,6 +1307,7 @@ impl ImportPage {
             | ImportPhase::Published { pack, .. }
             | ImportPhase::CompiledLocal { pack, .. }
             | ImportPhase::PackFinished { pack, .. }
+            | ImportPhase::PackFailed { pack, .. }
             | ImportPhase::PreviewThumb { pack, .. } => pack.clone(),
             ImportPhase::Idle | ImportPhase::AllDone { .. } => self.selected_pack_id().0,
         };
@@ -1292,6 +1379,44 @@ impl ImportPage {
         matches!(self.kenney_phase, ImportPhase::IconsPending { .. })
             && landings_drained
             && !self.icons_busy()
+    }
+
+    /// Staged meshes of the parked `IconsPending` pack that were never
+    /// REGISTERED for the icon wait ([`ImportPage::track_import_icon`]).
+    ///
+    /// The wait is over when every registered icon has reported; a mesh
+    /// that never registered is therefore invisible to it, and the gate
+    /// reads a wait with nothing outstanding as "all icons done — publish".
+    /// That is not a hypothetical: `land_imported_pack` once queued every
+    /// fresh GPU render WITHOUT registering it, so a 38-pack run resumed
+    /// instantly, compiled against the placeholders it had just written,
+    /// and every pack died on the placeholder guard while its real icons
+    /// were still rendering.
+    ///
+    /// The gate opens anyway when this is non-empty (a mesh that can never
+    /// be queued must not park an import forever) — the caller LOGS it,
+    /// and the publish-time placeholder guard still refuses the pack. This
+    /// is the diagnosis, not the enforcement.
+    pub fn unregistered_mesh_icons(&self) -> Vec<String> {
+        let ImportPhase::IconsPending { library, .. } = &self.kenney_phase else {
+            return Vec::new();
+        };
+        library
+            .iter()
+            .filter(|landing| landing.content_type.contains("gltf"))
+            .filter_map(|landing| {
+                let stem = landing.path.file_stem()?.to_str()?;
+                // Keys are `pack:<source>:<pack>:<stem>:<fingerprint>` —
+                // match on everything up to the fingerprint, which the
+                // caller computes from bytes this side cannot see.
+                let prefix = format!("pack:{}:{}:{stem}:", landing.source_id, landing.pack);
+                (!self
+                    .import_icon_files
+                    .iter()
+                    .any(|key| key.starts_with(&prefix)))
+                .then(|| stem.to_string())
+            })
+            .collect()
     }
 
     /// Let the parked import thread continue: normal readiness
@@ -1493,6 +1618,25 @@ impl ImportPage {
                                 more,
                             });
                         }
+                        // A pack that COMPILED but whose compile or publish
+                        // was refused did not import. Counting it among the
+                        // successes is how "0 packs imported · 38 failed"
+                        // could ever have been the honest summary of a run
+                        // where something else went wrong.
+                        ImportPhase::CompiledLocal {
+                            pack,
+                            error: Some(message),
+                            ..
+                        } => {
+                            let _ = tx.send(ImportPhase::PackFailed {
+                                pack: pack.clone(),
+                                message: message.clone(),
+                                done,
+                                total,
+                                more,
+                            });
+                            failed.push((pack, message));
+                        }
                         ImportPhase::CompiledLocal {
                             pack,
                             assets,
@@ -1513,6 +1657,17 @@ impl ImportPage {
                             });
                         }
                         ImportPhase::Failed { pack, message } => {
+                            // Say it NOW, not as a count at the end: this
+                            // phase is what the card draws and what the app
+                            // log records for this pack. `failed` still
+                            // carries the reason into `AllDone`.
+                            let _ = tx.send(ImportPhase::PackFailed {
+                                pack: pack.clone(),
+                                message: message.clone(),
+                                done,
+                                total,
+                                more,
+                            });
                             failed.push((pack, message));
                         }
                         other => {
@@ -1558,6 +1713,11 @@ impl ImportPage {
                             // fail closed instead of leaking a wait no one
                             // will ever resolve.
                             | ImportPhase::IconsPending { .. }
+                            // Same for a multi-pack run that died between
+                            // packs: `compiling()` calls these two busy, so
+                            // without this the queue would never advance.
+                            | ImportPhase::PackFinished { more: true, .. }
+                            | ImportPhase::PackFailed { more: true, .. }
                     ) {
                         self.kenney_phase = ImportPhase::Failed {
                             pack: self.selected_pack_id().0,
@@ -1571,6 +1731,25 @@ impl ImportPage {
             }
         }
         changed
+    }
+}
+
+/// A count is not a diagnosis. Name the first pack that failed and quote
+/// its reason verbatim (trimmed to one status-line's worth), so an
+/// "N failed" summary always ships at least one thread to pull.
+pub fn failure_summary(failed: &[(String, String)]) -> String {
+    let Some((pack, message)) = failed.first() else {
+        return String::new();
+    };
+    let mut reason = message.replace('\n', " ");
+    if reason.chars().count() > 160 {
+        reason = reason.chars().take(157).collect::<String>() + "…";
+    }
+    let rest = failed.len().saturating_sub(1);
+    if rest == 0 {
+        format!("{pack}: {reason}")
+    } else {
+        format!("{pack}: {reason} (+{rest} more)")
     }
 }
 
@@ -1696,7 +1875,8 @@ fn run_kaykit_import(
                 pack: "kaykit".into(),
                 assets: library.len(),
                 blobs: 0,
-                out: PathBuf::from(format!("pack_import: {error}")),
+                out: bundle,
+                error: Some(format!("compile refused the pack: {error}")),
                 library,
                 bake: BakeStats::default(),
             };
@@ -1737,7 +1917,8 @@ fn run_kaykit_import(
             pack: "kaykit".into(),
             assets: report.assets,
             blobs: report.blobs,
-            out: PathBuf::from(error.clone()),
+            out: report.plan_path.clone(),
+            error: Some(format!("publish to the asset store failed: {error}")),
             library,
             bake: BakeStats::default(),
         };
@@ -1753,6 +1934,7 @@ fn run_kaykit_import(
             assets: report.assets,
             blobs: report.blobs,
             out: report.plan_path,
+            error: None,
             library,
             bake,
         };
@@ -1984,7 +2166,8 @@ fn run_kenney_import(
                 pack: pack_name,
                 assets: library.len(),
                 blobs: 0,
-                out: PathBuf::from(format!("pack_import: {error}")),
+                out: bundle,
+                error: Some(format!("compile refused the pack: {error}")),
                 library,
                 bake,
             };
@@ -2028,7 +2211,8 @@ fn run_kenney_import(
                 pack: pack_name,
                 assets: report.assets,
                 blobs: report.blobs,
-                out: PathBuf::from(format!("publish: {error}")),
+                out: report.plan_path.clone(),
+                error: Some(format!("publish to the asset store failed: {error}")),
                 library,
                 bake,
             };
@@ -2043,6 +2227,7 @@ fn run_kenney_import(
             assets: report.assets,
             blobs: report.blobs,
             out: plan_path,
+            error: None,
             library,
             bake,
         };
@@ -3510,6 +3695,142 @@ mod tests {
         });
         assert!(page.resume_icons_pending());
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// The exact shape of the 38-packs-failed regression: staged meshes were
+    /// queued for a GPU render but never REGISTERED for the icon wait, so
+    /// the gate saw an empty wait, read "icons ready", and let compile+publish
+    /// run against the placeholders — every pack then died on the publish-time
+    /// placeholder guard while its real icons were still rendering.
+    #[test]
+    fn a_staged_mesh_that_never_registered_is_named_before_the_gate_opens() {
+        let mut page = ImportPage::default();
+        let landing = |stem: &str| LibraryLanding {
+            path: PathBuf::from(format!("/tmp/{stem}.glb")),
+            label: format!("kenney/space-kit/{stem}"),
+            domain: "mesh",
+            content_type: "model/gltf-binary",
+            prompt: "test".into(),
+            thumbnail: None,
+            source_id: "kenney".into(),
+            pack: "space-kit".into(),
+        };
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "space-kit".into(),
+            assets: 2,
+            library: vec![landing("a"), landing("b")],
+            bake: BakeStats::default(),
+        });
+
+        // Nothing registered: the wait is empty, so the gate WOULD open on
+        // drained landings — and both meshes are named as the reason.
+        assert!(!page.icons_busy(), "an empty wait is not busy — that is the trap");
+        assert!(page.icons_pending_ready(true));
+        assert_eq!(page.unregistered_mesh_icons(), vec!["a".to_string(), "b".to_string()]);
+
+        // Registering one (whatever its content fingerprint) accounts for it.
+        page.track_import_icon("pack:kenney:space-kit:a:deadbeef".into(), None);
+        assert_eq!(page.unregistered_mesh_icons(), vec!["b".to_string()]);
+        assert!(page.icons_busy(), "a registered, unrendered icon holds the gate shut");
+        assert!(!page.icons_pending_ready(true));
+
+        // With both registered nothing is unaccounted for, and the gate is
+        // held by the renders themselves — the correct, restored behaviour.
+        page.track_import_icon("pack:kenney:space-kit:b:cafe1234".into(), None);
+        assert!(page.unregistered_mesh_icons().is_empty());
+        assert!(!page.icons_pending_ready(true));
+        page.note_rendered_icon("pack:kenney:space-kit:a:deadbeef", b"\x89PNG\r\n\x1a\nicon");
+        assert!(!page.icons_pending_ready(true), "one icon left");
+        page.note_rendered_icon("pack:kenney:space-kit:b:cafe1234", b"\x89PNG\r\n\x1a\nicon");
+        assert!(page.icons_pending_ready(true));
+    }
+
+    /// A non-mesh landing (a plain pack image) is not part of the icon wait.
+    #[test]
+    fn unregistered_mesh_icons_ignores_non_mesh_landings() {
+        let mut page = ImportPage::default();
+        page.ingest_phase(ImportPhase::IconsPending {
+            pack: "space-kit".into(),
+            assets: 1,
+            library: vec![LibraryLanding {
+                path: PathBuf::from("/tmp/colormap.png"),
+                label: "kenney/space-kit/colormap".into(),
+                domain: "image",
+                content_type: "image/png",
+                prompt: "test".into(),
+                thumbnail: None,
+                source_id: "kenney".into(),
+                pack: "space-kit".into(),
+            }],
+            bake: BakeStats::default(),
+        });
+        assert!(page.unregistered_mesh_icons().is_empty());
+    }
+
+    /// A run may not report "N failed" without saying why at least once.
+    #[test]
+    fn a_failed_run_always_carries_a_reason() {
+        let mut page = ImportPage::default();
+        page.kenney_phase = ImportPhase::AllDone {
+            ok: Vec::new(),
+            failed: vec![
+                ("blaster-kit".into(), "icon for blaster-a never rendered".into()),
+                ("car-kit".into(), "icon for car-a never rendered".into()),
+            ],
+            skipped: vec!["arena".into()],
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("2 failed"), "{line}");
+        assert!(line.contains("blaster-kit"), "{line}");
+        assert!(line.contains("icon for blaster-a never rendered"), "{line}");
+        assert!(line.contains("+1 more"), "{line}");
+        assert!(line.contains("1 not on disk"), "{line}");
+        assert!(page.kenney_phase.failure_reason().is_some());
+
+        // One pack dying mid-run says so on the spot, and keeps the run busy.
+        page.kenney_phase = ImportPhase::PackFailed {
+            pack: "car-kit".into(),
+            message: "compile refused the pack: multi-texture GLB".into(),
+            done: 3,
+            total: 38,
+            more: true,
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("car-kit"), "{line}");
+        assert!(line.contains("multi-texture GLB"), "{line}");
+        assert!(page.compiling(), "more packs follow — the run is still busy");
+        assert_eq!(
+            page.kenney_phase.failure_reason().as_deref(),
+            Some("car-kit: compile refused the pack: multi-texture GLB"),
+            "a reason must name the pack it belongs to"
+        );
+
+        // A publish that was REFUSED is a failure, not a local compile.
+        page.kenney_phase = ImportPhase::CompiledLocal {
+            pack: "car-kit".into(),
+            assets: 50,
+            blobs: 60,
+            out: PathBuf::from("/tmp/plan.json"),
+            error: Some("publish to the asset store failed: 401 unauthorized".into()),
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        };
+        let line = page.kenney_status_line(true);
+        assert!(line.contains("NOT imported"), "{line}");
+        assert!(line.contains("401 unauthorized"), "{line}");
+        assert!(page.kenney_phase.failure_reason().is_some());
+
+        // A local compile with no server session is NOT a failure.
+        page.kenney_phase = ImportPhase::CompiledLocal {
+            pack: "car-kit".into(),
+            assets: 50,
+            blobs: 60,
+            out: PathBuf::from("/tmp/plan.json"),
+            error: None,
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        };
+        assert!(page.kenney_phase.failure_reason().is_none());
     }
 
     #[test]
