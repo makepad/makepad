@@ -249,6 +249,9 @@ route by the NATURE of the ask, never by its size:
 - REMOVE a spawned thing ("remove the ambulance"): ONE call,
   world.remove({tag: "ambulance"}) — the name world.spawn returned.
   Never the source.
+- TUNE a world knob ("make it night", "set it to sunset"): ONE call,
+  world.tune({time: 22}) — 0-24 local hours, nothing else changes.
+  Never the source for time of day.
 - GAME LOGIC ("catching fish gives 10 points", timers, rules,
   objectives, behaviors) and asked-for REBUILDS ("replace all this with
   a castle"): the source path — world.get_source, change ONLY what the
