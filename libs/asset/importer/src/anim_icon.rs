@@ -5,6 +5,7 @@
 //! an animated-icon preview. KayKit rigs use the same packer after CPU-skin.
 
 use crate::classic_import::encode_png_rgba;
+use makepad_asset_data::{ThumbnailCells, ThumbnailView, ThumbnailViewKind};
 
 pub const TILE: usize = 128;
 pub const SHEET_W: usize = 1024;
@@ -238,42 +239,67 @@ fn edge(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
 /// Library-card playback rate for a walk/idle sheet (matches billboard default).
 pub const SHEET_PREVIEW_FPS: f32 = 8.0;
 
-/// True for the 1024-wide packed sheet, or any single-row 128-tall strip
-/// with at least two tiles. Regular square thumbs (256/512/1024) stay still.
-pub fn is_anim_sheet(width: usize, height: usize) -> bool {
-    if width < TILE * 2 || height < TILE {
-        return false;
-    }
-    if width % TILE != 0 || height % TILE != 0 {
-        return false;
-    }
-    height == TILE || width == SHEET_W
-}
-
-/// Split a decoded BGRA sheet into 128² frames. Uniform (empty) cells are
-/// dropped so leftover studio-clear padding is not played.
-pub fn split_sheet_bgra(width: usize, height: usize, data: &[u32]) -> Option<Vec<Vec<u32>>> {
-    if !is_anim_sheet(width, height) || data.len() < width * height {
+/// LEGACY ONLY: split a decoded BGRA sheet into 128² frames by measuring it.
+///
+/// This is the guess the views contract replaced. A packed sheet now DECLARES
+/// its layout ([`PackedSheet::anim_view`]) and consumers cut the cells it
+/// names, so nothing has to ask "is 1024x1024 a 64-tile sheet or a Flux
+/// render?" — a question this function gets wrong, and always did.
+///
+/// It survives for exactly one job: revisions published BEFORE the contract
+/// carried views, whose thumbnails say nothing about themselves. Call it only
+/// when `ThumbnailMeta::animation()` returned `None`, and delete it when the
+/// catalog has no pre-views revisions left.
+pub fn legacy_split_sheet_bgra(width: usize, height: usize, data: &[u32]) -> Option<Vec<Vec<u32>>> {
+    // The old shape test: the 1024-wide packed sheet, or any single-row
+    // 128-tall strip with at least two tiles.
+    let is_sheet = width >= TILE * 2
+        && height >= TILE
+        && width % TILE == 0
+        && height % TILE == 0
+        && (height == TILE || width == SHEET_W);
+    if !is_sheet || data.len() < width * height {
         return None;
     }
-    let cols = width / TILE;
-    let rows = height / TILE;
+    let frames = cut_cells_bgra(width, height, data, TILE as u32, (width / TILE) as u32, 0,
+        ((width / TILE) * (height / TILE)) as u32);
+    // Uniform (empty) cells are dropped so leftover studio-clear padding is
+    // not played — the other half of the guess a declared count replaces.
+    let painted: Vec<Vec<u32>> = frames
+        .into_iter()
+        .filter(|tile| tile.iter().filter(|&&p| !is_sheet_clear(p)).count() >= 16)
+        .collect();
+    (painted.len() > 1).then_some(painted)
+}
+
+/// Cut `count` cells out of a decoded BGRA sheet, starting at cell `first`,
+/// using a DECLARED layout. No measuring, no emptiness test: the producer
+/// said how many frames it wrote and where they are.
+pub fn cut_cells_bgra(
+    width: usize,
+    height: usize,
+    data: &[u32],
+    cell: u32,
+    cols: u32,
+    first: u32,
+    count: u32,
+) -> Vec<Vec<u32>> {
+    let (cell, cols) = (cell.max(1) as usize, cols.max(1) as usize);
     let mut frames = Vec::new();
-    for row in 0..rows {
-        for col in 0..cols {
-            let mut tile = vec![0u32; TILE * TILE];
-            for y in 0..TILE {
-                let src = (row * TILE + y) * width + col * TILE;
-                let dst = y * TILE;
-                tile[dst..dst + TILE].copy_from_slice(&data[src..src + TILE]);
-            }
-            if tile_is_empty(&tile) {
-                continue;
-            }
-            frames.push(tile);
+    for i in 0..count as usize {
+        let index = first as usize + i;
+        let (ox, oy) = ((index % cols) * cell, (index / cols) * cell);
+        if ox + cell > width || oy + cell > height || data.len() < width * height {
+            break;
         }
+        let mut tile = vec![0u32; cell * cell];
+        for y in 0..cell {
+            let src = (oy + y) * width + ox;
+            tile[y * cell..(y + 1) * cell].copy_from_slice(&data[src..src + cell]);
+        }
+        frames.push(tile);
     }
-    (frames.len() > 1).then_some(frames)
+    frames
 }
 
 const CLEAR_BGRA: u32 = {
@@ -281,45 +307,218 @@ const CLEAR_BGRA: u32 = {
     (a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32
 };
 
-fn tile_is_empty(tile: &[u32]) -> bool {
-    const MIN_PAINTED: usize = 16;
-    tile.iter().filter(|&&p| !is_sheet_clear(p)).count() < MIN_PAINTED
-}
-
 fn is_sheet_clear(p: u32) -> bool {
     let a = (p >> 24) & 0xFF;
     a == 0 || p == CLEAR_BGRA
 }
 
-/// Pack tiles into a 1024-wide sheet (height = 128 × rows). Empty cells stay
-/// the studio clear so the grid stays readable.
-pub fn pack_sheet(tiles: &[TileRgba]) -> Result<Vec<u8>, String> {
+/// The PNG text-chunk key a packed sheet stamps its own layout into.
+///
+/// The staged-pack path hands a bare PNG file from the importer that PACKED
+/// it to the importer that PUBLISHES it, days and processes apart, with
+/// nothing but a directory between them. Rather than invent a sidecar file
+/// (a new pack media kind, a new attach rule, a new way to lose one), the
+/// sheet carries its layout inside itself, in a chunk every PNG reader
+/// already knows to skip. What the packer wrote is what the manifest
+/// declares, with no third party to keep in step.
+pub const SHEET_LAYOUT_KEY: &str = "makepad-sheet";
+
+/// Write `cells` + `fps` into the PNG as a `tEXt` chunk, before `IEND`.
+///
+/// A restamp REPLACES: a producer that knows the real frame count stamps
+/// over the packer's default, and the picture ends up carrying one layout,
+/// not a history of them.
+pub fn stamp_layout(png: &[u8], cells: ThumbnailCells, fps: f32) -> Vec<u8> {
+    let png = strip_layout(png);
+    let png = png.as_slice();
+    let iend = match find_iend(png) {
+        Some(at) => at,
+        None => return png.to_vec(),
+    };
+    let text = format!(
+        "{SHEET_LAYOUT_KEY}\0cells {} {} {} {} {} {}",
+        cells.cols, cells.cell_w, cells.cell_h, cells.first, cells.count, fps
+    );
+    let mut out = png[..iend].to_vec();
+    crate::classic_import::push_png_chunk(&mut out, b"tEXt", text.as_bytes());
+    out.extend_from_slice(&png[iend..]);
+    out
+}
+
+/// Read back a stamped layout, if the picture carries one.
+pub fn read_layout(png: &[u8]) -> Option<(ThumbnailCells, f32)> {
+    let body = png_text_chunk(png, SHEET_LAYOUT_KEY)?;
+    let mut parts = body.split_whitespace();
+    if parts.next()? != "cells" {
+        return None;
+    }
+    let mut num = || parts.next().and_then(|s| s.parse::<u32>().ok());
+    let (cols, cell_w, cell_h, first, count) = (num()?, num()?, num()?, num()?, num()?);
+    let fps = parts.next().and_then(|s| s.parse::<f32>().ok()).unwrap_or(SHEET_PREVIEW_FPS);
+    if cols == 0 || cell_w == 0 || cell_h == 0 || count == 0 {
+        return None;
+    }
+    Some((ThumbnailCells { cols, cell_w, cell_h, first, count }, fps))
+}
+
+/// The declared views of a thumbnail image: an `anim` view when the picture
+/// is a stamped sheet, nothing at all when it is an ordinary still. A still
+/// that says nothing is honest; guessing from its dimensions is not.
+pub fn views_of_png(png: &[u8]) -> Vec<ThumbnailView> {
+    match read_layout(png) {
+        Some((cells, fps)) => vec![ThumbnailView::cells(ThumbnailViewKind::Anim, cells, fps)],
+        None => Vec::new(),
+    }
+}
+
+/// Drop any layout chunk already in the picture, so a restamp replaces
+/// rather than stacks.
+fn strip_layout(png: &[u8]) -> Vec<u8> {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return png.to_vec();
+    }
+    let mut out = png[..8].to_vec();
+    let mut off = 8usize;
+    while off + 12 <= png.len() {
+        let Ok(len) = png[off..off + 4].try_into() else {
+            break;
+        };
+        let n = u32::from_be_bytes(len) as usize;
+        if off + 12 + n > png.len() {
+            break;
+        }
+        let ours = &png[off + 4..off + 8] == b"tEXt"
+            && png[off + 8..off + 8 + n].starts_with(SHEET_LAYOUT_KEY.as_bytes())
+            && png.get(off + 8 + SHEET_LAYOUT_KEY.len()) == Some(&0);
+        if !ours {
+            out.extend_from_slice(&png[off..off + 12 + n]);
+        }
+        off += 12 + n;
+    }
+    out
+}
+
+fn find_iend(png: &[u8]) -> Option<usize> {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    let mut off = 8usize;
+    while off + 12 <= png.len() {
+        let n = u32::from_be_bytes(png[off..off + 4].try_into().ok()?) as usize;
+        if &png[off + 4..off + 8] == b"IEND" {
+            return Some(off);
+        }
+        off = off.checked_add(12)?.checked_add(n)?;
+    }
+    None
+}
+
+fn png_text_chunk(png: &[u8], key: &str) -> Option<String> {
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    let mut off = 8usize;
+    while off + 12 <= png.len() {
+        let n = u32::from_be_bytes(png[off..off + 4].try_into().ok()?) as usize;
+        if off + 12 + n > png.len() {
+            return None;
+        }
+        if &png[off + 4..off + 8] == b"tEXt" {
+            let data = &png[off + 8..off + 8 + n];
+            if let Some(split) = data.iter().position(|b| *b == 0) {
+                if &data[..split] == key.as_bytes() {
+                    return String::from_utf8(data[split + 1..].to_vec()).ok();
+                }
+            }
+        }
+        off += 12 + n;
+    }
+    None
+}
+
+/// A packed sheet and the layout it ACTUALLY has: the cell size, how many
+/// cells per row, and how many of those cells are frames rather than the
+/// clear padding that buys a published thumbnail its height floor.
+///
+/// This is the thing consumers used to have to guess. A producer hands the
+/// layout to the manifest ([`Self::anim_view`]) and nobody measures pixels
+/// again.
+pub struct PackedSheet {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub cell: u32,
+    pub cols: u32,
+    /// Real frames, padding excluded.
+    pub count: u32,
+}
+
+impl PackedSheet {
+    /// The declared cell layout of this sheet.
+    pub fn cells(&self) -> ThumbnailCells {
+        ThumbnailCells {
+            cols: self.cols,
+            cell_w: self.cell,
+            cell_h: self.cell,
+            first: 0,
+            count: self.count,
+        }
+    }
+
+    /// The manifest view a thumbnail carries for this sheet.
+    pub fn anim_view(&self, fps: f32) -> ThumbnailView {
+        ThumbnailView::cells(ThumbnailViewKind::Anim, self.cells(), fps)
+    }
+}
+
+/// Pack 128² tiles into a 1024-wide sheet (height = 128 x rows).
+pub fn pack_sheet(tiles: &[TileRgba]) -> Result<PackedSheet, String> {
+    pack_grid(tiles, TILE, TILES_PER_ROW)
+}
+
+/// Pack `cell`-square tiles `cols` per row. Empty cells stay the studio
+/// clear so the grid stays readable — and are excluded from `count`, so a
+/// consumer plays the frames and not the padding.
+pub fn pack_grid(tiles: &[TileRgba], cell: usize, cols: usize) -> Result<PackedSheet, String> {
     if tiles.is_empty() {
         return Err("no animation tiles".into());
     }
+    let (cell, cols) = (cell.max(1), cols.max(1));
     let n = tiles.len().min(MAX_TILES);
-    let rows = (n + TILES_PER_ROW - 1) / TILES_PER_ROW;
-    let w = SHEET_W;
-    let h = rows * TILE;
+    let rows = n.div_ceil(cols);
+    let (w, h) = (cols * cell, rows * cell);
     let mut rgba = vec![0u8; w * h * 4];
     for px in rgba.chunks_exact_mut(4) {
         px.copy_from_slice(&CLEAR);
     }
     for (i, tile) in tiles.iter().take(n).enumerate() {
-        if tile.len() < TILE * TILE * 4 {
+        if tile.len() < cell * cell * 4 {
             continue;
         }
-        let col = i % TILES_PER_ROW;
-        let row = i / TILES_PER_ROW;
-        let ox = col * TILE;
-        let oy = row * TILE;
-        for y in 0..TILE {
-            let src = y * TILE * 4;
+        let (ox, oy) = ((i % cols) * cell, (i / cols) * cell);
+        for y in 0..cell {
+            let src = y * cell * 4;
             let dst = ((oy + y) * w + ox) * 4;
-            rgba[dst..dst + TILE * 4].copy_from_slice(&tile[src..src + TILE * 4]);
+            rgba[dst..dst + cell * 4].copy_from_slice(&tile[src..src + cell * 4]);
         }
     }
-    encode_png_rgba(&rgba, w as u32, h as u32)
+    let cells = ThumbnailCells {
+        cols: cols as u32,
+        cell_w: cell as u32,
+        cell_h: cell as u32,
+        first: 0,
+        count: n as u32,
+    };
+    Ok(PackedSheet {
+        // Stamped on the way out: a sheet that leaves this function already
+        // says what it is, wherever it ends up.
+        png: stamp_layout(&encode_png_rgba(&rgba, w as u32, h as u32)?, cells, SHEET_PREVIEW_FPS),
+        width: w as u32,
+        height: h as u32,
+        cell: cell as u32,
+        cols: cols as u32,
+        count: n as u32,
+    })
 }
 
 /// Prefer a named loop (stand / idle / walk) then fall back to the first
@@ -393,7 +592,8 @@ pub fn skinned_anim_sheet(glb: &[u8]) -> Option<Vec<u8>> {
             -std::f32::consts::FRAC_PI_2 + 0.35,
         ));
     }
-    pack_sheet(&tiles).ok()
+    // The bytes carry their own layout, stamped by the packer.
+    pack_sheet(&tiles).ok().map(|sheet| sheet.png)
 }
 
 fn subsample(idx: &[usize], max: usize) -> Vec<usize> {
@@ -417,17 +617,71 @@ mod tests {
     fn sheet_is_1024_wide_with_128_tiles() {
         let tile = fit_tile(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1);
         assert_eq!(tile.len(), TILE * TILE * 4);
-        let png = pack_sheet(&[tile.clone(), tile]).unwrap();
+        let sheet = pack_sheet(&[tile.clone(), tile]).unwrap();
+        let png = &sheet.png;
         assert!(png.starts_with(b"\x89PNG"));
         // IHDR width at bytes 16..20
         let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
         let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
         assert_eq!(w, SHEET_W as u32);
         assert_eq!(h, TILE as u32);
+        assert_eq!((sheet.width, sheet.height), (w, h));
+    }
+
+    /// A packed sheet says what it is, in its own bytes: the layout the
+    /// packer WROTE travels with the file through a staged pack directory,
+    /// so the manifest declares it instead of a consumer measuring it.
+    #[test]
+    fn a_packed_sheet_carries_its_own_layout() {
+        let tile = fit_tile(&[255, 0, 0, 255], 1, 1);
+        let sheet = pack_sheet(&[tile.clone(), tile.clone(), tile]).unwrap();
+        let (cells, fps) = read_layout(&sheet.png).expect("the sheet declares itself");
+        assert_eq!(cells, sheet.cells());
+        assert_eq!(cells.cols, TILES_PER_ROW as u32);
+        assert_eq!((cells.cell_w, cells.cell_h), (TILE as u32, TILE as u32));
+        assert_eq!(cells.count, 3, "three frames, not eight cells");
+        assert_eq!(fps, SHEET_PREVIEW_FPS);
+        // The stamp is a tEXt chunk: the picture is unchanged, and a reader
+        // that knows nothing about it decodes the same pixels.
+        let (plain, w, h) = crate::classic_import::decode_png_stored(&sheet.png).unwrap();
+        assert_eq!((w, h), (sheet.width, sheet.height));
+        assert_eq!(plain.len(), (w * h * 4) as usize);
+        // An ordinary picture declares nothing rather than guessing.
+        let still = crate::classic_import::encode_png_rgba(&[9, 9, 9, 255], 1, 1).unwrap();
+        assert_eq!(read_layout(&still), None);
+        assert!(views_of_png(&still).is_empty());
+        // A restamp replaces the count with the producer's real one.
+        let mine = ThumbnailCells { count: 2, ..sheet.cells() };
+        let restamped = stamp_layout(&sheet.png, mine, 12.0);
+        assert_eq!(read_layout(&restamped), Some((mine, 12.0)));
+    }
+
+    /// The declared cutter takes the frames the layout NAMES, in order,
+    /// including cells the old emptiness guess would have thrown away.
+    #[test]
+    fn declared_cells_are_cut_without_measuring() {
+        let (cell, cols) = (2usize, 2usize);
+        // 4x4 sheet of 2x2 cells, each filled with its own index.
+        let mut data = vec![0u32; 4 * 4];
+        for i in 0..4usize {
+            let (ox, oy) = ((i % cols) * cell, (i / cols) * cell);
+            for y in 0..cell {
+                for x in 0..cell {
+                    data[(oy + y) * 4 + ox + x] = i as u32 + 1;
+                }
+            }
+        }
+        let frames = cut_cells_bgra(4, 4, &data, cell as u32, cols as u32, 1, 2);
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].iter().all(|p| *p == 2));
+        assert!(frames[1].iter().all(|p| *p == 3));
+        // A range that runs off the picture stops rather than reading
+        // someone else's pixels.
+        assert_eq!(cut_cells_bgra(4, 4, &data, cell as u32, cols as u32, 3, 8).len(), 1);
     }
 
     #[test]
-    fn split_skips_empty_cells_and_needs_two_frames() {
+    fn legacy_split_skips_empty_cells_and_needs_two_frames() {
         let red = fit_tile(&[255, 0, 0, 255], 1, 1);
         let green = fit_tile(&[0, 255, 0, 255], 1, 1);
         let mut red_bgra = vec![0u32; TILE * TILE];
@@ -452,12 +706,12 @@ mod tests {
             sheet[row..row + TILE].copy_from_slice(&red_bgra[src..src + TILE]);
             sheet[row + TILE..row + TILE * 2].copy_from_slice(&green_bgra[src..src + TILE]);
         }
-        let frames = split_sheet_bgra(SHEET_W, TILE, &sheet).expect("two painted tiles");
+        let frames = legacy_split_sheet_bgra(SHEET_W, TILE, &sheet).expect("two painted tiles");
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0], red_bgra);
         assert_eq!(frames[1], green_bgra);
-        assert!(split_sheet_bgra(512, 512, &vec![1u32; 512 * 512]).is_none());
-        assert!(split_sheet_bgra(TILE, TILE, &red_bgra).is_none());
+        assert!(legacy_split_sheet_bgra(512, 512, &vec![1u32; 512 * 512]).is_none());
+        assert!(legacy_split_sheet_bgra(TILE, TILE, &red_bgra).is_none());
     }
 
     #[test]

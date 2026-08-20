@@ -790,7 +790,7 @@ fn convert_md2_inner(
         ));
     }
     let icon_png = if tiles.len() >= 2 {
-        crate::anim_icon::pack_sheet(&tiles).ok()
+        crate::anim_icon::pack_sheet(&tiles).ok().map(|sheet| sheet.png)
     } else if let Some(tile) = tiles.first() {
         encode_png_rgba(tile, crate::anim_icon::TILE as u32, crate::anim_icon::TILE as u32).ok()
     } else {

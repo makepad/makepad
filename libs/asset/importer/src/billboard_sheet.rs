@@ -221,12 +221,26 @@ fn write_thumb_strip(
     if tiles.is_empty() {
         return None;
     }
+    // The REAL frame count, before the padding below. This is the number the
+    // strip declares and a consumer plays; everything after it is clear
+    // tiles bought for height, not animation.
+    let frames = tiles.len() as u32;
+    let fps = bb.preview_fps() as f32;
     // `pack_sheet` sizes the sheet from the tile count; one extra clear tile
     // buys the second row that ThumbnailMeta::validate demands (>=256px).
     while tiles.len() <= anim_icon::SHEET_W / anim_icon::TILE {
         tiles.push(anim_icon::fit_tile(&[], 0, 0));
     }
-    let png = anim_icon::pack_sheet(&tiles).ok()?;
+    let sheet = anim_icon::pack_sheet(&tiles).ok()?;
+    // Stamp the actor's OWN frame count and rate over the packer's default:
+    // the manifest knows how many frames it drew and how fast they run, and
+    // that is what the catalog should say rather than "however many cells
+    // happen to look painted".
+    let png = anim_icon::stamp_layout(
+        &sheet.png,
+        makepad_asset_data::ThumbnailCells { count: frames, ..sheet.cells() },
+        fps,
+    );
     let path = dir.join(name);
     std::fs::write(&path, png).ok()?;
     Some(path)
@@ -417,7 +431,15 @@ mod tests {
         let (_, w, h) = decode_png_stored(&std::fs::read(&thumb).unwrap()).unwrap();
         assert_eq!(w as usize, anim_icon::SHEET_W);
         assert_eq!(h, 256, "two rows clear the 256px thumbnail floor");
-        assert!(anim_icon::is_anim_sheet(w as usize, h as usize));
+        // The strip declares its own layout: EIGHT cells wide by two rows,
+        // but only the three real frames, at the actor's own rate — the
+        // padding that bought the 256px floor is not animation.
+        let (cells, fps) = anim_icon::read_layout(&std::fs::read(&thumb).unwrap())
+            .expect("the strip says what it is");
+        assert_eq!(cells.cols, anim_icon::SHEET_W as u32 / anim_icon::TILE as u32);
+        assert_eq!((cells.cell_w, cells.cell_h), (128, 128));
+        assert_eq!(cells.count, 3, "three frames, not nine padded cells");
+        assert_eq!(fps, bb.preview_fps() as f32);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -231,6 +231,7 @@ pub fn publish_game(
             media: ThumbnailMedia::Png,
             width: THUMB,
             height: THUMB,
+            views: Vec::new(),
         },
     );
     request.description = game.description.clone();

@@ -24,8 +24,8 @@ use makepad_asset_data::{
     sha256, AssetAlias, AssetFile, AssetKind, Axis, BlobId, Bounds, Capabilities, CoordinateSystem,
     DerivativePolicy, DeviceTier, FileRole, ImageDims, ImportAsset, ImportFile, ImportManifest,
     ImportThumbnail, MediaType, Metrics, PackEntryKey, Pivot, Redistribution, Rights,
-    SourceCollection, SourceCollectionId, SourceOrigin, ThumbnailMedia, ThumbnailMeta, Vec3,
-    IMPORT_ASSET_ID_POLICY_V1,
+    SourceCollection, SourceCollectionId, SourceOrigin, ThumbnailCells, ThumbnailMedia,
+    ThumbnailMeta, ThumbnailView, ThumbnailViewKind, Vec3, IMPORT_ASSET_ID_POLICY_V1,
 };
 use makepad_render::skin::SkinnedModel;
 use makepad_render::StaticModel;
@@ -2329,6 +2329,21 @@ struct HashedFile {
     nav: Option<WorldNav>,
     /// A flat / fully transparent image: never a legal thumbnail.
     placeholder: bool,
+    /// The cell layout a packed sheet stamped into itself, when this image
+    /// is one. Read from the bytes that were hashed, so a thumbnail declares
+    /// the layout its packer WROTE instead of one a consumer measured.
+    sheet: Option<(ThumbnailCells, f32)>,
+}
+
+/// The declared views of a thumbnail file: an `anim` view when the picture
+/// stamped its own cell layout, nothing at all otherwise. A still that says
+/// nothing about itself is honest — the alternative was every consumer
+/// measuring the pixels and calling a 1024-square render a 64-frame sheet.
+fn sheet_views(file: &HashedFile) -> Vec<ThumbnailView> {
+    match file.sheet {
+        Some((cells, fps)) => vec![ThumbnailView::cells(ThumbnailViewKind::Anim, cells, fps)],
+        None => Vec::new(),
+    }
 }
 
 #[derive(Debug)]
@@ -2937,7 +2952,7 @@ fn billboard_asset(
                     width: d.width,
                     height: d.height,
                     byte_len: t.byte_len,
-                    views: Vec::new(),
+                    views: sheet_views(t),
                 },
             })
         }
@@ -3314,7 +3329,7 @@ fn mesh_asset(
                 width: dims.width,
                 height: dims.height,
                 byte_len: thumb.byte_len,
-                views: Vec::new(),
+                views: sheet_views(thumb),
             },
         }),
         metrics: Metrics {
@@ -3399,6 +3414,7 @@ fn hash_and_measure(root: &PackRoot, file: DiscoveredFile) -> Result<HashedFile,
         billboard: measured.billboard,
         nav: measured.nav,
         placeholder: measured.placeholder,
+        sheet: measured.sheet,
     })
 }
 
@@ -3554,6 +3570,8 @@ struct Measured {
     /// True for an image that is a flat/placeholder tile, never a picture of
     /// the asset. Measured from the bytes that were just hashed.
     placeholder: bool,
+    /// The stamped cell layout of a packed sheet, read from those same bytes.
+    sheet: Option<(ThumbnailCells, f32)>,
 }
 
 impl Measured {
@@ -3568,6 +3586,7 @@ impl Measured {
     fn thumbnailable_image(w: u32, h: u32, bytes: &[u8]) -> Self {
         Self {
             placeholder: thumbnail_is_placeholder(bytes),
+            sheet: crate::anim_icon::read_layout(bytes),
             ..Self::image(w, h)
         }
     }
