@@ -144,6 +144,7 @@ pub fn spawn_broker(
         None => Box::new(EnvFactory {
             fleet_bases: cfg.fleet_bases.clone(),
             fleet: cfg.fleet.clone(),
+            availability: Vec::new(),
         }),
     };
     let join = std::thread::Builder::new()
@@ -1180,7 +1181,13 @@ trait ProviderFactory: Send {
 struct EnvFactory {
     fleet_bases: Vec<String>,
     fleet: String,
+    /// Availability rows are a fleet SCAN each; a create used to pay two
+    /// (probe + wrapper seed) and a bursty dead window turned both into a
+    /// user-visible 503. Cache per kind for a short TTL.
+    availability: Vec<(ProviderKind, ProviderAvailability, Instant)>,
 }
+
+const AVAILABILITY_TTL: Duration = Duration::from_secs(20);
 
 impl EnvFactory {
     fn bases(&self) -> Vec<String> {
@@ -1204,10 +1211,20 @@ impl EnvFactory {
 
 impl ProviderFactory for EnvFactory {
     fn probe(&mut self, kind: ProviderKind) -> ProviderAvailability {
-        match self.open_raw(kind) {
+        if let Some((_, av, at)) =
+            self.availability.iter().find(|(k, _, _)| *k == kind)
+        {
+            if at.elapsed() < AVAILABILITY_TTL {
+                return av.clone();
+            }
+        }
+        let av = match self.open_raw(kind) {
             Ok(mut p) => strip_location(p.availability()),
             Err(reason) => ProviderAvailability::Unavailable { reason },
-        }
+        };
+        self.availability.retain(|(k, _, _)| *k != kind);
+        self.availability.push((kind, av.clone(), Instant::now()));
+        av
     }
 
     fn open(&mut self, kind: ProviderKind) -> Result<Box<dyn ChatProvider>, String> {
@@ -1215,26 +1232,24 @@ impl ProviderFactory for EnvFactory {
         // actor NEVER blocks on provider HTTP: the fleet begin_turn's ~18 s
         // flaky-LAN backoff ran inline on the actor and starved every other
         // session's events/tool-result routes (entry 13, act three). The
-        // one blocking probe left is the seed here, at session create.
+        // seed availability comes from the cached probe (create just did
+        // one) instead of a second fleet scan.
+        let seed = self.probe(kind);
         match kind {
             ProviderKind::FleetQwen => {
-                let mut inner = FleetQwenChatProvider::new(HttpFleetTransport, self.bases());
-                let seed = inner.availability();
+                let inner = FleetQwenChatProvider::new(HttpFleetTransport, self.bases());
                 Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
             }
             ProviderKind::OpenAi => {
-                let mut inner = makepad_asset_chat::openai::from_env();
-                let seed = inner.availability();
+                let inner = makepad_asset_chat::openai::from_env();
                 Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
             }
             ProviderKind::Grok => {
-                let mut inner = makepad_asset_chat::grok::from_env();
-                let seed = inner.availability();
+                let inner = makepad_asset_chat::grok::from_env();
                 Ok(Box::new(ThreadedProvider::spawn(inner, seed)))
             }
         }
     }
-
 }
 
 fn strip_location(av: ProviderAvailability) -> ProviderAvailability {
