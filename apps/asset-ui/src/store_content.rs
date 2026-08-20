@@ -89,6 +89,11 @@ pub struct StoreFile {
     pub path: std::path::PathBuf,
     pub role: FileRole,
     pub revision: String,
+    /// The manifest's declared thumbnail views ([`ThumbnailMeta::views`]) —
+    /// what the picture IS, carried WITH the picture so no consumer ever
+    /// has to guess (or worse, measure). Empty for payload files and for
+    /// revisions baked before the views contract.
+    pub views: Vec<makepad_asset_data::ThumbnailView>,
 }
 
 /// Same resolution as [`fetch_viewable`] — detail → newest PUBLISHED
@@ -113,7 +118,7 @@ pub fn materialize(
     let path = client
         .blob_path(&file.blob, Some(file.byte_len).filter(|n| *n > 0))
         .map_err(|e| format!("blob {}: {e}", file.blob))?;
-    Ok(StoreFile { blob: file.blob, path, role: file.role, revision: head })
+    Ok(StoreFile { blob: file.blob, path, role: file.role, revision: head, views: Vec::new() })
 }
 
 /// The asset's own thumbnail, materialised the same way. Small, and the
@@ -135,6 +140,7 @@ pub fn materialize_thumbnail(
         path,
         role: FileRole::Texture,
         revision: head,
+        views: thumbnail.views,
     })
 }
 
