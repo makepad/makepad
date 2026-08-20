@@ -44,6 +44,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::json::Value;
 use crate::publish::{PublishBundle, PublishRequest, PublishStage, Published, PublishedBundle};
 use crate::resolver::{ResolvedFile, ResolvedThumbnail, TierPreference};
+use crate::side_channels::{SideChannelFile, SideChannelOutcome};
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId, ClientProfile,
     DerivedVariantId, DerivedVariantManifest, FileRole, GameAlias, GameRevisionId,
@@ -103,6 +104,13 @@ pub enum ClientRequest {
     /// side channel ([`ClientRuntime::poll_stages`]), and `cancel` aborts it
     /// between stages.
     PublishBundle { request: Box<PublishBundle> },
+    /// Attach derived side-channel files (separated stems, aligned lyrics) to
+    /// an asset's head revision — see [`crate::side_channels`]. The payload is
+    /// `Arc`d because it is megabytes of encoded audio the caller already
+    /// holds, and it is unwrapped rather than copied when nothing else shares
+    /// it. Idempotent at the client: a concurrent winner reports
+    /// [`SideChannelOutcome::AlreadyPresent`].
+    PublishSideChannels { asset: AssetId, files: Arc<Vec<SideChannelFile>> },
     /// Advertised generation capabilities, optionally domain-filtered.
     FetchJobProfiles { domain: Option<String> },
     /// Enqueue a generation job; the server schedules the compute.
@@ -167,6 +175,9 @@ pub enum ClientOutput {
     GcCancelled(bool),
     Published(Published),
     PublishedBundle(PublishedBundle),
+    /// Whether the side-channel attach wrote a revision or found the roles
+    /// already there.
+    SideChannels(SideChannelOutcome),
     JobProfiles(Vec<JobProfileDto>),
     JobQueued(JobId),
     JobStatus(JobStatusDto),
@@ -670,6 +681,7 @@ fn classify(request: &ClientRequest, fast_blob_max_bytes: u64) -> Lane {
         ClientRequest::ResolveFile { .. }
         | ClientRequest::PublishArtifact { .. }
         | ClientRequest::PublishBundle { .. }
+        | ClientRequest::PublishSideChannels { .. }
         | ClientRequest::RunImport { .. }
         | ClientRequest::RegisterSourceCollection { .. } => Lane::Bulk,
         // A long-poll parks a worker for its whole wait; it must never do
@@ -941,6 +953,14 @@ fn run_one(
                 Some(&mut on_stage),
                 &abort,
             )?))
+        }
+        ClientRequest::PublishSideChannels { asset, files } => {
+            // Unwrap rather than copy: the encoded stems are megabytes and
+            // this worker is the only holder once the caller let go.
+            let files = Arc::try_unwrap(files).unwrap_or_else(|shared| (*shared).clone());
+            Ok(ClientOutput::SideChannels(
+                client.publish_side_channel_files(&asset, files)?,
+            ))
         }
         ClientRequest::FetchJobProfiles { domain } => Ok(ClientOutput::JobProfiles(
             client.api().job_profiles(domain.as_deref())?,
