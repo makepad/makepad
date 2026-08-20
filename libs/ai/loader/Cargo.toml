@@ -10,3 +10,7 @@ makepad-micro-serde = { path = "../../micro_serde" }
 [[bin]]
 name = "storage-bench"
 path = "src/bin/storage_bench.rs"
+
+[[bin]]
+name = "mac-storage-bench"
+path = "src/bin/mac_storage_bench.rs"
