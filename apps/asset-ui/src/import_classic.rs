@@ -6,7 +6,8 @@
 //! `pack_import` rights path as Kenney. AO bake runs on every produced GLB.
 
 use crate::import::{
-    probe_dir, BakeStats, DiskProbe, ImportPhase, LibraryLanding, ServerSession,
+    clear_pack_staging, probe_dir, BakeStats, DiskProbe, IconResumeGate, ImportPhase,
+    LibraryLanding, ServerSession,
 };
 use makepad_widgets::*;
 use makepad_asset_importer::classic_import::{
@@ -214,6 +215,12 @@ pub struct ClassicImportCard {
     pending_out: PathBuf,
     tdm: Option<TdmSync>,
     iso: Option<IsoSync>,
+    /// The icon-render handshake for THIS source, mirroring Kenney/KayKit:
+    /// the import thread parks in `ImportPhase::IconsPending` until every
+    /// landing it handed the UI has been drained into the icon renderer, so
+    /// a classic pack publishes real thumbnails and its staging can be
+    /// reclaimed the moment publish succeeds. See [`IconResumeGate`].
+    icon_resume: IconResumeGate,
 }
 
 struct IsoSync {
@@ -265,6 +272,7 @@ impl ClassicImportCard {
             pending_out: PathBuf::new(),
             tdm: None,
             iso: None,
+            icon_resume: IconResumeGate::default(),
         }
     }
 
@@ -294,6 +302,9 @@ impl ClassicImportCard {
                     | ImportPhase::Publishing { .. }
                     | ImportPhase::Annotating { .. }
                     | ImportPhase::Baking { .. }
+                    // Parked waiting for icons: the thread is alive and WILL
+                    // publish, so a second start must still be refused.
+                    | ImportPhase::IconsPending { .. }
             )
     }
 
@@ -402,6 +413,18 @@ impl ClassicImportCard {
                 "published {pack} · {assets} assets · {annotated} annotated · {}",
                 bake_fragment(bake)
             ),
+            ImportPhase::IconsPending { pack, assets, .. } => {
+                format!("{pack}: rendering {assets} icons…")
+            }
+            ImportPhase::PackFinished { pack, assets, .. } => {
+                format!("{pack}: finished · {assets} assets")
+            }
+            ImportPhase::AllDone { ok, failed, skipped } => format!(
+                "all done · {} imported · {} failed · {} skipped",
+                ok.len(),
+                failed.len(),
+                skipped.len()
+            ),
             ImportPhase::Failed { pack, message } => format!("{pack}: {message}"),
             ImportPhase::Cancelled { pack, message } => format!("{pack}: stopped — {message}"),
             ImportPhase::Idle => {
@@ -433,7 +456,9 @@ impl ClassicImportCard {
                     )
                 }
             }
-            other => format!("{other:?}"),
+            // Never Debug-format into UI text: a phase carries whole
+            // LibraryLanding vectors and the card printed the lot.
+            ImportPhase::PreviewThumb { pack, .. } => format!("{pack}: preview"),
         }
     }
 
@@ -502,11 +527,28 @@ impl ClassicImportCard {
         std::mem::take(&mut self.pending_previews)
     }
 
+    /// True once this card's parked import may continue: its landings are
+    /// drained and the UI's icon renderer is idle (or the user cancelled).
+    pub fn icons_pending_ready(&self, landings_drained: bool, icons_busy: bool) -> bool {
+        matches!(self.phase, ImportPhase::IconsPending { .. }) && landings_drained && !icons_busy
+    }
+
+    /// Let the parked import thread continue. No-op past the first call per
+    /// `IconsPending` phase.
+    pub fn resume_icons_pending(&mut self) -> bool {
+        self.icon_resume.resume()
+    }
+
     fn ingest(&mut self, phase: ImportPhase) {
         match &phase {
             ImportPhase::PreviewThumb { name, png, .. } => {
                 self.pending_previews.push((name.clone(), png.clone()));
                 return;
+            }
+            ImportPhase::IconsPending { library, .. } => {
+                self.pending_landings.extend(library.iter().cloned());
+                // A fresh icon wait for this pack: allow exactly one resume.
+                self.icon_resume.arm();
             }
             ImportPhase::Published { library, .. }
             | ImportPhase::CompiledLocal { library, .. } => {
@@ -1401,11 +1443,23 @@ impl ClassicImportCard {
         self.rx = Some(rx);
         self.phase = ImportPhase::compiling(pack_name.clone());
         let cancel = self.cancel.clone();
+        // Same handshake Kenney/KayKit use: the thread parks after staging
+        // until the UI has taken every landing for icon rendering.
+        let (gate, icon_resume_rx) = IconResumeGate::armed();
+        self.icon_resume = gate;
         thread::Builder::new()
             .name(format!("asset-ui-{}-import", source.id()))
             .spawn(move || {
-                let phase =
-                    run_classic_import(&dir, &out, source, &pack_name, server, &tx, &cancel);
+                let phase = run_classic_import(
+                    &dir,
+                    &out,
+                    source,
+                    &pack_name,
+                    server,
+                    &tx,
+                    &cancel,
+                    &icon_resume_rx,
+                );
                 let _ = tx.send(phase);
             })
             .map_err(|e| format!("failed to start classic import thread: {e}"))?;
@@ -1455,6 +1509,7 @@ fn bake_fragment(bake: &BakeStats) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_classic_import(
     pack_dir: &Path,
     out: &Path,
@@ -1463,6 +1518,7 @@ fn run_classic_import(
     server: Option<ServerSession>,
     tx: &std::sync::mpsc::Sender<ImportPhase>,
     cancel: &AtomicBool,
+    icon_resume_rx: &Receiver<()>,
 ) -> ImportPhase {
     let work = out.join("work");
     let staged = work.join("source");
@@ -1557,6 +1613,37 @@ fn run_classic_import(
         }
     };
 
+    // Real icons before publish, ALWAYS — the same handshake Kenney/KayKit
+    // use. Conversion already wrote this pack's own thumbnails (world
+    // previews, sprite strips, mesh rasters); parking here hands those
+    // landings to the UI's icon renderer and, crucially, guarantees every
+    // landing has been READ out of `work/source/` before the staging
+    // cleanup below deletes it.
+    let library = classic_library_landings(&staged, source, pack_name, &convert.assets);
+    let _ = tx.send(ImportPhase::IconsPending {
+        pack: pack_name.into(),
+        assets: library.len(),
+        library: library.clone(),
+        bake: BakeStats {
+            total: convert.bake.total,
+            baked: convert.bake.baked,
+            skipped: convert.bake.skipped,
+            failed: convert.bake.failed,
+        },
+    });
+    if icon_resume_rx.recv().is_err() {
+        return ImportPhase::Cancelled {
+            pack: pack_name.into(),
+            message: "icon handshake lost".into(),
+        };
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return ImportPhase::Cancelled {
+            pack: pack_name.into(),
+            message: "stopped while rendering icons".into(),
+        };
+    }
+
     let spec = source.pack_spec(pack_name);
     let report = match pack_import::compile_pack(&staged, &bundle, spec, None, false) {
         Ok(r) => Some(r),
@@ -1564,8 +1651,8 @@ fn run_classic_import(
             log!("import {pack_name}: pack_import failed: {error}");
             // Converted assets still land in the local library. Catalog
             // publish needs a valid bundle; we report the compile error in
-            // the local status line instead of dropping the pack.
-            let library = classic_library_landings(&staged, source, pack_name, &convert.assets);
+            // the local status line instead of dropping the pack. Staging
+            // stays put for inspection (`staging_dirs_to_clear(false)`).
             let bake = BakeStats {
                 total: convert.bake.total,
                 baked: convert.bake.baked,
@@ -1583,8 +1670,6 @@ fn run_classic_import(
         }
     };
     let report = report.expect("compile ok");
-
-    let library = classic_library_landings(&staged, source, pack_name, &convert.assets);
 
     let publish_result = if let Some(session) = server {
         let _ = tx.send(ImportPhase::Publishing {
@@ -1644,6 +1729,10 @@ fn run_classic_import(
             bake,
         };
     }
+    // Published: the converted tree has done its job (the catalog has the
+    // blobs, the library has its copies), so reclaim `work/`+`out/` exactly
+    // like the Kenney/KayKit path. A classic pack stages gigabytes.
+    clear_pack_staging(pack_name, out, true);
     ImportPhase::Published {
         pack: pack_name.into(),
         assets: report.assets,
@@ -2046,6 +2135,23 @@ impl ClassicImportPage {
             .any(|card| card.handle_http_response(cx, request_id, response))
     }
 
+    /// Let every classic card parked in `IconsPending` continue once the UI
+    /// has drained its landings and the icon renderer is idle (or the user
+    /// cancelled it). Mirrors `ImportPage::resume_icons_pending` — see
+    /// [`IconResumeGate`]. Returns the sources that were resumed.
+    pub fn resume_icons_pending(&mut self, landings_drained: bool, icons_busy: bool) -> Vec<&'static str> {
+        let mut resumed = Vec::new();
+        for card in self.cards_mut() {
+            let ready = card.icons_pending_ready(landings_drained, icons_busy);
+            let cancelled = card.stop_requested()
+                && matches!(card.phase, ImportPhase::IconsPending { .. });
+            if (ready || cancelled) && card.resume_icons_pending() {
+                resumed.push(card.source.id());
+            }
+        }
+        resumed
+    }
+
     fn cards_mut(&mut self) -> impl Iterator<Item = &mut ClassicImportCard> {
         [
             &mut self.freedoom,
@@ -2116,6 +2222,42 @@ fn fmt_bytes(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn icons_pending(pack: &str) -> ImportPhase {
+        ImportPhase::IconsPending {
+            pack: pack.into(),
+            assets: 3,
+            library: Vec::new(),
+            bake: BakeStats::default(),
+        }
+    }
+
+    #[test]
+    fn a_classic_pack_waits_for_its_icons_before_publishing() {
+        let mut card = ClassicImportCard::new(ClassicSource::Freedoom);
+        // Idle: nothing to wait for.
+        assert!(!card.icons_pending_ready(true, false));
+
+        card.phase = icons_pending("freedoom");
+        // Landings still queued for the icon renderer: NOT ready.
+        assert!(!card.icons_pending_ready(false, false));
+        // Renderer still working through them: NOT ready.
+        assert!(!card.icons_pending_ready(true, true));
+        // Drained and idle: the parked thread may compile+publish.
+        assert!(card.icons_pending_ready(true, false));
+        // And the card counts as busy while parked, so a second start of the
+        // same source is refused instead of racing the first.
+        assert!(card.compiling());
+    }
+
+    #[test]
+    fn resuming_an_unarmed_card_is_a_no_op() {
+        // A card that never started an import has no channel: resume must
+        // report nothing rather than pretend it signalled a thread.
+        let mut page = ClassicImportPage::default();
+        page.freedoom.phase = icons_pending("freedoom");
+        assert!(page.resume_icons_pending(true, false).is_empty());
+    }
 
     #[test]
     fn shareware_cards_say_local_preview_not_a_redistributable_grant() {

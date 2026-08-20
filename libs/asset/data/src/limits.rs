@@ -35,7 +35,11 @@ pub const MAX_FILES_PER_ASSET: usize = 64;
 pub const MAX_DEPENDENCIES_PER_ASSET: usize = 64;
 /// Maximum dependency-chain depth an asset closure may declare.
 pub const MAX_DEPENDENCY_DEPTH: u32 = 8;
-pub const MAX_ANCHORS_PER_ASSET: usize = 32;
+/// Anchors per asset. 64, not 32: a converted Doom map publishes its player
+/// starts, walk heights, exit, keys, every door, every lift and every
+/// teleport pad, and E1M8-sized maps pass 32 on doors alone — a level that
+/// silently drops half its doors is worse than one that refuses.
+pub const MAX_ANCHORS_PER_ASSET: usize = 64;
 pub const MAX_SPAWN_PARAMS: usize = 64;
 pub const MAX_PROVENANCE_PARENTS: usize = 8;
 
