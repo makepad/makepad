@@ -94,9 +94,18 @@ use crate::scheduler::{plan_run, DispatchPlan, EndpointLoad, MAX_ACTIVE_RUNS};
 // The shared preview widgets: the same set the VJ and DJ surfaces adopt.
 use makepad_asset_widgets::{AudioAction, ClipFormat, ContentPreview, PreviewContent};
 
-/// The readable name of an imported item: the last segment of its stable
-/// file id, which is the thing a person recognises.
+/// The readable name of an imported item: the model's own stem.
+///
+/// A pack item's id is `pack:<source>:<pack>:<stem>:<fingerprint>`, so the
+/// LAST segment is a content hash — or the literal word `premade` for an
+/// item that needs no render. Reading the tail blindly titled every card in
+/// the import feed "premade" instead of naming the thing arriving.
 fn import_item_name(file: &str) -> String {
+    if let Some((_, _, stem, _)) = crate::import::parse_pack_icon_key(file) {
+        if !stem.is_empty() {
+            return stem;
+        }
+    }
     let tail = file
         .rsplit(|c| c == ':' || c == '/')
         .next()
@@ -104,9 +113,12 @@ fn import_item_name(file: &str) -> String {
     if tail.is_empty() { file.to_string() } else { tail.to_string() }
 }
 
-/// Where it came from: the segment before the name (the pack, the wad, the
-/// folder), so a grid of imports says what is arriving from where.
+/// Where it came from: the pack (or the wad, the folder), so a grid of
+/// imports says what is arriving from where.
 fn import_item_source(file: &str) -> String {
+    if let Some((_, pack, _, _)) = crate::import::parse_pack_icon_key(file) {
+        return pack;
+    }
     let mut parts: Vec<&str> = file.split(|c| c == ':' || c == '/').filter(|s| !s.is_empty()).collect();
     parts.pop();
     parts.pop().unwrap_or("").to_string()
@@ -995,8 +1007,10 @@ script_mod! {
     // shape, not the size.
     let CatalogCell = GalleryCard{
         width: 150 height: 150
-        flow: Down spacing: 6
-        padding: 9
+        // spacing/padding MUST equal store_views::GRID_CARD_SPACING /
+        // GRID_CARD_PAD — the per-draw card-height math assumes them.
+        flow: Down spacing: 3
+        padding: 4
         grid_thumb_box := View{
             width: Fill height: 88
             align: Align{x: 0.5 y: 0.5}
@@ -8082,7 +8096,7 @@ impl App {
             .map(|library| library.ao_sidecar_bytes(file))
             .unwrap_or((None, None));
         let spawn = self.library.as_ref().and_then(|library| library.world_spawn(file));
-        self.queue_glb_thumbnail_ao(cx, file, bytes, aomesh, ao_png, spawn);
+        let _ = self.queue_glb_thumbnail_ao(cx, file, bytes, aomesh, ao_png, spawn);
     }
 
     /// `spawn` is passed in explicitly (rather than looked up from `file`
@@ -8090,6 +8104,14 @@ impl App {
     /// `library.world_spawn`) or a staged PACK item that has no library row
     /// at all (caller reads the staged `.spawn` sidecar directly via
     /// `library::parse_world_spawn`) — see `land_imported_pack`.
+    ///
+    /// Returns whether this file is now IN FLIGHT on the renderer — queued
+    /// by this call, or already queued/active from an earlier one. The
+    /// pack-import icon handshake parks until every in-flight icon reports
+    /// back (`ImportPage::icons_busy`), so a caller that registers a file
+    /// for that wait MUST only do so when this said `true`; registering a
+    /// job that was never queued parks the import thread forever.
+    #[must_use]
     fn queue_glb_thumbnail_ao(
         &mut self,
         cx: &mut Cx,
@@ -8098,24 +8120,25 @@ impl App {
         aomesh: Option<Vec<u8>>,
         ao_png: Option<Vec<u8>>,
         spawn: Option<([f32; 3], f32, f32)>,
-    ) {
+    ) -> bool {
         if !bytes.starts_with(b"glTF") {
-            return;
+            log!("thumbnail: {file} is not a GLB — no icon render queued");
+            return false;
         }
-        if let Some(mut renderer) = self
-            .ui
-            .widget(cx, ids!(thumbnail_renderer))
-            .borrow_mut::<ThumbnailRenderer>()
-        {
-            renderer.queue_library_thumbnail_ao_spawn(
-                cx,
-                file.to_string(),
-                bytes.to_vec(),
-                aomesh,
-                ao_png,
-                spawn,
-            );
-        }
+        let widget = self.ui.widget(cx, ids!(thumbnail_renderer));
+        let Some(mut renderer) = widget.borrow_mut::<ThumbnailRenderer>() else {
+            error!("thumbnail: renderer widget unavailable — no icon render queued for {file}");
+            return false;
+        };
+        renderer.queue_library_thumbnail_ao_spawn(
+            cx,
+            file.to_string(),
+            bytes.to_vec(),
+            aomesh,
+            ao_png,
+            spawn,
+        );
+        true
     }
 
     /// Commit completed model-only renders after the headless renderer's
@@ -10452,10 +10475,10 @@ impl App {
                     active.job.title(),
                     self.import_page.kenney_status_line(self.store.connected()),
                     self.import_page.progress_fraction(),
-                    matches!(
-                        self.import_page.kenney_phase,
-                        crate::import::ImportPhase::Failed { .. }
-                    ),
+                    // Every refusal shape, not just the terminal one: a
+                    // pack that died mid-"Import all", or one whose
+                    // compile/publish was refused, draws as failed too.
+                    self.import_page.kenney_phase.failure_reason().is_some(),
                 ),
                 ImportJob::Freedoom { .. } => (
                     active.job.title(),
@@ -10810,6 +10833,23 @@ impl App {
             }
             return;
         }
+        // The gate is about to open. If a staged mesh never registered for
+        // the wait, the wait was a lie — say so BEFORE the publish-time
+        // placeholder guard turns it into a bare refusal further down.
+        let unregistered = self.import_page.unregistered_mesh_icons();
+        if !unregistered.is_empty() {
+            error!(
+                "import: {} staged mesh(es) never registered for the icon wait ({}{}) — publish will refuse the placeholders",
+                unregistered.len(),
+                unregistered
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if unregistered.len() > 5 { ", …" } else { "" }
+            );
+        }
         if self.import_page.resume_icons_pending() || !resumed_classic.is_empty() {
             log!("import: icons ready — resuming compile+publish");
             if self.surface == Surface::Import {
@@ -10956,11 +10996,25 @@ impl App {
         for (key, existing) in icon_tracks {
             self.import_page.track_import_icon(key, existing);
         }
+        let mut queued = 0usize;
         for (key, bytes, aomesh, ao_png, spawn) in thumbs {
-            self.queue_glb_thumbnail_ao(cx, &key, &bytes, aomesh, ao_png, spawn);
+            // REGISTER THE WAIT, then queue. `ImportPhase::IconsPending`
+            // parks the import thread until `import_icon_files` is fully
+            // processed (`ImportPage::icons_busy`), so an icon that renders
+            // but was never registered leaves the gate reading "nothing
+            // queued — resume now": compile+publish then runs against the
+            // 512² placeholders `assign_staged_thumbnails` just wrote and
+            // the pack dies on its own last guard, with every icon landing
+            // uselessly minutes later. Only ever register what really went
+            // on the renderer, or the opposite failure (a wait nothing can
+            // ever satisfy) parks the import forever.
+            if self.queue_glb_thumbnail_ao(cx, &key, &bytes, aomesh, ao_png, spawn) {
+                self.import_page.track_import_icon(key, None);
+                queued += 1;
+            }
         }
         log!(
-            "import: staged {staged} pack item(s) ({reused} icon reused) · icons {}/{}",
+            "import: staged {staged} pack item(s) ({reused} icon reused, {queued} icon queued) · icons {}/{}",
             self.import_page.icons_done,
             self.import_page.icons_total()
         );
@@ -12763,6 +12817,21 @@ impl AppMain for App {
                     );
                 }
                 if kenney_poll {
+                    // A failure must never leave the log at [I]. One [E]
+                    // line per failed pack, naming the pack and the reason
+                    // — and for a multi-pack run, one per pack that died,
+                    // at the end, so the whole list is readable at once.
+                    if let crate::import::ImportPhase::AllDone { failed, .. } =
+                        &self.import_page.kenney_phase
+                    {
+                        for (pack, message) in failed {
+                            error!("import: {pack} FAILED — {message}");
+                        }
+                    } else if let Some(reason) =
+                        self.import_page.kenney_phase.failure_reason()
+                    {
+                        error!("import: FAILED — {reason}");
+                    }
                     log!(
                         "import: {}",
                         self.import_page.kenney_status_line(self.store.connected())
@@ -12917,10 +12986,40 @@ impl AppMain for App {
             }
             // ASSET_UI_IMPORT=a,b,c queues several imports in order; each
             // pack is the same job the LOAD surface enqueues.
+            // `kenney:<kit>` is ONE kit — the whole compile+icons+publish
+            // leg of a real import against a single pack, which is what
+            // reproducing a pack failure needs (and what "kenney" alone,
+            // 46 kits and an hour of GPU renders, is useless for).
             if let Some(names) = self.auto.import.take() {
                 for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
                     let empty = String::new;
-                    let job = match name.to_ascii_lowercase().as_str() {
+                    let lower = name.to_ascii_lowercase();
+                    if let Some(kit) = lower.strip_prefix("kenney:") {
+                        let packs = crate::import::on_disk_kenney_packs();
+                        match packs.iter().position(|(pack, _)| pack == kit) {
+                            Some(pack_index) => {
+                                log!("auto: queue import kenney kit {kit} (#{pack_index})");
+                                self.enqueue_import(
+                                    cx,
+                                    ImportJob::Kenney {
+                                        pack: kit.to_string(),
+                                        pack_index,
+                                        path: empty(),
+                                    },
+                                );
+                            }
+                            None => error!(
+                                "auto: no Kenney kit {kit} on disk — have {}",
+                                packs
+                                    .iter()
+                                    .map(|(pack, _)| pack.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        }
+                        continue;
+                    }
+                    let job = match lower.as_str() {
                         "duke3d" | "duke" => Some(ImportJob::Duke3d { path: empty() }),
                         "quake3" | "quakeiii" | "q3" => Some(ImportJob::Quake3 { path: empty() }),
                         "quake2" | "q2" => Some(ImportJob::Quake2 { path: empty() }),

@@ -390,13 +390,15 @@ impl ClassicImportCard {
                 assets,
                 bake,
                 out,
+                error,
                 library,
                 ..
             } => {
-                let why = out
-                    .to_str()
-                    .filter(|s| s.starts_with("pack_import:"))
-                    .unwrap_or("server offline — not in catalog");
+                let why = error.as_deref().unwrap_or_else(|| {
+                    out.to_str()
+                        .filter(|s| s.starts_with("pack_import:"))
+                        .unwrap_or("server offline — not in catalog")
+                });
                 format!(
                     "compiled {pack} locally · {assets} assets · {} landings · {why} · {}",
                     library.len(),
@@ -459,6 +461,11 @@ impl ClassicImportCard {
             // Never Debug-format into UI text: a phase carries whole
             // LibraryLanding vectors and the card printed the lot.
             ImportPhase::PreviewThumb { pack, .. } => format!("{pack}: preview"),
+            // Multi-pack-only phase; a classic source imports one pack per
+            // run and never emits it. Still say the reason if it appears.
+            ImportPhase::PackFailed { pack, message, .. } => {
+                format!("{pack}: NOT imported — {message}")
+            }
         }
     }
 
@@ -1664,6 +1671,7 @@ fn run_classic_import(
                 assets: convert.assets.len(),
                 blobs: 0,
                 out: PathBuf::from(format!("pack_import: {error}")),
+                error: Some(format!("compile refused the pack: {error}")),
                 library,
                 bake,
             };
@@ -1725,6 +1733,7 @@ fn run_classic_import(
             assets: report.assets,
             blobs: report.blobs,
             out: report.plan_path,
+            error: None,
             library,
             bake,
         };
