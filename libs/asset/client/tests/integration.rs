@@ -2369,3 +2369,131 @@ fn source_page_over_ceiling_is_refused() {
         other => panic!("over-ceiling source page must refuse, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// side-channels: stems + lyrics attached to a published audio asset
+// ---------------------------------------------------------------------------
+
+#[test]
+fn side_channels_attach_reuse_blobs_and_are_idempotent() {
+    use makepad_asset_client::side_channels::{SideChannelFile, SideChannelOutcome};
+    use makepad_asset_client::{PublishFile, PublishRequest, PublishThumbnail};
+    use makepad_asset_data::{AssetKind, MediaType, ThumbnailMedia};
+
+    let token = format!("mpat_{}", "6d".repeat(32));
+    let fx = FixtureServer::start(
+        FixtureStore::default(),
+        FixtureOptions { auth_token: Some(token.clone()), ..FixtureOptions::default() },
+    );
+    let mut cfg = config("side_channels");
+    cfg.token = Some(token);
+    let mut client = AssetClient::connect(cfg, fx.endpoints(), None).expect("connect");
+
+    // A published audio track.
+    let audio = payload(41, 9_000);
+    let request = PublishRequest::new(
+        "music",
+        AssetKind::Audio,
+        "Test Track",
+        PublishFile {
+            bytes: audio.clone(),
+            media: MediaType::Mp3,
+            role: FileRole::Audio,
+            media_millis: 187_000,
+            dims: None,
+        },
+        PublishThumbnail {
+            bytes: payload(42, 900),
+            media: ThumbnailMedia::Png,
+            width: 512,
+            height: 512,
+            views: Vec::new(),
+        },
+    );
+    let published = client.publish_artifact(&request).expect("publish audio");
+
+    // Attach the four stems and the lyrics.
+    let stems: Vec<Vec<u8>> = (0..4).map(|i| payload(50 + i, 4_000 + i as usize)).collect();
+    let lyrics = br#"{"format":"vj-lyrics","version":4,"lines":[]}"#.to_vec();
+    let files = |stems: &[Vec<u8>], lyrics: &[u8]| -> Vec<SideChannelFile> {
+        let mut out: Vec<SideChannelFile> = FileRole::STEMS
+            .iter()
+            .zip(stems)
+            .map(|(role, bytes)| SideChannelFile {
+                role: *role,
+                media: MediaType::Ogg,
+                bytes: bytes.clone(),
+            })
+            .collect();
+        out.push(SideChannelFile {
+            role: FileRole::Lyrics,
+            media: MediaType::Json,
+            bytes: lyrics.to_vec(),
+        });
+        out
+    };
+    let outcome = client
+        .publish_side_channel_files(&published.asset_id, files(&stems, &lyrics))
+        .expect("attach side channels");
+    let revision = match outcome {
+        SideChannelOutcome::Published { revision } => revision,
+        other => panic!("expected a publish, got {other:?}"),
+    };
+    assert_ne!(revision, published.revision, "a NEW revision is the head");
+
+    // The head advanced and the manifest carries every role, with the audio
+    // blob REUSED (same id, no second upload of its bytes).
+    let detail = client.asset_detail(&published.asset_id).expect("detail");
+    assert_eq!(detail.latest_published().unwrap().revision, revision);
+    let manifest = client.fetch_asset_manifest(&revision).expect("manifest");
+    for role in FileRole::STEMS {
+        assert!(manifest.files.iter().any(|f| f.role == role), "{role:?} present");
+    }
+    assert!(manifest.files.iter().any(|f| f.role == FileRole::Lyrics));
+    let audio_file =
+        manifest.files.iter().find(|f| f.role == FileRole::Audio).expect("audio kept");
+    assert_eq!(audio_file.blob, published.artifact_blob, "audio blob reused");
+    // Total bytes still exactly the sum of the parts (validate enforces it,
+    // but assert the value moved).
+    let sum: u64 = manifest.files.iter().map(|f| f.byte_len).sum::<u64>()
+        + manifest.thumbnail.as_ref().map(|t| t.byte_len).unwrap_or(0);
+    assert_eq!(manifest.metrics.total_bytes, sum);
+
+    // A stem blob round-trips through the verified cache path.
+    let stem_file =
+        manifest.files.iter().find(|f| f.role == FileRole::StemDrums).expect("drums");
+    let bytes =
+        client.fetch_blob_bytes(&stem_file.blob, Some(stem_file.byte_len)).expect("stem blob");
+    assert_eq!(bytes, stems[0]);
+
+    // Idempotence: a second identical attach is a no-op reporting the head.
+    let again = client
+        .publish_side_channel_files(&published.asset_id, files(&stems, &lyrics))
+        .expect("re-attach");
+    assert_eq!(again, SideChannelOutcome::AlreadyPresent { revision });
+
+    // A PARTIAL stem set refuses locally (contract: all four or none) on a
+    // FRESH asset — on the analysed one above it would be absorbed by role
+    // idempotence instead, which is also what a re-bake relies on.
+    let mut fresh = request.clone();
+    fresh.title = "Second Track".into();
+    fresh.artifact.bytes[0] ^= 0x55;
+    let second = client.publish_artifact(&fresh).expect("publish second audio");
+    let posts_before = fx.log.requests.lock().unwrap().len();
+    let partial: Vec<SideChannelFile> = FileRole::STEMS[..3]
+        .iter()
+        .zip(&stems)
+        .map(|(role, bytes)| SideChannelFile {
+            role: *role,
+            media: MediaType::Ogg,
+            bytes: bytes.iter().map(|b| b ^ 1).collect(),
+        })
+        .collect();
+    let err = client.publish_side_channel_files(&second.asset_id, partial);
+    assert!(err.is_err(), "partial stems must refuse: {err:?}");
+    let log = fx.log.requests.lock().unwrap();
+    assert!(
+        !log[posts_before..].iter().any(|r| r.method == "POST" && r.target.contains("/revisions")),
+        "no staging happened for the refused set"
+    );
+}
