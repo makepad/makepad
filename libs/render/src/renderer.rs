@@ -868,6 +868,31 @@ struct LoadedAnimPart {
     collider: Vec<(Vec3f, Vec3f)>,
 }
 
+/// Whether a sky projection's layer images get a mip chain.
+///
+/// A sky is sampled by DIRECTION, so `atan2` puts a branch cut in the
+/// longitude: at one heading, two neighbouring pixels differ by a whole
+/// texture period in u. The colour is fine — the sampler repeats — but the
+/// hardware picks the mip level from exactly that derivative, so those
+/// pixels collapse to the smallest level and the sky wears a one-pixel line
+/// down the seam. (Measured on Doom E1M1: a dark column in the middle of the
+/// sky, wherever the cut happened to be.)
+///
+/// A CYLINDER strip (Doom, Duke) is never minified — 256 texels x 4 wraps is
+/// under 3 texels per degree against 8+ pixels per degree in any view that
+/// exists — so its chain buys nothing and costs the seam. It ships without
+/// one, and the seam has nowhere to come from.
+///
+/// The other two keep theirs: QUAKE_SCROLL has no cut at all (its uv is a
+/// smooth function of the direction) and its zenith swirl genuinely
+/// minifies; CUBE (Q3 equirect) minifies hard at the poles, where dropping
+/// mips would trade a hairline for sparkle. Cube still has the cut — the
+/// real fix there is an explicit LOD from ray-space derivatives, which needs
+/// a repeat sampler that takes a lod.
+fn sky_wants_mips(projection: crate::model::SkyProjection) -> bool {
+    !matches!(projection, crate::model::SkyProjection::Cylinder)
+}
+
 /// A resident [`crate::model::SkyPart`]: the faces plus their layer images.
 struct LoadedSky {
     part: crate::model::SkyPart,
@@ -3227,11 +3252,28 @@ impl Renderer {
                 let indices = part.indices.clone();
                 let g = Geometry::new(cx);
                 g.update(cx, part.indices.clone(), part.vertices.clone());
+                let mips = sky_wants_mips(part.projection);
                 let mut layer = |i: usize, fallback: u32| -> Texture {
                     part.images
                         .get(i)
                         .and_then(|png| ImageBuffer::from_png(png).ok())
-                        .map(|img| img.into_new_mip_repeat_texture(cx))
+                        .map(|img| {
+                            if mips {
+                                img.into_new_mip_repeat_texture(cx)
+                            } else {
+                                // Explicitly mip-FREE (not `into_new_texture`,
+                                // which builds a chain on some backends).
+                                Texture::new_with_format(
+                                    cx,
+                                    TextureFormat::VecBGRAu8_32 {
+                                        width: img.width,
+                                        height: img.height,
+                                        data: Some(img.data),
+                                        updated: TextureUpdated::Full,
+                                    },
+                                )
+                            }
+                        })
                         .unwrap_or_else(|| {
                             let mut flat = ImageBuffer::default();
                             flat.width = 1;
@@ -8260,6 +8302,58 @@ mod caster_only_tests {
 mod sky_lane_tests {
     use super::*;
     use crate::model::tests::room_and_sky_glb;
+
+    #[test]
+    /// Which sky gets a mip chain, and why. A cylinder strip must NOT: it is
+    /// magnified in every view that exists, and the chain is what turns
+    /// `atan2`'s branch cut into a one-pixel line down the sky (the hairline
+    /// on Doom maps). The other two keep theirs — Quake's swirl and the
+    /// equirect poles are real minification.
+    fn only_the_cylinder_sky_ships_without_mips() {
+        use crate::model::SkyProjection;
+        assert!(!sky_wants_mips(SkyProjection::Cylinder), "the seam lives here");
+        assert!(sky_wants_mips(SkyProjection::QuakeScroll));
+        assert!(sky_wants_mips(SkyProjection::Cube));
+    }
+
+    #[test]
+    /// The cut itself, in the CPU twin of the shader's mapping: two headings
+    /// a hair apart across it land a whole texture period apart in u — the
+    /// jump the hardware would have read as "minified to nothing" — while
+    /// the colour they name is the same texel. Nothing here can fix that;
+    /// only having no mip levels can.
+    fn the_longitude_cut_jumps_by_whole_periods() {
+        use crate::model::{SkyPart, SkyProjection};
+        let part = SkyPart {
+            projection: SkyProjection::Cylinder,
+            repeat: 4.0,
+            speeds: vec![0.0],
+            offset: 0.0,
+            texture: None,
+            v_span: 0.5,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            min: vec3f(0.0, 0.0, 0.0),
+            max: vec3f(0.0, 0.0, 0.0),
+            images: Vec::new(),
+        };
+        let eps = 1.0e-4;
+        let left = part.direction_uv(vec3f(eps, 0.0, -1.0), 0, 0.0);
+        let right = part.direction_uv(vec3f(-eps, 0.0, -1.0), 0, 0.0);
+        let jump = (left[0] - right[0]).abs();
+        assert!(
+            (jump - part.repeat).abs() < 1.0e-3,
+            "one turn of the compass = `repeat` periods of u, got {jump}"
+        );
+        // Whole periods: the two sides name the same texel, so the picture
+        // is continuous even though the coordinate is not.
+        assert!((jump - jump.round()).abs() < 1.0e-3);
+        // Away from the cut the mapping is smooth — a degree of yaw moves u
+        // by a degree's worth, not by a period.
+        let a = part.direction_uv(vec3f(0.0, 0.0, 1.0), 0, 0.0);
+        let b = part.direction_uv(vec3f(0.017, 0.0, 1.0), 0, 0.0);
+        assert!((a[0] - b[0]).abs() < 0.02, "smooth away from the cut");
+    }
 
     #[test]
     fn the_sky_clock_advances_and_can_be_pinned() {
