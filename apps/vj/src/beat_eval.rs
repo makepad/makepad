@@ -871,6 +871,13 @@ pub struct TrackReport {
     /// Fraction of the downbeats a grid fitted to the first (and second) half
     /// of the track calls that the whole-track grid also calls downbeats.
     pub downbeat_halves: (f64, f64),
+    /// How strongly the track's arrangement changes cluster on the rulings
+    /// of the published grid: +1 on them, -1 exactly between them.
+    pub pulse_alignment: f64,
+    /// Mid-band (clap/snare) comb energy half a beat away, over the same at
+    /// the published phase. Above one says the backbeat is landing between
+    /// the rulings.
+    pub mid_ratio: f64,
     /// Fraction of the track's structural boundaries that land on bar
     /// position zero under our grid, and how many were counted. Chance is
     /// 0.25.
@@ -1369,6 +1376,38 @@ pub fn piecewise_fit(
     PiecewiseGrid { segments, beats }
 }
 
+/// How many arrangement changes land within a quarter-beat of a ruling.
+pub fn changes_on_beat(changes: &[f64], period: f64, comb_offset: f64) -> (usize, usize) {
+    let mut on = 0usize;
+    for at in changes {
+        let beat = (at - comb_offset) / period;
+        if (beat - beat.round()).abs() <= 0.25 {
+            on += 1;
+        }
+    }
+    (on, changes.len())
+}
+
+/// How strongly the arrangement changes cluster ON the rulings of a grid, as
+/// a number in `[-1, 1]`: the mean of `cos(2 pi * beat)` over them. One means
+/// every change sits on a ruling, minus one that every change sits exactly
+/// half a beat away.
+///
+/// This lives with the judge and not with the analysis because measuring it
+/// is all it turned out to be good for: it does not separate the grids that
+/// are half a beat out from the ones that are not.
+pub fn pulse_alignment(changes: &[f64], period: f64, comb_offset: f64) -> f64 {
+    if changes.is_empty() || period <= 0.0 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for at in changes {
+        let beat = (at - comb_offset) / period;
+        sum += (std::f64::consts::TAU * beat).cos();
+    }
+    sum / changes.len() as f64
+}
+
 /// Median signed offset of `beats` from `grid`, in fractions of a beat,
 /// wrapped to `[-0.5, 0.5)`. Tells an offbeat lock (±0.5) apart from a
 /// tracking disagreement.
@@ -1574,6 +1613,32 @@ pub fn evaluate(path: &Path, pcm: &TrackPcm) -> TrackReport {
     let downbeat_margin = downbeat_margin(pcm, &grid);
     let downbeat_structure =
         downbeat_vs_structure(&grid, &structural_boundaries(pcm, 24));
+    // The analysis's own phase evidence, read at the published phase, so the
+    // threshold that acts on it can be chosen from data.
+    let (pulse_alignment, mid_ratio) = {
+        let envelopes = super::build_envelopes(pcm);
+        let hop_rate = envelopes.sample_rate / envelopes.hop as f64;
+        let changes = super::structural_changes(&envelopes);
+        let period_hops = grid.beat_secs * hop_rate;
+        let offset_hops = grid.first_beat_secs * hop_rate - 0.5;
+        let alignment = pulse_alignment(&changes, period_hops, offset_hops);
+        // The backbeat: a clap or snare lives in the mid band, on beats 2
+        // and 4, and unlike an arrangement change it is a transient with a
+        // position good to a hop.
+        let mid: Vec<f32> = {
+            let mut out = vec![0.0f32; envelopes.band_rms.len()];
+            let mut previous = 0.0f32;
+            for (index, rms) in envelopes.band_rms.iter().enumerate() {
+                let energy = (1.0 + 96.0 * rms[1]).ln();
+                out[index] = if index == 0 { 0.0 } else { (energy - previous).max(0.0) };
+                previous = energy;
+            }
+            out
+        };
+        let here = super::comb_energy(&mid, period_hops, offset_hops);
+        let there = super::comb_energy(&mid, period_hops, offset_hops + period_hops * 0.5);
+        (alignment, there / here.max(1e-9))
+    };
     let half = pcm.frames.len() / 2;
     let first_half =
         TrackPcm { frames: pcm.frames[..half].to_vec(), sample_rate: pcm.sample_rate };
@@ -1633,6 +1698,8 @@ pub fn evaluate(path: &Path, pcm: &TrackPcm) -> TrackReport {
         downbeat_margin,
         downbeat_halves,
         downbeat_structure,
+        pulse_alignment,
+        mid_ratio,
         drift_ms,
     }
 }
@@ -2063,6 +2130,20 @@ fn one_track_diagnostics() {
         beats,
         (60.0 / grid.bpm - oracle_period) * beats * 1000.0,
     );
+    // What the ARRANGEMENT says about the two pulses half a beat apart.
+    {
+        let changes = super::structural_changes(&envelopes);
+        let period_hops = grid.beat_secs * hop_rate;
+        let offset_hops = grid.first_beat_secs * hop_rate - 0.5;
+        let (here, total) = changes_on_beat(&changes, period_hops, offset_hops);
+        let (there, _) =
+            changes_on_beat(&changes, period_hops, offset_hops + period_hops * 0.5);
+        eprintln!(
+            "arrangement: {total} changes, {here} land on this pulse, {there} on the \
+             one half a beat away"
+        );
+    }
+
     // What the low band says about the two pulses half a beat apart.
     let period_hops = grid.beat_secs * hop_rate;
     let offset_hops = grid.first_beat_secs * hop_rate - 0.5;
@@ -2147,7 +2228,7 @@ pub fn print_track(report: &TrackReport, took: f64) {
          phase {:+.3} (rephased F {:.3})\n             oracle F {:.3} CMLt {:.3} bias {:+.1}/jit {:.1} ms\n    \
          support  ours/oracle {:.4}  ref/oracle {:.4} | \
          ours bias {:+5.1} ms jitter {:4.1} ms | downbeat x{:.2} halves {:.2}/{:.2} \
-         structure {:.2} of {} | drift {:3.0} ms | {:.1}s",
+         structure {:.2} of {} align {:+.2} mid {:.2} | drift {:3.0} ms | {:.1}s",
         report.name.chars().take(38).collect::<String>(),
         report.seconds,
         report.tagged_bpm.map(|b| format!("{b:.0}")).unwrap_or("-".into()),
@@ -2180,6 +2261,8 @@ pub fn print_track(report: &TrackReport, took: f64) {
         report.downbeat_halves.1,
         report.downbeat_structure.0,
         report.downbeat_structure.1,
+        report.pulse_alignment,
+        report.mid_ratio,
         report.drift_ms,
         took,
     );
@@ -2341,18 +2424,33 @@ pub fn summarize(reports: &[TrackReport]) {
         .filter(|r| r.vs_kicks.f >= 0.8)
         .map(|r| r.grid.confidence as f64)
         .collect();
-    let bad: Vec<f64> = reports
+    // Split the failures by KIND. Confidence is a fit residual and cannot
+    // see a grid that fits beautifully on the wrong pulse, so lumping the
+    // two together hides both what it does and what it cannot do.
+    let bad_fit: Vec<f64> = reports
         .iter()
-        .filter(|r| r.vs_kicks.f < 0.4 && r.kick_coverage > 0.15)
+        .filter(|r| {
+            r.vs_kicks.f < 0.4 && r.kick_coverage > 0.15 && r.kick_phase.abs() <= 0.2
+        })
+        .map(|r| r.grid.confidence as f64)
+        .collect();
+    let bad_pulse: Vec<f64> = reports
+        .iter()
+        .filter(|r| {
+            r.vs_kicks.f < 0.4 && r.kick_coverage > 0.15 && r.kick_phase.abs() > 0.2
+        })
         .map(|r| r.grid.confidence as f64)
         .collect();
     eprintln!(
-        "  confidence: {:.3} on the {} grids that scored 0.8+, {:.3} on the {} that \
-         scored under 0.4",
+        "  confidence: {:.3} on the {} grids that scored 0.8+; {:.3} on the {} that \
+         scored under 0.4 for a bad FIT; {:.3} on the {} that scored under 0.4 for a \
+         wrong PULSE (which it cannot see)",
         mean(&good),
         good.len(),
-        mean(&bad),
-        bad.len(),
+        mean(&bad_fit),
+        bad_fit.len(),
+        mean(&bad_pulse),
+        bad_pulse.len(),
     );
     let offbeat = reports
         .iter()
