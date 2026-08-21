@@ -1263,6 +1263,7 @@ script_mod! {
                                     gen_profile := DropDown{labels: ["…"]}
                                     gen_len := DropDown{labels: ["…"]}
                                     gen_go := ChromeButton{text: "Queue"}
+                                    gen_blast := ChromeButton{text: "BLAST"}
                                     // Keep the queue topped up from the same
                                     // prompt for as long as it is checked.
                                     gen_loop := CheckBox{text: "CONT"}
@@ -10699,6 +10700,11 @@ impl MatchEvent for App {
         if let Some(text) = submit_prompt {
             self.gen.set_prompt(text);
             let cmds = self.gen.generate(now_ms());
+            self.run_gen_cmds(cmds);
+            self.grids_dirty = true;
+        }
+        if self.ui.button(cx, ids!(gen_blast)).clicked(actions) {
+            let cmds = self.gen.blast(now_ms());
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
         }
