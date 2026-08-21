@@ -236,6 +236,9 @@ pub(crate) struct HeadlessRenderTargets {
     /// because sampling happens behind `&self`, deep inside the draw loop.
     last_used: HashMap<usize, std::cell::Cell<u64>>,
     frame: u64,
+    /// Textures already reported as unsupported cube-face targets, so the
+    /// warning is one line per texture rather than one per frame forever.
+    warned_cube_faces: std::collections::HashSet<usize>,
 }
 
 /// Frames a render target may go completely untouched — neither rendered into
@@ -995,11 +998,37 @@ impl Cx {
         let Some(color_texture) = self.passes[draw_pass_id].color_textures.first().cloned() else {
             return;
         };
-        // Cube faces need six framebuffers behind one texture; not modelled.
+        let texture_id = color_texture.texture.texture_id();
+        // Cube-face targets (`add_color_texture_face`, which is how XR
+        // passthrough and cube probes render) are not modelled: one texture
+        // needs six attachments and the sampler wants them contiguous, six
+        // faces of `width*height*4` floats in +X/-X/+Y/-Y/+Z/-Z order (see
+        // `Texture2D::sample_face_from_data`).
+        //
+        // The shape a fix would take, if it is ever wanted: give the texture ONE
+        // framebuffer of `height*6` rows, so face f occupies rows
+        // `f*height..(f+1)*height` and the stacked buffer already IS the layout
+        // the sampler expects — no assembly step, and `headless_texture_info`
+        // reports the per-face height. That needs a y-origin on the viewport
+        // (`setup_triangle` currently anchors at row 0) and a row-scoped clear,
+        // since each face carries its own load action and clearing the whole
+        // buffer would wipe its five neighbours.
+        //
+        // Until then, say so rather than rendering nothing quietly: a silently
+        // skipped pass is how child passes used to come out as a flat colour,
+        // and that cost a day to find.
         if color_texture.cube_face.is_some() {
+            if render_targets.warned_cube_faces.insert(texture_id.0) {
+                crate::error!(
+                    "headless: pass renders to cube face {:?} of texture {} — \
+                     cube-face render targets are not implemented, so anything \
+                     sampling this texture will read whatever was there before",
+                    color_texture.cube_face,
+                    texture_id.0,
+                );
+            }
             return;
         }
-        let texture_id = color_texture.texture.texture_id();
 
         let dpi_factor = match self.passes[draw_pass_id].dpi_factor {
             Some(dpi) => dpi,
