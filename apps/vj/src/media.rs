@@ -2132,7 +2132,8 @@ mod tests {
             shared: Arc::new(SlotShared {
                 stop: AtomicBool::new(false),
                 paused: AtomicBool::new(paused),
-                loop_on: AtomicBool::new(false),
+                mode: AtomicU8::new(PlayMode::Once as u8),
+                muted: AtomicBool::new(false),
                 seek_100ns: AtomicI64::new(-1),
                 position_100ns: AtomicI64::new(0),
                 video_ready: AtomicBool::new(false),
