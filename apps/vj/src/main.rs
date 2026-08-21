@@ -721,6 +721,8 @@ script_mod! {
                                                     align: Align{x: 0.0, y: 0.5}
                                                     slot_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                     slot_a_loop := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
+                                                    slot_a_pp := ChromeButton{width: 26 text: "\u{2194}"}
+                                                    slot_a_mute := ChromeButton{width: 26 text: "M"}
                                                     slot_a_sync := ChromeButton{width: 34 text: "♪1"}
                                                     slot_a_pos := ApcHSlider{width: Fill default: 0.0}
                                                     slot_a_time := Tick{width: 64 text: ""}
@@ -843,6 +845,8 @@ script_mod! {
                                                     align: Align{x: 0.0, y: 0.5}
                                                     slot_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
                                                     slot_b_loop := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") } }
+                                                    slot_b_pp := ChromeButton{width: 26 text: "\u{2194}"}
+                                                    slot_b_mute := ChromeButton{width: 26 text: "M"}
                                                     slot_b_sync := ChromeButton{width: 34 text: "♪1"}
                                                     slot_b_pos := ApcHSlider{width: Fill default: 0.0}
                                                     slot_b_time := Tick{width: 64 text: ""}
@@ -3600,6 +3604,13 @@ pub struct App {
     /// Per-slot loop flag (video), and beat-sync length in beats (0 = free).
     #[rust([true, true])]
     slot_loop: [bool; 2],
+    /// Ping-pong (forward-backward bounce) per video slot; combined with
+    /// slot_loop into the player's PlayMode (ping-pong wins).
+    #[rust]
+    slot_pingpong: [bool; 2],
+    /// Per-slot video audio mute (a pad loop is a visual).
+    #[rust]
+    slot_video_muted: [bool; 2],
     #[rust]
     slot_sync_beats: [u32; 2],
     /// Whole-unit FX speed multiplier (×1 ×2 ×4 ×8) and the operator's beat
@@ -4444,6 +4455,31 @@ impl App {
         match slot {
             SlotId::A => ids!(slot_a_loop),
             SlotId::B => ids!(slot_b_loop),
+        }
+    }
+
+    fn slot_pp_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(slot_a_pp),
+            SlotId::B => ids!(slot_b_pp),
+        }
+    }
+
+    fn slot_mute_path(slot: SlotId) -> &'static [LiveId] {
+        match slot {
+            SlotId::A => ids!(slot_a_mute),
+            SlotId::B => ids!(slot_b_mute),
+        }
+    }
+
+    /// The player mode a slot's toggles add up to (ping-pong wins).
+    fn slot_play_mode(&self, i: usize) -> crate::media::PlayMode {
+        if self.slot_pingpong[i] {
+            crate::media::PlayMode::PingPong
+        } else if self.slot_loop[i] {
+            crate::media::PlayMode::Loop
+        } else {
+            crate::media::PlayMode::Once
         }
     }
 
@@ -6248,7 +6284,8 @@ impl App {
                                 true,
                             ) {
                                 Ok(mut player) => {
-                                    player.set_loop(self.slot_loop[slot.index()]);
+                                    player.set_mode(self.slot_play_mode(slot.index()));
+                                    player.set_muted(self.slot_video_muted[slot.index()]);
                                     self.slot_media[slot.index()] = SlotMedia::Video;
                                     self.players[slot.index()] = Some(player);
                                     self.apply_slot_beat_sync(slot);
@@ -10738,10 +10775,27 @@ impl MatchEvent for App {
             }
             if self.ui.button(cx, Self::slot_loop_path(slot)).clicked(actions) {
                 self.slot_loop[i] = !self.slot_loop[i];
+                let mode = self.slot_play_mode(i);
                 if let Some(player) = self.players[i].as_mut() {
-                    player.set_loop(self.slot_loop[i]);
+                    player.set_mode(mode);
                 }
                 self.video_pump = cx.new_next_frame();
+            }
+            if self.ui.button(cx, Self::slot_pp_path(slot)).clicked(actions) {
+                self.slot_pingpong[i] = !self.slot_pingpong[i];
+                let mode = self.slot_play_mode(i);
+                if let Some(player) = self.players[i].as_mut() {
+                    player.set_mode(mode);
+                }
+                self.paint_lit(cx, Self::slot_pp_path(slot), self.slot_pingpong[i]);
+                self.video_pump = cx.new_next_frame();
+            }
+            if self.ui.button(cx, Self::slot_mute_path(slot)).clicked(actions) {
+                self.slot_video_muted[i] = !self.slot_video_muted[i];
+                if let Some(player) = self.players[i].as_mut() {
+                    player.set_muted(self.slot_video_muted[i]);
+                }
+                self.paint_lit(cx, Self::slot_mute_path(slot), self.slot_video_muted[i]);
             }
             if self.ui.button(cx, Self::slot_sync_path(slot)).clicked(actions) {
                 self.slot_sync_beats[i] = match self.slot_sync_beats[i] {
