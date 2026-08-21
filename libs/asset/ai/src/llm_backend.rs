@@ -799,7 +799,44 @@ mod llama_worker {
     /// Context each lane may hold. The arena is `lanes * this`, so the total
     /// stays put as lanes are added rather than multiplying VRAM.
     fn context_per_lane() -> u32 {
-        MAX_CONTEXT / lane_count() as u32
+        context_for_lanes(MAX_CONTEXT, lane_count())
+    }
+
+    /// Split a total context budget across lanes.
+    ///
+    /// Separated from the env lookup so the arithmetic is testable: getting it
+    /// wrong either overruns VRAM (multiplying instead of dividing) or hands
+    /// every conversation a uselessly short window, and both are quiet.
+    fn context_for_lanes(total: u32, lanes: usize) -> u32 {
+        (total / lanes.max(1) as u32).max(1)
+    }
+
+    #[cfg(test)]
+    mod lane_config_tests {
+        use super::{context_for_lanes, MAX_CONTEXT};
+
+        #[test]
+        fn lanes_divide_the_context_budget_they_do_not_multiply_it() {
+            // The arena is lanes x per-lane, so per-lane must DIVIDE. The
+            // opposite mistake allocates 4x the KV and fails at load, on the
+            // box, after a swap.
+            assert_eq!(context_for_lanes(32768, 1), 32768);
+            assert_eq!(context_for_lanes(32768, 2), 16384);
+            assert_eq!(context_for_lanes(32768, 4), 8192);
+            for lanes in 1..=8 {
+                let per = context_for_lanes(MAX_CONTEXT, lanes);
+                assert!(
+                    per * lanes as u32 <= MAX_CONTEXT,
+                    "{lanes} lanes x {per} overruns the {MAX_CONTEXT} budget"
+                );
+            }
+        }
+
+        #[test]
+        fn a_degenerate_lane_count_still_yields_a_usable_window() {
+            assert_eq!(context_for_lanes(32768, 0), 32768, "zero lanes reads as one");
+            assert!(context_for_lanes(4, 8) >= 1, "never a zero-length context");
+        }
     }
 
     /// One session, N conversations, jobs joining and leaving at chunk
