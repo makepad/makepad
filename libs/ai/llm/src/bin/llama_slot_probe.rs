@@ -13,7 +13,11 @@
 //!
 //! Usage: `llama-slot-probe <model.gguf> [--tokens N] [--slots N]`
 
-use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab, SlotTable};
+use makepad_ai_llm::{
+    LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler, LlamaModel,
+    LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaVocab, SlotTable,
+};
+use std::collections::HashMap;
 
 /// Graph activations grow with the slot count: wider batches mean wider
 /// intermediates, and the arena the attention mask spans grows too. The 512 MiB
@@ -241,12 +245,159 @@ fn main() {
         }
     }
 
+    // Sixth gate: THE SHIPPING CODE PATH. Gates 3-5 drive SlotTable and the
+    // session directly — the same call sequence LaneExecutor makes, but not
+    // LaneExecutor. This one runs the real LaneScheduler and LaneExecutor that
+    // the service will use, so the thing verified on hardware is the thing that
+    // ships rather than a faithful imitation of it.
+    //
+    // Same width-timeline discipline as gate 5: both runs join and leave at the
+    // same steps and differ only in WHO the neighbours are.
+    match shipping_path(&model, &vocab, slots, PER_SLOT_CONTEXT) {
+        Ok(n) => println!("PASS: shipping scheduler kept lane 0 stable over {n} tokens"),
+        Err(e) => {
+            eprintln!("FAIL (shipping path): {e}");
+            std::process::exit(1);
+        }
+    }
+
     if timing {
         if let Err(e) = timing_sweep(&model, &vocab, slots, PER_SLOT_CONTEXT) {
             eprintln!("timing failed: {e}");
             std::process::exit(1);
         }
     }
+}
+
+/// Drive the REAL LaneScheduler/LaneExecutor through a join/leave timeline and
+/// return each job's token stream.
+///
+/// Greedy sampling (temperature 0) so the streams are deterministic and any
+/// difference is the scheduler's doing, not the RNG's.
+fn run_shipping(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+    neighbours: &[&str],
+) -> Result<HashMap<u64, Vec<i32>>, String> {
+    const SOLO_STEPS: usize = 3;
+    const WIDE_STEPS: usize = 4;
+    const AFTER_LEAVE_STEPS: usize = 3;
+    const BUDGET: usize = 64;
+
+    let session = build_session(model, slots, per_slot_context)?;
+    let table = session.new_slot_table().map_err(|e| e.to_string())?;
+    let scheduler = LaneScheduler::new(table, 8);
+    let params = LlamaSamplingParams {
+        temperature: 0.0,
+        ..LlamaSamplingParams::default()
+    };
+    // Prove the callback fires: a forgotten publish is the silent failure it
+    // exists to prevent, so the gate refuses to pass without evidence it ran.
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_hits = seen.clone();
+    let mut exec = LaneExecutor::new(session, scheduler, params).on_counts(move |_counts| {
+        seen_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    let mut streams: HashMap<u64, Vec<i32>> = HashMap::new();
+    let mut record = |events: Vec<LaneEvent>, streams: &mut HashMap<u64, Vec<i32>>| {
+        for event in events {
+            if let LaneEvent::Token { job, token, .. } = event {
+                streams.entry(job).or_default().push(token);
+            }
+        }
+    };
+    let submit = |exec: &mut LaneExecutor, job: u64, text: &str| -> Result<(), String> {
+        let prompt = vocab.tokenize(text, true, true).map_err(|e| e.to_string())?;
+        exec.scheduler()
+            .submit(LaneRequest {
+                job,
+                session: format!("gate-session-{job}"),
+                prompt_tokens: prompt,
+                max_new: BUDGET,
+            })
+            .map_err(|r| format!("submit refused job {}", r.job))
+    };
+    // A prefill consumes a step, so each lane needs one extra to get going.
+    let mut pump = |exec: &mut LaneExecutor,
+                    streams: &mut HashMap<u64, Vec<i32>>,
+                    decode_steps: usize,
+                    prefills: usize|
+     -> Result<(), String> {
+        for _ in 0..(decode_steps + prefills) {
+            record(exec.step()?, streams);
+        }
+        Ok(())
+    };
+
+    submit(&mut exec, 1, LANE_PROMPTS[0])?;
+    pump(&mut exec, &mut streams, SOLO_STEPS, 1)?;
+
+    submit(&mut exec, 2, neighbours[0])?;
+    submit(&mut exec, 3, neighbours[1])?;
+    pump(&mut exec, &mut streams, WIDE_STEPS, 2)?;
+
+    exec.scheduler().cancel(2);
+    pump(&mut exec, &mut streams, AFTER_LEAVE_STEPS, 0)?;
+
+    if seen.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return Err("on_counts never fired — /health would advertise stale occupancy".to_string());
+    }
+    Ok(streams)
+}
+
+fn shipping_path(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+) -> Result<usize, String> {
+    if slots < 3 {
+        return Err("shipping-path gate needs at least 3 lanes".to_string());
+    }
+    let a = run_shipping(
+        model,
+        vocab,
+        slots,
+        per_slot_context,
+        &[LANE_PROMPTS[1], LANE_PROMPTS[2]],
+    )?;
+    let b = run_shipping(
+        model,
+        vocab,
+        slots,
+        per_slot_context,
+        &[ALT_PROMPTS[1], ALT_PROMPTS[2]],
+    )?;
+
+    let lane_a = a.get(&1).cloned().unwrap_or_default();
+    let lane_b = b.get(&1).cloned().unwrap_or_default();
+    if lane_a.is_empty() {
+        return Err("job 1 produced no tokens through the shipping path".to_string());
+    }
+    if lane_a != lane_b {
+        let at = lane_a
+            .iter()
+            .zip(&lane_b)
+            .position(|(x, y)| x != y)
+            .unwrap_or(0);
+        return Err(format!(
+            "job 1 changed at index {at} when only its NEIGHBOURS changed\n               with A: {lane_a:?}\n  with B: {lane_b:?}"
+        ));
+    }
+    let neigh_a = a.get(&3).cloned().unwrap_or_default();
+    let neigh_b = b.get(&3).cloned().unwrap_or_default();
+    if neigh_a == neigh_b {
+        return Err(format!(
+            "neighbour job 3 produced the same stream for both prompt sets, so the \n               experiment did not vary: {neigh_a:?}"
+        ));
+    }
+    println!("  job 1 stable across a join/leave timeline driven by the real scheduler");
+    println!("  neighbour job 3 differs between runs (experiment is live)");
+    println!("  on_counts fired, so /health would have been kept current");
+    Ok(lane_a.len())
 }
 
 /// Run lane 0 through a fixed timeline of neighbours joining and leaving,
