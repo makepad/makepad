@@ -32,13 +32,12 @@ pub const MAX_PROMPT_BYTES: usize = 2_000;
 /// steps scale with length so a longer clip is not a blurrier one.
 pub const VIDEO_LENGTHS: &[(u32, u32)] = &[(39, 30), (65, 30), (97, 40), (129, 50)];
 
-/// How many generations CONTINUOUS mode keeps in flight. One is the
-/// honest default: today a server runs a VJ job at a time, and a queue
-/// deeper than the fleet can serve just buries the operator's own manual
-/// submissions behind an hour of backlog. The fleet worker's server-side
-/// fan-out lands separately; the loop reads this constant, so raising it is
-/// the only change needed then.
-pub const CONTINUOUS_IN_FLIGHT: usize = 1;
+/// How many generations CONTINUOUS mode keeps in flight. Six matches the
+/// video fleet's ceiling (full H3 on the RTX 6000 + five Q4 4090s): the
+/// worker fans queued jobs out one per box, so keeping the queue this deep
+/// is what makes every box busy. Boxes not yet serving just leave jobs
+/// honestly pending — the queue never lies about it.
+pub const CONTINUOUS_IN_FLIGHT: usize = 6;
 
 /// Wait after a failed continuous submission before trying again, so a
 /// broken profile cannot spin the queue.
