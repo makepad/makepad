@@ -1119,15 +1119,24 @@ mod llama_worker {
         // and a hybrid model's is nothing like a full-attention model's.
         // Sizing a card from a guess is how a context knob becomes an
         // out-of-memory at load, on the box, after a swap.
-        let per_token = exec.session().attention_cache_bytes_per_token().unwrap_or(0);
-        let kv_bytes = exec.session().attention_cache_bytes().unwrap_or(0);
+        // Reported as "unknown" rather than 0 when the session cannot answer.
+        // A zero-byte KV report reads as a fact, and sizing a card from it is
+        // exactly the mistake this line exists to prevent.
+        let geometry = match (
+            exec.session().attention_cache_bytes(),
+            exec.session().attention_cache_bytes_per_token(),
+        ) {
+            (Ok(bytes), Ok(per_token)) if bytes > 0 => format!(
+                "attention KV {:.2} GiB ({per_token} B/token/lane)",
+                bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            ),
+            _ => "attention KV unknown".to_string(),
+        };
         eprintln!(
             "[llm-worker] batched worker: {lanes} lanes x {} tok, queue {queue_max}, \
-             speculation depth {}, attention KV {:.2} GiB ({} B/token/lane)",
+             speculation depth {}, {geometry}",
             context_per_lane(),
             exec.session().speculation_depth(),
-            kv_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-            per_token,
         );
 
         loop {
@@ -1416,14 +1425,26 @@ mod llama_worker {
                 // Reported every step, open block or not: a client showing
                 // "thinking, N" needs N to move, and it needs to learn the
                 // moment it stops.
-                let _ = lane.events.send(WorkerEvent::Serving(
-                    crate::backend::ServingUpdate::Think {
-                        think: lane.think_tokens.unwrap_or(lane.token_ids.len()),
-                        visible: lane
-                            .think_tokens
-                            .map(|think| lane.token_ids.len().saturating_sub(think)),
+                // A reply with NO think block at all is all visible. Reporting
+                // the total as `think` with no `visible` would tell a client
+                // the user saw none of it, and it would show "thinking" for a
+                // turn that was answering the whole time.
+                let opened = decoded.contains("<think>");
+                let update = match (opened, lane.think_tokens) {
+                    (_, Some(think)) => crate::backend::ServingUpdate::Think {
+                        think,
+                        visible: Some(lane.token_ids.len().saturating_sub(think)),
                     },
-                ));
+                    (true, None) => crate::backend::ServingUpdate::Think {
+                        think: lane.token_ids.len(),
+                        visible: None,
+                    },
+                    (false, None) => crate::backend::ServingUpdate::Think {
+                        think: 0,
+                        visible: Some(lane.token_ids.len()),
+                    },
+                };
+                let _ = lane.events.send(WorkerEvent::Serving(update));
                 if let Some(snapshot) = super::next_stream_snapshot(&lane.streamed, &decoded) {
                     lane.streamed = snapshot.clone();
                     let _ = lane.events.send(WorkerEvent::Text(snapshot));
