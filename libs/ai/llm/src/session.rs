@@ -552,7 +552,49 @@ impl LlamaSession {
     /// a context knob turns into an out-of-memory at load, on the box, after a
     /// swap.
     pub fn attention_cache_bytes(&self) -> Result<usize> {
-        attention_cache_bytes_from_spec(&self.spec)
+        // NOT `attention_cache_bytes_from_spec`: that one REFUSES a spec
+        // containing recurrent layers, because it is the fallback for sizing a
+        // whole cache without a template. Every hybrid model has recurrent
+        // layers, so asking it here returned an error that a caller would
+        // reasonably turn into 0 — and a zero-byte KV report is worse than no
+        // report, because it reads as a fact.
+        let mut total = 0usize;
+        let mut seen = BTreeSet::new();
+        for layer in &self.spec.layers {
+            let HybridLayerSpec::Attention { decode, .. } = layer else {
+                continue;
+            };
+            if !seen.insert(decode.cache_layer_index) {
+                continue;
+            }
+            let rows = u64::from(decode.cache.max_context)
+                .checked_mul(u64::from(decode.cache.max_sequences))
+                .ok_or_else(|| LlamaError::format("attention cache rows overflow"))?;
+            for (width, ty) in [
+                (
+                    u64::from(decode.block.k_head_dim) * u64::from(decode.block.kv_head_count),
+                    decode.cache.k_type,
+                ),
+                (
+                    u64::from(decode.block.v_head_dim) * u64::from(decode.block.kv_head_count),
+                    decode.cache.v_type,
+                ),
+            ] {
+                let elements = width
+                    .checked_mul(rows)
+                    .ok_or_else(|| LlamaError::format("attention cache elements overflow"))?;
+                let bytes = ggml_row_size_for_type(
+                    ty,
+                    i64::try_from(elements)
+                        .map_err(|_| LlamaError::format("attention elements do not fit in i64"))?,
+                )
+                .map_err(LlamaError::format)?;
+                total = total
+                    .checked_add(bytes)
+                    .ok_or_else(|| LlamaError::format("attention cache bytes overflow"))?;
+            }
+        }
+        Ok(total)
     }
 
     /// Bytes one more token of context costs, per lane.
