@@ -501,6 +501,26 @@ script_mod! {
             border_color_down: #xff8a8042
         }
     }
+    // Always-visible deletion affordance. Destructive red is still reserved
+    // for hover/down, but the normal-state × is deliberately high contrast.
+    // Defined HERE, next to DangerButton, because `let` bindings only resolve
+    // backwards: the fleet job row (far above the library) uses it too, and
+    // it silently failed to resolve while this lived further down.
+    let LibraryDeleteButton = DangerButton{
+        width: 22 height: 22
+        padding: 0
+        draw_text +: {
+            color: #xc6cfd8
+            color_hover: #xffffff
+            color_down: #xffffff
+            text_style: theme.font_bold{font_size: 11}
+        }
+        draw_bg +: {
+            color: #xffffff0b
+            border_color: #xffffff14
+            border_size: 1.0
+        }
+    }
 
     let Card = RoundedView{
         width: Fill height: Fit
@@ -691,15 +711,37 @@ script_mod! {
                 }
             }
         }
-        jtext := BrightLabel{ width: Fill text: "" draw_text +: { text_style: theme.font_regular{font_size: 8.5} } }
+        jtext := BrightLabel{
+            width: Fill text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+            draw_text +: { text_style: theme.font_regular{font_size: 8.5} }
+        }
         jcancel := LibraryDeleteButton{ text: "×" }
     }
-    // One model on a box, inside the box popup.
+    // Chip sized for a one-line table row: the routing list is forty rows
+    // deep, so its buttons are shorter and tighter than a panel chip.
+    let RoutingChip = ChipButton{
+        height: 16
+        padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
+        draw_text +: { text_style: theme.font_regular{font_size: 8} }
+    }
+    // One model on a box, inside the box popup — a TABLE row, not a flow:
+    // check | light | name | domain | state | ack | ★. Every column past the
+    // name has a fixed width, so the ack and ★ buttons line up down the list
+    // instead of jittering with their own label lengths, and the state text
+    // gets a bounded box of its own. It used to be the `Fill` column between
+    // the name and the buttons, which left it 20-40px on ★-wide rows and cut
+    // "ready · 24 GB" down to "rea" right where the buttons start. Only the
+    // name flexes now; anything that overflows ellipsizes.
     let FleetModelRow = View{
-        width: Fill height: 20 flow: Right spacing: 6
+        width: Fill height: 18 flow: Right spacing: 4
+        // Keeps the ★ column clear of the scroll bar's overlay track.
+        padding: Inset{left: 0 right: 6 top: 0 bottom: 0}
         align: Align{y: 0.5}
         visible: false
         enable := CheckBox{
+            width: 17
             text: ""
             active: true
             padding: Inset{left: 2 right: 2 top: 1 bottom: 1}
@@ -716,15 +758,31 @@ script_mod! {
                 }
             }
         }
-        mname := BrightLabel{ width: 170 text: "" draw_text +: { text_style: theme.font_regular{font_size: 8.5} } }
-        mdomain := HintLabel{ width: 56 text: "" }
-        mnote := HintLabel{ width: Fill text: "" }
-        terms := ChipButton{ text: "ack" }
+        mname := BrightLabel{
+            width: Fill text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+            draw_text +: { text_style: theme.font_regular{font_size: 8.5} }
+        }
+        mdomain := HintLabel{
+            width: 46 text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+        }
+        // Widest real value is "downloading 100%"; every other state is
+        // "<state> · <n> GB" and lands well inside this.
+        mnote := HintLabel{
+            width: 74 text: ""
+            max_lines: 1
+            text_overflow: TextOverflow.Ellipsis
+        }
+        terms := RoutingChip{ width: 38 text: "ack" }
         // Per-box, per-domain preference: "on THIS box use THIS model for
         // that domain" (a 3090 gets the small image model, the 5090 the
         // big one, same request). Routing hides the domain's other models
         // on the box while a preference stands.
-        prefer := ChipButton{ text: "prefer" }
+        // Wide enough for the longest label it takes, "★ preferred".
+        prefer := RoutingChip{ width: 70 text: "prefer" }
     }
     // One artifact of the selected run in the run tray: thumb + kind. Click
     // = open in the viewer AND pin as the next transform run's input.
@@ -812,23 +870,6 @@ script_mod! {
         padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
         draw_text +: {
             text_style: theme.font_regular{font_size: 7.5}
-        }
-    }
-    // Always-visible deletion affordance. Destructive red is still reserved
-    // for hover/down, but the normal-state × is deliberately high contrast.
-    let LibraryDeleteButton = DangerButton{
-        width: 22 height: 22
-        padding: 0
-        draw_text +: {
-            color: #xc6cfd8
-            color_hover: #xffffff
-            color_down: #xffffff
-            text_style: theme.font_bold{font_size: 11}
-        }
-        draw_bg +: {
-            color: #xffffff0b
-            border_color: #xffffff14
-            border_size: 1.0
         }
     }
     // Compact grab affordance. Claims and sweep-locks the pointer on
@@ -2041,8 +2082,20 @@ script_mod! {
                             fleet_box_defaults := ChipButton{ text: "Defaults" }
                             fleet_box_close := LibraryDeleteButton{ text: "×" }
                         }
-                        fleet_box_status := HintLabel{ text: "" }
-                        fleet_box_hint := HintLabel{ text: "Unchecked = never routed to this box by this app. ★ prefer = for that domain this box only ever runs that model (small GPU → small image model, big GPU → large, same request). Defaults = largest present model that fits, per domain. The box itself is untouched." }
+                        // Both header lines are bounded to the panel: without
+                        // a width they were Fit, so they ran straight off the
+                        // right edge and read as truncated mid-word.
+                        fleet_box_status := HintLabel{
+                            width: Fill text: ""
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
+                        }
+                        fleet_box_hint := HintLabel{
+                            width: Fill
+                            max_lines: 2
+                            text_overflow: TextOverflow.Ellipsis
+                            text: "Unchecked = not routed here. ★ = this box's only model for that domain."
+                        }
                         // Live jobs on the box (ours AND other clients'), each
                         // with its own Cancel → POST /job/<id>/cancel.
                         fleet_box_jobs := View{
@@ -2057,7 +2110,7 @@ script_mod! {
                         fleet_box_rows := QuietScrollY{
                             width: Fill
                             height: Fill
-                            flow: Down spacing: 2
+                            flow: Down spacing: 1
                             fm0 := FleetModelRow{}
                             fm1 := FleetModelRow{}
                             fm2 := FleetModelRow{}
@@ -4658,14 +4711,17 @@ impl App {
         };
         let host = url.trim_start_matches("http://").to_string();
         self.ui.label(cx, ids!(fleet_box_title)).set_text(cx, &host);
+        // Busy state and VRAM first, GPU name last: the line is one
+        // ellipsized row in the panel, and the model name is the half that
+        // can afford to lose its tail.
         let status = match &snap.health {
             Some(h) => {
                 let (busy, _) = self.box_busy_text(&url, &snap);
                 format!(
-                    "{} · vram {}/{} MB · {busy}",
-                    h.gpu.as_deref().unwrap_or("no gpu info"),
+                    "{busy} · vram {}/{} MB · {}",
                     h.vram_free_mb.unwrap_or(0),
                     h.vram_total_mb.unwrap_or(0),
+                    h.gpu.as_deref().unwrap_or("no gpu info"),
                 )
             }
             None => "down — last known models".to_string(),
