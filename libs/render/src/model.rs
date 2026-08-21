@@ -735,20 +735,55 @@ pub(crate) fn voxel_boxes(
         let is_on = |f: &Vec<Option<(Vec3f, Vec3f)>>, c: &Vec<bool>, i: usize| {
             f[i].is_some() && !c[i]
         };
+        // A model THINNER THAN ONE CELL gets a single layer of cells in y, and
+        // then a cell's tight top is the only height the grid records. The
+        // emitted box takes the UNION of its cells, so merging columns that
+        // end at different heights raises the whole run to the tallest one.
+        //
+        // That is the floating-car bug, exactly. A Kenney city road tile is
+        // 1 x 0.02 x 1 — carriageway at y = 0.01, sidewalk at y = 0.02 — and
+        // came out as ONE box (-.5,0,-.5)..(.5,0.02,.5): the kerb, spread
+        // over the road. A car parked on one measured its contact patch at
+        // -11.840 with the road drawn at -11.910: 7 cm of air under tyres
+        // whose suspension was exact to 0.2 mm. It was standing on a kerb
+        // that covered the carriageway.
+        //
+        // So on a flat tile a run only grows across columns that END at the
+        // same height, to within an eighth of the tile's own thickness —
+        // finer than any kit's kerb, coarse enough that a bumpy tile still
+        // merges into one box. Taller models are untouched: with more than
+        // one layer, occupancy already carries the height.
+        let flat_tile = dims[1] == 1;
+        let top_band = (size.y / 8.0).max(1.0e-6);
+        let joins = |f: &Vec<Option<(Vec3f, Vec3f)>>, seed: usize, i: usize| {
+            if !flat_tile {
+                return true;
+            }
+            match (f[seed], f[i]) {
+                (Some((_, a)), Some((_, b))) => (a.y - b.y).abs() <= top_band,
+                _ => false,
+            }
+        };
         for zi in 0..dims[2] {
             for yi in 0..dims[1] {
                 for xi in 0..dims[0] {
-                    if !is_on(&filled, &consumed, at(xi, yi, zi)) {
+                    let seed = at(xi, yi, zi);
+                    if !is_on(&filled, &consumed, seed) {
                         continue;
                     }
                     let mut x1 = xi + 1;
-                    while x1 < dims[0] && is_on(&filled, &consumed, at(x1, yi, zi)) {
+                    while x1 < dims[0]
+                        && is_on(&filled, &consumed, at(x1, yi, zi))
+                        && joins(&filled, seed, at(x1, yi, zi))
+                    {
                         x1 += 1;
                     }
                     let mut z1 = zi + 1;
                     'z: while z1 < dims[2] {
                         for x in xi..x1 {
-                            if !is_on(&filled, &consumed, at(x, yi, z1)) {
+                            if !is_on(&filled, &consumed, at(x, yi, z1))
+                                || !joins(&filled, seed, at(x, yi, z1))
+                            {
                                 break 'z;
                             }
                         }
@@ -3764,6 +3799,162 @@ pub(crate) mod tests {
             pbr: PbrMaterial::default(),
         };
         assert!(model.collider_parts().len() <= 8);
+    }
+
+    /// A road tile is paint plus kerb plus sidewalk, and only the paint is
+    /// drivable. Its collider has to say so.
+    ///
+    /// The tile is thinner than one voxel cell, so the grid holds a single
+    /// layer of columns and each column's height lives ONLY in its tight
+    /// bounds. Merging the carriageway columns in with the kerb columns
+    /// raised the whole tile to kerb height, and a car parked on a street
+    /// stood 7 cm over the asphalt it is drawn on — the reported "the kenney
+    /// car wheels are like 5 cm above the road", with the suspension exact
+    /// and the road wrong.
+    #[test]
+    fn a_flat_tile_collides_at_its_carriageway_not_its_kerb() {
+        // A Kenney city road tile, to the millimetre: 1 x 0.02 x 1, bottom at
+        // 0, carriageway at 0.01 over |z| < 0.4, sidewalk at 0.02 outside it.
+        // A SHELL, like the real art — no interior triangles anywhere.
+        let mut v: Vec<f32> = Vec::new();
+        let mut idx: Vec<u32> = Vec::new();
+        let mut quad = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| {
+            let base = (v.len() / MODEL_VERTEX_FLOATS) as u32;
+            for p in [a, b, c, d] {
+                v.extend_from_slice(&p);
+                v.extend(std::iter::repeat(0.0).take(MODEL_VERTEX_FLOATS - 3));
+            }
+            idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        let (lo, hi) = (-0.5f32, 0.5f32);
+        let (kerb, road, top) = (0.4f32, 0.01f32, 0.02f32);
+        // Bottom.
+        quad([lo, 0.0, lo], [hi, 0.0, lo], [hi, 0.0, hi], [lo, 0.0, hi]);
+        // Carriageway top.
+        quad([lo, road, -kerb], [hi, road, -kerb], [hi, road, kerb], [lo, road, kerb]);
+        // Sidewalk tops.
+        for (z0, z1) in [(lo, -kerb), (kerb, hi)] {
+            quad([lo, top, z0], [hi, top, z0], [hi, top, z1], [lo, top, z1]);
+            // Kerb face, sidewalk edge down to the paint.
+            let zk = if z0 == lo { -kerb } else { kerb };
+            quad([lo, road, zk], [hi, road, zk], [hi, top, zk], [lo, top, zk]);
+        }
+        // Outer walls, full thickness.
+        for z in [lo, hi] {
+            quad([lo, 0.0, z], [hi, 0.0, z], [hi, top, z], [lo, top, z]);
+        }
+        for x in [lo, hi] {
+            quad([x, 0.0, lo], [x, 0.0, hi], [x, top, hi], [x, top, lo]);
+        }
+        let boxes = voxel_boxes(
+            &v,
+            &idx,
+            Vec3f { x: lo, y: 0.0, z: lo },
+            Vec3f { x: hi, y: top, z: hi },
+        );
+        assert!(!boxes.is_empty(), "a road tile with no collider at all");
+
+        // Sample the tile across its width. Every point of the carriageway
+        // must be drivable, and drivable AT THE PAINT — a wheel resting on
+        // 0.02 there is resting on a kerb spread over the road.
+        let surface_at = |x: f32, z: f32| -> Option<f32> {
+            boxes
+                .iter()
+                .filter(|(a, b)| x >= a.x && x <= b.x && z >= a.z && z <= b.z)
+                .map(|(_, b)| b.y)
+                .fold(None, |acc: Option<f32>, y| Some(acc.map_or(y, |a| a.max(y))))
+        };
+        for z in [-0.35f32, -0.2, 0.0, 0.2, 0.35] {
+            let y = surface_at(0.0, z).unwrap_or_else(|| panic!("no collider over the road at z={z}"));
+            assert!(
+                (y - road).abs() < 1.0e-4,
+                "the carriageway collides at {y} instead of the paint at {road} (z={z})"
+            );
+        }
+        // The sidewalk is still there to stand on, at its own height.
+        for z in [-0.45f32, 0.45] {
+            let y = surface_at(0.0, z).unwrap_or_else(|| panic!("no collider over the sidewalk at z={z}"));
+            assert!(
+                (y - top).abs() < 1.0e-4,
+                "the sidewalk collides at {y}, not at {top} (z={z})"
+            );
+        }
+        // Solid down to the tile's own floor: a raycast from above has to
+        // stop, and a mover must not fall through the paint.
+        assert!(
+            boxes.iter().all(|(a, _)| a.y.abs() < 1.0e-4),
+            "a tile collider that does not reach its own base: {boxes:?}"
+        );
+    }
+
+    /// The same claim against the REAL kit the towns are built from, when
+    /// the pack is installed. Kenney's own numbers, not a fixture's.
+    #[test]
+    fn kenney_road_tiles_collide_at_the_asphalt() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/packs/kenney/city-kit-roads");
+        let mut checked = 0;
+        for name in ["road-straight", "road-crossing", "road-crossroad-line"] {
+            let Ok(bytes) = std::fs::read(dir.join(format!("{name}.glb"))) else {
+                continue;
+            };
+            let m = StaticModel::parse_glb(&bytes).expect("kit tile parses");
+            checked += 1;
+            // The carriageway is the level the tile's own art puts under the
+            // centre of the tile; the kerb is the tile's top. They differ, or
+            // this test is measuring the wrong model.
+            assert!(
+                m.max.y > m.min.y,
+                "{name}: a flat tile with no thickness at all"
+            );
+            let boxes = m.voxel_collider_boxes();
+            let top_at = |x: f32, z: f32| -> Option<f32> {
+                boxes
+                    .iter()
+                    .filter(|(a, b)| x >= a.x && x <= b.x && z >= a.z && z <= b.z)
+                    .map(|(_, b)| b.y)
+                    .fold(None, |acc: Option<f32>, y| Some(acc.map_or(y, |a| a.max(y))))
+            };
+            let centre = top_at(0.0, 0.0).expect("no collider under the middle of a road tile");
+            assert!(
+                centre < m.max.y - 1.0e-4,
+                "{name}: the middle of the road collides at the tile's TOP ({centre} of \
+                 {}) — the kerb is covering the carriageway, and a car parks on it",
+                m.max.y
+            );
+            // And it is the DRAWN surface, not some arbitrary lower level:
+            // the highest triangle the art puts over the tile's centre. Read
+            // from triangles, not vertices — a tile is a shell, and its
+            // carriageway quad has all four corners out on the tile edge.
+            let p = |i: u32| {
+                let o = i as usize * MODEL_VERTEX_FLOATS;
+                [m.vertices[o], m.vertices[o + 1], m.vertices[o + 2]]
+            };
+            let art = m
+                .indices
+                .chunks_exact(3)
+                .map(|t| [p(t[0]), p(t[1]), p(t[2])])
+                .filter(|t| {
+                    let (x0, x1) = (
+                        t[0][0].min(t[1][0]).min(t[2][0]),
+                        t[0][0].max(t[1][0]).max(t[2][0]),
+                    );
+                    let (z0, z1) = (
+                        t[0][2].min(t[1][2]).min(t[2][2]),
+                        t[0][2].max(t[1][2]).max(t[2][2]),
+                    );
+                    x0 <= 0.0 && x1 >= 0.0 && z0 <= 0.0 && z1 >= 0.0
+                })
+                .map(|t| t[0][1].max(t[1][1]).max(t[2][1]))
+                .fold(f32::MIN, f32::max);
+            assert!(
+                (centre - art).abs() < 1.0e-3,
+                "{name}: collider {centre} vs drawn surface {art} under the tile centre"
+            );
+        }
+        if checked == 0 {
+            eprintln!("SKIP: kenney/city-kit-roads not installed");
+        }
     }
 }
 
