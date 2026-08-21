@@ -10491,6 +10491,9 @@ impl MatchEvent for App {
         self.apc_input_ports = inputs;
         self.apc_output_ports = outputs;
         self.apc_leds.set_model(model.unwrap_or_default());
+        // The press decoder translates grid notes with the same per-model
+        // mapping the LEDs use — one truth for both directions.
+        self.apc.model = model.unwrap_or_default();
         self.apc_leds.invalidate();
         self.midi_status = if self.apc_input_ports.is_empty() {
             "APC: not connected".to_string()
