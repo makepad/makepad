@@ -72,11 +72,12 @@ fn generate(
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().unwrap_or_else(|| {
-        eprintln!("usage: llama-slot-probe <model.gguf> [--tokens N] [--slots N]");
+        eprintln!("usage: llama-slot-probe <model.gguf> [--tokens N] [--slots N] [--timing]");
         std::process::exit(2);
     });
     let mut max_new = 24usize;
     let mut slots = 4u32;
+    let mut timing = false;
     let mut rest: Vec<String> = args.collect();
     let mut index = 0;
     while index < rest.len() {
@@ -94,6 +95,10 @@ fn main() {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(slots);
                 index += 2;
+            }
+            "--timing" => {
+                timing = true;
+                index += 1;
             }
             other => {
                 eprintln!("unknown argument {other}");
@@ -216,6 +221,82 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    if timing {
+        if let Err(e) = timing_sweep(&model, &vocab, slots, PER_SLOT_CONTEXT) {
+            eprintln!("timing failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Steady-state decode rate at 1..N active lanes, from ONE session — which is
+/// the dynamic-degradation scenario itself: the same box, the same weights,
+/// only the number of lanes actually generating changes.
+fn timing_sweep(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+) -> Result<(), String> {
+    const WARMUP: usize = 8;
+    const MEASURE: usize = 40;
+    let max_lanes = (slots as usize).min(LANE_PROMPTS.len());
+    let mut session = build_session(model, slots, per_slot_context)?;
+
+    println!();
+    println!("=== steady-state decode, {MEASURE} steps after {WARMUP} warm-up ===");
+    println!("{:>6}  {:>11}  {:>13}  {:>11}", "lanes", "step ms", "per-lane tok/s", "aggregate");
+
+    for active in 1..=max_lanes {
+        let prompts: Vec<Vec<i32>> = LANE_PROMPTS
+            .iter()
+            .take(active)
+            .map(|t| vocab.tokenize(t, true, true).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let mut table = session.new_slot_table().map_err(|e| e.to_string())?;
+        let mut next_token = Vec::with_capacity(active);
+        for (lane, prompt) in prompts.iter().enumerate() {
+            table.admit().ok_or_else(|| "table full".to_string())?;
+            let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
+            let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
+            let logits = session
+                .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+                .map_err(|e| format!("lane {lane} prefill: {e}"))?;
+            table.advance(lane, prompt.len()).map_err(|e| e.to_string())?;
+            table.begin_decoding(lane).map_err(|e| e.to_string())?;
+            next_token.push(argmax_token_id(&logits).ok_or_else(|| "no argmax".to_string())?);
+        }
+
+        let mut started = None;
+        for step in 0..(WARMUP + MEASURE) {
+            if step == WARMUP {
+                started = Some(std::time::Instant::now());
+            }
+            let plan = table.plan_step().ok_or_else(|| "nothing to plan".to_string())?;
+            let tokens: Vec<i32> = plan.slots.iter().map(|s| next_token[s.slot]).collect();
+            let rows = session
+                .step_slots(&plan, &tokens)
+                .map_err(|e| format!("{active} lanes step {step}: {e}"))?;
+            for (row, step_slot) in rows.iter().zip(&plan.slots) {
+                let lane = step_slot.slot;
+                next_token[lane] = argmax_token_id(row).ok_or_else(|| "no argmax".to_string())?;
+                table.advance(lane, 1).map_err(|e| e.to_string())?;
+            }
+        }
+        let elapsed = started.ok_or_else(|| "timer never started".to_string())?.elapsed();
+        let step_ms = elapsed.as_secs_f64() * 1e3 / MEASURE as f64;
+        let per_lane = 1000.0 / step_ms;
+        println!(
+            "{:>6}  {:>11.3}  {:>13.1}  {:>11.1}",
+            active,
+            step_ms,
+            per_lane,
+            per_lane * active as f64
+        );
+    }
+    println!("(no speculation: one token per lane per step)");
+    Ok(())
 }
 
 /// A second, disjoint set of neighbour prompts. Different lengths AND different
@@ -530,6 +611,7 @@ fn slot_independence(
         LlamaSessionConfig {
             max_context: Some(per_slot_context),
             max_sequences: slots,
+            extra_activation_bytes: activation_reserve(slots),
             ..LlamaSessionConfig::default()
         },
     )
