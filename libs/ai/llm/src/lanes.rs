@@ -121,6 +121,15 @@ pub struct LaneScheduler {
     lanes: Vec<Option<Lane>>,
     pending: VecDeque<LaneRequest>,
     queue_max: usize,
+    /// Tokens that END a turn. A property of the model, so every lane on one
+    /// session shares them.
+    ///
+    /// The scheduler cannot ask a vocabulary anything, and until it was told
+    /// these it ended a lane at `max_new` and NOWHERE else: a reply ran past
+    /// its own end-of-turn token into a fresh one, forever, and the lane never
+    /// retired. [`LaneExecutor`] fills these from the session so no caller can
+    /// forget them.
+    stop_tokens: Vec<i32>,
 }
 
 impl LaneScheduler {
@@ -131,7 +140,19 @@ impl LaneScheduler {
             lanes,
             pending: VecDeque::new(),
             queue_max,
+            stop_tokens: Vec::new(),
         }
+    }
+
+    /// Tokens that end a lane's turn. Empty means "run to `max_new`", which is
+    /// only ever right for a caller feeding synthetic tokens.
+    pub fn with_stop_tokens(mut self, tokens: impl IntoIterator<Item = i32>) -> Self {
+        self.stop_tokens = tokens.into_iter().collect();
+        self
+    }
+
+    pub fn stop_tokens(&self) -> &[i32] {
+        &self.stop_tokens
     }
 
     pub fn slots_total(&self) -> usize {
@@ -247,12 +268,21 @@ impl LaneScheduler {
 
     /// Report a completed prefill: the lane ingested `count` tokens and its
     /// first generated token is `first_token`.
+    ///
+    /// A prompt whose very first sampled token is a stop token asks for an
+    /// empty reply, and gets one. Decoding it instead would step past the end
+    /// of the turn on token zero.
     pub fn on_prefilled(&mut self, lane: usize, count: usize, first_token: i32) {
         let _ = self.table.advance(lane, count);
         let _ = self.table.begin_decoding(lane);
+        let stops = self.stop_tokens.contains(&first_token);
         if let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) {
             slot.next_token = Some(first_token);
-            slot.phase = LanePhase::Decoding;
+            slot.phase = if stops {
+                LanePhase::Done(LaneOutcome::Complete)
+            } else {
+                LanePhase::Decoding
+            };
         }
     }
 
@@ -262,26 +292,42 @@ impl LaneScheduler {
     /// The token a lane just DECODED is the one it emits; `sampled` is what it
     /// will decode next. Conflating the two drops the first token of every
     /// generation and appends one that was never produced.
+    ///
+    /// A lane ends here on **either** of two conditions, and dropping the
+    /// second one is what made a reply run forever: `max_new` reached, or the
+    /// next token being a stop token. The stop token is neither emitted nor
+    /// decoded — the turn is over at the token before it.
     pub fn on_decoded(&mut self, plan: &StepPlan, sampled: &[i32]) -> Vec<LaneEvent> {
         let mut events = Vec::new();
+        // Split borrows: the stop set and the lanes are separate fields, and
+        // reading one while mutating the other is exactly what this needs.
+        let stop_tokens = &self.stop_tokens;
+        let lanes = &mut self.lanes;
+        let table = &mut self.table;
         for (step, &next) in plan.slots.iter().zip(sampled) {
             let index = step.slot;
-            let Some(lane) = self.lanes.get_mut(index).and_then(|l| l.as_mut()) else {
+            let Some(lane) = lanes.get_mut(index).and_then(|l| l.as_mut()) else {
                 continue;
             };
             let emitted = match lane.next_token {
                 Some(token) => token,
                 None => continue,
             };
+            if stop_tokens.contains(&emitted) {
+                // Only reachable if a stop token was seeded past the guards
+                // above; end the turn rather than emit it.
+                lane.phase = LanePhase::Done(LaneOutcome::Complete);
+                continue;
+            }
             lane.produced += 1;
             lane.next_token = Some(next);
-            let _ = self.table.advance(index, 1);
+            let _ = table.advance(index, 1);
             events.push(LaneEvent::Token {
                 job: lane.request.job,
                 token: emitted,
                 produced: lane.produced,
             });
-            if lane.produced >= lane.request.max_new {
+            if lane.produced >= lane.request.max_new || stop_tokens.contains(&next) {
                 lane.phase = LanePhase::Done(LaneOutcome::Complete);
             }
         }
@@ -295,12 +341,28 @@ impl LaneScheduler {
     /// loop and hands back the tokens it GENERATED. So this emits them
     /// directly rather than going through the feed-one/emit-previous dance,
     /// and advances the lane by the whole chunk.
-    pub fn on_generated(&mut self, lane: usize, tokens: &[i32]) -> Vec<LaneEvent> {
+    ///
+    /// `stopped` is the session's own verdict — it stopped for a reason other
+    /// than running out of budget. The session drops the stop token rather
+    /// than returning it, so the chunk can be SHORT, or empty, and still be
+    /// the end of the turn. Without this the lane looked merely under-budget:
+    /// it stayed claimed, produced nothing on every subsequent step, spun the
+    /// worker, and — because a claimed lane is not solo — pushed the next
+    /// conversation onto the unspeculated batched path.
+    ///
+    /// An empty chunk ends the lane whatever `stopped` says. A generator that
+    /// returned nothing cannot make progress, and looping on it is a spin with
+    /// no exit.
+    pub fn on_generated(&mut self, lane: usize, tokens: &[i32], stopped: bool) -> Vec<LaneEvent> {
         let mut events = Vec::new();
+        let stop_tokens = &self.stop_tokens;
         let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) else {
             return events;
         };
         for &token in tokens {
+            if stop_tokens.contains(&token) {
+                break;
+            }
             slot.produced += 1;
             events.push(LaneEvent::Token {
                 job: slot.request.job,
@@ -308,7 +370,7 @@ impl LaneScheduler {
                 produced: slot.produced,
             });
         }
-        if slot.produced >= slot.request.max_new {
+        if stopped || tokens.is_empty() || slot.produced >= slot.request.max_new {
             slot.phase = LanePhase::Done(LaneOutcome::Complete);
         }
         let _ = self.table.advance(lane, tokens.len());
@@ -482,6 +544,11 @@ impl LaneExecutor {
         params: crate::LlamaSamplingParams,
     ) -> Self {
         let samplers = vec![None; scheduler.slots_total()];
+        // Taken from the session rather than asked of the caller. A scheduler
+        // with no stop tokens ends a lane only at `max_new`, and the failure
+        // that causes is silent: a reply that runs past its own end-of-turn
+        // token into a new one, and a lane that never retires.
+        let scheduler = scheduler.with_stop_tokens(session.stop_tokens());
         Self {
             session,
             scheduler,
@@ -496,6 +563,12 @@ impl LaneExecutor {
     pub fn on_counts(mut self, sink: impl FnMut(LaneCounts) + Send + 'static) -> Self {
         self.on_counts = Some(Box::new(sink));
         self
+    }
+
+    /// The resident session, for callers that need its vocabulary or context
+    /// bounds while the executor owns it.
+    pub fn session(&self) -> &crate::LlamaSession {
+        &self.session
     }
 
     pub fn scheduler(&mut self) -> &mut LaneScheduler {
@@ -605,10 +678,18 @@ impl LaneExecutor {
                         .continue_sampled_with(want, params, sampler)
                         .map_err(|e| format!("solo decode: {e}"))?
                 };
-                events.extend(
-                    self.scheduler
-                        .on_generated(SOLO_LANE, &generated.token_ids),
-                );
+                // Two ways the turn is over, and the second is not a stop
+                // reason: a chunk shorter than asked for, with no reason
+                // given, means the session cannot make progress. The
+                // single-lane worker has always broken on both; the lane
+                // worker inherited neither.
+                let stopped = generated.stop_reason != crate::LlamaStopReason::MaxNewTokens
+                    || generated.token_ids.len() < want;
+                events.extend(self.scheduler.on_generated(
+                    SOLO_LANE,
+                    &generated.token_ids,
+                    stopped,
+                ));
             }
             LaneStep::Decode { plan, tokens } => {
                 let rows = self
@@ -649,9 +730,12 @@ impl LaneExecutor {
 mod tests {
     use super::*;
 
+    /// The end-of-turn token these tests stand in for `<|im_end|>` with.
+    const EOS: i32 = 7;
+
     fn scheduler(slots: usize, queue_max: usize) -> LaneScheduler {
         let table = SlotTable::new(slots, 512, 1, 0).expect("table");
-        LaneScheduler::new(table, queue_max)
+        LaneScheduler::new(table, queue_max).with_stop_tokens([EOS])
     }
 
     fn request(job: u64, prompt: &[i32], max_new: usize) -> LaneRequest {
@@ -860,7 +944,7 @@ mod tests {
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };
-        sched.on_prefilled(lane, tokens.len(), 7);
+        sched.on_prefilled(lane, tokens.len(), 70);
         assert_eq!(sched.slots_claimed(), 1);
         assert_eq!(sched.lanes_active(), 1);
 
@@ -935,7 +1019,7 @@ mod tests {
         };
         sched.on_prefilled(lane, tokens.len(), 0);
 
-        let events = sched.on_generated(0, &[41, 42, 43]);
+        let events = sched.on_generated(0, &[41, 42, 43], false);
         assert_eq!(
             events,
             vec![
@@ -957,12 +1041,162 @@ mod tests {
         sched.on_prefilled(lane, tokens.len(), 0);
         // A speculative round can overshoot the budget; the lane must still
         // finish rather than run on.
-        sched.on_generated(0, &[1, 2, 3]);
+        sched.on_generated(0, &[1, 2, 3], false);
         assert_eq!(sched.remaining(0), 0);
         assert!(matches!(
             sched.reap().first(),
             Some(LaneEvent::Finished { job: 6, .. })
         ));
+    }
+
+    /// REGRESSION, 2026-08-21. Live `.165` chat: a user said "hi" and the
+    /// reply never ended.
+    ///
+    /// The batched path ended a lane at `max_new` and nowhere else, so a reply
+    /// ran straight through its own end-of-turn token and started a new turn,
+    /// over and over, until the token budget ran out. Every symptom the box
+    /// showed follows from it: the endless reply, the lane that stayed
+    /// claimed, the next conversation queueing behind it, and — because a
+    /// claimed lane is not solo — that conversation decoding on the
+    /// unspeculated batched path at 69 tok/s instead of the ~110 solo one.
+    #[test]
+    fn a_reply_ends_at_its_stop_token_instead_of_running_to_the_budget() {
+        let mut sched = scheduler(2, 4);
+        // A generous budget, as a chat request has: the budget must NOT be
+        // what ends this turn.
+        sched.submit(request(1, &[1, 2], 512)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+
+        // Two real tokens, then the model wants to end the turn.
+        let mut emitted = Vec::new();
+        for next in [101, EOS] {
+            let LaneStep::Decode { plan, .. } = sched.next_step() else {
+                panic!("expected decode");
+            };
+            emitted.extend(sched.on_decoded(&plan, &[next]));
+        }
+        assert_eq!(
+            emitted
+                .iter()
+                .filter_map(|e| match e {
+                    LaneEvent::Token { token, .. } => Some(*token),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![100, 101],
+            "the stop token is never emitted, and nothing follows it"
+        );
+
+        let finished = sched.reap();
+        assert!(
+            finished.contains(&LaneEvent::Finished {
+                job: 1,
+                lane: 0,
+                outcome: LaneOutcome::Complete
+            }),
+            "the lane must finish on the stop token, got {finished:?}"
+        );
+        assert_eq!(sched.slots_claimed(), 0, "and free its slot");
+        assert!(sched.is_idle(), "and leave the worker with nothing to spin on");
+        assert_eq!(
+            sched.next_step(),
+            LaneStep::Idle,
+            "a retired lane must not keep planning steps"
+        );
+    }
+
+    /// REGRESSION, same incident, the other half.
+    ///
+    /// The solo speculative path DOES stop at the stop token — the session
+    /// drops it and returns a short chunk. The scheduler never heard about it,
+    /// saw only "under budget", and kept the lane. That lane then produced
+    /// nothing on every following step: the worker spun, the slot stayed
+    /// claimed, and the next turn was no longer solo.
+    #[test]
+    fn a_solo_chunk_that_stopped_finishes_the_lane_even_when_it_came_up_short() {
+        let mut sched = scheduler(2, 4);
+        sched.submit(request(2, &[1], 512)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+
+        let events = sched.on_generated(0, &[41, 42], true);
+        assert_eq!(events.len(), 2, "both tokens are still the lane's output");
+        assert!(
+            sched
+                .reap()
+                .contains(&LaneEvent::Finished {
+                    job: 2,
+                    lane: 0,
+                    outcome: LaneOutcome::Complete
+                }),
+            "a stopped chunk ends the turn even 510 tokens under budget"
+        );
+        assert!(sched.is_idle());
+    }
+
+    /// A generator that returns nothing cannot make progress. Looping on it is
+    /// a spin with no exit, and it is what pinned a core on the live box.
+    #[test]
+    fn a_solo_chunk_that_produced_nothing_ends_the_lane_rather_than_spinning() {
+        let mut sched = scheduler(2, 4);
+        sched.submit(request(3, &[1], 512)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+
+        assert!(sched.on_generated(0, &[], false).is_empty());
+        assert!(!sched.reap().is_empty(), "an empty chunk retires the lane");
+        assert!(sched.is_idle(), "and the worker gets to block again");
+    }
+
+    /// An empty reply is a reply. Decoding the stop token instead would step
+    /// past the end of the turn on token zero.
+    #[test]
+    fn a_prompt_whose_first_token_is_a_stop_token_yields_an_empty_reply() {
+        let mut sched = scheduler(2, 4);
+        sched.submit(request(4, &[1, 2], 512)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), EOS);
+        assert_eq!(sched.lanes_active(), 0, "it is over before it decodes");
+        assert!(sched.reap().contains(&LaneEvent::Finished {
+            job: 4,
+            lane: 0,
+            outcome: LaneOutcome::Complete
+        }));
+        assert!(sched.is_idle());
+    }
+
+    /// The whole point of retiring properly: the NEXT conversation is solo
+    /// again, so it takes the speculative fast path instead of the batched
+    /// one. This is the 69-vs-110 tok/s the box measured.
+    #[test]
+    fn a_finished_turn_leaves_the_next_one_solo() {
+        let mut sched = scheduler(4, 4);
+        sched.submit(request(1, &[1], 512)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+        sched.on_generated(0, &[41], true);
+        sched.reap();
+
+        sched.submit(request(2, &[1], 512)).expect("submit");
+        let LaneStep::Prefill { lane, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        assert!(
+            sched.is_solo(lane),
+            "a lane left claimed by the previous turn is what forced the \
+             batched path onto a single conversation"
+        );
     }
 
     #[test]
