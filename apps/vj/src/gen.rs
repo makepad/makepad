@@ -592,6 +592,10 @@ impl GenModel {
         self.video_length = index.min(VIDEO_LENGTHS.len() - 1);
     }
 
+    pub fn video_length(&self) -> usize {
+        self.video_length
+    }
+
     /// Dropdown rows for the length picker, in seconds at H3's 24 fps.
     pub fn video_length_labels() -> Vec<String> {
         VIDEO_LENGTHS
