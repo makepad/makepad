@@ -4,6 +4,10 @@
 //!   opcheck                      — per-op numerical gates vs CPU references
 //!                                  (runs every kernel through the exact
 //!                                  planner/dispatch path the session uses)
+//!   mmvq-error                   — error distribution of the Q8_1-activation
+//!                                  decode mat-vec over many rows, K and
+//!                                  widths: the evidence behind `opcheck`'s
+//!                                  mat-vec tolerances
 //!   opcheck-q4k-mmq              — focused forced packed-Q4_K MMQ oracle
 //!   generate <gguf> [...]        — full-model run with truthful metrics
 //!   bench <gguf> [...]           — hardened protocol: 1 discarded warm-up,
@@ -21,7 +25,7 @@ use std::time::Instant;
 use makepad_ai_llm::{
     CudaExecRuntime, ExecBackendKind, ExecRuntime, LlamaModel, LlamaSession, LlamaSessionConfig,
 };
-use makepad_ai_llm::cuda_exec::{host_split_reset, host_split_snapshot};
+use makepad_ai_llm::cuda_exec::{host_split_reset, host_split_snapshot, MMV_MAX_COLUMNS};
 use makepad_ai_cuda::quant;
 use makepad_ai_llm::{
     BufferUsage, Context, GluOp, Graph, InitParams, TensorId, TensorType, UnaryOp,
@@ -32,6 +36,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
         Some("opcheck") => opcheck(),
+        Some("mmvq-error") => mmvq_error_report(),
         Some("opcheck-q4k-mmq") => opcheck_q4k_mmq(),
         Some("opcheck-q6k-mmq") => opcheck_q6k_mmq(),
         Some("opcheck-q5k-mmq") => opcheck_q5k_mmq(),
@@ -39,7 +44,7 @@ fn main() {
         Some("bench") => bench(&args[2..]),
         _ => {
             eprintln!(
-                "usage: llama-cuda-canary <opcheck|opcheck-q4k-mmq|opcheck-q5k-mmq|opcheck-q6k-mmq|generate|bench> ..."
+                "usage: llama-cuda-canary <opcheck|mmvq-error|opcheck-q4k-mmq|opcheck-q5k-mmq|opcheck-q6k-mmq|generate|bench> ..."
             );
             2
         }
@@ -726,6 +731,193 @@ fn mmq_round_row(x: &[f32]) -> Vec<f32> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Route-aware references for quantized mul_mat.
+//
+// A matmul route decides three things, and only the third is the kernel's
+// arithmetic:
+//
+//   1. how the WEIGHTS are decoded (exact, and separately gated by `get_rows`),
+//   2. what happens to the ACTIVATIONS before the dot product,
+//   3. in what order the products are summed.
+//
+// (2) is not an error the kernel makes, it is the format the kernel is defined
+// over — `mul_mat_vec_q` takes Q8_1 activations the way a bf16 GEMM takes bf16
+// ones. Model it, and what is left to gate is (3), which is tight. Skip it and
+// the case measures the activation format instead: for Q8_1 that is ~1e-3
+// relative on a random column, four orders above any tolerance worth having,
+// and the gate can no longer tell a decode bug from arithmetic that is working
+// exactly as designed.
+// ---------------------------------------------------------------------------
+
+/// What a route does to its activations before the dot product happens.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ActFormat {
+    /// Hand-written `mmv_quant` / `mmv_f32`: activations stay f32.
+    F32,
+    /// Official `mul_mat_vec_q`: the activation column is quantized to Q8_1.
+    ///
+    /// `vec_dot_q{4,5}_K_q8_1_impl_vmmq` rebuilds the mins term from the sum of
+    /// the q8_1 *integer* quants (`dp4a` against `0x01010101`) scaled by the
+    /// block's `d`, and never reads the stored `ds.y` sum — that field is only
+    /// used on the MMQ path. So every K-quant term on this route is
+    /// `weight * (q * d_f16)`, exactly what `q81_round_row` reconstructs, and
+    /// the model is a model of the *format*, not of the kernel's internals.
+    Q81,
+    /// Dequant slab + cuBLAS: both sides are rounded to bf16.
+    Bf16,
+}
+
+impl ActFormat {
+    fn label(self) -> &'static str {
+        match self {
+            ActFormat::F32 => "f32",
+            ActFormat::Q81 => "q8_1",
+            ActFormat::Bf16 => "bf16",
+        }
+    }
+
+    fn round_column(self, raw: &[f32]) -> Vec<f32> {
+        match self {
+            ActFormat::F32 => raw.to_vec(),
+            ActFormat::Q81 => q81_round_row(raw),
+            ActFormat::Bf16 => raw.iter().map(|v| bf16_round(*v)).collect(),
+        }
+    }
+}
+
+/// Which route the planner will take for `kind` at `m` columns. Mirrors
+/// `select_kernel` + `mmvq_q81_kind_ok` rather than restating the rule, so a
+/// dispatch change moves the reference with it instead of silently leaving the
+/// case pointed at a kernel that is no longer running.
+fn route_act_format(kind: i32, m: usize) -> ActFormat {
+    if m > MMV_MAX_COLUMNS {
+        return ActFormat::Bf16;
+    }
+    let routes = unsafe { makepad_ai_cuda::llm_ops::quant_kind_routes(kind) };
+    if routes & makepad_ai_cuda::llm_ops::ROUTE_MMVQ != 0 {
+        ActFormat::Q81
+    } else if makepad_ai_cuda::llm_ops::quant_kind_is_official_only(kind) {
+        // No hand-written mat-vec for these kinds: the dispatcher falls back to
+        // the dequant slab, which is a bf16 GEMM at any width.
+        ActFormat::Bf16
+    } else {
+        ActFormat::F32
+    }
+}
+
+/// Per-element error budget for a dot product whose terms' absolute values sum
+/// to `mag`, given that the reference already reproduced the route's input
+/// rounding.
+///
+/// The budget is relative to the summed term magnitude, never to the result:
+/// a row whose terms cancel to near zero did not thereby become more accurate,
+/// and a result-relative bound would call the same arithmetic a pass on one row
+/// and a failure on the next.
+///
+///   * `F32` / `Q81` — both sides now compute the same mathematical sum, so
+///     only the accumulation differs: the reference in f64, the kernel in f32
+///     in a different order. f32 accumulation of `n` terms is bounded by
+///     `n * 2^-24 * mag` sequentially and `log2(n) * 2^-24 * mag` in a tree.
+///     `1e-6` is ~17 ulp of the summed magnitude: room for a 16-deep tree with
+///     three orders to spare, and still four orders tighter than the ~1e-3
+///     the Q8_1 format itself costs, which is the gap a real bug has to hide in.
+///   * `Bf16` — the reference rounds both inputs to bf16, but the slab path
+///     reduces through cuBLAS tiles whose intermediate rounding is not
+///     modelled. `1e-4` is the bound the IQ cases were calibrated at: a correct
+///     kernel clears it by ~50x, and IQ3_S's wrong tiles missed it by ~100x.
+///
+/// The absolute floor keeps a fully-cancelling row from being gated on zero.
+fn dot_error_budget(fmt: ActFormat, mag: f32) -> f32 {
+    match fmt {
+        ActFormat::F32 | ActFormat::Q81 => 1e-4 + 1e-6 * mag,
+        ActFormat::Bf16 => 1e-3 + 1e-4 * mag,
+    }
+}
+
+/// Reference results for a quantized `mul_mat`, and the summed term magnitude
+/// behind each one. `rows` are the CPU-dequantized weight rows; `acts` is the
+/// `[k, m]` activation block in column-major order, as the tensor holds it.
+fn quant_matmul_reference(
+    rows: &[Vec<f32>],
+    acts: &[f32],
+    k: usize,
+    m: usize,
+    fmt: ActFormat,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = rows.len();
+    let mut want = vec![0.0f32; n * m];
+    let mut mag = vec![0.0f32; n * m];
+    for col in 0..m {
+        let col_act = fmt.round_column(&acts[col * k..(col + 1) * k]);
+        for (row, wrow) in rows.iter().enumerate() {
+            let mut acc = 0.0f64;
+            let mut sum_abs = 0.0f64;
+            for i in 0..k {
+                let w = if fmt == ActFormat::Bf16 {
+                    bf16_round(wrow[i])
+                } else {
+                    wrow[i]
+                };
+                let term = w as f64 * col_act[i] as f64;
+                acc += term;
+                sum_abs += term.abs();
+            }
+            want[col * n + row] = acc as f32;
+            mag[col * n + row] = sum_abs as f32;
+        }
+    }
+    (want, mag)
+}
+
+/// Compare against a per-element budget and report the headroom.
+///
+/// `worst` is `max |got - want| / budget`. Passing means below 1; how far
+/// below is how much room a regression has to hide in, so it is printed on
+/// success too — a case that only just passes has stopped gating and should be
+/// read as a finding, not as a green tick.
+fn compare_budget(
+    name: &str,
+    acts: &str,
+    got: &[f32],
+    want: &[f32],
+    budget: &[f32],
+    failures: &mut usize,
+) -> f32 {
+    if got.len() != want.len() {
+        println!("FAIL {name}: length {} vs expected {}", got.len(), want.len());
+        *failures += 1;
+        return f32::INFINITY;
+    }
+    let mut worst = 0.0f32;
+    let mut worst_at = 0usize;
+    let mut max_abs = 0.0f32;
+    let mut non_finite = 0usize;
+    for (i, ((g, w), b)) in got.iter().zip(want).zip(budget).enumerate() {
+        let d = (g - w).abs();
+        if !d.is_finite() {
+            non_finite += 1;
+            continue;
+        }
+        max_abs = max_abs.max(d);
+        let ratio = d / b.max(f32::MIN_POSITIVE);
+        if ratio > worst {
+            worst = ratio;
+            worst_at = i;
+        }
+    }
+    if non_finite > 0 || worst > 1.0 {
+        println!(
+            "FAIL {name}: {acts} acts, {:.3}x budget @ {worst_at} (got {:.6}, want {:.6}, budget {:.6}), non_finite {non_finite}",
+            worst, got[worst_at], want[worst_at], budget[worst_at],
+        );
+        *failures += 1;
+    } else {
+        println!("ok   {name}: {acts} acts, max_abs {max_abs:.7}, {:.4}x budget", worst);
+    }
+    worst
 }
 
 fn iq_kinds_canary(exec: &CudaExecRuntime, failures: &mut usize) {
@@ -1646,6 +1838,422 @@ fn cpy_ssm_state_canary(exec: &CudaExecRuntime, failures: &mut usize) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `mmvq-error` — the distribution behind the tolerance argument.
+//
+// The opcheck cases are three numbers per kernel. This is the same kernels over
+// thousands of rows, several K, both activation shapes, at every width decode
+// can take, and it separates the two questions the gate has to keep apart:
+//
+//   * "is the kernel right?"  — error against a reference that models the Q8_1
+//     activation format. If this is not at the f32 accumulation floor, the
+//     kernel is broken.
+//   * "what does the format cost?" — error against a full-f32 reference. This
+//     is the price of Q8_1 activations and it is a property of llama.cpp's
+//     decode design, not of this port; it is what upstream's own MUL_MAT test
+//     accepts by gating aggregate NMSE rather than per-element error.
+//
+// The third column is the one a product decision reads: the kernel-to-kernel
+// gap between `mul_mat_vec_q` and the f32-activation `mmv_quant` we could ship
+// instead, measured in the output's own units.
+// ---------------------------------------------------------------------------
+
+struct ErrorDist {
+    count: usize,
+    /// `sum((got-want)^2) / sum(want^2)` — the metric upstream's
+    /// `test-backend-ops` gates MUL_MAT on.
+    nmse: f64,
+    /// |error| as a fraction of the summed term magnitude of that dot.
+    mean_rel: f64,
+    p99_rel: f64,
+    max_rel: f64,
+    max_abs: f32,
+    non_finite: usize,
+}
+
+fn error_dist(got: &[f32], want: &[f32], mag: &[f32]) -> ErrorDist {
+    let mut sq_err = 0.0f64;
+    let mut sq_ref = 0.0f64;
+    let mut rels: Vec<f64> = Vec::with_capacity(got.len());
+    let mut max_abs = 0.0f32;
+    let mut non_finite = 0usize;
+    for ((g, w), m) in got.iter().zip(want).zip(mag) {
+        let d = (*g - *w) as f64;
+        if !d.is_finite() {
+            non_finite += 1;
+            continue;
+        }
+        sq_err += d * d;
+        sq_ref += (*w as f64) * (*w as f64);
+        max_abs = max_abs.max(d.abs() as f32);
+        if *m > 0.0 {
+            rels.push(d.abs() / *m as f64);
+        }
+    }
+    rels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pick = |q: f64| -> f64 {
+        if rels.is_empty() {
+            return 0.0;
+        }
+        let idx = ((rels.len() - 1) as f64 * q).round() as usize;
+        rels[idx]
+    };
+    ErrorDist {
+        count: got.len(),
+        nmse: if sq_ref > 0.0 { sq_err / sq_ref } else { 0.0 },
+        mean_rel: if rels.is_empty() {
+            0.0
+        } else {
+            rels.iter().sum::<f64>() / rels.len() as f64
+        },
+        p99_rel: pick(0.99),
+        max_rel: pick(1.0),
+        max_abs,
+        non_finite,
+    }
+}
+
+/// Uniform activations in roughly [-1, 1): every value in a Q8_1 block is the
+/// same order, which is the *easy* case for an 8-bit block scale.
+fn acts_uniform(rng: &mut Rng, n: usize) -> Vec<f32> {
+    f32s(rng, n)
+}
+
+/// The hard case, and the realistic one: a few outlier channels an order up.
+/// A Q8_1 block scale is set by its largest magnitude, so one outlier coarsens
+/// the other 31 values by that factor. Real transformer hidden states have
+/// exactly this shape, so a soundness claim made only on uniform data is a
+/// claim about the wrong distribution.
+fn acts_outlier(rng: &mut Rng, n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| {
+            let v = rng.f32();
+            if i % 32 == 7 {
+                v * 16.0
+            } else {
+                v
+            }
+        })
+        .collect()
+}
+
+/// Upstream `test-backend-ops` gates MUL_MAT on aggregate NMSE at this bound,
+/// for exactly these kernels and quant types. Meeting it is the "llama.cpp
+/// ships this" half of the argument; the Q8_1-modelled column below is the
+/// "and our port is exact anyway" half.
+const UPSTREAM_MUL_MAT_NMSE: f64 = 5e-4;
+
+/// The f32 accumulation floor. Once the activation format is modelled the two
+/// sides compute the same sum, so what is left is f32 reduction order against
+/// an f64 reference: per element ~1e-6 of the summed term magnitude, which for
+/// these shapes lands three to four orders below this bound. Set well above the
+/// measured floor so ordinary reduction reshuffles do not trip it, and far
+/// enough below `UPSTREAM_MUL_MAT_NMSE` that it still separates "kernel exact"
+/// from "kernel merely acceptable".
+const Q81_MODEL_NMSE: f64 = 1e-9;
+
+#[allow(clippy::too_many_lines)]
+fn mmvq_error_report() -> i32 {
+    let exec = match ExecRuntime::with_backend(ExecBackendKind::Cuda) {
+        Ok(ExecRuntime::Cuda(runtime)) => runtime,
+        Ok(_) => unreachable!(),
+        Err(err) => {
+            eprintln!("mmvq-error: CUDA runtime unavailable: {err:?}");
+            return 3;
+        }
+    };
+    println!("device: {}", exec.device_description());
+    println!("column cap: MMV_MAX_COLUMNS = {MMV_MAX_COLUMNS}");
+    println!(
+        "\ncolumns: nmse_* = sum(err^2)/sum(ref^2) against the Q8_1-modelled \
+         reference, the full-f32 reference, and the f32-activation KERNEL.\n\
+         rel_* = |err| as a fraction of that dot's summed term magnitude \
+         (mean / p99 / max)."
+    );
+    println!(
+        "\n{:<6} {:<8} {:>5} {:>3} {:>6} {:>10} {:>10} {:>10} {:>26} {:>26}",
+        "type",
+        "acts",
+        "k",
+        "m",
+        "rows",
+        "nmse_q81",
+        "nmse_f32",
+        "nmse_f32k",
+        "rel_q81 mean/p99/max",
+        "rel_f32 mean/p99/max",
+    );
+    println!("{}", "-".repeat(120));
+
+    let mut failures = 0usize;
+    let mut rng = Rng::new(0x5151_4d4d_0e11);
+    for (ty, tag) in [
+        (TensorType::Q4K, "q4_K"),
+        (TensorType::Q5K, "q5_K"),
+        (TensorType::Q6K, "q6_K"),
+    ] {
+        let kind = quant_kind_of(ty);
+        for k in [512usize, 2048, 4096] {
+            let n = 257usize;
+            let weights = quant_blocks(&mut rng, ty, k, n);
+            let row_bytes = weights.len() / n;
+            let rows: Vec<Vec<f32>> = (0..n)
+                .map(|row| dequant_row(ty, &weights[row * row_bytes..(row + 1) * row_bytes], k))
+                .collect();
+            for (acts_tag, outlier) in [("uniform", false), ("outlier", true)] {
+                for m in [1usize, 2, 4, 8] {
+                    // The report is about the Q8_1 route; if the dispatcher
+                    // would not take it at this width there is nothing here to
+                    // measure, and silently reporting the other route's numbers
+                    // under these headings would be worse than saying nothing.
+                    if route_act_format(kind, m) != ActFormat::Q81 {
+                        println!("SKIP {tag}/{acts_tag}/k{k}/m{m}: dispatch is not on mul_mat_vec_q");
+                        continue;
+                    }
+                    let acts = if outlier {
+                        acts_outlier(&mut rng, k * m)
+                    } else {
+                        acts_uniform(&mut rng, k * m)
+                    };
+                    let got = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m, false);
+                    let f32_kernel = run_quant_mul_mat(&exec, ty, &weights, &acts, k, n, m, true);
+                    let (want_q81, mag_q81) =
+                        quant_matmul_reference(&rows, &acts, k, m, ActFormat::Q81);
+                    let (want_f32, mag_f32) =
+                        quant_matmul_reference(&rows, &acts, k, m, ActFormat::F32);
+                    let d_q81 = error_dist(&got, &want_q81, &mag_q81);
+                    let d_f32 = error_dist(&got, &want_f32, &mag_f32);
+                    let d_kernels = error_dist(&got, &f32_kernel, &mag_f32);
+                    println!(
+                        "{tag:<6} {acts_tag:<8} {k:>5} {m:>3} {:>6} {:>10.2e} {:>10.2e} {:>10.2e} {:>26} {:>26}",
+                        d_q81.count,
+                        d_q81.nmse,
+                        d_f32.nmse,
+                        d_kernels.nmse,
+                        format!(
+                            "{:.1e}/{:.1e}/{:.1e}",
+                            d_q81.mean_rel, d_q81.p99_rel, d_q81.max_rel
+                        ),
+                        format!(
+                            "{:.1e}/{:.1e}/{:.1e}",
+                            d_f32.mean_rel, d_f32.p99_rel, d_f32.max_rel
+                        ),
+                    );
+                    let label = format!("{tag}/{acts_tag}/k{k}/m{m}");
+                    if d_q81.non_finite > 0 || d_q81.nmse > Q81_MODEL_NMSE {
+                        println!(
+                            "FAIL {label}: kernel is not exact on its own input format \
+                             (nmse {:.3e} > {Q81_MODEL_NMSE:.0e}, max_rel {:.2e}, \
+                             max_abs {:.7}, non_finite {})",
+                            d_q81.nmse, d_q81.max_rel, d_q81.max_abs, d_q81.non_finite,
+                        );
+                        failures += 1;
+                    }
+                    if d_f32.nmse > UPSTREAM_MUL_MAT_NMSE {
+                        println!(
+                            "FAIL {label}: Q8_1 activation cost {:.3e} exceeds upstream's \
+                             MUL_MAT gate {UPSTREAM_MUL_MAT_NMSE:.0e}",
+                            d_f32.nmse,
+                        );
+                        failures += 1;
+                    }
+                    // If the route quietly changed under us, `got` would be the
+                    // f32-activation kernel's answer and the two columns would
+                    // collapse into each other. Requiring three orders of
+                    // separation keeps the exactness result from being a
+                    // tautology about a kernel that is no longer running.
+                    if d_f32.nmse < d_q81.nmse * 1e3 {
+                        println!(
+                            "FAIL {label}: no route separation (nmse_f32 {:.3e} vs nmse_q81 {:.3e}) \
+                             — is this still on mul_mat_vec_q?",
+                            d_f32.nmse, d_q81.nmse,
+                        );
+                        failures += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "\nmmvq-error: {failures} failures{}",
+        if failures == 0 { " (green)" } else { "" }
+    );
+    i32::from(failures != 0)
+}
+
+/// One `mul_mat` through the planner, optionally with the official Q8_1
+/// mat-vec route switched off so the hand-written f32-activation kernel runs.
+fn run_quant_mul_mat(
+    exec: &CudaExecRuntime,
+    ty: TensorType,
+    weights: &[u8],
+    acts: &[f32],
+    k: usize,
+    n: usize,
+    m: usize,
+    force_f32_acts: bool,
+) -> Vec<f32> {
+    let _disable = force_f32_acts.then(|| ScopedEnv::set("MKLLM_DISABLE_Q81_MMVQ", "1"));
+    let mut bench = Bench::new(512 << 20);
+    let w = bench.tensor("w", ty, &[k as i64, n as i64], weights);
+    let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(acts));
+    let out = bench
+        .ctx
+        .mul_mat(w, x, BufferUsage::Activations)
+        .expect("mul_mat");
+    let outputs = bench.run(exec, out, &[out]);
+    bytes_to_f32(&outputs[&out])
+}
+
+/// GGUF block kind for a tensor type, as the CUDA launchers number them.
+fn quant_kind_of(ty: TensorType) -> i32 {
+    use makepad_ai_cuda::llm_ops as ops;
+    match ty {
+        TensorType::Q4K => ops::QUANT_Q4K,
+        TensorType::Q5K => ops::QUANT_Q5K,
+        TensorType::Q6K => ops::QUANT_Q6K,
+        TensorType::Q8_0 => ops::QUANT_Q80,
+        TensorType::Q3K => ops::QUANT_Q3K,
+        TensorType::IQ4Xs => ops::QUANT_IQ4XS,
+        TensorType::IQ4Nl => ops::QUANT_IQ4NL,
+        TensorType::IQ3S => ops::QUANT_IQ3S,
+        other => unreachable!("quant_kind_of: no CUDA kind for {other:?}"),
+    }
+}
+
+/// Widths the quantized mat-vec cases sweep.
+///
+/// 1 is plain decode. 2..8 is a speculative verify batch, which is why the
+/// range exists at all. 9..16 are the widths a raised `MMVQ_MAX_BATCH_SIZE`
+/// would unlock; they are filtered against the live cap, so at the shipped cap
+/// they print a SKIP and under a raised one they run — "the widths a bigger cap
+/// unlocks are numerically sound" becomes a statement someone can execute
+/// rather than an argument someone has to win.
+const MMV_CASE_WIDTHS: [usize; 8] = [1, 2, 5, 8, 9, 10, 12, 16];
+
+/// One width past the cap, on the dequant-slab GEMM.
+const GEMM_CASE_WIDTH: usize = 33;
+
+/// Run one `mul_mat` through the real planner and compare against the
+/// reference for the route it takes.
+fn quant_matmul_case(
+    exec: &CudaExecRuntime,
+    name: &str,
+    ty: TensorType,
+    rows: &[Vec<f32>],
+    weights: &[u8],
+    acts: &[f32],
+    k: usize,
+    n: usize,
+    m: usize,
+    fmt: ActFormat,
+    failures: &mut usize,
+) {
+    let mut bench = Bench::new(64 << 20);
+    let w = bench.tensor("w", ty, &[k as i64, n as i64], weights);
+    let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(acts));
+    let out = bench
+        .ctx
+        .mul_mat(w, x, BufferUsage::Activations)
+        .expect("mul_mat");
+    let outputs = bench.run(exec, out, &[out]);
+    let got = bytes_to_f32(&outputs[&out]);
+    let (want, mag) = quant_matmul_reference(rows, acts, k, m, fmt);
+    let budget: Vec<f32> = mag.iter().map(|g| dot_error_budget(fmt, *g)).collect();
+    compare_budget(name, fmt.label(), &got, &want, &budget, failures);
+}
+
+/// The mat-vec and GEMM gates for every weight type decode reads.
+///
+/// The width decides the route and the route decides the activation format, so
+/// the reference is chosen per width instead of once per type:
+///
+///   * `m <= MMV_MAX_COLUMNS`, K-quant — official `mul_mat_vec_q`, Q8_1
+///     activations. This is the kernel every shipped decode step runs: `m = 1`
+///     for plain decode, `m = draft + 1` for a speculative verify batch.
+///   * `m <= MMV_MAX_COLUMNS`, Q8_0 — hand-written `mmv_quant`, f32
+///     activations (Q8_0 is deliberately off the official route; see
+///     `mkllm_kind_route_mask`).
+///   * `m > MMV_MAX_COLUMNS` — dequant slab + cuBLAS, bf16 on both sides.
+///
+/// Because each case's reference encodes its route, the reference is also the
+/// route proof: a silent fall-back from `mul_mat_vec_q` to the f32 mat-vec
+/// moves the result by ~1e-3 of the summed term magnitude, three orders past
+/// the budget, so the case goes red rather than passing on the wrong kernel.
+fn quant_matmul_canary(exec: &CudaExecRuntime, rng: &mut Rng, failures: &mut usize) {
+    for (ty, tag) in [
+        (TensorType::Q4K, "q4k"),
+        (TensorType::Q5K, "q5k"),
+        (TensorType::Q6K, "q6k"),
+        (TensorType::Q8_0, "q80"),
+    ] {
+        let (k, n) = (512usize, 33usize);
+        let kind = quant_kind_of(ty);
+        let weights = quant_blocks(rng, ty, k, n);
+        let row_bytes = weights.len() / n;
+        let rows: Vec<Vec<f32>> = (0..n)
+            .map(|row| dequant_row(ty, &weights[row * row_bytes..(row + 1) * row_bytes], k))
+            .collect();
+
+        for m in MMV_CASE_WIDTHS {
+            let name = format!("mmv_{tag}_m{m}");
+            if m > MMV_MAX_COLUMNS {
+                println!("SKIP {name}: column cap is {MMV_MAX_COLUMNS}");
+                continue;
+            }
+            let acts = f32s(rng, k * m);
+            let fmt = route_act_format(kind, m);
+            quant_matmul_case(
+                exec, &name, ty, &rows, &weights, &acts, k, n, m, fmt, failures,
+            );
+        }
+
+        // The hand-written `mmv_quant` is not dead code: the official route
+        // needs contiguous activation columns and a contiguous destination and
+        // declines otherwise, and unlike `mul_mat_vec_q` it promises to read
+        // the activations as f32. Force it and gate it at the f32 budget, so
+        // the tight f32 gate these cases used to carry survives — pointed at
+        // the kernel that actually makes the promise.
+        if ty != TensorType::Q8_0 {
+            let _disable = ScopedEnv::set("MKLLM_DISABLE_Q81_MMVQ", "1");
+            for m in [1usize, 5] {
+                let name = format!("mmvf32_{tag}_m{m}");
+                let acts = f32s(rng, k * m);
+                quant_matmul_case(
+                    exec,
+                    &name,
+                    ty,
+                    &rows,
+                    &weights,
+                    &acts,
+                    k,
+                    n,
+                    m,
+                    ActFormat::F32,
+                    failures,
+                );
+            }
+        }
+
+        let m = GEMM_CASE_WIDTH;
+        let acts = f32s(rng, k * m);
+        let fmt = route_act_format(kind, m);
+        quant_matmul_case(
+            exec,
+            &format!("gemm_{tag}"),
+            ty,
+            &rows,
+            &weights,
+            &acts,
+            k,
+            n,
+            m,
+            fmt,
+            failures,
+        );
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn opcheck() -> i32 {
     let exec = match ExecRuntime::with_backend(ExecBackendKind::Cuda) {
@@ -1660,58 +2268,7 @@ fn opcheck() -> i32 {
     let mut failures = 0usize;
     let mut rng = Rng::new(1234);
 
-    // --- quantized mat-vec + GEMM, all three K-quants, small and large M
-    for (ty, name_v, name_g) in [
-        (TensorType::Q4K, "mmv_q4k", "gemm_q4k"),
-        (TensorType::Q5K, "mmv_q5k", "gemm_q5k"),
-        (TensorType::Q6K, "mmv_q6k", "gemm_q6k"),
-        (TensorType::Q8_0, "mmv_q80", "gemm_q80"),
-    ] {
-        let (k, n) = (512usize, 33usize);
-        let weights = quant_blocks(&mut rng, ty, k, n);
-        let row_bytes = weights.len() / n;
-        for (case_name, m, tol_abs, tol_rel) in [
-            (name_v, 5usize, 1e-3f32, 1e-5f32),
-            (name_g, 33usize, 5e-2f32, 1e-2f32),
-        ] {
-            let acts = f32s(&mut rng, k * m);
-            let mut bench = Bench::new(64 << 20);
-            let w = bench.tensor("w", ty, &[k as i64, n as i64], &weights);
-            let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(&acts));
-            let out = bench
-                .ctx
-                .mul_mat(w, x, BufferUsage::Activations)
-                .expect("mul_mat");
-            let outputs = bench.run(&exec, out, &[out]);
-            let got = bytes_to_f32(&outputs[&out]);
-            // The GEMM route (m > MMV_MAX) computes with bf16-rounded weights
-            // and activations; model exactly that so cancellation-heavy dots
-            // do not read as kernel defects.
-            let is_gemm = m > 8;
-            let mut want = vec![0.0f32; n * m];
-            for row in 0..n {
-                let mut wrow = dequant_row(ty, &weights[row * row_bytes..(row + 1) * row_bytes], k);
-                if is_gemm {
-                    for w in wrow.iter_mut() {
-                        *w = bf16_round(*w);
-                    }
-                }
-                for col in 0..m {
-                    let mut acc = 0.0f64;
-                    for i in 0..k {
-                        let a = if is_gemm {
-                            bf16_round(acts[col * k + i])
-                        } else {
-                            acts[col * k + i]
-                        };
-                        acc += wrow[i] as f64 * a as f64;
-                    }
-                    want[col * n + row] = acc as f32;
-                }
-            }
-            compare_tol(case_name, got, want, tol_abs, tol_rel, &mut failures);
-        }
-    }
+    quant_matmul_canary(&exec, &mut rng, &mut failures);
 
     q4k_mmq_canary(&exec, &mut failures);
     q5k_mmq_canary(&exec, &mut failures);
