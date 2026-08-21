@@ -44,7 +44,7 @@
 
 use std::time::{Duration, Instant};
 
-use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
+use makepad_ai_llm::{LlamaSession, LlamaSessionConfig, LlamaStopReason};
 
 const DEFAULT_COLS: &[usize] = &[1, 2, 3, 4, 6, 8, 10, 12, 16, 24, 32, 64, 128, 256];
 
@@ -127,15 +127,39 @@ fn parse_args() -> Args {
     args
 }
 
-/// Filler context. Timing is independent of *which* ids these are — the same
-/// weights are read either way — so they are generated rather than tokenized,
-/// which makes the fill length exact and the run reproducible without a
-/// tokenizer round-trip.
-fn filler_tokens(count: usize, vocab_size: usize) -> Vec<i32> {
-    let span = vocab_size.saturating_sub(2048).max(1024);
-    (0..count)
-        .map(|i| (1024 + (i.wrapping_mul(7919)) % span) as i32)
-        .collect()
+/// A paragraph of ordinary prose, cycled to reach the requested fill.
+///
+/// A decode step's cost does not depend on *which* ids sit in the cache, so
+/// synthetic ids would do for the `--cols` curve. They will not do for
+/// `--verify-widths`: that mode has to actually generate, and a model fed
+/// random ids answers with an immediate end-of-sequence, so no verify round
+/// ever runs. Real text keeps the model writing.
+const FILLER_TEXT: &str = "\
+The harbour was busy that morning. Cranes swung over the quay, gulls argued \
+above the fish market, and the ferry from the north island came in twenty \
+minutes late as it always did. Anna counted the crates as they landed, marking \
+each one in the ledger she carried under her arm, and thought about the letter \
+she had not yet answered. The tide would turn at four. By then the last of the \
+cargo would be stacked in the long shed, the tally would balance or it would \
+not, and she would walk home along the seawall with the wind behind her. ";
+
+fn filler_tokens(session: &LlamaSession, count: usize) -> Vec<i32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let seed = session
+        .vocab()
+        .tokenize(FILLER_TEXT, false, true)
+        .unwrap_or_default();
+    if seed.is_empty() {
+        // No usable tokenizer: fall back to synthetic ids. Fine for --cols,
+        // and --verify-widths will report that it could not generate.
+        let span = session.vocab().len().saturating_sub(2048).max(1024);
+        return (0..count)
+            .map(|i| (1024 + (i.wrapping_mul(7919)) % span) as i32)
+            .collect();
+    }
+    seed.iter().copied().cycle().take(count).collect()
 }
 
 fn median(mut values: Vec<f64>) -> f64 {
@@ -195,8 +219,7 @@ fn main() {
     };
     println!("loaded in {:.1}s", started.elapsed().as_secs_f64());
 
-    let vocab_size = session.vocab().len();
-    let rows = match measure_columns(&mut session, &args, vocab_size) {
+    let rows = match measure_columns(&mut session, &args) {
         Ok(rows) => rows,
         Err(err) => {
             eprintln!("llama-batch-bench: {err}");
@@ -207,21 +230,17 @@ fn main() {
     drop(session);
 
     if !args.verify_widths.is_empty() {
-        measure_verify_widths(&args, vocab_size);
+        measure_verify_widths(&args);
     }
 }
 
-fn measure_columns(
-    session: &mut LlamaSession,
-    args: &Args,
-    vocab_size: usize,
-) -> Result<Vec<Row>, String> {
+fn measure_columns(session: &mut LlamaSession, args: &Args) -> Result<Vec<Row>, String> {
     let mut rows = Vec::new();
     for &cols in &args.cols {
         // Every column count is measured from the SAME fill, so the rows differ
         // only in width. Re-prefill rather than letting the cache drift.
         session.reset().map_err(|e| format!("reset: {e:?}"))?;
-        let prompt = filler_tokens(args.fill, vocab_size);
+        let prompt = filler_tokens(session, args.fill);
         let prefill_started = Instant::now();
         session
             .append_tokens(&prompt)
@@ -238,7 +257,7 @@ fn measure_columns(
         }
         let fill_at_start = session.token_count();
 
-        let step = filler_tokens(cols, vocab_size);
+        let step = filler_tokens(session, cols);
         for _ in 0..args.warmup {
             session
                 .append_tokens(&step)
@@ -330,7 +349,7 @@ fn report_columns(rows: &[Row], args: &Args) {
 /// times those calls itself (`SpeculativeStats::verify_nanos` over `rounds`),
 /// so a short greedy generation per width is enough. The draft forwards and
 /// the sampling are timed separately and excluded.
-fn measure_verify_widths(args: &Args, vocab_size: usize) {
+fn measure_verify_widths(args: &Args) {
     println!("\nn_outputs=B verify-shape curve  (fill {} tok)", args.fill);
     println!(
         "{:>5}  {:>10}  {:>12}  {:>10}  {:>8}",
@@ -359,21 +378,32 @@ fn measure_verify_widths(args: &Args, vocab_size: usize) {
             println!("{width:>5}  (this gguf carries no MTP draft head — verify shape unavailable)");
             continue;
         }
-        if let Err(err) = session.append_tokens(&filler_tokens(args.fill, vocab_size)) {
+        let prompt = filler_tokens(&session, args.fill);
+        if let Err(err) = session.append_tokens(&prompt) {
             eprintln!("  B={width}: prefill failed: {err:?}");
             continue;
         }
         // One short warm generation so graphs are compiled and captured, then
         // a measured one; the counters are cumulative, so difference them.
-        if let Err(err) = session.continue_greedy(width * 2) {
-            eprintln!("  B={width}: warmup failed: {err:?}");
-            continue;
+        match session.continue_greedy(width * 2) {
+            Ok(warm) if warm.stop_reason != LlamaStopReason::MaxNewTokens => {
+                println!("{width:>5}  (warmup stopped: {:?})", warm.stop_reason);
+                continue;
+            }
+            Err(err) => {
+                eprintln!("  B={width}: warmup failed: {err:?}");
+                continue;
+            }
+            Ok(_) => {}
         }
         let before = session.speculative_stats();
-        if let Err(err) = session.continue_greedy(args.verify_tokens) {
-            eprintln!("  B={width}: generate failed: {err:?}");
-            continue;
-        }
+        let generated = match session.continue_greedy(args.verify_tokens) {
+            Ok(generated) => generated,
+            Err(err) => {
+                eprintln!("  B={width}: generate failed: {err:?}");
+                continue;
+            }
+        };
         let after = session.speculative_stats();
         let (Some(before), Some(after)) = (before, after) else {
             continue;
@@ -383,7 +413,11 @@ fn measure_verify_widths(args: &Args, vocab_size: usize) {
         let drafted = after.drafted.saturating_sub(before.drafted);
         let accepted = after.accepted.saturating_sub(before.accepted);
         if rounds == 0 {
-            println!("{width:>5}  (no verify rounds ran — generation stopped early)");
+            println!(
+                "{width:>5}  (no verify rounds ran: {} tokens, stop {:?})",
+                generated.token_ids.len(),
+                generated.stop_reason
+            );
             continue;
         }
         let ms = Duration::from_nanos(nanos).as_secs_f64() * 1e3 / rounds as f64;
