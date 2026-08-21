@@ -396,7 +396,7 @@ impl LaneExecutor {
             } => {
                 let logits = self
                     .session
-                    .prefill_slot_chunk(kv_base, state_row, start, &tokens)
+                    .prefill_slot_chunk(lane, kv_base, state_row, start, &tokens)
                     .map_err(|e| format!("lane {lane} prefill: {e}"))?;
                 // A lane's stream is seeded once, when it is admitted, and
                 // carried for the whole generation.

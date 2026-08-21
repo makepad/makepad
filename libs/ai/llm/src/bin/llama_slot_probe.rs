@@ -455,7 +455,7 @@ fn run_timeline(
         let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
         let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
         let logits = session
-            .prefill_slot_chunk(kv_base, state_row, 0, &prompt)
+            .prefill_slot_chunk(lane, kv_base, state_row, 0, &prompt)
             .map_err(|e| format!("lane {lane} prefill: {e}"))?;
         table.advance(lane, prompt.len()).map_err(|e| e.to_string())?;
         table.begin_decoding(lane).map_err(|e| e.to_string())?;
@@ -577,7 +577,7 @@ fn timing_sweep(
             let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
             let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
             let logits = session
-                .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+                .prefill_slot_chunk(lane, kv_base, state_row, 0, prompt)
                 .map_err(|e| format!("lane {lane} prefill: {e}"))?;
             table.advance(lane, prompt.len()).map_err(|e| e.to_string())?;
             table.begin_decoding(lane).map_err(|e| e.to_string())?;
@@ -658,7 +658,7 @@ fn run_batch_with_neighbours(
         let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
         let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
         let logits = session
-            .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+            .prefill_slot_chunk(lane, kv_base, state_row, 0, prompt)
             .map_err(|e| format!("lane {lane} prefill: {e}"))?;
         table
             .advance(lane, prompt.len())
@@ -786,7 +786,7 @@ fn decode_lane_alone(
         .ok_or_else(|| format!("slot {lane} missing"))?;
     let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
     let mut logits = session
-        .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+        .prefill_slot_chunk(lane, kv_base, state_row, 0, prompt)
         .map_err(|e| format!("lane {lane} prefill: {e}"))?;
     let mut produced = Vec::new();
     let mut fill = prompt.len();
@@ -794,7 +794,7 @@ fn decode_lane_alone(
         let token = argmax_token_id(&logits).ok_or_else(|| format!("lane {lane}: no argmax"))?;
         produced.push(token);
         logits = session
-            .prefill_slot_chunk(kv_base, state_row, fill, &[token])
+            .prefill_slot_chunk(lane, kv_base, state_row, fill, &[token])
             .map_err(|e| format!("lane {lane} decode: {e}"))?;
         fill += 1;
     }
@@ -849,7 +849,7 @@ fn batched_interleave(
         let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
         let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
         let logits = session
-            .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+            .prefill_slot_chunk(lane, kv_base, state_row, 0, prompt)
             .map_err(|e| format!("lane {lane} batched prefill: {e}"))?;
         table
             .advance(lane, prompt.len())
@@ -948,7 +948,7 @@ fn slot_independence(
         let state_row = slot.live_state_row();
 
         let mut logits = session
-            .prefill_slot_chunk(kv_base, state_row, 0, &prompt)
+            .prefill_slot_chunk(slot_index, kv_base, state_row, 0, &prompt)
             .map_err(|e| format!("slot {slot_index} prefill: {e}"))?;
 
         let mut produced = Vec::new();
@@ -958,7 +958,7 @@ fn slot_independence(
                 .ok_or_else(|| format!("slot {slot_index} produced no argmax"))?;
             produced.push(token);
             logits = session
-                .prefill_slot_chunk(kv_base, state_row, fill, &[token])
+                .prefill_slot_chunk(slot_index, kv_base, state_row, fill, &[token])
                 .map_err(|e| format!("slot {slot_index} decode: {e}"))?;
             fill += 1;
         }
