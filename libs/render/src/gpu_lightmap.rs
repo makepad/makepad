@@ -303,7 +303,43 @@ pub struct GpuBakeJob {
     pub casters_only: Vec<GpuBakeMesh>,
     /// World xz rect of the ground region (x0, z0, span, span).
     pub terrain_world: Option<Vec4f>,
+    /// Why this bake was scheduled, for the log. The bake is the one thing
+    /// in the frame that can change a settled picture seconds after the
+    /// world appeared, so it says so out loud.
+    pub trigger: BakeTrigger,
 }
+
+/// What asked for a bake. Purely for the log line — a blowout that "pops
+/// in" has to be attributable to the run that caused it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BakeTrigger {
+    /// The first bake of a realm: the world just loaded.
+    #[default]
+    FirstBake,
+    /// The world changed — an edit, a re-eval, streamed-in props.
+    WorldEdit,
+    /// The sun moved far enough to restrengthen the lamps.
+    SunChange,
+}
+
+impl BakeTrigger {
+    fn label(self) -> &'static str {
+        match self {
+            BakeTrigger::FirstBake => "first bake",
+            BakeTrigger::WorldEdit => "world edit / re-eval",
+            BakeTrigger::SunChange => "sun change",
+        }
+    }
+}
+
+/// The sum a lamp is allowed to leave on flat, unshadowed, up-facing
+/// ground: daylight plus every pool that reaches it. Above 1.0 the frame
+/// clips — a near-white albedo goes to pure white with the warm rim of the
+/// tint's red channel saturating first. `lightmap::lamp_daylight_scale` is
+/// the rail that keeps this true; this constant is what the bake CHECKS,
+/// so a future path that skips the rail is caught by its own log line
+/// instead of by a screenshot.
+const LM_EXPOSURE_CEILING: f32 = 1.0;
 
 /// What the renderer stores when a scheduled layout is first realized.
 pub struct GpuLmDelivery {
@@ -613,6 +649,221 @@ fn bake_budget_from_env() -> usize {
 
 fn v3(x: f32, y: f32, z: f32) -> Vec3f {
     Vec3f { x, y, z }
+}
+
+/// The one number a region's exposure report is about: what the brightest
+/// texel of `region` can read once the bake lands, and how it got there.
+struct RegionExposure {
+    /// Lamps whose reach touches the region.
+    lamps: usize,
+    /// The brightest lamp light any texel of the region can receive.
+    /// Evaluated AT each touching bulb's own hot spot and summed there, so
+    /// two pools 26 m apart do not add into a number neither of them
+    /// delivers — a report that cries wolf is worse than no report.
+    lamp_peak: f32,
+    /// `daylight + lamp_peak`: the composite an unshadowed, flat, up-facing
+    /// texel of this region reads on an albedo of 1. Over
+    /// [`LM_EXPOSURE_CEILING`] the frame CLIPS.
+    sum: f32,
+    /// GROUND regions only: how many texels the pools drive past the
+    /// FRAME's clip point. `LM_LAMP_SAT_TEXELS` of them is the collar a
+    /// fixture is allowed (5cf85a720: "a lamp may blow out a 1.13 m collar,
+    /// never the street"); more than that is the street.
+    clip_texels: f32,
+}
+
+fn region_exposure(
+    region: &Region,
+    lights: &[LmLight],
+    daylight: f32,
+    texels_per_unit: f32,
+) -> RegionExposure {
+    use crate::lightmap::{
+        lamp_ground_light, lamp_ground_texels_over, lamp_mount_from_radius, lamp_peak_in_box,
+        LM_LAMP_CEIL,
+    };
+    let ground = matches!(region.kind, RegionKind::Ground);
+    let headroom = (LM_EXPOSURE_CEILING - daylight).max(0.0);
+    let touching: Vec<&LmLight> = lights
+        .iter()
+        .filter(|l| sphere_touches_box(l.pos, l.radius, region.min, region.max))
+        .collect();
+    // What light `l` lays at world point `p`. On the ground that is the
+    // pool's own arithmetic and exact for a harvested fixture; on a mesh
+    // the surface normal is unknown, so the distance falloff alone is the
+    // honest upper bound.
+    let at = |l: &LmLight, p: Vec3f| -> f32 {
+        let cmax = l.color.x.max(l.color.y).max(l.color.z);
+        if ground {
+            let mount = lamp_mount_from_radius(l.radius);
+            let rho = ((p.x - l.pos.x).powi(2) + (p.z - l.pos.z).powi(2)).sqrt();
+            lamp_ground_light(mount, rho, l.radius, cmax, l.spot)
+        } else {
+            let d = ((p.x - l.pos.x).powi(2) + (p.y - l.pos.y).powi(2) + (p.z - l.pos.z).powi(2))
+                .sqrt();
+            if d >= l.radius {
+                0.0
+            } else {
+                let att = 1.0 - d / l.radius;
+                cmax * att * att
+            }
+        }
+    };
+    // The hot spot is under one of the bulbs; overlap between pools shows
+    // up because every OTHER pool is evaluated at that same point.
+    let mut lamp_peak = 0.0f32;
+    let mut clip_texels = 0.0f32;
+    for l in &touching {
+        let p = Vec3f {
+            x: l.pos.x.clamp(region.min.x, region.max.x),
+            y: l.pos.y.clamp(region.min.y, region.max.y),
+            z: l.pos.z.clamp(region.min.z, region.max.z),
+        };
+        let here: f32 = touching.iter().map(|o| at(o, p)).sum();
+        // On a mesh the point-sample IS `lamp_peak_in_box`; take the pair's
+        // max so the bound can never read under the closest approach.
+        lamp_peak = lamp_peak
+            .max(here)
+            .max(if ground { 0.0 } else { lamp_peak_in_box(l, region.min, region.max) });
+        if ground {
+            let cmax = l.color.x.max(l.color.y).max(l.color.z);
+            clip_texels += lamp_ground_texels_over(
+                lamp_mount_from_radius(l.radius),
+                l.radius,
+                cmax,
+                l.spot,
+                texels_per_unit,
+                headroom,
+            );
+        }
+    }
+    // The atlas cannot carry more than its own ceiling however many pools
+    // overlap, so the report may not claim more either.
+    lamp_peak = lamp_peak.min(LM_LAMP_CEIL);
+    RegionExposure {
+        lamps: touching.len(),
+        lamp_peak,
+        sum: daylight + lamp_peak,
+        clip_texels,
+    }
+}
+
+/// Annotate the bake, once per run, at INFO — the permanent record of what
+/// the bake is about to do to a picture the player is already looking at.
+///
+/// A bake is the ONE thing that changes a settled frame seconds after a
+/// world appears, so a blowout that "pops in" must be attributable from the
+/// log alone: which run, what triggered it, how many regions and lamps, how
+/// much of the display's 0..1 the sky had already spent, and — per region
+/// that a lamp reaches — the sum that region's brightest texel will read.
+/// Any region over [`LM_EXPOSURE_CEILING`] gets its own loud line naming
+/// itself and its numbers, so the next regression does not need a
+/// screenshot.
+///
+/// Cost is per REGION, not per texel: a handful of float ops against a
+/// light list that is already in hand. The heavy per-region lines are
+/// capped so a city of thousands of props stays readable.
+fn report_bake_exposure(state: &BakeState, scene: &LmScene, trigger: BakeTrigger, budget: usize) {
+    use crate::lightmap::{LM_LAMP_GROUND_PEAK, LM_LAMP_SAT_TEXELS};
+    let daylight =
+        crate::lightmap::daylight_on_ground(scene.sun_dir, scene.sun_color, scene.sun_sky);
+    let scale = crate::lightmap::lamp_daylight_scale(daylight);
+    // The ground region's real density, so `clip_texels` is in the same
+    // units the collar budget is written in.
+    let tpu = state
+        .regions
+        .iter()
+        .find(|r| matches!(r.kind, RegionKind::Ground))
+        .map(|r| r.rect.w as f32 / (r.max.x - r.min.x).max(0.0001))
+        .unwrap_or(crate::lightmap::LM_LAMP_SAT_DENSITY);
+    let exposure = |r: &Region| region_exposure(r, &state.lights, daylight, tpu);
+    log!(
+        "lm bake: {} — {} regions ({} lamp-lit), {} lamp(s), {}px atlas, {} region(s)/frame, \
+         ground {:.2} texels/unit; sun elev {:.0} deg, daylight {:.3} of {:.1} on flat ground, \
+         headroom {:.3}, lamp scale {:.2} (pool peak {:.3})",
+        trigger.label(),
+        state.regions.len(),
+        state.regions.iter().filter(|r| exposure(r).lamps > 0).count(),
+        state.lights.len(),
+        state.size,
+        if budget == 0 { state.regions.len() } else { budget },
+        tpu,
+        scene.sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees(),
+        daylight,
+        LM_EXPOSURE_CEILING,
+        (LM_EXPOSURE_CEILING - daylight).max(0.0),
+        scale,
+        LM_LAMP_GROUND_PEAK * scale,
+    );
+    /// Per-region detail lines one bake may print before it summarizes: a
+    /// city of thousands of props must stay readable.
+    const DETAIL_LINES: usize = 8;
+    let mut printed = 0usize;
+    let mut blown = 0usize;
+    let (mut worst, mut worst_at) = (0.0f32, 0usize);
+    for (ri, r) in state.regions.iter().enumerate() {
+        let e = exposure(r);
+        if e.sum > worst {
+            worst = e.sum;
+            worst_at = ri;
+        }
+        let kind = if matches!(r.kind, RegionKind::Ground) { "ground" } else { "mesh" };
+        // LOUD, and never elided: a pool painting more than the documented
+        // collar past the frame\'s clip point IS the blown plaza, and this
+        // is it naming itself. Everything the eye would have had to guess
+        // from a screenshot is on this line.
+        if e.clip_texels > LM_LAMP_SAT_TEXELS {
+            blown += 1;
+            error!(
+                "lm bake: region {ri} ({kind}) BLOWS OUT — {:.0} ground texels past the clip \
+                 point ({:.0}x the {} texel collar a fixture is allowed), {} lamp(s), \
+                 {}x{} texels over world ({:.1},{:.1})..({:.1},{:.1}); daylight {:.3} + lamp \
+                 {:.3} = {:.3} > {:.1}. A texel of albedo {:.2} or brighter reaches white. \
+                 The daylight rail (lightmap::lamp_daylight_scale) did not hold.",
+                e.clip_texels,
+                e.clip_texels / LM_LAMP_SAT_TEXELS,
+                LM_LAMP_SAT_TEXELS as u32,
+                e.lamps,
+                r.rect.w, r.rect.h,
+                r.min.x, r.min.z, r.max.x, r.max.z,
+                daylight, e.lamp_peak, e.sum, LM_EXPOSURE_CEILING,
+                (LM_EXPOSURE_CEILING / e.sum.max(1e-4)).clamp(0.0, 1.0),
+            );
+        } else if e.lamps > 0 && printed < DETAIL_LINES {
+            printed += 1;
+            log!(
+                "lm bake: region {ri} ({kind}) {}x{} texels, {} lamp(s), daylight {:.3} + lamp \
+                 {:.3} = {:.3} ({:.0}% of the clip point{})",
+                r.rect.w,
+                r.rect.h,
+                e.lamps,
+                daylight,
+                e.lamp_peak,
+                e.sum,
+                100.0 * e.sum / LM_EXPOSURE_CEILING,
+                if e.clip_texels > 0.0 {
+                    format!(", {:.0} texels in the fixture\'s own collar", e.clip_texels)
+                } else {
+                    String::new()
+                },
+            );
+        }
+    }
+    if blown > 0 {
+        error!(
+            "lm bake: {blown} region(s) blow out — the picture WILL flood white when this bake lands"
+        );
+    } else {
+        log!(
+            "lm bake: clean — no region paints past the collar; brightest is region {} at {:.3} \
+             of {:.1} ({} detail line(s) shown of {} lamp-lit)",
+            worst_at,
+            worst,
+            LM_EXPOSURE_CEILING,
+            printed,
+            state.regions.iter().filter(|r| exposure(r).lamps > 0).count(),
+        );
+    }
 }
 
 fn min3(a: Vec3f, b: Vec3f) -> Vec3f {
@@ -1152,7 +1403,7 @@ impl GpuLightmapBaker {
             mesh_map: job.mesh_map.clone(),
             terrain_world: job.terrain_world,
         };
-        self.state = Some(BakeState {
+        let state = BakeState {
             size,
             regions,
             meshes,
@@ -1162,7 +1413,9 @@ impl GpuLightmapBaker {
             scene_min,
             scene_max,
             tex,
-        });
+        };
+        report_bake_exposure(&state, &job.scene, job.trigger, self.bake_budget);
+        self.state = Some(state);
         self.dirty = true;
         Some(delivery)
     }
@@ -2413,6 +2666,91 @@ mod tests {
             baker.bake_budget,
         );
         assert!(baker.bake_progress().is_none());
+    }
+
+    fn ground_region(min: Vec3f, max: Vec3f, px: usize) -> Region {
+        Region {
+            rect: LmRect { x: 1, y: 1, w: px, h: px },
+            kind: RegionKind::Ground,
+            min,
+            max,
+        }
+    }
+
+    /// The bake's own alarm, both ways. A blowout that "pops in" seconds
+    /// after a world appears must be attributable from the LOG — so the
+    /// region that will flood has to name itself, and a region running
+    /// inside its headroom has to stay quiet. (A report that cries wolf is
+    /// worse than no report: this is the test that keeps it honest.)
+    #[test]
+    fn the_bake_reports_the_region_that_will_flood_and_stays_quiet_otherwise() {
+        use crate::lightmap::{
+            lamp_daylight_scale, lamp_photometry, LM_LAMP_SAT_TEXELS,
+        };
+        // The reported world: noon over a town-sized ground region, one ×2
+        // Kenney lantern in the middle of it.
+        let daylight = 0.861; // measured, and what the bake logs at 12.5
+        let mount = 1.369 * 2.0;
+        let (radius, strength) = lamp_photometry(mount);
+        let tint = Vec3f { x: 1.0, y: 0.775, z: 0.475 };
+        let region = ground_region(
+            v3(-50.0, -1.0, -50.0),
+            v3(37.0, 2.0, 37.0),
+            1024,
+        );
+        let tpu = 11.77;
+
+        // WITHOUT the rail: a 0.30 pool against 0.139 of headroom paints
+        // far more than the collar a fixture is allowed.
+        let blown = vec![LmLight {
+            pos: v3(14.0, mount, -5.0),
+            color: tint * strength,
+            radius,
+            dir: v3(0.0, -1.0, 0.0),
+            spot: 1.0,
+        }];
+        let e = region_exposure(&region, &blown, daylight, tpu);
+        assert_eq!(e.lamps, 1);
+        assert!(e.sum > 1.0, "the reported blowout did not reproduce: {}", e.sum);
+        assert!(
+            e.clip_texels > LM_LAMP_SAT_TEXELS,
+            "the blown street was inside the collar budget: {} texels",
+            e.clip_texels
+        );
+
+        // WITH it: same lamp, same sun, nothing over the ceiling and
+        // nothing to shout about.
+        let scale = lamp_daylight_scale(daylight);
+        let railed = vec![LmLight {
+            color: tint * (strength * scale),
+            ..blown[0].clone()
+        }];
+        let e = region_exposure(&region, &railed, daylight, tpu);
+        assert!(e.sum <= 1.0, "the rail did not hold: {}", e.sum);
+        assert_eq!(e.clip_texels, 0.0, "a railed pool still clipped the frame");
+
+        // Two lamps 26 m apart do not ADD into a brightness neither of them
+        // delivers — the loose bound that made the first cut of this report
+        // cry wolf on the ground region.
+        let pair = vec![
+            railed[0].clone(),
+            LmLight { pos: v3(-12.0, mount, 5.0), ..railed[0].clone() },
+        ];
+        let e2 = region_exposure(&region, &pair, daylight, tpu);
+        assert_eq!(e2.lamps, 2);
+        assert!(
+            (e2.lamp_peak - e.lamp_peak).abs() < 1e-3,
+            "distant pools summed: one {} vs two {}",
+            e.lamp_peak,
+            e2.lamp_peak
+        );
+
+        // And a region no lamp reaches is not lamp-lit at all.
+        let far = ground_region(v3(400.0, 0.0, 400.0), v3(500.0, 1.0, 500.0), 64);
+        let e3 = region_exposure(&far, &pair, daylight, tpu);
+        assert_eq!(e3.lamps, 0);
+        assert_eq!(e3.lamp_peak, 0.0);
+        assert_eq!(e3.sum, daylight);
     }
 
     #[test]
