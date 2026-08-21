@@ -1358,7 +1358,13 @@ impl PortalList {
             // the template ref itself is exact; for a non-isolated (main-app) list it
             // yields MAIN_SPLASH_VM_ID, i.e. exactly `cx.with_vm`, so normal usage is
             // unchanged.
-            let vm_id = cx.script_ref_vm_id(template_ref);
+            let Some(vm_id) = cx.script_ref_vm_id(template_ref) else {
+                // The isolate that minted this template has been reclaimed, so
+                // the list is on its way out too. An empty item is the only
+                // honest answer: instantiating from a dead heap is what the
+                // comment above warns about.
+                return (WidgetRef::empty(), false);
+            };
             match self.items.entry(entry_id) {
                 Entry::Occupied(mut occ) => {
                     if occ.get().template == template {
