@@ -158,3 +158,27 @@ fn portallist_partially_clipped_row_is_still_clickable(app: TestApp) {
     app.locator(Selector::id("outside_button")).click();
     app.locator(Selector::id("last_played")).wait_text("outside");
 }
+
+/// One huge wheel delta (a fast coast) must land as a first_id jump, not as
+/// thousands of pixels of negative-scroll backlog that the draw loop walks
+/// row by row: before the renormalisation, dy=4000 here instantiated 106 row
+/// widgets in one frame (dy=8000 in the games list drew ~200). The landing
+/// position itself must match the height-tree mapping a scroll-bar drag
+/// lands by (uniform 40px rows: 4000px = row 100).
+#[makepad_test]
+fn one_big_wheel_delta_jumps_instead_of_walking_every_row(app: TestApp) {
+    app.locator(Selector::all().text_exact("Play 0")).wait_visible();
+    app.locator(Selector::id("list")).scroll(0.0, 4000.0);
+    app.locator(Selector::all().text_exact("Play 100")).wait_visible();
+
+    let total = app
+        .widget_snapshot()
+        .iter()
+        .filter(|w| w.id == "play_button")
+        .count();
+    assert!(
+        total <= 24,
+        "a big wheel delta materialised {total} row widgets — the backlog \
+         was walked instead of jumped"
+    );
+}
