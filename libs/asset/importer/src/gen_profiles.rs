@@ -238,6 +238,7 @@ mod tests {
                 vram_reserve_mb: Some(2048),
                 queue_limit: Some(8),
                 fleet: None,
+                lanes: None,
             }),
             models,
         }

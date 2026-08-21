@@ -701,6 +701,19 @@ fn build_product(
     request_out.categories = vec![kind.category.to_string()];
     request_out.tags = kind.tags.iter().map(|t| t.to_string()).collect();
     request_out.tags.extend(extra_tags);
+    // Client-proposed tags ride the job body (the VJ's loop pipe tags its
+    // clips `loop`). Bounded and charset-checked here so a buggy client
+    // cannot spray the catalog with junk rows.
+    if let Some(tags) = request.body.get("tags").and_then(Value::as_arr) {
+        for tag in tags.iter().filter_map(Value::as_str).take(4) {
+            let tag = tag.trim().to_ascii_lowercase();
+            let ok = (2..=24).contains(&tag.len())
+                && tag.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if ok && !request_out.tags.contains(&tag) {
+                request_out.tags.push(tag);
+            }
+        }
+    }
     request_out.stats = stats;
     Ok(request_out)
 }
@@ -1301,6 +1314,7 @@ mod tests {
                 vram_reserve_mb: Some(2 * 1024),
                 queue_limit: Some(8),
                 fleet: None,
+                lanes: None,
             }),
             models,
         }
@@ -1396,6 +1410,43 @@ mod tests {
         assert!(!is_vram_admission_error("invalid video dimensions"));
         assert!(!is_vram_admission_error("unknown model"));
         assert_eq!(bounded("aéé", 4), "aé");
+    }
+
+    /// The VJ's loop pipe tags its clips `loop` through the job body; the
+    /// worker forwards bounded, charset-clean tags and drops the rest.
+    #[test]
+    fn client_tags_ride_the_body_bounded_and_sanitized() {
+        let kind = kind_of("image.generate").unwrap();
+        let body = obj(vec![
+            ("prompt", s("a looping tunnel")),
+            (
+                "tags",
+                Value::Arr(vec![
+                    s("loop"),
+                    s(" LOOP "),                    // dup after normalize
+                    s("x"),                          // too short
+                    s("has spaces"),                 // bad charset
+                    s("this-tag-is-far-too-long-to-keep"), // too long
+                    s("ok-2"),
+                ]),
+            ),
+        ]);
+        let request = GenRequest::from_body(kind, &body).unwrap();
+        let product = GenArtifact {
+            content_type: "image/png".to_string(),
+            bytes: tiny_png(),
+        };
+        let publish = build_product(kind, "gen", &request, product).unwrap();
+        assert!(publish.tags.contains(&"loop".to_string()), "{:?}", publish.tags);
+        assert_eq!(
+            publish.tags.iter().filter(|t| *t == "loop").count(),
+            1,
+            "{:?}",
+            publish.tags
+        );
+        // Take-4 bound is applied BEFORE filtering, so ok-2 (position 6) is
+        // dropped with the junk; the junk itself never lands.
+        assert!(!publish.tags.iter().any(|t| t.contains(' ') || t.len() > 24), "{:?}", publish.tags);
     }
 
     #[test]

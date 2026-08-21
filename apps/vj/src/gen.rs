@@ -283,6 +283,10 @@ pub struct GenPipe {
     pub namespace: &'static str,
     pub expand: bool,
     pub alpha: bool,
+    /// A clip meant to run on a pad forever: the prompt is steered toward
+    /// cyclic motion, the published asset is tagged `loop`, and the audio
+    /// track is skipped (a pad loop is a visual).
+    pub loop_video: bool,
 }
 
 pub const GEN_PIPES: &[GenPipe] = &[
@@ -292,6 +296,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: false,
+        loop_video: false,
     },
     GenPipe {
         label: "expand → alpha",
@@ -299,6 +304,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: true,
+        loop_video: false,
     },
     GenPipe {
         label: "expand → video",
@@ -306,6 +312,15 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: false,
+        loop_video: false,
+    },
+    GenPipe {
+        label: "expand → video loop",
+        kind: "video.generate",
+        namespace: "gen",
+        expand: true,
+        alpha: false,
+        loop_video: true,
     },
     GenPipe {
         label: "expand → music",
@@ -313,6 +328,7 @@ pub const GEN_PIPES: &[GenPipe] = &[
         namespace: "gen",
         expand: true,
         alpha: false,
+        loop_video: false,
     },
 ];
 
@@ -476,7 +492,24 @@ impl GenModel {
         if pipe.alpha {
             pairs.push(("alpha".to_string(), Value::Bool(true)));
         }
-        pairs.push(("prompt".to_string(), s(prompt.clone())));
+        if pipe.loop_video {
+            // A pad loop is a visual: skip the joint audio decode/mux, and
+            // tag the row so the grids can find loops as loops.
+            pairs.push(("audio".to_string(), Value::Bool(false)));
+            pairs.push(("tags".to_string(), Value::Arr(vec![s("loop")])));
+        }
+        // The video model has no native loop mode; the loop pipe steers the
+        // motion instead. The row's title stays the operator's own words.
+        let body_prompt = if pipe.loop_video {
+            format!(
+                "{prompt} — a seamless perfectly looping clip: continuous cyclic \
+                 motion, no cuts, no camera jumps, the final frame flowing back \
+                 into the first"
+            )
+        } else {
+            prompt.clone()
+        };
+        pairs.push(("prompt".to_string(), s(body_prompt)));
 
         // Bound the visible rows: drop the oldest terminal row; refuse when
         // every slot is an ACTIVE job.
@@ -905,6 +938,33 @@ mod tests {
         assert_eq!(body.get("model").and_then(Value::as_str), Some("h3"));
         assert_eq!(body.get("width").and_then(Value::as_u64), Some(640));
         assert_eq!(body.get("prompt").and_then(Value::as_str), Some("neon tunnel"));
+    }
+
+    /// The loop pipe is the video pipe plus loop steering: cyclic-motion
+    /// prompt, `loop` tag, no audio track — and the row title stays the
+    /// operator's own words.
+    #[test]
+    fn the_loop_pipe_steers_the_prompt_and_tags_the_row() {
+        let loop_index = GEN_PIPES
+            .iter()
+            .position(|p| p.loop_video)
+            .expect("a loop pipe");
+        let mut m = GenModel::new();
+        m.set_prompt("neon tunnel".into());
+        m.select_profile(loop_index);
+        let cmds = m.generate(0);
+        let GenCmd::Enqueue { kind, body, .. } = cmds[0].clone() else {
+            panic!()
+        };
+        assert_eq!(kind, "video.generate");
+        assert_eq!(body.get("audio").and_then(Value::as_bool), Some(false));
+        let tags = body.get("tags").and_then(Value::as_arr).expect("tags");
+        assert_eq!(tags.iter().filter_map(Value::as_str).collect::<Vec<_>>(), vec!["loop"]);
+        let prompt = body.get("prompt").and_then(Value::as_str).unwrap();
+        assert!(prompt.starts_with("neon tunnel"), "{prompt}");
+        assert!(prompt.contains("looping"), "{prompt}");
+        assert_eq!(m.jobs().next().unwrap().title, "neon tunnel");
+        assert_eq!(m.jobs().next().unwrap().profile_label, "expand → video loop");
     }
 
     #[test]
