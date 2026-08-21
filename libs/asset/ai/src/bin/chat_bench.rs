@@ -53,7 +53,7 @@ fn main() {
     let base = args.next().unwrap_or_else(|| {
         eprintln!(
             "usage: chat-bench <http://box:8123> [--turns N] [--model ID] \
-             [--interleave] [--as-a-game-client] [--system-words N]"
+             [--interleave] [--as-a-game-client] [--long] [--system-words N]"
         );
         std::process::exit(2);
     });
@@ -63,6 +63,8 @@ fn main() {
     let mut interleave = false;
     // Behave like the real game client instead of echoing the reply back.
     let mut as_a_game_client = false;
+    // Ask for long answers so the rate is decode-bound.
+    let mut long = false;
     // Words of taught context. The default is deliberately game-sized: a
     // bench with a one-line prompt does not test prefill at all.
     let mut system_words = 2000usize;
@@ -86,6 +88,10 @@ fn main() {
                 as_a_game_client = true;
                 index += 1;
             }
+            "--long" => {
+                long = true;
+                index += 1;
+            }
             "--system-words" => {
                 system_words = rest
                     .get(index + 1)
@@ -105,8 +111,9 @@ fn main() {
          game-client={as_a_game_client}  system~{system_words} words"
     );
     let mut failures: Vec<String> = Vec::new();
-    let mut main_chat = Conversation::new("bench-primary", system_words, as_a_game_client);
-    let mut other_chat = Conversation::new("bench-interleaved", system_words, as_a_game_client);
+    let mut main_chat = Conversation::new("bench-primary", system_words, as_a_game_client, long);
+    let mut other_chat =
+        Conversation::new("bench-interleaved", system_words, as_a_game_client, long);
 
     for turn in 1..=turns {
         // The interleaved arm runs BETWEEN the primary's turns, which is the
@@ -254,18 +261,43 @@ struct Conversation {
     /// Store replies the way the game client stores them — reasoning removed —
     /// and carry tool results between turns.
     as_a_game_client: bool,
+    /// Ask for long answers, so the measured rate is the decode rate.
+    long_answers: bool,
 }
 
 impl Conversation {
-    fn new(id: &'static str, system_words: usize, as_a_game_client: bool) -> Self {
+    fn new(
+        id: &'static str,
+        system_words: usize,
+        as_a_game_client: bool,
+        long_answers: bool,
+    ) -> Self {
         let mut system = long_system_prompt(system_words);
         // Two conversations must not share a prompt, or "both stayed warm"
         // could be one lane serving both.
         system.push_str(id);
-        Self { id, system, messages: Vec::new(), as_a_game_client }
+        Self { id, system, messages: Vec::new(), as_a_game_client, long_answers }
     }
 
     fn next_question(&self) -> String {
+        // A rate read off a 30-token reply is mostly HTTP and the poll
+        // interval: at 120 ms granularity a turn that decodes in 300 ms
+        // measures as whatever the poller happened to see. `--long` asks for
+        // enough output that the number is the decode rate, which is the one
+        // the user's meter shows.
+        if self.long_answers {
+            const LONG: [&str; 3] = [
+                "Write a 60-line poem about a lighthouse keeper who is afraid of the dark.",
+                "Write another 60 lines, same keeper, the morning after.",
+                "Now 60 more, from the point of view of the light itself.",
+            ];
+            let asked = self
+                .messages
+                .iter()
+                .filter(|(role, text)| role == "user" && !text.starts_with("<tool_response>"))
+                .count();
+            return LONG[asked % LONG.len()].to_string();
+        }
         const QUESTIONS: [&str; 6] = [
             "In one sentence, what is a GPU?",
             "And what is a CPU?",
@@ -394,7 +426,7 @@ fn request_json(model: &str, system: &str, messages: &[(String, String)]) -> Str
         out.push_str(&escape(text));
         out.push_str("\"}");
     }
-    out.push_str("],\"max_tokens\":400,\"temperature\":0.7,\"seed\":7}");
+    out.push_str("],\"max_tokens\":1200,\"temperature\":0.7,\"seed\":7}");
     out
 }
 
