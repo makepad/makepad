@@ -79,6 +79,7 @@ impl Runtime {
         _arena: &Arena,
         _n_tokens: usize,
         _n_outputs: usize,
+        _attention_key_base: usize,
         _attention_key_count: usize,
         _n_seqs: usize,
     ) -> Result<Compiled> {

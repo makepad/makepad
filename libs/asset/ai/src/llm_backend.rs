@@ -976,7 +976,18 @@ mod llama_worker {
     const MAX_CONTEXT: u32 = 32768;
     /// Batched prefill: measured 350-600 tok/s vs ~28 tok/s at batch 1 on
     /// the 9B (see libs/converse qwen_filter.rs).
-    const PREFILL_BATCH: usize = 64;
+    ///
+    /// 512, not 64. A chunk's cost is dominated by terms that do not scale
+    /// with the tokens in it — the attention kernel's pass over the key span,
+    /// and a 27B FFN that is latency-bound below a few hundred columns — so 64
+    /// was costing a factor of four and a half on a real prompt. Measured on
+    /// .217, 4096 tokens into one lane: 786 tok/s at 64, 3575 at 512, 3800 at
+    /// 1024. The last step is not worth twice the graph activations.
+    ///
+    /// A player feels this as the wait before the FIRST token of a fresh
+    /// conversation: a 7,900-token taught context is 10 s at 786 tok/s and
+    /// 2.2 s at 3575.
+    const PREFILL_BATCH: usize = 512;
 
     /// Concurrent decode lanes. 1 keeps the single-lane worker, which is the
     /// path every existing deployment runs; >1 selects the batched worker.
@@ -1039,6 +1050,29 @@ mod llama_worker {
             assert_eq!(context_for_lanes(32768, 0), 32768, "zero lanes reads as one");
             assert!(context_for_lanes(4, 8) >= 1, "never a zero-length context");
         }
+    }
+
+    /// Say ONCE why a long conversation keeps prefilling cold.
+    ///
+    /// Once per process, not per turn: it is a property of how the box is
+    /// configured, so repeating it every message would bury the turn lines that
+    /// are actually per-turn facts.
+    fn warn_open_think_is_never_warm() {
+        use std::sync::Once;
+        static SAID: Once = Once::new();
+        if crate::protocol::chat_think_mode() == "brief" {
+            return;
+        }
+        SAID.call_once(|| {
+            eprintln!(
+                "[llm-worker] NOTE: a returning conversation cannot be warm while thinking is \
+                 open. The lane's cache holds <think> + the reasoning + the answer; a client \
+                 stores the answer alone, so its next prompt stops extending the cache at the \
+                 last token of the previous prompt and the whole history is re-ingested. \
+                 MAKEPAD_ASSET_AI_CHAT_THINK=brief makes the rendered history match what was \
+                 generated, and turns after the first become a delta."
+            );
+        });
     }
 
     /// One session, N conversations, jobs joining and leaving at chunk
@@ -1333,6 +1367,17 @@ mod llama_worker {
                             "[llm-worker] turn {job}: prefill {} {ingested} tok",
                             if resumed { "RESUMED, ingested only" } else { "cold, ingested" }
                         );
+                        // A big COLD ingest on a box that thinks out loud is
+                        // not a bug in the matcher, and the next person to read
+                        // this log should not have to derive that again. The
+                        // KV holds the reasoning; the client stores the reply
+                        // without it; so the prompt cannot extend what the lane
+                        // holds, and the divergence sits at the last token of
+                        // the previous prompt — which is why the whole
+                        // conversation is re-ingested rather than a tail of it.
+                        if !resumed && ingested > 1024 {
+                            warn_open_think_is_never_warm();
+                        }
                         if let Some(lane) = jobs.get_mut(&job) {
                             lane.warm = Some((ingested, resumed));
                             let _ = lane.events.send(WorkerEvent::Serving(
@@ -1380,14 +1425,43 @@ mod llama_worker {
                                 },
                             ));
                         }
-                        if let Some(think) = lane.think_tokens {
-                            let total = lane.token_ids.len();
+                        let total = lane.token_ids.len();
+                        if total == 0 {
+                            // A turn that produced NOTHING is the one thing this
+                            // log absolutely has to carry, and until now it was
+                            // the one thing it dropped: the line below only
+                            // printed when a think block had closed, so an empty
+                            // reply left no trace at all and the client's
+                            // "llm produced an empty expansion" had nothing on
+                            // the box to match it against.
+                            //
+                            // It means the model sampled its end-of-turn token as
+                            // the FIRST token after the prompt — it read the turn
+                            // as already finished. A closed think block in the
+                            // generation prefill is the known way to provoke
+                            // that, so the mode is named here rather than left to
+                            // be guessed.
+                            eprintln!(
+                                "[llm-worker] turn {job}: EMPTY REPLY - the model ended the turn \
+                                 on its first token (think mode: {}). The client will report this \
+                                 as an empty expansion.",
+                                crate::protocol::chat_think_mode(),
+                            );
+                        } else if let Some(think) = lane.think_tokens {
                             eprintln!(
                                 "[llm-worker] turn {job}: {total} tokens generated, {think} of \
                                  them inside <think> ({:.0}% never shown to the user), \
                                  {} visible",
                                 think as f64 / total.max(1) as f64 * 100.0,
                                 total.saturating_sub(think),
+                            );
+                        } else {
+                            // No think block at all (brief mode, or a model that
+                            // does not reason). Still say what came out: a turn
+                            // with no line at all is indistinguishable from a
+                            // turn that never happened.
+                            eprintln!(
+                                "[llm-worker] turn {job}: {total} tokens generated, all visible"
                             );
                         }
                         // The session's KV now holds prompt + reply + suffix,

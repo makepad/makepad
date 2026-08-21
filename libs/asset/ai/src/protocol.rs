@@ -258,6 +258,52 @@ pub fn think_prefill_for_expand(model_id: &str) -> &'static str {
 /// a strict string-prefix extension (KV reuse).
 pub const CHAT_COMMIT_SUFFIX: &str = "<|im_end|>\n";
 
+/// The think block a FINISHED assistant turn is rendered with.
+///
+/// A historical turn is over, so its block has to be closed: an open `<think>`
+/// followed by the answer and `<|im_end|>` reads as reasoning that never
+/// concluded, and the model learns to end turns on a planning sentence. When
+/// the generation prefill is itself closed — brief mode, or the empty-closed
+/// block older Qwens use — that IS what the model saw while producing the turn,
+/// so reusing it verbatim makes the rendered history byte-identical to the
+/// tokens the KV already holds, which is the whole of prefix reuse.
+///
+/// When the generation prefill is OPEN (Qwen3.8's default), no rendering can
+/// have that property: the KV holds the reasoning and the stored turn does not.
+/// The closed empty block is then the honest reconstruction, and warmth has to
+/// come from somewhere else.
+pub fn history_think_prefill(generation_prefill: &str) -> &str {
+    if generation_prefill.contains("</think>") {
+        generation_prefill
+    } else {
+        CHAT_THINK_PREFILL
+    }
+}
+
+/// A stored assistant turn with any client-side think-block compensation
+/// removed.
+///
+/// Clients that strip reasoning before storing a reply have to put the closing
+/// tag back, because the service opens a block on every assistant turn it
+/// renders (`libs/asset/chat/src/qwen.rs` prepends `"\n</think>\n\n"`). Two
+/// halves of one decision living in two crates is how the rendered turn stops
+/// matching what the model produced, so the service takes the text apart again
+/// and renders the block itself.
+///
+/// Only a block with NOTHING in it is stripped. Real reasoning coming back is a
+/// client echoing the reply verbatim, and that text is the KV's own content —
+/// removing it would break exactly the case it is trying to help.
+pub fn assistant_history_text(text: &str) -> &str {
+    let Some(close) = text.find("</think>") else {
+        return text;
+    };
+    let (before, after) = text.split_at(close);
+    if !before.trim().is_empty() && before.trim() != "<think>" {
+        return text;
+    }
+    after["</think>".len()..].trim_start_matches(['\n', '\r'])
+}
+
 /// Prefix-stable ChatML for multi-turn chat. Previous assistant turns are
 /// reconstructed with the same think-prefill the generation prompt used, so
 /// `prompt_n + reply + CHAT_COMMIT_SUFFIX` is a prefix of `prompt_{n+1}`.
@@ -270,6 +316,7 @@ pub fn assemble_chat_prompt_with_think(
     messages: &[ChatMessageJson],
     think_prefill: &str,
 ) -> String {
+    let history_prefill = history_think_prefill(think_prefill);
     let mut out = String::new();
     out.push_str("<|im_start|>system\n");
     let sys = system.trim_end();
@@ -289,9 +336,11 @@ pub fn assemble_chat_prompt_with_think(
         out.push_str(role);
         out.push('\n');
         if role == "assistant" {
-            out.push_str(think_prefill);
+            out.push_str(history_prefill);
+            out.push_str(assistant_history_text(&m.text));
+        } else {
+            out.push_str(&m.text);
         }
-        out.push_str(&m.text);
         out.push_str("<|im_end|>\n");
     }
     out.push_str("<|im_start|>assistant\n");
@@ -806,6 +855,193 @@ pub struct ModelInventoryArtifactJson {
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct ErrorJson {
     pub error: String,
+}
+
+#[cfg(test)]
+mod warm_history_tests {
+    use super::*;
+
+    fn msg(role: &str, text: &str) -> ChatMessageJson {
+        ChatMessageJson {
+            role: role.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    /// A stored assistant turn exactly as the game client sends it.
+    ///
+    /// `libs/asset/chat/src/qwen.rs` strips reasoning before storing a reply
+    /// and puts the closing tag back on the way out, because the service opens
+    /// a block on every assistant turn it renders. Any test of warmth that does
+    /// not model THAT is testing a client nobody runs — which is why the
+    /// existing prefix-cache tests pass while every real turn is cold.
+    fn as_the_client_sends_it(visible: &str) -> ChatMessageJson {
+        msg("assistant", &format!("\n</think>\n\n{visible}"))
+    }
+
+    /// A real game turn: taught system block, a user turn, a tool call and its
+    /// result (the client wraps tool outcomes as user-role
+    /// `<tool_response>`), and the answer.
+    fn a_real_conversation() -> (String, Vec<ChatMessageJson>, String) {
+        let system = "You are the world builder. Verbs: place, move, remove.";
+        let first = vec![msg("user", "put a lamp by the door")];
+        let visible = "place(lamp, near=door)";
+        (system.to_string(), first, visible.to_string())
+    }
+
+    /// THE WARMTH PROPERTY, stated as the KV sees it: what the lane holds after
+    /// a turn — the prompt it ingested plus the tokens it generated — has to be
+    /// a prefix of the NEXT turn's prompt. Anything less and the whole
+    /// conversation is re-ingested, which at a 7,900-token taught context is
+    /// seconds of wall clock on every single message.
+    #[test]
+    fn a_brief_thought_makes_the_next_turn_extend_the_last_one() {
+        let (system, first_turn, visible) = a_real_conversation();
+        let think = CHAT_THINK_PREFILL_BRIEF_38;
+
+        // Turn 1: the prompt the lane ingests, then what the model generates.
+        // In brief mode the block is already closed when generation starts, so
+        // the model produces the answer and nothing else.
+        let prompt_1 = assemble_chat_prompt_with_think(&system, &first_turn, think);
+        let committed = format!("{prompt_1}{visible}");
+
+        // Turn 2: the client stores the visible answer, adds the tool result
+        // and the next user message, and sends the lot back.
+        let mut second_turn = first_turn.clone();
+        second_turn.push(as_the_client_sends_it(&visible));
+        second_turn.push(msg(
+            "user",
+            "<tool_response>\nplaced lamp #7\n</tool_response>",
+        ));
+        second_turn.push(msg("user", "now move it left"));
+        let prompt_2 = assemble_chat_prompt_with_think(&system, &second_turn, think);
+
+        assert!(
+            prompt_2.starts_with(&committed),
+            "turn 2 must extend what the lane already holds.\n  held:  {:?}\n  sent:  {:?}",
+            &committed[committed.len().saturating_sub(120)..],
+            &prompt_2[..prompt_2.len().min(committed.len() + 40)],
+        );
+        // And the extension is small — that is the whole point.
+        assert!(
+            prompt_2.len() - committed.len() < 200,
+            "the delta should be one tool result and one user turn, got {} bytes",
+            prompt_2.len() - committed.len()
+        );
+    }
+
+    /// The same conversation with thinking OPEN, which is Qwen3.8's default and
+    /// what .165 serves today. It CANNOT be warm, and this test exists to say
+    /// so out loud rather than let the next reader assume it is a bug in the
+    /// matcher.
+    ///
+    /// The KV holds `<think>` + the reasoning + `</think>` + the answer. The
+    /// client stores the answer alone. No rendering of the stored turn can
+    /// reproduce reasoning that was thrown away, so the prompt diverges at the
+    /// first token after the open block — which is the LAST token of the
+    /// previous prompt, so the common prefix is the entire conversation and the
+    /// match still fails.
+    #[test]
+    fn an_open_thought_cannot_be_warm_and_the_divergence_is_at_the_block() {
+        let (system, first_turn, visible) = a_real_conversation();
+        let think = CHAT_THINK_PREFILL_OPEN;
+
+        let prompt_1 = assemble_chat_prompt_with_think(&system, &first_turn, think);
+        let reasoning = "The door is at x=3. A lamp goes beside it.";
+        let committed = format!("{prompt_1}{reasoning}\n</think>\n\n{visible}");
+
+        let mut second_turn = first_turn.clone();
+        second_turn.push(as_the_client_sends_it(&visible));
+        second_turn.push(msg("user", "now move it left"));
+        let prompt_2 = assemble_chat_prompt_with_think(&system, &second_turn, think);
+
+        assert!(
+            !prompt_2.starts_with(&committed),
+            "if this ever passes, open-think warmth became possible and the \
+             brief-mode workaround can be retired"
+        );
+        let shared = committed
+            .bytes()
+            .zip(prompt_2.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert_eq!(
+            shared,
+            prompt_1.len(),
+            "the divergence is exactly at the end of turn 1's prompt: everything \
+             before it matches, and the very next byte is reasoning the client \
+             did not keep"
+        );
+    }
+
+    /// The client's closing tag is removed rather than duplicated. Without
+    /// this, brief mode renders `<think>..</think>` twice on every historical
+    /// turn and the rendered history stops matching the KV for a second,
+    /// independent reason.
+    #[test]
+    fn the_clients_compensation_is_taken_apart_not_stacked() {
+        assert_eq!(assistant_history_text("\n</think>\n\nhello"), "hello");
+        assert_eq!(assistant_history_text("<think>\n</think>\n\nhello"), "hello");
+        assert_eq!(assistant_history_text("plain answer"), "plain answer");
+        // Real reasoning coming back is the KV's own content: a client echoing
+        // the reply verbatim is the case warmth WANTS, so it is left alone.
+        let verbatim = "I should place it.\n</think>\n\nplace(lamp)";
+        assert_eq!(assistant_history_text(verbatim), verbatim);
+    }
+
+    /// Rendering a finished turn with an OPEN block would teach the model that
+    /// turns end mid-thought. Whatever the generation prefill is, history is
+    /// closed.
+    /// LIVE REGRESSION, 2026-08-21, and the reason this test is here rather
+    /// than a fix: turn 1 of an asset-ui chat answered, turn 2 came back
+    /// "llm produced an empty expansion". That error means the model sampled
+    /// its end-of-turn token as the FIRST token after the prompt.
+    ///
+    /// The brief seed is a CLOSED think block, so the generation prompt ends
+    /// with a finished thought and nothing else. On a long taught context with
+    /// a substantive question the model answers (gated: four turns on .217);
+    /// on a two-word casual turn it can read the turn as already over. That is
+    /// the same trap as the empty `</think>` prefill, in a milder form, and
+    /// the guard below is necessary but demonstrably NOT sufficient.
+    ///
+    /// So this test pins what is actually known, and names what is not: the
+    /// seed's shape is fine, and shape is not the whole story. The fix is a
+    /// retry — a chat turn whose prefill samples a stop token should be re-run
+    /// once with the open prefill rather than handed to the user as an error —
+    /// and it is not built.
+    #[test]
+    fn the_brief_seed_is_well_formed_which_is_necessary_and_not_sufficient() {
+        let seed = CHAT_THINK_PREFILL_BRIEF_38;
+        assert!(seed.starts_with("<think>") && seed.contains("</think>"));
+        assert!(
+            seed.trim_end().ends_with("</think>") || seed.ends_with("\n\n"),
+            "the seed must hand the model a finished thought and then get out of              the way, or the answer starts inside the block"
+        );
+        let inner = seed
+            .trim_start_matches("<think>")
+            .split("</think>")
+            .next()
+            .unwrap_or("");
+        assert!(!inner.trim().is_empty(), "an EMPTY closed block returns nothing at all");
+    }
+
+    #[test]
+    fn a_finished_turn_is_never_left_thinking() {
+        for prefill in [
+            CHAT_THINK_PREFILL,
+            CHAT_THINK_PREFILL_OPEN,
+            CHAT_THINK_PREFILL_BRIEF_38,
+        ] {
+            assert!(
+                history_think_prefill(prefill).contains("</think>"),
+                "{prefill:?} rendered an unfinished thought into history"
+            );
+        }
+        // Open mode keeps today's bytes exactly: the client's own
+        // reconstruction was `<think>\n` + `\n</think>\n\n`, which is the empty
+        // closed block character for character.
+        assert_eq!(history_think_prefill(CHAT_THINK_PREFILL_OPEN), CHAT_THINK_PREFILL);
+    }
 }
 
 #[cfg(test)]

@@ -382,6 +382,29 @@ fn should_use_flash_attention(head_dim: u32, n_tokens: usize) -> bool {
     !fattn_disabled && head_dim == 256
 }
 
+/// Re-express absolute arena rows in the coordinates of a graph whose
+/// attention window starts at `base`.
+///
+/// A row below the window is a caller error, not a clamp: it would mean the
+/// batch is asking a windowed graph about a conversation the window does not
+/// contain, and silently clamping it to the window's first row would produce
+/// fluent output built on somebody else's history.
+fn window_relative_rows(rows: &[i32], base: usize) -> Result<Vec<i32>> {
+    rows.iter()
+        .map(|row| {
+            usize::try_from(*row)
+                .ok()
+                .and_then(|value| value.checked_sub(base))
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or_else(|| {
+                    LlamaError::format(format!(
+                        "cache row {row} is below this graph's attention window base {base}"
+                    ))
+                })
+        })
+        .collect()
+}
+
 fn attention_mask_tensor_type(head_dim: u32, n_tokens: usize) -> TensorType {
     if should_use_flash_attention(head_dim, n_tokens) {
         TensorType::F16
@@ -871,6 +894,11 @@ pub struct HybridAttentionCacheView {
     pub v_head_dim: i64,
     pub kv_head_count: i64,
     pub max_context: usize,
+    /// First arena row this graph's attention window covers. Nonzero only for
+    /// a slot prefill, whose window is its own region rather than the arena
+    /// from row 0 — the mask writer subtracts it so a row's bounds are
+    /// expressed in the window the graph actually built.
+    pub graph_key_base: usize,
     pub graph_key_count: usize,
     pub max_sequences: i64,
     pub causal_window: Option<usize>,
@@ -906,7 +934,17 @@ pub struct HybridDecodeBatchLayout {
     /// `kv_base(s)` makes the mask block-diagonal, so a slot sees its own
     /// history and nothing else — with no change to any tensor shape, and so
     /// no change to any CUDA kernel.
+    ///
+    /// A batch whose graph is WINDOWED on one slot ([`Self::attention_key_base`])
+    /// needs none of this: its window contains only that slot's rows.
     pub attention_key_lower_bounds: Vec<i32>,
+    /// First arena row the compiled graph's attention window covers, matching
+    /// the graph this layout will be executed against.
+    ///
+    /// Cache WRITE indices stay absolute — `set_rows` addresses the whole
+    /// arena — so this shifts only the mask, whose columns are the window's.
+    /// Zero for every graph that attends from the cache's first row.
+    pub attention_key_base: usize,
 }
 
 /// The recurrent state-row vector a checkpointed batch needs:
@@ -1019,6 +1057,7 @@ impl HybridDecodeBatchLayout {
             hidden_read_rows: Vec::new(),
             hidden_write_rows: Vec::new(),
             attention_key_lower_bounds: Vec::new(),
+            attention_key_base: 0,
         })
     }
 
@@ -2474,6 +2513,7 @@ fn build_attention_decode_from_hidden(
     input_write_indices: TensorId,
     input_rope_positions: Option<TensorId>,
     n_tokens: usize,
+    attention_key_base: usize,
     attention_key_count: usize,
     shared_input_mask: Option<TensorId>,
     prefix: &str,
@@ -2487,10 +2527,21 @@ fn build_attention_decode_from_hidden(
             spec.cache.max_context
         ))
     })?;
-    if attention_key_count == 0 || attention_key_count > max_context {
+    // The window this graph attends over is `[base, base + count)` of the
+    // shared arena. `base` is 0 for every single-conversation graph — the
+    // cache tensor and the window then coincide, byte for byte, with what this
+    // function has always built. It is nonzero only for a SLOT's own prefill,
+    // where the slot owns rows `[kv_base, kv_base + capacity)` and the keys
+    // below its base belong to somebody else's conversation: attending over
+    // them costs the kernel a full pass across every one of those rows to
+    // discover the mask has already excluded them, which at 128k per lane is
+    // most of the prefill.
+    if attention_key_count == 0 || attention_key_base + attention_key_count > max_context {
         return Err(LlamaError::format(format!(
-            "attention decode key_count {} is outside 1..={}",
-            attention_key_count, max_context
+            "attention decode key window [{}..{}) is outside 0..{}",
+            attention_key_base,
+            attention_key_base + attention_key_count,
+            max_context
         )));
     }
 
@@ -2866,6 +2917,16 @@ fn build_attention_decode_from_hidden(
         (k_cache, v_cache)
     };
 
+    // Byte offset of the window's first key row. The cache WRITE above still
+    // uses absolute arena rows — `set_rows` targets the whole tensor — so only
+    // what attention READS moves. Zero base means offset zero, which is the
+    // view every existing graph has.
+    let k_window_offset = row_size(spec.cache.k_type, k_merged_width)?
+        .checked_mul(attention_key_base)
+        .ok_or_else(|| LlamaError::format("overflow offsetting the k cache window"))?;
+    let v_window_offset = row_size(spec.cache.v_type, v_merged_width)?
+        .checked_mul(attention_key_base)
+        .ok_or_else(|| LlamaError::format("overflow offsetting the v cache window"))?;
     let k_cache_view = ctx
         .view_4d(
             k_cache_written,
@@ -2880,7 +2941,7 @@ fn build_attention_decode_from_hidden(
                 spec.cache.k_type,
                 k_merged_width * i64::from(spec.cache.max_context),
             )?,
-            0,
+            k_window_offset,
         )
         .map_err(LlamaError::format)?;
     let v_cache_view = ctx
@@ -2897,7 +2958,7 @@ fn build_attention_decode_from_hidden(
                 spec.cache.v_type,
                 v_merged_width * i64::from(spec.cache.max_context),
             )?,
-            0,
+            v_window_offset,
         )
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(k_cache_view, format!("{prefix}.k_cache_view"))
@@ -3093,6 +3154,9 @@ pub fn build_attention_decode_graph_with_key_count(
         input_write_indices,
         input_rope_positions,
         n_tokens,
+        // Single-block probe graph: it has no slots, so its window starts at
+        // the cache's first row.
+        0,
         attention_key_count,
         None,
         "attn_decode",
@@ -6630,6 +6694,7 @@ fn build_hybrid_decode_graph_impl(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_base: usize,
     attention_key_count: usize,
     n_seqs: usize,
 ) -> Result<HybridDecodeGraph> {
@@ -7056,6 +7121,7 @@ fn build_hybrid_decode_graph_impl(
                     })?,
                     input_rope_positions,
                     n_tokens,
+                    attention_key_base,
                     attention_key_count,
                     shared_input_mask,
                     &format!("{prefix}.attn"),
@@ -7083,6 +7149,7 @@ fn build_hybrid_decode_graph_impl(
                             layer_index, decode.cache.max_context
                         ))
                     })?,
+                    graph_key_base: attention_key_base,
                     graph_key_count: attention_key_count,
                     max_sequences: i64::from(decode.cache.max_sequences),
                     causal_window: decode
@@ -7407,6 +7474,7 @@ pub fn build_hybrid_decode_graph(
         shared_cache,
         n_tokens,
         n_tokens,
+        0,
         default_attention_key_count(spec)?,
         1,
     )
@@ -7427,6 +7495,7 @@ pub fn build_hybrid_decode_graph_with_outputs(
         shared_cache,
         n_tokens,
         n_outputs,
+        0,
         default_attention_key_count(spec)?,
         1,
     )
@@ -7439,6 +7508,7 @@ pub fn build_hybrid_decode_graph_with_attention_key_count(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_base: usize,
     attention_key_count: usize,
 ) -> Result<HybridDecodeGraph> {
     build_hybrid_decode_graph_impl(
@@ -7448,6 +7518,7 @@ pub fn build_hybrid_decode_graph_with_attention_key_count(
         shared_cache,
         n_tokens,
         n_outputs,
+        attention_key_base,
         attention_key_count,
         1,
     )
@@ -7467,6 +7538,7 @@ pub fn build_hybrid_decode_graph_with_sequences(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_base: usize,
     attention_key_count: usize,
     n_seqs: usize,
 ) -> Result<HybridDecodeGraph> {
@@ -7477,6 +7549,7 @@ pub fn build_hybrid_decode_graph_with_sequences(
         shared_cache,
         n_tokens,
         n_outputs,
+        attention_key_base,
         attention_key_count,
         n_seqs,
     )
@@ -7523,6 +7596,7 @@ pub fn prepare_hybrid_decode_graph_with_attention_key_count(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_base: usize,
     attention_key_count: usize,
     features: MetalDeviceFeatures,
 ) -> Result<(HybridDecodeGraph, MetalPreparedGraph)> {
@@ -7533,6 +7607,7 @@ pub fn prepare_hybrid_decode_graph_with_attention_key_count(
         shared_cache,
         n_tokens,
         n_outputs,
+        attention_key_base,
         attention_key_count,
     )?;
     let prepared = prepare_graph(ctx, &decode.graph, features).map_err(LlamaError::format)?;
@@ -7732,6 +7807,7 @@ fn compile_hybrid_decode_metal_impl(
     shared_buffers: Option<&MetalContextBuffers>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_base: usize,
     attention_key_count: Option<usize>,
     n_seqs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
@@ -7762,6 +7838,7 @@ fn compile_hybrid_decode_metal_impl(
             shared_cache.as_ref(),
             n_tokens,
             n_outputs,
+            attention_key_base,
             attention_key_count,
             runtime.features(),
         )?
@@ -7816,7 +7893,7 @@ pub fn compile_hybrid_decode_metal(
     spec: &HybridDecodeSpec,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens, None, 1)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens, 0, None, 1)
 }
 
 pub fn compile_hybrid_decode_metal_with_outputs(
@@ -7825,7 +7902,7 @@ pub fn compile_hybrid_decode_metal_with_outputs(
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs, None, 1)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs, 0, None, 1)
 }
 
 pub fn compile_hybrid_decode_metal_with_shared_state(
@@ -7843,6 +7920,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state(
         Some(shared_buffers),
         n_tokens,
         n_tokens,
+        0,
         None,
         1,
     )
@@ -7864,6 +7942,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state_and_outputs(
         Some(shared_buffers),
         n_tokens,
         n_outputs,
+        0,
         None,
         1,
     )
@@ -7885,6 +7964,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state(
         Some(shared_buffers),
         n_tokens,
         n_tokens,
+        0,
         None,
         1,
     )
@@ -7907,6 +7987,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
         Some(shared_buffers),
         n_tokens,
         n_outputs,
+        0,
         None,
         1,
     )
@@ -7920,6 +8001,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
     shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_base: usize,
     attention_key_count: usize,
     n_seqs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
@@ -7931,6 +8013,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
         Some(shared_buffers),
         n_tokens,
         n_outputs,
+        attention_key_base,
         Some(attention_key_count),
         n_seqs,
     )
@@ -8345,18 +8428,33 @@ pub(crate) fn build_hybrid_decode_writes(
                 continue;
             }
             let key_count = attention_mask_write_key_count(ctx, input_mask)?;
-            // The mask is indexed by ABSOLUTE cache row, so its upper bound is
-            // the row each token writes, not the token's within-slot position.
-            // For a single sequence the two are equal (`attention_write_indices`
-            // is `positions` verbatim), so this is byte-identical to keying off
-            // `positions`; for a unified multi-slot arena the write index is
-            // `kv_base + position` and only the write index is correct.
+            // The mask is indexed by the graph's own key WINDOW, so its upper
+            // bound is the row each token writes, not the token's within-slot
+            // position. For a single sequence the two are equal
+            // (`attention_write_indices` is `positions` verbatim), so this is
+            // byte-identical to keying off `positions`; for a unified
+            // multi-slot arena the write index is `kv_base + position` and only
+            // the write index is correct.
+            //
+            // A windowed graph (slot prefill) starts its view at `graph_key_base`,
+            // so every bound shifts down by that base and the lower bounds
+            // disappear: a window that contains only this slot's rows has
+            // nothing below it to exclude.
+            let base = cache_view.graph_key_base;
+            let (uppers, lowers) = if base == 0 {
+                (layout.attention_write_indices.clone(), layout.attention_key_lower_bounds.clone())
+            } else {
+                (
+                    window_relative_rows(&layout.attention_write_indices, base)?,
+                    window_relative_rows(&layout.attention_key_lower_bounds, base)?,
+                )
+            };
             let bytes = position_attention_mask_bytes_for_tensor(
                 ctx,
                 input_mask,
                 key_count,
-                &layout.attention_write_indices,
-                layout.attention_key_lower_bounds(),
+                &uppers,
+                (!lowers.is_empty()).then_some(&lowers),
                 cache_view.causal_window,
             )?;
             writes.push((input_mask, bytes));
@@ -9381,9 +9479,46 @@ mod tests {
             None,
             n_tokens,
             n_tokens,
+            0,
             256,
             n_seqs,
         )
+    }
+
+    /// A slot's prefill graph is WINDOWED on that slot's own rows, so the mask
+    /// it writes is indexed from the window's first row rather than the
+    /// arena's. Getting this backwards is silent: every row of the mask would
+    /// be `-inf` (an upper bound below the lower one) and the lane would attend
+    /// to nothing at all, which reads as a model that has forgotten the prompt
+    /// rather than as an error.
+    #[test]
+    fn a_windowed_graph_sees_its_own_rows_from_zero() {
+        // Slot 1 of a 64k-per-slot arena, prefilling its first four tokens.
+        let base = 65536;
+        let writes = vec![65536, 65537, 65538, 65539];
+        assert_eq!(
+            window_relative_rows(&writes, base).expect("inside the window"),
+            vec![0, 1, 2, 3],
+            "the slot's first token is the window's first key"
+        );
+        // Base 0 is the identity, which is why every graph that existed before
+        // this window is byte-identical under it.
+        assert_eq!(
+            window_relative_rows(&writes, 0).expect("no window"),
+            writes
+        );
+    }
+
+    #[test]
+    fn a_row_below_the_window_is_refused_rather_than_clamped() {
+        // Row 12 belongs to slot 0; a graph windowed on slot 1 must not be
+        // told about it. Clamping would make the mask admit slot 1's own first
+        // key in its place — a neighbour's history, read as this one's.
+        let err = window_relative_rows(&[12], 65536).expect_err("below the window");
+        assert!(
+            format!("{err:?}").contains("below this graph's attention window base"),
+            "{err:?}"
+        );
     }
 
     #[test]
