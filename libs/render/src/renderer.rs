@@ -321,9 +321,6 @@ pub struct Renderer {
     /// set_star_map_png), uploaded lazily on the first sky draw.
     star_map: Option<ImageBuffer>,
     star_texture: Option<Texture>,
-    /// Celestial-sphere rotation rows (world dir -> map dir) from the day
-    /// cycle; None = static star dome (identity).
-    star_rot: Option<[Vec4f; 3]>,
     /// The GPU-resident light bake (gpu_lightmap.rs): fragment-shader
     /// passes, zero readback — THE bake path. OnChange re-bakes on the
     /// settle kick; Realtime (opt-in) re-bakes dirty regions per frame.
@@ -2052,7 +2049,6 @@ impl Default for Renderer {
             lm_debug: if std::env::var("SANDBOX_LM_DEBUG").is_ok() { 1.0 } else { 0.0 },
             star_map: None,
             star_texture: None,
-            star_rot: None,
             gpu_baker: {
                 // MAKEPAD_GPU_LM_MODE=realtime starts the baker in Realtime
                 // (unattended runs can't press the F8 debug toggle).
@@ -3982,13 +3978,6 @@ impl Renderer {
             }
             Err(e) => log!("star map: png decode failed: {e:?}"),
         }
-    }
-
-    /// Celestial rotation for the star dome (world dir -> map dir rows).
-    /// The day cycle drives this so the stars wheel with the sun around
-    /// the same celestial pole; None = a static dome.
-    pub fn set_star_rotation(&mut self, rows: Option<[Vec4f; 3]>) {
-        self.star_rot = rows;
     }
 
     /// The bound star texture + gain: the decoded panorama, or a 1x1 black
@@ -6071,15 +6060,21 @@ impl Renderer {
                     sa.sun_e = f.sun;
                     sa.sun_true = f.sun_true;
                     // The star dome: panorama texture (or the 1x1 black
-                    // stand-in) plus the celestial rotation the day cycle
-                    // drives.
+                    // stand-in) plus the celestial rotation, derived from
+                    // the SAME hour that placed the sun — no host has to
+                    // drive it, so every path that sets a time of day gets
+                    // a sky that wheels correctly. A world with no hour
+                    // (an authored sun direction) keeps a fixed dome.
                     let (star_tex, gain) = self.star_binding(cx.cx);
                     sa.cube.draw_vars.set_texture(0, &star_tex);
-                    let rows = self.star_rot.unwrap_or([
-                        vec4(1.0, 0.0, 0.0, 0.0),
-                        vec4(0.0, 1.0, 0.0, 0.0),
-                        vec4(0.0, 0.0, 1.0, 0.0),
-                    ]);
+                    let rows = match world.sun.time_of_day {
+                        Some(hours) => crate::sun::celestial_rows(hours, world.sun.latitude),
+                        None => [
+                            vec4(1.0, 0.0, 0.0, 0.0),
+                            vec4(0.0, 1.0, 0.0, 0.0),
+                            vec4(0.0, 0.0, 1.0, 0.0),
+                        ],
+                    };
                     sa.star_r0 = vec4(rows[0].x, rows[0].y, rows[0].z, gain);
                     sa.star_r1 = rows[1];
                     sa.star_r2 = rows[2];
