@@ -1866,6 +1866,13 @@ pub struct ChatServingDto {
     pub gen_tokens: u32,
     pub lanes_active: Option<u32>,
     pub slots_total: Option<u32>,
+    /// Tokens the prefix cache let this turn skip (absent on old services).
+    pub prefix_ingested: Option<u32>,
+    pub prefix_resumed: Option<bool>,
+    /// Hidden reasoning tokens so far. `visible_tokens` stays absent while
+    /// the think block is still open — that absence IS the "thinking" flag.
+    pub think_tokens: Option<u32>,
+    pub visible_tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1998,6 +2005,10 @@ fn parse_chat_serving(v: &Value) -> Option<ChatServingDto> {
         gen_tokens: v.get("gen_tokens").and_then(Value::as_u64)?.min(10_000_000) as u32,
         lanes_active: lane("lanes_active"),
         slots_total: lane("slots_total"),
+        prefix_ingested: v.get("prefix_ingested").and_then(Value::as_u64).map(|n| n.min(10_000_000) as u32),
+        prefix_resumed: v.get("prefix_resumed").and_then(Value::as_bool),
+        think_tokens: v.get("think_tokens").and_then(Value::as_u64).map(|n| n.min(10_000_000) as u32),
+        visible_tokens: v.get("visible_tokens").and_then(Value::as_u64).map(|n| n.min(10_000_000) as u32),
     })
 }
 
