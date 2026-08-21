@@ -45,8 +45,11 @@ seed (reroll = change the seed) and come out at the right world scale:
     game.place(r, t.slots[1])
     game.autodrive(r, {points: t.waypoints, pace: 0.85})
     game.race({laps: 3})
+    game.player_character({pos: t.start, model: "kenney/mini-characters/character-male-b"})
   EVERY car gets its OWN slot from t.slots — two cars on one spawnpoint
-  explode at the green flag. game.standings() feeds a HUD.
+  explode at the green flag. THE PLAYER SPAWNS AT t.start (beside their
+  car) — a player at the terrain centre cannot reach the grid.
+  game.standings() feeds a HUD.
 - game.scatter({models: ["kenney/nature-kit/tree_default",
   "kenney/nature-kit/tree_oak"], pos: vec3(0,0,0), size: 40, spacing: 4,
   count: 30, seed: 3}) — forests, rocks, crowds of props with natural
