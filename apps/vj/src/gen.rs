@@ -55,7 +55,7 @@ pub const CONTINUOUS_BACKOFF_MS: u64 = 8_000;
 /// blasting repeats nothing.
 const BLAST_SUBJECTS: &[&str] = &[
     "a chrome jellyfish", "a wireframe panther", "liquid mercury dancers",
-    "a fractal cathedral", "neon koi fish", "a holographic skull",
+    "a fractal cathedral", "neon koi fish", "a grinning holographic sun",
     "molten glass orchids", "crystalline lightning", "a clockwork galaxy",
     "smoke serpents", "prismatic soap bubbles", "an origami phoenix",
     "magnetic ferrofluid spikes", "aurora ribbons", "glitching statues",
@@ -181,6 +181,8 @@ pub struct GenJob {
     pub last_progress_permille: u16,
     /// Transient status transport warning. A successful status clears it.
     pub status_warning: Option<String>,
+    /// GPU box tag parsed from the worker's progress note ("@.203 …").
+    pub node_tag: Option<String>,
     /// Asset the worker's result document declared.
     pub produced: Option<AssetId>,
     /// The produced asset appeared on the catalog event stream.
@@ -224,8 +226,14 @@ impl GenJob {
             }
             (_, false, _) => "worker: waiting · node: waiting".to_string(),
             (_, true, GenNodeState::Waiting) => "worker: assigned · node: waiting".to_string(),
-            (_, true, GenNodeState::Queued) => "worker: assigned · node: queued".to_string(),
-            (_, true, GenNodeState::Active) => "worker: assigned · node: active".to_string(),
+            (_, true, GenNodeState::Queued) => match &self.node_tag {
+                Some(tag) => format!("gpu {tag} · queued on the box"),
+                None => "worker: assigned · node: queued".to_string(),
+            },
+            (_, true, GenNodeState::Active) => match &self.node_tag {
+                Some(tag) => format!("gpu {tag} · rendering"),
+                None => "worker: assigned · node: active".to_string(),
+            },
             (_, true, GenNodeState::Finished) => "worker: finished · node: finished".to_string(),
         };
         let (stage, mut message, progress_permille, tone) = match &self.state {
@@ -679,6 +687,7 @@ impl GenModel {
             title,
             profile_label: pipe.label.to_string(),
             kind: pipe.kind.to_string(),
+            node_tag: None,
             state: GenJobState::Submitting,
             last_poll_ms: now_ms,
             submitted_ms: now_ms,
@@ -760,7 +769,15 @@ impl GenModel {
                 }
             }
             JobStateDto::Running => {
-                let (permille, note) = status.progress.clone().unwrap_or((0, String::new()));
+                let (permille, mut note) = status.progress.clone().unwrap_or((0, String::new()));
+                // "@.203 denoise 11/49" — the worker names the GPU box in
+                // the note so the drawer can say WHO is rendering.
+                if let Some(rest) = note.strip_prefix('@') {
+                    if let Some((tag, stage)) = rest.split_once(' ') {
+                        row.node_tag = Some(tag.to_string());
+                        note = stage.to_string();
+                    }
+                }
                 row.worker_assigned = true;
                 row.node_state = node_state_from_note(&note);
                 row.started_ms.get_or_insert(now_ms);
