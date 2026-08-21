@@ -26,18 +26,22 @@ pub const MAX_CONTEXT_BYTES: usize = 32_000;
 pub const BASE: &str = include_str!("../context/base.md");
 pub const GAME: &str = include_str!("../context/game.md");
 pub const VJ: &str = include_str!("../context/vj.md");
+pub const GEN: &str = include_str!("../context/gen.md");
 
 /// Which app-flavored context (and client-tool surface) a session gets.
 /// Declared by the connecting app at session create; unknown slugs are
 /// refused at the route, never silently defaulted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientProfile {
-    /// Librarian framing only (asset UI and anything undeclared).
+    /// Librarian framing only (anything undeclared).
     General,
     /// The game sandbox: splash authoring + client-executed world tools.
     Game,
     /// The VJ performance app.
     Vj,
+    /// The asset UI's Create pane: content generation, with the fleet
+    /// generate/defaults tools executed by that app's own pipeline.
+    Gen,
 }
 
 impl ClientProfile {
@@ -46,6 +50,7 @@ impl ClientProfile {
             "general" => Some(ClientProfile::General),
             "game" => Some(ClientProfile::Game),
             "vj" => Some(ClientProfile::Vj),
+            "gen" => Some(ClientProfile::Gen),
             _ => None,
         }
     }
@@ -55,6 +60,7 @@ impl ClientProfile {
             ClientProfile::General => "general",
             ClientProfile::Game => "game",
             ClientProfile::Vj => "vj",
+            ClientProfile::Gen => "gen",
         }
     }
 
@@ -63,12 +69,51 @@ impl ClientProfile {
             ClientProfile::General => "",
             ClientProfile::Game => GAME,
             ClientProfile::Vj => VJ,
+            ClientProfile::Gen => GEN,
         }
     }
 
-    /// The game profile's world tools are executed by the connected client.
-    pub fn client_world_tools(self) -> bool {
-        matches!(self, ClientProfile::Game)
+    /// Which calls the CONNECTED APP executes: the broker parks the turn on
+    /// the tool-result route instead of running the tool itself.
+    ///
+    /// Two profiles declare tools of their own. The game's `world.*` edit
+    /// the running level, which only that process has. The asset UI's
+    /// generate/defaults/fleet tools drive the app's own fleet pipeline —
+    /// the server-side dispatcher has always said so in its refusal text
+    /// ("executed by the AI Content app"); this is the seam that actually
+    /// sends them there.
+    pub fn client_executes(self, call: &crate::tools::ContentToolCall) -> bool {
+        use crate::tools::ContentToolCall as C;
+        match self {
+            ClientProfile::Game => matches!(
+                call,
+                C::WorldPlace { .. }
+                    | C::WorldRemove { .. }
+                    | C::WorldMove { .. }
+                    | C::WorldList
+                    | C::WorldGetSource
+                    | C::WorldSetSource { .. }
+                    | C::WorldSetPlayerModel { .. }
+                    | C::WorldSpawn { .. }
+                    | C::WorldTune { .. }
+                    | C::WorldAddAddon { .. }
+            ),
+            ClientProfile::Gen => matches!(
+                call,
+                C::ImageGenerate { .. }
+                    | C::VideoGenerate { .. }
+                    | C::AudioGenerate { .. }
+                    | C::SpeechGenerate { .. }
+                    | C::MusicGenerate { .. }
+                    | C::MeshGenerate { .. }
+                    | C::WorldGenerate { .. }
+                    | C::CharacterGenerate { .. }
+                    | C::DefaultsGet
+                    | C::DefaultsSet { .. }
+                    | C::FleetIntrospect { .. }
+            ),
+            ClientProfile::General | ClientProfile::Vj => false,
+        }
     }
 }
 
@@ -99,7 +144,12 @@ mod tests {
         // A generous stand-in for the dynamic layer: a 40-table schema
         // summary plus counts is ~4 KB in practice.
         let dynamic = "x".repeat(6_000);
-        for profile in [ClientProfile::General, ClientProfile::Game, ClientProfile::Vj] {
+        for profile in [
+            ClientProfile::General,
+            ClientProfile::Game,
+            ClientProfile::Vj,
+            ClientProfile::Gen,
+        ] {
             let text = assemble(profile, &dynamic);
             assert!(
                 text.len() < MAX_CONTEXT_BYTES,
@@ -113,11 +163,62 @@ mod tests {
 
     #[test]
     fn profiles_roundtrip_and_unknown_is_refused() {
-        for p in [ClientProfile::General, ClientProfile::Game, ClientProfile::Vj] {
+        for p in [
+            ClientProfile::General,
+            ClientProfile::Game,
+            ClientProfile::Vj,
+            ClientProfile::Gen,
+        ] {
             assert_eq!(ClientProfile::from_slug(p.slug()), Some(p));
         }
         assert_eq!(ClientProfile::from_slug("root"), None);
         assert_eq!(ClientProfile::from_slug(""), None);
+    }
+
+    /// Each profile parks exactly its own app's tools on the client, and
+    /// nobody else's: a general session that waited for an answer no client
+    /// is going to send would stall for the whole park timeout.
+    #[test]
+    fn only_the_declaring_profile_parks_its_tools_on_the_app() {
+        use crate::tools::ContentToolCall as C;
+        let place = C::WorldPlace { items: Vec::new() };
+        let generate = C::ImageGenerate {
+            prompt: "a rusty trawler".into(),
+            then: None,
+            model: None,
+            width: None,
+            height: None,
+            steps: None,
+        };
+        let search = C::AssetSearch { query: "trawler".into(), limit: 8 };
+
+        assert!(ClientProfile::Game.client_executes(&place));
+        assert!(!ClientProfile::Game.client_executes(&generate));
+        assert!(ClientProfile::Gen.client_executes(&generate));
+        assert!(ClientProfile::Gen.client_executes(&C::DefaultsGet));
+        assert!(ClientProfile::Gen.client_executes(&C::FleetIntrospect { domain: None }));
+        assert!(!ClientProfile::Gen.client_executes(&place));
+        for profile in [ClientProfile::General, ClientProfile::Vj] {
+            assert!(!profile.client_executes(&generate));
+            assert!(!profile.client_executes(&place));
+        }
+        for profile in [
+            ClientProfile::General,
+            ClientProfile::Game,
+            ClientProfile::Vj,
+            ClientProfile::Gen,
+        ] {
+            assert!(!profile.client_executes(&search), "{profile:?} runs search on the server");
+        }
+    }
+
+    #[test]
+    fn the_gen_layer_teaches_the_generate_surface() {
+        for needle in
+            ["image.generate", "defaults.set", "fleet.introspect", "Create page"]
+        {
+            assert!(GEN.contains(needle), "gen context lost: {needle}");
+        }
     }
 
     #[test]
