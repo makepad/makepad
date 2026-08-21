@@ -7936,6 +7936,12 @@ impl App {
         let prompt = lines.next().unwrap_or("").to_string();
         self.gen.select_profile(selected);
         self.gen.set_video_length(length);
+        self.ui
+            .drop_down(cx, ids!(gen_profile))
+            .set_selected_item(cx, self.gen.selected);
+        self.ui
+            .drop_down(cx, ids!(gen_len))
+            .set_selected_item(cx, self.gen.video_length());
         if !prompt.is_empty() {
             self.gen.set_prompt(prompt.clone());
             self.ui.text_input(cx, ids!(gen_prompt)).set_text(cx, &prompt);
