@@ -227,6 +227,15 @@ script_mod! {
             return dl
         }
 
+        // Sun visibility with a lamp pool's fill of its own shadow folded in.
+        // See lightmap::lamp_shadow_fill for the law and why it cannot blow
+        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // strength at which the fill is complete.
+        sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            return sun_vis + (1.0 - sun_vis) * fill
+        }
+
         vertex: fn() {
             let pos = self.get_size() * self.geom.geom_pos + self.get_pos()
             // TRUE world position first (the stage/view transform must not
@@ -310,8 +319,12 @@ script_mod! {
             // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
             let lamps = lm.xyz * (0.5 * has_lm)
             let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
-            let c = self.lit_color.xyz + self.v_direct * sun_vis
-                + self.color.xyz * (lamps + dl)
+            // The lamps light this fragment WITHOUT the sun's shadow (a shadow
+            // is the absence of sun, not of light), and a strong enough pool
+            // fills that shadow back in — lightmap::lamp_shadow_fill.
+            let local = lamps + dl
+            let c = self.lit_color.xyz + self.v_direct * self.sun_filled(sun_vis, local)
+                + self.color.xyz * local
             let fogged = mix(c, self.fog_color, self.v_fog)
             return vec4(fogged, self.lit_color.w)
         }
@@ -1205,6 +1218,15 @@ script_mod! {
             return dl
         }
 
+        // Sun visibility with a lamp pool's fill of its own shadow folded in.
+        // See lightmap::lamp_shadow_fill for the law and why it cannot blow
+        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // strength at which the fill is complete. Inherited by DrawScenePbr.
+        sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            return sun_vis + (1.0 - sun_vis) * fill
+        }
+
         // Octahedral decode: the inverse of skin.rs's oct_encode. Two f16
         // lanes carry a unit normal that would otherwise cost three floats.
         // sign is inlined rather than shared: the builtin sign() returns 0 at
@@ -1356,9 +1378,17 @@ script_mod! {
             )
             // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
             let lamps = lm.xyz * (0.5 * has_lm)
+            // Local light — baked pools plus the per-frame slots — reaches
+            // this fragment WITHOUT the sun's shadow term, because a shadow
+            // is the absence of SUN and of nothing else. Over its bright core
+            // a pool additionally fills that shadow back in, so a lamp drowns
+            // out the streak its own pole throws across its own pool:
+            // lightmap::lamp_shadow_fill.
+            let local = lamps + self.v_dl
+            let sun_lit = self.sun_filled(sun_all, local)
             let analytic = self.v_ambient * ao
-                + self.v_direct * (ao_direct * sun_all)
-                + (lamps + self.v_dl) * ao_direct
+                + self.v_direct * (ao_direct * sun_lit)
+                + local * ao_direct
             // prelit: albedo already carries COLOR_0 = LM×4. Multiplying
             // the sun again zeros any face that looks inward or down.
             let lit = albedo * mix(analytic, vec3(1.0, 1.0, 1.0), self.prelit)
@@ -1389,7 +1419,7 @@ script_mod! {
             // so a faint lamp or a misplaced shadow reads instantly.
             if self.lm_debug > 0.5 {
                 return vec4(
-                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_all) + lamps,
+                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_lit) + lamps,
                     1.0
                 )
             }
@@ -1479,6 +1509,10 @@ script_mod! {
             )
             // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
             let lamps = lm.xyz * (0.5 * has_lm)
+            // Unshadowed local light, and the sun gate a strong pool fills
+            // back in — lightmap::lamp_shadow_fill, exactly as DrawSceneSkinned.
+            let local = lamps + self.v_dl
+            let sun_lit = self.sun_filled(sun_all, local)
 
             // The material. Factor x map, per the glTF spec; orm_on is 0 for
             // a factors-only material so the sample folds out to 1.
@@ -1515,7 +1549,7 @@ script_mod! {
             // radiance * BRDF * N.L. Shadowed exactly like the diffuse sun:
             // a highlight surviving inside a shadow is the classic tell.
             let sun_spec = self.v_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001))
-                * (sun_all * ao_direct)
+                * (sun_lit * ao_direct)
 
             // Ambient specular WITHOUT an environment map: the hemisphere
             // ambient this renderer already computes, looked up along the
@@ -1536,8 +1570,8 @@ script_mod! {
             // at grazing angles it only ever darkens, and without an
             // environment probe there is nothing to hand the energy to.)
             let analytic = self.v_ambient * ao
-                + self.v_direct * (ao_direct * sun_all)
-                + (lamps + self.v_dl) * ao_direct
+                + self.v_direct * (ao_direct * sun_lit)
+                + local * ao_direct
             let lit = albedo * ((1.0 - metal) * analytic) + sun_spec * f + amb_spec
             return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
         }
@@ -1819,6 +1853,15 @@ script_mod! {
             return dl
         }
 
+        // Sun visibility with a lamp pool's fill of its own shadow folded in.
+        // See lightmap::lamp_shadow_fill for the law and why it cannot blow
+        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // strength at which the fill is complete.
+        sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            return sun_vis + (1.0 - sun_vis) * fill
+        }
+
         // One palette row by flat texel index. sample_nearest with explicit
         // lod: the vertex stage cannot use implicit gradients, and RGBA32F is
         // not linearly filterable on every GLES/WebGPU device — nearest at
@@ -1954,8 +1997,14 @@ script_mod! {
                 self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w),
                 self.csm_p.x
             )
+            // A character standing in a lamp pool inside a building's shadow
+            // gets the same fill the ground under its feet does, or it would
+            // read as the one thing in the pool the lamp failed to light —
+            // lightmap::lamp_shadow_fill.
             let lit = albedo * (
-                self.v_ambient * ao + (self.v_direct * sun_vis + self.v_dl) * ao_direct
+                self.v_ambient * ao
+                    + (self.v_direct * self.sun_filled(sun_vis, self.v_dl) + self.v_dl)
+                        * ao_direct
             )
             return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
         }
@@ -2313,6 +2362,15 @@ script_mod! {
             return dl
         }
 
+        // Sun visibility with a lamp pool's fill of its own shadow folded in.
+        // See lightmap::lamp_shadow_fill for the law and why it cannot blow
+        // anything out; 0.075 is lightmap::LM_LAMP_SHADOW_FILL_AT, the pool
+        // strength at which the fill is complete.
+        sun_filled: fn(sun_vis: float, local: vec3) -> float {
+            let fill = clamp(max(max(local.x, local.y), local.z) / 0.075, 0.0, 1.0)
+            return sun_vis + (1.0 - sun_vis) * fill
+        }
+
         csm_tap: fn(u: float, v: float, ci: float, ref01: float) -> float {
             let m = 1.5 * self.csm_p.y
             let uu = clamp(u, m, 1.0 - m)
@@ -2436,15 +2494,21 @@ script_mod! {
             )
             // 0.5 = lightmap::LM_LAMP_CEIL — the atlas RGB decode.
             let lamps = lm.xyz * (0.5 * has_lm)
+            // Local light reaches the ground WITHOUT the sun's shadow term,
+            // and over its bright core a pool fills that shadow back in —
+            // this is the surface a street lamp's own pole shadow lands on,
+            // so it is where the fill has to read: lightmap::lamp_shadow_fill.
+            let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
+            let local = lamps + dl
+            let sun_lit = self.sun_filled(sun_vis, local)
             if self.lm_debug > 0.5 {
                 return vec4(
-                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_vis) + lamps,
+                    mix(vec3(0.6, 0.1, 0.1), vec3(0.1, 0.6, 0.1), sun_lit) + lamps,
                     1.0
                 )
             }
-            let dl = self.dl_sum(self.v_dl_pos, self.v_dl_nrm)
-            let c = self.lit_color.xyz + self.v_direct_col * sun_vis
-                + self.v_albedo * (lamps + dl)
+            let c = self.lit_color.xyz + self.v_direct_col * sun_lit
+                + self.v_albedo * local
             return vec4(mix(c, self.fog_color, self.v_fog), self.lit_color.w)
         }
 
