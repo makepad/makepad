@@ -594,9 +594,21 @@ fn prim_triangle_count(json: &crate::skin::Val, prim: &crate::skin::Val) -> usiz
 // Navigation grid
 // ---------------------------------------------------------------------------
 
-/// Smallest xz cell the nav grid uses. A body is two radii (0.5) wide, so
-/// this is one body per cell — fine enough for a Doom corridor (2 units).
-const NAV_CELL_MIN: f32 = 0.5;
+/// Smallest xz cell the nav grid uses: ONE BODY per cell, i.e. two radii.
+///
+/// This used to be the bare number 0.5 — a Doom body's width at the Doom
+/// importer's metres-per-map-unit. A map published at a different scale (a
+/// Quake 1 level is 1/32, twice Doom's 1/64) then got a lattice half the
+/// width of the body walking it: several sample points across one body, so
+/// every ledge and jamb cut the grid into slivers, the room watershed read
+/// the whole map as corridor, and the string-pull had a mandatory waypoint
+/// every metre. The cell has to be the body's, or the graph is not a graph
+/// of where THIS body can walk.
+fn nav_cell_min(cfg: &WalkerConfig) -> f32 {
+    // 0.5 is the finest lattice worth probing (a Doom body's width, and the
+    // old fixed value); a WIDER body only ever makes it coarser.
+    (cfg.radius * 2.0).max(0.5)
+}
 /// Above this many columns the cell grows instead: a 500-unit outdoor map
 /// must not turn into a hundred million probes.
 const NAV_MAX_COLUMNS: usize = 40_000;
@@ -710,7 +722,7 @@ impl NavGrid {
         let (min, max) = level.bounds();
         let span_x = (max.x - min.x).max(0.001);
         let span_z = (max.z - min.z).max(0.001);
-        let mut cell = NAV_CELL_MIN;
+        let mut cell = nav_cell_min(cfg);
         let (mut nx, mut nz);
         loop {
             nx = ((span_x / cell).ceil() as usize).max(1);
@@ -809,7 +821,7 @@ impl NavGrid {
                             continue; // no use escaping into another prison
                         }
                         let dy = self.cells[b].pos.y - self.cells[a].pos.y;
-                        let reach = cfg.step_up + STEP_EPS + HAZARD_ESCAPE_STEP;
+                        let reach = cfg.step_up + STEP_EPS + hazard_escape_step(cfg.step_up);
                         if dy <= cfg.step_up + STEP_EPS || dy > reach {
                             continue; // already linked, or genuinely a cliff
                         }
@@ -822,7 +834,7 @@ impl NavGrid {
                             self.cells[a].pos,
                             self.cells[b].pos,
                             cfg.radius,
-                            (cfg.step_up + HAZARD_ESCAPE_STEP).min(cfg.height * 0.8),
+                            (cfg.step_up + hazard_escape_step(cfg.step_up)).min(cfg.height * 0.8),
                             cfg.height,
                         ) {
                             continue;
@@ -1065,7 +1077,7 @@ impl NavGrid {
         // must be a place you can leave.
         let reach = cfg.step_up
             + STEP_EPS
-            + if self.cells[a].kind == SurfaceKind::Hazard { HAZARD_ESCAPE_STEP } else { 0.0 };
+            + if self.cells[a].kind == SurfaceKind::Hazard { hazard_escape_step(cfg.step_up) } else { 0.0 };
         if dy > reach {
             return StepVerdict::TooTall(dy);
         }
@@ -1572,8 +1584,14 @@ impl Default for WalkerConfig {
 }
 
 impl WalkerConfig {
-    /// The body/gait each engine gives its player, in the classic
-    /// importer's world units (map units / 64).
+    /// The body/gait each engine gives its player, at the classic
+    /// importer's ORIGINAL metres per map unit (1/64).
+    ///
+    /// These are ratios of an engine's own constants, not the map's units:
+    /// an importer is free to publish at whatever scale suits its source
+    /// (Quake 1 is 1/32, twice this), and every such map DECLARES its step
+    /// height. Use [`Self::with_declared`] to land the body in the units of
+    /// the map it is about to walk — a preset alone is a guess.
     pub fn for_style(bob: BobStyle) -> WalkerConfig {
         let base = WalkerConfig { bob, ..WalkerConfig::default() };
         match bob {
@@ -1597,6 +1615,60 @@ impl WalkerConfig {
                 ..base
             },
         }
+    }
+
+    /// Put the preset body into the units of the map it is about to walk,
+    /// from the facts the importer DECLARED about that map.
+    ///
+    /// Every classic converter publishes its engine's step height and eye
+    /// height as anchors, in the GLB's own metres — `step_height` /
+    /// `eye_height` (`world_nav.rs`). A preset says "18 units"; the map says
+    /// what a unit is worth. Doom's 24 at 1/64 is 0.375 and matches the
+    /// preset; Quake 1's 18 at **1/32** is 0.5625, exactly twice the 18-at-
+    /// 1/64 the Quake preset carries (Quake II and III publish at 1/64, so
+    /// the preset was written for those and silently halved the body on
+    /// every Quake 1 map).
+    ///
+    /// A halved body is not a smaller walker, it is a broken one: it cannot
+    /// climb the map's own stairs, its nav lattice is finer than its own
+    /// width, and the graph it plans on stops being a graph of where it can
+    /// go. So the declared step sets the SCALE and the whole body travels
+    /// with it — radius, height, eye, step, fall limit, walking speed, and
+    /// gravity (length/s², so once as well). Angles and durations do not
+    /// scale, and neither does the bob (already a fraction of eye height).
+    ///
+    /// Declaring nothing (Build states no step height) keeps the preset.
+    pub fn with_declared(mut self, step_height: Option<f32>, eye_height: Option<f32>) -> Self {
+        let scale = step_height
+            .filter(|s| s.is_finite() && *s > 1.0e-4)
+            .map(|s| s / self.step_up.max(1.0e-4))
+            // A map whose step is 30× the preset's is not a scale, it is a
+            // bad sidecar: keep the body we know rather than invent one.
+            .filter(|k| (0.1..=10.0).contains(k) && (*k - 1.0).abs() > 0.02);
+        if let Some(k) = scale {
+            self.radius *= k;
+            self.height *= k;
+            self.step_up *= k;
+            self.eye_height *= k;
+            self.fall_limit *= k;
+            self.speed *= k;
+            self.gravity *= k;
+            self.probe_ahead *= k;
+        }
+        // The eye is declared outright, so it needs no scaling guess — and
+        // `PlayerNav` already reads the same anchor to turn the authored
+        // `player_start` eye into feet. The two must agree or the walker
+        // spawns at one height and looks from another.
+        if let Some(e) = eye_height.filter(|e| e.is_finite() && *e > 0.05) {
+            self.eye_height = e;
+        }
+        self
+    }
+
+    /// Radius of the circle a body traces when it walks and turns as hard
+    /// as it can — walking speed over turn rate.
+    pub fn turn_radius(&self) -> f32 {
+        self.speed / self.turn_rate.max(0.01)
     }
 }
 
@@ -1647,7 +1719,15 @@ pub(crate) fn knee_height(step_up: f32, height: f32) -> f32 {
 /// step cannot leave — the way OUT is worth a bigger stretch than an
 /// ordinary step: about 38 map units instead of 24. Being stuck in the goo
 /// is worse than a walker who once climbs a step Doom would not have.
-const HAZARD_ESCAPE_STEP: f32 = 0.23;
+///
+/// A RATIO of the body's own step, not a length: the same 38-vs-24 stretch
+/// has to mean the same thing on a map published at half the metres per map
+/// unit. (`0.375 · 0.6133` is Doom's 0.23 to the last float.)
+const HAZARD_ESCAPE_RATIO: f32 = 0.23 / 0.375;
+
+pub(crate) fn hazard_escape_step(step_up: f32) -> f32 {
+    step_up * HAZARD_ESCAPE_RATIO
+}
 /// Ticks between forward look-ahead probes (60 Hz → five per second).
 const LOOKAHEAD_TICKS: u32 = 12;
 /// Time constant of the eased turn (a corner takes about this long).
@@ -1725,6 +1805,10 @@ pub struct LevelWalker {
     /// Camera yaw, lagging the body's heading slightly.
     cam_yaw: f32,
     probe_countdown: u32,
+    /// Distance to the point the route is steering at, when there is one.
+    /// The tick's speed limit reads it: a body may not walk faster than its
+    /// own turn can steer toward what it is aiming at.
+    aim_dist: Option<f32>,
     /// Stand still this tick (waiting for a door to open).
     hold: bool,
     /// The cell under the feet is in a pocket the graph had to link with
@@ -1884,6 +1968,7 @@ impl LevelWalker {
             speed_now: 0.0,
             cam_yaw: yaw,
             probe_countdown: 0,
+            aim_dist: None,
             hold: false,
             escape_step: false,
             external: false,
@@ -1974,6 +2059,16 @@ impl LevelWalker {
                 nav.goal = nav.path.back().copied();
                 nav.best_gap = f32::MAX;
                 nav.since_progress = 0.0;
+                nav.blocked_ticks = 0;
+                // A fresh route is a fresh plan, so the "try the other way
+                // round the obstruction" offset goes with the old one. The
+                // built-in tour cleared it on its own replan; an EXTERNAL
+                // planner never runs that branch, so once a watchdog set
+                // the offset the body steered 34° off every bearing it was
+                // given, for the rest of the level. That crab is a body
+                // that cannot converge on any waypoint — it circles one
+                // forever, which is the tour that looks demented.
+                nav.slide = 0.0;
             }
             None => self.ext_route = Some(route),
         }
@@ -2184,31 +2279,56 @@ impl LevelWalker {
             (false, true) => self.cfg.speed * self.ext_speed,
             (false, false) => self.cfg.speed * 0.25 * self.ext_speed,
         };
+        // A body walking `v` and turning at `w` traces a circle of radius
+        // `v / w`. If what it is steering at lies INSIDE that circle it can
+        // never turn toward it — it orbits, at full turn rate, until
+        // something else rescues it. So the turn sets the speed: never walk
+        // faster than `turn_rate · distance to the aim point`. That is the
+        // slow-into-the-corner a person does, and it is a HARD requirement,
+        // not a comfort: without it the tour circles a waypoint forever
+        // wherever the route bends tighter than the body can turn. Doom's
+        // 1 m circle sits well inside its string-pulled waypoints and never
+        // meets the cap; a map published at twice the metres per map unit
+        // walks twice as fast and meets it at every corner.
+        let want_speed = match self.aim_dist {
+            Some(d) => want_speed.min(self.cfg.turn_rate * d),
+            None => want_speed,
+        };
         self.speed_now += (want_speed - self.speed_now) * (dt / SPEED_EASE_SECS).min(1.0);
         let step = self.speed_now * dt;
         let dir = yaw_forward(self.yaw);
         let mut moved = false;
-        if facing_target {
-            for delta in [
-                vec3f(dir.x * step, 0.0, dir.z * step),
-                vec3f(dir.x * step, 0.0, 0.0),
-                vec3f(0.0, 0.0, dir.z * step),
-            ] {
-                if delta.x == 0.0 && delta.z == 0.0 {
-                    continue;
+        // The body walks THROUGH its turns, at the quarter speed decided
+        // just above. It used to stand still for every heading change wider
+        // than `facing_target` — and that dead stop was the whole jitter:
+        // an eight-neighbour route turns 45° at a corner, 45° is wider than
+        // the gate, so the walker stopped, spun, took a step, stopped again.
+        // Worse, it was self-feeding: standing still is no progress, no
+        // progress trips the planner's watchdog, a dropped leg makes the
+        // next one CELL-BY-CELL, and a cell-by-cell leg turns at every
+        // single cell. Stepping while turning is safe on its own — every
+        // candidate step still goes through `try_move`, which refuses to
+        // enter geometry — and a person walks the curve rather than pausing
+        // to aim.
+        for delta in [
+            vec3f(dir.x * step, 0.0, dir.z * step),
+            vec3f(dir.x * step, 0.0, 0.0),
+            vec3f(0.0, 0.0, dir.z * step),
+        ] {
+            if delta.x == 0.0 && delta.z == 0.0 {
+                continue;
+            }
+            if let Some(landed) = self.try_move(delta, level) {
+                self.pos.x = landed.x;
+                self.pos.z = landed.z;
+                // Step UP (or level) instantly, as the originals do.
+                // A lower floor is NOT snapped to: the walker is now
+                // unsupported and next tick's gravity drops it.
+                if !self.airborne && landed.y >= self.pos.y - LAND_EPS {
+                    self.pos.y = landed.y;
                 }
-                if let Some(landed) = self.try_move(delta, level) {
-                    self.pos.x = landed.x;
-                    self.pos.z = landed.z;
-                    // Step UP (or level) instantly, as the originals do.
-                    // A lower floor is NOT snapped to: the walker is now
-                    // unsupported and next tick's gravity drops it.
-                    if !self.airborne && landed.y >= self.pos.y - LAND_EPS {
-                        self.pos.y = landed.y;
-                    }
-                    moved = true;
-                    break;
-                }
+                moved = true;
+                break;
             }
         }
         // A body step UP is instant and collision-correct; the EYE is not
@@ -2494,6 +2614,11 @@ impl LevelWalker {
         // Aim at the next waypoint. Waypoints are cell centres, so the
         // heading is simply the bearing to the next one, plus the slide
         // offset that walks the body along a wall it snagged on.
+        //
+        // The aim NEVER jumps a waypoint the queue still holds: a route is
+        // a proven chain of cells and the straight line to a later one may
+        // go through a wall. What keeps a close waypoint reachable is the
+        // speed cap below, not skipping it.
         let mut aim = None;
         for w in nav.path.iter() {
             let Some(c) = grid.cell(*w) else { continue };
@@ -2504,6 +2629,14 @@ impl LevelWalker {
             aim = Some((dx, dz));
             break;
         }
+        // How far the thing being steered at is — the tick's speed limit.
+        // A body walking `v` while turning at `w` traces a circle of radius
+        // `v/w`; steering at anything INSIDE that circle is a circle round
+        // it, never a path to it, and the body orbits at full turn rate
+        // until something else rescues it. That orbit is the tour a viewer
+        // calls demented, and it is what a corner does to a walker whose
+        // route bends tighter than its own turning circle.
+        self.aim_dist = aim.map(|(dx, dz)| (dx * dx + dz * dz).sqrt());
         let slide = nav.slide;
         match aim {
             // yaw 0 looks down -Z (see `yaw_forward`).
@@ -2548,7 +2681,7 @@ impl LevelWalker {
             .map(|f| f.kind)
             .unwrap_or_default();
         let escape = match standing_in == SurfaceKind::Hazard || self.escape_step {
-            true => HAZARD_ESCAPE_STEP,
+            true => hazard_escape_step(self.cfg.step_up),
             false => 0.0,
         };
         let step = (self.cfg.step_up + escape).min(self.cfg.height * 0.8);
@@ -2593,7 +2726,7 @@ impl LevelWalker {
             .map(|f| f.kind)
             .unwrap_or_default();
         let escape = match standing_in == SurfaceKind::Hazard || self.escape_step {
-            true => HAZARD_ESCAPE_STEP,
+            true => hazard_escape_step(self.cfg.step_up),
             false => 0.0,
         };
         // The knee ray must start above the tallest step this body may take,
@@ -2836,9 +2969,14 @@ mod tests {
         let mut prev_eye = w.camera().eye.y;
         let (mut body_jumps, mut worst_grounded, mut worst_any) = (0, 0.0f32, 0.0f32);
         let mut prev_body = w.feet().y;
+        // The HIGHEST tread reached, not where the wander happened to stop:
+        // the walker walks through its turns, so the tail of a free wander
+        // is wherever it was going next, and the subject here is the eye.
+        let mut top = w.feet().y;
         for _ in 0..900 {
             w.tick(1.0 / 60.0, &level);
             let body = w.feet().y;
+            top = top.max(body);
             let eye = w.camera().eye.y;
             if body - prev_body > 0.1 {
                 body_jumps += 1; // the body DOES snap up a tread
@@ -2865,7 +3003,7 @@ mod tests {
         // Even falling, the eye never moves faster than free fall over one
         // tread (√(2·g·0.25) ≈ 3.1 u/s ≈ 0.052 per tick).
         assert!(worst_any < 0.06, "eye outran gravity: {worst_any} per tick");
-        assert!(w.feet().y >= 0.75, "climbed the stairs: {:?}", w.feet());
+        assert!(top >= 0.75, "climbed the stairs, reached {top}");
     }
 
     #[test]
@@ -2904,12 +3042,20 @@ mod tests {
         let mut w = LevelWalker::new(vec3f(0.0, 1.2, 1.5), 0.0, cfg, 3);
         let mut heights = Vec::new();
         let mut airborne_ticks = 0;
+        // Eye above feet on the tick the fall ENDS: that is the landing dip
+        // the test is about. Reading it 600 ticks later measures head bob,
+        // which rises above the nominal eye height by design.
+        let mut landing_dip = None;
+        let mut was_airborne = false;
         for _ in 0..600 {
             w.tick(1.0 / 60.0, &level);
             heights.push(w.feet().y);
             if w.is_airborne() {
                 airborne_ticks += 1;
+            } else if was_airborne && landing_dip.is_none() {
+                landing_dip = Some(w.camera().eye.y - w.feet().y);
             }
+            was_airborne = w.is_airborne();
         }
         let landed = *heights.last().unwrap();
         assert!((landed - 0.0).abs() < 1e-3, "lands on the lower floor: {landed}");
@@ -2920,8 +3066,9 @@ mod tests {
             assert!(drop < 0.35, "teleported down {drop} in one tick");
         }
         // Landing dips the view, then eases back (Doom's deltaviewheight).
-        let dip = w.camera().eye.y - w.feet().y;
-        assert!(dip <= cfg.eye_height + 1e-3, "the view never rises on landing");
+        let dip = landing_dip.expect("the walker landed");
+        assert!(dip <= cfg.eye_height + 1e-3, "the view never rises on landing: {dip}");
+        assert!(dip > 0.0, "the eye is still above the feet: {dip}");
     }
 
     #[test]
@@ -3505,7 +3652,7 @@ mod tests {
                             nav.cells[a].pos,
                             nav.cells[b].pos,
                             cfg.radius,
-                            (cfg.step_up + HAZARD_ESCAPE_STEP).min(cfg.height * 0.8),
+                            (cfg.step_up + hazard_escape_step(cfg.step_up)).min(cfg.height * 0.8),
                             cfg.height,
                         );
                         rises.push((dy, blocked));
@@ -3520,7 +3667,7 @@ mod tests {
         }
         let climbable = rises
             .iter()
-            .filter(|(dy, blocked)| *dy <= cfg.step_up + STEP_EPS + HAZARD_ESCAPE_STEP && !*blocked)
+            .filter(|(dy, blocked)| *dy <= cfg.step_up + STEP_EPS + hazard_escape_step(cfg.step_up) && !*blocked)
             .count();
         println!("  of those, {climbable} are within the escape step and unblocked");
         // Drop the body in the LOWEST floor of the map — the bottom of the
@@ -3705,7 +3852,7 @@ mod tests {
                     other => return (other, travelled),
                 }
                 let want = vec3f(at.x + dir.x * tick, at.y, at.z + dir.z * tick);
-                let up = cfg.step_up + STEP_EPS + HAZARD_ESCAPE_STEP;
+                let up = cfg.step_up + STEP_EPS + hazard_escape_step(cfg.step_up);
                 let Some(floor) =
                     level.floor_below(vec3f(want.x, want.y + up, want.z), up + cfg.fall_limit)
                 else {
@@ -4239,6 +4386,255 @@ pub(crate) mod test_geometry {
             vec3f(x, y0, z1),
             vec3f(x, y1, z1),
             vec3f(x, y1, z0),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The map's units, and a route a body can actually walk
+// ---------------------------------------------------------------------------
+
+/// What went wrong on Quake 1 maps, pinned.
+///
+/// Three separate faults, all of which read to a viewer as one thing — a
+/// walker that spins, stops and gets stuck on corners:
+///
+/// 1. the body was in the PRESET's units, not the map's (a Quake 1 level is
+///    published at 1/32, twice a Doom level's metres per map unit);
+/// 2. the nav lattice was a fixed 0.5 m instead of one body wide, so the
+///    graph was finer than the legs walking it;
+/// 3. the walker stood still for any heading change over 34°, and walked
+///    at a speed its own turn rate could not steer — so it orbited close
+///    waypoints instead of reaching them.
+#[cfg(test)]
+mod walk_in_the_maps_units {
+    use super::test_geometry::{floor, wall_x, wall_z};
+    use super::*;
+
+    /// A roofed room `span` across, floor at 0.
+    fn room(span: f32, height: f32) -> LevelCollision {
+        let (mut p, mut i) = (Vec::new(), Vec::new());
+        let h = span * 0.5;
+        floor(&mut p, &mut i, -h, h, -h, h, 0.0);
+        floor(&mut p, &mut i, -h, h, -h, h, height);
+        wall_x(&mut p, &mut i, -h, h, -h, 0.0, height);
+        wall_x(&mut p, &mut i, -h, h, h, 0.0, height);
+        wall_z(&mut p, &mut i, -h, h, -h, 0.0, height);
+        wall_z(&mut p, &mut i, -h, h, h, 0.0, height);
+        LevelCollision::from_positions(p, i)
+    }
+
+    #[test]
+    fn a_declared_step_puts_the_whole_body_in_the_maps_units() {
+        let preset = WalkerConfig::for_style(BobStyle::Quake);
+        // Quake 1 publishes at 1/32: its 18-unit step is 0.5625, twice the
+        // 18-at-1/64 the preset carries.
+        let quake1 = preset.with_declared(Some(0.5625), Some(1.4375));
+        let k = 0.5625 / preset.step_up;
+        assert!((k - 2.0).abs() < 0.01, "the Quake 1 scale is 2x: {k}");
+        assert!((quake1.step_up - 0.5625).abs() < 1e-4, "{}", quake1.step_up);
+        assert!((quake1.radius - preset.radius * k).abs() < 1e-4, "{}", quake1.radius);
+        assert!((quake1.height - preset.height * k).abs() < 1e-4, "{}", quake1.height);
+        assert!((quake1.speed - preset.speed * k).abs() < 1e-3, "{}", quake1.speed);
+        // Gravity is a length per second squared: it scales once too, or a
+        // body in a double-scale world falls in slow motion.
+        assert!((quake1.gravity - preset.gravity * k).abs() < 1e-3, "{}", quake1.gravity);
+        assert!((quake1.fall_limit - preset.fall_limit * k).abs() < 1e-3, "{}", quake1.fall_limit);
+        // The eye is declared outright, not scaled: it is what the map says.
+        assert!((quake1.eye_height - 1.4375).abs() < 1e-4, "{}", quake1.eye_height);
+
+        // A map at the preset's own scale changes nothing but the eye.
+        let doom = WalkerConfig::for_style(BobStyle::Doom).with_declared(Some(0.375), Some(0.6406));
+        let base = WalkerConfig::for_style(BobStyle::Doom);
+        assert!((doom.step_up - base.step_up).abs() < 1e-6, "{}", doom.step_up);
+        assert!((doom.radius - base.radius).abs() < 1e-6, "{}", doom.radius);
+        assert!((doom.speed - base.speed).abs() < 1e-6, "{}", doom.speed);
+
+        // Declaring nothing (Build states no step height) keeps the preset,
+        // and a nonsense declaration is refused rather than believed.
+        let none = WalkerConfig::for_style(BobStyle::Duke).with_declared(None, None);
+        assert_eq!(none.step_up, WalkerConfig::for_style(BobStyle::Duke).step_up);
+        let junk = WalkerConfig::for_style(BobStyle::Doom).with_declared(Some(400.0), None);
+        assert_eq!(junk.step_up, base.step_up, "a 400 m step is a bad sidecar, not a scale");
+        let nan = WalkerConfig::for_style(BobStyle::Doom).with_declared(Some(f32::NAN), None);
+        assert_eq!(nan.step_up, base.step_up);
+    }
+
+    #[test]
+    fn the_nav_lattice_is_one_body_wide_whatever_the_map_scale() {
+        let level = room(24.0, 4.0);
+        let doom = WalkerConfig::for_style(BobStyle::Doom);
+        let quake1 = WalkerConfig::for_style(BobStyle::Quake).with_declared(Some(0.5625), None);
+        let small = NavGrid::build(&level, &doom);
+        let big = NavGrid::build(&level, &quake1);
+        assert!((small.cell_size() - doom.radius * 2.0).abs() < 1e-4, "{}", small.cell_size());
+        assert!((big.cell_size() - quake1.radius * 2.0).abs() < 1e-4, "{}", big.cell_size());
+        assert!(
+            big.cell_size() > small.cell_size() * 1.9,
+            "a body twice as wide gets a lattice twice as coarse: {} vs {}",
+            big.cell_size(),
+            small.cell_size()
+        );
+    }
+
+    /// Put a walker in an open room on an external route to one cell, and
+    /// report how long it took to get there (in ticks) and how far it
+    /// wandered on the way.
+    fn drive_to(cfg: WalkerConfig, target: Vec3f, ticks: usize) -> (Option<usize>, f32) {
+        let level = room(32.0, 6.0);
+        let grid = NavGrid::build(&level, &cfg);
+        let start = vec3f(0.0, 0.0, 0.0);
+        let goal = grid.cell_at(target).expect("target is walkable");
+        let goal_pos = grid.cell(goal).expect("cell").pos;
+        // Facing -Z: the target below is off to the side, which is what a
+        // route corner looks like from the body's point of view.
+        let mut w = LevelWalker::new(start, 0.0, cfg, 3);
+        w.set_external_planner(true);
+        w.set_route(vec![goal]);
+        let mut travelled = 0.0;
+        let mut prev = start;
+        for t in 0..ticks {
+            w.tick_in(1.0 / 60.0, &level, Some(&grid));
+            let feet = w.feet();
+            travelled += ((feet.x - prev.x).powi(2) + (feet.z - prev.z).powi(2)).sqrt();
+            prev = feet;
+            let gap =
+                ((feet.x - goal_pos.x).powi(2) + (feet.z - goal_pos.z).powi(2)).sqrt();
+            if gap < grid.cell_size() * 0.6 || w.route().is_empty() {
+                return (Some(t), travelled);
+            }
+        }
+        (None, travelled)
+    }
+
+    #[test]
+    fn a_waypoint_inside_the_turning_circle_is_reached_and_not_orbited() {
+        // The Quake 1 body: 3.8 m/s over 1.6 rad/s is a 2.4 m turning
+        // circle, and its nav cells are a metre apart. A waypoint 1.5 m to
+        // the side sits well inside that circle.
+        let cfg = WalkerConfig::for_style(BobStyle::Quake).with_declared(Some(0.5625), None);
+        let radius = cfg.turn_radius();
+        assert!(radius > 2.0, "the Quake 1 tour has a wide turning circle: {radius}");
+        let target = vec3f(1.5, 0.0, 0.0);
+        let (arrived, travelled) = drive_to(cfg, target, 60 * 8);
+        let arrived = arrived.expect("the body must reach a waypoint inside its turning circle");
+        // Orbiting shows up as distance without arrival: the straight line
+        // is 1.5 m, and a body that circles covers many times that.
+        assert!(
+            travelled < 6.0,
+            "walked {travelled:.1} m to a point 1.5 m away — that is an orbit, not a path"
+        );
+        assert!(arrived < 60 * 5, "took {arrived} ticks to walk 1.5 m");
+    }
+
+    #[test]
+    fn the_body_covers_ground_while_it_turns() {
+        // A route corner behind the shoulder: the heading error starts well
+        // over the "facing the target" gate. The body used to stand
+        // perfectly still until it had spun to within 34° — which is the
+        // stop-spin-go stutter, and (being no progress) it also tripped the
+        // planner's watchdog, whose dropped legs then came back cell by
+        // cell, so every one of THOSE turned 45° too.
+        let cfg = WalkerConfig::for_style(BobStyle::Doom);
+        let level = room(32.0, 6.0);
+        let grid = NavGrid::build(&level, &cfg);
+        // Straight out to the side: yaw 0 looks down -Z, so +X is 90° off.
+        let goal = grid.cell_at(vec3f(6.0, 0.0, 0.0)).expect("walkable");
+        let mut w = LevelWalker::new(vec3f(0.0, 0.0, 0.0), 0.0, cfg, 3);
+        w.set_external_planner(true);
+        w.set_route(vec![goal]);
+        let mut moved_while_turning = 0.0;
+        for _ in 0..18 {
+            let before = w.feet();
+            w.tick_in(1.0 / 60.0, &level, Some(&grid));
+            // Still turning: nowhere near the target heading yet.
+            assert!(
+                w.yaw().abs() < std::f32::consts::FRAC_PI_2 - 0.2,
+                "the turn should not be finished in 0.3 s"
+            );
+            let feet = w.feet();
+            moved_while_turning +=
+                ((feet.x - before.x).powi(2) + (feet.z - before.z).powi(2)).sqrt();
+        }
+        assert!(
+            moved_while_turning > 0.02,
+            "the body stood still for the whole turn ({moved_while_turning:.3} m)"
+        );
+    }
+
+    #[test]
+    fn a_walker_never_walks_faster_than_its_turn_can_steer() {
+        // The invariant behind both of the above: the circle a body traces
+        // (speed / turn rate) must fit inside the distance to what it is
+        // steering at.
+        let cfg = WalkerConfig::for_style(BobStyle::Quake).with_declared(Some(0.5625), None);
+        let level = room(32.0, 6.0);
+        let grid = NavGrid::build(&level, &cfg);
+        let goal = grid.cell_at(vec3f(1.2, 0.0, 0.6)).expect("walkable");
+        let goal_pos = grid.cell(goal).expect("cell").pos;
+        let mut w = LevelWalker::new(vec3f(0.0, 0.0, 0.0), 0.0, cfg, 3);
+        w.set_external_planner(true);
+        w.set_route(vec![goal]);
+        for _ in 0..240 {
+            let before = w.feet();
+            w.tick_in(1.0 / 60.0, &level, Some(&grid));
+            if w.route().is_empty() {
+                return; // arrived, which is the point
+            }
+            let feet = w.feet();
+            let speed =
+                ((feet.x - before.x).powi(2) + (feet.z - before.z).powi(2)).sqrt() * 60.0;
+            let gap =
+                ((before.x - goal_pos.x).powi(2) + (before.z - goal_pos.z).powi(2)).sqrt();
+            // The cap is on the speed the body WANTS; the actual one eases
+            // down over `SPEED_EASE_SECS`, and the gap closes while it does.
+            let lag = speed * SPEED_EASE_SECS;
+            assert!(
+                speed <= cfg.turn_rate * (gap + lag) + 0.05,
+                "walked {speed:.2} m/s at a waypoint {gap:.2} m away — a circle of \
+                 {:.2} m round a point it can never reach",
+                speed / cfg.turn_rate
+            );
+        }
+        panic!("never reached a waypoint 1.3 m away in four seconds");
+    }
+
+    #[test]
+    fn a_fresh_route_forgets_the_old_ones_slide() {
+        // The "try the other way round the obstruction" offset is armed by
+        // the stuck watchdog and cleared by the next plan — except that the
+        // clearing lives in the BUILT-IN tour's replan, which an external
+        // planner never runs. So on a `player_nav` tour the first give-up
+        // left the body steering 34° off every bearing it was handed, for
+        // the rest of the level, and a body that crabs converges on nothing.
+        let cfg = WalkerConfig::for_style(BobStyle::Doom);
+        let level = room(32.0, 6.0);
+        let grid = NavGrid::build(&level, &cfg);
+        let goal = grid.cell_at(vec3f(0.0, 0.0, -6.0)).expect("walkable");
+        let mut w = LevelWalker::new(vec3f(0.0, 0.0, 0.0), 0.0, cfg, 3);
+        w.set_external_planner(true);
+        w.set_route(vec![goal]);
+        w.tick_in(1.0 / 60.0, &level, Some(&grid));
+        // Arm it the way the watchdog does.
+        w.nav.as_mut().expect("nav state").slide = -0.6;
+        w.set_route(vec![goal]);
+        assert_eq!(
+            w.nav.as_ref().expect("nav state").slide,
+            0.0,
+            "a fresh route must not inherit the last one's slide offset"
+        );
+        // And the body converges on it.
+        let goal_pos = grid.cell(goal).expect("cell").pos;
+        let mut best = f32::MAX;
+        for _ in 0..60 * 8 {
+            w.tick_in(1.0 / 60.0, &level, Some(&grid));
+            let feet = w.feet();
+            best = best
+                .min(((feet.x - goal_pos.x).powi(2) + (feet.z - goal_pos.z).powi(2)).sqrt());
+        }
+        assert!(
+            best < grid.cell_size(),
+            "a crabbing body never converges: closest approach {best:.2} m"
         );
     }
 }

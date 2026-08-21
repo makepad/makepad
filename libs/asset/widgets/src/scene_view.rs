@@ -17,7 +17,7 @@
 
 use crate::walk_world::{build_level, WalkMoment, WalkPrep, WalkWorld};
 use makepad_render::level::{BobStyle, WalkerConfig};
-use makepad_render::player_nav::NavAnchor;
+use makepad_render::player_nav::{config_for_world, NavAnchor};
 use makepad_render::{
     preview_scene_state, set_pass_camera, DrawSceneAlpha, DrawSceneCube, DrawSceneShadow,
     DrawSceneSkinned, DrawSceneSky, DrawSceneTerrain, DrawSceneTexture, ModelInstance,
@@ -242,7 +242,7 @@ impl SceneView {
         // Parsing, and above all the nav grid, run off the frame thread:
         // a real map is a capsule probe per cell and a wall probe per edge.
         let (tx, rx) = channel();
-        let cfg = WalkerConfig::for_style(self.bob_style);
+        let cfg = config_for_world(self.bob_style, &self.anchors);
         self.parsing = Some(rx);
         std::thread::Builder::new()
             .name("asset-widgets-scene".into())
@@ -380,7 +380,7 @@ impl SceneView {
             .map(|p| (p.part, (p.min, p.max)))
             .collect();
         let triangles = prep.level.as_ref().map(|l| l.triangles()).unwrap_or(0);
-        let cfg = WalkerConfig::for_style(self.bob_style);
+        let cfg = config_for_world(self.bob_style, &self.anchors);
         // Seeded by the load, so one tour is repeatable while two wells
         // showing the same map do not walk in lockstep.
         let seed = self.load_count.wrapping_mul(0x9e37);

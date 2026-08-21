@@ -49,7 +49,7 @@ use makepad_render::level::{
     SurfaceKind, UpAxis, WalkerConfig, WalkerEvent,
 };
 use makepad_render::model::MODEL_VERTEX_FLOATS;
-use makepad_render::player_nav::{NavAnchor, PlayerNav};
+use makepad_render::player_nav::{config_for_world, NavAnchor, PlayerNav};
 use makepad_render::{Renderer, StaticModel};
 use makepad_widgets::*;
 
@@ -296,9 +296,15 @@ impl WalkWorld {
     }
 }
 
-/// The body, gait and gravity a world walks with. A host that knows the
-/// source engine (from a tag, a path, a manifest) says so; everything else
-/// gets Doom's.
-pub fn config_for(source: &str) -> WalkerConfig {
-    WalkerConfig::for_style(BobStyle::from_source(source))
+/// The body, gait and gravity a world walks with — the ONE place a host
+/// decides them, so a grid is never built for one set of legs and walked by
+/// another.
+///
+/// Both halves of the contract's per-game allowance go in: the STYLE, from
+/// whatever the host knows about the source engine (a tag, a path, a
+/// manifest — anything unrecognised gets Doom's), and the map's own
+/// DECLARED facts, which say what its metres are worth. A preset without
+/// the declaration is a body in some other map's units.
+pub fn config_for(source: &str, anchors: &[NavAnchor]) -> WalkerConfig {
+    config_for_world(BobStyle::from_source(source), anchors)
 }

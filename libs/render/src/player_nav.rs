@@ -42,7 +42,7 @@
 //! `player_nav seam` (`set_external_planner` / `set_route` /
 //! `set_target_yaw` / `request_door`).
 
-use crate::level::{LevelCollision, LevelWalker, NavGrid, SurfaceKind, WalkerConfig};
+use crate::level::{BobStyle, LevelCollision, LevelWalker, NavGrid, SurfaceKind, WalkerConfig};
 use makepad_draw::*;
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,32 @@ pub struct NavAnchor {
     pub pos: Vec3f,
     pub yaw: f32,
     pub scale: Vec3f,
+}
+
+impl NavAnchor {
+    /// The scalar an `eye_height` / `floor_height` / `step_height` anchor
+    /// carries (they live in `pos.y`), for the named one.
+    pub fn height(anchors: &[NavAnchor], name: &str) -> Option<f32> {
+        anchors
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.pos.y)
+            .filter(|v| v.is_finite())
+    }
+}
+
+/// The body that walks THIS map: the engine's style preset, put into the
+/// map's own units by what the importer declared about it.
+///
+/// This is the whole of the per-game difference the map contract allows —
+/// a style enum plus declared facts — and it is the one call every host
+/// should make. [`WalkerConfig::for_style`] alone is the preset's own
+/// scale, which is only right for a map published at that scale.
+pub fn config_for_world(bob: BobStyle, anchors: &[NavAnchor]) -> WalkerConfig {
+    WalkerConfig::for_style(bob).with_declared(
+        NavAnchor::height(anchors, "step_height"),
+        NavAnchor::height(anchors, "eye_height"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -624,10 +650,16 @@ impl Rng {
 const UNREACHED: u32 = u32::MAX;
 /// Seconds a requested door may stay shut before it is written off.
 const DOOR_GIVE_UP: f32 = 2.5;
-/// Start asking for a door this far out, so it is open on arrival.
-const DOOR_ASK_M: f32 = 1.7;
+/// Start asking for a door this far out, so it is open on arrival: two body
+/// heights, which is Doom's 1.7 m and a Quake 1 map's 3.5 — a LENGTH here
+/// would be half a body on one map and two on another.
+fn door_ask_m(cfg: &WalkerConfig) -> f32 {
+    cfg.height * 2.0
+}
 /// Sparse-route segments never exceed this many dense cells.
 const SEG_MAX_CELLS: usize = 12;
+/// …and this many while the planner is being careful (a leg just failed).
+const CAREFUL_SEG_CELLS: usize = 3;
 
 fn edge_key(a: u32, b: u32) -> u64 {
     (a as u64) << 32 | b as u64
@@ -690,6 +722,11 @@ pub struct PlayerNav {
     leg_kind: Option<LegKind>,
     dest_cell: Option<u32>,
     leg_doors: Vec<(u16, Vec3f)>,
+    /// A leg is outstanding: it was handed to the walker and its outcome
+    /// (arrived, or dropped by the watchdog) has not been read yet. Set at
+    /// INSTALL, not on first sight of a non-empty route — a short leg can
+    /// be walked out within the tick it was given, and one whose outcome
+    /// is never read leaves the planner picking the same target forever.
     leg_seen: bool,
     last_front: Option<u32>,
     /// Plan the next leg cell-by-cell (a smoothed leg just failed).
@@ -903,7 +940,13 @@ impl PlayerNav {
                 continue;
             }
             if let Some(c) = grid.cell(self.markers[i].cell) {
-                if horiz(c.pos, feet) < 0.6 && (c.pos.y - feet.y).abs() < self.cfg.step_up + 0.2 {
+                // Reach is the grid's own cell (which is one body wide), not
+                // a length: a marker is "brushed past" at the same body
+                // distance whatever metres a map's unit is worth.
+                let reach = grid.cell_size() * 1.2;
+                if horiz(c.pos, feet) < reach
+                    && (c.pos.y - feet.y).abs() < self.cfg.step_up + self.cfg.step_up * 0.5
+                {
                     self.marker_reached(i, walker);
                 }
             }
@@ -1019,7 +1062,7 @@ impl PlayerNav {
             let dist = horiz(feet, pos);
             if self.open_doors.contains(&d) || self.jammed.contains(&d) {
                 self.leg_doors.remove(0);
-            } else if dist < DOOR_ASK_M {
+            } else if dist < door_ask_m(&self.cfg) {
                 if self.requested != Some(d) {
                     walker.request_door(Some(d));
                     self.requested = Some(d);
@@ -1048,7 +1091,6 @@ impl PlayerNav {
         }
         let route = walker.route();
         if !route.is_empty() {
-            self.leg_seen = true;
             self.last_front = route.first().copied();
             // Trim the dense mirror to what is left (consumed from front).
             if let Some(front) = self.last_front {
@@ -1716,15 +1758,21 @@ impl PlayerNav {
                 }
             }
         }
-        let sparse = if self.careful > 0 {
-            path.clone()
-        } else {
-            self.sparsify(&path, feet, grid, level, allow_hazard)
+        // Careful means SHORTER straights, not none. Handing the walker the
+        // raw cell path made every eight-neighbour corner a 45° waypoint a
+        // metre ahead, which is the sawtooth a body cannot walk smoothly —
+        // and it kept failing the same way, so `careful` never cleared.
+        // Three cells still hugs the proven ground closely enough that a
+        // smoother's guess is not what put the body there.
+        let seg_max = match self.careful > 0 {
+            true => CAREFUL_SEG_CELLS,
+            false => SEG_MAX_CELLS,
         };
+        let sparse = self.sparsify(&path, feet, grid, level, allow_hazard, seg_max);
         self.dest_cell = path.last().copied();
         self.leg = path;
         self.leg_kind = Some(kind);
-        self.leg_seen = false;
+        self.leg_seen = true;
         self.last_front = sparse.first().copied();
         self.stats.legs += 1;
         walker.set_route(sparse);
@@ -1847,6 +1895,7 @@ impl PlayerNav {
     /// Doorway, teleporter and rim cells are mandatory (the body must pass
     /// through the MIDDLE the route chose); between them the leg runs as
     /// far as line-of-sight (at body width, over continuous floor) allows.
+    #[allow(clippy::too_many_arguments)]
     fn sparsify(
         &self,
         path: &[u32],
@@ -1854,6 +1903,7 @@ impl PlayerNav {
         grid: &NavGrid,
         level: &LevelCollision,
         allow_hazard: bool,
+        seg_max: usize,
     ) -> Vec<u32> {
         let mandatory = |c: u32| -> bool {
             let Some(cell) = grid.cell(c) else { return false };
@@ -1867,7 +1917,7 @@ impl PlayerNav {
         let mut i = 0usize;
         while i < path.len() {
             let mut lim = i;
-            while lim + 1 < path.len() && lim - i < SEG_MAX_CELLS && !mandatory(path[lim]) {
+            while lim + 1 < path.len() && lim - i < seg_max && !mandatory(path[lim]) {
                 lim += 1;
             }
             let mut best = i;
