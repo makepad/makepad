@@ -315,11 +315,24 @@ spawn/addon/tune/swap/remove all survive). LEVEL state (placements,
 addons, knobs, player body) is the revision chain; RUNTIME state
 (score, mid-walk positions) stays save_data territory.
 
-Sequencing: the UI half (a "New game" slot + per-game current state,
-switching without loss) lands first on local slots; the sandbox-side
-part split (parts on disk, assembled eval) next; the store-facing
-half (roles, per-edit revisions, undo) after contract review with the
-coordinator.
+**Global group** (user, superseding local slots): "these games need to
+be shared between multiplayers, and persisted on the asset server …
+make this 'games' list global so it's the same for everyone connected."
+So for NOW: the games list is ONE shared list — the container asset IS
+the shared world, everyone's edits advance ITS revision chain, and the
+revision history is the shared undo. No per-player forks or private
+drafts yet ("New game" creates a fresh DRAFT GAME ASSET in the global
+group, visible to all). The games panel is already a catalog query with
+events, so global-by-construction; play = fetch head, edit = publish a
+new revision, panels update everywhere. LIVE co-presence (two players
+in one world at once) stays the LAN/rooms machinery — this is the
+CONTENT layer.
+
+Sequencing: design confirmation with the coordinator first (the create-
+game + per-edit-revision publish path is contract-level), then the
+sandbox-side part split (assembled eval), then the store-facing half
+(roles, per-edit revisions, undo). Local slots are DEAD as a design —
+do not build them.
 
 ## 5. Phase 2 — delegation (later)
 
