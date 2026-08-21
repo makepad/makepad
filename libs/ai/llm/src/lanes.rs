@@ -33,7 +33,25 @@ pub const CHUNK_TOKENS: usize = 24;
 /// Prompt tokens a lane ingests per prefill step, unless the caller says
 /// otherwise. Matches the single-sequence prefill batch, which has always
 /// chunked for the same reason.
-pub const DEFAULT_PREFILL_CHUNK: usize = 64;
+///
+/// 512 rather than a smaller number because a prefill chunk's cost is very
+/// far from proportional to the tokens in it: the attention kernel walks the
+/// lane's whole key span once per chunk, and the FFN of a 27B model at 64
+/// columns is latency-bound rather than compute-bound. Measured on a 5090,
+/// 4096 tokens into one lane (.217, `llama-slot-probe --prefill-rate`):
+///
+/// | chunk | lane 0 | lane 1 (base 65536) |
+/// |---|---|---|
+/// | 64 | 786 tok/s | 603 tok/s |
+/// | 256 | 3130 | 1438 |
+/// | 512 | 3575 | 1561 |
+/// | 1024 | 3800 | 1727 |
+///
+/// So 64 was costing a factor of four and a half. 1024 buys a further 6 % for
+/// twice the graph activations, which is the wrong side of a trade whose
+/// failure mode is an out-of-memory at prefill on a box sized for the smaller
+/// one.
+pub const DEFAULT_PREFILL_CHUNK: usize = 512;
 
 /// A request waiting for, or occupying, a lane.
 #[derive(Clone, Debug, PartialEq)]
@@ -246,6 +264,11 @@ impl LaneScheduler {
         self.lanes.iter().filter(|lane| lane.is_some()).count()
     }
 
+    /// Whether `lane` currently holds a conversation.
+    pub fn is_lane_claimed(&self, lane: usize) -> bool {
+        self.lanes.get(lane).map(|l| l.is_some()).unwrap_or(false)
+    }
+
     pub fn slots_free(&self) -> usize {
         self.slots_total() - self.slots_claimed()
     }
@@ -337,6 +360,25 @@ impl LaneScheduler {
     /// unparked ones is what stops a passing conversation from evicting a
     /// player mid-session on a box with lanes to spare.
     fn free_slot(&self) -> Option<usize> {
+        // A conversation arriving ALONE goes to slot 0 if it can, even over a
+        // park.
+        //
+        // Slot 0 is the only lane whose history can live in the session's own
+        // single-sequence state, and that state is what the session-native
+        // speculative path decodes against — the measured 89-100 tok/s one. Any
+        // other lane decodes through a slot, and on this box that is half the
+        // rate. Preferring an unparked lane is right when someone else is
+        // talking (it protects their append); when nobody else is talking there
+        // is no append to protect from THIS turn, and the choice is between a
+        // stranger's dormant cache and this speaker's decode rate.
+        //
+        // Only when the box is otherwise idle: with a second lane live, taking
+        // slot 0 would not make this turn native anyway (`is_solo` is false),
+        // so the eviction would buy nothing at all.
+        let alone = self.pending.len() <= 1 && self.slots_claimed() == 0;
+        if alone && self.lanes.first().map(|lane| lane.is_none()).unwrap_or(false) {
+            return Some(0);
+        }
         let unparked = (0..self.lanes.len())
             .find(|index| self.lanes[*index].is_none() && self.parked[*index].is_none());
         unparked.or_else(|| (0..self.lanes.len()).find(|index| self.lanes[*index].is_none()))
@@ -1678,6 +1720,63 @@ mod tests {
     }
 
     #[test]
+    /// LIVE, 2026-08-21: a user's poem streamed at 45 tok/s on a box whose solo
+    /// path measures 89-100. Their conversation was on lane 1, because lane 0
+    /// was PARKED by an earlier one and free_slot preferred an unparked lane —
+    /// and only lane 0 can run the session-native speculative path.
+    ///
+    /// So a conversation arriving alone takes slot 0, park or no park. What it
+    /// costs is a dormant conversation's cache; what it buys is this speaker's
+    /// decode rate, and there is nobody else on the box to be slowed down.
+    #[test]
+    fn a_conversation_arriving_alone_lands_where_it_can_speculate() {
+        let mut sched = scheduler(4, 4);
+        // Someone talked, and left their history parked on slot 0.
+        sched.submit(request(1, &[1, 2, 3], 2)).expect("submit");
+        let _ = run_to_completion(&mut sched, 12);
+        assert!(sched.is_idle(), "the first conversation retired");
+
+        // A DIFFERENT conversation now arrives, alone.
+        sched
+            .submit(LaneRequest {
+                session: "someone-else".to_string(),
+                ..request(2, &[9, 9, 9], 2)
+            })
+            .expect("submit");
+        sched.admit_pending();
+        assert!(
+            sched.is_solo(SOLO_LANE),
+            "a lone arrival must land on the lane that can speculate, not beside it"
+        );
+    }
+
+    /// The other half of the same rule: with someone else already talking,
+    /// taking slot 0 would NOT make this turn native — `is_solo` is false
+    /// either way — so the park is left alone and the newcomer goes elsewhere.
+    #[test]
+    fn a_second_conversation_does_not_evict_a_park_for_nothing() {
+        let mut sched = scheduler(4, 4);
+        sched.submit(request(1, &[1, 2, 3], 2)).expect("submit");
+        let _ = run_to_completion(&mut sched, 12);
+
+        // One conversation is live...
+        sched
+            .submit(LaneRequest { session: "a".to_string(), ..request(2, &[5, 5], 40) })
+            .expect("submit");
+        sched.admit_pending();
+        let first = (0..4).find(|i| sched.is_lane_claimed(*i)).expect("claimed");
+        // ...and a second arrives behind it.
+        sched
+            .submit(LaneRequest { session: "b".to_string(), ..request(3, &[7, 7], 40) })
+            .expect("submit");
+        sched.admit_pending();
+        let second = (0..4)
+            .find(|i| sched.is_lane_claimed(*i) && *i != first)
+            .expect("second claimed");
+        assert_ne!(first, second, "two conversations, two lanes");
+    }
+
+    #[test]
     fn a_sole_occupant_is_solo_and_a_shared_box_is_not() {
         // The condition that decides whether a lane may take the speculative
         // path. It has to include the QUEUE: a lane that is alone right now
@@ -2079,6 +2178,15 @@ mod tests {
         }
     }
 
+    /// A park is safe from a conversation that is INTERLEAVING with it — which
+    /// is the case it was built for, and the case that still holds.
+    ///
+    /// It is not safe from a conversation arriving when the box is idle: that
+    /// one takes slot 0, because slot 0 is the only lane that can speculate and
+    /// a dormant cache is worth less than the live speaker's decode rate. See
+    /// `a_conversation_arriving_alone_lands_where_it_can_speculate`. Here the
+    /// first conversation is still LIVE when the second arrives, so its park is
+    /// untouched — and the assertion below is that its append survives.
     #[test]
     fn another_conversation_cannot_steal_a_parked_append() {
         // THE reason this is per lane. One shared prefix belongs to whoever
@@ -2096,13 +2204,18 @@ mod tests {
         let LaneStep::Decode { plan, .. } = sched.next_step() else {
             panic!("expected decode");
         };
-        sched.on_decoded(&plan, &[101]);
-        sched.reap();
-
-        // Somebody else runs a whole turn in between.
+        // Somebody else arrives WHILE player 1 is still holding its lane, which
+        // is what "interleaving" means and the only shape the park has to
+        // survive.
         let mut b = request(2, &[40, 41], 1);
         b.session = "player-2".to_string();
         sched.submit(b).expect("submit");
+        // ADMITTED while player 1 still holds its lane. That is the whole of
+        // "interleaving": the second conversation is admitted next to a live
+        // one, so the idle rule does not apply and the park is not a candidate.
+        sched.admit_pending();
+        sched.on_decoded(&plan, &[101]);
+        sched.reap();
         let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
             panic!("expected prefill");
         };

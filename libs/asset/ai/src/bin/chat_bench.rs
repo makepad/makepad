@@ -53,7 +53,7 @@ fn main() {
     let base = args.next().unwrap_or_else(|| {
         eprintln!(
             "usage: chat-bench <http://box:8123> [--turns N] [--model ID] \
-             [--interleave] [--system-words N]"
+             [--interleave] [--as-a-game-client] [--long] [--system-words N]"
         );
         std::process::exit(2);
     });
@@ -61,6 +61,10 @@ fn main() {
     let mut turns = 3usize;
     let mut model = "qwen3.8-27b".to_string();
     let mut interleave = false;
+    // Behave like the real game client instead of echoing the reply back.
+    let mut as_a_game_client = false;
+    // Ask for long answers so the rate is decode-bound.
+    let mut long = false;
     // Words of taught context. The default is deliberately game-sized: a
     // bench with a one-line prompt does not test prefill at all.
     let mut system_words = 2000usize;
@@ -80,6 +84,14 @@ fn main() {
                 interleave = true;
                 index += 1;
             }
+            "--as-a-game-client" => {
+                as_a_game_client = true;
+                index += 1;
+            }
+            "--long" => {
+                long = true;
+                index += 1;
+            }
             "--system-words" => {
                 system_words = rest
                     .get(index + 1)
@@ -96,11 +108,12 @@ fn main() {
 
     println!(
         "chat-bench {base}  model={model}  turns={turns}  interleave={interleave}  \
-         system~{system_words} words"
+         game-client={as_a_game_client}  system~{system_words} words"
     );
     let mut failures: Vec<String> = Vec::new();
-    let mut main_chat = Conversation::new("bench-primary", system_words);
-    let mut other_chat = Conversation::new("bench-interleaved", system_words);
+    let mut main_chat = Conversation::new("bench-primary", system_words, as_a_game_client, long);
+    let mut other_chat =
+        Conversation::new("bench-interleaved", system_words, as_a_game_client, long);
 
     for turn in 1..=turns {
         // The interleaved arm runs BETWEEN the primary's turns, which is the
@@ -134,6 +147,13 @@ fn main() {
 /// One turn's outcome, in the units a person experiences.
 struct TurnResult {
     turn: usize,
+    /// Generated tokens per second between the first and last poll that carried
+    /// any — the client meter's own arithmetic.
+    meter: Option<f64>,
+    /// Longest wall gap between two polls that carried tokens.
+    biggest_gap: f64,
+    /// How many polls carried tokens at all.
+    deltas: usize,
     /// Wall time until the first character the user could READ — after the
     /// think block, not after the first token.
     first_visible: Option<Duration>,
@@ -165,15 +185,22 @@ fn report(result: &TurnResult, prefix: &str) {
         .first_visible
         .map(|d| format!("{:.2}s", d.as_secs_f64()))
         .unwrap_or_else(|| "never".to_string());
+    let meter = result
+        .meter
+        .map(|r| format!("{r:.1}"))
+        .unwrap_or_else(|| "n/a".to_string());
     println!(
         "{prefix}turn {}: {warmth}  ttf-visible {ttfv}  total {:.2}s  \
-         visible {:.1} tok/s ({} tok)  all {:.1} tok/s (think {})",
+         visible {:.1} tok/s ({} tok)  all {:.1} tok/s (think {})  \
+         METER {meter} tok/s ({} deltas, worst gap {:.2}s)",
         result.turn,
         result.total.as_secs_f64(),
         result.visible_rate(),
         result.visible_tokens,
         result.total_rate(),
         result.think_tokens,
+        result.deltas,
+        result.biggest_gap,
     );
 }
 
@@ -245,18 +272,46 @@ struct Conversation {
     /// prompts, not the same one twice.
     system: String,
     messages: Vec<(String, String)>,
+    /// Store replies the way the game client stores them — reasoning removed —
+    /// and carry tool results between turns.
+    as_a_game_client: bool,
+    /// Ask for long answers, so the measured rate is the decode rate.
+    long_answers: bool,
 }
 
 impl Conversation {
-    fn new(id: &'static str, system_words: usize) -> Self {
+    fn new(
+        id: &'static str,
+        system_words: usize,
+        as_a_game_client: bool,
+        long_answers: bool,
+    ) -> Self {
         let mut system = long_system_prompt(system_words);
         // Two conversations must not share a prompt, or "both stayed warm"
         // could be one lane serving both.
         system.push_str(id);
-        Self { id, system, messages: Vec::new() }
+        Self { id, system, messages: Vec::new(), as_a_game_client, long_answers }
     }
 
     fn next_question(&self) -> String {
+        // A rate read off a 30-token reply is mostly HTTP and the poll
+        // interval: at 120 ms granularity a turn that decodes in 300 ms
+        // measures as whatever the poller happened to see. `--long` asks for
+        // enough output that the number is the decode rate, which is the one
+        // the user's meter shows.
+        if self.long_answers {
+            const LONG: [&str; 3] = [
+                "Write a 60-line poem about a lighthouse keeper who is afraid of the dark.",
+                "Write another 60 lines, same keeper, the morning after.",
+                "Now 60 more, from the point of view of the light itself.",
+            ];
+            let asked = self
+                .messages
+                .iter()
+                .filter(|(role, text)| role == "user" && !text.starts_with("<tool_response>"))
+                .count();
+            return LONG[asked % LONG.len()].to_string();
+        }
         const QUESTIONS: [&str; 6] = [
             "In one sentence, what is a GPU?",
             "And what is a CPU?",
@@ -265,7 +320,12 @@ impl Conversation {
             "Name one thing that changes at high resolution.",
             "Summarise this conversation in one line.",
         ];
-        QUESTIONS[(self.messages.len() / 2) % QUESTIONS.len()].to_string()
+        let asked = self
+            .messages
+            .iter()
+            .filter(|(role, text)| role == "user" && !text.starts_with("<tool_response>"))
+            .count();
+        QUESTIONS[asked % QUESTIONS.len()].to_string()
     }
 }
 
@@ -289,6 +349,14 @@ fn run_turn(
 
     let mut first_visible = None;
     let mut last = String::new();
+    // THE METER, measured the way the client computes it: generated-token
+    // deltas over the wall time between the polls that carried them. A
+    // service-side round rate says what the GPU did; this says what the person
+    // watching the number sees, and the two came apart by a factor of two on
+    // the live box.
+    let mut meter_first: Option<(Instant, u64)> = None;
+    let mut meter_last: Option<(Instant, u64)> = None;
+    let mut meter_gaps: Vec<(f64, u64)> = Vec::new();
     loop {
         if started.elapsed() > TURN_TIMEOUT {
             return Err(format!("turn {turn} did not finish in {TURN_TIMEOUT:?}"));
@@ -299,11 +367,30 @@ fn run_turn(
         // First VISIBLE text, not first token: everything before the think
         // block closes is reasoning the user never sees.
         if first_visible.is_none() {
-            if let Some(after) = partial.split("</think>").nth(1) {
-                if !after.trim().is_empty() {
-                    first_visible = Some(started.elapsed());
+            // A reply that never opens a think block is visible from its first
+            // character. Waiting for `</think>` in that case reports "never"
+            // for the fastest turns there are — which is how a brief-think run
+            // came back reading like a broken one.
+            let visible = if partial.contains("<think>") {
+                partial.split("</think>").nth(1).unwrap_or("")
+            } else {
+                partial.as_str()
+            };
+            if !visible.trim().is_empty() {
+                first_visible = Some(started.elapsed());
+            }
+        }
+        if let Some(gen) = field_u64(&status, "gen_tokens") {
+            let now = Instant::now();
+            if meter_first.is_none() && gen > 0 {
+                meter_first = Some((now, gen));
+            }
+            if let Some((prev_at, prev_gen)) = meter_last {
+                if gen > prev_gen {
+                    meter_gaps.push((now.duration_since(prev_at).as_secs_f64(), gen - prev_gen));
                 }
             }
+            meter_last = Some((now, gen));
         }
         last = status.clone();
         match field_str(&status, "state").as_deref() {
@@ -317,10 +404,52 @@ fn run_turn(
     }
     let total = started.elapsed();
     let text = field_str(&last, "partial_text").unwrap_or_default();
-    chat.messages.push(("assistant".to_string(), text.clone()));
+    // What the CLIENT stores, which is not always what the model wrote.
+    //
+    // `--as-a-game-client` reproduces `libs/asset/chat/src/qwen.rs`: reasoning
+    // is stripped before the reply is kept, and the closing tag is put back on
+    // the way out because the service opens a block on every assistant turn it
+    // renders. Feeding the reply back VERBATIM — this bench's original
+    // behaviour — is the one shape in which warmth could hit, so a bench that
+    // only does that will report a warm box while every real conversation is
+    // cold. That is exactly what happened.
+    let stored = if chat.as_a_game_client {
+        let visible = text.rsplit("</think>").next().unwrap_or(&text).trim_start();
+        format!("\n</think>\n\n{visible}")
+    } else {
+        text.clone()
+    };
+    chat.messages.push(("assistant".to_string(), stored));
+    // A game turn is a tool call and its result, not two lines of prose. The
+    // client wraps tool outcomes as user-role `<tool_response>`, so that is
+    // what the next prompt carries.
+    if chat.as_a_game_client {
+        chat.messages.push((
+            "user".to_string(),
+            format!("<tool_response>\nok, applied ({} chars)\n</tool_response>", text.len()),
+        ));
+    }
 
+    // Sustained rate between the first delta that carried tokens and the last,
+    // which is what a meter averaging over its window converges to. The
+    // per-delta spread is reported too: a burst of 24 tokens every 270 ms and a
+    // steady trickle read the same on average and feel nothing alike.
+    let meter = match (meter_first, meter_last) {
+        (Some((a, ga)), Some((b, gb))) if gb > ga && b > a => {
+            Some((gb - ga) as f64 / b.duration_since(a).as_secs_f64())
+        }
+        _ => None,
+    };
+    let biggest_gap = meter_gaps
+        .iter()
+        .map(|(secs, _)| *secs)
+        .fold(0.0f64, f64::max);
+    let deltas = meter_gaps.len();
     Ok(TurnResult {
         turn,
+        meter,
+        biggest_gap,
+        deltas,
         first_visible,
         total,
         visible_tokens: field_u64(&last, "visible_tokens").unwrap_or(0),
@@ -349,7 +478,7 @@ fn request_json(model: &str, system: &str, messages: &[(String, String)]) -> Str
         out.push_str(&escape(text));
         out.push_str("\"}");
     }
-    out.push_str("],\"max_tokens\":400,\"temperature\":0.7,\"seed\":7}");
+    out.push_str("],\"max_tokens\":1200,\"temperature\":0.7,\"seed\":7}");
     out
 }
 

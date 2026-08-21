@@ -862,6 +862,10 @@ impl StepPlan {
             hidden_read_rows: Vec::new(),
             hidden_write_rows: Vec::new(),
             attention_key_lower_bounds,
+            // A batched decode step spans several slots at once, so its window
+            // is the whole arena from row 0 — one graph cannot be anchored on
+            // two bases. Only a single-slot prefill is windowed.
+            attention_key_base: 0,
         };
         layout.validate()?;
         if let Some(&highest) = layout.attention_write_indices.iter().max() {

@@ -190,6 +190,7 @@ impl CudaExecRuntime {
         arena: &CudaContextArena,
         n_tokens: usize,
         n_outputs: usize,
+        attention_key_base: usize,
         attention_key_count: usize,
         n_seqs: usize,
     ) -> Result<CompiledHybridDecodeCuda> {
@@ -201,6 +202,7 @@ impl CudaExecRuntime {
                 &arena.imp,
                 n_tokens,
                 n_outputs,
+                attention_key_base,
                 attention_key_count,
                 n_seqs,
             )?,
