@@ -1263,6 +1263,13 @@ script_mod! {
                                     gen_profile := DropDown{labels: ["…"]}
                                     gen_len := DropDown{labels: ["…"]}
                                     gen_go := ChromeButton{text: "Queue"}
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0, y: 0.5}
                                     gen_blast := ChromeButton{text: "BLAST"}
                                     // Keep the queue topped up from the same
                                     // prompt for as long as it is checked.
@@ -6168,34 +6175,59 @@ impl App {
     }
 
     fn run_gen_cmds(&mut self, cmds: Vec<GenCmd>) {
-        let Some(up) = self.up.as_mut() else { return };
-        for cmd in cmds {
-            match cmd {
-                GenCmd::FetchProfiles => {
-                    if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobProfiles {
-                        domain: Some("video".to_string()),
-                    }) {
-                        self.cat_reqs.insert(id, CatPurpose::JobProfiles);
+        // A dead runtime must never eat commands in silence: the rows say
+        // so, and the session-loss clock starts so the reconnect machinery
+        // brings the connection back without anyone noticing twice.
+        let now = now_ms();
+        let mut runtime_down = false;
+        {
+            let Some(up) = self.up.as_mut() else { return };
+            for cmd in cmds {
+                match cmd {
+                    GenCmd::FetchProfiles => {
+                        if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobProfiles {
+                            domain: Some("video".to_string()),
+                        }) {
+                            self.cat_reqs.insert(id, CatPurpose::JobProfiles);
+                        } else {
+                            runtime_down = true;
+                        }
                     }
-                }
-                GenCmd::Enqueue { tag, namespace, kind, body } => {
-                    if let Ok(id) =
-                        up.catalog.submit(ClientRequest::EnqueueJob { namespace, kind, body })
-                    {
-                        self.cat_reqs.insert(id, CatPurpose::JobEnqueue { tag });
+                    GenCmd::Enqueue { tag, namespace, kind, body } => {
+                        match up.catalog.submit(ClientRequest::EnqueueJob { namespace, kind, body }) {
+                            Ok(id) => {
+                                self.cat_reqs.insert(id, CatPurpose::JobEnqueue { tag });
+                            }
+                            Err(_) => {
+                                runtime_down = true;
+                                self.gen.enqueue_failed_at(
+                                    tag,
+                                    "connection lost — reconnecting, press Queue again".to_string(),
+                                    Some(now),
+                                );
+                            }
+                        }
                     }
-                }
-                GenCmd::PollStatus { job } => {
-                    if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobStatus { job }) {
-                        self.cat_reqs.insert(id, CatPurpose::JobStatus { job });
+                    GenCmd::PollStatus { job } => {
+                        if let Ok(id) = up.catalog.submit(ClientRequest::FetchJobStatus { job }) {
+                            self.cat_reqs.insert(id, CatPurpose::JobStatus { job });
+                        } else {
+                            runtime_down = true;
+                        }
                     }
-                }
-                GenCmd::Cancel { job } => {
-                    if let Ok(id) = up.catalog.submit(ClientRequest::CancelJob { job }) {
-                        self.cat_reqs.insert(id, CatPurpose::JobCancel { job });
+                    GenCmd::Cancel { job } => {
+                        if let Ok(id) = up.catalog.submit(ClientRequest::CancelJob { job }) {
+                            self.cat_reqs.insert(id, CatPurpose::JobCancel { job });
+                        } else {
+                            runtime_down = true;
+                        }
                     }
                 }
             }
+        }
+        if runtime_down && self.session_loss_since.is_none() {
+            self.session_loss_since =
+                Some(Instant::now() - Duration::from_secs_f64(SESSION_LOSS_GRACE_S));
         }
     }
 
