@@ -93,6 +93,10 @@ pub struct MacosClasses {
     pub menu_target: *const Class,
     pub view: *const Class,
     pub timer_delegate: *const Class,
+    /// Subclass swapped onto AppKit's NSTitlebarContainerView so the
+    /// transparent titlebar stops eating drags (see macos_delegates).
+    /// Null when the private class is absent — callers skip the swap.
+    pub titlebar_container: *const Class,
 }
 
 impl MacosClasses {
@@ -111,6 +115,7 @@ impl MacosClasses {
             app_delegate: define_app_delegate(),
             menu_target: define_menu_target_class(),
             view: define_cocoa_view_class(),
+            titlebar_container: define_titlebar_container_class(),
         }
     }
 }
