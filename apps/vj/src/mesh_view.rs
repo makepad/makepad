@@ -13,7 +13,7 @@ use crate::media::PreparedMesh;
 use makepad_render::level::{
     BobStyle, LevelCollision, LevelWalker, NavGrid, WalkerConfig, WalkerEvent,
 };
-use makepad_render::player_nav::{NavAnchor, PlayerNav};
+use makepad_render::player_nav::{config_for_world, NavAnchor, PlayerNav};
 use makepad_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_render::{
     preview_scene_state, set_pass_camera, DrawSceneAlpha, DrawSceneCube,
@@ -448,7 +448,7 @@ impl VjMeshView {
                     lift,
                 });
             }
-            PreparedMesh::Statue { model, base_color, level, nav, start } => {
+            PreparedMesh::Statue { model, base_color, level, nav_cfg, nav, start } => {
                 // GPU-only: the GLB was parsed on the decode worker (30ms of
                 // a 35ms Doom level), so this is the buffer/texture upload.
                 let name = format!("vj/statue-{}", self.load_count);
@@ -467,7 +467,7 @@ impl VjMeshView {
                         self.dancer = None;
                         self.statue_yaw = 0.0;
                         if self.world_mode {
-                            self.load_world(name, min, max, level, nav, start);
+                            self.load_world(name, min, max, level, nav_cfg, nav, start);
                         } else {
                             let height = (max.y - min.y).max(0.01);
                             let scale = 1.75 / height;
@@ -508,6 +508,7 @@ impl VjMeshView {
         min: Vec3f,
         max: Vec3f,
         level: Option<Box<LevelCollision>>,
+        nav_cfg: Option<WalkerConfig>,
         mut nav: Option<Box<NavGrid>>,
         start: Option<Vec3f>,
     ) {
@@ -536,8 +537,13 @@ impl VjMeshView {
             }
         }
         let doors: Vec<String> = doors.into_iter().map(|(p, _)| p).collect();
-        // Body, gait and gravity of the source engine.
-        let cfg = WalkerConfig::for_style(self.bob_style);
+        // player_nav: the world's manifest anchors, taken here so the body
+        // below is built from the SAME facts the planner reads.
+        let anchors = std::mem::take(&mut self.world_anchors);
+        // Body, gait and gravity of the source engine, in this map's own
+        // units. The prep worker built the nav grid with exactly this
+        // config; walking it with any other offers steps the legs refuse.
+        let cfg = nav_cfg.unwrap_or_else(|| config_for_world(self.bob_style, &anchors));
         let trace = std::env::var_os("VJ_WALKER_TRACE").is_some();
         let Some(level) = level else {
             self.tour = None;
@@ -552,7 +558,6 @@ impl VjMeshView {
         // grid. Its anchored start (when the manifest carries one) beats
         // the grid's best guess; without a grid the walker's built-in tour
         // keeps the picture alive.
-        let anchors = std::mem::take(&mut self.world_anchors);
         let player =
             nav.as_deref().and_then(|g| PlayerNav::new(g, &level, &cfg, &anchors, seed));
         let (start, start_yaw) = match player.as_ref() {
