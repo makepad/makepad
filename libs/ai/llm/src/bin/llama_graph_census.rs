@@ -107,6 +107,9 @@ fn run() -> Result<(), String> {
         Some(&shared_cache),
         args.n_tokens,
         args.n_outputs,
+        // The census counts one graph's nodes; it has no slots, so its
+        // attention window starts at the cache's first row.
+        0,
         key_count,
     )
     .map_err(|e| format!("{e:?}"))?;

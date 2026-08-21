@@ -95,6 +95,13 @@ struct SessionGraphParams {
     kind: SessionGraphKind,
     n_tokens: usize,
     n_outputs: usize,
+    /// First arena row this graph's attention window starts at.
+    ///
+    /// Part of the KEY because two graphs of the same shape over different
+    /// windows are different graphs: one reads slot 1's rows, the other slot
+    /// 2's. Zero for everything except a slot's own prefill, so every graph
+    /// that existed before keys, compiles and runs exactly as it did.
+    attention_key_base: usize,
     attention_key_count: usize,
     /// Slots sharing this batch. 1 for every single-sequence path, which is
     /// every path that exists today — so a solo session keys, compiles and
@@ -108,6 +115,7 @@ impl SessionGraphParams {
             kind: SessionGraphKind::Main,
             n_tokens,
             n_outputs,
+            attention_key_base: 0,
             attention_key_count,
             n_seqs: 1,
         }
@@ -125,6 +133,7 @@ impl SessionGraphParams {
             kind: SessionGraphKind::Main,
             n_tokens: n_seqs,
             n_outputs: n_seqs,
+            attention_key_base: 0,
             attention_key_count,
             n_seqs,
         }
@@ -140,6 +149,7 @@ impl SessionGraphParams {
             kind: SessionGraphKind::MainVerify,
             n_tokens,
             n_outputs: n_tokens,
+            attention_key_base: 0,
             attention_key_count,
             n_seqs,
         }
@@ -156,6 +166,7 @@ impl SessionGraphParams {
             kind: SessionGraphKind::MainVerify,
             n_tokens,
             n_outputs: n_tokens,
+            attention_key_base: 0,
             attention_key_count,
             n_seqs: 1,
         }
@@ -166,6 +177,7 @@ impl SessionGraphParams {
             kind: SessionGraphKind::MtpDraft,
             n_tokens,
             n_outputs: 1,
+            attention_key_base: 0,
             attention_key_count,
             n_seqs: 1,
         }
@@ -186,6 +198,7 @@ impl SessionGraphParams {
             kind: SessionGraphKind::MtpDraft,
             n_tokens: width,
             n_outputs: width,
+            attention_key_base: 0,
             attention_key_count,
             n_seqs: 1,
         }
@@ -749,15 +762,31 @@ impl LlamaSession {
             .collect::<Result<Vec<_>>>()?;
         let base = i32::try_from(kv_base)
             .map_err(|_| LlamaError::format("slot kv_base does not fit in i32"))?;
-        let key_span = kv_base + start + batch;
-        let attention_key_count = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
+        // The window is the SLOT's own rows, not the arena from row 0.
+        //
+        // A prefill graph costs `n_tokens x attention_key_count` in mask bytes
+        // and in the attention kernel's pass over the key span, and under
+        // slot-major addressing a lane's absolute span is its BASE plus its
+        // fill. Keying off the absolute span made lane N of a 128k-per-lane box
+        // pay for hundreds of thousands of rows belonging to other
+        // conversations — measured at 2.2x on lane 1 of a 2x64k session, and it
+        // grows with the base. Anchoring the window at `kv_base` makes a slot
+        // prefill cost exactly what the same prompt costs on lane 0, which is
+        // what it always should have cost.
+        //
+        // The bucketing is unchanged, only what it is applied to: the span
+        // WITHIN the slot. So slot 0 (base 0) keys the same graphs it always
+        // did and is byte-identical by construction.
+        let key_span = start + batch;
+        let window = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
             key_span
         } else {
-            key_span
-                .next_multiple_of(GRAPH_KEY_BUCKET)
-                .min(self.attention_arena_rows)
-        };
-        let graph_params = SessionGraphParams::greedy(batch, attention_key_count);
+            key_span.next_multiple_of(GRAPH_KEY_BUCKET)
+        }
+        .min(self.attention_arena_rows.saturating_sub(kv_base).max(1));
+        let attention_key_count = window;
+        let mut graph_params = SessionGraphParams::greedy(batch, attention_key_count);
+        graph_params.attention_key_base = kv_base;
         self.ensure_compiled_graph(graph_params)?;
         let state_row_i32 = i32::try_from(state_row)
             .map_err(|_| LlamaError::format("slot state row does not fit in i32"))?;
@@ -778,11 +807,13 @@ impl LlamaSession {
                 &output_ids,
             )?;
             layout.attention_write_indices = write_indices;
-            // Zero base is left EMPTY so slot 0 takes the mask builder's
-            // single-sequence path and stays byte-identical to today.
-            if base != 0 {
-                layout.attention_key_lower_bounds = vec![base; batch];
-            }
+            // No lower bounds, at ANY base. The window starts at this slot's
+            // first row, so there is nothing below it to exclude — the mask is
+            // the ordinary causal one and every slot takes the mask builder's
+            // single-sequence path, which is what makes slot k byte-identical
+            // to slot 0 rather than merely equivalent to it.
+            let _ = base;
+            layout.attention_key_base = kv_base;
             layout.recurrent_state_rows = vec![state_row_i32];
             if compiled.decode().input_recurrent_state_rows.is_none() {
                 layout.recurrent_state_rows.clear();
@@ -1718,6 +1749,7 @@ impl LlamaSession {
                 &self.graphs.shared_buffers,
                 params.n_tokens,
                 params.n_outputs,
+                params.attention_key_base,
                 params.attention_key_count,
                 params.n_seqs,
             ) {
@@ -3481,6 +3513,7 @@ fn build_runtime_state(
                 &shared_buffers,
                 1,
                 1,
+                0,
                 session_attention_key_count(spec)?,
                 1,
             )?;
