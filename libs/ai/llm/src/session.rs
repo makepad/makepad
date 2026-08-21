@@ -1338,6 +1338,36 @@ impl LlamaSamplingParams {
     }
 }
 
+/// Sampler RNG state for ONE generation.
+///
+/// The RNG stream must be seeded once per generation and then carried across
+/// every call that continues that generation. Callers that decode in chunks —
+/// the asset-ai chat worker decodes 24 tokens at a time so it can check
+/// cancellation and publish a partial-text snapshot — used to call
+/// [`LlamaSession::continue_sampled`] once per chunk, which re-seeded from
+/// `params.seed` every time: token 0 and token 24 drew the SAME uniform, and
+/// with the same logits (a real occurrence in a repetitive tail) they sampled
+/// the same token. The stream was 24 draws long, replayed, for the whole reply.
+///
+/// So the state is explicit and caller-owned rather than derived from `seed`
+/// inside the call. It is deliberately **not** `Copy`: forking the stream must
+/// be a visible `.clone()`, never an accidental move-out. One state per
+/// generation — and, once slots interleave, one state per slot.
+#[derive(Clone, Debug)]
+pub struct LlamaSamplerState {
+    rng: Xorshift64,
+}
+
+impl LlamaSamplerState {
+    /// Start a fresh stream. Same seed, same stream — reproducibility is
+    /// unchanged, it is only the re-seeding that is gone.
+    pub fn new(seed: u64) -> Self {
+        Self {
+            rng: Xorshift64::new(seed),
+        }
+    }
+}
+
 /// Deterministic per-session RNG so a seed reproduces a run exactly.
 #[derive(Clone, Copy, Debug)]
 struct Xorshift64(u64);
@@ -1501,22 +1531,46 @@ impl LlamaSession {
         self.mtp.is_some()
     }
 
-    /// Sample `max_new_tokens` tokens. With speculation on this uses proper
-    /// speculative rejection sampling (accept draft `x` with probability
-    /// `min(1, p(x)/q(x))`, otherwise draw from the normalised residual
-    /// `max(0, p - q)`), so the output distribution is exactly the one the
-    /// non-speculative sampler would produce.
+    /// Sample `max_new_tokens` tokens as ONE self-contained generation: the
+    /// RNG stream starts at `params.seed` and ends with the call.
+    ///
+    /// Decoding a reply in several chunks is therefore **not** a loop over this
+    /// method — that restarts the stream at every chunk boundary. Seed a
+    /// [`LlamaSamplerState`] once and loop over
+    /// [`continue_sampled_with`](Self::continue_sampled_with) instead.
     pub fn continue_sampled(
         &mut self,
         max_new_tokens: usize,
         params: LlamaSamplingParams,
     ) -> Result<LlamaGeneration> {
+        let mut state = LlamaSamplerState::new(params.seed);
+        self.continue_sampled_with(max_new_tokens, params, &mut state)
+    }
+
+    /// Sample `max_new_tokens` tokens, continuing the caller's RNG stream.
+    ///
+    /// With speculation on this uses proper speculative rejection sampling
+    /// (accept draft `x` with probability `min(1, p(x)/q(x))`, otherwise draw
+    /// from the normalised residual `max(0, p - q)`), so the output
+    /// distribution is exactly the one the non-speculative sampler would
+    /// produce.
+    ///
+    /// `params.seed` is ignored here — the stream lives in `state`, which the
+    /// caller seeds once per generation. Chunking a generation across several
+    /// calls with the same `state` yields exactly the token sequence one big
+    /// call would have produced.
+    pub fn continue_sampled_with(
+        &mut self,
+        max_new_tokens: usize,
+        params: LlamaSamplingParams,
+        state: &mut LlamaSamplerState,
+    ) -> Result<LlamaGeneration> {
         if params.is_greedy() {
             return self.continue_greedy(max_new_tokens);
         }
-        let mut rng = Xorshift64::new(params.seed);
+        let rng = &mut state.rng;
         if self.mtp.is_some() {
-            return self.continue_sampled_speculative(max_new_tokens, params, &mut rng);
+            return self.continue_sampled_speculative(max_new_tokens, params, rng);
         }
 
         let mut token_ids = Vec::with_capacity(max_new_tokens);
@@ -1526,7 +1580,7 @@ impl LlamaSession {
                 LlamaError::format("session has no logits yet; append context tokens first")
             })?;
             let probs = sampling_probabilities(logits, params)?;
-            let next_token = sample_from(&probs, &mut rng)?;
+            let next_token = sample_from(&probs, rng)?;
             if let Some(reason) = self.stop_reason_for(next_token) {
                 stop_reason = reason;
                 break;
@@ -2460,7 +2514,7 @@ fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
 mod tests {
     use super::{
         mtp_carry_ring, sample_from, sampling_probabilities, speculative_acceptance,
-        speculative_residual, LlamaSamplingParams, Xorshift64,
+        speculative_residual, LlamaSamplerState, LlamaSamplingParams, Xorshift64,
     };
 
     fn params(temperature: f32, top_p: f32, top_k: usize) -> LlamaSamplingParams {
@@ -2497,6 +2551,69 @@ mod tests {
         let logits = [0.0f32, 1.0, 0.5];
         let probs = sampling_probabilities(&logits, params(0.01, 1.0, 0)).unwrap();
         assert!(probs[1] > 0.999, "{probs:?}");
+    }
+
+    /// The chunked-decode regression, at the level where it actually happened:
+    /// a caller that decodes a reply `CHUNK` tokens at a time.
+    ///
+    /// Re-seeding per chunk (what `continue_sampled` does per call, and what
+    /// the chat worker used to do 24 tokens at a time) makes the draw sequence
+    /// PERIODIC — chunk 2 replays chunk 1 exactly. Carrying one
+    /// `LlamaSamplerState` across the chunks reproduces the single-shot stream
+    /// instead. Both halves are asserted: the fix must be equivalent to one
+    /// big call, and the old behaviour must be visibly broken so this test
+    /// fails if anyone re-seeds again.
+    #[test]
+    fn a_chunked_generation_carries_one_rng_stream() {
+        // A distribution wide enough that a repeated uniform repeats a token.
+        let probs: Vec<f32> = (0..64).map(|_| 1.0 / 64.0).collect();
+        const CHUNK: usize = 24;
+        const TOTAL: usize = 96;
+
+        let single: Vec<i32> = {
+            let mut state = LlamaSamplerState::new(7);
+            (0..TOTAL)
+                .map(|_| sample_from(&probs, &mut state.rng).unwrap())
+                .collect()
+        };
+
+        let chunked_carried: Vec<i32> = {
+            let mut state = LlamaSamplerState::new(7);
+            let mut out = Vec::new();
+            while out.len() < TOTAL {
+                let want = CHUNK.min(TOTAL - out.len());
+                for _ in 0..want {
+                    out.push(sample_from(&probs, &mut state.rng).unwrap());
+                }
+            }
+            out
+        };
+        assert_eq!(
+            chunked_carried, single,
+            "carrying the sampler state across chunks must equal one call"
+        );
+
+        let chunked_reseeded: Vec<i32> = {
+            let mut out = Vec::new();
+            while out.len() < TOTAL {
+                // The bug: a fresh state per chunk, from the same seed.
+                let mut state = LlamaSamplerState::new(7);
+                let want = CHUNK.min(TOTAL - out.len());
+                for _ in 0..want {
+                    out.push(sample_from(&probs, &mut state.rng).unwrap());
+                }
+            }
+            out
+        };
+        assert_eq!(
+            &chunked_reseeded[..CHUNK],
+            &chunked_reseeded[CHUNK..2 * CHUNK],
+            "re-seeding per chunk repeats the whole chunk verbatim"
+        );
+        assert_ne!(
+            chunked_reseeded, single,
+            "re-seeding per chunk must not be mistaken for the correct stream"
+        );
     }
 
     #[test]

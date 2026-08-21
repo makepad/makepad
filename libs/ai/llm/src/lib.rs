@@ -125,8 +125,8 @@ pub use runtime::{
 };
 pub use draft_vocab::DraftVocab;
 pub use session::{
-    LlamaGeneration, LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
-    SpeculativeStats,
+    LlamaGeneration, LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig,
+    LlamaStopReason, SpeculativeStats,
 };
 pub use vision::{
     calc_size_preserved_ratio, preprocess_rgb8, vision_rope_positions, PreparedImage,
