@@ -13,7 +13,18 @@
 //!
 //! Usage: `llama-slot-probe <model.gguf> [--tokens N] [--slots N]`
 
-use makepad_ai_llm::{LlamaSession, LlamaSessionConfig, LlamaVocab, LlamaModel};
+use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab};
+
+/// First index of the maximum, tie-broken low — llama.cpp's greedy ordering.
+fn argmax_token_id(logits: &[f32]) -> Option<i32> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, &value) in logits.iter().enumerate() {
+        if best.map(|(_, b)| value > b).unwrap_or(true) {
+            best = Some((index, value));
+        }
+    }
+    best.map(|(index, _)| index as i32)
+}
 
 const PROMPT: &str = "Explain in two sentences why a memory-bound decode step \
 gets cheaper per token when several sequences are batched together.";
@@ -148,4 +159,87 @@ fn main() {
     }
 
     println!("PASS: {slots} slots produce byte-identical solo output");
+
+    // Second gate: SLOT INDEPENDENCE. A conversation living in slot k must
+    // produce exactly what it produces in slot 0. This is the one that
+    // exercises the slot-major addressing itself — kv_base on every cache
+    // write, the mask lower bound, absolute row spans — rather than just the
+    // arena being taller. Runs at n_seqs == 1 per chunk, so it works on Metal.
+    match slot_independence(&model, &vocab, slots, max_new, PER_SLOT_CONTEXT) {
+        Ok(()) => println!("PASS: every slot decodes what slot 0 decodes"),
+        Err(e) => {
+            eprintln!("FAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Prefill the same prompt into each slot in turn and greedily decode it there,
+/// asserting every slot yields slot 0's token stream.
+fn slot_independence(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    max_new: usize,
+    per_slot_context: u32,
+) -> Result<(), String> {
+    let mut session = LlamaSession::from_model(
+        model,
+        LlamaSessionConfig {
+            max_context: Some(per_slot_context),
+            max_sequences: slots,
+            ..LlamaSessionConfig::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let prompt = vocab
+        .tokenize(PROMPT, true, true)
+        .map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<i32>> = None;
+    for slot_index in 0..slots as usize {
+        let table = session.new_slot_table().map_err(|e| e.to_string())?;
+        let slot = table
+            .slot(slot_index)
+            .ok_or_else(|| format!("slot {slot_index} missing from table"))?;
+        let kv_base = slot.kv_base();
+        let state_row = slot.live_state_row();
+
+        let mut logits = session
+            .prefill_slot_chunk(kv_base, state_row, 0, &prompt)
+            .map_err(|e| format!("slot {slot_index} prefill: {e}"))?;
+
+        let mut produced = Vec::new();
+        let mut fill = prompt.len();
+        for _ in 0..max_new {
+            let token = argmax_token_id(&logits)
+                .ok_or_else(|| format!("slot {slot_index} produced no argmax"))?;
+            produced.push(token);
+            logits = session
+                .prefill_slot_chunk(kv_base, state_row, fill, &[token])
+                .map_err(|e| format!("slot {slot_index} decode: {e}"))?;
+            fill += 1;
+        }
+
+        match &reference {
+            None => {
+                println!("slot 0 tokens: {produced:?}");
+                reference = Some(produced);
+            }
+            Some(expected) => {
+                if *expected != produced {
+                    let at = expected
+                        .iter()
+                        .zip(&produced)
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    return Err(format!(
+                        "slot {slot_index} diverges from slot 0 at index {at}\n  slot 0: {expected:?}\n  slot {slot_index}: {produced:?}"
+                    ));
+                }
+                println!("slot {slot_index}: identical to slot 0");
+            }
+        }
+    }
+    Ok(())
 }

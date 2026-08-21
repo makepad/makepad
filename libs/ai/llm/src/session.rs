@@ -401,8 +401,6 @@ pub struct LlamaSession {
     /// Equals `max_context` for a single-slot session, which is every session
     /// that exists today.
     attention_arena_rows: usize,
-    /// Next token each slot will decode, set by the caller after sampling.
-    slot_tokens: BTreeMap<usize, i32>,
     context_extra_bytes: usize,
     weights: LoadedGgufWeights,
     graphs: SessionGraphSet,
@@ -483,17 +481,104 @@ impl LlamaSession {
         )
     }
 
+    /// Prefill one slot's region with a chunk of tokens.
+    ///
+    /// A prefill chunk is ONE sequence, so this runs at `n_seqs == 1` — the
+    /// slot only shows up as a nonzero `kv_base` on the cache writes and a
+    /// nonzero lower bound on the mask. That means every slot's prefill uses
+    /// the same compiled graphs as today's single-stream prefill, and works on
+    /// Metal as well as CUDA.
+    ///
+    /// `start` is the within-slot position of the first token. Returns the
+    /// logits of the chunk's last token.
+    pub fn prefill_slot_chunk(
+        &mut self,
+        kv_base: usize,
+        state_row: usize,
+        start: usize,
+        tokens: &[i32],
+    ) -> Result<Vec<f32>> {
+        if tokens.is_empty() {
+            return Err(LlamaError::format("a prefill chunk needs at least one token"));
+        }
+        let batch = tokens.len();
+        let positions: Vec<i32> = (start..start + batch)
+            .map(|position| {
+                i32::try_from(position)
+                    .map_err(|_| LlamaError::format("slot position does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let write_indices: Vec<i32> = (start..start + batch)
+            .map(|position| {
+                i32::try_from(kv_base + position)
+                    .map_err(|_| LlamaError::format("slot cache row does not fit in i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let base = i32::try_from(kv_base)
+            .map_err(|_| LlamaError::format("slot kv_base does not fit in i32"))?;
+        let key_span = kv_base + start + batch;
+        let attention_key_count = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
+            key_span
+        } else {
+            key_span
+                .next_multiple_of(GRAPH_KEY_BUCKET)
+                .min(self.attention_arena_rows)
+        };
+        let graph_params = SessionGraphParams::greedy(batch, attention_key_count);
+        self.ensure_compiled_graph(graph_params)?;
+        let state_row_i32 = i32::try_from(state_row)
+            .map_err(|_| LlamaError::format("slot state row does not fit in i32"))?;
+        let run = {
+            let compiled = self
+                .graphs
+                .graph_for_mut(graph_params)
+                .ok_or_else(|| LlamaError::format("compiled prefill graph was not cached"))?;
+            let output_ids = [i32::try_from(batch - 1)
+                .map_err(|_| LlamaError::format("slot output id does not fit in i32"))?];
+            let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+                &positions,
+                attention_key_count,
+                &output_ids,
+            )?;
+            layout.attention_write_indices = write_indices;
+            // Zero base is left EMPTY so slot 0 takes the mask builder's
+            // single-sequence path and stays byte-identical to today.
+            if base != 0 {
+                layout.attention_key_lower_bounds = vec![base; batch];
+            }
+            layout.recurrent_state_rows = vec![state_row_i32];
+            if compiled.decode().input_recurrent_state_rows.is_none() {
+                layout.recurrent_state_rows.clear();
+            }
+            compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)?
+        };
+        let mut rows = split_run_logits(run, 1)?;
+        rows.pop()
+            .ok_or_else(|| LlamaError::format("prefill chunk produced no logits"))
+    }
+
     /// Run one multi-slot decode step: one token per active slot, one logit row
     /// per active slot, in plan order.
     ///
-    /// Returns the logits for each slot in `plan.slots` order. The caller owns
-    /// sampling (one `LlamaSamplerState` per slot) and is responsible for
-    /// telling the slot table what was produced.
-    pub fn step_slots(&mut self, plan: &crate::slots::StepPlan) -> Result<Vec<Vec<f32>>> {
+    /// `tokens[i]` is the token slot `plan.slots[i]` decodes. The caller owns
+    /// sampling (one `LlamaSamplerState` per slot) and tells the slot table
+    /// what was produced.
+    pub fn step_slots(
+        &mut self,
+        plan: &crate::slots::StepPlan,
+        tokens: &[i32],
+    ) -> Result<Vec<Vec<f32>>> {
         if plan.slots.is_empty() {
             return Err(LlamaError::format("a decode step needs at least one slot"));
         }
         let width = plan.slots.len();
+        if tokens.len() != width {
+            return Err(LlamaError::format(format!(
+                "step plan has {} slots but {} tokens were supplied",
+                width,
+                tokens.len()
+            )));
+        }
         if width > self.slot_count() {
             return Err(LlamaError::format(format!(
                 "step plan has {} slots but the session was built for {}",
@@ -515,16 +600,6 @@ impl LlamaSession {
         };
         let graph_params = SessionGraphParams::batched(width, attention_key_count);
         self.ensure_compiled_graph(graph_params)?;
-
-        let token_ids: Vec<i32> = plan
-            .slots
-            .iter()
-            .map(|step| {
-                self.slot_token(step.slot)
-                    .ok_or_else(|| LlamaError::format(format!("slot {} has no token", step.slot)))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         let mut layout = layout;
         layout.attention_key_count = attention_key_count;
         let run = {
@@ -532,23 +607,9 @@ impl LlamaSession {
                 .graphs
                 .graph_for_mut(graph_params)
                 .ok_or_else(|| LlamaError::format("compiled batched graph was not cached"))?;
-            compiled.execute_logits_only_with_layout(
-                LogitsProbeInput::TokenIds(&token_ids),
-                &layout,
-            )?
+            compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)?
         };
         split_run_logits(run, width)
-    }
-
-    /// The token a slot feeds into the next step. Set by the caller through
-    /// [`Self::set_slot_token`].
-    fn slot_token(&self, slot: usize) -> Option<i32> {
-        self.slot_tokens.get(&slot).copied()
-    }
-
-    /// Queue the token a slot will decode on the next step.
-    pub fn set_slot_token(&mut self, slot: usize, token_id: i32) {
-        self.slot_tokens.insert(slot, token_id);
     }
 
     pub fn remaining_context(&self) -> usize {
@@ -941,26 +1002,25 @@ impl LlamaSession {
         // so the r/s caches need one row per batch position plus the live row.
         // Each slot owns a contiguous block of recurrent rows: the live row
         // plus one checkpoint per verify-batch position when speculating.
-        let recurrent_rows = if draft_max > 0 {
-            let rows = usize::from(config.max_sequences > 0)
-                .checked_mul(config.max_sequences as usize)
-                .and_then(|slots| slots.checked_mul(draft_max + 2))
-                .and_then(|rows| u32::try_from(rows).ok())
-                .ok_or_else(|| LlamaError::format("spec_draft_max is too large"))?;
+        // Recurrent rows are per SLOT, and the slot count is `max_sequences`.
+        // The attention cache's `n_seq_max` is 1 because the slot index folds
+        // into the context dimension, so it must NOT be reused here — doing so
+        // gave every slot row 0 and therefore one shared recurrent state.
+        //
+        // With speculation each slot owns `draft_max + 2` rows: the live row
+        // plus one checkpoint per verify-batch position.
+        let rows_per_slot = if draft_max > 0 { draft_max + 2 } else { 1 };
+        let recurrent_rows = (config.max_sequences as usize)
+            .checked_mul(rows_per_slot)
+            .and_then(|rows| u32::try_from(rows).ok())
+            .ok_or_else(|| LlamaError::format("recurrent row count is too large"))?;
+        for spec in [&mut spec, &mut spec_embeddings] {
             for layer in spec.layers.iter_mut() {
                 if let HybridLayerSpec::Recurrent { decode, .. } = layer {
-                    decode.cache.max_sequences = rows;
+                    decode.cache.max_sequences = recurrent_rows;
                 }
             }
-            for layer in spec_embeddings.layers.iter_mut() {
-                if let HybridLayerSpec::Recurrent { decode, .. } = layer {
-                    decode.cache.max_sequences = rows;
-                }
-            }
-            rows
-        } else {
-            cache_shape.n_seq_max
-        };
+        }
         // MKLLM_MTP_FULL_DRAFT_VOCAB=1 keeps the full 248320-row draft head
         // (the A/B for the restricted-head win).
         let draft_vocab = if draft_max > 0 && std::env::var_os("MKLLM_MTP_FULL_DRAFT_VOCAB").is_none()
@@ -1093,7 +1153,6 @@ impl LlamaSession {
             attention_arena_rows: usize::try_from(attention_arena_rows).map_err(|_| {
                 LlamaError::format("session attention arena does not fit in usize")
             })?,
-            slot_tokens: BTreeMap::new(),
             context_extra_bytes,
             weights,
             graphs,
