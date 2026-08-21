@@ -859,7 +859,13 @@ impl Texture2D {
         self.data_len / stride
     }
 
-    fn sample_face_from_data(&self, data: &[f32], face: usize, coord: Vec2f) -> Vec4f {
+    fn sample_face_from_data(
+        &self,
+        data: &[f32],
+        face: usize,
+        coord: Vec2f,
+        filter: SampleFilter,
+    ) -> Vec4f {
         if self.width == 0 || self.height == 0 {
             return vec4(0.0, 0.0, 0.0, 0.0);
         }
@@ -871,6 +877,19 @@ impl Texture2D {
 
         let u = coord.x.max(0.0).min(1.0);
         let v = coord.y.max(0.0).min(1.0);
+        if let SampleFilter::Nearest = filter {
+            // Exact texel fetch: what every data pass (depth maps, coverage
+            // and SDF masks, lightmap atlases) means by `sample_nearest`.
+            // Filtering them mixes neighbouring PAYLOAD values and the result
+            // is noise, not a blur.
+            let x = ((u * self.width as f32) as usize).min(self.width - 1);
+            let y = ((v * self.height as f32) as usize).min(self.height - 1);
+            let idx = base + (y * self.width + x) * 4;
+            if idx + 3 < data.len() {
+                return vec4(data[idx], data[idx + 1], data[idx + 2], data[idx + 3]);
+            }
+            return vec4(0.0, 0.0, 0.0, 0.0);
+        }
         // Bilinear sample with clamp-to-edge, matching GPU filtered text sampling.
         let fx = u * self.width as f32 - 0.5;
         let fy = v * self.height as f32 - 0.5;
@@ -906,15 +925,20 @@ impl Texture2D {
         c0 * (1.0 - ty) + c1 * ty
     }
 
-    fn sample_2d(&self, coord: Vec2f) -> Vec4f {
+    fn sample_2d(&self, coord: Vec2f, mode: SampleMode) -> Vec4f {
         let Some(data) = self.data_slice() else {
             return vec4(0.0, 0.0, 0.0, 0.0);
         };
-        let wrapped = vec2(coord.x.rem_euclid(1.0), coord.y.rem_euclid(1.0));
-        self.sample_face_from_data(data, 0, wrapped)
+        // Makepad's default sampler is clamp-to-edge on every GPU backend;
+        // only `sample_repeat` / `sample_as_bgra_repeat` ask for wrapping.
+        let coord = match mode.address {
+            SampleAddress::Repeat => vec2(coord.x.rem_euclid(1.0), coord.y.rem_euclid(1.0)),
+            SampleAddress::ClampToEdge => coord,
+        };
+        self.sample_face_from_data(data, 0, coord, mode.filter)
     }
 
-    fn sample_cube(&self, dir: Vec3f) -> Vec4f {
+    fn sample_cube(&self, dir: Vec3f, mode: SampleMode) -> Vec4f {
         let Some(data) = self.data_slice() else {
             return vec4(0.0, 0.0, 0.0, 0.0);
         };
@@ -945,31 +969,76 @@ impl Texture2D {
         };
 
         let uv = vec2(u * 0.5 + 0.5, v * 0.5 + 0.5);
-        self.sample_face_from_data(data, face, uv)
+        self.sample_face_from_data(data, face, uv, mode.filter)
     }
 
     pub fn sample<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
-        coord.sample_texture(self)
+        coord.sample_texture(self, SampleMode::DEFAULT)
     }
 
     pub fn sample_lod<C: TextureSampleCoord>(&self, coord: C, _lod: f32) -> Vec4f {
-        coord.sample_texture(self)
+        coord.sample_texture(self, SampleMode::DEFAULT)
+    }
+
+    /// Exact texel fetch, clamp-to-edge (`sample_nearest`).
+    pub fn sample_nearest<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
+        coord.sample_texture(self, SampleMode::NEAREST)
+    }
+
+    /// Filtered with wrapping (`sample_repeat` / `sample_as_bgra_repeat`).
+    pub fn sample_repeat<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
+        coord.sample_texture(self, SampleMode::REPEAT)
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum SampleFilter {
+    Linear,
+    Nearest,
+}
+
+#[derive(Clone, Copy)]
+pub enum SampleAddress {
+    ClampToEdge,
+    Repeat,
+}
+
+/// The sampler state a shader asked for, mirroring `ShaderSampler` on the GPU
+/// backends: makepad's default is filtered + clamp-to-edge.
+#[derive(Clone, Copy)]
+pub struct SampleMode {
+    pub filter: SampleFilter,
+    pub address: SampleAddress,
+}
+
+impl SampleMode {
+    pub const DEFAULT: SampleMode = SampleMode {
+        filter: SampleFilter::Linear,
+        address: SampleAddress::ClampToEdge,
+    };
+    pub const NEAREST: SampleMode = SampleMode {
+        filter: SampleFilter::Nearest,
+        address: SampleAddress::ClampToEdge,
+    };
+    pub const REPEAT: SampleMode = SampleMode {
+        filter: SampleFilter::Linear,
+        address: SampleAddress::Repeat,
+    };
+}
+
 pub trait TextureSampleCoord {
-    fn sample_texture(self, texture: &Texture2D) -> Vec4f;
+    fn sample_texture(self, texture: &Texture2D, mode: SampleMode) -> Vec4f;
 }
 
 impl TextureSampleCoord for Vec2f {
-    fn sample_texture(self, texture: &Texture2D) -> Vec4f {
-        texture.sample_2d(self)
+    fn sample_texture(self, texture: &Texture2D, mode: SampleMode) -> Vec4f {
+        texture.sample_2d(self, mode)
     }
 }
 
 impl TextureSampleCoord for Vec3f {
-    fn sample_texture(self, texture: &Texture2D) -> Vec4f {
-        texture.sample_cube(self)
+    fn sample_texture(self, texture: &Texture2D, mode: SampleMode) -> Vec4f {
+        texture.sample_cube(self, mode)
     }
 }
 

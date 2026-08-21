@@ -1804,8 +1804,18 @@ impl ShaderFnCompiler {
                         }
                         ShaderBackend::Rust => {
                             // Rust headless backend keeps texture data in logical RGBA,
-                            // so sample_as_bgra is a no-op alias of sample.
-                            if let Some(lod) = lod {
+                            // so sample_as_bgra is a no-op alias of sample. The
+                            // sampler STATE is not: `sample_nearest` means an exact
+                            // texel fetch (every data pass depends on it) and only
+                            // the *_repeat forms wrap, so each maps to its own
+                            // runtime method rather than collapsing to `sample`.
+                            if method_id == id!(sample_nearest) {
+                                write!(s, "{}.sample_nearest({})", texture_expr, coord).ok();
+                            } else if method_id == id!(sample_repeat)
+                                || method_id == id!(sample_as_bgra_repeat)
+                            {
+                                write!(s, "{}.sample_repeat({})", texture_expr, coord).ok();
+                            } else if let Some(lod) = lod {
                                 write!(s, "{}.sample_lod({}, {})", texture_expr, coord, lod).ok();
                             } else {
                                 write!(s, "{}.sample({})", texture_expr, coord).ok();
