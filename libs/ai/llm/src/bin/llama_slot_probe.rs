@@ -341,6 +341,7 @@ fn run_shipping(
                 job,
                 session: format!("gate-session-{job}"),
                 prompt_tokens: prompt,
+                reset_first: true,
                 max_new: BUDGET,
             })
             .map_err(|r| format!("submit refused job {}", r.job))
@@ -358,7 +359,11 @@ fn run_shipping(
     };
 
     submit(&mut exec, 1, LANE_PROMPTS[0])?;
-    pump(&mut exec, &mut streams, SOLO_STEPS, 1)?;
+    // Prefill first, then observe. Speculation is a property of the DECODE
+    // path and can only be true once the lane is ingested session-natively.
+    record(exec.step()?, &mut streams);
+    let solo_speculated = exec.is_speculating();
+    pump(&mut exec, &mut streams, SOLO_STEPS, 0)?;
 
     submit(&mut exec, 2, neighbours[0])?;
     submit(&mut exec, 3, neighbours[1])?;
@@ -368,7 +373,18 @@ fn run_shipping(
     pump(&mut exec, &mut streams, AFTER_LEAVE_STEPS, 0)?;
 
     if seen.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        return Err("on_counts never fired — /health would advertise stale occupancy".to_string());
+        return Err("on_counts never fired - /health would advertise stale occupancy".to_string());
+    }
+    // The whole point of phase 1: a lone client keeps speculation. If this is
+    // false the box is correct but SLOW, and slow is the regression the user
+    // explicitly refused.
+    if spec_draft() > 0 && !solo_speculated {
+        return Err("a SOLE lane did not take the speculative path, so solo chat would run at \n  \
+                    the batched rate - correct, but the regression the user rejected"
+            .to_string());
+    }
+    if spec_draft() > 0 {
+        println!("  sole lane took the speculative path");
     }
     Ok(streams)
 }
