@@ -108,6 +108,11 @@ pub struct StepCostModel {
     step_ms: Vec<f32>,
     draft_base_ms: f32,
     draft_per_lane_ms: f32,
+    /// A fused multi-lane VERIFY batch is not a plain step of the same width,
+    /// and assuming it was is what made speculation look profitable when it
+    /// is not. Measured separately; see [`Self::verify_ms`].
+    verify_base_ms: f32,
+    verify_per_column_ms: f32,
 }
 
 impl StepCostModel {
@@ -140,6 +145,51 @@ impl StepCostModel {
         Self::from_points(MEASURED, 1.80, 0.30)
     }
 
+    /// Cost of a fused multi-lane VERIFY batch of `columns` columns.
+    ///
+    /// **This is not [`step_ms`](Self::step_ms) and the difference is the
+    /// whole story.** The `n_outputs = B` sweep that produced `step_ms`
+    /// measured the plain decode graph at B columns. A verify batch runs a
+    /// different graph — the one that checkpoints the recurrent state after
+    /// every token so a rejected draft can be rolled back — and on `.217` it
+    /// costs **2.5x more per column**:
+    ///
+    /// | shape | measured | `step_ms` says |
+    /// |---|---|---|
+    /// | 4 columns, 2 lanes | 40.3 ms | 24.3 |
+    /// | 6 columns, 2 lanes | 51.5 ms | 32.0 |
+    /// | 8 columns, 2 lanes | 63.2 ms | 40.0 |
+    /// | 6 columns, 3 lanes | 54.4 ms | 32.0 |
+    /// | 8 columns, 4 lanes | 70.9 ms | 40.0 |
+    ///
+    /// Fitted: `17.5 + 5.73 * columns`, against the plain graph's
+    /// `14.4 + 2.24 * columns` over the same runs. The lane count shows up
+    /// only weakly (8 columns costs 63.2 at 2 lanes and 70.9 at 4), so it is
+    /// not modelled — columns are what this is priced by.
+    ///
+    /// **Fitted at `n_seqs >= 2` and it does not describe `n_seqs == 1`.** A
+    /// solo 4-column verify measures ~28 ms, not the 40.4 this returns: going
+    /// from one sequence to two costs ~13 ms, going from two to four costs
+    /// ~8. Applying it at width 1 is therefore pessimistic, which is the safe
+    /// direction and affects only a lone lane that is not on slot 0 — the real
+    /// solo path is session-native and never asks this.
+    ///
+    /// Assuming the plain curve here is what made a batched speculative round
+    /// look like a 7-20 % win when the box says it is a 15-35 % loss at every
+    /// width. Measured on `llama-lane-spec-probe --measure`, 160-step windows,
+    /// acceptance ~0.8 on real prose; the same numbers came back within 3 % on
+    /// a 64-step window, so graph-capture churn is not in them.
+    pub fn verify_ms(&self, columns: usize) -> f32 {
+        self.verify_base_ms + self.verify_per_column_ms * columns as f32
+    }
+
+    /// Override the verify curve, for a box that has measured its own.
+    pub fn with_verify_cost(mut self, base_ms: f32, per_column_ms: f32) -> Self {
+        self.verify_base_ms = base_ms;
+        self.verify_per_column_ms = per_column_ms;
+        self
+    }
+
     /// Build from sparse measured points, linearly interpolating the gaps.
     pub fn from_points(points: &[(usize, f32)], draft_base_ms: f32, draft_per_lane_ms: f32) -> Self {
         let max = points.iter().map(|(c, _)| *c).max().unwrap_or(1);
@@ -162,6 +212,9 @@ impl StepCostModel {
             step_ms,
             draft_base_ms,
             draft_per_lane_ms,
+            // Measured on .217; see `verify_ms`.
+            verify_base_ms: 17.5,
+            verify_per_column_ms: 5.73,
         }
     }
 
@@ -203,6 +256,138 @@ impl StepCostModel {
 /// alike. The allocator's default assumption before a lane has an EMA of its
 /// own.
 pub const MEASURED_CHAT_ACCEPTANCE: f32 = 0.7647;
+
+/// The acceptance the BATCHED round's uniform depth is chosen at.
+///
+/// Measured on `.217` serving real chat turns through the lane worker:
+/// 0.51-0.62 across turns, 2.5-2.9 tokens per round. The campaign's 0.7647 is a
+/// warm-chat figure from a different prompt mix, and using it here would pick
+/// depth 1 at width 4 — which on the measured cost curve is a **10 % aggregate
+/// loss**. The pessimistic number is the safe one: over-estimating acceptance
+/// buys columns that are then thrown away, and every thrown-away column is paid
+/// for at the full step cost.
+pub const BATCHED_CHAT_ACCEPTANCE: f32 = 0.58;
+
+/// The ONE draft depth a fused multi-lane verify batch may run at.
+///
+/// **Uniform, because the batch shape says so.** `build_hybrid_decode_graph`
+/// requires `n_tokens % n_seqs == 0` and the delta-net scan reshapes the batch
+/// as `[w, n_tokens / n_seqs, n_seqs]`, so every lane in one verify batch
+/// contributes the same token count. [`allocate_depths`]'s heterogeneous
+/// allocation is not expressible in one batch: it would need padded columns,
+/// and a padded column costs exactly the column it is trying to save. Running a
+/// separate `n_seqs == 1` verify per lane instead is a measured regression
+/// against not speculating at all (4 lanes x 2 columns = 71.6 ms for ~1.9
+/// tokens each, against 24.3 ms for one 4-column step). So the step picks one
+/// depth, and heterogeneous depth is a recorded non-goal.
+///
+/// **Chosen at a fixed acceptance, deliberately NOT at any lane's live EMA.**
+/// Under uniformity a depth derived from lane 1's acceptance is a depth applied
+/// to lane 0, which makes one conversation's output depend on another's — the
+/// shared-state class this whole lane exists to prevent — and it destroys the
+/// only correctness property the batched speculative path can be gated on.
+/// B.14 of `feasibility.md` closed the cross-width form (spec-on/off
+/// bit-identity is structurally absent on the Q8_1 route), which leaves
+/// neighbour-invariance at a fixed width timeline as the gate; a
+/// neighbour-dependent depth would fail it by construction rather than by bug.
+///
+/// With one acceptance and one depth every lane's modelled rate is the same, so
+/// the aggregate and max-min objectives agree and the floor cannot pick between
+/// candidates. That is why this scans a single scalar instead of running the
+/// allocator's greedy pass.
+pub fn uniform_allocation(
+    width: usize,
+    draft_max: usize,
+    acceptance: f32,
+    config: &SchedulerConfig,
+    costs: &StepCostModel,
+) -> Option<Allocation> {
+    if width == 0 {
+        return None;
+    }
+    let ceiling = draft_depth_for_budget(width, draft_max, config.column_budget);
+    let demand = LaneDemand {
+        slot: 0,
+        acceptance,
+    };
+    let mut best: Option<Allocation> = None;
+    for depth in 0..=ceiling {
+        let columns = width * (depth + 1);
+        // Depth 0 is the PLAIN step — one token per lane through the ordinary
+        // decode graph, which is what the executor actually runs there. Any
+        // depth above it is a fused verify batch, and that is a different
+        // graph with a different price. Scoring both against one curve is the
+        // mistake that made speculation look profitable here.
+        let batch_ms = if depth == 0 {
+            match costs.step_ms(columns) {
+                Some(ms) => ms,
+                None => continue,
+            }
+        } else {
+            costs.verify_ms(columns)
+        };
+        // Every drafting lane rides the SAME draft forward — that is the whole
+        // reason a batched round is cheaper than N solo ones — so a round pays
+        // `depth` forwards of `width` lanes, not `width * depth` forwards.
+        let round_ms = batch_ms + depth as f32 * costs.draft_forward_ms(width);
+        if round_ms <= 0.0 {
+            continue;
+        }
+        let per_lane = demand.expected_tokens(depth) / (round_ms / 1000.0);
+        let candidate = Allocation {
+            depths: vec![depth; width],
+            columns,
+            round_ms,
+            aggregate_tok_s: per_lane * width as f32,
+            per_client_tok_s: vec![per_lane; width],
+            meets_floor: per_lane >= config.floor_tok_s,
+        };
+        // Better by a MARGIN, so a tie — or a hair's win the cost model cannot
+        // actually resolve — keeps the shallower depth. See
+        // [`SPECULATION_MARGIN`]: the curve is a lower bound and depth is what
+        // it under-charges for.
+        let better = match &best {
+            None => true,
+            Some(current) => {
+                candidate.aggregate_tok_s > current.aggregate_tok_s * SPECULATION_MARGIN
+            }
+        };
+        if better {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+/// How much a deeper uniform round must beat a shallower one by before it is
+/// taken.
+///
+/// Not a fudge factor — a correction for a bias whose SIGN is known.
+/// [`StepCostModel::measured_5090`] is explicitly a **lower bound** on a real
+/// multi-slot step: the `n_outputs = B` sweep it came from carries neither the
+/// per-slot recurrent state reads nor the unified-cache attention span, and
+/// both of those grow with the column count. Depth buys tokens by adding
+/// columns, so the model is optimistic about exactly the thing depth costs.
+///
+/// The case that forces the issue is real: at width 3 on the measured curve,
+/// depth 1 beats depth 0 by **0.02 %** — three draft-head reads, a catch-up and
+/// a doubled column count, for two hundredths of a token per second. A model
+/// that is a lower bound cannot resolve a margin that thin, and the shallow
+/// side is the one that cannot be wrong.
+const SPECULATION_MARGIN: f32 = 1.05;
+
+/// The uniform depth [`uniform_allocation`] picks, or 0 when nothing pays.
+pub fn batched_draft_depth(
+    width: usize,
+    draft_max: usize,
+    acceptance: f32,
+    config: &SchedulerConfig,
+    costs: &StepCostModel,
+) -> usize {
+    uniform_allocation(width, draft_max, acceptance, config, costs)
+        .and_then(|allocation| allocation.depths.first().copied())
+        .unwrap_or(0)
+}
 
 /// Measured acceptance on expander-prose prompts, where speculation LOSES
 /// outright (0.66x greedy at depth 5). Kept as a named constant because it is
@@ -293,6 +478,17 @@ impl Allocation {
 }
 
 /// Allocate the column budget across active lanes to maximise the objective.
+///
+/// **Not the shipped decision, and its cost basis is optimistic.** Per-lane
+/// depths cannot be expressed in one fused verify batch (see
+/// [`uniform_allocation`]), so nothing runs this; it is the design's
+/// heterogeneous allocator, kept because it is what the ladder would become if
+/// a ragged batch ever became expressible. It prices every candidate with
+/// [`StepCostModel::step_ms`], the PLAIN decode curve, which on `.217`
+/// under-states a real verify batch by 55-75 %. Anything that starts using
+/// this for a speculative allocation has to price the `k > 0` candidates with
+/// [`StepCostModel::verify_ms`] first, or it will reach the same wrong answer
+/// the uniform version did before the box corrected it.
 ///
 /// Each lane always holds one column (its own next token); the surplus is
 /// distributed as draft depth. For every affordable total column count we take
@@ -501,6 +697,12 @@ impl Slot {
     /// slot. Always inside the slot's own block.
     pub fn live_state_row(&self) -> usize {
         self.state_base + self.live_state_offset
+    }
+
+    /// Offset inside the slot's recurrent block that the next scan resumes
+    /// from. Always 0 without speculation.
+    pub fn live_state_offset(&self) -> usize {
+        self.live_state_offset
     }
 
     /// Offset inside the slot's recurrent block that the next scan resumes
@@ -867,6 +1069,46 @@ impl SlotTable {
         Ok(())
     }
 
+    /// Take over a slot's speculative bookkeeping from a path that advanced it
+    /// outside this table.
+    ///
+    /// Two facts move on their own inside a speculative round — which
+    /// checkpoint plane the next scan resumes from, and how far the draft
+    /// head's KV has been filled — and the session-native solo path owns both
+    /// of them while it runs. When that lane hands over to the batched path,
+    /// the table's copy is stale by exactly as many tokens as the last round
+    /// committed, and a stale resume row is not an error: it decodes fluently
+    /// against the state of a different number of tokens.
+    ///
+    /// Validated rather than assigned. An offset outside the slot's own block
+    /// would read a NEIGHBOUR's recurrent state, and a draft head claiming to
+    /// be ahead of the model is a hole its next catch-up skips over.
+    pub fn adopt_state(
+        &mut self,
+        index: usize,
+        live_state_offset: usize,
+        mtp_filled: usize,
+    ) -> Result<()> {
+        let rows = self.state_rows_per_slot;
+        let slot = self.require_mut(index)?;
+        if live_state_offset >= rows {
+            return Err(LlamaError::format(format!(
+                "slot {index} would resume from offset {live_state_offset} of a {rows}-row block, \
+                 which is another slot's state"
+            )));
+        }
+        if mtp_filled > slot.fill {
+            return Err(LlamaError::format(format!(
+                "slot {index} would put its draft head at {mtp_filled} tokens, ahead of the \
+                 model's {}",
+                slot.fill
+            )));
+        }
+        slot.live_state_offset = live_state_offset;
+        slot.mtp_filled = mtp_filled;
+        Ok(())
+    }
+
     /// Attention key span the next graph must cover: one past the highest
     /// occupied absolute row across ACTIVE slots.
     ///
@@ -976,6 +1218,155 @@ mod tests {
             .enumerate()
             .map(|(slot, &acceptance)| LaneDemand { slot, acceptance })
             .collect()
+    }
+
+    #[test]
+    fn the_batched_depth_never_spends_more_than_the_column_budget() {
+        // The wall the whole ladder exists for. A uniform depth that broke it
+        // would not error — it would fall off the MMVQ cliff and get slower,
+        // which is the failure mode nobody notices.
+        for width in 1..=8usize {
+            for acceptance in [0.0f32, 0.3, 0.58, 0.7647, 0.99] {
+                let depth = batched_draft_depth(
+                    width,
+                    SOLO_DRAFT_MAX,
+                    acceptance,
+                    &SchedulerConfig::default(),
+                    &StepCostModel::measured_5090(),
+                );
+                assert!(
+                    width * (depth + 1) <= COLUMN_BUDGET,
+                    "width {width} acceptance {acceptance} chose depth {depth}"
+                );
+                assert!(depth <= SOLO_DRAFT_MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn a_verify_batch_is_priced_as_a_verify_batch() {
+        // The guard against collapsing the two curves back into one. Doing that
+        // is not a simplification — it is a 55-75 % under-estimate of the graph
+        // the round actually runs, and it is exactly what made a batched
+        // speculative round look like a win before .217 was asked.
+        let costs = StepCostModel::measured_5090();
+        for columns in 2..=8usize {
+            let plain = costs.step_ms(columns).expect("measured column");
+            assert!(
+                costs.verify_ms(columns) > plain * 1.4,
+                "a {columns}-column verify batch priced at {} against a plain step's {plain}",
+                costs.verify_ms(columns)
+            );
+        }
+        // The measured anchor, so a re-fit that drifts far from the box shows up
+        // here rather than in a throughput report a week later.
+        assert!((costs.verify_ms(4) - 40.4).abs() < 2.0, "{}", costs.verify_ms(4));
+        assert!((costs.verify_ms(8) - 63.3).abs() < 2.0, "{}", costs.verify_ms(8));
+    }
+
+    #[test]
+    fn a_batched_round_does_not_speculate_at_the_measured_verify_cost() {
+        // What .217 said, and it said it at every width: a fused verify batch
+        // costs so much more per column than a plain step that no acceptance
+        // rate can pay for it. Measured aggregates, 160-step windows:
+        //
+        //   2 lanes  105.8 at depth 0   against  89.1 at depth 1
+        //   3 lanes  132.9 at depth 0   against  98.9 at depth 1
+        //   4 lanes  156.5 at depth 0   against 101.8 at depth 1
+        //
+        // The acceptance sweep is the load-bearing part, and it runs to 0.9 —
+        // the campaign's PROSE figure, the highest acceptance ever measured on
+        // this model, well above served chat's 0.51-0.62 and above the ~0.8
+        // the sweep above saw. Speculation loses across all of it.
+        //
+        // It does not lose at every conceivable acceptance: around 0.97, with
+        // the restricted draft head, depth 3 at width 2 starts to win. That
+        // number is the useful one to carry — it says how far from paying this
+        // is. Not "a bit under", but "needs an acceptance nothing has ever
+        // produced", which is the same as saying the verify batch has to get
+        // cheaper.
+        let config = SchedulerConfig::default();
+        for costs in [
+            StepCostModel::measured_5090(),
+            StepCostModel::measured_5090().with_restricted_draft_head(),
+        ] {
+            for width in 2..=4usize {
+                for acceptance in [BATCHED_CHAT_ACCEPTANCE, 0.8, 0.9] {
+                    assert_eq!(
+                        batched_draft_depth(width, SOLO_DRAFT_MAX, acceptance, &config, &costs),
+                        0,
+                        "width {width} at acceptance {acceptance} chose to speculate"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cheaper_draft_head_cannot_rescue_a_verify_batch() {
+        // The restricted-vocabulary sidecar makes a draft forward 3.3x cheaper
+        // at identical acceptance, and on the OLD cost basis that was enough to
+        // flip width 3 into speculating. Against the measured verify curve it
+        // changes nothing at any width, because the draft chain was never the
+        // binding term: at 2 lanes and depth 1 the round is 40.3 ms of verify
+        // and 0.6 ms of draft.
+        //
+        // Worth asserting rather than assuming, because "get a cheaper draft
+        // head" is the obvious next idea and this says, in advance, that it is
+        // aimed at the wrong 2 % of the round.
+        let config = SchedulerConfig::default();
+        let full = StepCostModel::measured_5090();
+        let restricted = StepCostModel::measured_5090().with_restricted_draft_head();
+        for width in 1..=4usize {
+            assert_eq!(
+                batched_draft_depth(width, SOLO_DRAFT_MAX, 0.9, &config, &full),
+                batched_draft_depth(width, SOLO_DRAFT_MAX, 0.9, &config, &restricted),
+                "width {width}: the sidecar changed the verdict, so the draft chain has \
+                 become the binding term and the round should be re-measured"
+            );
+        }
+    }
+
+    #[test]
+    fn the_batched_depth_is_blind_to_who_the_neighbours_are() {
+        // The property the on-hardware gate rests on: at one width, the depth
+        // is the same number whatever the lanes are doing. A depth derived from
+        // a live per-lane EMA would make lane 0's stream depend on lane 1's
+        // acceptance, which is neighbour influence introduced by the scheduler
+        // rather than by the kernels — and it would fail the invariance gate by
+        // construction.
+        let config = SchedulerConfig::default();
+        let costs = StepCostModel::measured_5090();
+        let a = batched_draft_depth(2, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &costs);
+        let b = batched_draft_depth(2, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &costs);
+        assert_eq!(a, b);
+        // And the signature takes no lane state at all, which is what makes
+        // that true by construction rather than by discipline.
+        let allocation =
+            uniform_allocation(2, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &costs)
+                .expect("allocation");
+        assert_eq!(allocation.depths, vec![a, a], "every lane, one depth");
+        assert!(
+            allocation
+                .per_client_tok_s
+                .windows(2)
+                .all(|w| w[0] == w[1]),
+            "one acceptance and one depth means one rate: {:?}",
+            allocation.per_client_tok_s
+        );
+    }
+
+    #[test]
+    fn a_session_with_speculation_off_never_gets_it_back_through_the_batch() {
+        let config = SchedulerConfig::default();
+        let costs = StepCostModel::measured_5090();
+        for width in 1..=4usize {
+            assert_eq!(
+                batched_draft_depth(width, 0, 0.99, &config, &costs),
+                0,
+                "width {width} conjured speculation out of a session that has no draft head"
+            );
+        }
     }
 
     /// Floor off, so tests exercise the objective rather than the constraint.
