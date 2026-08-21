@@ -971,7 +971,7 @@ impl HybridDecodeBatchLayout {
         (!self.attention_key_lower_bounds.is_empty()).then_some(&self.attention_key_lower_bounds)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.positions.is_empty() {
             return Err(LlamaError::format(
                 "hybrid decode batch layout requires at least one position",
