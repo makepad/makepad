@@ -216,6 +216,19 @@ struct RagdollLiveBody {
     body: BodyId,
 }
 
+/// How long a ragdoll lies still, after it has stopped moving AND its
+/// knockdown timer has run out, before the character controller takes back
+/// over. Being clipped by a car should read as a real knockdown with a beat
+/// of "ouch" in it; springing up the instant the body stops rolling read as
+/// a glitch, not as getting up. Retune here — nothing else encodes the feel.
+pub const RAGDOLL_DOWNTIME_TICKS: u16 = 150;
+
+/// A ragdoll that never settles (wedged in geometry, balanced on a kerb)
+/// still has to hand control back eventually. Comfortably longer than the
+/// longest knockdown plus a full downtime, so it only ever fires for a body
+/// that genuinely refuses to come to rest.
+pub const RAGDOLL_MAX_TICKS: u32 = 600;
+
 #[derive(Clone, Debug)]
 struct RagdollInstance {
     entity_id: u64,
@@ -1227,10 +1240,12 @@ fn update_ragdolls(dynamics: &mut RigidDynamics, entities: &mut [Entity]) {
         } else {
             ragdoll.settled_ticks = 0;
         }
-        // Normal recovery waits for both the gameplay timer and a stable body
-        // for 0.3 s. The safety cap prevents a wedged nonlethal ragdoll from
-        // suppressing control forever.
-        if ragdoll.settled_ticks >= 18 || (e.knocked_down == 0 && ragdoll.age_ticks >= 600) {
+        // Normal recovery waits for the gameplay timer, then for the body to
+        // lie still for [`RAGDOLL_DOWNTIME_TICKS`]. The safety cap prevents a
+        // wedged nonlethal ragdoll from suppressing control forever.
+        if ragdoll.settled_ticks >= RAGDOLL_DOWNTIME_TICKS
+            || (e.knocked_down == 0 && ragdoll.age_ticks >= RAGDOLL_MAX_TICKS)
+        {
             e.non_interactive = ragdoll.was_non_interactive;
             e.orient = Quat::default();
             e.yaw = crate::math::atan2(-v.x, -v.z);
@@ -1873,6 +1888,64 @@ mod ragdoll_tests {
         reconcile(&mut cloned, &[], None, None, None, 9.8);
         assert!(!cloned.ragdoll_active(7));
         assert_eq!(cloned.body_count(), 0);
+    }
+
+    /// A knocked-down character stays down for a beat. The ragdoll stops
+    /// moving almost immediately once it lands, so without a downtime the
+    /// villager a car just hit popped straight back onto their feet — the
+    /// hit read as a glitch rather than as a knockdown.
+    #[test]
+    fn a_settled_ragdoll_stays_down_for_the_downtime() {
+        let mut dynamics = RigidDynamics::new();
+        // No gravity, no starting velocity and a grazing contact that
+        // imparts nothing: the bodies are already at rest, so this measures
+        // the downtime itself and nothing else.
+        let mut entity = Entity {
+            id: 7,
+            kind: BodyKind::Mover,
+            half: vec3f(0.3, 0.9, 0.3),
+            collide: true,
+            gravity_scale: 0.0,
+            push_mass: 2.0,
+            knocked_down: 0,
+            ..Default::default()
+        };
+        assert!(dynamics.activate_ragdoll(
+            &mut entity,
+            &two_body_spec(),
+            &two_body_poses(),
+            1.0,
+            MoverImpact {
+                mover_id: 7,
+                rigid_id: 99,
+                direction: vec3f(1.0, 0.0, 0.0),
+                kick: 0.0,
+            },
+        ));
+        let mut entities = vec![entity];
+        let mut down_for = 0u32;
+        while dynamics.ragdoll_active(7) && down_for < RAGDOLL_MAX_TICKS {
+            step_dynamics(&mut dynamics, &mut entities);
+            down_for += 1;
+            assert_eq!(
+                entities[0].non_interactive,
+                dynamics.ragdoll_active(7),
+                "control state disagrees with the articulation at tick {down_for}"
+            );
+        }
+        assert!(!dynamics.ragdoll_active(7), "never stood up");
+        assert!(
+            down_for >= RAGDOLL_DOWNTIME_TICKS as u32,
+            "stood up after {down_for} ticks, before the {RAGDOLL_DOWNTIME_TICKS}-tick downtime"
+        );
+        // A settled body should need the downtime and little else; the
+        // safety cap must not be what ends an ordinary knockdown.
+        assert!(
+            down_for < RAGDOLL_MAX_TICKS,
+            "only the safety cap stood this ragdoll up"
+        );
+        assert!(!entities[0].non_interactive, "control was not handed back");
+        assert_eq!(dynamics.body_count(), 0, "ragdoll bodies outlived the ragdoll");
     }
 
     #[test]
