@@ -44,15 +44,35 @@ pub const COLUMN_BUDGET: usize = 8;
 /// stays at today's speed instead of dropping to the unspeculated rate: the
 /// column budget freed by idle slots is spent on draft depth.
 ///
-/// `solo_draft_max` is the session's configured ceiling (`spec_draft_max`);
-/// 0 disables speculation entirely, which is what phase 1 ships with.
-pub fn draft_depth_for(width: usize, solo_draft_max: usize) -> usize {
-    if width == 0 || solo_draft_max == 0 {
+/// `draft_max` is the session's **allocation** ceiling — how many draft tokens
+/// its recurrent rows were sized for (`draft_max + 2` rows per slot). It is
+/// deliberately NOT the depth that happens to be optimal when running solo.
+///
+/// That distinction is a trap worth naming, because it is invisible until the
+/// column budget moves. Measurement says a raised cap's value is not more slots
+/// but **more draft depth at 4 slots** — at a 16-column budget, 4 slots can
+/// afford depth 3, and speculation is what carries 4 slots over the playability
+/// floor. If this were configured to the solo optimum (2), that rung would be
+/// silently capped at 2 and the whole point of raising the cap would be lost
+/// with no error anywhere. Size the allocation for the deepest rung any width
+/// may take, and let this function do the narrowing.
+pub fn draft_depth_for(width: usize, draft_max: usize) -> usize {
+    draft_depth_for_budget(width, draft_max, COLUMN_BUDGET)
+}
+
+/// [`draft_depth_for`] against an explicit column budget.
+///
+/// The budget is a parameter so the ladder can be evaluated — and tested — at a
+/// raised cap before the cap itself moves. When the cap raise lands with both
+/// its verdicts (faster AND numerically sound), [`COLUMN_BUDGET`] is the single
+/// value that changes.
+pub fn draft_depth_for_budget(width: usize, draft_max: usize, column_budget: usize) -> usize {
+    if width == 0 || draft_max == 0 {
         return 0;
     }
-    // width * (draft + 1) <= COLUMN_BUDGET
-    let affordable = COLUMN_BUDGET / width;
-    affordable.saturating_sub(1).min(solo_draft_max)
+    // width * (draft + 1) <= column_budget
+    let affordable = column_budget / width;
+    affordable.saturating_sub(1).min(draft_max)
 }
 
 /// What a slot is doing between steps.
@@ -487,9 +507,8 @@ mod tests {
 
     #[test]
     fn the_draft_ladder_spends_exactly_the_free_column_budget() {
-        // The user-visible contract: one client keeps today's speculation, and
-        // each extra active client gives up depth rather than correctness.
-        // Every rung must fit the column budget.
+        // Every rung must fit the column budget — past it a step falls off the
+        // MMVQ cliff into a dequantise-the-whole-model path.
         for (width, expected) in [(1, 2), (2, 2), (3, 1), (4, 1)] {
             let depth = draft_depth_for(width, 2);
             assert_eq!(depth, expected, "ladder rung for width {width}");
@@ -499,12 +518,44 @@ mod tests {
                 width * (depth + 1)
             );
         }
-        // Past the budget speculation switches itself off rather than falling
-        // off the MMVQ cliff.
         assert_eq!(draft_depth_for(8, 2), 0);
         assert_eq!(draft_depth_for(9, 2), 0);
         // A session that disabled speculation never gets it back.
         assert_eq!(draft_depth_for(1, 0), 0);
+    }
+
+    #[test]
+    fn the_allocation_ceiling_narrows_the_ladder_and_is_not_the_solo_optimum() {
+        // The trap this guards: `draft_max` is how many draft tokens the
+        // slot's recurrent rows were SIZED for, not the depth that happens to
+        // be best when running solo. Configure it to the solo optimum and the
+        // wider rungs get silently clipped, with no error anywhere.
+        //
+        // At a 16-column budget 4 slots can afford depth 3...
+        assert_eq!(draft_depth_for_budget(4, 8, 16), 3);
+        // ...but an allocation sized for the solo optimum caps it at 2, and
+        // nothing reports that the extra depth was unavailable.
+        assert_eq!(draft_depth_for_budget(4, 2, 16), 2);
+    }
+
+    #[test]
+    fn a_raised_budget_changes_only_the_rungs_above_eight_columns() {
+        // Measured: widths <= 8 columns are point-for-point identical at both
+        // caps, so raising the cap cannot move the shipped solo path. Every
+        // rung that already fit in 8 columns must be unchanged.
+        for width in [1usize, 2, 3, 4, 8] {
+            let at8 = draft_depth_for_budget(width, 8, 8);
+            let at16 = draft_depth_for_budget(width, 8, 16);
+            if width * (at8 + 1) <= 8 && width * (at16 + 1) <= 8 {
+                assert_eq!(at8, at16, "rung for width {width} moved without needing to");
+            }
+            assert!(width * (at8 + 1) <= 8);
+            assert!(width * (at16 + 1) <= 16);
+        }
+        // The one rung a raised cap actually buys, and the reason the cap
+        // raise is argued for at all.
+        assert_eq!(draft_depth_for_budget(4, 8, 8), 1);
+        assert_eq!(draft_depth_for_budget(4, 8, 16), 3);
     }
 
     #[test]
