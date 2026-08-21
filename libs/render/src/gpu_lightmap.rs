@@ -388,6 +388,10 @@ struct Region {
     /// World bounds of the receiver (light culling, sun camera fit).
     min: Vec3f,
     max: Vec3f,
+    /// Measured chart density, atlas texels per world unit of SURFACE
+    /// (lightmap::chart_density; ground = rect over span). Converts the
+    /// world-space sun band into this region's texels at encode time.
+    tpu: f32,
 }
 
 struct BakeTextures {
@@ -1244,6 +1248,7 @@ impl GpuLightmapBaker {
                 kind: RegionKind::Mesh(i),
                 min: lo,
                 max: hi,
+                tpu: crate::lightmap::chart_density(m, rects[i].w, rects[i].h),
             });
             meshes.push(GpuBakeMesh {
                 geometry: job.mesh_geometry[i],
@@ -1310,6 +1315,7 @@ impl GpuLightmapBaker {
                 kind: RegionKind::Ground,
                 min: gmin,
                 max: gmax,
+                tpu: rect.w as f32 / (p.x1 - p.x0).max(0.001),
             });
             ground = Some(GroundInfo {
                 world: Vec4f {
@@ -2163,10 +2169,16 @@ impl GpuLightmapBaker {
                     .ok()
                     .and_then(|v| v.parse::<f32>().ok())
                     .unwrap_or(0.0);
+                // The world-space sun band in THIS region's texels: the
+                // penumbra is a world width, not a texel count, so a shadow
+                // edge keeps one softness crossing regions of different
+                // density. Floored at 1 texel (a chart cannot resolve
+                // narrower) and capped inside the DT's 6-texel reach.
+                let band = (crate::lightmap::LM_SUN_BAND_WORLD * r.tpu).clamp(1.0, 5.0);
                 d.misc_a = Vec4f {
                     x: inv_size,
                     y: show,
-                    z: 0.0,
+                    z: band,
                     w: 0.0,
                 };
                 d.draw_vars.set_texture(0, dt_final);
@@ -2694,6 +2706,7 @@ mod tests {
             kind: RegionKind::Ground,
             min,
             max,
+            tpu: px as f32 / (max.x - min.x).max(0.001),
         }
     }
 
