@@ -278,8 +278,23 @@ impl Registry {
     }
 
     /// Join every worker that already finished; called from the supervisor.
+    ///
+    /// Also drops any session whose worker is gone without being retired —
+    /// a panicked worker would otherwise hold a slot against the caps
+    /// forever while answering every route with a 503.
     fn reap(&self) {
         let mut inner = self.inner();
+        let dead: Vec<SessionId> = inner
+            .sessions
+            .iter()
+            .filter(|(_, slot)| slot.join.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in dead {
+            if let Some(slot) = inner.sessions.remove(&id) {
+                let _ = slot.join.join();
+            }
+        }
         let mut still = Vec::new();
         for join in inner.graveyard.drain(..) {
             if join.is_finished() {
@@ -714,7 +729,8 @@ impl Worker {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            match rx.recv_timeout(self.tick()) {
+            let tick = self.tick();
+            match rx.recv_timeout(tick) {
                 Ok(SessionCmd::Shutdown) => return,
                 Ok(cmd) => self.handle(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -725,14 +741,16 @@ impl Worker {
     }
 
     /// How long this worker may sleep before it must act on its own.
-    fn tick(&self) -> Duration {
+    fn tick(&mut self) -> Duration {
         if self.session.is_idle() {
             return IDLE_TICK;
         }
         if self.session.awaiting_client_tool().is_some() {
             // Sleep until the client tool's deadline; the answer normally
-            // arrives as a command and wakes us far sooner.
-            let since = self.client_wait.unwrap_or_else(Instant::now);
+            // arrives as a command and wakes us far sooner. The clock starts
+            // HERE, the first time we sleep on the park — starting it in
+            // `pump` instead would let the wait run to twice the timeout.
+            let since = *self.client_wait.get_or_insert_with(Instant::now);
             return CLIENT_TOOL_TIMEOUT.saturating_sub(since.elapsed()).max(STREAM_TICK);
         }
         STREAM_TICK
