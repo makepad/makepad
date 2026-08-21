@@ -27,6 +27,11 @@ pub const MAX_POLLS_PER_TICK: usize = 4;
 /// Longest prompt accepted.
 pub const MAX_PROMPT_BYTES: usize = 2_000;
 
+/// Video length choices: (frames, denoise steps), the same sanctioned
+/// pairs the asset UI offers. Frames obey H3's 17n+5 alignment at 24 fps;
+/// steps scale with length so a longer clip is not a blurrier one.
+pub const VIDEO_LENGTHS: &[(u32, u32)] = &[(39, 30), (65, 30), (97, 40), (129, 50)];
+
 /// How many generations CONTINUOUS mode keeps in flight. One is the
 /// honest default: today a server runs a VJ job at a time, and a queue
 /// deeper than the fleet can serve just buries the operator's own manual
@@ -378,6 +383,8 @@ pub struct GenModel {
     /// produced — without this memory that event matched no row and was
     /// gone, and the row said "being added to the catalog" forever.
     published_assets: Vec<AssetId>,
+    /// Picked row of [`VIDEO_LENGTHS`] for video pipes.
+    video_length: usize,
 }
 
 impl Default for ProfilesState {
@@ -398,6 +405,9 @@ impl GenModel {
                 .iter()
                 .position(|p| p.kind == "video.generate" && !p.loop_video)
                 .unwrap_or(0),
+            // The longest sanctioned clip (~5.4 s) — what the fleet default
+            // produced before the picker existed.
+            video_length: VIDEO_LENGTHS.len() - 1,
             ..GenModel::default()
         }
     }
@@ -503,6 +513,18 @@ impl GenModel {
         self.prompt = prompt;
     }
 
+    pub fn set_video_length(&mut self, index: usize) {
+        self.video_length = index.min(VIDEO_LENGTHS.len() - 1);
+    }
+
+    /// Dropdown rows for the length picker, in seconds at H3's 24 fps.
+    pub fn video_length_labels() -> Vec<String> {
+        VIDEO_LENGTHS
+            .iter()
+            .map(|(frames, _)| format!("{:.1} s", *frames as f64 / 24.0))
+            .collect()
+    }
+
     /// Submit the current prompt under the selected profile. The job body is
     /// the profile's advertised defaults with the prompt merged on top.
     pub fn generate(&mut self, now_ms: u64) -> Vec<GenCmd> {
@@ -524,8 +546,18 @@ impl GenModel {
             .find(|profile| profile.kind == pipe.kind)
         {
             if let Value::Obj(defaults) = profile.defaults.clone() {
-                pairs.extend(defaults.into_iter().filter(|(k, _)| k != "prompt"));
+                // The length picker owns frames/steps for video pipes; a
+                // duplicate key from the profile would shadow it.
+                let video = pipe.kind == "video.generate";
+                pairs.extend(defaults.into_iter().filter(|(k, _)| {
+                    k != "prompt" && !(video && (k == "frames" || k == "steps"))
+                }));
             }
+        }
+        if pipe.kind == "video.generate" {
+            let (frames, steps) = VIDEO_LENGTHS[self.video_length.min(VIDEO_LENGTHS.len() - 1)];
+            pairs.push(("frames".to_string(), Value::Int(frames as i64)));
+            pairs.push(("steps".to_string(), Value::Int(steps as i64)));
         }
         pairs.push(("expand".to_string(), Value::Bool(pipe.expand)));
         if pipe.alpha {
