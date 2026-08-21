@@ -53,7 +53,8 @@ fn main() {
     let base = args.next().unwrap_or_else(|| {
         eprintln!(
             "usage: chat-bench <http://box:8123> [--turns N] [--model ID] \
-             [--interleave] [--as-a-game-client] [--long] [--system-words N]"
+             [--interleave] [--as-a-game-client] [--long] [--system-words N] \
+             [--clients N]"
         );
         std::process::exit(2);
     });
@@ -65,6 +66,9 @@ fn main() {
     let mut as_a_game_client = false;
     // Ask for long answers so the rate is decode-bound.
     let mut long = false;
+    // Conversations talking to the box AT THE SAME TIME. 1 is the original
+    // single-client bench; more than 1 switches to the concurrency gate.
+    let mut clients = 1usize;
     // Words of taught context. The default is deliberately game-sized: a
     // bench with a one-line prompt does not test prefill at all.
     let mut system_words = 2000usize;
@@ -92,6 +96,10 @@ fn main() {
                 long = true;
                 index += 1;
             }
+            "--clients" => {
+                clients = rest.get(index + 1).and_then(|v| v.parse().ok()).unwrap_or(clients);
+                index += 2;
+            }
             "--system-words" => {
                 system_words = rest
                     .get(index + 1)
@@ -108,8 +116,12 @@ fn main() {
 
     println!(
         "chat-bench {base}  model={model}  turns={turns}  interleave={interleave}  \
-         game-client={as_a_game_client}  system~{system_words} words"
+         game-client={as_a_game_client}  clients={clients}  system~{system_words} words"
     );
+    if clients > 1 {
+        run_concurrency_gate(&base, &model, clients, turns, system_words, as_a_game_client, long);
+        return;
+    }
     let mut failures: Vec<String> = Vec::new();
     let mut main_chat = Conversation::new("bench-primary", system_words, as_a_game_client, long);
     let mut other_chat =
@@ -142,6 +154,291 @@ fn main() {
         eprintln!("FAIL: {failure}");
     }
     std::process::exit(1);
+}
+
+/// A client whose whole run takes more than this multiple of the fastest
+/// client's is not sharing the box, it is waiting behind it. Loose on purpose:
+/// four conversations on four lanes still contend for one card's memory
+/// bandwidth, and a decode round genuinely slows as lanes fill. This is
+/// catching "serialised", not grading the scheduler.
+const STARVATION_FACTOR: f64 = 3.0;
+
+/// One client's whole run, for the concurrency gate.
+struct ClientRun {
+    id: String,
+    /// (start, end) of every turn, as offsets from the gate's own start —
+    /// which is what makes overlap computable across threads.
+    spans: Vec<(f64, f64)>,
+    failures: Vec<String>,
+    visible_tokens: u64,
+    meters: Vec<f64>,
+}
+
+/// THE MULTI-CLIENT GATE.
+///
+/// The single-client bench answers "is chat fast for someone alone on the
+/// box". That is not the workload: the player's game chat, the asset UI, an
+/// eval rig and whatever agent is probing all live on this box at once, and
+/// the failure that actually reaches a user is one long turn making everyone
+/// else wait. Four lanes exist precisely so that cannot happen, and nothing
+/// until now checked that they do it.
+///
+/// It asserts three things, and the first is the one with teeth:
+///
+/// - **the turns genuinely OVERLAP.** Measured, not assumed: every turn
+///   records when it started and ended, and the gate computes the largest
+///   number of turns that were in flight at one instant. On a box with L lanes
+///   and C clients that number must reach `min(C, L)`. A box whose lanes are
+///   serialised — which this fleet has shipped before — has a maximum overlap
+///   of 1 while every other number still looks healthy.
+/// - **nobody starves.** Every client completes every turn, and no client's
+///   run takes more than [`STARVATION_FACTOR`] times the fastest client's.
+/// - **the box's own counters are honest.** `/health.lanes` is polled
+///   throughout. `slots_claimed` — lanes holding a conversation, generating or
+///   not — must reach `min(C, L)`, because that many conversations demonstrably
+///   were resident. `lanes_active` is deliberately NOT held to the same bar:
+///   it counts lanes GENERATING at that instant, and a client that is still
+///   prefilling is legitimately not one of them, so a peak below `min(C, L)`
+///   is a phase artefact rather than a fault. It is still reported, and it
+///   still fails if it never gets past 1 while turns provably overlapped —
+///   that is the serialisation signature this fleet has shipped before.
+fn run_concurrency_gate(
+    base: &str,
+    model: &str,
+    clients: usize,
+    turns: usize,
+    system_words: usize,
+    as_a_game_client: bool,
+    long: bool,
+) {
+    let advertised = advertised_lanes(base);
+    let expect_overlap = advertised.map_or(clients, |lanes| clients.min(lanes.max(1)));
+    println!(
+        "concurrency gate: {clients} clients x {turns} turns, box advertises {} lanes, \
+         expecting at least {expect_overlap} turns in flight at once",
+        advertised.map_or("?".to_string(), |l| l.to_string()),
+    );
+
+    // The health poller runs for the whole gate and stops when the clients do.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let peak_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let peak_claimed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let watcher = {
+        let base = base.to_string();
+        let stop = stop.clone();
+        let peak = peak_active.clone();
+        let claimed = peak_claimed.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(health) = get(&format!("{base}/health")) {
+                    if let Some(active) = field_u64(&health, "lanes_active") {
+                        peak.fetch_max(active, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Some(held) = field_u64(&health, "slots_claimed") {
+                        claimed.fetch_max(held, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+
+    let origin = Instant::now();
+    let workers: Vec<_> = (0..clients)
+        .map(|index| {
+            let base = base.to_string();
+            let model = model.to_string();
+            let id = format!("gate-client-{index}");
+            std::thread::spawn(move || {
+                let mut chat = Conversation::new(&id, system_words, as_a_game_client, long);
+                let mut run = ClientRun {
+                    id: id.clone(),
+                    spans: Vec::new(),
+                    failures: Vec::new(),
+                    visible_tokens: 0,
+                    meters: Vec::new(),
+                };
+                for turn in 1..=turns {
+                    let at = origin.elapsed().as_secs_f64();
+                    match run_turn(&base, &model, &mut chat, turn) {
+                        Ok(result) => {
+                            run.spans.push((at, origin.elapsed().as_secs_f64()));
+                            run.visible_tokens += result.visible_tokens;
+                            if let Some(meter) = result.meter {
+                                run.meters.push(meter);
+                            }
+                        }
+                        Err(e) => {
+                            run.spans.push((at, origin.elapsed().as_secs_f64()));
+                            run.failures.push(format!("{id} turn {turn}: {e}"));
+                        }
+                    }
+                }
+                run
+            })
+        })
+        .collect();
+
+    let mut runs: Vec<ClientRun> = Vec::new();
+    for worker in workers {
+        match worker.join() {
+            Ok(run) => runs.push(run),
+            Err(_) => {
+                eprintln!("FAIL: a client thread panicked");
+                std::process::exit(1);
+            }
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = watcher.join();
+
+    let wall = origin.elapsed().as_secs_f64();
+    let overlap = peak_overlap(&runs);
+    let peak_active = peak_active.load(std::sync::atomic::Ordering::Relaxed);
+    let peak_claimed = peak_claimed.load(std::sync::atomic::Ordering::Relaxed);
+    let busy: f64 = runs
+        .iter()
+        .flat_map(|run| run.spans.iter())
+        .map(|(start, end)| end - start)
+        .sum();
+
+    let mut failures: Vec<String> = Vec::new();
+    for run in &runs {
+        let span = run
+            .spans
+            .last()
+            .map(|(_, end)| end - run.spans[0].0)
+            .unwrap_or(0.0);
+        let meter = if run.meters.is_empty() {
+            "n/a".to_string()
+        } else {
+            format!("{:.1}", run.meters.iter().sum::<f64>() / run.meters.len() as f64)
+        };
+        println!(
+            "  {}: {} turns in {span:.1}s, {} visible tok, METER {meter} tok/s{}",
+            run.id,
+            run.spans.len(),
+            run.visible_tokens,
+            if run.failures.is_empty() { "" } else { "  [FAILED]" },
+        );
+        failures.extend(run.failures.iter().cloned());
+    }
+    println!(
+        "  wall {wall:.1}s, summed turn time {busy:.1}s, peak turns in flight {overlap}, \
+         box reported peak slots_claimed {peak_claimed} / lanes_active {peak_active}"
+    );
+
+    if overlap < expect_overlap {
+        failures.push(format!(
+            "peak {overlap} turns were in flight at once, expected {expect_overlap} — \
+             {clients} clients on a {} lane box are being served one at a time, so one \
+             client's long turn is every other client's wait",
+            advertised.map_or("?".to_string(), |l| l.to_string()),
+        ));
+    }
+    if peak_claimed < expect_overlap as u64 {
+        failures.push(format!(
+            "the box reported at most {peak_claimed} claimed lanes while {overlap} turns \
+             were genuinely in flight — the counter capacity is planned from is wrong"
+        ));
+    }
+    if overlap >= 2 && peak_active <= 1 {
+        failures.push(format!(
+            "lanes_active never got past {peak_active} while {overlap} turns overlapped — \
+             the lanes are being served one at a time"
+        ));
+    }
+    let spans: Vec<f64> = runs
+        .iter()
+        .map(|run| {
+            run.spans
+                .last()
+                .map(|(_, end)| end - run.spans[0].0)
+                .unwrap_or(0.0)
+        })
+        .collect();
+    if let (Some(fastest), Some(slowest)) = (
+        spans.iter().cloned().fold(None, |a: Option<f64>, b| Some(a.map_or(b, |a| a.min(b)))),
+        spans.iter().cloned().fold(None, |a: Option<f64>, b| Some(a.map_or(b, |a| a.max(b)))),
+    ) {
+        if fastest > 0.0 && slowest > fastest * STARVATION_FACTOR {
+            failures.push(format!(
+                "one client took {slowest:.1}s while another took {fastest:.1}s — \
+                 more than {STARVATION_FACTOR}x apart, which is queueing, not sharing"
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        println!("PASS: {clients} clients shared the box, none starved, the counters agree");
+        return;
+    }
+    for failure in &failures {
+        eprintln!("FAIL: {failure}");
+    }
+    std::process::exit(1);
+}
+
+/// The largest number of turns that were in flight at the same instant.
+///
+/// Computed from the recorded spans rather than sampled, so it cannot miss a
+/// short overlap between two polls: every start is +1 and every end is -1, and
+/// the running total's maximum is the answer. Ends are applied before starts at
+/// an identical timestamp, so two turns that merely touch are not counted as
+/// overlapping.
+fn peak_overlap(runs: &[ClientRun]) -> usize {
+    let mut events: Vec<(f64, i32)> = Vec::new();
+    for run in runs {
+        for (start, end) in &run.spans {
+            events.push((*start, 1));
+            events.push((*end, -1));
+        }
+    }
+    events.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut live = 0i32;
+    let mut peak = 0i32;
+    for (_, delta) in events {
+        live += delta;
+        peak = peak.max(live);
+    }
+    peak.max(0) as usize
+}
+
+/// Tokens the box has generated so far in this turn.
+///
+/// **`/job/{id}` does not carry a `gen_tokens` field.** Its `serving` block has
+/// `prefix_ingested`, `prefix_resumed`, `think_tokens` and `visible_tokens`,
+/// and nothing else — `gen_tokens` is SYNTHESISED by the broker
+/// (`libs/asset/chat/src/qwen.rs`, which parses it out of the `stage` string
+/// and re-emits it on its own events). This bench talks to the box directly, so
+/// reading `gen_tokens` here found nothing and the METER — the very number this
+/// bench added in order to measure the delivery gap — printed `n/a` on every
+/// single turn. An instrument that silently reports nothing is worse than no
+/// instrument, because the gap it was built to measure stays a guess.
+///
+/// So parse the same `decode k/n` stage string the broker parses, and only fall
+/// back to the field for a service that does publish one.
+fn generated_tokens(status: &str) -> Option<u64> {
+    if let Some(stage) = field_str(status, "stage") {
+        if let Some(rest) = stage.trim().strip_prefix("decode") {
+            let digits: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(count) = digits.parse::<u64>() {
+                return Some(count);
+            }
+        }
+    }
+    field_u64(status, "gen_tokens")
+}
+
+/// Lanes the box says it has, from `/health.lanes.slots_total`. Absent means an
+/// older service, and the gate then expects only what the clients asked for.
+fn advertised_lanes(base: &str) -> Option<usize> {
+    let health = get(&format!("{base}/health")).ok()?;
+    field_u64(&health, "slots_total").map(|n| n as usize)
 }
 
 /// One turn's outcome, in the units a person experiences.
@@ -267,7 +564,8 @@ fn long_system_prompt(words: usize) -> String {
 /// the box matches a prompt that EXTENDS what its lane already holds, so an
 /// approximation of the reply is a different conversation.
 struct Conversation {
-    id: &'static str,
+    #[allow(dead_code)]
+    id: String,
     /// Carried per conversation so two of them are genuinely different
     /// prompts, not the same one twice.
     system: String,
@@ -281,7 +579,7 @@ struct Conversation {
 
 impl Conversation {
     fn new(
-        id: &'static str,
+        id: &str,
         system_words: usize,
         as_a_game_client: bool,
         long_answers: bool,
@@ -290,7 +588,13 @@ impl Conversation {
         // Two conversations must not share a prompt, or "both stayed warm"
         // could be one lane serving both.
         system.push_str(id);
-        Self { id, system, messages: Vec::new(), as_a_game_client, long_answers }
+        Self {
+            id: id.to_string(),
+            system,
+            messages: Vec::new(),
+            as_a_game_client,
+            long_answers,
+        }
     }
 
     fn next_question(&self) -> String {
@@ -380,7 +684,7 @@ fn run_turn(
                 first_visible = Some(started.elapsed());
             }
         }
-        if let Some(gen) = field_u64(&status, "gen_tokens") {
+        if let Some(gen) = generated_tokens(&status) {
             let now = Instant::now();
             if meter_first.is_none() && gen > 0 {
                 meter_first = Some((now, gen));
