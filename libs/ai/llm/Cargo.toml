@@ -44,6 +44,12 @@ path = "src/bin/llama_tokenize.rs"
 name = "llama-batch-probe"
 path = "src/bin/llama_batch_probe.rs"
 
+# The decode column-cost curve: what an extra batch column actually costs,
+# which is what sets how many chats one card can serve.
+[[bin]]
+name = "llama-batch-bench"
+path = "src/bin/llama_batch_bench.rs"
+
 [[bin]]
 name = "vlm-vision-probe"
 path = "src/bin/vlm_vision_probe.rs"
