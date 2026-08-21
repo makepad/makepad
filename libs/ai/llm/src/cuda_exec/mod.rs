@@ -294,6 +294,16 @@ impl CompiledHybridDecodeCuda {
 #[cfg(makepad_llama_cuda_kernels)]
 pub use imp::{host_split_reset, host_split_snapshot, HostSplit};
 
+/// The widest activation batch the quantized mat-vec route serves, and with it
+/// the boundary between Q8_1-quantized activations and the bf16 GEMM slab.
+/// Exported so the numerical canary can place cases on both sides of the line
+/// the dispatcher actually draws.
+#[cfg(makepad_llama_cuda_kernels)]
+pub use imp::MMV_MAX_COLUMNS;
+
+#[cfg(not(makepad_llama_cuda_kernels))]
+pub const MMV_MAX_COLUMNS: usize = 8;
+
 #[cfg(not(makepad_llama_cuda_kernels))]
 #[derive(Default, Clone, Debug)]
 pub struct HostSplit {
