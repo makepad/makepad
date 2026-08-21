@@ -136,10 +136,14 @@ impl ChatFeed {
         ChatFeed { tx, dirty, connected }
     }
 
-    /// Push the user's turn. The bubble lands immediately so the UI never
-    /// looks like it dropped the message.
+    /// Send the user's turn.
+    ///
+    /// The user's BUBBLE is not pushed here. The app owns what the user
+    /// said — it is the only half that knows which lane the message went
+    /// down (a host with a device-local agent beside this one still shows
+    /// one bubble) — and this half owns everything that comes back. When
+    /// both pushed, the message appeared twice.
     pub fn send(&self, text: String, attachments: Vec<ChatAttachment>) {
-        ChatData::push(ChatRole::User, &text);
         ChatData::begin_stream();
         ChatData::set_activity("sending…");
         self.dirty.store(true, Ordering::Relaxed);

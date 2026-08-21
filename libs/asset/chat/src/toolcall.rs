@@ -142,10 +142,17 @@ fn extract_native(text: &str) -> Extract {
                 reason: "tool_call is neither <function=> nor JSON".to_string(),
             };
         };
+        // Every spelling of the name this stack has actually seen from a
+        // served model. `tool_name` is not a hypothetical: the box's Qwen
+        // emits `{"tool_name": "world.get_source", "arguments": {}}`, and
+        // while it was unrecognised the model retried the same shape over
+        // and over — the turn died in a loop with nothing to show for it.
         let Some(raw_name) = v
             .get("function")
             .and_then(Value::as_str)
             .or_else(|| v.get("name").and_then(Value::as_str))
+            .or_else(|| v.get("tool_name").and_then(Value::as_str))
+            .or_else(|| v.get("tool").and_then(Value::as_str))
         else {
             return Extract::Malformed { clean, reason: "tool_call missing function name".to_string() };
         };
@@ -153,6 +160,7 @@ fn extract_native(text: &str) -> Extract {
         let args = v
             .get("arguments")
             .or_else(|| v.get("args"))
+            .or_else(|| v.get("parameters"))
             .cloned()
             .unwrap_or(Value::Obj(Vec::new()));
         return Extract::Call { clean, name, args };

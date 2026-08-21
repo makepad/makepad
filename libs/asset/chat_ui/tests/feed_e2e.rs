@@ -118,6 +118,8 @@ fn a_turn_streams_runs_the_apps_tool_and_lands() {
     cfg.provider = ChatProviderKind::FleetQwen;
     let feed = ChatFeed::start(cfg, Box::new(RecordingTools { calls: calls_tx }));
 
+    // The app owns the user's bubble — exactly as a host does it.
+    ChatData::push(ChatRole::User, "make me a trawler");
     feed.send("make me a trawler".into(), Vec::new());
 
     // The broker parked image.generate on us and the worker executed it.
@@ -131,6 +133,13 @@ fn a_turn_streams_runs_the_apps_tool_and_lands() {
 
     let data = CHAT.read().unwrap();
     let roles: Vec<ChatRole> = data.messages.iter().map(|m| m.role).collect();
+    // The feed must not echo the user's message: the app pushed it, and a
+    // second push put the same bubble on screen twice.
+    assert_eq!(
+        roles.iter().filter(|r| **r == ChatRole::User).count(),
+        1,
+        "one send, one user bubble: {roles:?}"
+    );
     assert_eq!(roles[0], ChatRole::User, "{roles:?}");
     assert!(
         roles.contains(&ChatRole::Tool),
