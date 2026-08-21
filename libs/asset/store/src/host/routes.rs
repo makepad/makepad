@@ -55,6 +55,10 @@ pub struct RouteCtx {
     /// Live worker announcements of what the GPU fleet can execute NOW,
     /// merged over `cfg.job_profiles` by `GET /v1/job-profiles`.
     pub profiles: std::sync::Arc<super::profiles::ProfileRegistry>,
+    /// Live game rooms — who is playing what, right now, and how to reach
+    /// them. In memory and leased: a room is a process on somebody's desk,
+    /// not a catalog entry.
+    pub rooms: std::sync::Arc<super::rooms::RoomRegistry>,
 }
 
 /// Serve one parsed request head to completion.

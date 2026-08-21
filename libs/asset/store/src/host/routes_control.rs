@@ -67,6 +67,9 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
     if let Some(r) = super::routes_chat::dispatch(conn, head, rc, &seg) {
         return r;
     }
+    if let Some(r) = super::routes_rooms::dispatch(conn, head, rc, &seg) {
+        return r;
+    }
     match seg.as_slice() {
         ["v1", "health"] => {
             if is_read(m) {

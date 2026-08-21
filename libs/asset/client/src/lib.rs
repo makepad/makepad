@@ -77,6 +77,7 @@ pub use dto::{
     ChatProviderStateDto, ChatSessionDto, ChatSessionId, ChatSessionStateDto, ChatToolOutcomeDto,
     OperationEventsPageDto, OperationId, OperationInputDto, OperationProgressDto, OperationStateDto,
     OperationStatusDto, OperationTypeDto, PrincipalDto, ResolvedVariantMapDto,
+    RoomClaimDto, RoomDto,
     SourceCollectionRowDto, SourceCollectionsPageDto,
 };
 pub use error::{ClientError, ClientResult};
