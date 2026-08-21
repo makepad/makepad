@@ -169,6 +169,9 @@ pub struct HitRow {
     /// Kind as the server reported it; `None` falls back to the lane's kind
     /// (each lane is an exact-kind search).
     pub kind: Option<AssetKind>,
+    /// Server-side last-update stamp: the strip sorts newest-first on it,
+    /// so tonight's generations lead from the left.
+    pub updated_ms: u64,
 }
 
 /// The four buckets an operator actually thinks in, and the ones the Asset
@@ -314,6 +317,8 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     /// pad, and a grid that renumbers itself under that hand is a grid
     /// that fires the wrong clip.
     order: Vec<AssetId>,
+    /// updated_ms per placed asset, for the newest-first ordering.
+    stamps: HashMap<AssetId, u64>,
     /// The PENDING head column: assets the generators published while the
     /// operator was watching, filling the leftmost column top to bottom.
     /// It merges into `order` when it fills (a new empty column starts) or
@@ -396,6 +401,7 @@ impl<C: Clone> BrowseModel<C> {
             error: None,
             refresh_wanted: false,
             order: Vec::new(),
+            stamps: HashMap::new(),
             pending: Vec::new(),
             // The first page of a fresh model IS the sort.
             resort: true,
@@ -575,12 +581,15 @@ impl<C: Clone> BrowseModel<C> {
             }
         }
         let mut added = 0usize;
+        let mut resorted = false;
         for hit in hits {
             if self.index.contains_key(&hit.asset) {
                 continue; // keyset pages should not repeat; drop dupes anyway
             }
             added += 1;
+            self.stamps.insert(hit.asset, hit.updated_ms);
             self.place(hit.asset);
+            resorted = true;
             self.index.insert(hit.asset, self.tiles.len());
             let kind = hit.kind.or_else(|| self.kinds.get(slot).copied());
             match self.carry.remove(&hit.asset) {
@@ -615,7 +624,14 @@ impl<C: Clone> BrowseModel<C> {
             let listed = &self.index;
             self.order.retain(|asset| listed.contains_key(asset));
             self.pending.retain(|asset| listed.contains_key(asset));
+            // Newest first: the operator reads the strip left-to-right as
+            // "what just came in" — tonight's generations lead.
+            let stamps = &self.stamps;
+            self.order.sort_by_key(|asset| {
+                std::cmp::Reverse(stamps.get(asset).copied().unwrap_or(0))
+            });
         }
+        let _ = resorted;
         let mut cmds = self.pump_resolves();
         if self.restarting[slot] {
             // Re-walking after a stale cursor: a page of only-known hits is
@@ -839,6 +855,7 @@ mod tests {
             alias: None,
             live: true,
             kind: None,
+            updated_ms: seed as u64,
         }
     }
 
@@ -930,7 +947,8 @@ mod tests {
         m.refresh();
         // Six settled tiles.
         m.page_arrived(1, 0, true, (1..=6).map(hit).collect(), 6, None);
-        let body: Vec<AssetId> = (1..=6).map(|s| hit(s).asset).collect();
+        // Newest first: the strip leads with the freshest updated_ms.
+        let body: Vec<AssetId> = (1..=6).rev().map(|s| hit(s).asset).collect();
         assert_eq!(m.display_order(), body.iter().map(|a| Some(*a)).collect::<Vec<_>>());
 
         // A publish event re-lists with two new assets at the FRONT (what
@@ -985,8 +1003,8 @@ mod tests {
         m.page_arrived(gen, 0, true, [3u8, 9, 1].iter().map(|s| hit(*s)).collect(), 3, None);
         assert_eq!(
             m.display_order(),
-            vec![Some(hit(3).asset), Some(hit(9).asset), Some(hit(1).asset)],
-            "a re-sort follows the server's order exactly"
+            vec![Some(hit(9).asset), Some(hit(3).asset), Some(hit(1).asset)],
+            "a re-sort orders newest-first by updated_ms"
         );
         // A tile the server dropped is gone after a re-sort...
         let cmds = m.refresh();
