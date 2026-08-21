@@ -61,6 +61,15 @@ pub struct Record {
     pub face: Vec<String>,
     /// One sanitized occupation word ("police", "farmer", "knight").
     pub job: Option<String>,
+    /// How the character reads FROM BEHIND, small, in motion.
+    ///
+    /// THE view a player has of their own body for an entire game, and the
+    /// one no annotation ever carried: every line in the catalog described a
+    /// zoomed front portrait. That is how "old man with a full brown beard,
+    /// brown hat and a sword" and "im a goddamn monkey" were both true of
+    /// kenney/mini-dungeon/character-human on the same evening — one is the
+    /// thumbnail, the other is the game.
+    pub back: String,
 }
 
 impl Record {
@@ -213,6 +222,13 @@ pub fn parse_record(reply: &str) -> Record {
             "job" | "role2" | "occupation" => {
                 rec.job = sanitize_job(value);
                 seen.push("job");
+            }
+            "back" | "behind" | "rear" => {
+                // Shorter than desc on purpose: it has one job, and it
+                // rides in the same description line a 30-row SQL result
+                // multiplies by thirty.
+                rec.back = clamp_words(value, 16);
+                seen.push("back");
             }
             "desc" | "description" => {
                 // 20 words: enough for the person variant's "age, hair,

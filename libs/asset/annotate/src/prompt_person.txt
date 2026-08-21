@@ -2,7 +2,7 @@ This image is a 4x4 grid of 16 renders of ONE low-poly 3D game CHARACTER on a da
 
 You are describing this character so a program can find people by their look, for requests like "the old man with the beard" or "a woman in a red dress". Report what the PERSON looks like — the things a stranger would notice first — not a caption.
 
-Reply with exactly these thirteen lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
+Reply with exactly these fourteen lines, nothing before or after, no markdown. Write "-" only when you truly cannot tell.
 
 what: 2 to 4 words naming the person by their most distinctive look or apparent role, like old bald man, police officer, young woman, orc warrior
 cat: character
@@ -17,3 +17,5 @@ job: ONE word for the occupation or role the outfit suggests, like police, farme
 colors: 1 to 3 dominant clothing colours, comma separated, plain colour words
 style: 1 or 2 words from: low-poly cartoon realistic toy medieval modern sci-fi rustic
 desc: at most 20 words of concrete visual detail: age impression, hair or baldness and its colour, facial hair, anything worn on the head or face, clothing and its colours, anything held or carried, and the occupation or role the outfit suggests
+back: at most 16 words for how this character reads FROM BEHIND, small, in motion — the view a player has of their own body for the whole game. Use the rear views in the grid, not the front ones. Say what the SILHOUETTE and the block of colour read as to someone who cannot see the face: what shape the head and body make, the dominant colours from behind, and anything still recognisable from back there (a hat, a pack, a weapon, hair). If nothing distinguishes it from behind, say so plainly — "plain brown box head, no features" is the most useful answer you can give
+
