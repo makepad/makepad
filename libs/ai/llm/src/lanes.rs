@@ -40,7 +40,13 @@ pub struct LaneRequest {
     /// sticky affinity a collision would hand two players the same lane and
     /// therefore each other's KV.
     pub session: String,
+    /// Tokens to ingest. With `reset_first` false this is the DELTA the
+    /// session's existing state does not already hold, which is how prefix
+    /// reuse survives: the worker owns that decision, the executor obeys it.
     pub prompt_tokens: Vec<i32>,
+    /// Clear the session's single-sequence state before ingesting. False only
+    /// for a solo-lane prefix hit.
+    pub reset_first: bool,
     pub max_new: usize,
 }
 
@@ -275,6 +281,79 @@ impl LaneScheduler {
         events
     }
 
+    /// Report a whole CHUNK produced by the solo speculative path.
+    ///
+    /// The batched path decodes one token per lane per step and emits the
+    /// token it just consumed; the speculative path runs the session's own
+    /// loop and hands back the tokens it GENERATED. So this emits them
+    /// directly rather than going through the feed-one/emit-previous dance,
+    /// and advances the lane by the whole chunk.
+    pub fn on_generated(&mut self, lane: usize, tokens: &[i32]) -> Vec<LaneEvent> {
+        let mut events = Vec::new();
+        let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) else {
+            return events;
+        };
+        for &token in tokens {
+            slot.produced += 1;
+            events.push(LaneEvent::Token {
+                job: slot.request.job,
+                token,
+                produced: slot.produced,
+            });
+        }
+        if slot.produced >= slot.request.max_new {
+            slot.phase = LanePhase::Done(LaneOutcome::Complete);
+        }
+        let _ = self.table.advance(lane, tokens.len());
+        events
+    }
+
+    /// Seed the token a lane will decode next.
+    ///
+    /// Needed when a lane hands over from the speculative path to the batched
+    /// one: the speculative path leaves its next token implicit in the
+    /// session's logits, while the batched path needs it explicit.
+    pub fn set_next_token(&mut self, lane: usize, token: i32) {
+        if let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) {
+            slot.next_token = Some(token);
+        }
+    }
+
+    /// Whether `lane` is the only claimed lane and nothing is queued behind it.
+    ///
+    /// The condition for taking the solo speculative path: no other lane can
+    /// join before the chunk completes, so the session's own single-sequence
+    /// state stays authoritative for its duration.
+    pub fn is_solo(&self, lane: usize) -> bool {
+        self.pending.is_empty()
+            && self.slots_claimed() == 1
+            && self
+                .lanes
+                .get(lane)
+                .map(|l| l.is_some())
+                .unwrap_or(false)
+    }
+
+    /// Whether `lane`'s request asked for the session to be cleared before its
+    /// prompt is ingested. False only for a solo-lane prefix hit, where the
+    /// prompt tokens are the delta on top of state already resident.
+    pub fn reset_requested(&self, lane: usize) -> bool {
+        self.lanes
+            .get(lane)
+            .and_then(|l| l.as_ref())
+            .map(|slot| slot.request.reset_first)
+            .unwrap_or(true)
+    }
+
+    /// Tokens `lane` still owes its caller.
+    pub fn remaining(&self, lane: usize) -> usize {
+        self.lanes
+            .get(lane)
+            .and_then(|l| l.as_ref())
+            .map(|slot| slot.request.max_new.saturating_sub(slot.produced))
+            .unwrap_or(0)
+    }
+
     /// Retire finished and cancelled lanes, freeing their slots.
     pub fn reap(&mut self) -> Vec<LaneEvent> {
         let mut events = Vec::new();
@@ -341,6 +420,15 @@ pub struct LaneExecutor {
     /// had, one level up.
     samplers: Vec<Option<crate::LlamaSamplerState>>,
     params: crate::LlamaSamplingParams,
+    /// Slot 0's history currently lives in the session's OWN single-sequence
+    /// state, so the speculative path can run against it.
+    ///
+    /// The two paths disagree about where a lane's history is: the speculative
+    /// one advances the session's token list, the batched one writes through
+    /// slot rows and does not. So this is set only while slot 0 is the sole
+    /// occupant, and cleared the moment the batch widens — after which that
+    /// turn finishes unspeculated and the next one re-establishes it.
+    solo_native: bool,
     /// Invoked with fresh counts after every step.
     ///
     /// A callback rather than "the caller remembers to ask": a forgotten
@@ -350,7 +438,19 @@ pub struct LaneExecutor {
     on_counts: Option<Box<dyn FnMut(LaneCounts) + Send>>,
 }
 
+/// The one lane whose history can live in the session's own single-sequence
+/// state, and therefore the only lane that can speculate in phase 1. Slot 0
+/// because its `kv_base` is 0, which is exactly where the session-native path
+/// writes.
+pub const SOLO_LANE: usize = 0;
+
 impl LaneExecutor {
+    fn sampler_for(&mut self, lane: usize) -> &mut crate::LlamaSamplerState {
+        let params = self.params;
+        self.samplers[lane]
+            .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed ^ (lane as u64 + 1)))
+    }
+
     pub fn new(
         session: crate::LlamaSession,
         scheduler: LaneScheduler,
@@ -362,6 +462,7 @@ impl LaneExecutor {
             scheduler,
             samplers,
             params,
+            solo_native: false,
             on_counts: None,
         }
     }
@@ -382,11 +483,67 @@ impl LaneExecutor {
         self.scheduler.is_idle()
     }
 
+    /// Whether the next step will run the solo speculative path.
+    pub fn is_speculating(&self) -> bool {
+        self.solo_native && self.scheduler.is_solo(SOLO_LANE)
+    }
+
     /// Perform one scheduler step. Returns the events to report to callers.
     pub fn step(&mut self) -> Result<Vec<LaneEvent>, String> {
         let mut events = Vec::new();
+        // HANDOVER, before anything reads the plan. If slot 0 was running
+        // session-native and is no longer alone, its next token is still
+        // implicit in the session's logits; the batched path needs it
+        // explicit. Miss this and the lane feeds a zero token — a plausible
+        // word, not an error.
+        if self.solo_native && !self.scheduler.is_solo(SOLO_LANE) {
+            let next = {
+                let logits = self
+                    .session
+                    .last_logits()
+                    .ok_or_else(|| "handover with no logits to sample".to_string())?
+                    .to_vec();
+                let params = self.params;
+                let sampler = self.sampler_for(SOLO_LANE);
+                sampler
+                    .sample_logits(&logits, params)
+                    .map_err(|e| format!("handover sample: {e}"))?
+            };
+            self.scheduler.set_next_token(SOLO_LANE, next);
+            self.solo_native = false;
+        }
         match self.scheduler.next_step() {
             LaneStep::Idle => {}
+            LaneStep::Prefill {
+                lane,
+                kv_base,
+                state_row,
+                start,
+                tokens,
+            } if lane == SOLO_LANE && self.scheduler.is_solo(lane) => {
+                // Session-native ingest, so the speculative loop can run
+                // against it. `reset_first` is the worker's prefix decision.
+                if self.scheduler.reset_requested(lane) {
+                    self.session.reset().map_err(|e| format!("reset: {e}"))?;
+                }
+                self.session
+                    .append_tokens(&tokens)
+                    .map_err(|e| format!("solo prefill: {e}"))?;
+                let logits = self
+                    .session
+                    .last_logits()
+                    .ok_or_else(|| "solo prefill produced no logits".to_string())?
+                    .to_vec();
+                let first = {
+                    let params = self.params;
+                    let sampler = self.sampler_for(lane);
+                    sampler
+                        .sample_logits(&logits, params)
+                        .map_err(|e| format!("lane {lane} sample: {e}"))?
+                };
+                self.solo_native = true;
+                self.scheduler.on_prefilled(lane, tokens.len(), first);
+            }
             LaneStep::Prefill {
                 lane,
                 kv_base,
@@ -407,6 +564,27 @@ impl LaneExecutor {
                     .sample_logits(&logits, self.params)
                     .map_err(|e| format!("lane {lane} sample: {e}"))?;
                 self.scheduler.on_prefilled(lane, tokens.len(), first);
+            }
+            LaneStep::Decode { plan, .. }
+                if self.solo_native
+                    && plan.slots.len() == 1
+                    && plan.slots[0].slot == SOLO_LANE =>
+            {
+                // The session's own loop: speculation, chunked so the caller
+                // keeps its cancel and streaming boundaries.
+                let want = CHUNK_TOKENS.min(self.scheduler.remaining(SOLO_LANE)).max(1);
+                let generated = {
+                    let params = self.params;
+                    let sampler = self.samplers[SOLO_LANE]
+                        .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
+                    self.session
+                        .continue_sampled_with(want, params, sampler)
+                        .map_err(|e| format!("solo decode: {e}"))?
+                };
+                events.extend(
+                    self.scheduler
+                        .on_generated(SOLO_LANE, &generated.token_ids),
+                );
             }
             LaneStep::Decode { plan, tokens } => {
                 let rows = self
@@ -457,6 +635,7 @@ mod tests {
             job,
             session: format!("session-{job}"),
             prompt_tokens: prompt.to_vec(),
+            reset_first: true,
             max_new,
         }
     }
@@ -698,6 +877,83 @@ mod tests {
             vec![(1, 0), (2, 1)],
             "each retirement must name the lane it freed"
         );
+    }
+
+    #[test]
+    fn a_sole_occupant_is_solo_and_a_shared_box_is_not() {
+        // The condition that decides whether a lane may take the speculative
+        // path. It has to include the QUEUE: a lane that is alone right now
+        // but has work waiting behind it would be joined mid-chunk.
+        let mut sched = scheduler(4, 8);
+        sched.submit(request(1, &[1, 2], 20)).expect("submit");
+        sched.admit_pending();
+        assert!(sched.is_solo(0), "sole occupant, nothing queued");
+
+        sched.submit(request(2, &[1], 20)).expect("submit");
+        assert!(
+            !sched.is_solo(0),
+            "work is queued behind it, so it is about to be joined"
+        );
+        sched.admit_pending();
+        assert!(!sched.is_solo(0), "and now genuinely shares the box");
+    }
+
+    #[test]
+    fn a_generated_chunk_emits_every_token_and_advances_the_lane() {
+        // The speculative path hands back tokens it already produced, unlike
+        // the batched path which emits the token it just consumed. Getting
+        // this wrong drops or duplicates a whole chunk, not one token.
+        let mut sched = scheduler(2, 4);
+        sched.submit(request(5, &[1, 2], 10)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 0);
+
+        let events = sched.on_generated(0, &[41, 42, 43]);
+        assert_eq!(
+            events,
+            vec![
+                LaneEvent::Token { job: 5, token: 41, produced: 1 },
+                LaneEvent::Token { job: 5, token: 42, produced: 2 },
+                LaneEvent::Token { job: 5, token: 43, produced: 3 },
+            ]
+        );
+        assert_eq!(sched.remaining(0), 7, "ten asked, three delivered");
+    }
+
+    #[test]
+    fn a_generated_chunk_still_stops_at_the_budget() {
+        let mut sched = scheduler(2, 4);
+        sched.submit(request(6, &[1], 2)).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 0);
+        // A speculative round can overshoot the budget; the lane must still
+        // finish rather than run on.
+        sched.on_generated(0, &[1, 2, 3]);
+        assert_eq!(sched.remaining(0), 0);
+        assert!(matches!(
+            sched.reap().first(),
+            Some(LaneEvent::Finished { job: 6, .. })
+        ));
+    }
+
+    #[test]
+    fn a_prefix_hit_asks_the_session_not_to_reset() {
+        let mut sched = scheduler(2, 4);
+        let mut hit = request(9, &[7, 8], 4);
+        hit.reset_first = false;
+        sched.submit(hit).expect("submit");
+        sched.admit_pending();
+        assert!(
+            !sched.reset_requested(0),
+            "a prefix hit must not clear the state it is reusing"
+        );
+        // An unclaimed lane defaults to resetting: safer to re-ingest than to
+        // decode on top of whatever a previous conversation left behind.
+        assert!(sched.reset_requested(1));
     }
 
     #[test]
