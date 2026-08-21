@@ -425,6 +425,22 @@ are the same list operations the UI and verbs use. The list is the
 data; the tools are its lens. ("That spawn thing should be queryable
 and editable by the AI in minimal tokens.")
 
+**TERRAIN — the data overlay (design note, 2026-08-21; build when
+terrain editing becomes a feature, not before).** User direction: "we
+want some kind of external datastructure for the terrain the AI can
+operate on instead of splash-ing it — or have splash spawn and then
+store the 'edits' elsewhere." The terrain splits the same way the
+scene/script split works: the BASE stays the seeded `game.terrain`
+line in splash (parameters, not data — regenerable, cheap, readable),
+and EDITS are a versioned DATA OVERLAY — ordered delta patches
+(height/material brushes with extents), a sibling of the spawn list in
+the container, revisioned with the world. The AI operates through
+terrain TOOLS that append/edit overlay patches in tens of tokens; it
+never rewrites geometry into source, and a reload replays base + overlay
+deterministically. This note exists to prevent the wrong shortcut
+(baking edited heightfields into splash or into opaque saves) when the
+feature lands.
+
 Migration: the flat assembled splash remains the transition form —
 worlds load either way while verbs and container roles retarget.
 
