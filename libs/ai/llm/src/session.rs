@@ -479,6 +479,25 @@ impl LlamaSession {
         self.mtp.map(|mtp| mtp.draft_max).unwrap_or(0)
     }
 
+    /// Tokens that end a turn: this model's end-of-sequence and padding ids.
+    ///
+    /// Exposed because a scheduler that owns lanes has to know when a lane's
+    /// turn is over, and it has no vocabulary of its own to ask. The
+    /// single-stream loop consults [`Self::stop_reason_for`] internally; a
+    /// caller driving decode itself must consult this.
+    pub fn stop_tokens(&self) -> Vec<i32> {
+        let mut tokens = Vec::with_capacity(2);
+        if let Some(eos) = self.vocab.eos_token_id() {
+            tokens.push(eos);
+        }
+        if let Some(pad) = self.vocab.padding_token_id() {
+            if !tokens.contains(&pad) {
+                tokens.push(pad);
+            }
+        }
+        tokens
+    }
+
     /// Slots this session was built for. 1 for every single-stream session.
     pub fn slot_count(&self) -> usize {
         self.config.max_sequences as usize
