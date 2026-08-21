@@ -286,6 +286,22 @@ fn main() {
         }
     }
 
+    // Seventh gate: THE SOLO SPEED FLOOR. Everything above asks whether the
+    // output is right; this asks whether a lone client is fast, which is the
+    // half of the acceptance criteria no gate covered. Only meaningful with
+    // speculation on, so it is skipped — loudly — at --spec 0.
+    if spec_draft() > 0 {
+        match solo_speed_floor(&model, &vocab, slots, PER_SLOT_CONTEXT, max_new.max(64)) {
+            Ok(()) => println!("PASS: a solo turn through the executor keeps the session's rate"),
+            Err(e) => {
+                eprintln!("FAIL (solo speed): {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!("SKIP: solo speed floor needs --spec N (nothing to measure at spec 0)");
+    }
+
     if timing {
         if let Err(e) = timing_sweep(&model, &vocab, slots, PER_SLOT_CONTEXT) {
             eprintln!("timing failed: {e}");
@@ -770,6 +786,158 @@ const LANE_PROMPTS: &[&str] = &[
     "Give one reason batching helps GPU inference.",
     "Say hello.",
 ];
+
+/// Seventh gate: THE SOLO SPEED FLOOR, through the shipping executor.
+///
+/// Every gate above asks whether the output is right. None of them asks
+/// whether a lone client is FAST, and "correct but slow" is the regression the
+/// user explicitly refused: the acceptance number is a solo floor, not a
+/// correctness claim.
+///
+/// It measures the same generation twice on one loaded model:
+///
+/// 1. **session-native** — `continue_sampled_with` straight on the session,
+///    which is the campaign's own measured path and therefore the number the
+///    floor was set from;
+/// 2. **through `LaneExecutor`** — one job, one lane, exactly what the service
+///    runs.
+///
+/// The A/B is the point. A single number tells you the box is slow; two tell
+/// you WHERE. If both are at the floor the service's problem is above this
+/// layer; if only the executor one is low, the executor is not taking the
+/// speculative path it claims to take, and `is_speculating()` says so directly.
+///
+/// Refuses to pass vacuously: with `--spec 0` there is no speculation to
+/// measure and the gate says so rather than certifying the unspeculated rate.
+fn solo_speed_floor(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+    tokens: usize,
+) -> Result<(), String> {
+    if spec_draft() == 0 {
+        return Err("needs --spec N: with speculation off there is no floor to measure, \n  \
+                    and passing would certify the unspeculated rate as if it were the target"
+            .to_string());
+    }
+    let params = LlamaSamplingParams {
+        temperature: 0.7,
+        top_p: 0.95,
+        seed: 1234,
+        ..LlamaSamplingParams::default()
+    };
+    let prompt = vocab.tokenize(PROMPT, true, true).map_err(|e| e.to_string())?;
+
+    // --- 1. session-native, the campaign path ---
+    let mut session = build_session(model, slots, per_slot_context)?;
+    if session.speculation_depth() == 0 {
+        return Err(format!(
+            "--spec {} requested but the draft head did not load; nothing below would mean \n  \
+             anything",
+            spec_draft()
+        ));
+    }
+    session.append_tokens(&prompt).map_err(|e| e.to_string())?;
+    let before = session.speculative_stats();
+    let started = std::time::Instant::now();
+    let native = {
+        let mut state = makepad_ai_llm::LlamaSamplerState::new(params.seed);
+        session
+            .continue_sampled_with(tokens, params, &mut state)
+            .map_err(|e| e.to_string())?
+    };
+    let native_secs = started.elapsed().as_secs_f64();
+    let native_rate = native.token_ids.len() as f64 / native_secs.max(1e-9);
+    let after = session.speculative_stats();
+    let rounds = after.map(|a| a.rounds).unwrap_or(0) - before.map(|b| b.rounds).unwrap_or(0);
+    let accepted =
+        after.map(|a| a.accepted).unwrap_or(0) - before.map(|b| b.accepted).unwrap_or(0);
+    let drafted = after.map(|a| a.drafted).unwrap_or(0) - before.map(|b| b.drafted).unwrap_or(0);
+    println!(
+        "  session-native: {:.1} tok/s over {} tokens ({} rounds, {:.2} tok/round, \
+         acceptance {:.2})",
+        native_rate,
+        native.token_ids.len(),
+        rounds,
+        if rounds > 0 {
+            (accepted + rounds) as f64 / rounds as f64
+        } else {
+            0.0
+        },
+        if drafted > 0 {
+            accepted as f64 / drafted as f64
+        } else {
+            0.0
+        }
+    );
+    drop(session);
+
+    // --- 2. through the shipping executor, one job on one lane ---
+    let session = build_session(model, slots, per_slot_context)?;
+    let table = session.new_slot_table().map_err(|e| e.to_string())?;
+    let scheduler = LaneScheduler::new(table, 8);
+    let mut exec = LaneExecutor::new(session, scheduler, params);
+    exec.scheduler()
+        .submit(LaneRequest {
+            job: 1,
+            session: "solo-floor".to_string(),
+            prompt_tokens: prompt.clone(),
+            reset_first: true,
+            max_new: tokens,
+            sampling: params,
+        })
+        .map_err(|r| format!("submit refused job {}", r.job))?;
+
+    // The prefill is its own step and is NOT decode time. Timing it would
+    // report a prompt-length-dependent number and call it a decode rate.
+    exec.step()?;
+    let speculating = exec.is_speculating();
+    let started = std::time::Instant::now();
+    let mut produced = 0usize;
+    let mut finished = false;
+    for _ in 0..(tokens + 8) {
+        for event in exec.step()? {
+            match event {
+                LaneEvent::Token { .. } => produced += 1,
+                LaneEvent::Finished { .. } => finished = true,
+            }
+        }
+        if finished {
+            break;
+        }
+    }
+    let lane_secs = started.elapsed().as_secs_f64();
+    let lane_rate = produced as f64 / lane_secs.max(1e-9);
+    println!(
+        "  through LaneExecutor: {lane_rate:.1} tok/s over {produced} tokens \
+         (speculating={speculating})"
+    );
+
+    if !speculating {
+        return Err("the sole lane did NOT take the speculative path. Solo chat runs at the \n  \
+                    batched rate: correct, and the regression the user rejected."
+            .to_string());
+    }
+    if !finished {
+        return Err("the lane never finished inside its own token budget".to_string());
+    }
+    // Ratio, not an absolute floor: the absolute number belongs to the card,
+    // and this gate has to mean the same thing on every box. What it pins is
+    // that routing a solo turn through the executor does not COST anything
+    // against running it on the session directly.
+    let ratio = lane_rate / native_rate.max(1e-9);
+    println!("  executor/native = {ratio:.2}");
+    if ratio < 0.85 {
+        return Err(format!(
+            "the executor path is {:.0}% of the session-native rate ({lane_rate:.1} vs \n  \
+             {native_rate:.1} tok/s). A solo turn should cost the same either way; this much \n  \
+             loss means the executor is not decoding the way the session does.",
+            ratio * 100.0
+        ));
+    }
+    Ok(())
+}
 
 fn build_session(
     model: &LlamaModel,
