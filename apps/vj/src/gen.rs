@@ -48,6 +48,51 @@ pub const CONTINUOUS_IN_FLIGHT: usize = 6;
 /// broken profile cannot spin the queue.
 pub const CONTINUOUS_BACKOFF_MS: u64 = 8_000;
 
+// --------------------------------------------------------------- blast mode
+
+/// Word banks for BLAST: one press fills every parallel pipe with an
+/// invented visual. Combinatorial enough (~10^4 shapes) that a night of
+/// blasting repeats nothing.
+const BLAST_SUBJECTS: &[&str] = &[
+    "a chrome jellyfish", "a wireframe panther", "liquid mercury dancers",
+    "a fractal cathedral", "neon koi fish", "a holographic skull",
+    "molten glass orchids", "crystalline lightning", "a clockwork galaxy",
+    "smoke serpents", "prismatic soap bubbles", "an origami phoenix",
+    "magnetic ferrofluid spikes", "aurora ribbons", "glitching statues",
+];
+const BLAST_ACTIONS: &[&str] = &[
+    "pulsing to an unheard beat", "swirling into a vortex", "shattering and reforming",
+    "cascading in slow motion", "orbiting a black sun", "melting upward",
+    "strobing through color cycles", "breathing like a living thing",
+    "multiplying into infinity", "dissolving into particles",
+];
+const BLAST_SETTINGS: &[&str] = &[
+    "inside an endless mirror hall", "over a midnight ocean", "in a cathedral rave",
+    "under ultraviolet stage light", "against pure darkness", "in a neon-drenched alley",
+    "inside a giant lava lamp", "over a glass dancefloor", "in deep space",
+    "surrounded by falling embers",
+];
+const BLAST_STYLES: &[&str] = &[
+    "hyperreal", "synthwave", "iridescent", "monochrome with one neon accent",
+    "vhs-degraded", "macro lens", "volumetric fog", "high contrast",
+];
+
+/// One invented prompt. A tiny LCG keeps this dependency-free; the caller
+/// advances the seed between calls.
+pub fn blast_prompt(seed: &mut u64) -> String {
+    let mut next = |n: usize| {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*seed >> 33) as usize) % n
+    };
+    format!(
+        "{} {} {}, {}, continuous forward motion",
+        BLAST_SUBJECTS[next(BLAST_SUBJECTS.len())],
+        BLAST_ACTIONS[next(BLAST_ACTIONS.len())],
+        BLAST_SETTINGS[next(BLAST_SETTINGS.len())],
+        BLAST_STYLES[next(BLAST_STYLES.len())],
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilesState {
     Idle,
@@ -515,6 +560,24 @@ impl GenModel {
 
     pub fn set_prompt(&mut self, prompt: String) {
         self.prompt = prompt;
+    }
+
+    /// BLAST: one press queues an invented visual for every parallel pipe.
+    /// The operator's own prompt-box text is untouched.
+    pub fn blast(&mut self, now_ms: u64) -> Vec<GenCmd> {
+        let keep = self.prompt.clone();
+        let mut seed = now_ms ^ (self.next_tag.wrapping_mul(0x9e37_79b9));
+        let mut cmds = Vec::new();
+        for _ in 0..CONTINUOUS_IN_FLIGHT {
+            self.prompt = blast_prompt(&mut seed);
+            let fired = self.generate(now_ms);
+            if fired.is_empty() {
+                break; // rows full / profile refused — stop honestly
+            }
+            cmds.extend(fired);
+        }
+        self.prompt = keep;
+        cmds
     }
 
     pub fn set_video_length(&mut self, index: usize) {
