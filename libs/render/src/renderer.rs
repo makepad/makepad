@@ -309,6 +309,14 @@ pub struct Renderer {
     lm_top_fallback: Option<Texture>,
     /// SANDBOX_LM_DEBUG=1: shader shows the lightmap alone.
     lm_debug: f32,
+    /// The baked lightmap's KILL SWITCH (F9 in the sandbox,
+    /// `MAKEPAD_LIGHTMAP=off` at launch). Off binds the 1x1 "fully sunlit,
+    /// no lamps" stand-in instead of the atlas, so every static falls back
+    /// to the purely analytic path — the same picture the world shows in
+    /// the seconds before its first bake lands. The bake keeps running, so
+    /// turning it back on is instant, and the pair is a built-in A/B for
+    /// exactly the baked-vs-provisional comparison a lighting bug needs.
+    lightmap_enabled: bool,
     /// Night-sky star panorama (equirectangular, decoded once via
     /// set_star_map_png), uploaded lazily on the first sky draw.
     star_map: Option<ImageBuffer>,
@@ -335,7 +343,8 @@ pub struct Renderer {
     /// Cached [`Self::harvest_lamps`] output — the harvest walks strings, so
     /// it reruns only when the placed-prop list changes.
     lamp_cache: Vec<crate::lightmap::LmLight>,
-    lamp_cache_rev: Option<u64>,
+    /// (`models_rev`, `lamp_daylight_key`) the cache was built for.
+    lamp_cache_rev: Option<(u64, u32)>,
     /// Precomputed static-light selection grid (light_grid.rs): per cell,
     /// the ≤8 strongest lamps pre-packed in the shader's uniform layout.
     /// Rebuilt with `lamp_cache` — never on the hot path. Runtime selection
@@ -383,10 +392,12 @@ pub struct Renderer {
     /// OnChange runs a pinned sun, and a caster whose sidecar disagrees
     /// with it falls to the blob tier rather than to a wrong-length shadow.
     sdf_baked_sun_len: f32,
-    /// Last (render_rev, models_rev) a GPU lightmap job was scheduled for:
-    /// in Realtime mode a sun-only change must NOT re-kick the whole job —
-    /// the baker follows the sun per frame on its own.
-    lm_kick_key: Option<(u64, u64)>,
+    /// Last (render_rev, models_rev, daylight quantum) a GPU lightmap job
+    /// was scheduled for: in Realtime mode a sun-only change must NOT
+    /// re-kick the whole job — the baker follows the sun per frame on its
+    /// own — UNLESS it moved the lamps' daylight-headroom scale, which is
+    /// baked into the atlas RGB and cannot follow anything per frame.
+    lm_kick_key: Option<(u64, u64, u32)>,
     shadow_geometry: Option<Geometry>,
     last_dynamic_shadow_tris: usize,
     shadow_points: Vec<Vec3f>,
@@ -1671,9 +1682,9 @@ const SHADOW_SETTLE: std::time::Duration = std::time::Duration::from_millis(200)
 #[derive(Default)]
 struct ShadowRebuildGate {
     /// The key the current chunks were built for. None = never built.
-    built: Option<(u64, u64, u64)>,
+    built: Option<(u64, u64, u64, u32)>,
     /// Latest key seen since `built`, and when it last CHANGED.
-    pending: Option<((u64, u64, u64), std::time::Instant)>,
+    pending: Option<((u64, u64, u64, u32), std::time::Instant)>,
 }
 
 impl ShadowRebuildGate {
@@ -1681,7 +1692,7 @@ impl ShadowRebuildGate {
     /// after doing so, or the gate will keep saying yes.
     fn should_rebuild(
         &mut self,
-        key: (u64, u64, u64),
+        key: (u64, u64, u64, u32),
         now: std::time::Instant,
         settle: std::time::Duration,
     ) -> bool {
@@ -1703,7 +1714,7 @@ impl ShadowRebuildGate {
         }
     }
 
-    fn mark_built(&mut self, key: (u64, u64, u64)) {
+    fn mark_built(&mut self, key: (u64, u64, u64, u32)) {
         self.built = Some(key);
         self.pending = None;
     }
@@ -2034,6 +2045,10 @@ impl Default for Renderer {
             lm_ground: None,
             lm_top: None,
             lm_top_fallback: None,
+            lightmap_enabled: !matches!(
+                std::env::var("MAKEPAD_LIGHTMAP").as_deref(),
+                Ok("off") | Ok("0") | Ok("false")
+            ),
             lm_debug: if std::env::var("SANDBOX_LM_DEBUG").is_ok() { 1.0 } else { 0.0 },
             star_map: None,
             star_texture: None,
@@ -3618,22 +3633,54 @@ impl Renderer {
                 spot: 1.0,
             });
         }
-        Self::rail_lamp_pools(&mut out);
         out
     }
 
-    /// The sanity rail on static lights, applied wherever a lamp list is
+    /// THE static light list for this sun: harvested fixtures (or the
+    /// host's hand-set lights) with both rails applied, exactly once.
+    ///
+    /// One entry point on purpose — [`Self::rail_lamp_pools`]'s daylight
+    /// scale is a MULTIPLIER, so applying it twice would square it. The
+    /// bake and the per-frame analytic list must both come through here, or
+    /// a static and a character standing on the same texel disagree about
+    /// how bright the lamp above them is.
+    fn static_lights_for(&self, sun: &SunLight) -> Vec<crate::lightmap::LmLight> {
+        let mut lights = if self.lm_lights.is_empty() {
+            self.harvest_lamps()
+        } else {
+            self.lm_lights.clone()
+        };
+        Self::rail_lamp_pools(&mut lights, sun);
+        lights
+    }
+
+    /// The sanity rails on static lights, applied wherever a lamp list is
     /// built so the baked atlas and the analytic per-frame term never
-    /// disagree: no single light may clip the light atlas over more than
-    /// [`LM_LAMP_SAT_TEXELS`](crate::lightmap::LM_LAMP_SAT_TEXELS) ground
-    /// texels. `harvest_lamps` sizes its fixtures so this never fires;
-    /// hand-set lights (`set_static_lights`) go through no such solve, and
-    /// one of those must still not be able to paint a plaza white.
+    /// disagree. Two of them, in order:
+    ///
+    /// 1. **Daylight headroom** — a lamp may only add the light the sky is
+    ///    not already delivering
+    ///    ([`lamp_daylight_scale`](crate::lightmap::lamp_daylight_scale)).
+    ///    This is the rail on the SUM that reaches the screen, and the one
+    ///    that stops a 0.30 pool painting a near-white plaza to 1.26 under a
+    ///    noon sun.
+    /// 2. **Atlas saturation** — no single light may clip the light atlas
+    ///    over more than
+    ///    [`LM_LAMP_SAT_TEXELS`](crate::lightmap::LM_LAMP_SAT_TEXELS) ground
+    ///    texels. `harvest_lamps` sizes its fixtures so this never fires;
+    ///    hand-set lights (`set_static_lights`) go through no such solve, and
+    ///    one of those must still not be able to paint a plaza white.
     ///
     /// A light's implied mount is what its reach leaves over the pool it is
     /// meant to cover — exact for anything `lamp_photometry` sized.
-    fn rail_lamp_pools(lights: &mut [crate::lightmap::LmLight]) {
+    fn rail_lamp_pools(lights: &mut [crate::lightmap::LmLight], sun: &SunLight) {
         use crate::lightmap::{cap_lamp_pool, LM_LAMP_POOL_RADIUS, LM_LAMP_SAT_DENSITY};
+        let day = Self::lamp_daylight_scale(sun);
+        if day < 1.0 {
+            for l in lights.iter_mut() {
+                l.color = l.color * day;
+            }
+        }
         let mut capped = 0usize;
         for l in lights.iter_mut() {
             let mount = (l.radius - LM_LAMP_POOL_RADIUS).max(0.25);
@@ -3650,6 +3697,24 @@ impl Renderer {
         }
     }
 
+    /// This sun's daylight headroom factor for every static lamp — the one
+    /// number that ties the lamp list to the sky. Read by the rail and by
+    /// the bake/lamp-cache keys, so a sun change that MOVES it re-kicks the
+    /// bake and a sun change that does not costs nothing.
+    fn lamp_daylight_scale(sun: &SunLight) -> f32 {
+        crate::lightmap::lamp_daylight_scale(crate::lightmap::daylight_on_ground(
+            sun.dir, sun.color, sun.sky,
+        ))
+    }
+
+    /// The daylight scale as a cache key: quantized to 1/32 so a day cycle
+    /// re-bakes when the lamps CHANGE STRENGTH and never on a
+    /// floating-point wobble of the sun. One step is 3% of the pool peak —
+    /// 0.009 of light, under a byte on the brightest albedo there is.
+    fn lamp_daylight_key(sun: &SunLight) -> u32 {
+        (Self::lamp_daylight_scale(sun) * 32.0).round() as u32
+    }
+
     /// Transient lights for THIS frame, on top of the per-frame list the
     /// renderer builds itself (street lamps + firework flashes). For hosts:
     /// muzzle flashes, spell impacts, anything that lives a few frames.
@@ -3662,18 +3727,17 @@ impl Renderer {
     /// Rebuild this frame's dynamic light list: harvested lamps first (they
     /// are the `frame_baked_count` prefix — already in the baked atlas, so
     /// only dynamic geometry may add them analytically), then transients.
-    fn build_frame_lights(&mut self) {
-        if self.lamp_cache_rev != Some(self.models_rev) {
-            self.lamp_cache = if self.lm_lights.is_empty() {
-                self.harvest_lamps()
-            } else {
-                let mut l = self.lm_lights.clone();
-                // Same rail the bake applies, so a hand-set light lights
-                // dynamics with exactly the strength it baked into statics.
-                Self::rail_lamp_pools(&mut l);
-                l
-            };
-            self.lamp_cache_rev = Some(self.models_rev);
+    fn build_frame_lights(&mut self, sun: &SunLight) {
+        // The SUN is part of the key: the daylight-headroom rail makes a
+        // lamp's strength a function of the sky, so a day cycle that dims
+        // the pools must dim them for dynamics too — the analytic term and
+        // the baked atlas are the same lamp seen twice and may never
+        // disagree.
+        let key = (self.models_rev, Self::lamp_daylight_key(sun));
+        if self.lamp_cache_rev != Some(key) {
+            // The same list the bake snapshots, through the same rails.
+            self.lamp_cache = self.static_lights_for(sun);
+            self.lamp_cache_rev = Some(key);
             // The static-light selection grid lives and dies with the lamp
             // set — rebuilt HERE, on the settle path, never per frame. This
             // is what keeps runtime selection O(1) at any light count.
@@ -3695,7 +3759,12 @@ impl Renderer {
     /// same settle-debounced cadence as the static shadow rebuild — a burst
     /// of edits pays one bake, after the world goes still. A newer kick
     /// replaces a pending one wholesale (the baker re-plans the layout).
-    fn kick_lightmap_bake(&mut self, world: &GameWorld, sun: &SunLight) {
+    fn kick_lightmap_bake(
+        &mut self,
+        world: &GameWorld,
+        sun: &SunLight,
+        trigger: crate::gpu_lightmap::BakeTrigger,
+    ) {
         let mut meshes = Vec::new();
         let mut mesh_map = Vec::new();
         let mut mesh_geometry = Vec::new();
@@ -3837,14 +3906,7 @@ impl Renderer {
             self.lm_top = None;
             return;
         }
-        let mut lights = if self.lm_lights.is_empty() {
-            self.harvest_lamps()
-        } else {
-            self.lm_lights.clone()
-        };
-        // Idempotent for a harvested list (already railed) — it is here for
-        // the hand-set `lm_lights` path, which nothing else guards.
-        Self::rail_lamp_pools(&mut lights);
+        let lights = self.static_lights_for(sun);
         let scene = crate::lightmap::LmScene {
             meshes,
             planars,
@@ -3852,6 +3914,7 @@ impl Renderer {
             lights,
             sun_dir: sun.dir,
             sun_color: sun.color,
+            sun_sky: sun.sky,
             // Bounce is the slow luxury tier; off unless asked for until the
             // disk cache lands.
             bounce: std::env::var("LM_BOUNCE").is_ok(),
@@ -3864,6 +3927,7 @@ impl Renderer {
             mesh_map,
             casters_only,
             terrain_world,
+            trigger,
         });
     }
 
@@ -4246,10 +4310,32 @@ impl Renderer {
         }
     }
 
+    /// Is the baked lightmap being SAMPLED? (The bake itself always runs.)
+    pub fn lightmap_enabled(&self) -> bool {
+        self.lightmap_enabled
+    }
+
+    /// Turn baked-lightmap sampling on/off; returns the new state. Off, the
+    /// world renders on the analytic path alone: full sun everywhere the
+    /// cascades do not shadow, and no baked lamp pools. Nothing is
+    /// invalidated, so the toggle is instant in both directions.
+    pub fn set_lightmap_enabled(&mut self, on: bool) -> bool {
+        self.lightmap_enabled = on;
+        on
+    }
+
+    /// Flip it. The sandbox binds this to F9.
+    pub fn toggle_lightmap(&mut self) -> bool {
+        self.lightmap_enabled = !self.lightmap_enabled;
+        self.lightmap_enabled
+    }
+
     /// The lightmap atlas to bind: the real one, else a 1x1 "fully sunlit,
-    /// no lamps" stand-in so shaders sample unconditionally.
+    /// no lamps" stand-in so shaders sample unconditionally. The stand-in
+    /// is also what the kill switch binds — an atlas that says "lit, no
+    /// lamps" everywhere IS the analytic path.
     fn lightmap_texture(&mut self, cx: &mut Cx) -> Texture {
-        if let Some(t) = &self.lightmap {
+        if let (true, Some(t)) = (self.lightmap_enabled, &self.lightmap) {
             return t.clone();
         }
         if self.lm_fallback.is_none() {
@@ -4362,7 +4448,7 @@ impl Renderer {
     /// one, else a 1x1 "no blocker measured" stand-in (byte 255) so shaders
     /// sample unconditionally.
     fn lm_top_binding(&mut self, cx: &mut Cx) -> (Texture, f32, f32) {
-        if let Some((t, base, range)) = &self.lm_top {
+        if let (true, Some((t, base, range))) = (self.lightmap_enabled, &self.lm_top) {
             return (t.clone(), *base, *range);
         }
         if self.lm_top_fallback.is_none() {
@@ -5896,7 +5982,7 @@ impl Renderer {
         // transients — their street-lamp light is already baked into the
         // atlas RGB, and adding it analytically would double-light every
         // static surface. Written before any of their draw items open.
-        self.build_frame_lights();
+        self.build_frame_lights(&sun);
         {
             let transients = self.frame_baked_count..self.frame_lights.len();
             select_lights_for_world(
@@ -6127,7 +6213,18 @@ impl Renderer {
         // what keeps OnChange at zero bake passes in steady state (the
         // two-mode invariant; gpu_lightmap.rs pins it).
         {
-            let key = (world.render_rev, self.bake.generation(), self.models_rev);
+            // The DAYLIGHT quantum is in the key: a lamp's strength is a
+            // function of the sky (the headroom rail), so a sun that moves
+            // enough to change it has changed the atlas, not just the shade
+            // term. Quantized, so a day cycle pays a bake per 3% of pool —
+            // not one per frame.
+            let day_key = Self::lamp_daylight_key(&sun);
+            let key = (
+                world.render_rev,
+                self.bake.generation(),
+                self.models_rev,
+                day_key,
+            );
             if self
                 .shadow_gate
                 .should_rebuild(key, std::time::Instant::now(), SHADOW_SETTLE)
@@ -6136,16 +6233,25 @@ impl Renderer {
                 // Same settle cadence: the light bake becomes GPU render
                 // passes on the next frame (gpu_lightmap.rs). In Realtime
                 // the baker re-bakes visible regions per frame on its own —
-                // only a WORLD change re-schedules the whole job (a sun-only
-                // change re-planning layout and textures would churn for
-                // nothing); OnChange re-kicks on every settle, sun changes
-                // included.
-                let world_key = (world.render_rev, self.models_rev);
+                // only a WORLD change (or a sun change that moves the lamps)
+                // re-schedules the whole job; OnChange re-kicks on every
+                // settle, sun changes included.
+                let world_key = (world.render_rev, self.models_rev, day_key);
                 if self.lm_kick_key != Some(world_key)
                     || self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::OnChange
                 {
+                    // Name the cause in the bake's own log line: a blowout
+                    // that pops in has to be attributable to the run that
+                    // caused it, not guessed at from a screenshot.
+                    let trigger = match self.lm_kick_key {
+                        None => crate::gpu_lightmap::BakeTrigger::FirstBake,
+                        Some((rev, models, _)) if (rev, models) != (world_key.0, world_key.1) => {
+                            crate::gpu_lightmap::BakeTrigger::WorldEdit
+                        }
+                        Some(_) => crate::gpu_lightmap::BakeTrigger::SunChange,
+                    };
                     self.lm_kick_key = Some(world_key);
-                    self.kick_lightmap_bake(world, &sun);
+                    self.kick_lightmap_bake(world, &sun, trigger);
                 }
                 self.shadow_gate.mark_built(key);
             }
@@ -7394,16 +7500,16 @@ mod realm_lifecycle_tests {
             vec3f(1.0, 1.0, 1.0),
             4.0,
         ));
-        renderer.lamp_cache_rev = Some(renderer.models_rev);
+        renderer.lamp_cache_rev = Some((renderer.models_rev, 256));
         renderer.light_rank.push((1.0, 0));
         renderer.light_sel.push(0);
         renderer.light_block_scratch[0] = 1.0;
         renderer.light_cell_memory.insert(7, (2, 3));
         renderer.char_ground.push(4.0);
         renderer.model_ground.push(5.0);
-        renderer.lm_kick_key = Some((1, renderer.models_rev));
+        renderer.lm_kick_key = Some((1, renderer.models_rev, 32));
         renderer.shadow_points.push(vec3f(1.0, 2.0, 3.0));
-        renderer.shadow_gate.built = Some((1, renderer.models_rev, 1));
+        renderer.shadow_gate.built = Some((1, renderer.models_rev, 1, 32));
         let models_rev = renderer.models_rev;
         let bake_generation = renderer.bake.generation();
         let quality = renderer.quality();
@@ -7669,23 +7775,23 @@ mod chunk_tests {
         let t0 = Instant::now();
         let mut gate = ShadowRebuildGate::default();
         // First sight builds immediately.
-        assert!(gate.should_rebuild((1, 0, 0), t0, settle));
-        gate.mark_built((1, 0, 0));
-        assert!(!gate.should_rebuild((1, 0, 0), t0, settle));
+        assert!(gate.should_rebuild((1, 0, 0, 0), t0, settle));
+        gate.mark_built((1, 0, 0, 0));
+        assert!(!gate.should_rebuild((1, 0, 0, 0), t0, settle));
         // Burst: five mutations in quick succession — no rebuild during it,
         // and the settle clock restarts on every change.
         for i in 2..7u64 {
             let now = t0 + Duration::from_millis(10 * i);
-            assert!(!gate.should_rebuild((i, 0, 0), now, settle));
+            assert!(!gate.should_rebuild((i, 0, 0, 0), now, settle));
         }
         // Still pending just before the window closes...
         let last_change = t0 + Duration::from_millis(60);
-        assert!(!gate.should_rebuild((6, 0, 0), last_change + Duration::from_millis(199), settle));
+        assert!(!gate.should_rebuild((6, 0, 0, 0), last_change + Duration::from_millis(199), settle));
         // ...and exactly one rebuild once it has.
         let at_rest = last_change + Duration::from_millis(200);
-        assert!(gate.should_rebuild((6, 0, 0), at_rest, settle));
-        gate.mark_built((6, 0, 0));
-        assert!(!gate.should_rebuild((6, 0, 0), at_rest + Duration::from_millis(1000), settle));
+        assert!(gate.should_rebuild((6, 0, 0, 0), at_rest, settle));
+        gate.mark_built((6, 0, 0, 0));
+        assert!(!gate.should_rebuild((6, 0, 0, 0), at_rest + Duration::from_millis(1000), settle));
     }
 
     /// Tiling must regroup the terrain mesh, not change it: the union of
