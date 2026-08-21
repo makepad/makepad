@@ -1097,15 +1097,27 @@ impl SlotTable {
                  which is another slot's state"
             )));
         }
-        if mtp_filled > slot.fill {
-            return Err(LlamaError::format(format!(
-                "slot {index} would put its draft head at {mtp_filled} tokens, ahead of the \
-                 model's {}",
-                slot.fill
-            )));
-        }
         slot.live_state_offset = live_state_offset;
-        slot.mtp_filled = mtp_filled;
+        // A draft head cannot be ahead of the model, and when it looks ahead the
+        // reason is that the SLOT CHANGED HANDS: the solo path advances the
+        // session's own draft-head fill every round with no idea which slot it
+        // is sitting in, so a handover carries the PREVIOUS occupant's number.
+        // Observed on .217 as `draft head at 8366 tokens, ahead of the model's
+        // 1024` — 1024 being two prefill chunks of the new conversation.
+        //
+        // This used to be an error, and refusing the turn is disproportionate:
+        // the draft head only PROPOSES. Speculative rejection sampling emits
+        // exactly the target distribution whatever the drafter says, so a wrong
+        // fill can cost acceptance and cannot cost correctness. Killing the turn
+        // hands a player a gguf-layer error to protect a number that is not
+        // allowed to affect their reply.
+        //
+        // The honest recovery is ZERO rather than `slot.fill`: rows
+        // `[0, slot.fill)` of this slot's draft head hold the previous
+        // occupant's tokens too, so clamping would condition the drafter on
+        // someone else's conversation. Zero costs one catch-up, which is the
+        // same work a fresh lane already does.
+        slot.mtp_filled = if mtp_filled > slot.fill { 0 } else { mtp_filled };
         Ok(())
     }
 
@@ -1974,6 +1986,48 @@ mod tests {
             table.advance(0, 1).is_err(),
             "overrunning a slot would corrupt its neighbour's rows"
         );
+    }
+
+    /// A handover must never kill the turn over the draft head's bookkeeping.
+    ///
+    /// The solo path advances the session's own draft-head fill with no idea
+    /// which slot it occupies, so when a slot changes hands the number it
+    /// carries across belongs to the PREVIOUS conversation. On .217 that
+    /// surfaced as `draft head at 8366 tokens, ahead of the model's 1024` and
+    /// reached the player as a raw gguf-layer error on every ~20k prompt.
+    #[test]
+    fn a_stale_draft_head_fill_restarts_instead_of_failing_the_turn() {
+        let mut table = table();
+        table.admit().expect("admit");
+        table.advance(0, 10).expect("the new occupant's prefill");
+
+        // The previous occupant left the session's draft head far ahead.
+        table
+            .adopt_state(0, 0, 8366)
+            .expect("a handover may not fail over an optimisation's bookkeeping");
+        assert_eq!(
+            table.slot(0).expect("slot").mtp_filled(),
+            0,
+            "ZERO, not the model's fill: rows below it hold the previous \
+             occupant's tokens too, and conditioning the drafter on someone \
+             else's conversation is the bug this is avoiding"
+        );
+
+        // A fill the slot can actually justify is carried across untouched.
+        table.adopt_state(0, 0, 7).expect("adopt");
+        assert_eq!(table.slot(0).expect("slot").mtp_filled(), 7);
+    }
+
+    /// The other half of the guard is unchanged: a resume offset outside the
+    /// slot's own block would read a NEIGHBOUR's recurrent state, and that
+    /// really is fatal — it changes what the model computes, where a wrong
+    /// draft fill only changes how often a proposal survives.
+    #[test]
+    fn a_resume_offset_from_another_slots_block_is_still_refused() {
+        let mut table = table();
+        table.admit().expect("admit");
+        table.advance(0, 10).expect("prefill");
+        assert!(table.adopt_state(0, usize::MAX, 0).is_err());
     }
 
     #[test]

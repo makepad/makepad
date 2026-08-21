@@ -1851,6 +1851,16 @@ pub struct LlamaSamplingParams {
     /// 0 disables top-k.
     pub top_k: usize,
     pub seed: u64,
+    /// Subtracted from the logit of every token that appears AT ALL in the
+    /// recent window. Flat: seen once costs the same as seen twenty times.
+    pub presence_penalty: f32,
+    /// Subtracted once per OCCURRENCE in the recent window, so a token the
+    /// generation keeps returning to gets pushed down further each time.
+    pub frequency_penalty: f32,
+    /// How many of the most recently sampled tokens the two penalties look
+    /// at. 0 disables both, which is the default and reproduces every
+    /// pre-penalty run exactly.
+    pub penalty_last_n: usize,
 }
 
 impl Default for LlamaSamplingParams {
@@ -1860,6 +1870,9 @@ impl Default for LlamaSamplingParams {
             top_p: 0.9,
             top_k: 0,
             seed: 7,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            penalty_last_n: 0,
         }
     }
 }
@@ -1867,6 +1880,15 @@ impl Default for LlamaSamplingParams {
 impl LlamaSamplingParams {
     fn is_greedy(&self) -> bool {
         self.temperature <= 0.0
+    }
+
+    /// Whether the penalties can change any logit. Both a zero window and two
+    /// zero strengths mean "not configured", and the sampler then skips the
+    /// whole path rather than copying a 248320-entry row to subtract nothing
+    /// from it.
+    fn penalises(&self) -> bool {
+        self.penalty_last_n > 0
+            && (self.presence_penalty != 0.0 || self.frequency_penalty != 0.0)
     }
 }
 
@@ -1888,6 +1910,14 @@ impl LlamaSamplingParams {
 #[derive(Clone, Debug)]
 pub struct LlamaSamplerState {
     rng: Xorshift64,
+    /// The tokens this generation has committed, most recent last, trimmed to
+    /// the penalty window. It lives here rather than being re-derived from the
+    /// session's token vector for the same reason the RNG does: a lane's
+    /// generation is chunked across many calls and interleaved with three other
+    /// lanes, and "the tokens I have produced" must follow the conversation,
+    /// not the slot it happens to be sitting in. Empty when no penalty is
+    /// configured — nothing is recorded that nothing will read.
+    recent: Vec<i32>,
 }
 
 impl LlamaSamplerState {
@@ -1896,6 +1926,30 @@ impl LlamaSamplerState {
     pub fn new(seed: u64) -> Self {
         Self {
             rng: Xorshift64::new(seed),
+            recent: Vec::new(),
+        }
+    }
+
+    /// The window the penalties read.
+    fn recent(&self) -> &[i32] {
+        &self.recent
+    }
+
+    /// Record a committed token, keeping at most `penalty_last_n` of them.
+    ///
+    /// Called for tokens the generation actually KEPT. A speculative round
+    /// drafts tokens it then throws away, and a rejected draft was never part
+    /// of the reply — penalising against it would make the penalty depend on
+    /// how the drafter guessed, which is the one thing speculation is not
+    /// allowed to change.
+    fn remember(&mut self, token: i32, params: LlamaSamplingParams) {
+        if !params.penalises() {
+            return;
+        }
+        self.recent.push(token);
+        let over = self.recent.len().saturating_sub(params.penalty_last_n);
+        if over > 0 {
+            self.recent.drain(..over);
         }
     }
 
@@ -1913,11 +1967,20 @@ impl LlamaSamplerState {
         logits: &[f32],
         params: LlamaSamplingParams,
     ) -> Result<i32> {
-        if params.is_greedy() {
-            return argmax_token_id(logits);
-        }
-        let probs = sampling_probabilities(logits, params)?;
-        sample_from(&probs, &mut self.rng)
+        let token = if params.is_greedy() {
+            // Greedy is penalised too. A temperature-zero loop is the worst
+            // kind — nothing random can ever break it — so the one path that
+            // most needs the penalty is not the one to leave out.
+            match penalty_window(params, self.recent()) {
+                Some(penalties) => argmax_penalized(logits, &penalties)?,
+                None => argmax_token_id(logits)?,
+            }
+        } else {
+            let probs = sampling_probabilities(logits, params, self.recent())?;
+            sample_from(&probs, &mut self.rng)?
+        };
+        self.remember(token, params);
+        Ok(token)
     }
 }
 
@@ -1949,7 +2012,11 @@ impl Xorshift64 {
 /// temperature, then top-k, then top-p, then renormalise. Entries outside the
 /// kept set are exactly zero, which is what makes the speculative residual
 /// `max(0, p - q)` well defined over the whole vocabulary.
-fn sampling_probabilities(logits: &[f32], params: LlamaSamplingParams) -> Result<Vec<f32>> {
+fn sampling_probabilities(
+    logits: &[f32],
+    params: LlamaSamplingParams,
+    recent: &[i32],
+) -> Result<Vec<f32>> {
     if logits.is_empty() {
         return Err(LlamaError::format("cannot sample from empty logits"));
     }
@@ -1962,6 +2029,19 @@ fn sampling_probabilities(logits: &[f32], params: LlamaSamplingParams) -> Result
         .iter()
         .map(|logit| ((logit - max_logit) / temperature).exp())
         .collect();
+    // The penalties fold in here as a rescale rather than as a second pass over
+    // a copied logit row: `exp((l - p - max) / T) == exp((l - max) / T) *
+    // exp(-p / T)`, exactly, so touching the handful of penalised entries is
+    // the same arithmetic as penalising the whole row would have been. Using
+    // the UNPENALISED max as the stability offset stays valid because a penalty
+    // only ever subtracts — nothing can exceed the offset and overflow.
+    if let Some(penalties) = penalty_window(params, recent) {
+        for (index, penalty) in penalties {
+            if let Some(value) = probs.get_mut(index) {
+                *value *= (-penalty / temperature).exp();
+            }
+        }
+    }
     let sum: f32 = probs.iter().sum();
     if !(sum > 0.0) {
         return Err(LlamaError::format("logit softmax underflowed to zero"));
@@ -2032,6 +2112,83 @@ fn sampling_probabilities(logits: &[f32], params: LlamaSamplingParams) -> Result
         *value /= total;
     }
     Ok(probs)
+}
+
+/// Push the tokens a generation keeps returning to back down the logit row.
+///
+/// This is the ONLY thing standing between a thinking model at long context
+/// and a reply that runs to the token cap. A 27B at Q4 given a conversation
+/// full of ids and measurements will, often enough to matter, stop reading its
+/// context and start CONTINUING A PATTERN instead — the counting babble a
+/// player sees as `1.1.1.1..4.23.23.4.234.24`. The loop is self-reinforcing:
+/// every repetition makes the next repetition likelier, so once it starts,
+/// temperature and nucleus sampling cannot end it, and the box's own telemetry
+/// shows why — a looping turn verifies at acceptance 0.96 against 0.44-0.68 for
+/// ordinary prose, because a loop is the easiest thing in the world to predict.
+/// Qwen's own guidance for quantised 3.x is a presence penalty for exactly this
+/// symptom.
+///
+/// Both penalties are the OpenAI shape — flat for presence, per-occurrence for
+/// frequency — subtracted from the raw logit before temperature, so the
+/// strength means the same thing whatever the temperature is.
+///
+/// It never copies the logit row. `sampling_probabilities` already allocates
+/// two vocabulary-sized vectors per call, and the runbook records that ranking
+/// this vocabulary "costs more than the forward passes themselves" — so a third
+/// 1 MB copy per sampled token per lane is not a cost this path can absorb for
+/// a feature that is about to be on by default. At most `penalty_last_n`
+/// entries change, so the caller is handed those and applies them where it is
+/// already touching the data.
+///
+/// Returns `None` when nothing is configured, which is the whole feature
+/// switched off with no work done at all.
+fn penalty_window(params: LlamaSamplingParams, recent: &[i32]) -> Option<BTreeMap<usize, f32>> {
+    if !params.penalises() || recent.is_empty() {
+        return None;
+    }
+    let window = recent.len().min(params.penalty_last_n);
+    let mut counts: BTreeMap<usize, f32> = BTreeMap::new();
+    for &token in &recent[recent.len() - window..] {
+        // An id that is not a vocabulary index is ignored rather than fatal.
+        // The window is fed from committed token ids, and taking a lane down
+        // mid-conversation over one odd value would be a far worse failure
+        // than declining to penalise it.
+        let Ok(index) = usize::try_from(token) else {
+            continue;
+        };
+        *counts.entry(index).or_insert(0.0) += 1.0;
+    }
+    let mut out: BTreeMap<usize, f32> = BTreeMap::new();
+    for (index, count) in counts {
+        let penalty = params.presence_penalty + params.frequency_penalty * count;
+        if penalty != 0.0 {
+            out.insert(index, penalty);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Greedy's answer under the same penalties, without materialising a penalised
+/// row. The penalties only ever LOWER a logit, so the winner is either the best
+/// entry outside the window or the best penalised entry inside it, and both are
+/// found in one pass plus a walk of at most `penalty_last_n` entries.
+fn argmax_penalized(logits: &[f32], penalties: &BTreeMap<usize, f32>) -> Result<i32> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, &logit) in logits.iter().enumerate() {
+        if logit.is_nan() {
+            continue;
+        }
+        let value = logit - penalties.get(&index).copied().unwrap_or(0.0);
+        if best.is_none_or(|(_, seen)| value > seen) {
+            best = Some((index, value));
+        }
+    }
+    let (index, _) = best.ok_or_else(|| LlamaError::format("logits contain no finite value"))?;
+    i32::try_from(index).map_err(|_| LlamaError::format("sampled token does not fit in i32"))
 }
 
 /// Inverse-CDF draw from a normalised probability vector.
@@ -2156,9 +2313,8 @@ impl LlamaSession {
         if params.is_greedy() {
             return self.continue_greedy(max_new_tokens);
         }
-        let rng = &mut state.rng;
         if self.mtp.is_some() {
-            return self.continue_sampled_speculative(max_new_tokens, params, rng);
+            return self.continue_sampled_speculative(max_new_tokens, params, state);
         }
 
         let mut token_ids = Vec::with_capacity(max_new_tokens);
@@ -2167,13 +2323,14 @@ impl LlamaSession {
             let logits = self.last_logits().ok_or_else(|| {
                 LlamaError::format("session has no logits yet; append context tokens first")
             })?;
-            let probs = sampling_probabilities(logits, params)?;
-            let next_token = sample_from(&probs, rng)?;
+            let probs = sampling_probabilities(logits, params, state.recent())?;
+            let next_token = sample_from(&probs, &mut state.rng)?;
             if let Some(reason) = self.stop_reason_for(next_token) {
                 stop_reason = reason;
                 break;
             }
             self.append_token(next_token)?;
+            state.remember(next_token, params);
             token_ids.push(next_token);
         }
         Ok(LlamaGeneration {
@@ -2187,14 +2344,14 @@ impl LlamaSession {
         &mut self,
         max_new_tokens: usize,
         params: LlamaSamplingParams,
-        rng: &mut Xorshift64,
+        state: &mut LlamaSamplerState,
     ) -> Result<LlamaGeneration> {
         let mut token_ids = Vec::with_capacity(max_new_tokens);
         let mut stop_reason = LlamaStopReason::MaxNewTokens;
         while token_ids.len() < max_new_tokens {
             let remaining = max_new_tokens - token_ids.len();
             if let Some(reason) =
-                self.speculative_round_sampled(&mut token_ids, remaining, params, rng)?
+                self.speculative_round_sampled(&mut token_ids, remaining, params, state)?
             {
                 stop_reason = reason;
                 break;
@@ -2214,7 +2371,7 @@ impl LlamaSession {
         out: &mut Vec<i32>,
         remaining: usize,
         params: LlamaSamplingParams,
-        rng: &mut Xorshift64,
+        state: &mut LlamaSamplerState,
     ) -> Result<Option<LlamaStopReason>> {
         let mtp = self
             .mtp
@@ -2225,8 +2382,8 @@ impl LlamaSession {
             let logits = self.last_logits().ok_or_else(|| {
                 LlamaError::format("session has no logits yet; append context tokens first")
             })?;
-            let probs = sampling_probabilities(logits, params)?;
-            sample_from(&probs, rng)?
+            let probs = sampling_probabilities(logits, params, state.recent())?;
+            sample_from(&probs, &mut state.rng)?
         };
         if let Some(reason) = self.stop_reason_for(first) {
             return Ok(Some(reason));
@@ -2260,7 +2417,7 @@ impl LlamaSession {
             if let Some(mtp) = self.mtp.as_mut() {
                 mtp.draft_nanos += started.elapsed().as_nanos() as u64;
             }
-            let (drafted, proposal) = self.draft_proposal(&logits, params, rng)?;
+            let (drafted, proposal) = self.draft_proposal(&logits, params, &mut state.rng)?;
             token = drafted;
             drafts.push(token);
             draft_probs.push(proposal);
@@ -2285,12 +2442,23 @@ impl LlamaSession {
             )));
         }
 
+        // The penalty window advances WITHIN the round. The target row at
+        // position `i` is the distribution for the token that follows `first`
+        // and `drafts[..i]`, so those tokens belong in the window that shapes
+        // it — exactly as they would if the round had been i+1 separate decode
+        // steps. Speculation is not allowed to change the distribution it
+        // samples from, and the part of that distribution the penalty owns is
+        // no exception.
+        let mut window: Vec<i32> = state.recent().to_vec();
+        window.push(first);
+
         let mut accepted = 0usize;
         let mut bonus = None;
         for index in 0..drafts.len() {
             let target = sampling_probabilities(
                 &run.logits[index * vocab_size..(index + 1) * vocab_size],
                 params,
+                &window,
             )?;
             let drafted = drafts[index] as usize;
             let q = draft_probs[index]
@@ -2300,14 +2468,15 @@ impl LlamaSession {
                 .unwrap_or(0.0);
             let p = target[drafted];
             let ratio = speculative_acceptance(p, q);
-            if rng.next_f32() < ratio {
+            if state.rng.next_f32() < ratio {
                 accepted += 1;
+                window.push(drafts[index]);
                 continue;
             }
             // Rejected: draw the replacement from the normalised residual so
             // the overall distribution stays exactly `p`.
             let residual = speculative_residual(&target, &draft_probs[index]);
-            bonus = Some(sample_from(&residual, rng)?);
+            bonus = Some(sample_from(&residual, &mut state.rng)?);
             break;
         }
         let bonus = match bonus {
@@ -2316,8 +2485,9 @@ impl LlamaSession {
                 let target = sampling_probabilities(
                     &run.logits[accepted * vocab_size..(accepted + 1) * vocab_size],
                     params,
+                    &window,
                 )?;
-                sample_from(&target, rng)?
+                sample_from(&target, &mut state.rng)?
             }
         };
 
@@ -2335,6 +2505,12 @@ impl LlamaSession {
         self.token_ids.extend_from_slice(committed);
         self.rope_pos_next += committed.len() as i64;
         out.extend_from_slice(committed);
+        // Only what the round KEPT enters the window. Drafts that were
+        // rejected, and the bonus token that has not been committed yet, were
+        // never part of the reply.
+        for &token in committed {
+            state.remember(token, params);
+        }
         // The next round samples `first` from these logits; when the whole
         // draft was consumed the bonus token is already drawn, so feed it as a
         // one-hot to keep the two paths on one code path.
@@ -2532,13 +2708,24 @@ impl LlamaSession {
     /// the nucleus is non-zero, so this stays small whether or not the head is
     /// restricted, and the rejection-sampling residual can subtract it from a
     /// full-vocabulary target without materialising a second full vector.
+    /// The draft's `q` is deliberately NOT penalised, and that is a
+    /// correctness statement rather than an omission. Rejection sampling emits
+    /// exactly the target `p` for ANY proposal distribution `q` — `q` only
+    /// decides how often a draft survives. Penalising here would mean mapping
+    /// the recent REAL token ids back through a restricted draft vocabulary,
+    /// which is a second place for that mapping to be wrong, in exchange for
+    /// nothing the output distribution can see. What it costs is acceptance,
+    /// and only while a penalty is actively biting: the drafter proposes the
+    /// token the loop wants, the penalised target rejects it, and the round
+    /// commits the replacement. That is the loop being broken, priced
+    /// correctly.
     fn draft_proposal(
         &self,
         logits: &[f32],
         params: LlamaSamplingParams,
         rng: &mut Xorshift64,
     ) -> Result<(i32, Vec<(u32, f32)>)> {
-        let probs = sampling_probabilities(logits, params)?;
+        let probs = sampling_probabilities(logits, params, &[])?;
         let drafted = sample_from(&probs, rng)?;
         let mut sparse = Vec::new();
         for (index, &probability) in probs.iter().enumerate() {
@@ -2935,7 +3122,7 @@ impl LlamaSession {
                 &draft_probs[index],
                 rows,
                 params[index],
-                &mut samplers[index].rng,
+                &mut samplers[index],
             )?);
         }
         if let Some(mtp) = self.mtp.as_mut() {
@@ -2970,12 +3157,20 @@ impl LlamaSession {
         draft_probs: &[Vec<(u32, f32)>],
         rows: &[Vec<f32>],
         params: LlamaSamplingParams,
-        rng: &mut Xorshift64,
+        sampler: &mut LlamaSamplerState,
     ) -> Result<SpecRoundOutcome> {
+        // This lane's window, advanced within the round exactly as the
+        // single-stream path advances its own — `batch[0]` is the token the
+        // round starts from, and each accepted draft joins the window before
+        // the next target row is shaped.
+        let mut window: Vec<i32> = sampler.recent().to_vec();
+        if let Some(&first) = batch.first() {
+            window.push(first);
+        }
         let mut accepted = 0usize;
         let mut bonus = None;
         for index in 0..drafts.len() {
-            let target = sampling_probabilities(&rows[index], params)?;
+            let target = sampling_probabilities(&rows[index], params, &window)?;
             let drafted = drafts[index] as usize;
             let q = draft_probs[index]
                 .iter()
@@ -2983,19 +3178,20 @@ impl LlamaSession {
                 .map(|(_, probability)| *probability)
                 .unwrap_or(0.0);
             let p = target.get(drafted).copied().unwrap_or(0.0);
-            if rng.next_f32() < speculative_acceptance(p, q) {
+            if sampler.rng.next_f32() < speculative_acceptance(p, q) {
                 accepted += 1;
+                window.push(drafts[index]);
                 continue;
             }
             let residual = speculative_residual(&target, &draft_probs[index]);
-            bonus = Some(sample_from(&residual, rng)?);
+            bonus = Some(sample_from(&residual, &mut sampler.rng)?);
             break;
         }
         let bonus = match bonus {
             Some(token) => token,
             None => {
-                let target = sampling_probabilities(&rows[accepted], params)?;
-                sample_from(&target, rng)?
+                let target = sampling_probabilities(&rows[accepted], params, &window)?;
+                sample_from(&target, &mut sampler.rng)?
             }
         };
 
@@ -3013,6 +3209,11 @@ impl LlamaSession {
         }
 
         let committed = batch[..=commit].to_vec();
+        // Only what this lane KEPT enters its window; a rejected draft was
+        // never part of this conversation's reply.
+        for &token in &committed {
+            sampler.remember(token, params);
+        }
         let start = lane.fill;
         // The draft head ingested exactly the positions it DRAFTED from:
         // `start .. start + drafts.len()`. Without KV reuse only the first of
@@ -3762,9 +3963,10 @@ fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
 #[cfg(test)]
 mod tests {
     use super::{
-        draft_head_fill_after, mtp_carry_ring, sample_from, sampling_probabilities,
-        slot_lower_bounds, slot_lower_bounds_per_token, speculative_acceptance,
-        speculative_residual, LlamaSamplerState, LlamaSamplingParams, SpecLane, Xorshift64,
+        argmax_penalized, argmax_token_id, draft_head_fill_after, mtp_carry_ring, penalty_window,
+        sample_from, sampling_probabilities, slot_lower_bounds, slot_lower_bounds_per_token,
+        speculative_acceptance, speculative_residual, LlamaSamplerState, LlamaSamplingParams,
+        SpecLane, Xorshift64,
     };
 
     fn params(temperature: f32, top_p: f32, top_k: usize) -> LlamaSamplingParams {
@@ -3773,13 +3975,14 @@ mod tests {
             top_p,
             top_k,
             seed: 7,
+            ..Default::default()
         }
     }
 
     #[test]
     fn sampling_probabilities_normalise_and_respect_top_k() {
         let logits = [1.0f32, 2.0, 3.0, 4.0];
-        let probs = sampling_probabilities(&logits, params(1.0, 1.0, 2)).unwrap();
+        let probs = sampling_probabilities(&logits, params(1.0, 1.0, 2), &[]).unwrap();
         assert_eq!(probs.len(), 4);
         assert!(probs[0] == 0.0 && probs[1] == 0.0, "{probs:?}");
         assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-5, "{probs:?}");
@@ -3791,7 +3994,7 @@ mod tests {
     #[test]
     fn top_p_keeps_the_smallest_prefix_reaching_the_mass() {
         let logits = [0.0f32, 10.0, 0.0, 0.0];
-        let probs = sampling_probabilities(&logits, params(1.0, 0.9, 0)).unwrap();
+        let probs = sampling_probabilities(&logits, params(1.0, 0.9, 0), &[]).unwrap();
         assert_eq!(probs[1], 1.0);
         assert!(probs.iter().enumerate().all(|(i, p)| i == 1 || *p == 0.0));
     }
@@ -3799,8 +4002,211 @@ mod tests {
     #[test]
     fn low_temperature_collapses_onto_the_argmax() {
         let logits = [0.0f32, 1.0, 0.5];
-        let probs = sampling_probabilities(&logits, params(0.01, 1.0, 0)).unwrap();
+        let probs = sampling_probabilities(&logits, params(0.01, 1.0, 0), &[]).unwrap();
         assert!(probs[1] > 0.999, "{probs:?}");
+    }
+
+    /// The penalties are OFF unless asked for, and "off" has to mean
+    /// bit-identical, not merely similar: every measurement, every gate and
+    /// every byte-exactness comparison on this fleet predates them.
+    #[test]
+    fn an_unconfigured_penalty_changes_nothing() {
+        let logits = [1.0f32, 2.0, 3.0, 4.0];
+        let plain = sampling_probabilities(&logits, params(1.0, 1.0, 0), &[]).unwrap();
+        let with_history =
+            sampling_probabilities(&logits, params(1.0, 1.0, 0), &[3, 3, 3, 2]).unwrap();
+        assert_eq!(plain, with_history, "no window configured, so no penalty");
+
+        // Configured strength but a zero window is still off, and so is a
+        // window with zero strength. Both halves have to be present.
+        let no_window = LlamaSamplingParams {
+            presence_penalty: 2.0,
+            frequency_penalty: 2.0,
+            penalty_last_n: 0,
+            ..params(1.0, 1.0, 0)
+        };
+        assert_eq!(
+            sampling_probabilities(&logits, no_window, &[3, 3, 3]).unwrap(),
+            plain
+        );
+        let no_strength = LlamaSamplingParams {
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+            penalty_last_n: 64,
+            ..params(1.0, 1.0, 0)
+        };
+        assert_eq!(
+            sampling_probabilities(&logits, no_strength, &[3, 3, 3]).unwrap(),
+            plain
+        );
+    }
+
+    /// The whole point: a token the generation keeps returning to loses mass,
+    /// and the one it has not used gains it.
+    #[test]
+    fn a_repeated_token_loses_its_grip() {
+        let logits = [0.0f32, 0.0, 0.0, 3.0];
+        let penalised = LlamaSamplingParams {
+            presence_penalty: 1.0,
+            frequency_penalty: 0.5,
+            penalty_last_n: 64,
+            ..params(1.0, 1.0, 0)
+        };
+        let plain = sampling_probabilities(&logits, penalised, &[]).unwrap();
+        assert!(plain[3] > 0.85, "token 3 dominates before any penalty: {plain:?}");
+
+        // Token 3 five times over: presence once, frequency five times.
+        let looped = [3i32, 3, 3, 3, 3];
+        let after = sampling_probabilities(&logits, penalised, &looped).unwrap();
+        assert!(after[3] < plain[3], "the loop's token must lose mass");
+        assert!(after[0] > plain[0], "the mass has to go somewhere");
+        // 3.0 - (1.0 + 0.5 * 5) = -0.5, now BELOW the untouched entries, so
+        // the loop is not merely discouraged, it is outvoted.
+        assert!(after[0] > after[3], "{after:?}");
+        assert!((after.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+
+    /// Frequency is per occurrence and presence is flat, which is the whole
+    /// reason to carry both: one of them notices a token used twenty times.
+    #[test]
+    fn frequency_counts_and_presence_does_not() {
+        let logits = [0.0f32, 5.0];
+        let presence_only = LlamaSamplingParams {
+            presence_penalty: 1.0,
+            frequency_penalty: 0.0,
+            penalty_last_n: 64,
+            ..params(1.0, 1.0, 0)
+        };
+        let once = sampling_probabilities(&logits, presence_only, &[1]).unwrap();
+        let twenty = sampling_probabilities(&logits, presence_only, &[1; 20]).unwrap();
+        assert_eq!(once, twenty, "presence is flat by definition");
+
+        let frequency_only = LlamaSamplingParams {
+            presence_penalty: 0.0,
+            frequency_penalty: 0.25,
+            penalty_last_n: 64,
+            ..params(1.0, 1.0, 0)
+        };
+        let once = sampling_probabilities(&logits, frequency_only, &[1]).unwrap();
+        let twenty = sampling_probabilities(&logits, frequency_only, &[1; 20]).unwrap();
+        assert!(twenty[1] < once[1], "frequency has to keep counting");
+    }
+
+    /// The window is the last N tokens, not the whole reply. A model that
+    /// used a word once at the top of a long answer must be free to use it
+    /// again at the bottom — otherwise the penalty stops being a loop-breaker
+    /// and starts being a vocabulary ban.
+    #[test]
+    fn the_window_forgets() {
+        // Token 1 is the one under test; token 2 is filler, so the filler's
+        // own penalty cannot be mistaken for token 1's.
+        let logits = [0.0f32, 5.0, 0.0];
+        let short_window = LlamaSamplingParams {
+            presence_penalty: 6.0,
+            frequency_penalty: 0.0,
+            penalty_last_n: 3,
+            ..params(1.0, 1.0, 0)
+        };
+        let plain = sampling_probabilities(&logits, short_window, &[]).unwrap();
+
+        // Token 1 is old news: three newer tokens have pushed it out.
+        let stale = [1i32, 2, 2, 2];
+        let after = sampling_probabilities(&logits, short_window, &stale).unwrap();
+        assert!(
+            after[1] >= plain[1],
+            "token 1 left the window and must not be penalised: {after:?}"
+        );
+
+        // Inside the window it is penalised, so the test is not vacuous.
+        let fresh = [2i32, 2, 1];
+        let inside = sampling_probabilities(&logits, short_window, &fresh).unwrap();
+        assert!(inside[1] < plain[1] * 0.5, "{inside:?}");
+    }
+
+    /// The rescale IS the penalty, to floating-point tolerance.
+    ///
+    /// `sampling_probabilities` never builds a penalised logit row — it folds
+    /// the penalty in as `exp(-p / T)` on the handful of affected entries,
+    /// because copying a 248320-entry row per sampled token per lane is a cost
+    /// this path cannot absorb. That identity is the one thing holding the
+    /// optimisation up, so it is asserted against the obvious implementation
+    /// rather than trusted.
+    #[test]
+    fn the_rescale_equals_penalising_the_row() {
+        let logits = [0.5f32, 3.0, -1.0, 2.25, 0.0, 4.5];
+        let recent = [1i32, 3, 1, 5, 1];
+        for temperature in [0.2f32, 0.7, 1.0, 1.8] {
+            let penalised = LlamaSamplingParams {
+                presence_penalty: 0.75,
+                frequency_penalty: 0.4,
+                penalty_last_n: 8,
+                ..params(temperature, 1.0, 0)
+            };
+            // The obvious implementation: subtract from the row, then sample.
+            let mut by_hand = logits;
+            for (index, penalty) in penalty_window(penalised, &recent).unwrap() {
+                by_hand[index] -= penalty;
+            }
+            let expected =
+                sampling_probabilities(&by_hand, params(temperature, 1.0, 0), &[]).unwrap();
+            let actual = sampling_probabilities(&logits, penalised, &recent).unwrap();
+            for (index, (a, b)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "T={temperature} entry {index}: rescale {a} vs penalised row {b}"
+                );
+            }
+        }
+    }
+
+    /// Greedy takes the same answer the penalised row would have given,
+    /// including the case that matters: the raw argmax is a token the loop has
+    /// been repeating, so the winner has to CHANGE.
+    #[test]
+    fn greedy_argmax_agrees_with_the_penalised_row() {
+        let logits = [0.0f32, 1.0, 5.0, 4.0];
+        let penalties = penalty_window(
+            LlamaSamplingParams {
+                presence_penalty: 1.0,
+                frequency_penalty: 0.5,
+                penalty_last_n: 8,
+                ..params(1.0, 1.0, 0)
+            },
+            &[2i32, 2, 2],
+        )
+        .unwrap();
+        // Token 2 is the raw argmax at 5.0 but has been used three times:
+        // 5.0 - (1.0 + 1.5) = 2.5, which loses to token 3's untouched 4.0.
+        assert_eq!(argmax_token_id(&logits).unwrap(), 2);
+        assert_eq!(argmax_penalized(&logits, &penalties).unwrap(), 3);
+
+        let mut by_hand = logits;
+        for (index, penalty) in &penalties {
+            by_hand[*index] -= penalty;
+        }
+        assert_eq!(
+            argmax_penalized(&logits, &penalties).unwrap(),
+            argmax_token_id(&by_hand).unwrap()
+        );
+    }
+
+    /// A token id that is not a vocabulary index must not panic the sampler.
+    /// The window is fed from committed token ids, and a draft vocabulary or a
+    /// malformed gguf is exactly the kind of thing that puts a stray value in
+    /// one — an out-of-range id is a reason to ignore that entry, never a
+    /// reason to take a lane down mid-conversation.
+    #[test]
+    fn an_out_of_range_token_in_the_window_is_ignored() {
+        let logits = [0.0f32, 1.0, 2.0];
+        let penalised = LlamaSamplingParams {
+            presence_penalty: 1.0,
+            frequency_penalty: 0.0,
+            penalty_last_n: 8,
+            ..params(1.0, 1.0, 0)
+        };
+        let plain = sampling_probabilities(&logits, penalised, &[]).unwrap();
+        let junk = sampling_probabilities(&logits, penalised, &[-1, 9999, i32::MIN]).unwrap();
+        assert_eq!(plain, junk);
     }
 
     /// The chunked-decode regression, at the level where it actually happened:
@@ -4089,6 +4495,7 @@ mod nucleus_tests {
             top_p,
             top_k: 0,
             seed: 7,
+            ..Default::default()
         }
     }
 
@@ -4099,7 +4506,7 @@ mod nucleus_tests {
     fn wide_nucleus_falls_back_to_the_exact_ranking() {
         let vocab = 4096;
         let logits: Vec<f32> = (0..vocab).map(|i| (i % 7) as f32 * 1e-3).collect();
-        let probs = sampling_probabilities(&logits, params(0.99)).unwrap();
+        let probs = sampling_probabilities(&logits, params(0.99), &[]).unwrap();
         let kept = probs.iter().filter(|p| **p > 0.0).count();
         assert!(kept > 1024, "kept {kept}, expected the full nucleus");
         assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-4);
@@ -4111,7 +4518,7 @@ mod nucleus_tests {
         logits[10] = 24.0;
         logits[20] = 23.0;
         logits[30] = 22.0;
-        let probs = sampling_probabilities(&logits, params(0.9)).unwrap();
+        let probs = sampling_probabilities(&logits, params(0.9), &[]).unwrap();
         // The three peaks carry all the mass, so the nucleus is just them and
         // it fits well inside the candidate cap.
         assert!(probs[10] > 0.0 && probs[20] > 0.0);

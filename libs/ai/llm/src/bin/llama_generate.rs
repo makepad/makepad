@@ -695,6 +695,12 @@ fn run_spec_sample_gate(
                     top_p: args.top_p,
                     top_k: 0,
                     seed: args.seed + run as u64,
+                    // No penalties here, on purpose: this binary exists to
+                    // match an upstream llama.cpp CLI that is invoked with
+                    // `--repeat-penalty 1 --presence-penalty 0
+                    // --frequency-penalty 0` for exactly the same reason.
+                    // Turning them on would make the comparison meaningless.
+                    ..Default::default()
                 };
                 let start = Instant::now();
                 let generation = session.continue_sampled(args.max_new_tokens, params)?;
@@ -840,6 +846,8 @@ fn run_build_draft_vocab(
                 top_p: args.top_p,
                 top_k: 0,
                 seed: args.seed + run as u64,
+                // Penalty-free for the byte-exactness comparison; see above.
+                ..Default::default()
             };
             let generation = session.continue_sampled(args.max_new_tokens, params)?;
             for token in &generation.token_ids {
