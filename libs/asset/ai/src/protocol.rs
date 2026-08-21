@@ -196,9 +196,45 @@ pub fn model_uses_open_think(model_id: &str) -> bool {
     id.contains("qwen3.8") || id.contains("qwen38")
 }
 
+/// A CLOSED one-line thought for chat, the same shape that already works for
+/// expander jobs.
+///
+/// The obvious way to turn thinking off — an empty `</think>` prefill — does
+/// not work on 3.8: it emits `<|im_end|>` immediately and the reply is empty.
+/// That is recorded beside [`CHAT_THINK_PREFILL_EXPAND_38`] and was learned the
+/// expensive way. Seeding a SHORT closed thought instead leaves the block
+/// satisfied and starts the model on the answer.
+///
+/// Why it matters here: with an open block the model reasons before one
+/// readable character, and a measured 86 % of a short reply's tokens are
+/// invisible. The rate a person sees is the box's rate times the visible
+/// fraction, so no amount of decode speed reaches a visible-tokens target
+/// while that fraction stays low.
+pub const CHAT_THINK_PREFILL_BRIEF_38: &str = "<think>\nAnswer the user directly.\n</think>\n\n";
+
+/// How much a chat turn should think, from `MAKEPAD_ASSET_AI_CHAT_THINK`.
+///
+/// `open` (the default) is today's behaviour exactly. `brief` seeds the closed
+/// one-liner above. A knob rather than a decision because it trades quality for
+/// perceived speed, and that trade belongs to whoever runs the box — measured
+/// per model, not assumed.
+pub fn chat_think_mode() -> &'static str {
+    match std::env::var("MAKEPAD_ASSET_AI_CHAT_THINK")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Ok("brief") => "brief",
+        _ => "open",
+    }
+}
+
 pub fn think_prefill_for_model(model_id: &str) -> &'static str {
     if model_uses_open_think(model_id) {
-        CHAT_THINK_PREFILL_OPEN
+        if chat_think_mode() == "brief" {
+            CHAT_THINK_PREFILL_BRIEF_38
+        } else {
+            CHAT_THINK_PREFILL_OPEN
+        }
     } else {
         CHAT_THINK_PREFILL
     }
@@ -770,4 +806,40 @@ pub struct ModelInventoryArtifactJson {
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct ErrorJson {
     pub error: String,
+}
+
+#[cfg(test)]
+mod think_mode_tests {
+    use super::*;
+
+    #[test]
+    fn the_brief_thought_is_closed_and_short() {
+        // An EMPTY `</think>` prefill makes 3.8 emit `<|im_end|>` at once and
+        // the reply is empty — recorded beside CHAT_THINK_PREFILL_EXPAND_38,
+        // learned the expensive way. What works is a closed block with
+        // something in it, so this must have both properties.
+        assert!(CHAT_THINK_PREFILL_BRIEF_38.starts_with("<think>"));
+        assert!(CHAT_THINK_PREFILL_BRIEF_38.contains("</think>"));
+        let inner = CHAT_THINK_PREFILL_BRIEF_38
+            .trim_start_matches("<think>")
+            .split("</think>")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !inner.trim().is_empty(),
+            "an EMPTY closed block is the thing that returns nothing"
+        );
+        assert!(
+            inner.split_whitespace().count() <= 8,
+            "the point is to spend no budget thinking"
+        );
+    }
+
+    #[test]
+    fn a_model_without_open_think_is_unaffected_by_the_knob() {
+        // The knob is a 3.8 behaviour. Older models already prefill a closed
+        // block, and reaching in to change them would be changing something
+        // nobody measured.
+        assert_eq!(think_prefill_for_model("qwen3.5-9b"), CHAT_THINK_PREFILL);
+    }
 }
