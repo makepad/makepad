@@ -603,6 +603,41 @@ impl AssetClient {
         self.api.operation_finalize(op, request)
     }
 
+    // ---- live game rooms ---------------------------------------------------
+    //
+    // The rendezvous behind "press Play and be where your friends are". See
+    // `Api::rooms` / `Api::claim_room` for what each call promises; the
+    // sequence a game plays is: list for this game → dial what you find →
+    // on failure, claim naming what you could not reach.
+
+    pub fn rooms(&self, game: Option<&str>) -> ClientResult<Vec<crate::dto::RoomDto>> {
+        self.api.rooms(game)
+    }
+
+    pub fn claim_room(
+        &self,
+        game: &str,
+        invite: &str,
+        host: &str,
+        ttl_ms: u64,
+        replacing: Option<&str>,
+    ) -> ClientResult<crate::dto::RoomClaimDto> {
+        self.api.claim_room(game, invite, host, ttl_ms, replacing)
+    }
+
+    pub fn room_heartbeat(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        self.api.room_heartbeat(room, token, ttl_ms)
+    }
+
+    pub fn retire_room(&self, room: &str, token: &str) -> ClientResult<()> {
+        self.api.retire_room(room, token)
+    }
+
     // ---- chat broker -------------------------------------------------------
 
     pub fn chat_providers(&self) -> ClientResult<Vec<crate::dto::ChatProviderDto>> {

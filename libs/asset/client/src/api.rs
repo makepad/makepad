@@ -1049,6 +1049,139 @@ impl Api {
         Ok(BlobHead { size: head.content_length, etag_matches })
     }
 
+    // ---- live game rooms ---------------------------------------------------
+
+    /// Who is playing what, right now. `game` narrows it to the one room a
+    /// player about to press Play cares about.
+    ///
+    /// A room is a running process on somebody's desk, so this list is a
+    /// snapshot and nothing else: by the time it is read, a host may already
+    /// have closed the lid. Callers must treat a failed dial as ordinary
+    /// (see `claim_room`'s `replacing`), never as an error to report.
+    pub fn rooms(&self, game: Option<&str>) -> ClientResult<Vec<crate::dto::RoomDto>> {
+        if let Some(g) = game {
+            if g.is_empty() || g.len() > wire::MAX_ROOM_GAME_BYTES || !wire::query_value_ok(g) {
+                return Err(ClientError::InvalidInput { what: "room game id" });
+            }
+        }
+        let path = wire::path_rooms(game);
+        let mut req = Request::get(&path);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_rooms(&v)
+    }
+
+    /// Take a game's claim, or learn who holds it — one atomic call, because
+    /// two people pressing Play in the same second must not both come away
+    /// believing they are the host.
+    ///
+    /// `replacing` names a room this caller actually tried to dial and could
+    /// not reach. It is the only way a live claim changes hands, and it is
+    /// what stops a stale room becoming a wall every later player runs into:
+    /// a failed join is always followed by a claim that names the room it
+    /// failed on, so the joiner hosts instead of retrying forever.
+    pub fn claim_room(
+        &self,
+        game: &str,
+        invite: &str,
+        host: &str,
+        ttl_ms: u64,
+        replacing: Option<&str>,
+    ) -> ClientResult<crate::dto::RoomClaimDto> {
+        let bounded = |text: &str, max: usize| {
+            !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
+        };
+        if !bounded(game, wire::MAX_ROOM_GAME_BYTES) {
+            return Err(ClientError::InvalidInput { what: "room game id" });
+        }
+        if !bounded(invite, wire::MAX_ROOM_INVITE_BYTES) {
+            return Err(ClientError::InvalidInput { what: "room invite" });
+        }
+        if !bounded(host, wire::MAX_ROOM_HOST_BYTES) {
+            return Err(ClientError::InvalidInput { what: "room host name" });
+        }
+        if !(wire::MIN_ROOM_TTL_MS..=wire::MAX_ROOM_TTL_MS).contains(&ttl_ms) {
+            return Err(ClientError::InvalidInput { what: "room ttl" });
+        }
+        let mut pairs: Vec<(&str, Value)> = vec![
+            ("game", json::s(game)),
+            ("invite", json::s(invite)),
+            ("host", json::s(host)),
+            ("ttl_ms", Value::Int(ttl_ms.min(i64::MAX as u64) as i64)),
+        ];
+        if let Some(room) = replacing {
+            if !bounded(room, 64) {
+                return Err(ClientError::InvalidInput { what: "replaced room id" });
+            }
+            pairs.push(("replacing", json::s(room)));
+        }
+        let body = json::obj(pairs).to_json().into_bytes();
+        let path = wire::path_rooms_claim();
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        // 201 the claim is mine, 200 somebody else holds it. Both are
+        // answers, not failures.
+        let v = self.call_json_accept(self.endpoints.control, req, &[200, 201])?;
+        dto::parse_room_claim(&v)
+    }
+
+    /// "Still here" — renew the room's lease. A [`ClientError::NotFound`]
+    /// means the claim moved on (it lapsed, or a joiner that could not reach
+    /// this host took it), and the answer is to claim again, not to retry.
+    pub fn room_heartbeat(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: u64,
+    ) -> ClientResult<crate::dto::RoomDto> {
+        let body = self.room_token_body(room, token, Some(ttl_ms))?;
+        let path = wire::path_room_heartbeat(room);
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        let v = self.call_json(self.endpoints.control, req)?;
+        dto::parse_room_envelope(&v)
+    }
+
+    /// Give the claim up. Idempotent at the server: a room already gone
+    /// answers the same way, because a host that leaves and then exits runs
+    /// both paths and neither is wrong.
+    pub fn retire_room(&self, room: &str, token: &str) -> ClientResult<()> {
+        let body = self.room_token_body(room, token, None)?;
+        let path = wire::path_room_retire(room);
+        let mut req = Request::post(&path, &body);
+        req.bearer = self.bearer();
+        req.allow_no_content = true;
+        let resp =
+            http::http_call_pooled(self.endpoints.control, &req, &self.limits, self.pool())?;
+        self.accept(resp, &[200, 204])?;
+        Ok(())
+    }
+
+    fn room_token_body(
+        &self,
+        room: &str,
+        token: &str,
+        ttl_ms: Option<u64>,
+    ) -> ClientResult<Vec<u8>> {
+        let bounded = |text: &str| {
+            !text.is_empty() && text.len() <= 64 && !text.chars().any(char::is_control)
+        };
+        if !bounded(room) || !wire::query_value_ok(room) {
+            return Err(ClientError::InvalidInput { what: "room id" });
+        }
+        if !bounded(token) {
+            return Err(ClientError::InvalidInput { what: "room token" });
+        }
+        let mut pairs: Vec<(&str, Value)> = vec![("token", json::s(token))];
+        if let Some(ttl_ms) = ttl_ms {
+            if !(wire::MIN_ROOM_TTL_MS..=wire::MAX_ROOM_TTL_MS).contains(&ttl_ms) {
+                return Err(ClientError::InvalidInput { what: "room ttl" });
+            }
+            pairs.push(("ttl_ms", Value::Int(ttl_ms.min(i64::MAX as u64) as i64)));
+        }
+        Ok(json::obj(pairs).to_json().into_bytes())
+    }
+
     // ---- jobs (generation scheduling) --------------------------------------
 
     /// Generation capabilities this server advertises. The server stays the

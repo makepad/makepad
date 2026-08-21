@@ -629,6 +629,96 @@ pub fn parse_retire(v: &Value) -> ClientResult<RetireDto> {
     })
 }
 
+// ---- live game rooms -------------------------------------------------------
+
+/// One live room: somebody is playing `game` right now, and `invite` is how
+/// to reach them. The invite is opaque to this crate — it is the game app's
+/// own address-plus-key spelling, and it carries capability data, so it is
+/// carried, never interpreted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomDto {
+    pub room: String,
+    pub game: String,
+    pub invite: String,
+    pub host: String,
+    pub created_ms: u64,
+    pub expires_ms: u64,
+}
+
+/// The answer to "I am about to host this game; is anybody already?".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomClaimDto {
+    /// The claim is yours. `token` is the only proof of that and is issued
+    /// once — heartbeat and retire need it.
+    Claimed { room: RoomDto, token: String },
+    /// Somebody was already hosting. Join `room` instead of standing up a
+    /// second world nobody would find.
+    Occupied { room: RoomDto },
+}
+
+impl RoomClaimDto {
+    pub fn room(&self) -> &RoomDto {
+        match self {
+            Self::Claimed { room, .. } | Self::Occupied { room } => room,
+        }
+    }
+}
+
+fn room_text<'a>(v: &'a Value, key: &'static str, max: usize, what: &'static str) -> ClientResult<&'a str> {
+    let s = need_str(v, key, max, what)?;
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return Err(ClientError::Protocol { what });
+    }
+    Ok(s)
+}
+
+pub fn parse_room(v: &Value) -> ClientResult<RoomDto> {
+    Ok(RoomDto {
+        room: room_text(v, "room", 64, "room id")?.to_string(),
+        game: room_text(v, "game", crate::wire::MAX_ROOM_GAME_BYTES, "room game")?.to_string(),
+        invite: room_text(v, "invite", crate::wire::MAX_ROOM_INVITE_BYTES, "room invite")?
+            .to_string(),
+        host: room_text(v, "host", crate::wire::MAX_ROOM_HOST_BYTES, "room host")?.to_string(),
+        created_ms: need_u64(v, "created_ms", "room created_ms")?,
+        expires_ms: need_u64(v, "expires_ms", "room expires_ms")?,
+    })
+}
+
+pub fn parse_rooms(v: &Value) -> ClientResult<Vec<RoomDto>> {
+    let arr = need(v, "rooms", "rooms list")?
+        .as_arr()
+        .ok_or(ClientError::Protocol { what: "rooms list" })?;
+    if arr.len() > crate::wire::MAX_ROOMS_PAGE {
+        return Err(ClientError::OverBudget {
+            what: "rooms",
+            limit: crate::wire::MAX_ROOMS_PAGE as u64,
+            found: arr.len() as u64,
+        });
+    }
+    arr.iter().map(parse_room).collect()
+}
+
+/// A heartbeat answers with the room as the server now holds it — the
+/// renewed lease included, so a host never has to guess when to beat again.
+pub fn parse_room_envelope(v: &Value) -> ClientResult<RoomDto> {
+    parse_room(need(v, "room", "room envelope")?)
+}
+
+pub fn parse_room_claim(v: &Value) -> ClientResult<RoomClaimDto> {
+    let room = parse_room(need(v, "room", "room claim room")?)?;
+    // A closed vocabulary: an outcome this client does not understand must
+    // refuse, never fall through to "somebody else is hosting" — that would
+    // silently drop a claim the caller actually holds.
+    match need_str(v, "outcome", 16, "room claim outcome")? {
+        "claimed" => Ok(RoomClaimDto::Claimed {
+            room,
+            token: room_text(v, "token", 64, "room claim token")?.to_string(),
+        }),
+        "occupied" => Ok(RoomClaimDto::Occupied { room }),
+        _ => Err(ClientError::Protocol { what: "room claim outcome" }),
+    }
+}
+
 // ---- blob garbage collection -----------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

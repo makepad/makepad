@@ -201,6 +201,48 @@ pub fn path_gc_cancel() -> String {
     "/v1/gc/cancel".to_string()
 }
 
+// ---- live game rooms (LAN rendezvous) --------------------------------------
+//
+// Players' machines talk to each other over direct sockets; this server is
+// only where they find each other, because it is the one thing both of them
+// are already attached to. Rooms are leased, in-memory and never catalog
+// assets — see `store/src/host/rooms.rs`.
+
+/// Live rooms, optionally narrowed to the game a player just pressed Play
+/// on. `game` must already be query-charset safe (an asset-id spelling is).
+pub fn path_rooms(game: Option<&str>) -> String {
+    match game {
+        Some(g) => format!("/v1/rooms?game={g}"),
+        None => "/v1/rooms".to_string(),
+    }
+}
+
+/// Ask for a game's claim and learn who holds it — one call, because asking
+/// and taking must be the same atomic act.
+pub fn path_rooms_claim() -> String {
+    "/v1/rooms".to_string()
+}
+
+/// `room` is the canonical `room_<16 lowercase hex>` spelling.
+pub fn path_room_heartbeat(room: &str) -> String {
+    format!("/v1/rooms/{room}/heartbeat")
+}
+
+pub fn path_room_retire(room: &str) -> String {
+    format!("/v1/rooms/{room}/retire")
+}
+
+/// Room-field ceilings, mirroring the server's own (`host::rooms`). A value
+/// over budget is refused here rather than sent and 400'd.
+pub const MAX_ROOM_GAME_BYTES: usize = 64;
+pub const MAX_ROOM_INVITE_BYTES: usize = 200;
+pub const MAX_ROOM_HOST_BYTES: usize = 64;
+/// Lease bounds a room claim or heartbeat may ask for.
+pub const MIN_ROOM_TTL_MS: u64 = 5_000;
+pub const MAX_ROOM_TTL_MS: u64 = 10 * 60 * 1000;
+/// Most rooms one listing may carry — the server caps at 64 games.
+pub const MAX_ROOMS_PAGE: usize = 64;
+
 // ---- jobs (generation scheduling) ------------------------------------------
 
 /// Advertised generation capabilities; `domain` filters (`video`, `audio`…).
