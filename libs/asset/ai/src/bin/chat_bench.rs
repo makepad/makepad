@@ -52,7 +52,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let base = args.next().unwrap_or_else(|| {
         eprintln!(
-            "usage: chat-bench <http://box:8123> [--turns N] [--model ID] [--interleave]"
+            "usage: chat-bench <http://box:8123> [--turns N] [--model ID] \
+             [--interleave] [--system-words N]"
         );
         std::process::exit(2);
     });
@@ -60,6 +61,9 @@ fn main() {
     let mut turns = 3usize;
     let mut model = "qwen3.8-27b".to_string();
     let mut interleave = false;
+    // Words of taught context. The default is deliberately game-sized: a
+    // bench with a one-line prompt does not test prefill at all.
+    let mut system_words = 2000usize;
     let rest: Vec<String> = args.collect();
     let mut index = 0;
     while index < rest.len() {
@@ -76,6 +80,13 @@ fn main() {
                 interleave = true;
                 index += 1;
             }
+            "--system-words" => {
+                system_words = rest
+                    .get(index + 1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(system_words);
+                index += 2;
+            }
             other => {
                 eprintln!("unknown argument {other}");
                 std::process::exit(2);
@@ -83,10 +94,13 @@ fn main() {
         }
     }
 
-    println!("chat-bench {base}  model={model}  turns={turns}  interleave={interleave}");
+    println!(
+        "chat-bench {base}  model={model}  turns={turns}  interleave={interleave}  \
+         system~{system_words} words"
+    );
     let mut failures: Vec<String> = Vec::new();
-    let mut main_chat = Conversation::new("bench-primary");
-    let mut other_chat = Conversation::new("bench-interleaved");
+    let mut main_chat = Conversation::new("bench-primary", system_words);
+    let mut other_chat = Conversation::new("bench-interleaved", system_words);
 
     for turn in 1..=turns {
         // The interleaved arm runs BETWEEN the primary's turns, which is the
@@ -201,17 +215,45 @@ fn check(result: &TurnResult, turn: usize) -> Vec<String> {
     out
 }
 
+/// A system prompt long enough to be REAL.
+///
+/// A one-line prompt exercises none of what a game session does. The bug that
+/// put "loading" on every one of a player's messages — a whole prompt in one
+/// prefill graph, gigabytes of activations on a high lane — was invisible to
+/// every gate that used thirty-token prompts, including this bench's first
+/// version. Prefill cost scales with prompt length; a bench that never carries
+/// a long one is not testing prefill.
+const TAUGHT_CONTEXT: &str =
+    "You are a helpful assistant inside a game world. Answer briefly. \
+     Reference material follows, and you may use it. ";
+
+fn long_system_prompt(words: usize) -> String {
+    let mut out = String::from(TAUGHT_CONTEXT);
+    // ~4 bytes a token, so this lands near `words` tokens.
+    while out.split_whitespace().count() < words {
+        out.push_str("The world contains objects, rules, places and people. ");
+    }
+    out
+}
+
 /// A growing chat, fed back verbatim — which is the only way warmth can hit:
 /// the box matches a prompt that EXTENDS what its lane already holds, so an
 /// approximation of the reply is a different conversation.
 struct Conversation {
     id: &'static str,
+    /// Carried per conversation so two of them are genuinely different
+    /// prompts, not the same one twice.
+    system: String,
     messages: Vec<(String, String)>,
 }
 
 impl Conversation {
-    fn new(id: &'static str) -> Self {
-        Self { id, messages: Vec::new() }
+    fn new(id: &'static str, system_words: usize) -> Self {
+        let mut system = long_system_prompt(system_words);
+        // Two conversations must not share a prompt, or "both stayed warm"
+        // could be one lane serving both.
+        system.push_str(id);
+        Self { id, system, messages: Vec::new() }
     }
 
     fn next_question(&self) -> String {
@@ -235,7 +277,7 @@ fn run_turn(
 ) -> Result<TurnResult, String> {
     let question = chat.next_question();
     chat.messages.push(("user".to_string(), question));
-    let body = request_json(model, &chat.messages);
+    let body = request_json(model, &chat.system, &chat.messages);
     // A rough token count, only used to size the warmth bar. Four bytes per
     // token is close enough for "did this re-read everything?".
     let prompt_tokens_estimate = (body.len() / 4) as u64;
@@ -290,11 +332,13 @@ fn run_turn(
     })
 }
 
-fn request_json(model: &str, messages: &[(String, String)]) -> String {
+fn request_json(model: &str, system: &str, messages: &[(String, String)]) -> String {
     let mut out = String::new();
     out.push_str("{\"model\":\"");
     out.push_str(model);
-    out.push_str("\",\"domain\":\"chat\",\"chat_system\":\"You are a helpful assistant. Answer briefly.\",\"chat_messages\":[");
+    out.push_str("\",\"domain\":\"chat\",\"chat_system\":\"");
+    out.push_str(&escape(system));
+    out.push_str("\",\"chat_messages\":[");
     for (index, (role, text)) in messages.iter().enumerate() {
         if index > 0 {
             out.push(',');
