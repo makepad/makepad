@@ -87,6 +87,7 @@ struct ActiveJob {
 /// itself survives server-side).
 const MAX_POLL_FAILS: u8 = 20;
 
+#[derive(Clone)]
 struct CachedPick {
     base: String,
     model: String,
@@ -94,43 +95,53 @@ struct CachedPick {
     at: Instant,
 }
 
-pub struct FleetQwenChatProvider<T: FleetTransport> {
-    transport: T,
-    /// Node base URLs from LAN discovery, e.g. `http://10.0.0.169:8123`.
-    bases: Vec<String>,
-    max_tokens: u32,
-    active: Option<ActiveJob>,
-    cached: Option<CachedPick>,
+/// The picked node/model and the dead-node marks, behind one lock so MANY
+/// providers can share them.
+///
+/// One provider per chat session is the design (a provider owns exactly one
+/// conversation lane), but the fleet ROSTER is a fact about the LAN, not
+/// about a session: without sharing, N concurrent sessions each run their
+/// own `/health` + `/models` scan and each pays its own 3 s connect timeouts
+/// on a box that just went dark. Sharing turns that into one scan per
+/// [`PICK_TTL`] for the whole process, and a node that goes dark is skipped
+/// by every session at once.
+///
+/// [`FleetQwenChatProvider::new`] gives a provider a private cache, so a
+/// standalone provider (and every test) behaves exactly as before.
+#[derive(Default)]
+pub struct FleetPickCache {
+    state: std::sync::Mutex<PickState>,
+}
+
+#[derive(Default)]
+struct PickState {
+    pick: Option<CachedPick>,
     dead_until: Vec<(String, Instant)>,
 }
 
-impl<T: FleetTransport> FleetQwenChatProvider<T> {
-    pub fn new(transport: T, bases: Vec<String>) -> FleetQwenChatProvider<T> {
-        FleetQwenChatProvider {
-            transport,
-            bases,
-            // A LEVEL-BUILDING turn carries reasoning plus a complete splash
-            // source; 2048 was observed cutting the build mid-thought. The
-            // serving tier's total context still bounds the sum.
-            max_tokens: 3072,
-            active: None,
-            cached: None,
-            dead_until: Vec::new(),
-        }
+impl FleetPickCache {
+    pub fn new() -> FleetPickCache {
+        FleetPickCache::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PickState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn is_dead(&self, base: &str) -> bool {
-        self.dead_until
+        self.lock()
+            .dead_until
             .iter()
             .any(|(b, until)| b == base && Instant::now() < *until)
     }
 
-    fn mark_dead(&mut self, base: &str) {
+    fn mark_dead(&self, base: &str) {
         let until = Instant::now() + DEAD_TTL;
-        if let Some(slot) = self.dead_until.iter_mut().find(|(b, _)| b == base) {
+        let mut state = self.lock();
+        if let Some(slot) = state.dead_until.iter_mut().find(|(b, _)| b == base) {
             slot.1 = until;
         } else {
-            self.dead_until.push((base.to_string(), until));
+            state.dead_until.push((base.to_string(), until));
         }
         // Deliberately KEEP the cached pick even when it names this base:
         // the dead-list already stops its EARLY reuse (the TTL fast path
@@ -139,8 +150,72 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // turn on a single-node fleet, mid-burst.
     }
 
-    fn remember(&mut self, base: String, model: String, text_fallback: bool) {
-        self.cached = Some(CachedPick { base, model, text_fallback, at: Instant::now() });
+    fn remember(&self, base: String, model: String, text_fallback: bool) {
+        self.lock().pick =
+            Some(CachedPick { base, model, text_fallback, at: Instant::now() });
+    }
+
+    /// The pick if it is still warm AND its node is not on the dead list.
+    fn fresh(&self) -> Option<(String, String, bool)> {
+        let pick = self.lock().pick.clone()?;
+        if pick.at.elapsed() < PICK_TTL && !self.is_dead(&pick.base) {
+            Some((pick.base, pick.model, pick.text_fallback))
+        } else {
+            None
+        }
+    }
+
+    fn last_base(&self) -> Option<String> {
+        self.lock().pick.as_ref().map(|p| p.base.clone())
+    }
+
+    /// Take the stale pick for the scan's last-resort fallback.
+    fn take_stale(&self) -> Option<(String, String, bool)> {
+        let pick = self.lock().pick.take()?;
+        Some((pick.base, pick.model, pick.text_fallback))
+    }
+}
+
+pub struct FleetQwenChatProvider<T: FleetTransport> {
+    transport: T,
+    /// Node base URLs from LAN discovery, e.g. `http://10.0.0.169:8123`.
+    bases: Vec<String>,
+    max_tokens: u32,
+    active: Option<ActiveJob>,
+    /// Private by default; the broker hands EVERY session's provider the
+    /// same one so the fleet is probed once, not once per session.
+    picks: std::sync::Arc<FleetPickCache>,
+}
+
+impl<T: FleetTransport> FleetQwenChatProvider<T> {
+    pub fn new(transport: T, bases: Vec<String>) -> FleetQwenChatProvider<T> {
+        FleetQwenChatProvider::with_pick_cache(
+            transport,
+            bases,
+            std::sync::Arc::new(FleetPickCache::new()),
+        )
+    }
+
+    /// Share one node/model pick (and one dead-node list) across providers.
+    pub fn with_pick_cache(
+        transport: T,
+        bases: Vec<String>,
+        picks: std::sync::Arc<FleetPickCache>,
+    ) -> FleetQwenChatProvider<T> {
+        FleetQwenChatProvider {
+            transport,
+            bases,
+            // A LEVEL-BUILDING turn carries reasoning plus a complete splash
+            // source; 2048 was observed cutting the build mid-thought. The
+            // serving tier's total context still bounds the sum.
+            max_tokens: 3072,
+            active: None,
+            picks,
+        }
+    }
+
+    fn mark_dead(&mut self, base: &str) {
+        self.picks.mark_dead(base);
     }
 
     /// Probe fleet nodes; pick the best available chat model.
@@ -152,30 +227,28 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// twice. Recently-failed bases are skipped for [`DEAD_TTL`], and the
     /// scan stops at the first usable node (last-good first).
     fn probe(&mut self) -> Result<(String, String, bool), String> {
-        if let Some(cached) = self.cached.as_ref() {
-            if cached.at.elapsed() < PICK_TTL && !self.is_dead(&cached.base) {
-                return Ok((cached.base.clone(), cached.model.clone(), cached.text_fallback));
-            }
+        if let Some(pick) = self.picks.fresh() {
+            return Ok(pick);
         }
         if self.bases.is_empty() {
             return Err("no fleet nodes configured".to_string());
         }
         let mut reasons = Vec::new();
         let mut order = self.bases.clone();
-        if let Some(cached) = self.cached.as_ref() {
-            if let Some(i) = order.iter().position(|b| b == &cached.base) {
+        if let Some(last) = self.picks.last_base() {
+            if let Some(i) = order.iter().position(|b| b == &last) {
                 let good = order.remove(i);
                 order.insert(0, good);
             }
         }
         for base in order {
-            if self.is_dead(&base) {
+            if self.picks.is_dead(&base) {
                 reasons.push(format!("{base}: skipped (recently unreachable)"));
                 continue;
             }
             match self.probe_one(&base, &mut reasons) {
                 Some((model, text_fallback)) => {
-                    self.remember(base.clone(), model.clone(), text_fallback);
+                    self.picks.remember(base.clone(), model.clone(), text_fallback);
                     return Ok((base, model, text_fallback));
                 }
                 None => {}
@@ -188,10 +261,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // POST decide (it has its own connect handling). Without this the
         // FINAL round of a long successful turn died at the re-probe and
         // the user saw an error after their level had already built.
-        if let Some(cached) = self.cached.take() {
-            let (base, model, text_fallback) =
-                (cached.base.clone(), cached.model.clone(), cached.text_fallback);
-            self.remember(base.clone(), model.clone(), text_fallback);
+        if let Some((base, model, text_fallback)) = self.picks.take_stale() {
+            self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
         Err(if reasons.is_empty() {

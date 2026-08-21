@@ -382,6 +382,54 @@ fn qwen_cancel_posts_job_cancel() {
     assert!(p.poll().is_empty());
 }
 
+/// N concurrent chat sessions each own a provider, but the fleet roster is
+/// a fact about the LAN — with a shared pick cache the SECOND provider
+/// inherits the first one's scan instead of paying its own `/health` +
+/// `/models` (and its own connect timeouts on a dark box).
+#[test]
+fn qwen_providers_share_one_probe_through_the_pick_cache() {
+    let picks = std::sync::Arc::new(makepad_asset_chat::qwen::FleetPickCache::new());
+
+    let mut first = ScriptedFleet::default();
+    first.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    first.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let seen_first = first.seen_gets.clone();
+    let mut a =
+        FleetQwenChatProvider::with_pick_cache(first, vec!["http://n1:8765".into()], picks.clone());
+    assert!(a.availability().is_available());
+    assert_eq!(seen_first.borrow().len(), 2, "the first provider scans once");
+
+    // A transport that PANICS on any GET: the second provider must not
+    // touch the network at all.
+    let second = ScriptedFleet::default();
+    let seen_second = second.seen_gets.clone();
+    let mut b = FleetQwenChatProvider::with_pick_cache(
+        second,
+        vec!["http://n1:8765".into()],
+        picks.clone(),
+    );
+    match b.availability() {
+        ProviderAvailability::Available { model, .. } => assert_eq!(model, "qwen3.8-27b"),
+        other => panic!("shared pick was not reused: {other:?}"),
+    }
+    assert!(seen_second.borrow().is_empty(), "{:?}", seen_second.borrow());
+
+    // A private cache (the plain constructor) is unchanged: it scans.
+    let mut third = ScriptedFleet::default();
+    third.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    third.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    let seen_third = third.seen_gets.clone();
+    let mut c = FleetQwenChatProvider::new(third, vec!["http://n1:8765".into()]);
+    assert!(c.availability().is_available());
+    assert_eq!(seen_third.borrow().len(), 2);
+}
+
 // -------------------------------------------------------------- responses
 
 #[derive(Clone)]
