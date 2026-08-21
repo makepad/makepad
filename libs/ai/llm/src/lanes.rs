@@ -116,6 +116,14 @@ pub enum LaneStep {
         /// Reported outward so a client can see its conversation stayed warm
         /// rather than infer it from a latency it cannot attribute.
         resumed: bool,
+        /// True when this chunk finishes the prompt.
+        ///
+        /// Only then is there a token to sample: a middle chunk's logits
+        /// predict the next PROMPT token, which is already known. Sampling
+        /// anyway costs a full-vocabulary pass per chunk AND draws from the
+        /// lane's RNG — which would make a conversation's output depend on how
+        /// its prompt happened to be split.
+        last: bool,
     },
     /// Decode one token for every lane in `plan`, in plan order.
     Decode { plan: StepPlan, tokens: Vec<i32> },
@@ -403,6 +411,7 @@ impl LaneScheduler {
                     state_row: slot.live_state_row(),
                     start: slot.fill(),
                     tokens: lane.request.prompt_tokens[lane.ingested..end].to_vec(),
+                    last: end >= lane.request.prompt_tokens.len(),
                     // Only the FIRST chunk may reset: the ones after it are
                     // appending to state this same lane just wrote.
                     resumed: self.resumed.get(index).copied().unwrap_or(false)
@@ -831,6 +840,7 @@ impl LaneExecutor {
                 start,
                 tokens,
                 resumed,
+                last,
             } if lane == SOLO_LANE && self.scheduler.is_solo(lane) => {
                 let _ = resumed;
                 // Session-native ingest, so the speculative loop can run
@@ -841,17 +851,24 @@ impl LaneExecutor {
                 self.session
                     .append_tokens(&tokens)
                     .map_err(|e| format!("solo prefill: {e}"))?;
-                let logits = self
-                    .session
-                    .last_logits()
-                    .ok_or_else(|| "solo prefill produced no logits".to_string())?
-                    .to_vec();
-                let first = {
+                // Only the LAST chunk has a token to sample. A middle chunk's
+                // logits predict the next PROMPT token, which is already
+                // known — sampling it would cost a full-vocabulary pass per
+                // chunk and draw from this lane's RNG, making the reply depend
+                // on how the prompt happened to be split.
+                let first = if last {
+                    let logits = self
+                        .session
+                        .last_logits()
+                        .ok_or_else(|| "solo prefill produced no logits".to_string())?
+                        .to_vec();
                     let params = self.params_for(lane);
                     let sampler = self.sampler_for(lane);
                     sampler
                         .sample_logits(&logits, params)
                         .map_err(|e| format!("lane {lane} sample: {e}"))?
+                } else {
+                    0
                 };
                 self.solo_native = true;
                 events.extend(self.scheduler.on_prefilled(lane, tokens.len(), first));
@@ -863,6 +880,7 @@ impl LaneExecutor {
                 start,
                 tokens,
                 resumed,
+                last,
             } => {
                 let _ = resumed;
                 let logits = self
@@ -871,11 +889,15 @@ impl LaneExecutor {
                     .map_err(|e| format!("lane {lane} prefill: {e}"))?;
                 // A lane's stream is seeded once, when it is admitted, and
                 // carried for the whole generation.
-                let params = self.params_for(lane);
-                let sampler = self.sampler_for(lane);
-                let first = sampler
-                    .sample_logits(&logits, params)
-                    .map_err(|e| format!("lane {lane} sample: {e}"))?;
+                let first = if last {
+                    let params = self.params_for(lane);
+                    let sampler = self.sampler_for(lane);
+                    sampler
+                        .sample_logits(&logits, params)
+                        .map_err(|e| format!("lane {lane} sample: {e}"))?
+                } else {
+                    0
+                };
                 events.extend(self.scheduler.on_prefilled(lane, tokens.len(), first));
             }
             LaneStep::Decode { plan, .. }
@@ -1469,6 +1491,27 @@ mod tests {
         }
         assert_eq!(offered, prompt, "every token goes in, once, in order");
         assert_eq!(starts, vec![0, 8, 16], "each chunk resumes where the last stopped");
+    }
+
+    #[test]
+    fn only_the_last_chunk_of_a_prefill_is_asked_for_a_token() {
+        // A middle chunk's logits predict the next PROMPT token, which is
+        // already known. Sampling one costs a full-vocabulary pass per chunk
+        // and DRAWS FROM THE LANE'S RNG — which would make a conversation's
+        // reply depend on how its prompt happened to be split, and a chunk
+        // size is not something a chat should be able to feel.
+        let mut sched = scheduler(2, 4).with_prefill_chunk(4);
+        let prompt: Vec<i32> = (0..10).collect();
+        sched.submit(request(1, &prompt, 4)).expect("submit");
+        let mut lasts = Vec::new();
+        for _ in 0..3 {
+            let LaneStep::Prefill { lane, tokens, last, .. } = sched.next_step() else {
+                break;
+            };
+            lasts.push(last);
+            sched.on_prefilled(lane, tokens.len(), 700);
+        }
+        assert_eq!(lasts, vec![false, false, true], "only the final chunk");
     }
 
     #[test]
