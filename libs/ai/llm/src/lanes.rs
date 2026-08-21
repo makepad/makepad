@@ -48,6 +48,13 @@ pub struct LaneRequest {
     /// for a solo-lane prefix hit.
     pub reset_first: bool,
     pub max_new: usize,
+    /// Sampling settings for THIS request.
+    ///
+    /// Per-request, not per-executor: temperature and seed belong to the
+    /// caller, and two chats sharing one setting would silently sample with
+    /// each other's — the same shared-state bug class as the recurrent row and
+    /// the carry ring, one level up.
+    pub sampling: crate::LlamaSamplingParams,
 }
 
 /// A lane that has been admitted.
@@ -345,6 +352,14 @@ impl LaneScheduler {
             .unwrap_or(true)
     }
 
+    /// Sampling settings for whoever holds `lane`.
+    pub fn sampling_for(&self, lane: usize) -> Option<crate::LlamaSamplingParams> {
+        self.lanes
+            .get(lane)
+            .and_then(|l| l.as_ref())
+            .map(|slot| slot.request.sampling)
+    }
+
     /// Tokens `lane` still owes its caller.
     pub fn remaining(&self, lane: usize) -> usize {
         self.lanes
@@ -445,10 +460,20 @@ pub struct LaneExecutor {
 pub const SOLO_LANE: usize = 0;
 
 impl LaneExecutor {
+    /// Sampling settings for whoever holds `lane`, falling back to the
+    /// executor's default when the lane is unclaimed.
+    fn params_for(&self, lane: usize) -> crate::LlamaSamplingParams {
+        self.scheduler.sampling_for(lane).unwrap_or(self.params)
+    }
+
+    /// The lane's RNG stream, seeded ONCE from its own request's seed.
+    ///
+    /// Seeded per lane rather than per executor so two chats with the same
+    /// seed still get their own stream, and a chat's stream does not depend on
+    /// which lane it happened to land in.
     fn sampler_for(&mut self, lane: usize) -> &mut crate::LlamaSamplerState {
-        let params = self.params;
-        self.samplers[lane]
-            .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed ^ (lane as u64 + 1)))
+        let seed = self.params_for(lane).seed;
+        self.samplers[lane].get_or_insert_with(|| crate::LlamaSamplerState::new(seed))
     }
 
     pub fn new(
@@ -503,7 +528,7 @@ impl LaneExecutor {
                     .last_logits()
                     .ok_or_else(|| "handover with no logits to sample".to_string())?
                     .to_vec();
-                let params = self.params;
+                let params = self.params_for(SOLO_LANE);
                 let sampler = self.sampler_for(SOLO_LANE);
                 sampler
                     .sample_logits(&logits, params)
@@ -535,7 +560,7 @@ impl LaneExecutor {
                     .ok_or_else(|| "solo prefill produced no logits".to_string())?
                     .to_vec();
                 let first = {
-                    let params = self.params;
+                    let params = self.params_for(lane);
                     let sampler = self.sampler_for(lane);
                     sampler
                         .sample_logits(&logits, params)
@@ -557,11 +582,10 @@ impl LaneExecutor {
                     .map_err(|e| format!("lane {lane} prefill: {e}"))?;
                 // A lane's stream is seeded once, when it is admitted, and
                 // carried for the whole generation.
-                let sampler = self.samplers[lane].get_or_insert_with(|| {
-                    crate::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
-                });
+                let params = self.params_for(lane);
+                let sampler = self.sampler_for(lane);
                 let first = sampler
-                    .sample_logits(&logits, self.params)
+                    .sample_logits(&logits, params)
                     .map_err(|e| format!("lane {lane} sample: {e}"))?;
                 self.scheduler.on_prefilled(lane, tokens.len(), first);
             }
@@ -574,7 +598,7 @@ impl LaneExecutor {
                 // keeps its cancel and streaming boundaries.
                 let want = CHUNK_TOKENS.min(self.scheduler.remaining(SOLO_LANE)).max(1);
                 let generated = {
-                    let params = self.params;
+                    let params = self.params_for(SOLO_LANE);
                     let sampler = self.samplers[SOLO_LANE]
                         .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
                     self.session
@@ -594,12 +618,12 @@ impl LaneExecutor {
                 let mut sampled = Vec::with_capacity(rows.len());
                 for (row, step) in rows.iter().zip(&plan.slots) {
                     let lane = step.slot;
-                    let sampler = self.samplers[lane].get_or_insert_with(|| {
-                        crate::LlamaSamplerState::new(self.params.seed ^ (lane as u64 + 1))
-                    });
+                    let params = self.params_for(lane);
+                    let sampler = self.samplers[lane]
+                        .get_or_insert_with(|| crate::LlamaSamplerState::new(params.seed));
                     sampled.push(
                         sampler
-                            .sample_logits(row, self.params)
+                            .sample_logits(row, params)
                             .map_err(|e| format!("lane {lane} sample: {e}"))?,
                     );
                 }
@@ -637,6 +661,7 @@ mod tests {
             prompt_tokens: prompt.to_vec(),
             reset_first: true,
             max_new,
+            sampling: crate::LlamaSamplingParams::default(),
         }
     }
 
@@ -954,6 +979,31 @@ mod tests {
         // An unclaimed lane defaults to resetting: safer to re-ingest than to
         // decode on top of whatever a previous conversation left behind.
         assert!(sched.reset_requested(1));
+    }
+
+    #[test]
+    fn each_lane_samples_with_its_own_settings() {
+        // Temperature and seed belong to the caller. Two chats sharing one
+        // setting would silently sample with each other's — the same
+        // shared-state class as the recurrent row and the carry ring.
+        let mut sched = scheduler(2, 4);
+        let mut hot = request(1, &[1], 4);
+        hot.sampling.temperature = 1.3;
+        hot.sampling.seed = 111;
+        let mut cold = request(2, &[1], 4);
+        cold.sampling.temperature = 0.0;
+        cold.sampling.seed = 222;
+        sched.submit(hot).expect("submit");
+        sched.submit(cold).expect("submit");
+        sched.admit_pending();
+
+        let a = sched.sampling_for(0).expect("lane 0 params");
+        let b = sched.sampling_for(1).expect("lane 1 params");
+        assert_eq!(a.temperature, 1.3);
+        assert_eq!(a.seed, 111);
+        assert_eq!(b.temperature, 0.0);
+        assert_eq!(b.seed, 222);
+        assert!(sched.sampling_for(9).is_none(), "no lane, no settings");
     }
 
     #[test]
