@@ -457,40 +457,59 @@ impl LlmBackend {
         }
     }
 
-    /// Runs one expansion; `on_token(k, max)` fires per decode chunk,
-    /// `on_text` receives prefix-stable full-text snapshots (real path
-    /// only) and `cancel` is checked between chunks.
-    fn expand(
-        &mut self,
-        job: &ExpandJob,
-        cancel: &CancelToken,
-        on_token: &mut dyn FnMut(u32, u32),
-        on_stage: &mut dyn FnMut(&str),
-        on_text: &mut dyn FnMut(&str),
-    ) -> Result<String, AssetAiError> {
-        match &mut self.generator {
-            Generator::Stub(generate) => {
-                cancel.check()?;
-                let _ = (&on_token, &on_stage, &on_text);
-                generate(job)
-            }
-            #[cfg(feature = "llm")]
-            Generator::Llama(worker) => {
-                let worker = worker.as_ref().ok_or_else(|| {
-                    AssetAiError::Backend("llm backend used before ensure_loaded".to_string())
-                })?;
-                worker
-                    .expand(job.clone(), cancel.clone(), on_token, on_stage, on_text)
-                    .map_err(|e| {
-                        if e == "cancelled" {
-                            AssetAiError::Cancelled
-                        } else {
-                            AssetAiError::Backend(format!("llm: {e}"))
-                        }
-                    })
-            }
+}
+
+/// Runs one expansion; `on_token(k, max)` fires per decode chunk, `on_text`
+/// receives prefix-stable full-text snapshots (real path only) and `cancel` is
+/// checked between chunks.
+///
+/// Takes the generator rather than the backend so the caller can hold `&mut`
+/// on one field instead of the whole struct.
+fn expand_with(
+    generator: &mut Generator,
+    job: &ExpandJob,
+    cancel: &CancelToken,
+    on_token: &mut dyn FnMut(u32, u32),
+    on_stage: &mut dyn FnMut(&str),
+    on_text: &mut dyn FnMut(&str),
+) -> Result<String, AssetAiError> {
+    match generator {
+        Generator::Stub(generate) => {
+            cancel.check()?;
+            let _ = (&on_token, &on_stage, &on_text);
+            generate(job)
+        }
+        #[cfg(feature = "llm")]
+        Generator::Llama(worker) => {
+            let worker = worker.as_ref().ok_or_else(|| {
+                AssetAiError::Backend("llm backend used before ensure_loaded".to_string())
+            })?;
+            expand_through(worker, job, cancel, on_token, on_stage, on_text)
         }
     }
+}
+
+/// The worker call itself, shared by the `&mut self` path and the concurrent
+/// handle. `&LlamaWorker` is all it needs: the session lives on its own thread
+/// and this only posts to it.
+#[cfg(feature = "llm")]
+fn expand_through(
+    worker: &llama_worker::LlamaWorker,
+    job: &ExpandJob,
+    cancel: &CancelToken,
+    on_token: &mut dyn FnMut(u32, u32),
+    on_stage: &mut dyn FnMut(&str),
+    on_text: &mut dyn FnMut(&str),
+) -> Result<String, AssetAiError> {
+    worker
+        .expand(job.clone(), cancel.clone(), on_token, on_stage, on_text)
+        .map_err(|e| {
+            if e == "cancelled" {
+                AssetAiError::Cancelled
+            } else {
+                AssetAiError::Backend(format!("llm: {e}"))
+            }
+        })
 }
 
 impl ContentBackend for LlmBackend {
@@ -576,6 +595,107 @@ impl ContentBackend for LlmBackend {
         on_text: &mut dyn FnMut(&str),
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        let model_id = self.model_id.clone();
+        let prompts_dir = self.prompts_dir.clone();
+        let generator = &mut self.generator;
+        llm_generate_streamed(
+            &model_id,
+            prompts_dir.as_deref(),
+            &mut |job, cancel, on_token, on_stage, on_text| {
+                expand_with(generator, job, cancel, on_token, on_stage, on_text)
+            },
+            params,
+            progress,
+            on_text,
+            cancel,
+        )
+    }
+
+    /// A resident LLM can serve several turns at once — that is the whole
+    /// point of the lane session — so it hands out a handle and lets the
+    /// caller drop the backend registry lock before generating.
+    ///
+    /// Only when the worker is actually up. Before `ensure_loaded` there is
+    /// nothing to talk to, and a handle that answers "used before
+    /// ensure_loaded" to every turn would be worse than admitting there is no
+    /// concurrent path yet.
+    ///
+    /// The stub generator deliberately gets none: it is an `FnMut` owned by
+    /// one backend object, and pretending otherwise would make a test path
+    /// claim a concurrency the real one has to honour.
+    #[cfg(feature = "llm")]
+    fn concurrent(&self) -> Option<Box<dyn crate::backend::ConcurrentBackend>> {
+        match &self.generator {
+            Generator::Llama(Some(worker)) => Some(Box::new(LlmConcurrent {
+                model_id: self.model_id.clone(),
+                prompts_dir: self.prompts_dir.clone(),
+                worker: worker.clone(),
+            })),
+            _ => None,
+        }
+    }
+}
+
+/// One turn's view of a resident LLM: everything `llm_generate_streamed` needs
+/// and nothing that has to be locked.
+///
+/// Cloned per caller rather than shared, because the channel to the session
+/// thread is `Send` but not `Sync`.
+#[cfg(feature = "llm")]
+struct LlmConcurrent {
+    model_id: String,
+    prompts_dir: Option<PathBuf>,
+    worker: llama_worker::LlamaWorker,
+}
+
+#[cfg(feature = "llm")]
+impl crate::backend::ConcurrentBackend for LlmConcurrent {
+    fn generate_streamed(
+        &self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        llm_generate_streamed(
+            &self.model_id,
+            self.prompts_dir.as_deref(),
+            &mut |job, cancel, on_token, on_stage, on_text| {
+                expand_through(&self.worker, job, cancel, on_token, on_stage, on_text)
+            },
+            params,
+            progress,
+            on_text,
+            cancel,
+        )
+    }
+}
+
+/// The LLM generation body, free of `self`.
+///
+/// Extracted so the two entry points cannot drift: `LlmBackend` runs it
+/// through `&mut self` (the stub generator needs that), and the concurrent
+/// handle runs it through a cloned worker channel with no lock held. Both
+/// build the same prompt, honour the same think-budget floors, apply the same
+/// identity-anchor checks and emit the same artifacts, because it is the same
+/// code — a second copy would be one refusal or one floor out of date within a
+/// release.
+#[allow(clippy::too_many_arguments)]
+fn llm_generate_streamed(
+    model_id: &str,
+    prompts_dir: Option<&Path>,
+    expand: &mut dyn FnMut(
+        &ExpandJob,
+        &CancelToken,
+        &mut dyn FnMut(u32, u32),
+        &mut dyn FnMut(&str),
+        &mut dyn FnMut(&str),
+    ) -> Result<String, AssetAiError>,
+    params: &GenerateParams,
+    progress: ProgressSink,
+    on_text: &mut dyn FnMut(&str),
+    cancel: &CancelToken,
+) -> Result<Vec<ArtifactData>, AssetAiError> {
         let is_chat = params.target_domain == "chat";
         if params.prompt.trim().is_empty() {
             return Err(AssetAiError::Backend(if is_chat {
@@ -601,7 +721,7 @@ impl ContentBackend for LlmBackend {
             let system = format!(
                 "Target domain: {}.\n\n{}",
                 params.target_domain,
-                system_prompt_for(&params.target_domain, self.prompts_dir.as_deref())
+                system_prompt_for(&params.target_domain, prompts_dir)
             );
             let mut user = String::new();
             if !params.identity_anchor.trim().is_empty() {
@@ -625,7 +745,7 @@ impl ContentBackend for LlmBackend {
                     role: "user".to_string(),
                     text: user,
                 }],
-                crate::protocol::think_prefill_for_model(&self.model_id),
+                crate::protocol::think_prefill_for_model(model_id),
             )
         };
 
@@ -655,12 +775,12 @@ impl ContentBackend for LlmBackend {
                 // chat budget is spent inside the open think and the reply
                 // truncates to nothing.
                 max_tokens: if is_chat {
-                    if crate::protocol::model_uses_open_think(&self.model_id) {
+                    if crate::protocol::model_uses_open_think(model_id) {
                         params.max_tokens.max(128)
                     } else {
                         params.max_tokens
                     }
-                } else if crate::protocol::model_uses_open_think(&self.model_id) {
+                } else if crate::protocol::model_uses_open_think(model_id) {
                     params.max_tokens.max(512)
                 } else {
                     params.max_tokens
@@ -711,7 +831,7 @@ impl ContentBackend for LlmBackend {
                 }
             };
             let raw =
-                self.expand(&job, cancel, &mut on_token, &mut on_stage, &mut on_text_variant)?;
+                expand(&job, cancel, &mut on_token, &mut on_stage, &mut on_text_variant)?;
             let text = if is_chat {
                 raw
             } else {
@@ -743,7 +863,7 @@ impl ContentBackend for LlmBackend {
         }];
         if expansions.len() > 1 {
             let json = VariantsJson {
-                model: self.model_id.clone(),
+                model: model_id.to_string(),
                 target_domain: params.target_domain.clone(),
                 intent: params.prompt.clone(),
                 variants: expansions,
@@ -756,7 +876,20 @@ impl ContentBackend for LlmBackend {
         }
         progress("done", 1.0);
         Ok(artifacts)
-    }
+}
+
+/// Chat lanes this box is configured for.
+///
+/// The service reads it to size the chat admission class and the number of
+/// chat workers, so the store, the workers and the session all agree on one
+/// number instead of three places computing it. Available without the `llm`
+/// feature — a build with no LLM simply has one lane and no chat jobs.
+pub fn configured_lane_count() -> usize {
+    std::env::var("MAKEPAD_ASSET_AI_LLM_LANES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 8)
 }
 
 // ---------------------------------------------------------------------------
@@ -789,11 +922,7 @@ mod llama_worker {
     /// A box-level decision (VRAM and card), so it is an env knob rather than
     /// a per-request one: `MAKEPAD_ASSET_AI_LLM_LANES`.
     fn lane_count() -> usize {
-        std::env::var("MAKEPAD_ASSET_AI_LLM_LANES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1)
-            .clamp(1, 8)
+        super::configured_lane_count()
     }
 
     /// Context each lane may hold. The arena is `lanes * this`, so the total
@@ -1056,6 +1185,10 @@ mod llama_worker {
     /// session is built and used only on that thread; this handle is Send.
     /// The thread — and the resident weights — live for as long as the
     /// backend instance, which the server worker keeps across jobs.
+    /// Clone is a second handle to the SAME resident session, not a second
+    /// session: the struct is one channel to the thread that owns the weights.
+    /// That is what lets several turns be in flight at once.
+    #[derive(Clone)]
     pub struct LlamaWorker {
         tx: mpsc::Sender<WorkerMsg>,
     }

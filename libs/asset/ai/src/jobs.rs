@@ -318,6 +318,21 @@ impl JobStore {
         Ok(id)
     }
 
+    /// Models with a job RUNNING on them right now, in either class.
+    ///
+    /// Eviction reads this and refuses. With one admission class it could not
+    /// happen — the only running job was the one asking to load. With two, a
+    /// heavy job admitting itself can otherwise tear down the model a chat
+    /// turn is decoding through, and the turn dies with "llm worker dropped
+    /// the reply" for a reason that has nothing to do with it.
+    pub fn running_models(&self) -> Vec<String> {
+        self.running_heavy
+            .iter()
+            .chain(self.running_chat.iter())
+            .filter_map(|id| self.jobs.get(id).map(|job| job.model.clone()))
+            .collect()
+    }
+
     /// The admission class a job was submitted into.
     pub fn class_of(&self, id: &str) -> JobClass {
         self.class.get(id).copied().unwrap_or(JobClass::Heavy)
@@ -696,7 +711,7 @@ impl SharedJobs {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn params(model: &str) -> JobParams {
@@ -715,7 +730,7 @@ mod tests {
         })
     }
 
-    fn generate_params(model: &str) -> GenerateParams {
+    pub(crate) fn generate_params(model: &str) -> GenerateParams {
         GenerateParams {
             model: model.to_string(),
             prompt: "p".to_string(),

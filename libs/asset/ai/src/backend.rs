@@ -1040,6 +1040,26 @@ impl<'a> BackendCtx<'a> {
     }
 }
 
+/// Generation that does not need the backend registry.
+///
+/// Handed out by [`ContentBackend::concurrent`] under the registry lock and
+/// used after it is released, so several generations of the same resident
+/// model can run at once while residency itself stays serialised.
+///
+/// `&self`, deliberately: anything reachable through this handle must already
+/// be safe to drive from several turns at once. For the LLM that is true
+/// because the session lives on its own thread and every turn talks to it over
+/// a channel — the handle is a sender, not the session.
+pub trait ConcurrentBackend: Send {
+    fn generate_streamed(
+        &self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError>;
+}
+
 pub trait ContentBackend: Send {
     fn model_id(&self) -> &str;
 
@@ -1104,6 +1124,32 @@ pub trait ContentBackend: Send {
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
         let _ = on_text;
         self.generate(params, progress, cancel)
+    }
+
+    /// A handle that can run this backend's generation **without holding the
+    /// backend registry**.
+    ///
+    /// The registry is one map behind one lock because residency is a
+    /// whole-device decision: admitting a model may evict another, and two
+    /// threads each keeping their own map would each believe they owned the
+    /// GPU. But `generate_streamed` takes `&mut self` and runs for the whole
+    /// generation, so holding that lock across it would serialise everything
+    /// the map protects — which is the "one GPU, one job" rule the class split
+    /// exists to lift.
+    ///
+    /// A backend that can genuinely run several generations at once returns a
+    /// handle here. The handle is taken under the lock and used after it is
+    /// released, so residency stays serialised and generation does not.
+    ///
+    /// `None` (the default, and the honest answer for every backend that owns
+    /// a single GPU context) means "generate me through `&mut self`", i.e.
+    /// exactly today's behaviour.
+    ///
+    /// Returned **owned** rather than shared: the LLM handle is an
+    /// `mpsc::Sender`, which is `Send` but not `Sync`, so each caller needs its
+    /// own clone rather than a reference to one.
+    fn concurrent(&self) -> Option<Box<dyn ConcurrentBackend>> {
+        None
     }
 
     /// Live-session capability (see [`LiveConfig`] / `crate::realtime`).

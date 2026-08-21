@@ -44,6 +44,9 @@ pub struct ServiceHandle {
     pub http_thread: JoinHandle<()>,
     pub route_thread: JoinHandle<()>,
     pub worker_thread: JoinHandle<()>,
+    /// One per chat lane. They take from the chat admission class only, so a
+    /// chat turn never waits on the heavy worker and vice versa.
+    pub chat_threads: Vec<JoinHandle<()>>,
     /// Machine-wide Windows singleton plus the per-cache-dir lock. Hold this
     /// for the life of the daemon (main.rs never drops its handle). Dropping
     /// the handle releases both locks (tests rely on that for restarts).
@@ -205,6 +208,15 @@ pub struct ServiceShared {
     /// `BinaryMessage`/`TextMessage`/`DisconnectWebSocket` (which only carry
     /// the socket id) can find the right session.
     pub ws_sessions: Mutex<HashMap<u64, String>>,
+    /// The resident backends, shared by every worker thread.
+    ///
+    /// One map behind one lock because **residency is a whole-device
+    /// decision**: admitting a model may evict another, and two threads each
+    /// keeping their own map would each believe they owned the GPU and would
+    /// evict out from under one another. The lock is held for preparation,
+    /// admission and load — never for generation, which runs through
+    /// [`crate::backend::ConcurrentBackend`] with the lock released.
+    pub backends: Mutex<HashMap<String, Box<dyn ContentBackend>>>,
 }
 
 pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
@@ -295,6 +307,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         peer,
         realtime_sessions: Mutex::new(HashMap::new()),
         ws_sessions: Mutex::new(HashMap::new()),
+        backends: Mutex::new(HashMap::new()),
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
     // fleet-file edit. Frontends keep only beacons whose fleet matches.
@@ -319,11 +332,36 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let worker_shared = shared.clone();
     let worker_thread = std::thread::spawn(move || worker_loop(worker_shared));
 
+    // One chat worker per lane. The store admits exactly this many chat turns,
+    // so the two numbers are the same number by construction rather than by
+    // two places agreeing: a worker with no lane to decode in would sit in the
+    // session's queue where the job protocol cannot see it, and a lane with no
+    // worker to feed it is capacity nobody can reach.
+    //
+    // None at one lane: nothing is ever admitted into the chat class there
+    // (see `route_post`), so a worker would be a thread that only ever times
+    // out. A box that has not opted into lanes stays exactly as it was.
+    let chat_lanes = crate::llm_backend::configured_lane_count();
+    let chat_lanes = if chat_lanes > 1 { chat_lanes } else { 0 };
+    shared
+        .jobs
+        .with(|store| store.set_chat_slots(chat_lanes.max(1)));
+    let chat_threads: Vec<JoinHandle<()>> = (0..chat_lanes)
+        .map(|index| {
+            let chat_shared = shared.clone();
+            std::thread::Builder::new()
+                .name(format!("asset-ai-chat-{index}"))
+                .spawn(move || chat_worker_loop(chat_shared))
+                .expect("spawn chat worker")
+        })
+        .collect();
+
     Ok(ServiceHandle {
         addr,
         http_thread,
         route_thread,
         worker_thread,
+        chat_threads,
         singleton,
     })
 }
@@ -585,7 +623,32 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
     if let Err(e) = validate_loras_for_backend(&spec.backend, &params.loras) {
         return error_json(400, e.to_string());
     }
-    match shared.jobs.submit(JobParams::Generate(params), policy) {
+    // Admission class. Chat rides the lane worker, which serves several turns
+    // from one resident model, so those turns admit alongside each other and
+    // alongside heavy work. Everything else keeps one-at-a-time.
+    //
+    // `pull_only` is HEAVY even for the llm backend: it downloads and verifies
+    // gigabytes and never reaches a lane, so admitting it as chat would let a
+    // pull occupy a lane slot a conversation is waiting for.
+    //
+    // And only on a box configured for lanes. At one lane there is nothing to
+    // batch, so the only thing the split would buy is running a chat turn
+    // CONCURRENTLY with a heavy generation on a GPU sized for one of them —
+    // a VRAM decision an operator should opt into, not one a default should
+    // make. `MAKEPAD_ASSET_AI_LLM_LANES` unset therefore keeps exactly today's
+    // behaviour, everywhere.
+    let class = if spec.backend == "llm"
+        && !params.pull_only
+        && crate::llm_backend::configured_lane_count() > 1
+    {
+        crate::jobs::JobClass::Chat
+    } else {
+        crate::jobs::JobClass::Heavy
+    };
+    match shared
+        .jobs
+        .submit_as(JobParams::Generate(params), policy, class)
+    {
         Ok(job_id) => ok_json(
             GenerateResponseJson {
                 job_id: Some(job_id),
@@ -861,18 +924,54 @@ fn model_revision(spec: &ModelSpec) -> Option<String> {
 // Worker: executes one job at a time, keeps backends alive across jobs
 // ---------------------------------------------------------------------------
 
-fn worker_loop(shared: Arc<ServiceShared>) {
-    let mut backends: HashMap<String, Box<dyn ContentBackend>> = HashMap::new();
+/// The chat admission class: one turn per lane, all of them in flight at once.
+///
+/// It runs the SAME `execute_job` as the heavy worker. The whole difference is
+/// which class it takes from — and that `execute_job` releases the backend
+/// registry before generating whenever the backend hands out a concurrent
+/// handle, which the resident LLM does and nothing else does.
+///
+/// It never sweeps for idle eviction. Retiring a resident is the heavy
+/// worker's business, and a chat worker doing it between turns could evict the
+/// model its own next turn needs.
+fn chat_worker_loop(shared: Arc<ServiceShared>) {
     loop {
-        let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
-            idle_evict_sweep(&shared, &mut backends);
+        let Some(job_id) = shared
+            .jobs
+            .wait_take_next_of(crate::jobs::JobClass::Chat, Duration::from_millis(500))
+        else {
             continue;
         };
         let is_live = shared.jobs.with(|store| store.is_live(&job_id));
         let result = if is_live {
-            execute_live_job(&shared, &mut backends, &job_id)
+            // A live session owns the device frame by frame; it is not a chat
+            // turn and must not have been admitted here.
+            Err(AssetAiError::Backend(
+                "a live session cannot run in the chat admission class".to_string(),
+            ))
         } else {
-            execute_job(&shared, &mut backends, &job_id)
+            execute_job(&shared, &job_id)
+        };
+        match result {
+            Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
+            Err(AssetAiError::Cancelled) => shared.jobs.with(|store| store.cancelled(&job_id)),
+            Err(e) => shared.jobs.with(|store| store.fail(&job_id, e.to_string())),
+        }
+        apply_finished_retention(&shared);
+    }
+}
+
+fn worker_loop(shared: Arc<ServiceShared>) {
+    loop {
+        let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
+            idle_evict_sweep(&shared);
+            continue;
+        };
+        let is_live = shared.jobs.with(|store| store.is_live(&job_id));
+        let result = if is_live {
+            execute_live_job(&shared, &job_id)
+        } else {
+            execute_job(&shared, &job_id)
         };
         match result {
             Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
@@ -906,14 +1005,11 @@ fn apply_finished_retention(shared: &Arc<ServiceShared>) {
 /// residents that have not served anything for the configured window are
 /// retired so a quiet box returns its VRAM. Pins are exempt — that is what
 /// a pin means.
-fn idle_evict_sweep(
-    shared: &Arc<ServiceShared>,
-    backends: &mut HashMap<String, Box<dyn ContentBackend>>,
-) {
+fn idle_evict_sweep(shared: &Arc<ServiceShared>) {
     let Some(window) = shared.residency.idle_evict else {
         return;
     };
-    let idle: Vec<String> = {
+    let idle: Vec<String> = with_backends(shared, |backends| {
         let last_used = shared.last_used.lock().unwrap();
         backends
             .iter()
@@ -927,19 +1023,37 @@ fn idle_evict_sweep(
             })
             .map(|(model_id, _)| model_id.clone())
             .collect()
-    };
+    });
     for model_id in idle {
         eprintln!("residency: idle-evicting {model_id}");
-        match evict_resident(shared, backends, &model_id, &mut |_| {}) {
+        // Re-taken per model rather than held across the sweep: an unload can
+        // be slow, and a chat turn waiting to LOAD behind an eviction of a
+        // model it does not care about is the queue this whole change removes.
+        let result = with_backends(shared, |backends| {
+            evict_resident(shared, backends, &model_id, &mut |_| {})
+        });
+        match result {
             Ok(()) => {}
             Err(e) => eprintln!("residency: idle-evict {model_id} failed: {e}"),
         }
     }
 }
 
+/// Take the shared backend registry for the duration of `f`.
+///
+/// Everything that touches residency runs in here: constructing a backend,
+/// preparing artifacts, admitting a load, evicting, unloading. Generation does
+/// NOT — see `ConcurrentBackend`.
+fn with_backends<R>(
+    shared: &ServiceShared,
+    f: impl FnOnce(&mut HashMap<String, Box<dyn ContentBackend>>) -> R,
+) -> R {
+    let mut guard = shared.backends.lock().unwrap();
+    f(&mut guard)
+}
+
 fn execute_job(
     shared: &Arc<ServiceShared>,
-    backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     job_id: &str,
 ) -> Result<Vec<ArtifactRefJson>, AssetAiError> {
     let params = match shared.jobs.with(|store| store.take_params(job_id)) {
@@ -972,9 +1086,12 @@ fn execute_job(
     // Backend construction is required only to select a backend-specific
     // artifact converter and MUST remain cheap. Resident model state belongs
     // exclusively to ensure_loaded below; pull_only never reaches it.
-    if !backends.contains_key(&spec.id) {
-        backends.insert(spec.id.clone(), create_backend(&spec)?);
-    }
+    with_backends(shared, |backends| -> Result<(), AssetAiError> {
+        if !backends.contains_key(&spec.id) {
+            backends.insert(spec.id.clone(), create_backend(&spec)?);
+        }
+        Ok(())
+    })?;
     // Load (may download). Per-file byte progress is aggregated across the
     // registry file list into the model tracker, and mirrored into the job
     // as a "download" stage fraction.
@@ -1045,12 +1162,12 @@ fn execute_job(
         cancel: &cancel,
         progress: &mut load_progress,
     };
-    let prepare = {
+    let prepare = with_backends(shared, |backends| {
         let backend = backends.get_mut(&spec.id).unwrap();
         backend
             .prepare_artifacts(&mut ctx)
             .map(|()| backend.is_resident())
-    };
+    });
     match prepare {
         Ok(resident) => set_model_state(
             shared,
@@ -1094,7 +1211,9 @@ fn execute_job(
     // Disk artifacts remain Ready, so switching back is a warm-from-disk
     // load, not a pull. See crate::residency for the policy contract.
     cancel.check()?;
-    admit_for_load(shared, backends, &spec, job_id, &cancel)?;
+    with_backends(shared, |backends| {
+        admit_for_load(shared, backends, &spec, job_id, &cancel)
+    })?;
     cancel.check()?;
     shared
         .last_used
@@ -1107,9 +1226,14 @@ fn execute_job(
     // fallback: the second failure is the job's explicit error.
     let mut oom_retried = false;
     let generated: Vec<crate::backend::ArtifactData> = loop {
-        let load_error = {
+        // Load under the lock; GENERATE outside it. `concurrent()` is taken
+        // here, while the registry is still held, and used after it is
+        // released — that is the whole seam. A backend that returns None keeps
+        // exactly today's behaviour: generation re-takes the lock and holds it
+        // for the duration, so the device stays one-job-at-a-time for it.
+        let (load_error, concurrent) = with_backends(shared, |backends| {
             let backend = backends.get_mut(&spec.id).unwrap();
-            match backend.ensure_loaded(&mut ctx) {
+            let error = match backend.ensure_loaded(&mut ctx) {
                 Ok(()) => {
                     let resident = backend.is_resident();
                     set_model_state(
@@ -1127,15 +1251,19 @@ fn execute_job(
                     let _ = backend.unload();
                     Some(e)
                 }
-            }
-        };
+            };
+            let concurrent = if error.is_none() { backend.concurrent() } else { None };
+            (error, concurrent)
+        });
         if let Some(error) = load_error {
             if !oom_retried
                 && residency::error_is_oom(&error)
                 && residency::fresh_free_mb().is_some()
             {
                 oom_retried = true;
-                oom_evict_all_others(shared, backends, &spec.id, job_id, &error)?;
+                with_backends(shared, |backends| {
+                    oom_evict_all_others(shared, backends, &spec.id, job_id, &error)
+                })?;
                 continue;
             }
             set_model_state(
@@ -1155,7 +1283,6 @@ fn execute_job(
         cancel.check()?;
 
         let gen_result = {
-            let backend = backends.get_mut(&spec.id).unwrap();
             let gen_shared = shared.clone();
             let gen_job = job_id.to_string();
             let mut progress_sink = move |stage: &str, progress: f64| {
@@ -1173,55 +1300,67 @@ fn execute_job(
                     .jobs
                     .with(|store| store.set_partial_text(&text_job, text));
             };
-            backend.generate_streamed(&params, &mut progress_sink, &mut text_sink, &cancel)
+            match &concurrent {
+                Some(handle) => {
+                    handle.generate_streamed(&params, &mut progress_sink, &mut text_sink, &cancel)
+                }
+                None => with_backends(shared, |backends| {
+                    let backend = backends.get_mut(&spec.id).unwrap();
+                    backend.generate_streamed(
+                        &params,
+                        &mut progress_sink,
+                        &mut text_sink,
+                        &cancel,
+                    )
+                }),
+            }
         };
         match gen_result {
             Ok(artifacts) => {
-                let backend = backends.get_mut(&spec.id).unwrap();
-                if let Err(error) = cancel.check() {
-                    if !backend.resident_is_healthy_after_error(&error) {
-                        let _ = backend.unload();
+                let cancelled = cancel.check();
+                let resident = with_backends(shared, |backends| {
+                    let backend = backends.get_mut(&spec.id).unwrap();
+                    if let Err(error) = &cancelled {
+                        if !backend.resident_is_healthy_after_error(error) {
+                            let _ = backend.unload();
+                        }
                     }
-                    set_model_state(
-                        shared,
-                        &spec.id,
-                        if backend.is_resident() {
-                            ModelTrack::Loaded
-                        } else {
-                            ModelTrack::Ready
-                        },
-                    );
-                    return Err(error);
-                }
+                    backend.is_resident()
+                });
                 set_model_state(
                     shared,
                     &spec.id,
-                    if backend.is_resident() {
+                    if resident {
                         ModelTrack::Loaded
                     } else {
                         ModelTrack::Ready
                     },
                 );
+                cancelled?;
                 break artifacts;
             }
             Err(error) => {
-                {
+                with_backends(shared, |backends| {
                     let backend = backends.get_mut(&spec.id).unwrap();
                     if !backend.resident_is_healthy_after_error(&error) {
                         let _ = backend.unload();
                     }
-                }
+                });
                 if !oom_retried
                     && !matches!(error, AssetAiError::Cancelled)
                     && residency::error_is_oom(&error)
                     && residency::fresh_free_mb().is_some()
                 {
                     oom_retried = true;
-                    oom_evict_all_others(shared, backends, &spec.id, job_id, &error)?;
+                    with_backends(shared, |backends| {
+                        oom_evict_all_others(shared, backends, &spec.id, job_id, &error)
+                    })?;
                     continue;
                 }
-                let backend = backends.get_mut(&spec.id).unwrap();
-                let state = if backend.is_resident() {
+                let resident = with_backends(shared, |backends| {
+                    backends.get_mut(&spec.id).unwrap().is_resident()
+                });
+                let state = if resident {
                     ModelTrack::Loaded
                 } else if matches!(error, AssetAiError::Cancelled) {
                     ModelTrack::Ready
@@ -1304,9 +1443,10 @@ fn execute_job(
 /// then fix up model residency state exactly like `execute_job` does.
 fn execute_live_job(
     shared: &Arc<ServiceShared>,
-    backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     job_id: &str,
 ) -> Result<Vec<ArtifactRefJson>, AssetAiError> {
+    let mut guard = shared.backends.lock().unwrap();
+    let backends = &mut *guard;
     let params = match shared.jobs.with(|store| store.take_params(job_id)) {
         Some(JobParams::Live(params)) => params,
         Some(JobParams::Generate(_)) => {
@@ -1527,10 +1667,21 @@ fn resident_others_lru(
     backends: &HashMap<String, Box<dyn ContentBackend>>,
     keep: &str,
 ) -> Vec<String> {
+    // A model with a job running on it is never a candidate. With one
+    // admission class this was true for free: the only running job was the one
+    // asking to load. With two classes a heavy job can admit itself while a
+    // chat turn is mid-reply, and evicting under it tears down the session the
+    // turn is talking to — the turn then fails with "llm worker dropped the
+    // reply", which names neither the eviction nor the job that caused it.
+    let busy = shared.jobs.with(|store| store.running_models());
     let last_used = shared.last_used.lock().unwrap();
     let mut out: Vec<(String, Option<Instant>)> = backends
         .iter()
-        .filter(|(model_id, backend)| model_id.as_str() != keep && backend.is_resident())
+        .filter(|(model_id, backend)| {
+            model_id.as_str() != keep
+                && backend.is_resident()
+                && !busy.iter().any(|running| running == *model_id)
+        })
         .map(|(model_id, _)| (model_id.clone(), last_used.get(model_id).copied()))
         .collect();
     out.sort_by(|a, b| match (a.1, b.1) {
@@ -1842,6 +1993,7 @@ mod lifecycle_tests {
             ),
             realtime_sessions: Mutex::new(HashMap::new()),
             ws_sessions: Mutex::new(HashMap::new()),
+            backends: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1851,6 +2003,56 @@ mod lifecycle_tests {
             loads: 0,
             generates: 0,
         })
+    }
+
+    /// The invariant that makes two admission classes on one GPU safe.
+    ///
+    /// With one class it held for free — the only running job was the one
+    /// asking to load. With two, a heavy job can admit itself while a chat
+    /// turn is mid-reply, and evicting under it tears down the session that
+    /// turn is talking to. The turn then fails with "llm worker dropped the
+    /// reply", which names neither the eviction nor the job that caused it.
+    #[test]
+    fn eviction_never_takes_a_model_with_a_job_running_on_it() {
+        let shared = fixture_shared(&[]);
+        let backends = HashMap::from([
+            ("busy".to_string(), fixture(true)),
+            ("idle".to_string(), fixture(true)),
+        ]);
+
+        // Nothing running: both are candidates, so the filter is not just
+        // rejecting everything.
+        let candidates = resident_others_lru(&shared, &backends, "keep");
+        assert!(candidates.contains(&"busy".to_string()));
+        assert!(candidates.contains(&"idle".to_string()));
+
+        // A turn running on "busy" takes it off the table, and only it.
+        let running = shared
+            .jobs
+            .with(|store| {
+                store.submit_as(
+                    crate::jobs::JobParams::Generate(crate::jobs::tests::generate_params("busy")),
+                    crate::jobs::QueuePolicy::Queue,
+                    crate::jobs::JobClass::Chat,
+                )
+            })
+            .expect("submit");
+        shared
+            .jobs
+            .with(|store| store.take_next_of(crate::jobs::JobClass::Chat));
+        let candidates = resident_others_lru(&shared, &backends, "keep");
+        assert!(
+            !candidates.contains(&"busy".to_string()),
+            "a model serving a turn must never be an eviction candidate"
+        );
+        assert!(
+            candidates.contains(&"idle".to_string()),
+            "and an idle resident must still be one"
+        );
+
+        // And it comes back the moment the turn ends.
+        shared.jobs.with(|store| store.finish(&running, Vec::new()));
+        assert!(resident_others_lru(&shared, &backends, "keep").contains(&"busy".to_string()));
     }
 
     #[test]
