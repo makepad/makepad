@@ -108,11 +108,39 @@ impl RasterScratch {
     }
 }
 
+/// Per-draw-call raster state the GPU backends put in the pipeline descriptor.
+#[derive(Clone, Copy)]
+pub struct RasterState {
+    /// Premultiplied source-over blending. Off for the data-pass colour
+    /// formats (`Bgra8NoBlend`, `Rf32`), where the fragment REPLACES the
+    /// destination because alpha is payload, not opacity.
+    pub blend: bool,
+    /// Whether fragments update the depth buffer.
+    pub depth_write: bool,
+    /// Clamp written components to [0,1] — what an 8-bit unorm attachment does
+    /// on a GPU. Float attachments (`RenderRf32`, `RenderRGBAf16/f32`) keep the
+    /// raw value, which is the whole point of using them.
+    pub clamp_unorm: bool,
+}
+
+impl Default for RasterState {
+    fn default() -> Self {
+        Self {
+            blend: true,
+            depth_write: true,
+            clamp_unorm: true,
+        }
+    }
+}
+
 /// Rasterize only a row range `[row_start, row_end)` of the framebuffer.
 /// `color`/`depth_buf` are row-contiguous slices sized `(row_end-row_start)*width`.
+#[allow(clippy::too_many_arguments)]
 pub fn rasterize_triangle_rows<F>(
     width: usize,
     height: usize,
+    viewport: (usize, usize),
+    state: RasterState,
     row_start: usize,
     row_end: usize,
     color: &mut [[f32; 4]],
@@ -146,8 +174,14 @@ pub fn rasterize_triangle_rows<F>(
         return;
     }
 
-    let w = width as f32;
-    let h = height as f32;
+    // The viewport is anchored at the target's top-left corner and may be
+    // smaller than the target itself (a `TextureSize::Fixed` attachment larger
+    // than the pass rect) — clip space maps onto it, not onto the whole buffer,
+    // exactly as `setViewport` does on the GPU backends.
+    let vp_w = viewport.0.min(width).max(1);
+    let vp_h = viewport.1.min(height).max(1);
+    let w = vp_w as f32;
+    let h = vp_h as f32;
 
     // Convert from clip space [-1,1] to screen space [0, width/height].
     let ndc_to_screen = |pos: &[f32; 4]| -> (f32, f32, f32) {
@@ -206,7 +240,12 @@ pub fn rasterize_triangle_rows<F>(
     let min_x = sx[0].min(sx[1]).min(sx[2]).floor().max(0.0) as i32;
     let min_y = sy[0].min(sy[1]).min(sy[2]).floor().max(row_start as f32) as i32;
     let max_x = sx[0].max(sx[1]).max(sx[2]).ceil().min(w - 1.0) as i32;
-    let max_y = sy[0].max(sy[1]).max(sy[2]).ceil().min(row_end as f32 - 1.0) as i32;
+    let max_y = sy[0]
+        .max(sy[1])
+        .max(sy[2])
+        .ceil()
+        .min(row_end as f32 - 1.0)
+        .min(h - 1.0) as i32;
 
     if max_x < min_x || max_y < min_y {
         return;
@@ -343,13 +382,29 @@ pub fn rasterize_triangle_rows<F>(
                 }
             };
 
-            // Premultiplied alpha blending (source-over)
+            let frag_color = if state.clamp_unorm {
+                [
+                    frag_color[0].clamp(0.0, 1.0),
+                    frag_color[1].clamp(0.0, 1.0),
+                    frag_color[2].clamp(0.0, 1.0),
+                    frag_color[3].clamp(0.0, 1.0),
+                ]
+            } else {
+                frag_color
+            };
             let src_a = frag_color[3];
-            let dst = color[index];
-            color[index] = blend_premul_src_over(frag_color, dst);
-            // Match common UI blending behavior: fully transparent pixels should
-            // not occlude subsequent geometry in depth.
-            if src_a > 0.02 {
+            if state.blend {
+                let dst = color[index];
+                color[index] = blend_premul_src_over(frag_color, dst);
+            } else {
+                // Blending disabled: a raw component write, alpha included.
+                color[index] = frag_color;
+            }
+            // Match common UI blending behavior: fully transparent pixels
+            // should not occlude subsequent geometry in depth. A data pass
+            // has no such convention — its alpha is payload, so every
+            // surviving fragment owns the depth slot.
+            if state.depth_write && (!state.blend || src_a > 0.02) {
                 depth_buf[index] = depth;
             }
         }
