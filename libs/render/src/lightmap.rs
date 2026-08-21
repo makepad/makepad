@@ -1040,6 +1040,54 @@ mod tests {
         }
     }
 
+    /// Source pin for the chart-edge lamp repair (the boundary-seam fix).
+    /// The AO charts place face edges exactly ON texel centers, so a tile's
+    /// outermost chart texel goes to whichever face wins the rasterization
+    /// tie — on a max edge that is the sub-texel vertical SKIRT, which
+    /// bakes ~0.43x the top face's lamp light into the very texel the top
+    /// face's edge samples at full weight: a hard dark line at every
+    /// static-static boundary crossing a pool (measured on the town plaza:
+    /// boundary row 38-55 against a ground-region truth of 89-128, and a
+    /// rendered step of 22 RGB units that the repair takes to <2). The
+    /// repair lives in DrawLmLampDilate: partial-coverage texels are
+    /// distrusted and rebuilt from the fully-covered interior, with a
+    /// keep-rule for texels within their neighbors' range (shadow edges
+    /// only the raw sample gets right) and a monotone guard so the
+    /// continuation never extrapolates across a shadow edge. This test
+    /// pins the pieces together so a refactor cannot silently drop one.
+    #[test]
+    fn the_lamp_dilate_distrusts_chart_edge_texels() {
+        let src = include_str!("shaders.rs");
+        let dilate = {
+            let start = src.find("mod.draw.DrawLmLampDilate").expect("dilate shader");
+            let end = src[start..].find("mod.draw.DrawLmEncode").expect("encode follows");
+            &src[start..start + end]
+        };
+        for needle in [
+            // the coverage tap and both trust gates
+            "cov_tex: texture_2d(float)",
+            "covf: fn(off: vec2) -> float",
+            "if self.covf(vec2(0.0, 0.0)) > 0.99 {",
+            // the keep-rule margin for dark-side-of-gradient texels
+            "if om >= minv * 0.85 {",
+            // the shadow-edge extrapolation guard
+            "if s2m >= sm * 0.5 {",
+        ] {
+            assert!(
+                dilate.contains(needle),
+                "DrawLmLampDilate lost its chart-edge repair piece: {needle}"
+            );
+        }
+        // The smooth pass must keep skipping partial texels, or it eats the
+        // repair back out (measured: a rebuilt 122 fell to 91).
+        assert_eq!(
+            dilate.matches("if self.covf(vec2(0.0, 0.0)) > 0.99 {").count() >= 1
+                && dilate.matches("covf").count() >= 4,
+            true,
+            "the smooth pass stopped consulting coverage"
+        );
+    }
+
     #[test]
     fn regions_never_overlap() {
         let want = vec![(64, 32), (128, 128), (4, 4), (500, 20), (20, 500)];
