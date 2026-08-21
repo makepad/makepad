@@ -1027,6 +1027,21 @@ impl SessionTools<'_> {
             return out;
         }
         out.push('\n');
+        // A generation session's *.generate tools are executed by the
+        // CONNECTED APP on its own fleet; the registered-operation list
+        // below is a different, optional path. Say so before the list —
+        // without it, a worker-less server's wall of "[UNAVAILABLE: the
+        // worker is currently offline]" talked the model out of generating
+        // anything at all, and it told the user it had no image tool.
+        if self.profile == ClientProfile::Gen {
+            out.push_str(
+                "The *.generate tools (image, video, audio, speech, music, mesh, world, \
+                 character) run on the CONNECTED APP's fleet and are AVAILABLE in this \
+                 session. The registered operations below are a separate, optional path \
+                 for deriving from an existing asset; their worker status never applies \
+                 to the generate tools.\n",
+            );
+        }
         match self.inner {
             Some(tools) => out.push_str(&tools.capability_doc()),
             None => out.push_str("Asset tools are not connected.\n"),

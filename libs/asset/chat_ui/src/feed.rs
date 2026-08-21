@@ -464,6 +464,8 @@ fn handle_event(
                 serving.and_then(|s| s.visible_tokens),
             );
             view.raw.push_str(&text);
+            // The porthole reads the think block as it arrives.
+            ChatData::set_thinking_text(&toolcall::split_thinking(&view.raw).thinking);
             let visible = toolcall::strip_marker(&view.raw);
             if visible.trim().is_empty() {
                 // The box streams its hidden-reasoning progress before any

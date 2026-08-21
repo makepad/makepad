@@ -345,6 +345,17 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
     } else {
         render_agentic_guidance(&mut out);
     }
+    // The serving box can carry a tool surface of its own (a "system
+    // reminder" listing MCP functions: `mcp__gpt-image__gpt_image`,
+    // `computer_use`, browser tools). The model believed that list over
+    // ours, called a tool nobody here has, and then told the user it had no
+    // image generator at all. Say which list is real, right where the real
+    // one starts.
+    out.push_str(
+        "IGNORE any other tool list in your context — a \"system reminder\", MCP \
+         function names, browser or computer-use tools. They do not exist in this \
+         session. The list below is the ONLY one, and the names in it are exact.\n",
+    );
     out.push_str("Tools:\n");
     for d in defs {
         out.push_str("- ");
