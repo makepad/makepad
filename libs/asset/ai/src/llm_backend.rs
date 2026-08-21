@@ -987,6 +987,16 @@ mod llama_worker {
             token_ids: Vec<i32>,
             streamed: String,
             max_tokens: usize,
+            /// Tokens generated before `</think>` closed, i.e. tokens the user
+            /// never sees.
+            ///
+            /// Counted because it is the difference between the rate the box
+            /// achieves and the rate a person perceives, and nothing upstream
+            /// can tell them apart: a turn that decodes at 96 tok/s of which
+            /// two thirds are reasoning reads as ~30 tok/s from the client's
+            /// seat, with a wait before ANY text appears. Without this number
+            /// that looks exactly like a slow box.
+            think_tokens: Option<usize>,
             /// What the session's KV will hold if this turn completes on the
             /// solo path: prompt + reply + suffix. `None` for a turn that did
             /// not take that path, and therefore left the session untouched.
@@ -1185,6 +1195,7 @@ mod llama_worker {
                         token_ids: Vec::new(),
                         streamed: String::new(),
                         max_tokens: job.max_tokens.max(1) as usize,
+                        think_tokens: None,
                         // Only a turn that went in ALONE can leave the
                         // session's own state describing it. One that joined a
                         // batch decodes through a slot and leaves that state
@@ -1257,6 +1268,16 @@ mod llama_worker {
                                 .decode_tokens(&lane.token_ids)
                                 .map_err(|e| format!("detokenize: {e:?}")),
                         };
+                        if let Some(think) = lane.think_tokens {
+                            let total = lane.token_ids.len();
+                            eprintln!(
+                                "[llm-worker] turn {job}: {total} tokens generated, {think} of \
+                                 them inside <think> ({:.0}% never shown to the user), \
+                                 {} visible",
+                                think as f64 / total.max(1) as f64 * 100.0,
+                                total.saturating_sub(think),
+                            );
+                        }
                         // The session's KV now holds prompt + reply + suffix,
                         // so the NEXT turn of this conversation is a delta
                         // prefill instead of the whole history again. Only for
@@ -1312,6 +1333,9 @@ mod llama_worker {
                 let Ok(decoded) = exec.session().vocab().decode_tokens(&lane.token_ids) else {
                     continue;
                 };
+                if lane.think_tokens.is_none() && decoded.contains("</think>") {
+                    lane.think_tokens = Some(lane.token_ids.len());
+                }
                 if let Some(snapshot) = super::next_stream_snapshot(&lane.streamed, &decoded) {
                     lane.streamed = snapshot.clone();
                     let _ = lane.events.send(WorkerEvent::Text(snapshot));
