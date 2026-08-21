@@ -8066,13 +8066,24 @@ mod shadow_sdf_sidecar_tests {
         assert!(Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, None, &sun).is_some());
         // Wrong hash: rejected.
         assert!(Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, Some(78), &sun).is_none());
-        // A different sun (the noon-vs-evening case): rejected — its
-        // len_per_unit is baked into the projection.
+        // A MILDLY different sun (an authored time_of_day): loads — the
+        // instance build stretches the window by the length ratio
+        // (play-session-1 entry 18; exact matching starved the whole tier).
+        let mild =
+            SunLight { dir: vec3f(0.45, 0.70, 0.46).normalize(), ..SunLight::default() };
+        assert!(
+            Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, Some(77), &mild).is_some()
+        );
+        // A WILDLY different sun (near-noon vs the low bake): outside the
+        // 0.2-5x stretch band — rejected; a smeared stretch is worse than
+        // the blob.
         let other = SunLight { dir: vec3f(0.1, 0.95, 0.1).normalize(), ..SunLight::default() };
         assert!(
             Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, Some(77), &other).is_none()
         );
-        // Stale: sidecar older than the glb — rejected.
+        // Stale mtime rejects only an UNKEYED load (checkout files). A
+        // keyed load trusts the hash: the store cache writes both files at
+        // arbitrary times, and write ordering must not cost the shadows.
         let older = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
         std::fs::File::options()
             .write(true)
@@ -8080,7 +8091,8 @@ mod shadow_sdf_sidecar_tests {
             .unwrap()
             .set_modified(older)
             .unwrap();
-        assert!(Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, Some(77), &sun).is_none());
+        assert!(Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, None, &sun).is_none());
+        assert!(Renderer::load_shadow_sdf_sidecar(&sidecar, &glb, Some(77), &sun).is_some());
         // Missing either file: rejected, never a panic.
         assert!(Renderer::load_shadow_sdf_sidecar(
             &dir.join("absent.shadowsdf"),
