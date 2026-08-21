@@ -3933,6 +3933,12 @@ pub struct App {
     pending_filter: Option<String>,
     #[rust]
     filter_timer: Timer,
+    /// Search-row text (music / sfx / mesh) waiting for the same idle
+    /// debounce — typing queries the catalog, no button press needed.
+    #[rust]
+    pending_search: Option<(Surface, String)>,
+    #[rust]
+    search_timer: Timer,
     #[rust]
     video_pump: NextFrame,
     /// Finished decodes the operator is WAITING for (the clicked cue, a
@@ -10496,7 +10502,15 @@ impl MatchEvent for App {
         ];
         for (surface, search, category, go, more) in rows {
             let mut cmds = Vec::new();
+            // As-you-type, like the video filter above: the query fires
+            // after a short idle; Enter (and the button) fire at once.
+            if let Some(text) = self.ui.text_input(cx, search).changed(actions) {
+                self.pending_search = Some((surface, text));
+                cx.stop_timer(self.search_timer);
+                self.search_timer = cx.start_timeout(FILTER_DEBOUNCE_S);
+            }
             if let Some((text, _)) = self.ui.text_input(cx, search).returned(actions) {
+                self.pending_search = None;
                 cmds.extend(self.model(surface).set_text(text.trim().to_string()));
             }
             if let Some((text, _)) = self.ui.text_input(cx, category).returned(actions) {
@@ -11120,6 +11134,12 @@ impl AppMain for App {
             if let Some(text) = self.pending_filter.take() {
                 let cmds = self.model(Surface::Video).set_text(text.trim().to_string());
                 self.run_cat_cmds(Surface::Video, cmds);
+            }
+        }
+        if self.search_timer.is_event(event).is_some() {
+            if let Some((surface, text)) = self.pending_search.take() {
+                let cmds = self.model(surface).set_text(text.trim().to_string());
+                self.run_cat_cmds(surface, cmds);
             }
         }
         if self.refresh_timer.is_event(event).is_some() {
