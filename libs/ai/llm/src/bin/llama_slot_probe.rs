@@ -183,9 +183,11 @@ fn main() {
         Ok(lanes) => println!("PASS: {lanes} lanes batched, streams match stepped-alone"),
         Err(e) => {
             eprintln!("FAIL (cross-width): {e}");
-            eprintln!(
-                "  NOTE: this gate compares width B against width 1, and the shipped Q8_1 mmvq\n                   route is NOT bit-identical across widths. Re-run with MKLLM_DISABLE_Q81_MMVQ=1\n                   BEFORE concluding cross-lane bleed. If it passes there, this is the width\n                   finding, not batching. Gate 4 below is width-invariant and does not have\n                   this ambiguity."
-            );
+            eprintln!("  NOTE: this gate compares batch width B against width 1, and the");
+            eprintln!("  shipped Q8_1 mmvq route is NOT bit-identical across widths.");
+            eprintln!("  Re-run with MKLLM_DISABLE_Q81_MMVQ=1 BEFORE concluding cross-lane");
+            eprintln!("  bleed. If it passes there, this is the width finding, not batching.");
+            eprintln!("  Gate 4 is width-invariant and does not have this ambiguity.");
             std::process::exit(1);
         }
     }
@@ -421,6 +423,13 @@ fn batched_interleave(
 
     // Batched pass: a fresh session so no state carries over, all lanes
     // prefilled, then decoded TOGETHER one step at a time.
+    //
+    // Drop the reference session FIRST. Shadowing it would keep it alive to the
+    // end of the block, and each session owns its own device copy of the
+    // weights — two live 15 GB sessions do not fit on a 32 GB card, and the
+    // failure would be an OOM in the gate rather than anything about batching.
+    drop(session);
+    drop(table);
     let mut session = build_session(model, slots, per_slot_context)?;
     let mut table = session.new_slot_table().map_err(|e| e.to_string())?;
     let mut next_token = Vec::with_capacity(lanes);
