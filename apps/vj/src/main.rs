@@ -3933,10 +3933,11 @@ pub struct App {
     pending_filter: Option<String>,
     #[rust]
     filter_timer: Timer,
-    /// Search-row text (music / sfx / mesh) waiting for the same idle
-    /// debounce — typing queries the catalog, no button press needed.
+    /// Search-row input (music / sfx / mesh, text or category box) waiting
+    /// for the same idle debounce — typing queries the catalog, no button
+    /// press needed.
     #[rust]
-    pending_search: Option<(Surface, String)>,
+    pending_search: Option<(Surface, SearchBox, String)>,
     #[rust]
     search_timer: Timer,
     #[rust]
@@ -3963,6 +3964,13 @@ const EVENT_REFRESH_COOLDOWN_S: f64 = 3.0;
 /// Idle time after the last keystroke before the pad filter re-queries the
 /// server. Short enough to feel live, long enough not to search per key.
 const FILTER_DEBOUNCE_S: f64 = 0.3;
+
+/// Which box of a search row a debounced keystroke belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchBox {
+    Text,
+    Category,
+}
 
 impl App {
     fn model(&mut self, surface: Surface) -> &mut BrowseModel {
@@ -10505,7 +10513,12 @@ impl MatchEvent for App {
             // As-you-type, like the video filter above: the query fires
             // after a short idle; Enter (and the button) fire at once.
             if let Some(text) = self.ui.text_input(cx, search).changed(actions) {
-                self.pending_search = Some((surface, text));
+                self.pending_search = Some((surface, SearchBox::Text, text));
+                cx.stop_timer(self.search_timer);
+                self.search_timer = cx.start_timeout(FILTER_DEBOUNCE_S);
+            }
+            if let Some(text) = self.ui.text_input(cx, category).changed(actions) {
+                self.pending_search = Some((surface, SearchBox::Category, text));
                 cx.stop_timer(self.search_timer);
                 self.search_timer = cx.start_timeout(FILTER_DEBOUNCE_S);
             }
@@ -10514,6 +10527,7 @@ impl MatchEvent for App {
                 cmds.extend(self.model(surface).set_text(text.trim().to_string()));
             }
             if let Some((text, _)) = self.ui.text_input(cx, category).returned(actions) {
+                self.pending_search = None;
                 cmds.extend(self.model(surface).set_category(text.trim().to_string()));
             }
             if self.ui.button(cx, go).clicked(actions) {
@@ -11137,8 +11151,12 @@ impl AppMain for App {
             }
         }
         if self.search_timer.is_event(event).is_some() {
-            if let Some((surface, text)) = self.pending_search.take() {
-                let cmds = self.model(surface).set_text(text.trim().to_string());
+            if let Some((surface, field, text)) = self.pending_search.take() {
+                let text = text.trim().to_string();
+                let cmds = match field {
+                    SearchBox::Text => self.model(surface).set_text(text),
+                    SearchBox::Category => self.model(surface).set_category(text),
+                };
                 self.run_cat_cmds(surface, cmds);
             }
         }
