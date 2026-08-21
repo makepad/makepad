@@ -615,7 +615,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         match decoder.next_frame() {
             Ok(Some(frame)) => {
                 let cached = push_frame(&shared, frame, &mut rgb_scratch);
-                if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::PingPong
+                if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::Once
                     && !pingpong_over_budget
                     && !pingpong_cache_complete
                 {
@@ -642,14 +642,15 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     pingpong_cache_complete = true;
                 }
                 let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
-                if mode == PlayMode::PingPong && pingpong_cache_complete {
-                    // The whole clip is in memory: bounce it until the mode
-                    // changes, a seek lands, or the slot stops. Returns to
-                    // the decoder path when it exits.
-                    pingpong_playback(&shared, &pingpong_cache);
-                    // Playback exited: a seek is pending, the mode changed,
-                    // or the slot stops — the ordinary paths below all
-                    // handle those; the cache survives for a later bounce.
+                let silent = !info.has_audio || shared.muted.load(Ordering::Acquire);
+                if mode != PlayMode::Once && pingpong_cache_complete && silent {
+                    // The whole clip is in memory and nothing needs the
+                    // audio decoder: repeat it straight from the cache —
+                    // end to start with no decoder reopen, which is what
+                    // used to hiccup every wrap. Loop plays forward and
+                    // wraps; ping-pong bounces. Returns to the decoder
+                    // path when a seek lands or the mode changes.
+                    cache_playback(&shared, &pingpong_cache);
                     continue;
                 }
                 let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
@@ -748,11 +749,14 @@ fn push_frame(
     out
 }
 
-/// Bounce a fully cached clip: forward then backward, endpoints not
-/// repeated, pts synthesized monotonically so the pacing clock never sees
-/// time run backwards. Exits when the mode leaves PingPong, a seek lands,
-/// or the slot stops — the decoder path takes over again.
-fn pingpong_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
+/// Repeat a fully cached clip without ever touching the decoder again:
+/// Loop wraps end to start, PingPong bounces (endpoints not repeated), and
+/// switching between the two mid-play is seamless because the direction is
+/// read from the live mode every frame. pts are synthesized monotonically
+/// so the pacing clock never sees time run backwards. Exits when the mode
+/// goes to Once, a seek lands, or the slot stops — the decoder path takes
+/// over again.
+fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     if cache.len() < 2 {
         return;
     }
@@ -762,7 +766,6 @@ fn pingpong_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
     let delta = deltas[deltas.len() / 2].max(1);
     let mut synth_pts = cache.last().map(|f| f.pts_100ns).unwrap_or(0);
     let n = cache.len();
-    // Index walk: n-2 .. 0, then 1 .. n-1, repeating.
     let mut idx = n - 1;
     let mut forward = false;
     loop {
@@ -772,7 +775,8 @@ fn pingpong_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
             return;
         }
-        if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) != PlayMode::PingPong {
+        let mode = PlayMode::from_u8(shared.mode.load(Ordering::Acquire));
+        if mode == PlayMode::Once {
             return;
         }
         if shared.paused.load(Ordering::Acquire) {
@@ -783,7 +787,10 @@ fn pingpong_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
-        if forward {
+        if mode == PlayMode::Loop {
+            forward = true;
+            idx = (idx + 1) % n;
+        } else if forward {
             if idx + 1 >= n {
                 forward = false;
                 continue;
@@ -1074,7 +1081,15 @@ pub enum DecodeJob {
     /// Same prep, destined for a program slot (A/B overlay).
     /// Same prep for a program slot; `world` marks a walkable level, which
     /// the slot presents at authored scale instead of on a turntable.
-    SlotMesh { gen: u64, slot: usize, path: PathBuf, world: bool },
+    SlotMesh {
+        gen: u64,
+        slot: usize,
+        path: PathBuf,
+        world: bool,
+        /// The body that will walk it, when it is a world — the SAME one the
+        /// nav grid is built with here, so the graph and the legs agree.
+        cfg: Option<makepad_render::level::WalkerConfig>,
+    },
     /// Decode a still (PNG/JPEG) for a program slot.
     Still { gen: u64, slot: usize, path: PathBuf },
     /// Local `.billboard` manifest with one PNG per frame beside it.
@@ -1144,6 +1159,10 @@ pub enum PreparedMesh {
         model: Box<makepad_render::StaticModel>,
         base_color: Option<Vec<u8>>,
         level: Option<Box<makepad_render::level::LevelCollision>>,
+        /// The config the nav grid below was built with. The walker MUST be
+        /// given this one: a graph probed with one body and walked by
+        /// another offers steps the legs refuse.
+        nav_cfg: Option<makepad_render::level::WalkerConfig>,
         /// Walkable-cell graph over the whole map, so the tour plans routes
         /// instead of scoring the twelve headings in front of its nose.
         /// Tens of thousands of probes: worker work, never a frame's.
@@ -1221,13 +1240,14 @@ pub const CLIP_PREFERENCE: [&str; 4] = ["dance", "idle", "walk", "run"];
 fn build_level(
     model: &makepad_render::StaticModel,
     glb: &[u8],
+    cfg: &makepad_render::level::WalkerConfig,
 ) -> (
     Option<Box<makepad_render::level::LevelCollision>>,
     Option<Box<makepad_render::level::NavGrid>>,
     Option<makepad_widgets::Vec3f>,
 ) {
     use makepad_render::level::{
-        surface_kinds_from_glb, LevelCollision, NavGrid, SurfaceKind, UpAxis, WalkerConfig,
+        surface_kinds_from_glb, LevelCollision, NavGrid, SurfaceKind, UpAxis,
     };
     use makepad_render::model::MODEL_VERTEX_FLOATS;
     // Every classic pack publishes Y-up (the importer converts).
@@ -1259,7 +1279,6 @@ fn build_level(
     };
     // The nav grid is the expensive part (a capsule probe per cell, a wall
     // probe per edge) and the reason this whole function is off-thread.
-    let cfg = WalkerConfig::default();
     let started = std::time::Instant::now();
     let nav = NavGrid::build(&level, &cfg);
     let (nx, nz) = nav.dims();
@@ -1295,7 +1314,10 @@ fn build_level(
     (Some(Box::new(level)), nav, start)
 }
 
-fn prepare_mesh(path: &PathBuf, world: bool) -> Result<Box<PreparedMesh>, String> {
+fn prepare_mesh(
+    path: &PathBuf,
+    world: Option<makepad_render::level::WalkerConfig>,
+) -> Result<Box<PreparedMesh>, String> {
     use makepad_render::skin::{SkinnedModel, SKIN_VERTEX_FLOATS};
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_MESH_BYTES {
@@ -1311,9 +1333,9 @@ fn prepare_mesh(path: &PathBuf, world: bool) -> Result<Box<PreparedMesh>, String
         Err(skin_error) => {
             let static_model = makepad_render::StaticModel::parse_glb(&glb)
                 .map_err(|e| format!("mesh parse failed: {e} (skinned: {skin_error})"))?;
-            let (level, nav, start) = match world {
-                true => build_level(&static_model, &glb),
-                false => (None, None, None),
+            let (level, nav, start) = match world.as_ref() {
+                Some(cfg) => build_level(&static_model, &glb, cfg),
+                None => (None, None, None),
             };
             // The SAME parse the renderer would have done on the UI thread:
             // it travels instead of the bytes.
@@ -1321,6 +1343,7 @@ fn prepare_mesh(path: &PathBuf, world: bool) -> Result<Box<PreparedMesh>, String
                 model: Box::new(static_model),
                 base_color,
                 level,
+                nav_cfg: world,
                 nav,
                 start,
             }));
@@ -1336,6 +1359,7 @@ fn prepare_mesh(path: &PathBuf, world: bool) -> Result<Box<PreparedMesh>, String
             base_color,
             level: None,
             nav: None,
+            nav_cfg: None,
             start: None,
         }));
     }
@@ -1936,11 +1960,11 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
             if let Some(delay) = test_sleep_marker(&path) {
                 std::thread::sleep(delay);
             }
-            let result = prepare_mesh(&path, false);
+            let result = prepare_mesh(&path, None);
             DecodeDone::MeshPrep { gen, result }
         }
-        DecodeJob::SlotMesh { gen, slot, path, world } => {
-            let result = prepare_mesh(&path, world);
+        DecodeJob::SlotMesh { gen, slot, path, world, cfg } => {
+            let result = prepare_mesh(&path, cfg.filter(|_| world));
             DecodeDone::SlotMesh { gen, slot, world, result }
         }
         DecodeJob::Still { gen, slot, path } => {
@@ -2334,7 +2358,7 @@ mod tests {
         // Mesh prep on garbage refuses too (worker-side, never the UI).
         let junk = dir.join("junk.glb");
         std::fs::write(&junk, b"gLTF-not-really").unwrap();
-        assert!(prepare_mesh(&junk, false).is_err());
+        assert!(prepare_mesh(&junk, None).is_err());
     }
 
     #[test]
