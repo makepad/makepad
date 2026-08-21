@@ -1381,6 +1381,14 @@ fn register_task_hooks(cx: &mut Cx) {
 /// Caps how many timers an isolate holds and how fast they may tick
 /// (`splash_limits`). The main app VM is not an isolate and is left alone:
 /// its script is the embedder's own.
+/// Charges a timer FIRE to the isolate that owns it, on top of whatever its
+/// callback then costs. A wakeup is not free even when the callback is empty.
+fn splash_charge_wakeup(cx: &mut Cx, heap_key: usize) {
+    if cx.global::<CxWidgetAsync>().heap_to_vm.contains_key(&heap_key) {
+        crate::splash_limits::charge_wakeup(heap_key);
+    }
+}
+
 fn splash_timer_admit_hook(cx: &mut Cx, heap_key: usize, requested_s: f64) -> Option<f64> {
     if !cx.global::<CxWidgetAsync>().heap_to_vm.contains_key(&heap_key) {
         return Some(requested_s);
@@ -1409,6 +1417,11 @@ fn script_timer_dispatch_hook(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptVa
         .copied();
     match vm_id {
         Some(vm_id) => {
+            // The wakeup itself is charged before the callback runs: the
+            // dispatch that got us here cost the host whether or not the
+            // script does anything, and an app that asks to be woken a
+            // thousand times a second should pay for it out of its own share.
+            splash_charge_wakeup(cx, heap_key);
             // Same budget/limit as any other isolate entry, so a runaway timer callback
             // can't hang the host.
             cx.with_script_vm_id(vm_id, |vm| {

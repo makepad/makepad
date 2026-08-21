@@ -52,18 +52,48 @@ use std::time::{Duration, Instant};
 /// The window every CPU decision is made over.
 const WINDOW: Duration = Duration::from_secs(1);
 
-/// What all mini-apps together may spend of a window before ANYONE is
-/// trimmed. Below this there is headroom, so limiting an isolate would slow
-/// it down without speeding anything else up.
+/// The frame interval the host is trying to hold, in seconds. Set by the
+/// embedder ([`set_frame_target`]); 60Hz until it says otherwise.
+const DEFAULT_FRAME_TARGET: f64 = 1.0 / 60.0;
+
+/// How far past the target the smoothed frame interval must drift before the
+/// system counts as contended. Frames are noisy, and trimming apps over a
+/// single late frame would be a controller chasing its own tail.
+const CONTENTION_FACTOR: f64 = 1.5;
+
+/// What one timer FIRE costs its isolate, beyond the script it then runs.
 ///
-/// Not 100%: the rest is the launcher's own — drawing, input, the frame it
-/// owes the user. An app going flat out should not be able to stop the
-/// window it is drawn in from being painted.
-const COLLECTIVE_BUDGET: Duration = Duration::from_millis(800);
+/// A wakeup is not free even when the callback is empty: the event reaches
+/// the app through a full dispatch pass before any script executes, and that
+/// pass is host cost the script-time accounting cannot see. Charging it is
+/// what makes a 1ms timer expensive to the app that asked for it — which is
+/// the honest version of the arbitrary "fastest timer" floor this replaced.
+/// An estimate, deliberately: measuring the pre-hook dispatch per timer costs
+/// more than the number is worth.
+const WAKEUP_COST: Duration = Duration::from_micros(250);
 
 /// Live heap slots ALL isolates together may hold before anyone is asked to
-/// give some back. A lone app may use the lot.
-const GLOBAL_HEAP_SLOTS: usize = 24_000_000;
+/// give some back, unless the host says otherwise ([`set_memory_pool`]). A
+/// lone app may use the lot.
+///
+/// A default rather than a truth: how much memory there is to share is
+/// something the embedder knows and this crate does not.
+const DEFAULT_HEAP_POOL: usize = 24_000_000;
+
+thread_local! {
+    static HEAP_POOL: std::cell::Cell<usize> = const { std::cell::Cell::new(DEFAULT_HEAP_POOL) };
+}
+
+/// How many live heap slots all isolates together may hold. The host sets
+/// this from what the machine actually has; the default is a guess and says
+/// so.
+pub fn set_memory_pool(slots: usize) {
+    HEAP_POOL.with(|p| p.set(slots.max(1)));
+}
+
+fn heap_pool() -> usize {
+    HEAP_POOL.with(|p| p.get())
+}
 
 /// Live script timers across every isolate before the pool starts rationing.
 const GLOBAL_TIMERS: u32 = 512;
@@ -111,9 +141,6 @@ pub struct SplashLimits {
     /// Live script timers it may hold (a sanity backstop; what those timers
     /// COST is already charged as CPU when their callbacks run).
     pub timers_max: u32,
-    /// Shortest interval/timeout it may ask for, in seconds. Also the floor a
-    /// nonsense value (negative, NaN, infinite) is clamped to.
-    pub min_timer_interval_s: f64,
     /// Concurrent in-flight HTTP requests it may hold.
     pub http_max: u32,
 }
@@ -128,9 +155,8 @@ impl Default for SplashLimits {
             entry_time_ms: 64,
             entry_instructions: 200_000,
             cpu_max_ms: None,
-            mem_max_slots: GLOBAL_HEAP_SLOTS,
+            mem_max_slots: DEFAULT_HEAP_POOL,
             timers_max: 256,
-            min_timer_interval_s: 0.016,
             http_max: 16,
         }
     }
@@ -149,9 +175,8 @@ impl SplashLimits {
             weight: 1,
             entry_time_ms: 16,
             timers_max: 64,
-            min_timer_interval_s: 0.1,
             // A tile has no business ballooning even on an idle system.
-            mem_max_slots: GLOBAL_HEAP_SLOTS / 3,
+            mem_max_slots: DEFAULT_HEAP_POOL / 3,
             http_max: 4,
             ..Self::default()
         }
@@ -167,9 +192,6 @@ pub enum SplashLimitKind {
     Cpu,
     /// Asked for more timers than it may hold.
     Timers,
-    /// Asked for a timer faster than the floor (the request was clamped, not
-    /// refused — a clamped timer is still a working app).
-    TimerInterval,
     /// Holding more heap than its share of a system that has run out, or more
     /// than its own backstop.
     Memory,
@@ -182,7 +204,6 @@ impl SplashLimitKind {
         match self {
             SplashLimitKind::Cpu => "cpu",
             SplashLimitKind::Timers => "timers",
-            SplashLimitKind::TimerInterval => "timer-interval",
             SplashLimitKind::Memory => "memory",
             SplashLimitKind::Network => "network",
         }
@@ -218,18 +239,77 @@ struct IsolateState {
     heap_pressure: u32,
 }
 
-/// The shared CPU window. One window for every isolate, or shares would not
-/// be comparable.
+/// The shared CPU window, plus how the frame is actually doing. One window
+/// for every isolate, or shares would not be comparable.
 struct CpuWindow {
     started: Instant,
     /// Wall-clock spent in script this window, per heap.
     spent: HashMap<usize, Duration>,
     total: Duration,
+    /// The interval the host wants to hold between frames.
+    frame_target: f64,
+    /// Smoothed frame interval, or `None` while nothing is drawing — which
+    /// is not contention, it is quiet.
+    frame_ema: Option<f64>,
+    /// How much of their slice apps are currently allowed, 0..1. Falls while
+    /// the frame is being missed and climbs back when it recovers, so apps
+    /// give up exactly as much as the launcher needs and no more. There is no
+    /// number here that anybody chose.
+    pressure: f64,
 }
 
 impl Default for CpuWindow {
     fn default() -> Self {
-        Self { started: Instant::now(), spent: HashMap::new(), total: Duration::ZERO }
+        Self {
+            started: Instant::now(),
+            spent: HashMap::new(),
+            total: Duration::ZERO,
+            frame_target: DEFAULT_FRAME_TARGET,
+            frame_ema: None,
+            pressure: 1.0,
+        }
+    }
+}
+
+impl CpuWindow {
+    /// Whether the thing that owns the frame is losing it.
+    ///
+    /// This is the whole contention signal, and it deliberately measures the
+    /// LAUNCHER rather than the apps. The launcher draws every app's pixels,
+    /// so if it cannot make its deadline nothing else on screen matters —
+    /// which is why it does not sit in the same weighted pool as the apps.
+    /// It is not given a reserved slice either: a reservation would be an
+    /// arbitrary tax whenever it has nothing to draw. It simply gets first
+    /// call, and apps are trimmed exactly when, and only while, it is short.
+    fn contended(&self) -> bool {
+        match self.frame_ema {
+            // Nothing is drawing. Nobody is being kept waiting.
+            None => false,
+            Some(ema) => ema > self.frame_target * CONTENTION_FACTOR,
+        }
+    }
+
+    fn note_frame(&mut self, interval_s: f64) {
+        if !interval_s.is_finite() || interval_s <= 0.0 {
+            return;
+        }
+        // A long gap means nothing was being drawn, not that a frame was
+        // late; and one slow frame should not be a verdict, so a sample's
+        // influence is capped as well as smoothed.
+        let sample = interval_s.min(self.frame_target * 3.0);
+        self.frame_ema = Some(match self.frame_ema {
+            None => sample,
+            Some(ema) => ema * 0.8 + sample * 0.2,
+        });
+        // Squeeze while the frame is being missed, release when it is not.
+        // The floor is there so a squeezed app still makes progress, and the
+        // ceiling is "not squeezed at all", which is where it sits whenever
+        // the launcher is keeping up.
+        self.pressure = if self.contended() {
+            (self.pressure * 0.9).max(0.15)
+        } else {
+            (self.pressure * 1.05).min(1.0)
+        };
     }
 }
 
@@ -281,10 +361,6 @@ impl CpuWindow {
         (mine as f64 / weights as f64, count)
     }
 
-    /// This heap's slice of the collective budget, by weight.
-    fn share_of(&self, heap_key: usize, states: &HashMap<usize, IsolateState>) -> Duration {
-        COLLECTIVE_BUDGET.mul_f64(self.share_fraction(heap_key, states).0)
-    }
 }
 
 thread_local! {
@@ -371,40 +447,33 @@ pub(crate) fn cpu_allowance(heap_key: usize) -> Option<Duration> {
         WINDOW_STATE.with(|w| {
             let mut w = w.borrow_mut();
             w.roll(now);
-            let mine = w.spent_by(heap_key);
-            let (fraction, active) = w.share_fraction(heap_key, &states);
-
-            // The trimmed slice. Two jobs at once: leave the launcher enough
-            // of the window to draw the frame this app is being drawn in, and
-            // keep the weights meaningful while doing it — a heavyweight over
-            // budget should still run faster than a lightweight over budget,
-            // or the weight stops mattering exactly when it matters most.
-            // `fraction * active` is 1.0 for an even split, so an even split
-            // gives everyone the same trim.
-            let scale = fraction * active.max(1) as f64;
-            let trimmed = (entry / 8)
-                .mul_f64(scale)
-                .max(Duration::from_millis(4))
-                .min(entry);
 
             // An absolute ceiling does not care who else is running, which is
             // exactly why it is off by default.
             if let Some(cap) = limits.cpu_max_ms {
-                if mine >= Duration::from_millis(cap) {
-                    return Some(trimmed);
+                if w.spent_by(heap_key) >= Duration::from_millis(cap) {
+                    return Some(Duration::from_millis(4).max(entry / 8));
                 }
             }
-            if over_share(
-                w.total.as_secs_f64(),
-                COLLECTIVE_BUDGET.as_secs_f64(),
-                mine.as_secs_f64(),
-                fraction,
-            ) {
-                return Some(trimmed);
+            // Frames are fine: nobody is waiting on anything, so trimming an
+            // app would slow it down for no one's benefit. This is the case
+            // for one app alone on an idle machine, and it is the common one.
+            if !w.contended() {
+                return Some(entry);
             }
-            // Either there is headroom or this isolate is inside its share:
-            // both mean trimming it would slow it down for nobody's benefit.
-            Some(entry)
+            // The launcher is losing its frame. Two things decide the slice:
+            // WEIGHT splits what the apps get between them, and PRESSURE says
+            // how much that is in total — it falls while frames are missed and
+            // climbs back when they recover, so apps give up as much as the
+            // launcher needs and no more. Note the two multiply, which is why
+            // one app alone is squeezed just as hard as five together: the
+            // fractions across competing apps sum to one either way.
+            let (fraction, _) = w.share_fraction(heap_key, &states);
+            Some(
+                entry
+                    .mul_f64(fraction * w.pressure)
+                    .max(Duration::from_millis(4)),
+            )
         })
     })
 }
@@ -412,31 +481,58 @@ pub(crate) fn cpu_allowance(heap_key: usize) -> Option<Duration> {
 /// Charges what an entry actually took against the shared window.
 pub(crate) fn charge_cpu(heap_key: usize, spent: Duration) {
     let now = Instant::now();
-    let (yielded, mine, share) = WINDOW_STATE.with(|w| {
+    let (report, mine, fraction) = WINDOW_STATE.with(|w| {
         let mut w = w.borrow_mut();
         w.roll(now);
         *w.spent.entry(heap_key).or_default() += spent;
         w.total += spent;
         let mine = w.spent_by(heap_key);
         let (fraction, _) = STATES.with(|s| w.share_fraction(heap_key, &s.borrow()));
-        let yielded = over_share(
-            w.total.as_secs_f64(),
-            COLLECTIVE_BUDGET.as_secs_f64(),
-            mine.as_secs_f64(),
-            fraction,
-        );
-        (yielded, mine, COLLECTIVE_BUDGET.mul_f64(fraction))
+        // Worth telling the host about only when it means something: frames
+        // are being missed AND this isolate is the one using more than its
+        // weight of what the apps are collectively taking.
+        let report = w.contended() && mine.as_secs_f64() > w.total.as_secs_f64() * fraction;
+        (report, mine, fraction)
     });
-    // Only worth telling the host about when it means something: the thread
-    // was full AND this isolate was the one over its share of it.
-    if yielded {
+    if report {
         record(
             heap_key,
             SplashLimitKind::Cpu,
             mine.as_millis() as u64,
-            share.as_millis() as u64,
+            (mine.as_millis() as f64 * fraction) as u64,
         );
     }
+}
+
+/// Charges one timer FIRE to its isolate.
+///
+/// A wakeup costs the host a dispatch pass whether or not the callback does
+/// anything, and that cost is invisible to script-time accounting. Charging
+/// it here is what makes a fast timer expensive to the app that asked for
+/// one — replacing an arbitrary floor on how fast a timer may tick with the
+/// actual price of ticking that fast.
+pub(crate) fn charge_wakeup(heap_key: usize) {
+    charge_cpu(heap_key, WAKEUP_COST);
+}
+
+/// Tells the accounting how the frame is doing. The host calls this once per
+/// rendered frame with the interval since the last one; without it, nothing
+/// is ever considered contended and no app is ever trimmed.
+pub fn note_frame(interval_s: f64) {
+    WINDOW_STATE.with(|w| w.borrow_mut().note_frame(interval_s));
+}
+
+/// Sets the frame interval the host is trying to hold (default 60Hz).
+pub fn set_frame_target(interval_s: f64) {
+    if interval_s.is_finite() && interval_s > 0.0 {
+        WINDOW_STATE.with(|w| w.borrow_mut().frame_target = interval_s);
+    }
+}
+
+/// Whether the frame is currently being missed — exposed so a host can show
+/// or log why apps are being trimmed.
+pub fn is_contended() -> bool {
+    WINDOW_STATE.with(|w| w.borrow().contended())
 }
 
 /// Instructions this isolate may execute in one entry.
@@ -454,14 +550,17 @@ pub(crate) fn entry_instructions(heap_key: usize) -> usize {
 /// reaches `Duration::from_secs_f64` on several platform backends, which
 /// panics — so it is clamped by the same path.
 pub(crate) fn admit_timer(heap_key: usize, requested_s: f64) -> Option<f64> {
-    let (refused, limits, held, allowed) = STATES.with(|s| {
+    let (refused, held, allowed) = STATES.with(|s| {
         let mut st = s.borrow_mut();
         st.entry(heap_key).or_default();
         let limits = st[&heap_key].limits;
         let held = st[&heap_key].timers;
-        // Timer slots are a pool like any other: while the system as a whole
-        // is nowhere near using them up, one app holding a lot of them costs
-        // nobody anything.
+        // Timer slots are a pool like any other: while the system is nowhere
+        // near using them up, one app holding a lot of them costs nobody
+        // anything. How FAST they tick is not rationed here at all — a wakeup
+        // is charged to the app's processor share when it fires, which is the
+        // price of ticking fast, rather than an arbitrary floor on how fast an
+        // app is allowed to want to.
         let pool: u32 = st.values().map(|v| v.timers).sum();
         let weights: u64 = st
             .values()
@@ -485,27 +584,16 @@ pub(crate) fn admit_timer(heap_key: usize, requested_s: f64) -> Option<f64> {
         if !refused {
             st.get_mut(&heap_key).unwrap().timers += 1;
         }
-        (refused, limits, held, allowed)
+        (refused, held, allowed)
     });
     if refused {
         record(heap_key, SplashLimitKind::Timers, held as u64 + 1, allowed);
         return None;
     }
-    let floor = limits.min_timer_interval_s;
-    let clamped = if requested_s.is_finite() && requested_s > floor {
-        requested_s
-    } else {
-        floor
-    };
-    if clamped != requested_s {
-        record(
-            heap_key,
-            SplashLimitKind::TimerInterval,
-            (requested_s.max(0.0) * 1000.0) as u64,
-            (floor * 1000.0) as u64,
-        );
-    }
-    Some(clamped)
+    // The interval itself passes through untouched. Platform still refuses a
+    // value that would panic a backend (negative, NaN, infinite) — that is a
+    // validity check, not a policy about how often an app may work.
+    Some(requested_s)
 }
 
 /// Gives back a timer slot when one is stopped or fires for the last time.
@@ -521,7 +609,7 @@ pub(crate) fn release_timer(heap_key: usize) {
 /// on holding it.
 ///
 /// Memory is shared the way CPU is: while every isolate together fits under
-/// [`GLOBAL_HEAP_SLOTS`], nobody is capped — a lone app on a quiet system may
+/// [`heap_pool()`], nobody is capped — a lone app on a quiet system may
 /// use all of it. Past that watermark the isolate holding more than its
 /// weighted share is the one reported, and its own backstop applies whatever
 /// else is happening.
@@ -551,10 +639,10 @@ pub(crate) fn check_heap(heap_key: usize, live_slots: usize) -> bool {
             .sum::<u64>()
             .max(limits.weight.max(1) as u64);
         let fraction = limits.weight.max(1) as f64 / weights as f64;
-        let share = (GLOBAL_HEAP_SLOTS as f64 * fraction) as usize;
+        let share = (heap_pool() as f64 * fraction) as usize;
         let over = over_share(
             total as f64,
-            GLOBAL_HEAP_SLOTS as f64,
+            heap_pool() as f64,
             live_slots as f64,
             fraction,
         );
@@ -639,117 +727,129 @@ mod tests {
         STATES.with(|s| s.borrow_mut().clear());
         WINDOW_STATE.with(|w| *w.borrow_mut() = CpuWindow::default());
         EVENTS.with(|e| e.borrow_mut().clear());
+        set_memory_pool(DEFAULT_HEAP_POOL);
     }
 
     fn full() -> Duration {
         Duration::from_millis(SplashLimits::default().entry_time_ms)
     }
 
-    // ---- the rule itself -------------------------------------------------
+    /// Frames arriving late enough, often enough, to count as contention.
+    fn frames_are_slipping() {
+        for _ in 0..20 {
+            note_frame(DEFAULT_FRAME_TARGET * 4.0);
+        }
+    }
 
-    /// Both halves are required. A full pool where everyone is inside their
-    /// share is a busy system working; an isolate over its share of a pool
-    /// with room to spare is costing nobody anything.
+    fn frames_are_fine() {
+        for _ in 0..20 {
+            note_frame(DEFAULT_FRAME_TARGET);
+        }
+    }
+
+    // ---- what contention even is ----------------------------------------
+
+    /// Nothing drawing is not contention. It is quiet.
     #[test]
-    fn nothing_yields_unless_the_pool_is_full_and_it_is_over() {
-        assert!(!over_share(50.0, 100.0, 50.0, 0.1), "room to spare, no matter who holds it");
-        assert!(!over_share(150.0, 100.0, 5.0, 0.5), "full, but this one is well inside its share");
-        assert!(over_share(150.0, 100.0, 80.0, 0.5), "full AND over: yield");
+    fn silence_is_not_contention() {
+        reset();
+        assert!(!is_contended(), "no frames, no complaint");
+        frames_are_fine();
+        assert!(!is_contended(), "frames on time, nobody is waiting");
+        frames_are_slipping();
+        assert!(is_contended(), "the launcher is losing its frame");
+    }
+
+    /// One late frame is not a verdict.
+    #[test]
+    fn a_single_slow_frame_does_not_trip_it() {
+        reset();
+        frames_are_fine();
+        note_frame(DEFAULT_FRAME_TARGET * 8.0);
+        assert!(!is_contended(), "frames are noisy; the signal is smoothed");
     }
 
     // ---- CPU -------------------------------------------------------------
 
-    /// The headline property: one mini-app on its own is never trimmed for
-    /// being the only one running.
+    /// The headline property: an app is limited by nothing while the machine
+    /// is keeping up, however much it uses.
     #[test]
-    fn one_app_alone_gets_the_machine() {
+    fn an_app_is_not_trimmed_while_the_frame_is_fine() {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
-        // Far more than any static per-app quota would ever have allowed.
-        for _ in 0..10 {
-            assert_eq!(cpu_allowance(A), Some(full()), "nothing to share with");
+        frames_are_fine();
+        for _ in 0..50 {
+            assert_eq!(cpu_allowance(A), Some(full()), "nobody is waiting on anything");
             charge_cpu(A, full());
         }
         assert!(take_limit_events().is_empty(), "it has crossed nothing by running");
     }
 
-    /// ...but the launcher still gets to draw: past the collective budget
-    /// even a lone app yields some of the window back.
+    /// And it is trimmed exactly when the launcher starts losing frames.
     #[test]
-    fn the_launcher_keeps_its_own_air() {
+    fn trimming_starts_when_frames_start_slipping() {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
-        let mut spent = Duration::ZERO;
-        while spent < COLLECTIVE_BUDGET {
-            charge_cpu(A, full());
-            spent += full();
-        }
-        assert!(cpu_allowance(A).unwrap() < full(), "a runaway is trimmed even alone");
+        frames_are_fine();
+        assert_eq!(cpu_allowance(A), Some(full()));
+        frames_are_slipping();
+        assert!(cpu_allowance(A).unwrap() < full(), "the launcher gets its frame back");
     }
 
-    /// Five equally-weighted apps, all busy, end up level with each other.
+    /// Five equally-weighted apps under contention get equal slices.
     #[test]
     fn five_apps_balance_out() {
         reset();
         let heaps = [1usize, 2, 3, 4, 5];
         for h in heaps {
             set_limits_for_heap(h, Some(SplashLimits::default()));
+            charge_cpu(h, Duration::from_millis(1));
         }
-        let mut spent = [Duration::ZERO; 5];
-        for _ in 0..100 {
-            for (i, h) in heaps.iter().enumerate() {
-                let slice = cpu_allowance(*h).unwrap();
-                charge_cpu(*h, slice);
-                spent[i] += slice;
-            }
-        }
-        let (min, max) = (spent.iter().min().unwrap(), spent.iter().max().unwrap());
-        assert!(
-            *max - *min < full(),
-            "five equals should stay level; got {min:?}..{max:?}"
-        );
-        // And they are actually being rationed rather than running free.
-        assert!(cpu_allowance(1).unwrap() < full());
+        frames_are_slipping();
+        let slices: Vec<_> = heaps.iter().map(|h| cpu_allowance(*h).unwrap()).collect();
+        let (min, max) = (slices.iter().min().unwrap(), slices.iter().max().unwrap());
+        assert_eq!(min, max, "five equals, five equal slices");
+        assert!(*max < full(), "and all of them trimmed");
     }
 
-    /// Weight is what decides who yields, and only while they compete.
+    /// Weight decides who yields, and by how much.
     #[test]
-    fn weight_decides_who_yields() {
-        reset();
-        set_limits_for_heap(A, Some(SplashLimits::default())); // weight 4
-        set_limits_for_heap(B, Some(SplashLimits::background())); // weight 1
-        // Both busy, window full, split evenly so far.
-        charge_cpu(A, COLLECTIVE_BUDGET.mul_f64(0.5));
-        charge_cpu(B, COLLECTIVE_BUDGET.mul_f64(0.5));
-        assert_eq!(cpu_allowance(A), Some(full()), "4/5 share: still inside it");
-        assert!(cpu_allowance(B).unwrap() < full(), "1/5 share: over it, yields");
-    }
-
-    /// A trimmed heavyweight still outruns a trimmed lightweight, or the
-    /// weight stops meaning anything exactly when it matters most.
-    #[test]
-    fn trimming_stays_proportional() {
+    fn weight_decides_the_split() {
         reset();
         set_limits_for_heap(A, Some(SplashLimits { weight: 16, ..Default::default() }));
         set_limits_for_heap(B, Some(SplashLimits { weight: 1, ..Default::default() }));
-        charge_cpu(A, COLLECTIVE_BUDGET);
-        charge_cpu(B, COLLECTIVE_BUDGET);
+        charge_cpu(A, Duration::from_millis(1));
+        charge_cpu(B, Duration::from_millis(1));
+        frames_are_slipping();
         let (a, b) = (cpu_allowance(A).unwrap(), cpu_allowance(B).unwrap());
-        assert!(a > b, "over budget, the heavyweight still gets the bigger slice: {a:?} vs {b:?}");
+        assert!(a > b, "the heavyweight keeps the bigger slice: {a:?} vs {b:?}");
     }
 
-    /// An idle isolate holds nothing back for anyone else.
+    /// A quiet app holds nothing back for anyone else.
     #[test]
     fn quiet_apps_do_not_shrink_anyone_elses_share() {
         reset();
         for h in [1usize, 2, 3, 4, 5] {
             set_limits_for_heap(h, Some(SplashLimits::default()));
         }
-        charge_cpu(1, COLLECTIVE_BUDGET.mul_f64(0.9));
-        assert_eq!(
-            cpu_allowance(1),
-            Some(full()),
-            "four registered-but-quiet apps must not cost the busy one its share"
+        charge_cpu(1, Duration::from_millis(50));
+        // Only just slipping: deep pressure would floor both slices and the
+        // comparison below would be measuring the floor, not the share.
+        frames_are_fine();
+        for _ in 0..4 {
+            note_frame(DEFAULT_FRAME_TARGET * 3.0);
+        }
+        // Same pressure either way, so this compares the SHARE and nothing
+        // else: with four idle neighbours the busy app has the thread to
+        // itself, and it only drops to a fifth once they are busy too.
+        let alone_among_idlers = cpu_allowance(1).unwrap();
+        for h in [2usize, 3, 4, 5] {
+            charge_cpu(h, Duration::from_millis(50));
+        }
+        let sharing = cpu_allowance(1).unwrap();
+        assert!(
+            sharing < alone_among_idlers / 4,
+            "idle neighbours must not count as competitors ({alone_among_idlers:?} -> {sharing:?})"
         );
     }
 
@@ -759,8 +859,21 @@ mod tests {
         reset();
         assert!(SplashLimits::default().cpu_max_ms.is_none(), "off by default");
         set_limits_for_heap(A, Some(SplashLimits { cpu_max_ms: Some(100), ..Default::default() }));
+        frames_are_fine();
         charge_cpu(A, Duration::from_millis(120));
-        assert!(cpu_allowance(A).unwrap() < full(), "a max does not care that the system is idle");
+        assert!(cpu_allowance(A).unwrap() < full(), "a max does not care that frames are fine");
+    }
+
+    /// A wakeup costs its isolate, which is what replaced the arbitrary floor
+    /// on how fast a timer may tick.
+    #[test]
+    fn a_wakeup_is_charged_to_whoever_asked_for_it() {
+        reset();
+        set_limits_for_heap(A, Some(SplashLimits::default()));
+        let before = WINDOW_STATE.with(|w| w.borrow().spent_by(A));
+        charge_wakeup(A);
+        let after = WINDOW_STATE.with(|w| w.borrow().spent_by(A));
+        assert!(after > before, "waking the machine is not free");
     }
 
     /// The window forgets: an app trimmed a second ago starts even.
@@ -768,9 +881,11 @@ mod tests {
     fn the_window_rolls() {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
-        charge_cpu(A, COLLECTIVE_BUDGET);
+        charge_cpu(A, Duration::from_millis(500));
         WINDOW_STATE.with(|w| w.borrow_mut().started = Instant::now() - WINDOW);
-        assert_eq!(cpu_allowance(A), Some(full()), "a new window is a clean start");
+        WINDOW_STATE.with(|w| assert!(w.borrow().spent_by(A) > Duration::ZERO));
+        cpu_allowance(A);
+        WINDOW_STATE.with(|w| assert!(w.borrow().spent_by(A).is_zero(), "clean start"));
     }
 
     // ---- memory ----------------------------------------------------------
@@ -781,8 +896,23 @@ mod tests {
     fn one_app_may_hold_the_memory_nobody_is_using() {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
-        assert!(check_heap(A, GLOBAL_HEAP_SLOTS / 2));
-        assert!(take_limit_events().is_empty(), "plenty spare, so nothing to report");
+        assert!(check_heap(A, heap_pool() / 2));
+        assert!(take_limit_events().is_empty(), "plenty spare, nothing to report");
+    }
+
+    /// The pool is the host's to size — this crate does not know how much
+    /// memory the machine has.
+    #[test]
+    fn the_host_sizes_the_memory_pool() {
+        reset();
+        set_memory_pool(1000);
+        set_limits_for_heap(A, Some(SplashLimits::default()));
+        set_limits_for_heap(B, Some(SplashLimits::default()));
+        check_heap(B, 400);
+        // A is over half of a 1000-slot pool that is now full.
+        assert!(check_heap(A, 900));
+        assert!(check_heap(A, 900));
+        assert!(!check_heap(A, 900), "pressure, then a verdict");
     }
 
     /// Over its share of a FULL system it gets pressure first, and is only
@@ -792,10 +922,9 @@ mod tests {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
         set_limits_for_heap(B, Some(SplashLimits::default()));
-        // Between them they have filled the pool; A holds far more.
-        check_heap(B, GLOBAL_HEAP_SLOTS / 4);
-        let hog = GLOBAL_HEAP_SLOTS;
-        assert!(check_heap(A, hog), "first collection over share: pressure, not a stop");
+        check_heap(B, heap_pool() / 4);
+        let hog = heap_pool();
+        assert!(check_heap(A, hog), "first collection over share: pressure");
         assert!(check_heap(A, hog), "second: still just pressure");
         assert!(!check_heap(A, hog), "third: it is not coming down");
         assert!(take_limit_events().iter().any(|e| e.kind == SplashLimitKind::Memory));
@@ -807,11 +936,11 @@ mod tests {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
         set_limits_for_heap(B, Some(SplashLimits::default()));
-        check_heap(B, GLOBAL_HEAP_SLOTS / 4);
-        assert!(check_heap(A, GLOBAL_HEAP_SLOTS));
+        check_heap(B, heap_pool() / 4);
+        assert!(check_heap(A, heap_pool()));
         assert!(check_heap(A, 1000), "back inside its share");
-        assert!(check_heap(A, GLOBAL_HEAP_SLOTS), "pressure starts over, not where it left off");
-        assert!(check_heap(A, GLOBAL_HEAP_SLOTS));
+        assert!(check_heap(A, heap_pool()), "pressure starts over, not where it left off");
+        assert!(check_heap(A, heap_pool()));
     }
 
     /// `memory.max`: its own backstop is absolute and immediate.
@@ -825,29 +954,25 @@ mod tests {
 
     // ---- timers and requests --------------------------------------------
 
+    /// An app may ask for any interval it likes; what it pays is the wakeups.
+    #[test]
+    fn intervals_are_not_second_guessed() {
+        reset();
+        set_limits_for_heap(A, Some(SplashLimits::default()));
+        assert_eq!(admit_timer(A, 0.001), Some(0.001), "1ms is the app's business");
+        assert_eq!(admit_timer(A, 30.0), Some(30.0));
+        assert!(take_limit_events().is_empty(), "wanting a fast timer is not a crossing");
+    }
+
     /// A lone app may hold many timers; the cap is a backstop, not a budget.
     #[test]
     fn timers_are_pooled_not_rationed_per_app() {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
-        for _ in 0..64 {
+        for _ in 0..200 {
             assert!(admit_timer(A, 1.0).is_some(), "nobody else wants the slots");
         }
         assert!(take_limit_events().is_empty());
-    }
-
-    /// Nonsense intervals are clamped rather than passed to a platform
-    /// backend that would panic on them.
-    #[test]
-    fn intervals_are_floored() {
-        reset();
-        set_limits_for_heap(A, Some(SplashLimits { min_timer_interval_s: 0.05, ..Default::default() }));
-        assert_eq!(admit_timer(A, 1.0), Some(1.0), "a sane interval is untouched");
-        assert_eq!(admit_timer(A, 0.001), Some(0.05), "too fast is floored");
-        assert_eq!(admit_timer(A, -1.0), Some(0.05), "negative is floored, not passed on");
-        assert_eq!(admit_timer(A, f64::NAN), Some(0.05));
-        assert_eq!(admit_timer(A, f64::INFINITY), Some(0.05));
-        assert!(take_limit_events().iter().any(|e| e.kind == SplashLimitKind::TimerInterval));
     }
 
     /// The per-app backstop still stops a hoarder.
@@ -869,7 +994,7 @@ mod tests {
         reset();
         set_limits_for_heap(A, Some(SplashLimits::default()));
         assert!(admit_http(A, 8), "eight at once is fine when nobody else is asking");
-        assert!(!admit_http(A, SplashLimits::default().http_max as usize), "its own max still binds");
+        assert!(!admit_http(A, SplashLimits::default().http_max as usize), "its own max binds");
     }
 
     // ---- housekeeping ----------------------------------------------------
@@ -882,7 +1007,7 @@ mod tests {
         set_limits_for_heap(A, Some(SplashLimits { timers_max: 1, ..Default::default() }));
         admit_timer(A, 1.0);
         admit_timer(A, 1.0); // refused, records an event
-        charge_cpu(A, COLLECTIVE_BUDGET);
+        charge_cpu(A, Duration::from_millis(500));
         gc_limits(&[A]);
         assert!(take_limit_events().is_empty(), "a dead isolate's events die with it");
         assert_eq!(limits_for_heap(A), SplashLimits::default());
@@ -897,6 +1022,6 @@ mod tests {
         let bg = SplashLimits::background();
         assert!(bg.weight < fg.weight, "it yields when they compete");
         assert_eq!(bg.entry_instructions, fg.entry_instructions, "same work per entry");
-        assert!(bg.cpu_max_ms.is_none(), "no absolute cap on an idle system");
+        assert!(bg.cpu_max_ms.is_none(), "no absolute cap on a healthy system");
     }
 }
