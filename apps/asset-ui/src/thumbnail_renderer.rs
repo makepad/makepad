@@ -455,7 +455,6 @@ enum ThumbnailSubject {
         texture: Texture,
         palette: Vec<Mat4f>,
         bounds: Option<(Vec3f, Vec3f)>,
-        transform: Mat4f,
     },
     /// Material-bearing GLB. Fit + GPU meshes live on `ThumbnailRenderer.pbr`.
     Pbr,
@@ -741,7 +740,6 @@ impl ThumbnailRenderer {
                         texture: image_texture(cx, base_color),
                         palette,
                         bounds: Some(bounds),
-                        transform: frame.transform,
                     },
                     frame,
                     bounds.0,
@@ -909,11 +907,25 @@ impl ThumbnailRenderer {
             }
             active.step += 1;
             if let Some(next) = active.turntable.get(active.step).cloned() {
-                // The model turns; the camera does not. Both the frame and
-                // the placed instance carry the step's transform, or the
-                // picture would be of the previous angle.
-                if let ThumbnailSubject::Statue(instance) = &mut active.subject {
-                    instance.transform = next.transform;
+                // The model turns; the camera does not — so EVERY lane has
+                // to be handed the step's transform. Only the statue lane
+                // was, which is why props turned and rigged characters did
+                // not: a character's sixteen frames were sixteen copies of
+                // step 0. Nobody saw it, because a still card only ever
+                // draws frame 0 — but the VLM annotator reads the whole
+                // sheet, so every character in the catalog was described
+                // from one small view of its back, and "old man with a
+                // brown hat and a sword" was a guess (2026-08-21: the user
+                // saw a monkey).
+                //
+                // The skinned lane now reads `active.frame.transform` at
+                // draw time and has no copy of its own to go stale.
+                match &mut active.subject {
+                    ThumbnailSubject::Statue(instance) => {
+                        instance.transform = next.transform;
+                    }
+                    ThumbnailSubject::Pbr => self.pbr.set_fit(next.transform),
+                    ThumbnailSubject::Character { .. } => {}
                 }
                 active.frame = next;
                 active.rendered = false;
@@ -1004,10 +1016,9 @@ impl ThumbnailRenderer {
                     texture,
                     palette,
                     bounds,
-                    transform,
                 } => {
                     character_items.push(
-                        SkinnedDraw::new(1, *rig, *transform)
+                        SkinnedDraw::new(1, *rig, frame.transform)
                             .with_texture(0)
                             .with_bounds(*bounds)
                             .with_palette(palette.clone()),
@@ -1142,6 +1153,56 @@ mod tests {
         queue.finish_active();
         assert!(queue.take_next().is_none());
         assert_eq!(queue.pending_len(), 0);
+    }
+
+    /// A TURNTABLE HAS TO TURN.
+    ///
+    /// Sixteen steps, sixteen different angles, one shared distance so the
+    /// subject does not grow and shrink as it goes round. The live failure
+    /// this pins was one lane down from here — the skinned lane never
+    /// received the step's transform, so every rigged character's sheet was
+    /// sixteen copies of frame 0 — and it was invisible because a still card
+    /// only ever draws frame 0. The VLM annotator reads the whole sheet, so
+    /// every character description in the catalog was written from one small
+    /// view of the model's back.
+    #[test]
+    fn every_turntable_step_is_a_different_angle_at_one_distance() {
+        let frames = turntable_frames(vec3f(-0.3, 0.0, -0.3), vec3f(0.3, 1.8, 0.3));
+        assert_eq!(frames.len(), TURNTABLE_STEPS);
+
+        // One distance for all of them: a subject that swelled mid-turn
+        // would read as broken.
+        let distance = frames[0].cam_distance;
+        assert!(distance.is_finite() && distance > 0.0);
+        for frame in &frames {
+            assert_eq!(frame.cam_distance, distance);
+            assert_eq!(frame.yaw, THUMBNAIL_CAM_YAW, "the MODEL turns, not the camera");
+            assert_eq!(frame.pitch, THUMBNAIL_CAM_PITCH);
+        }
+
+        // Sixteen DISTINCT rotations — the property the skinned lane was
+        // silently throwing away.
+        let mut seen: Vec<[f32; 4]> = Vec::new();
+        for frame in &frames {
+            let v = &frame.transform.v;
+            let key = [v[0], v[2], v[8], v[10]]; // the yaw basis
+            assert!(
+                !seen.iter().any(|s| s
+                    .iter()
+                    .zip(key.iter())
+                    .all(|(a, b)| (a - b).abs() < 1.0e-4)),
+                "two steps share an angle: {key:?}"
+            );
+            seen.push(key);
+        }
+
+        // And it is a full circle: the last step is one step short of home.
+        let back = frames[TURNTABLE_STEPS - 1].transform.v;
+        let home = frames[0].transform.v;
+        assert!(
+            (back[0] - home[0]).abs() > 1.0e-3 || (back[2] - home[2]).abs() > 1.0e-3,
+            "the turn must not land back where it started"
+        );
     }
 
     #[test]
