@@ -149,10 +149,14 @@ pub struct RasterState {
     pub has_depth: bool,
     /// Whether fragments update the depth buffer.
     pub depth_write: bool,
-    /// Clamp written components to [0,1] — what an 8-bit unorm attachment does
-    /// on a GPU. Float attachments (`RenderRf32`, `RenderRGBAf16/f32`) keep the
-    /// raw value, which is the whole point of using them.
-    pub clamp_unorm: bool,
+    /// The attachment is 8-bit unorm, so a written component is clamped to
+    /// [0,1] AND rounded to a 1/255 step — a GPU stores eight bits, not a
+    /// float. Keeping full precision here is not "more accurate": a later pass
+    /// sampling the target sees smooth values where the hardware sees a
+    /// staircase, and any threshold or decode downstream turns that difference
+    /// into visible speckle. Float attachments (`RenderRf32`,
+    /// `RenderRGBAf16/f32`) keep the raw value, which is the point of using them.
+    pub unorm8: bool,
 }
 
 impl Default for RasterState {
@@ -161,7 +165,7 @@ impl Default for RasterState {
             blend: true,
             has_depth: true,
             depth_write: true,
-            clamp_unorm: true,
+            unorm8: true,
         }
     }
 }
@@ -525,12 +529,12 @@ pub fn rasterize_setup_rows<F>(
                 }
             };
 
-            let frag_color = if state.clamp_unorm {
+            let frag_color = if state.unorm8 {
                 [
-                    frag_color[0].clamp(0.0, 1.0),
-                    frag_color[1].clamp(0.0, 1.0),
-                    frag_color[2].clamp(0.0, 1.0),
-                    frag_color[3].clamp(0.0, 1.0),
+                    quantize_unorm8(frag_color[0]),
+                    quantize_unorm8(frag_color[1]),
+                    quantize_unorm8(frag_color[2]),
+                    quantize_unorm8(frag_color[3]),
                 ]
             } else {
                 frag_color
@@ -619,6 +623,24 @@ fn edge_pass(edge_value: f32, top_left: bool) -> bool {
     } else {
         top_left
     }
+}
+
+/// Store a colour the way an 8-bit unorm attachment does. Used for clears too:
+/// a GPU clearing a BGRA8 target rounds the clear colour to eight bits like any
+/// other write, and a background that is half an LSB off is still off.
+pub fn quantize_color_unorm8(c: [f32; 4]) -> [f32; 4] {
+    [
+        quantize_unorm8(c[0]),
+        quantize_unorm8(c[1]),
+        quantize_unorm8(c[2]),
+        quantize_unorm8(c[3]),
+    ]
+}
+
+/// Store one component the way an 8-bit unorm attachment does.
+#[inline]
+fn quantize_unorm8(v: f32) -> f32 {
+    (v.clamp(0.0, 1.0) * 255.0).round() * (1.0 / 255.0)
 }
 
 #[inline]
