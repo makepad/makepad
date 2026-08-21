@@ -155,15 +155,17 @@ fn run_lanes(
     };
 
     // Prefill, untimed: every lane, to completion.
+    //
+    // The loop condition is `is_idle`, which counts PENDING work as well as
+    // claimed lanes. Anything narrower is false on the first iteration —
+    // nothing is admitted until `step` calls `admit_pending`, so a condition
+    // written against lane occupancy skips the loop entirely and reports a run
+    // that never decoded.
     let mut guard = 0usize;
-    while exec.scheduler().lanes_active() > 0 && exec.scheduler().counts().slots_claimed > 0 {
-        if exec.scheduler().is_idle() {
-            break;
-        }
-        // The first decode step is the signal that prefill is over. Peeking is
-        // not available, so this counts on the executor to report a decode
-        // through its round counters instead: stop as soon as any lane has
-        // produced a token.
+    while !exec.is_idle() {
+        // The first token produced is the signal that prefill is over: a
+        // prefill step emits nothing until the chunk that finishes a prompt,
+        // and the scheduler decodes nothing while any lane still needs one.
         let events = exec.step()?;
         let produced = record(events, &mut run.streams);
         if produced > 0 {
