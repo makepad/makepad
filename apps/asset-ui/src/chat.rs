@@ -42,35 +42,81 @@ pub use makepad_asset_chat_ui::{ChatData, ChatRole};
 // mutable generation defaults
 // ---------------------------------------------------------------------------
 
+/// What the Generate form is set to right now, republished by the app on
+/// every chat refresh.
+///
+/// The chat is the OTHER front door to the same machinery, so the form is
+/// the source of truth for anything the conversation did not ask for: a
+/// chat run inherits the form's size, steps, model picks, box choice and
+/// mesh knobs, and only what the model spelled out overrides them.
 #[derive(Clone, Debug)]
-pub struct GenDefaults {
+pub struct FormDefaults {
     pub image_model: Option<String>,
     pub width: u32,
     pub height: u32,
     pub steps: Option<u32>,
+}
+
+impl Default for FormDefaults {
+    fn default() -> Self {
+        FormDefaults { image_model: None, width: 512, height: 512, steps: None }
+    }
+}
+
+/// The conversation's OVERRIDES on top of the form (`defaults.set`), plus
+/// the form snapshot they sit on.
+#[derive(Clone, Debug)]
+pub struct GenDefaults {
+    pub image_model: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub steps: Option<u32>,
     pub then: GenerateThen,
+    pub form: FormDefaults,
 }
 
 impl Default for GenDefaults {
     fn default() -> Self {
         GenDefaults {
             image_model: None,
-            width: 512,
-            height: 512,
+            width: None,
+            height: None,
             steps: None,
             then: GenerateThen::None,
+            form: FormDefaults::default(),
         }
     }
 }
 
 impl GenDefaults {
+    /// The values a run would actually use: the chat's override, else what
+    /// the form shows.
+    pub fn effective_model(&self) -> Option<String> {
+        self.image_model.clone().or_else(|| self.form.image_model.clone())
+    }
+
+    pub fn effective_width(&self) -> u32 {
+        self.width.unwrap_or(self.form.width)
+    }
+
+    pub fn effective_height(&self) -> u32 {
+        self.height.unwrap_or(self.form.height)
+    }
+
+    pub fn effective_steps(&self) -> Option<u32> {
+        self.steps.or(self.form.steps)
+    }
+
     pub fn summary(&self) -> String {
-        let model = self.image_model.as_deref().unwrap_or("affinity");
-        let steps = self.steps.map(|s| s.to_string()).unwrap_or_else(|| "model".into());
+        let model = self.effective_model().unwrap_or_else(|| "affinity".into());
+        let steps = self
+            .effective_steps()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "model".into());
         format!(
             "defaults · model {model} · {}×{} · steps {steps} · then {}",
-            self.width,
-            self.height,
+            self.effective_width(),
+            self.effective_height(),
             self.then.slug()
         )
     }
@@ -79,21 +125,25 @@ impl GenDefaults {
         json::obj(vec![
             (
                 "image_model",
-                match &self.image_model {
-                    Some(m) => json::s(m.clone()),
-                    None => json::s("affinity"),
-                },
+                json::s(self.effective_model().unwrap_or_else(|| "affinity".into())),
             ),
-            ("width", Value::Int(self.width as i64)),
-            ("height", Value::Int(self.height as i64)),
+            ("width", Value::Int(self.effective_width() as i64)),
+            ("height", Value::Int(self.effective_height() as i64)),
             (
                 "steps",
-                match self.steps {
+                match self.effective_steps() {
                     Some(s) => Value::Int(s as i64),
                     None => json::s("model"),
                 },
             ),
             ("then", json::s(self.then.slug())),
+            (
+                "note",
+                json::s(
+                    "these are the Create form's settings; anything you do not set \
+                     in a generate call follows the form",
+                ),
+            ),
         ])
     }
 }
@@ -501,6 +551,15 @@ impl ChatBridge {
         }
     }
 
+    /// Republish what the Generate form is set to. The chat's tools read
+    /// this so `defaults.get` answers with the settings the user can SEE,
+    /// and so a generate call that names nothing runs what the form would.
+    pub fn set_form_defaults(&self, form: FormDefaults) {
+        if let Ok(mut slot) = self.defaults.lock() {
+            slot.form = form;
+        }
+    }
+
     pub fn take_jobs(&self) -> Vec<ChatJob> {
         let mut out = Vec::new();
         while let Ok(job) = self.jobs_rx.try_recv() {
@@ -535,10 +594,10 @@ impl AppTools {
             };
         }
         if let Some(w) = width {
-            d.width = w;
+            d.width = Some(w);
         }
         if let Some(h) = height {
-            d.height = h;
+            d.height = Some(h);
         }
         if let Some(s) = steps {
             d.steps = Some(s);
@@ -610,10 +669,10 @@ impl AppTools {
             prompt: prompt.to_string(),
             kind,
             then,
-            model: model.clone().or(d.image_model.clone()),
-            width: width.unwrap_or(d.width),
-            height: height.unwrap_or(d.height),
-            steps: steps.or(d.steps),
+            model: model.clone().or_else(|| d.effective_model()),
+            width: width.unwrap_or_else(|| d.effective_width()),
+            height: height.unwrap_or_else(|| d.effective_height()),
+            steps: steps.or_else(|| d.effective_steps()),
             frames: VIDEO_LENGTHS[0].0,
             video_steps: VIDEO_LENGTHS[0].1,
             seconds: MUSIC_DEFAULT_SECONDS,
@@ -940,6 +999,42 @@ mod tests {
         assert_eq!(job.kind, ChatJobKind::Image);
         assert_eq!((job.width, job.height), (768, 768));
         assert!(job.prompt.contains("trawler"));
+    }
+
+    /// The chat is the other front door to the Generate form: a call that
+    /// names no size runs what the form is set to, and `defaults.get`
+    /// reports the same thing the user can see on screen.
+    #[test]
+    fn a_call_that_names_nothing_follows_the_form() {
+        let (mut tools, rx) = tools();
+        if let Ok(mut d) = tools.defaults.lock() {
+            d.form = FormDefaults {
+                image_model: Some("flux2-dev".into()),
+                width: 1024,
+                height: 1024,
+                steps: Some(20),
+            };
+        }
+        let outcome = tools.execute(
+            "image.generate",
+            &json::obj(vec![("prompt", json::s("a unicorn"))]),
+        );
+        assert!(matches!(outcome, ToolOutcome::Ok { .. }));
+        let job = rx.try_recv().expect("a job");
+        assert_eq!((job.width, job.height), (1024, 1024));
+        assert_eq!(job.steps, Some(20));
+        assert_eq!(job.model.as_deref(), Some("flux2-dev"));
+
+        match tools.execute("defaults.get", &json::obj(vec![])) {
+            ToolOutcome::Ok { value } => {
+                assert_eq!(value.get("width").and_then(Value::as_i64), Some(1024));
+                assert_eq!(
+                    value.get("image_model").and_then(Value::as_str),
+                    Some("flux2-dev")
+                );
+            }
+            other => panic!("expected the form's settings, got {other:?}"),
+        }
     }
 
     /// defaults.set is app state: it must survive into the next generate

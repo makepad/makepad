@@ -1603,6 +1603,22 @@ script_mod! {
                                 color_hover: #x3d9bf0
                                 color_drag: #x3d9bf0
                             }
+                            // The chat is the OTHER front door to the same
+                            // generation machinery, so it lives next to the
+                            // form rather than on a page of its own: form on
+                            // top, chat under it, both above the Fleet box,
+                            // and the user drags how much room each gets.
+                            a: Splitter{
+                            width: Fill
+                            height: Fill
+                            axis: SplitterAxis.Vertical
+                            align: SplitterAlign.FromB(300.0)
+                            size: 6.0
+                            draw_bg +: {
+                                color: #x1a1a1f
+                                color_hover: #x3d9bf0
+                                color_drag: #x3d9bf0
+                            }
                             a: QuietScrollY{
                         width: Fill
                         height: Fill
@@ -2022,6 +2038,54 @@ script_mod! {
                             stages_label := DimLabel{ text: "No pipeline yet — pick a chain above and Generate." }
                         }
                             }
+                            // Say it in words and the same run appears in the
+                            // queue above: one prompt box, one fleet, one
+                            // library.
+                            b: View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                padding: Inset{left: 14 right: 14 top: 6 bottom: 8}
+                                spacing: 4
+                                View{
+                                    width: Fill height: Fit flow: Right
+                                    align: Align{y: 0.5}
+                                    PanelHeading{ text: "Chat" margin: Inset{top: 0} }
+                                    View{ width: Fill height: Fit }
+                                    chat_cancel_btn := DangerButton{ text: "Stop" visible: false }
+                                    chat_clear_btn := GhostButton{ text: "Clear" }
+                                }
+                                chat_status := HintLabel{
+                                    width: Fill
+                                    text: "Waiting for the asset server…"
+                                }
+                                chat_list := AssetChatList{}
+                                View{
+                                    width: Fill height: Fit flow: Right spacing: 6
+                                    align: Align{y: 1.0}
+                                    chat_input := TextInputFlat{
+                                        width: Fill
+                                        height: 46
+                                        is_multiline: true
+                                        submit_on_enter: true
+                                        empty_text: "make me a picture of a unicorn"
+                                        draw_text +: {
+                                            text_style: theme.font_regular{font_size: 9}
+                                            color: #xdfe6ec
+                                            color_empty: #x5a616a
+                                        }
+                                        draw_bg +: {
+                                            border_radius: 3.0
+                                            border_size: 1.0
+                                            color: #x161619
+                                            border_color: #xffffff14
+                                            border_color_focus: #x3d9bf066
+                                        }
+                                    }
+                                    chat_send_btn := PrimaryButton{ text: "Send" }
+                                }
+                            }
+                            }
                             // Fleet box: one card per box — status light
                             // (idle / busy with what / down), host, the
                             // model it is busy with. Click a card for its
@@ -2189,7 +2253,6 @@ script_mod! {
                             padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
                             draw_bg +: { color: #x0f0f12 }
                             nav_create := SurfaceTab{ text: "● CREATE" }
-                            nav_chat := SurfaceTab{ text: "CHAT" }
                             nav_library := SurfaceTab{ text: "LIBRARY" }
                             nav_import := SurfaceTab{ text: "LOAD" }
                             nav_runs := SurfaceTab{ text: "RUNS + WORKERS" }
@@ -2561,53 +2624,6 @@ script_mod! {
                                         open_library_btn := GhostButton{ text: "Library ›" }
                                     }
                                     library_gallery := mod.widgets.LibraryGallery{}
-                                }
-                            }
-
-                            // ---- Chat: local Fleet Qwen + generation tools ----
-                            chat_surface := SolidView{
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                padding: 12
-                                spacing: 8
-                                draw_bg +: { color: #x0d0d10 }
-                                View{
-                                    width: Fill height: Fit flow: Down spacing: 3
-                                    PanelHeading{ text: "Qwen · fleet" margin: Inset{top: 0} }
-                                    chat_status := DimLabel{
-                                        text: "Waiting for the asset server…"
-                                    }
-                                    HintLabel{
-                                        text: "Ask for an image, video, sfx, speech, music, mesh, world, or character. Qwen calls the matching *.generate tool. Esc stops a reply."
-                                    }
-                                }
-                                chat_list := AssetChatList{}
-                                View{
-                                    width: Fill height: Fit flow: Right spacing: 6
-                                    align: Align{y: 1.0}
-                                    chat_input := TextInputFlat{
-                                        width: Fill
-                                        height: 56
-                                        is_multiline: true
-                                        submit_on_enter: true
-                                        empty_text: "hey make me an image of a rusty trawler at dawn"
-                                        draw_text +: {
-                                            text_style: theme.font_regular{font_size: 9}
-                                            color: #xdfe6ec
-                                            color_empty: #x5a616a
-                                        }
-                                        draw_bg +: {
-                                            border_radius: 3.0
-                                            border_size: 1.0
-                                            color: #x161619
-                                            border_color: #xffffff14
-                                            border_color_focus: #x3d9bf066
-                                        }
-                                    }
-                                    chat_send_btn := PrimaryButton{ text: "Send" }
-                                    chat_cancel_btn := DangerButton{ text: "Stop" visible: false }
-                                    chat_clear_btn := GhostButton{ text: "Clear" }
                                 }
                             }
 
@@ -3627,7 +3643,6 @@ const VOICES: &[&str] = &[
 enum Surface {
     #[default]
     Create,
-    Chat,
     Library,
     Import,
     Runs,
@@ -5929,9 +5944,24 @@ impl App {
                         .iter()
                         .find(|(url, _)| *url == snapshot.base_url)
                         .map_or(0, |(_, count)| *count),
-                    // The service does not advertise a GPU count; never
-                    // assume more than one per slot.
-                    capacity: 1,
+                    // Extra GPUs still never arrive as extra ports — that
+                    // part of the old comment stood. But a chat/text box's
+                    // advertised decode LANES are real concurrent capacity
+                    // on ONE card (see `LanesJson` in asset-ai/protocol.rs):
+                    // four idle lanes must not look like a full GPU. Every
+                    // other domain is a whole-GPU job and stays at 1.
+                    // Absent advert or non-chat domain: floor of 1, exactly
+                    // today's behaviour.
+                    capacity: if domain == "chat" || domain == "text" {
+                        snapshot
+                            .health
+                            .as_ref()
+                            .and_then(|health| health.lanes.as_ref())
+                            .map(|lanes| lanes.slots_total.clamp(1, u32::MAX as u64) as u32)
+                            .unwrap_or(1)
+                    } else {
+                        1
+                    },
                 }
             })
             .collect();
@@ -9455,7 +9485,6 @@ impl App {
         }
         let page = match surface {
             Surface::Create => id!(create_surface),
-            Surface::Chat => id!(chat_surface),
             Surface::Library => id!(library_surface),
             Surface::Import => id!(import_surface),
             Surface::Runs => id!(runs_surface),
@@ -9466,7 +9495,6 @@ impl App {
         flip.set_active_page(cx, page.into());
         for (tab, label, target) in [
             (ids!(nav_create), "CREATE", Surface::Create),
-            (ids!(nav_chat), "CHAT", Surface::Chat),
             (ids!(nav_library), "LIBRARY", Surface::Library),
             (ids!(nav_import), "LOAD", Surface::Import),
             (ids!(nav_runs), "RUNS + WORKERS", Surface::Runs),
@@ -9493,7 +9521,6 @@ impl App {
         }
         match surface {
             Surface::Create => {}
-            Surface::Chat => self.refresh_chat_ui(cx),
             Surface::Library => self.refresh_library_ui(cx),
             Surface::Import => self.refresh_import_ui(cx),
             Surface::Runs => self.refresh_runs_panel(cx),
@@ -9503,6 +9530,7 @@ impl App {
     }
 
     fn refresh_chat_ui(&mut self, cx: &mut Cx) {
+        self.publish_form_defaults(cx);
         let mut status = ChatData::status();
         let defaults = self.chat.defaults_summary();
         if !defaults.is_empty() && !status.contains("defaults") {
@@ -9563,14 +9591,52 @@ impl App {
             return;
         }
         for job in jobs {
-            self.enqueue_chat_job(job);
+            self.enqueue_chat_job(cx, job);
         }
         self.try_dispatch_pending(cx);
         self.refresh_chat_ui(cx);
         self.ui.redraw(cx);
     }
 
-    fn enqueue_chat_job(&mut self, job: ChatJob) {
+    /// Publish the Generate form's current settings to the chat's tools.
+    ///
+    /// The chat is an alternative front door to this same form, so the form
+    /// is the source of truth: `defaults.get` answers with what the user can
+    /// see, and a generate call that names no size or steps runs what
+    /// Generate would run.
+    fn publish_form_defaults(&mut self, cx: &mut Cx) {
+        let size = IMAGE_SIZES[self
+            .ui
+            .combo_box(cx, ids!(size_drop))
+            .selected_item()
+            .min(IMAGE_SIZES.len() - 1)];
+        let steps = self
+            .ui
+            .combo_box(cx, ids!(steps_drop))
+            .selected_item()
+            .checked_sub(1)
+            .and_then(|i| IMAGE_STEPS.get(i).copied());
+        let image_model = self
+            .collected_stage_models(cx, &["image"])
+            .into_iter()
+            .find(|(domain, _)| domain == "image")
+            .map(|(_, model)| model);
+        self.chat.set_form_defaults(crate::chat::FormDefaults {
+            image_model,
+            width: size.0,
+            height: size.1,
+            steps,
+        });
+    }
+
+    /// One queued run, from the chat instead of the button.
+    ///
+    /// It goes through the FORM's own spec builder: same params, same model
+    /// picks, same box choice, same queue, same History group, same publish
+    /// — the conversation only overrides what it actually asked for. If the
+    /// form's own state cannot make a spec right now (it wants a seed the
+    /// user has not picked), the chat still runs, from defaults.
+    fn enqueue_chat_job(&mut self, cx: &mut Cx, job: ChatJob) {
         let preset_name = job.kind.preset_name(job.then, job.model.as_deref());
         let Some(preset) = PRESETS.iter().position(|p| p.name == preset_name) else {
             ChatData::push(
@@ -9579,11 +9645,45 @@ impl App {
             );
             return;
         };
-        let model_overrides = job
-            .model
+        let base = self.current_run_spec(cx).ok();
+        let mut gen = base
             .as_ref()
-            .map(|model| vec![(job.kind.model_domain().to_string(), model.clone())])
+            .map(|run| run.gen.clone())
             .unwrap_or_default();
+        // The model's explicit numbers win over the form's.
+        match job.kind {
+            crate::chat::ChatJobKind::Video => {
+                if job.width > 0 && job.height > 0 {
+                    gen.video_size = (job.width, job.height);
+                }
+                if job.frames > 0 {
+                    gen.video_frames = job.frames;
+                    gen.video_steps = job.video_steps;
+                }
+            }
+            _ => {
+                if job.width > 0 && job.height > 0 {
+                    gen.image_size = (job.width, job.height);
+                }
+                if job.steps.is_some() {
+                    gen.image_steps = job.steps;
+                }
+            }
+        }
+        if job.seconds > 0 {
+            gen.music_seconds = job.seconds;
+        }
+        // Keep the form's per-stage model picks, but let a model the
+        // conversation named take its own domain.
+        let mut model_overrides = base
+            .as_ref()
+            .map(|run| run.model_overrides.clone())
+            .unwrap_or_default();
+        if let Some(model) = &job.model {
+            let domain = job.kind.model_domain().to_string();
+            model_overrides.retain(|(d, _)| d != &domain);
+            model_overrides.push((domain, model.clone()));
+        }
         let group_label = format!(
             "{} — \"{}\"",
             PRESETS[preset].name,
@@ -9592,14 +9692,14 @@ impl App {
         let note = match job.kind {
             crate::chat::ChatJobKind::Video => format!(
                 "queued {preset_name} · {}×{} · {}f · {}",
-                job.width,
-                job.height,
-                job.frames,
+                gen.video_size.0,
+                gen.video_size.1,
+                gen.video_frames,
                 job.model.as_deref().unwrap_or("affinity")
             ),
             crate::chat::ChatJobKind::Music => format!(
                 "queued {preset_name} · {}s · {}",
-                job.seconds,
+                gen.music_seconds,
                 job.model.as_deref().unwrap_or("affinity")
             ),
             crate::chat::ChatJobKind::Audio | crate::chat::ChatJobKind::Speech => format!(
@@ -9608,37 +9708,22 @@ impl App {
             ),
             _ => format!(
                 "queued {preset_name} · {}×{} · {}",
-                job.width,
-                job.height,
+                gen.image_size.0,
+                gen.image_size.1,
                 job.model.as_deref().unwrap_or("affinity")
             ),
         };
-        let mut gen = GenParams::default();
-        if job.width > 0 && job.height > 0 {
-            match job.kind {
-                crate::chat::ChatJobKind::Video => {
-                    gen.video_size = (job.width, job.height);
-                    gen.video_frames = job.frames;
-                    gen.video_steps = job.video_steps;
-                }
-                _ => {
-                    gen.image_size = (job.width, job.height);
-                    gen.image_steps = job.steps;
-                }
-            }
-        }
-        if job.seconds > 0 {
-            gen.music_seconds = job.seconds;
-        }
         self.run_queue.push(PendingRun {
             group_id: crate::library::new_group_id("run"),
             group_label,
             prompt: job.prompt,
             preset,
             model_overrides,
-            box_override: None,
-            voice: job.voice,
+            box_override: base.as_ref().and_then(|run| run.box_override.clone()),
+            voice: job.voice.or_else(|| base.as_ref().and_then(|run| run.voice.clone())),
             gen,
+            // A spoken "make me a picture of X" is a fresh generation: the
+            // image sitting selected in the form is NOT a silent seed for it.
             input: None,
         });
         ChatData::push(ChatRole::System, note);
@@ -12302,7 +12387,6 @@ impl MatchEvent for App {
         // Surface nav.
         for (tab, surface) in [
             (ids!(nav_create), Surface::Create),
-            (ids!(nav_chat), Surface::Chat),
             (ids!(nav_library), Surface::Library),
             (ids!(nav_import), Surface::Import),
             (ids!(nav_runs), Surface::Runs),
@@ -13650,7 +13734,6 @@ impl AppMain for App {
                     .set_text(cx, &self.store.status_label());
                 match self.surface {
                     Surface::Create => self.ui.redraw(cx),
-                    Surface::Chat => self.refresh_chat_ui(cx),
                     Surface::Library => self.refresh_library_ui(cx),
                     Surface::Import => self.refresh_import_ui(cx),
                     Surface::Runs => self.refresh_runs_panel(cx),
@@ -13738,7 +13821,8 @@ impl AppMain for App {
                 Some("import") => Surface::Import,
                 Some("runs") => Surface::Runs,
                 Some("admin") => Surface::Admin,
-                Some("chat") => Surface::Chat,
+                // The chat is no longer a page: it sits under the form.
+                Some("chat") => Surface::Create,
                 _ => Surface::Create,
             };
             self.show_surface(cx, surface);

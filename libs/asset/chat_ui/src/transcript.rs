@@ -9,6 +9,9 @@ pub static CHAT: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatData {
     messages: Vec::new(),
     streaming_text: String::new(),
     activity: String::new(),
+    activity_shown_at: None,
+    activity_clear_pending: false,
+    thinking_text: String::new(),
     status: String::new(),
     is_streaming: false,
     last_delta: None,
@@ -57,6 +60,13 @@ pub struct ChatData {
     /// Pinned under the streaming reply so a long silent tool call still
     /// moves.
     pub activity: String,
+    /// See [`ChatData::set_activity`]: when the current activity appeared,
+    /// and whether a clear is waiting for the minimum display time.
+    pub activity_shown_at: Option<std::time::Instant>,
+    pub activity_clear_pending: bool,
+    /// Live reasoning text (the think block so far), for the porthole under
+    /// the think dots.
+    pub thinking_text: String,
     /// The session-level line an app pins above the transcript ("Qwen ready
     /// · qwen3-27b"). Set by the feed, rendered by the host.
     pub status: String,
@@ -88,6 +98,9 @@ const BYTES_PER_TOKEN: f64 = 4.0;
 /// Ring bound. The window trims by time; this only stops a pathologically
 /// chatty stream from growing the buffer without limit.
 const RATE_MAX_POINTS: usize = 512;
+/// How long a freshly shown activity line is held before a clear may take
+/// it away (see [`ChatData::set_activity`]).
+pub const ACTIVITY_MIN_SHOWN: Duration = Duration::from_millis(700);
 
 /// Tokens-per-second for the reply currently on screen.
 ///
@@ -378,6 +391,9 @@ impl ChatData {
         data.rate.reset();
         data.is_streaming = false;
         data.activity.clear();
+        data.activity_shown_at = None;
+        data.activity_clear_pending = false;
+        data.thinking_text.clear();
         data.messages.len()
     }
 
@@ -391,9 +407,43 @@ impl ChatData {
             .flatten()
     }
 
+    /// The live reasoning tail, for the porthole under the think dots.
+    pub fn set_thinking_text(text: &str) {
+        if let Ok(mut data) = CHAT.write() {
+            if data.thinking_text != text {
+                data.thinking_text = text.to_string();
+            }
+        }
+    }
+
+    /// Minimum time a just-shown activity stays on screen. Clears inside
+    /// the window are DEFERRED (applied on the next set/draw after it), so
+    /// the "thinking" chip never flashes in and out within a fraction of a
+    /// second — the flicker reads as a glitch, not a status.
     pub fn set_activity(text: &str) {
         if let Ok(mut data) = CHAT.write() {
-            data.activity = text.to_string();
+            let now = std::time::Instant::now();
+            if text.is_empty() {
+                // A clear only lands once the current status had its beat.
+                match data.activity_shown_at {
+                    Some(at) if now.duration_since(at) < ACTIVITY_MIN_SHOWN => {
+                        data.activity_clear_pending = true;
+                    }
+                    _ => {
+                        data.activity.clear();
+                        data.activity_shown_at = None;
+                        data.activity_clear_pending = false;
+                    }
+                }
+            } else {
+                if data.activity != text {
+                    data.activity = text.to_string();
+                }
+                if data.activity_shown_at.is_none() {
+                    data.activity_shown_at = Some(now);
+                }
+                data.activity_clear_pending = false;
+            }
         }
     }
 
@@ -429,6 +479,9 @@ impl ChatData {
             data.messages.clear();
             data.streaming_text.clear();
             data.activity.clear();
+            data.activity_shown_at = None;
+            data.activity_clear_pending = false;
+            data.thinking_text.clear();
             data.is_streaming = false;
             data.last_delta = None;
             data.rate.reset();
@@ -672,6 +725,31 @@ mod tests {
         assert_eq!(data.messages[1].text, "queried → 3 rows");
         assert!(data.messages[1].detail.as_deref().unwrap().contains("name"));
         drop(data);
+        clear();
+    }
+
+    /// A status that appeared a moment ago does not blink out again: the
+    /// clear is deferred past the minimum display time, because a chip that
+    /// flashes in and out reads as a glitch.
+    #[test]
+    fn a_just_shown_activity_survives_an_immediate_clear() {
+        let _guard = CHAT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        ChatData::set_activity("thinking…");
+        ChatData::set_activity("");
+        {
+            let data = CHAT.read().unwrap();
+            assert_eq!(data.activity, "thinking…", "the clear must wait its turn");
+            assert!(data.activity_clear_pending);
+        }
+        // Past the window, a clear lands immediately.
+        std::thread::sleep(ACTIVITY_MIN_SHOWN + Duration::from_millis(20));
+        ChatData::set_activity("");
+        {
+            let data = CHAT.read().unwrap();
+            assert!(data.activity.is_empty());
+            assert!(!data.activity_clear_pending);
+        }
         clear();
     }
 
