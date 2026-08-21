@@ -102,6 +102,13 @@ fn main() {
     let mut max_new = 24usize;
     let mut slots = 4u32;
     let mut timing = false;
+    // Gate 8 (prefill rate) knobs. The whole point of that gate is that the
+    // numbers only separate at a REAL per-lane context and a REAL prompt, so
+    // both are arguments rather than the 2048/30-token shape the correctness
+    // gates use.
+    let mut prefill_rate = false;
+    let mut prefill_context = 65536u32;
+    let mut prefill_prompt = 4096usize;
     // Run ONLY the speed gate. The correctness gates take minutes and gate 3
     // is prompt luck across widths (see the runbook), so a perf question
     // should not have to survive them to get an answer. It is a filter on
@@ -133,6 +140,24 @@ fn main() {
                 speed_only = true;
                 index += 1;
             }
+            "--prefill-rate" => {
+                prefill_rate = true;
+                index += 1;
+            }
+            "--context" => {
+                prefill_context = rest
+                    .get(index + 1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(prefill_context);
+                index += 2;
+            }
+            "--prompt-tokens" => {
+                prefill_prompt = rest
+                    .get(index + 1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(prefill_prompt);
+                index += 2;
+            }
             "--spec" => {
                 let depth = rest.get(index + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
                 SPEC_DRAFT.store(depth, std::sync::atomic::Ordering::Relaxed);
@@ -158,6 +183,19 @@ fn main() {
         eprintln!("vocab: {e}");
         std::process::exit(1);
     });
+
+    if prefill_rate {
+        match prefill_rate_gate(&model, &vocab, slots, prefill_context, prefill_prompt) {
+            Ok(()) => {
+                println!("PASS: a high lane prefills at the rate lane 0 does");
+                return;
+            }
+            Err(e) => {
+                eprintln!("FAIL (prefill rate): {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if speed_only {
         match solo_speed_floor(&model, &vocab, slots, PER_SLOT_CONTEXT, max_new.max(64)) {
@@ -953,6 +991,11 @@ fn solo_speed_floor(
             match event {
                 LaneEvent::Token { .. } => produced += 1,
                 LaneEvent::Finished { .. } => finished = true,
+                // A prefill that finished after the timer started would make
+                // the rate below a prompt-length number. It cannot happen here
+                // (the prefill is stepped before the timer), and saying so is
+                // cheaper than a silent catch-all.
+                LaneEvent::Prefilled { .. } => {}
             }
         }
         if finished {
@@ -986,6 +1029,166 @@ fn solo_speed_floor(
              {native_rate:.1} tok/s). A solo turn should cost the same either way; this much \n  \
              loss means the executor is not decoding the way the session does.",
             ratio * 100.0
+        ));
+    }
+    Ok(())
+}
+
+/// Eighth gate: PREFILL RATE ON A HIGH LANE.
+///
+/// A user's first message is a whole system prompt — thousands of tokens — and
+/// the time before the first token is entirely prefill. Every gate above
+/// prefills thirty tokens, so none of them can see this: the cost of a slot
+/// prefill is `chunk_tokens x attention_key_count`, and under slot-major
+/// addressing a lane's key count is its BASE plus its fill. Lane 0's base is 0
+/// and lane N's base is `N * per_lane_context`, so at 64k per lane the top lane
+/// pays for a key span of tens of thousands of rows to attend to a prompt that
+/// has only a few thousand.
+///
+/// So this measures the SAME prompt on lane 0 and on the top lane, at two chunk
+/// sizes, and reports the four rates as one table. Two questions get answered by
+/// the shape of it rather than by argument:
+///
+/// - lane 0 fast and lane N slow, at both chunk sizes -> the key SPAN is the
+///   cost, and chunking cannot fix it (total work is `prompt x span` either
+///   way);
+/// - both lanes faster at the bigger chunk -> per-graph overhead is the cost
+///   and the chunk size is the lever.
+///
+/// The pass condition is the one a player feels: the top lane must prefill at
+/// no worse than half of what lane 0 manages, and above the floor the acceptance
+/// bar is set from (`MIN_PREFILL_RATE`).
+fn prefill_rate_gate(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    per_slot_context: u32,
+    prompt_tokens: usize,
+) -> Result<(), String> {
+    /// Tokens per second a lane must ingest at. Set from the single-sequence
+    /// path's measured rate on the same class of card (~3000 tok/s at batch
+    /// 64), halved so a slower card still passes a gate about the SHAPE of the
+    /// cost rather than about the silicon.
+    const MIN_PREFILL_RATE: f64 = 1500.0;
+
+    if slots < 2 {
+        return Err("needs at least 2 slots: with one lane every base is 0 and there is \n  \
+                    nothing to compare"
+            .to_string());
+    }
+    // A real prompt, not a repeated token: the tokenizer's own output, tiled
+    // until it is as long as a taught context. Repeating one id would let a
+    // cache or a degenerate attention pattern flatter the measurement.
+    let unit = vocab.tokenize(PROMPT, true, true).map_err(|e| e.to_string())?;
+    if unit.is_empty() {
+        return Err("tokenizer produced nothing for the probe prompt".to_string());
+    }
+    let mut prompt: Vec<i32> = Vec::with_capacity(prompt_tokens);
+    while prompt.len() < prompt_tokens {
+        let take = (prompt_tokens - prompt.len()).min(unit.len());
+        prompt.extend_from_slice(&unit[..take]);
+    }
+
+    let mut session = build_session(model, slots, per_slot_context)?;
+    let arena = session.attention_arena_rows();
+    println!(
+        "prefill rate: {slots} slots x {per_slot_context} tok (arena {arena} rows), \
+         prompt {} tokens",
+        prompt.len()
+    );
+    println!(
+        "{:>5}  {:>9}  {:>6}  {:>4}  {:>9}  {:>10}",
+        "lane", "kv_base", "chunk", "pass", "seconds", "tok/s"
+    );
+
+    let top = slots as usize - 1;
+    // Chunk sizes worth asking about. 64 is what shipped; the rest are there
+    // because the cost of a prefill chunk is NOT proportional to the tokens in
+    // it — the attention kernel re-reads the lane's whole key span per chunk,
+    // so halving the chunk count halves that read. The sweep says where that
+    // stops paying and the FFN takes over.
+    const CHUNKS: [usize; 5] = [64, 256, 512, 1024, 2048];
+    let mut rates: std::collections::HashMap<(usize, usize), f64> = std::collections::HashMap::new();
+    for &lane in &[0usize, top] {
+        for &chunk in CHUNKS.iter() {
+            // Two passes over a FRESH table each time. The first pays for every
+            // graph this (chunk, key-bucket) shape needs; the second finds them
+            // cached. If graph compilation were the cost, pass 2 would be much
+            // faster than pass 1 — which is a different bug with a different
+            // fix, so the gate reports both rather than averaging them away.
+            for pass in 1..=2 {
+                let mut table = session.new_slot_table().map_err(|e| e.to_string())?;
+                table.admit_at(lane).map_err(|e| e.to_string())?;
+                let kv_base = table
+                    .slot(lane)
+                    .ok_or_else(|| format!("lane {lane} has no slot"))?
+                    .kv_base();
+                let started = std::time::Instant::now();
+                let mut ingested = 0usize;
+                let mut failed: Option<String> = None;
+                while ingested < prompt.len() {
+                    let end = (ingested + chunk).min(prompt.len());
+                    let (state_row, start) = {
+                        let slot = table
+                            .slot(lane)
+                            .ok_or_else(|| format!("lane {lane} has no slot"))?;
+                        (slot.live_state_row(), slot.fill())
+                    };
+                    // A chunk that does not fit is DATA, not a crash: the whole
+                    // question this sweep answers is how big a chunk a lane's
+                    // key span can hold, and the ceiling is part of the answer.
+                    if let Err(e) =
+                        session.prefill_slot_chunk(lane, kv_base, state_row, start, &prompt[ingested..end])
+                    {
+                        failed = Some(format!("{e}"));
+                        break;
+                    }
+                    table
+                        .advance(lane, end - ingested)
+                        .map_err(|e| e.to_string())?;
+                    ingested = end;
+                }
+                if let Some(err) = failed {
+                    println!("{lane:>5}  {kv_base:>9}  {chunk:>6}  {pass:>4}  {:>9}  {err}", "-");
+                    break;
+                }
+                let secs = started.elapsed().as_secs_f64();
+                let rate = prompt.len() as f64 / secs.max(1e-9);
+                println!(
+                    "{lane:>5}  {kv_base:>9}  {chunk:>6}  {pass:>4}  {secs:>9.2}  {rate:>10.1}"
+                );
+                if pass == 2 {
+                    rates.insert((lane, chunk), rate);
+                }
+            }
+        }
+    }
+
+    let best_lane0 = CHUNKS
+        .iter()
+        .filter_map(|c| rates.get(&(0, *c)).copied())
+        .fold(0.0f64, f64::max);
+    let best_top = CHUNKS
+        .iter()
+        .filter_map(|c| rates.get(&(top, *c)).copied())
+        .fold(0.0f64, f64::max);
+    println!("lane 0 best {best_lane0:.1} tok/s, lane {top} best {best_top:.1} tok/s, ratio {:.2}", best_top / best_lane0.max(1e-9));
+
+    if best_top < MIN_PREFILL_RATE {
+        return Err(format!(
+            "lane {top} prefills at {best_top:.0} tok/s, under the {MIN_PREFILL_RATE:.0} floor. \n  \
+             A {prompt_len}-token first message costs {:.1} s of pure prefill before a player \n  \
+             sees anything.",
+            prompt.len() as f64 / best_top.max(1e-9),
+            prompt_len = prompt.len(),
+        ));
+    }
+    if best_top < best_lane0 * 0.5 {
+        return Err(format!(
+            "lane {top} prefills at {:.0}% of lane 0's rate ({best_top:.0} vs {best_lane0:.0} \n  \
+             tok/s). A lane's base is not supposed to be a cost — the same prompt is the same \n  \
+             work wherever it lands.",
+            best_top / best_lane0.max(1e-9) * 100.0
         ));
     }
     Ok(())
