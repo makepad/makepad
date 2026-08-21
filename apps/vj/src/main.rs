@@ -3823,6 +3823,16 @@ pub struct App {
     /// deck is loaded or a separation run reports its coverage.
     #[rust]
     lyrics_dispatch: LyricsDispatch,
+    /// Transcripts already in hand this session, by track digest. The
+    /// dispatch gate above refuses a second job for the same track — so a
+    /// reload, or the other deck playing the same track, re-hangs the words
+    /// from HERE instead of sitting on "waiting for separation" forever.
+    #[rust]
+    lyrics_by_digest: HashMap<String, Arc<TrackLyrics>>,
+    /// The digest under each deck's current track, learned from the
+    /// separation worker's coverage report (the only place it exists).
+    #[rust]
+    deck_track_digest: [Option<String>; 2],
     /// The transcript per deck, and the beat-quantized display schedule built
     /// from it plus that deck's grid. The schedule is rebuilt whenever either
     /// half arrives, because they land in either order.
@@ -6395,6 +6405,9 @@ impl App {
                             self.deck_lyrics[deck.index()] = None;
                             self.deck_karaoke[deck.index()] = None;
                             self.deck_lyrics_status[deck.index()] = String::new();
+                            // Until the new track's coverage report names its
+                            // digest, this deck matches no cached transcript.
+                            self.deck_track_digest[deck.index()] = None;
                             self.mixer.clear_deck_stems(deck);
                             self.submit_analysis(deck, pcm.clone());
                             // Fetch or compute, decided when the track was
@@ -8665,11 +8678,29 @@ impl App {
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
+                    self.deck_track_digest[deck.index()] = Some(digest.clone());
                     // A track this machine separated end to end is worth
                     // giving back — before the dispatch gate below, which
                     // stops at the SECOND report of the same coverage.
                     if complete {
                         self.arm_stems_write_back(deck, &digest, model_frames);
+                    }
+                    // Words already in hand for this digest — the other deck
+                    // played it, or an earlier load did. Hang them now: the
+                    // gate below is for JOBS and would refuse the re-ask,
+                    // which used to leave a reloaded track on "waiting for
+                    // separation" with its stems audibly live.
+                    if let Some(lyrics) = self.lyrics_by_digest.get(&digest).cloned() {
+                        if self.deck_lyrics[deck.index()].is_none() {
+                            self.deck_lyrics_status[deck.index()] =
+                                format!("lyrics: {} lines (cached)", lyrics.lines.len());
+                            self.deck_lyrics[deck.index()] = Some(lyrics);
+                            self.rebuild_karaoke(cx, deck);
+                            if self.karaoke_on {
+                                self.video_pump = cx.new_next_frame();
+                            }
+                        }
+                        continue;
                     }
                     if !self.lyrics_dispatch.should_dispatch(&digest, complete) {
                         continue;
@@ -8752,16 +8783,38 @@ impl App {
                     self.deck_lyrics_status[deck.index()] = text;
                 }
                 LyricsMsg::Ready { deck, gen, digest, lyrics } => {
-                    if self.decks.deck(deck).load_gen != gen {
-                        continue;
+                    // The transcript is the TRACK's, not the load's: it is
+                    // kept by digest so a reload or the other deck re-hangs
+                    // it without a new job — and so a Ready that raced a
+                    // re-cue is not lost with its generation, which used to
+                    // cost the words for the rest of the session.
+                    self.lyrics_by_digest.insert(digest.clone(), lyrics.clone());
+                    if self.decks.deck(deck).load_gen == gen {
+                        // Words this machine has and the store does not: the
+                        // same offer the stems make, and free — the document
+                        // is already in hand. Only from the asking deck's
+                        // still-current load, so the offer stays attached to
+                        // the asset the operator actually cued.
+                        self.arm_lyrics_write_back(deck, &digest, &lyrics);
                     }
-                    // Words this machine has and the store does not: the same
-                    // offer the stems make, and free — the document is already
-                    // in hand.
-                    self.arm_lyrics_write_back(deck, &digest, &lyrics);
-                    self.deck_lyrics[deck.index()] = Some(lyrics);
-                    self.rebuild_karaoke(cx, deck);
-                    if self.karaoke_on {
+                    // Hang the words on every deck currently showing this
+                    // digest: the asking deck usually, both when both play
+                    // the same track, the re-cued deck when the gen went
+                    // stale mid-transcription.
+                    let mut hung = false;
+                    for d in [DeckId::A, DeckId::B] {
+                        let i = d.index();
+                        if self.deck_track_digest[i].as_deref() != Some(digest.as_str()) {
+                            continue;
+                        }
+                        if self.deck_lyrics[i].is_some() {
+                            continue;
+                        }
+                        self.deck_lyrics[i] = Some(lyrics.clone());
+                        self.rebuild_karaoke(cx, d);
+                        hung = true;
+                    }
+                    if hung && self.karaoke_on {
                         self.video_pump = cx.new_next_frame();
                     }
                 }
