@@ -4127,6 +4127,30 @@ impl App {
     /// `world` = a walkable level (catalog kind `World` with a GLB): shown
     /// at authored scale and toured by the NPC walker, not shrunk onto a
     /// turntable. Splat worlds never reach here (they are PLY).
+    /// The body a world asset gets walked with: the engine family from its
+    /// alias, put into that map's own units by the anchors the importer
+    /// published (`step_height` / `eye_height`).
+    ///
+    /// One place, called BEFORE the prep job, because the nav grid and the
+    /// walker must be the same body — a graph probed with a Doom-scale body
+    /// and walked by a Quake 1 one offers steps the legs then refuse.
+    fn world_walker_config(&self, asset: AssetId) -> makepad_render::level::WalkerConfig {
+        let source = self
+            .video_model
+            .tile(&asset)
+            .and_then(|tile| tile.alias.clone())
+            .unwrap_or_default();
+        let anchors: Vec<makepad_render::player_nav::NavAnchor> = self
+            .world_anchors
+            .get(&asset)
+            .map(|list| list.iter().map(nav_anchor).collect())
+            .unwrap_or_default();
+        makepad_render::player_nav::config_for_world(
+            makepad_render::level::BobStyle::from_source(&source),
+            &anchors,
+        )
+    }
+
     fn apply_slot_mesh(
         &mut self,
         cx: &mut Cx,
@@ -4688,6 +4712,11 @@ impl App {
                 if is_video {
                     self.paint_icon_button(cx, Self::slot_play_path(slot), playing);
                     self.paint_icon_button(cx, Self::slot_loop_path(slot), shape.looping);
+                    // The strip redraw was resetting these two to unlit while
+                    // their state stayed on — a slot could bounce with an
+                    // innocent-looking dark arrow.
+                    self.paint_lit(cx, Self::slot_pp_path(slot), self.slot_pingpong[i]);
+                    self.paint_lit(cx, Self::slot_mute_path(slot), self.slot_video_muted[i]);
                     let sync = shape.sync_beats;
                     self.ui.button(cx, Self::slot_sync_path(slot)).set_text(
                         cx,
@@ -6240,6 +6269,12 @@ impl App {
                             self.mixer.set_slot_paused(slot, true);
                             self.slot_media[slot.index()] = SlotMedia::Mesh;
                             self.slot_aspect[slot.index()] = 16.0 / 9.0;
+                            // The body that will walk it, decided HERE: the
+                            // alias names the engine family and the manifest
+                            // anchors say what this map's metres are worth.
+                            // The nav grid is probed with it on the worker
+                            // and the walker is handed the same one back.
+                            let cfg = self.world_walker_config(item.asset);
                             self.decode.submit(DecodeJob::SlotMesh {
                                 gen,
                                 slot: slot.index(),
@@ -6247,6 +6282,7 @@ impl App {
                                 // A classic level publishes as kind World
                                 // with a RenderGlb; a prop never does.
                                 world: item.kind == Some(AssetKind::World),
+                                cfg: Some(cfg),
                             });
                         }
                         MediaType::Ply => {
