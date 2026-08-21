@@ -518,6 +518,7 @@ impl LlamaSession {
     /// logits of the chunk's last token.
     pub fn prefill_slot_chunk(
         &mut self,
+        lane: usize,
         kv_base: usize,
         state_row: usize,
         start: usize,
@@ -553,6 +554,10 @@ impl LlamaSession {
         self.ensure_compiled_graph(graph_params)?;
         let state_row_i32 = i32::try_from(state_row)
             .map_err(|_| LlamaError::format("slot state row does not fit in i32"))?;
+        let dump_row = self
+            .mtp
+            .map(|mtp| self.carry_dump_row(&mtp, lane))
+            .unwrap_or(0);
         let run = {
             let compiled = self
                 .graphs
@@ -574,6 +579,13 @@ impl LlamaSession {
             layout.recurrent_state_rows = vec![state_row_i32];
             if compiled.decode().input_recurrent_state_rows.is_none() {
                 layout.recurrent_state_rows.clear();
+            }
+            // With a draft head loaded the graph obliges every column to write
+            // a hidden-carry row. This lane is not speculating, so it dumps
+            // into its OWN block's scratch row: nothing reads it while the
+            // lane is not drafting, and it cannot alias another lane's ring.
+            if compiled.decode().input_hidden_write_rows.is_some() {
+                layout.hidden_write_rows = vec![dump_row; batch];
             }
             compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)?
         };
@@ -627,11 +639,25 @@ impl LlamaSession {
         self.ensure_compiled_graph(graph_params)?;
         let mut layout = layout;
         layout.attention_key_count = attention_key_count;
+        // Same obligation as prefill: with a draft head loaded every column
+        // must write a hidden row. Phase 1 does not speculate inside a batch,
+        // so each lane dumps into its own block and no ring is touched.
+        let dump_rows: Vec<i32> = match self.mtp {
+            Some(mtp) => plan
+                .slots
+                .iter()
+                .map(|step| self.carry_dump_row(&mtp, step.slot))
+                .collect(),
+            None => Vec::new(),
+        };
         let run = {
             let compiled = self
                 .graphs
                 .graph_for_mut(graph_params)
                 .ok_or_else(|| LlamaError::format("compiled batched graph was not cached"))?;
+            if compiled.decode().input_hidden_write_rows.is_some() {
+                layout.hidden_write_rows = dump_rows;
+            }
             compiled.execute_logits_only_with_layout(LogitsProbeInput::TokenIds(tokens), &layout)?
         };
         split_run_logits(run, width)
