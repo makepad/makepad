@@ -944,6 +944,16 @@ pub struct LaneExecutor {
     /// each rung on the hardware, and a knob that needs a rebuild per rung is a
     /// measurement that never happens.
     forced_depth: Option<usize>,
+    /// `MAKEPAD_LLAMA_BATCH_FORCE_ROUND`, when set: take the fused round even
+    /// at depth 0, where the executor would otherwise take the plain step.
+    ///
+    /// A diagnostic, and a pointed one. At depth 0 the two paths produce the
+    /// same tokens from the same columns and differ ONLY in which graph runs —
+    /// the plain decode graph, or the one that checkpoints the recurrent state
+    /// after every token. `.217` says the second costs 2.5x per column, and
+    /// this is the knob that says whether that is the checkpointing graph
+    /// itself or the multi-token recurrent scan it usually runs with.
+    force_round: bool,
     /// Batched speculative rounds run since load, and the shape of the last
     /// one.
     ///
@@ -1012,6 +1022,7 @@ impl LaneExecutor {
             costs,
             config: crate::slots::SchedulerConfig::default(),
             forced_depth,
+            force_round: std::env::var_os("MAKEPAD_LLAMA_BATCH_FORCE_ROUND").is_some(),
             batched_spec_rounds: 0,
             last_batched_spec: None,
             on_counts: None,
@@ -1039,6 +1050,17 @@ impl LaneExecutor {
     /// bounds while the executor owns it.
     pub fn session(&self) -> &crate::LlamaSession {
         &self.session
+    }
+
+    /// Give the session back.
+    ///
+    /// An executor is scoped to a set of lanes and their streams; the session
+    /// is the expensive thing, and on a box it is sixteen gigabytes of weights
+    /// that took a minute to reach the device. A gate that measures several
+    /// lane configurations has to be able to keep it across them, or most of
+    /// its wall time is model loading and its results are one reload apart.
+    pub fn into_session(self) -> crate::LlamaSession {
+        self.session
     }
 
     pub fn scheduler(&mut self) -> &mut LaneScheduler {
@@ -1305,7 +1327,7 @@ impl LaneExecutor {
                 // Taking the plain step there keeps the byte-identity the
                 // existing gates rest on and compiles one graph family fewer.
                 let depth = self.batched_depth(&plan);
-                if depth > 0 {
+                if depth > 0 || (self.force_round && self.session.speculative_enabled()) {
                     events.extend(self.speculative_batch(&plan, depth)?);
                 } else {
                     let rows = self

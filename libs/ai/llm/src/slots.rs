@@ -108,6 +108,11 @@ pub struct StepCostModel {
     step_ms: Vec<f32>,
     draft_base_ms: f32,
     draft_per_lane_ms: f32,
+    /// A fused multi-lane VERIFY batch is not a plain step of the same width,
+    /// and assuming it was is what made speculation look profitable when it
+    /// is not. Measured separately; see [`Self::verify_ms`].
+    verify_base_ms: f32,
+    verify_per_column_ms: f32,
 }
 
 impl StepCostModel {
@@ -140,6 +145,51 @@ impl StepCostModel {
         Self::from_points(MEASURED, 1.80, 0.30)
     }
 
+    /// Cost of a fused multi-lane VERIFY batch of `columns` columns.
+    ///
+    /// **This is not [`step_ms`](Self::step_ms) and the difference is the
+    /// whole story.** The `n_outputs = B` sweep that produced `step_ms`
+    /// measured the plain decode graph at B columns. A verify batch runs a
+    /// different graph — the one that checkpoints the recurrent state after
+    /// every token so a rejected draft can be rolled back — and on `.217` it
+    /// costs **2.5x more per column**:
+    ///
+    /// | shape | measured | `step_ms` says |
+    /// |---|---|---|
+    /// | 4 columns, 2 lanes | 40.3 ms | 24.3 |
+    /// | 6 columns, 2 lanes | 51.5 ms | 32.0 |
+    /// | 8 columns, 2 lanes | 63.2 ms | 40.0 |
+    /// | 6 columns, 3 lanes | 54.4 ms | 32.0 |
+    /// | 8 columns, 4 lanes | 70.9 ms | 40.0 |
+    ///
+    /// Fitted: `17.5 + 5.73 * columns`, against the plain graph's
+    /// `14.4 + 2.24 * columns` over the same runs. The lane count shows up
+    /// only weakly (8 columns costs 63.2 at 2 lanes and 70.9 at 4), so it is
+    /// not modelled — columns are what this is priced by.
+    ///
+    /// **Fitted at `n_seqs >= 2` and it does not describe `n_seqs == 1`.** A
+    /// solo 4-column verify measures ~28 ms, not the 40.4 this returns: going
+    /// from one sequence to two costs ~13 ms, going from two to four costs
+    /// ~8. Applying it at width 1 is therefore pessimistic, which is the safe
+    /// direction and affects only a lone lane that is not on slot 0 — the real
+    /// solo path is session-native and never asks this.
+    ///
+    /// Assuming the plain curve here is what made a batched speculative round
+    /// look like a 7-20 % win when the box says it is a 15-35 % loss at every
+    /// width. Measured on `llama-lane-spec-probe --measure`, 160-step windows,
+    /// acceptance ~0.8 on real prose; the same numbers came back within 3 % on
+    /// a 64-step window, so graph-capture churn is not in them.
+    pub fn verify_ms(&self, columns: usize) -> f32 {
+        self.verify_base_ms + self.verify_per_column_ms * columns as f32
+    }
+
+    /// Override the verify curve, for a box that has measured its own.
+    pub fn with_verify_cost(mut self, base_ms: f32, per_column_ms: f32) -> Self {
+        self.verify_base_ms = base_ms;
+        self.verify_per_column_ms = per_column_ms;
+        self
+    }
+
     /// Build from sparse measured points, linearly interpolating the gaps.
     pub fn from_points(points: &[(usize, f32)], draft_base_ms: f32, draft_per_lane_ms: f32) -> Self {
         let max = points.iter().map(|(c, _)| *c).max().unwrap_or(1);
@@ -162,6 +212,9 @@ impl StepCostModel {
             step_ms,
             draft_base_ms,
             draft_per_lane_ms,
+            // Measured on .217; see `verify_ms`.
+            verify_base_ms: 17.5,
+            verify_per_column_ms: 5.73,
         }
     }
 
@@ -260,13 +313,23 @@ pub fn uniform_allocation(
     let mut best: Option<Allocation> = None;
     for depth in 0..=ceiling {
         let columns = width * (depth + 1);
-        let Some(step_ms) = costs.step_ms(columns) else {
-            continue;
+        // Depth 0 is the PLAIN step — one token per lane through the ordinary
+        // decode graph, which is what the executor actually runs there. Any
+        // depth above it is a fused verify batch, and that is a different
+        // graph with a different price. Scoring both against one curve is the
+        // mistake that made speculation look profitable here.
+        let batch_ms = if depth == 0 {
+            match costs.step_ms(columns) {
+                Some(ms) => ms,
+                None => continue,
+            }
+        } else {
+            costs.verify_ms(columns)
         };
         // Every drafting lane rides the SAME draft forward — that is the whole
         // reason a batched round is cheaper than N solo ones — so a round pays
         // `depth` forwards of `width` lanes, not `width * depth` forwards.
-        let round_ms = step_ms + depth as f32 * costs.draft_forward_ms(width);
+        let round_ms = batch_ms + depth as f32 * costs.draft_forward_ms(width);
         if round_ms <= 0.0 {
             continue;
         }
@@ -415,6 +478,17 @@ impl Allocation {
 }
 
 /// Allocate the column budget across active lanes to maximise the objective.
+///
+/// **Not the shipped decision, and its cost basis is optimistic.** Per-lane
+/// depths cannot be expressed in one fused verify batch (see
+/// [`uniform_allocation`]), so nothing runs this; it is the design's
+/// heterogeneous allocator, kept because it is what the ladder would become if
+/// a ragged batch ever became expressible. It prices every candidate with
+/// [`StepCostModel::step_ms`], the PLAIN decode curve, which on `.217`
+/// under-states a real verify batch by 55-75 %. Anything that starts using
+/// this for a speculative allocation has to price the `k > 0` candidates with
+/// [`StepCostModel::verify_ms`] first, or it will reach the same wrong answer
+/// the uniform version did before the box corrected it.
 ///
 /// Each lane always holds one column (its own next token); the surplus is
 /// distributed as draft depth. For every affordable total column count we take
@@ -1166,50 +1240,87 @@ mod tests {
     }
 
     #[test]
-    fn a_batched_round_stops_speculating_where_it_stops_paying() {
-        // The measured 5090 curve at the acceptance real chat actually shows.
-        // Width 2 pays for one draft column; widths 3 and 4 do not, and at 4 it
-        // is a LOSS — speculating there would make the box slower than the
-        // no-spec floor the runbook measured (41.4 tok/s per lane).
-        let config = SchedulerConfig::default();
+    fn a_verify_batch_is_priced_as_a_verify_batch() {
+        // The guard against collapsing the two curves back into one. Doing that
+        // is not a simplification — it is a 55-75 % under-estimate of the graph
+        // the round actually runs, and it is exactly what made a batched
+        // speculative round look like a win before .217 was asked.
         let costs = StepCostModel::measured_5090();
-        let depth = |width| {
-            batched_draft_depth(width, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &costs)
-        };
-        assert_eq!(depth(2), 1, "width 2 buys ~7 % aggregate at depth 1");
-        assert_eq!(depth(3), 0, "width 3 is a dead heat, so take the cheap side");
-        assert_eq!(depth(4), 0, "width 4 at depth 1 is a 10 % aggregate loss");
+        for columns in 2..=8usize {
+            let plain = costs.step_ms(columns).expect("measured column");
+            assert!(
+                costs.verify_ms(columns) > plain * 1.4,
+                "a {columns}-column verify batch priced at {} against a plain step's {plain}",
+                costs.verify_ms(columns)
+            );
+        }
+        // The measured anchor, so a re-fit that drifts far from the box shows up
+        // here rather than in a throughput report a week later.
+        assert!((costs.verify_ms(4) - 40.4).abs() < 2.0, "{}", costs.verify_ms(4));
+        assert!((costs.verify_ms(8) - 63.3).abs() < 2.0, "{}", costs.verify_ms(8));
     }
 
     #[test]
-    fn a_cheaper_draft_head_buys_depth_the_full_one_cannot_afford() {
-        // The restricted-vocabulary sidecar is a pure draft-cost reduction with
-        // no acceptance penalty, so it is exactly the term that decides whether
-        // a deeper uniform round pays. Asserted as a DIRECTION rather than a
-        // rung, because the rung is a property of one measured curve and the
-        // direction is a property of the arithmetic: a cheaper draft can never
-        // make a shallower round the better choice.
+    fn a_batched_round_does_not_speculate_at_the_measured_verify_cost() {
+        // What .217 said, and it said it at every width: a fused verify batch
+        // costs so much more per column than a plain step that no acceptance
+        // rate can pay for it. Measured aggregates, 160-step windows:
+        //
+        //   2 lanes  105.8 at depth 0   against  89.1 at depth 1
+        //   3 lanes  132.9 at depth 0   against  98.9 at depth 1
+        //   4 lanes  156.5 at depth 0   against 101.8 at depth 1
+        //
+        // The acceptance sweep is the load-bearing part, and it runs to 0.9 —
+        // the campaign's PROSE figure, the highest acceptance ever measured on
+        // this model, well above served chat's 0.51-0.62 and above the ~0.8
+        // the sweep above saw. Speculation loses across all of it.
+        //
+        // It does not lose at every conceivable acceptance: around 0.97, with
+        // the restricted draft head, depth 3 at width 2 starts to win. That
+        // number is the useful one to carry — it says how far from paying this
+        // is. Not "a bit under", but "needs an acceptance nothing has ever
+        // produced", which is the same as saying the verify batch has to get
+        // cheaper.
+        let config = SchedulerConfig::default();
+        for costs in [
+            StepCostModel::measured_5090(),
+            StepCostModel::measured_5090().with_restricted_draft_head(),
+        ] {
+            for width in 2..=4usize {
+                for acceptance in [BATCHED_CHAT_ACCEPTANCE, 0.8, 0.9] {
+                    assert_eq!(
+                        batched_draft_depth(width, SOLO_DRAFT_MAX, acceptance, &config, &costs),
+                        0,
+                        "width {width} at acceptance {acceptance} chose to speculate"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cheaper_draft_head_cannot_rescue_a_verify_batch() {
+        // The restricted-vocabulary sidecar makes a draft forward 3.3x cheaper
+        // at identical acceptance, and on the OLD cost basis that was enough to
+        // flip width 3 into speculating. Against the measured verify curve it
+        // changes nothing at any width, because the draft chain was never the
+        // binding term: at 2 lanes and depth 1 the round is 40.3 ms of verify
+        // and 0.6 ms of draft.
+        //
+        // Worth asserting rather than assuming, because "get a cheaper draft
+        // head" is the obvious next idea and this says, in advance, that it is
+        // aimed at the wrong 2 % of the round.
         let config = SchedulerConfig::default();
         let full = StepCostModel::measured_5090();
         let restricted = StepCostModel::measured_5090().with_restricted_draft_head();
-        let mut somewhere_deeper = false;
         for width in 1..=4usize {
-            let a = batched_draft_depth(width, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &full);
-            let b = batched_draft_depth(
-                width,
-                SOLO_DRAFT_MAX,
-                BATCHED_CHAT_ACCEPTANCE,
-                &config,
-                &restricted,
+            assert_eq!(
+                batched_draft_depth(width, SOLO_DRAFT_MAX, 0.9, &config, &full),
+                batched_draft_depth(width, SOLO_DRAFT_MAX, 0.9, &config, &restricted),
+                "width {width}: the sidecar changed the verdict, so the draft chain has \
+                 become the binding term and the round should be re-measured"
             );
-            assert!(b >= a, "width {width}: cheaper drafts chose {b} against {a}");
-            somewhere_deeper |= b > a;
         }
-        assert!(
-            somewhere_deeper,
-            "the sidecar changed no verdict at any width, so it has stopped mattering \
-             to the allocator and the cost model should be re-measured"
-        );
     }
 
     #[test]
