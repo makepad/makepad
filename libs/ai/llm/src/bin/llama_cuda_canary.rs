@@ -32,6 +32,18 @@ use makepad_ai_llm::{
     GGML_ROPE_TYPE_IMROPE,
 };
 
+/// `quant_kind_routes`, shimmed: the FFI symbol only exists on CUDA
+/// platforms, and this canary must still COMPILE on a Mac (where every
+/// run exits early anyway).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn quant_kind_routes_shim(kind: i32) -> i32 {
+    unsafe { makepad_ai_cuda::llm_ops::quant_kind_routes(kind) }
+}
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn quant_kind_routes_shim(_kind: i32) -> i32 {
+    0
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
@@ -796,7 +808,7 @@ fn route_act_format(kind: i32, m: usize) -> ActFormat {
     if m > MMV_MAX_COLUMNS {
         return ActFormat::Bf16;
     }
-    let routes = unsafe { makepad_ai_cuda::llm_ops::quant_kind_routes(kind) };
+    let routes = quant_kind_routes_shim(kind);
     if routes & makepad_ai_cuda::llm_ops::ROUTE_MMVQ != 0 {
         ActFormat::Q81
     } else if makepad_ai_cuda::llm_ops::quant_kind_is_official_only(kind) {
@@ -999,7 +1011,7 @@ fn iq_kinds_canary(exec: &CudaExecRuntime, failures: &mut usize) {
             // inputs get rounded, and each rounding is modelled exactly rather
             // than absorbed into a loose tolerance — a slack tolerance here
             // cannot tell a decode bug from a quantization artefact.
-            let routes = unsafe { makepad_ai_cuda::llm_ops::quant_kind_routes(kind) };
+            let routes = quant_kind_routes_shim(kind);
             let taken = match route {
                 "mmv" if routes & makepad_ai_cuda::llm_ops::ROUTE_MMVQ != 0 => "mmv",
                 "mmq" if routes & makepad_ai_cuda::llm_ops::ROUTE_MMQ != 0 => "mmq",
