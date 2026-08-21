@@ -467,6 +467,25 @@ pub struct ServingFacts {
     pub lanes_active: Option<u32>,
     /// Lanes the serving box is configured for.
     pub slots_total: Option<u32>,
+    /// Tokens generated inside the model's think block — reasoning the user
+    /// never sees. Rises while the block is open.
+    ///
+    /// Without it a client cannot tell a slow box from a thinking one: the
+    /// meter reads a stalled rate while the box decodes flat out, and the
+    /// wait before ANY text appears is the whole block. With it the client
+    /// can say "thinking · N" and, once `visible_tokens` arrives, quote the
+    /// rate the person actually perceived alongside the rate the box hit.
+    pub think_tokens: Option<u32>,
+    /// Tokens generated after the think block closed. ABSENT while it is
+    /// still open, which is exactly how a client knows it still is.
+    pub visible_tokens: Option<u32>,
+    /// Tokens this turn had to ingest at prefill. A warm conversation ingests
+    /// a handful; a cold one ingests its whole history, and the difference is
+    /// seconds the user feels and cannot otherwise attribute.
+    pub prefix_ingested: Option<u32>,
+    /// True when the serving box kept this conversation's cache and appended
+    /// to it instead of re-reading the whole thing.
+    pub prefix_resumed: Option<bool>,
 }
 
 /// Sanity ceilings for the presentation counters (clamped, never refused).
@@ -483,6 +502,18 @@ impl ServingFacts {
         if let Some(total) = self.slots_total {
             pairs.push(("slots_total", Value::Int(total as i64)));
         }
+        if let Some(think) = self.think_tokens {
+            pairs.push(("think_tokens", Value::Int(think as i64)));
+        }
+        if let Some(visible) = self.visible_tokens {
+            pairs.push(("visible_tokens", Value::Int(visible as i64)));
+        }
+        if let Some(ingested) = self.prefix_ingested {
+            pairs.push(("prefix_ingested", Value::Int(ingested as i64)));
+        }
+        if let Some(resumed) = self.prefix_resumed {
+            pairs.push(("prefix_resumed", Value::Bool(resumed)));
+        }
         json::obj(pairs)
     }
 
@@ -497,10 +528,25 @@ impl ServingFacts {
                 .and_then(Value::as_u64)
                 .map(|n| n.min(MAX_LANES) as u32)
         };
+        // Same clamping law as the counters above: a cosmetic number must
+        // never be able to kill a live turn, so implausible values are pinned
+        // and unreadable ones simply go missing.
+        let count = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_u64)
+                .map(|n| n.min(MAX_GEN_TOKENS) as u32)
+        };
         Some(ServingFacts {
             gen_tokens: v.get("gen_tokens").and_then(Value::as_u64)?.min(MAX_GEN_TOKENS) as u32,
             lanes_active: lane("lanes_active"),
             slots_total: lane("slots_total"),
+            think_tokens: count("think_tokens"),
+            visible_tokens: count("visible_tokens"),
+            prefix_ingested: count("prefix_ingested"),
+            prefix_resumed: v.get("prefix_resumed").and_then(|b| match b {
+                Value::Bool(value) => Some(*value),
+                _ => None,
+            }),
         })
     }
 }

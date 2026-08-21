@@ -131,8 +131,7 @@ fn serving_facts_are_additive_on_delta() {
             serving: Some(ServingFacts {
                 gen_tokens: 128,
                 lanes_active: Some(2),
-                slots_total: Some(4),
-            }),
+                slots_total: Some(4), ..Default::default() }),
         },
     };
     let encoded = full.encode();
@@ -147,7 +146,7 @@ fn serving_facts_are_additive_on_delta() {
         seq: 9,
         body: ChatEventBody::Delta {
             text: "x".into(),
-            serving: Some(ServingFacts { gen_tokens: 1, lanes_active: None, slots_total: None }),
+            serving: Some(ServingFacts { gen_tokens: 1, lanes_active: None, slots_total: None, ..Default::default() }),
         },
     };
     assert_eq!(ChatEvent::decode(&no_lanes.encode()).unwrap(), no_lanes);

@@ -79,6 +79,12 @@ struct ActiveJob {
     /// Tokens the box reports having generated for THIS job, read off its
     /// `decode k/n` stage. Per job, so it restarts every tool round.
     gen_tokens: u32,
+    /// Last serving facts forwarded, so a poll that changed nothing does not
+    /// re-emit. Compared as a whole: warmth arrives before any token exists,
+    /// so keying only on the token count would swallow it.
+    think_tokens: Option<u32>,
+    visible_tokens: Option<u32>,
+    prefix_ingested: Option<u32>,
     /// Consecutive failed polls. A single dropped TCP connect must not
     /// kill a long generation turn; the job keeps running server-side.
     poll_fails: u8,
@@ -508,6 +514,9 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             finished: false,
             last_note: String::new(),
             gen_tokens: 0,
+            think_tokens: None,
+            visible_tokens: None,
+            prefix_ingested: None,
             poll_fails: 0,
         });
         Ok(())
@@ -552,17 +561,51 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             .get("stage")
             .and_then(Value::as_str)
             .and_then(parse_decode_tokens);
-        if let Some(generated) = generated {
-            if generated != active.gen_tokens {
+        // The box's own account of the turn, when it offers one: how much it
+        // had to ingest (warmth) and how much of what it generated the user
+        // will never see (the think block). Absent from an older service, and
+        // then simply not forwarded.
+        let serving = status.get("serving");
+        let field = |key: &str| {
+            serving
+                .and_then(|s| s.get(key))
+                .and_then(Value::as_u64)
+                .map(|n| n as u32)
+        };
+        let think_tokens = field("think_tokens");
+        let visible_tokens = field("visible_tokens");
+        let prefix_ingested = field("prefix_ingested");
+        let prefix_resumed = serving
+            .and_then(|s| s.get("prefix_resumed"))
+            .and_then(|b| match b {
+                Value::Bool(value) => Some(*value),
+                _ => None,
+            });
+        // Emit when ANY of it moved, not only the token count: warmth is known
+        // at prefill, before a single token exists, and it is the fact that
+        // explains the wait the user is sitting through right then.
+        let moved = generated.is_some_and(|g| g != active.gen_tokens)
+            || think_tokens != active.think_tokens
+            || visible_tokens != active.visible_tokens
+            || prefix_ingested != active.prefix_ingested;
+        if moved {
+            if let Some(generated) = generated {
                 active.gen_tokens = generated;
-                let base = active.base.clone();
-                let lanes = self.picks.lanes_for(&base);
-                events.push(ProviderEvent::Serving(ServingFacts {
-                    gen_tokens: generated,
-                    lanes_active: lanes.map(|(active, _)| active),
-                    slots_total: lanes.map(|(_, total)| total),
-                }));
             }
+            active.think_tokens = think_tokens;
+            active.visible_tokens = visible_tokens;
+            active.prefix_ingested = prefix_ingested;
+            let base = active.base.clone();
+            let lanes = self.picks.lanes_for(&base);
+            events.push(ProviderEvent::Serving(ServingFacts {
+                gen_tokens: active.gen_tokens,
+                lanes_active: lanes.map(|(active, _)| active),
+                slots_total: lanes.map(|(_, total)| total),
+                think_tokens,
+                visible_tokens,
+                prefix_ingested,
+                prefix_resumed,
+            }));
         }
         let Some(active) = &mut self.active else {
             return events;
