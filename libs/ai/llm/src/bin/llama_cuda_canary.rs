@@ -36,7 +36,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
         Some("opcheck") => opcheck(),
-        Some("mmvq-error") => mmvq_error_report(),
+        Some("mmvq-error") => mmvq_error_report(&args[2..]),
         Some("opcheck-q4k-mmq") => opcheck_q4k_mmq(),
         Some("opcheck-q6k-mmq") => opcheck_q6k_mmq(),
         Some("opcheck-q5k-mmq") => opcheck_q5k_mmq(),
@@ -1995,8 +1995,56 @@ const Q81_MODEL_NMSE: f64 = 1e-9;
 /// Must stay ascending; the last entry sizes the shared activation block.
 const MMV_WIDTHS: [usize; 5] = [1, 2, 4, 5, 8];
 
+/// Default sweep: small enough to stay a gate, wide enough to separate the
+/// shape effects. `--k` / `--n` point the same instrument at a real tensor —
+/// the LM head is the interesting one, because it is the only mat-vec whose
+/// column count equals `n_outputs`, so a verify batch changes its width by
+/// definition.
+const DEFAULT_REPORT_K: [usize; 3] = [512, 2048, 4096];
+const DEFAULT_REPORT_N: usize = 257;
+
+fn parse_usize_list(text: &str) -> Option<Vec<usize>> {
+    let list: Vec<usize> = text
+        .split(',')
+        .filter_map(|part| part.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
 #[allow(clippy::too_many_lines)]
-fn mmvq_error_report() -> i32 {
+fn mmvq_error_report(args: &[String]) -> i32 {
+    let mut ks: Vec<usize> = DEFAULT_REPORT_K.to_vec();
+    let mut n = DEFAULT_REPORT_N;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--k" => match it.next().and_then(|v| parse_usize_list(v)) {
+                Some(v) => ks = v,
+                None => {
+                    eprintln!("mmvq-error: --k wants a comma-separated list of multiples of 256");
+                    return 2;
+                }
+            },
+            "--n" => match it.next().and_then(|v| v.parse::<usize>().ok()) {
+                Some(v) if v > 0 => n = v,
+                _ => {
+                    eprintln!("mmvq-error: --n wants a positive integer");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!("mmvq-error: unknown argument {other}");
+                eprintln!("usage: llama-cuda-canary mmvq-error [--k 512,2048] [--n 257]");
+                return 2;
+            }
+        }
+    }
+    if let Some(bad) = ks.iter().find(|k| **k % 256 != 0) {
+        eprintln!("mmvq-error: k must be a multiple of the 256-value superblock, got {bad}");
+        return 2;
+    }
+
     let exec = match ExecRuntime::with_backend(ExecBackendKind::Cuda) {
         Ok(ExecRuntime::Cuda(runtime)) => runtime,
         Ok(_) => unreachable!(),
@@ -2007,6 +2055,7 @@ fn mmvq_error_report() -> i32 {
     };
     println!("device: {}", exec.device_description());
     println!("column cap: MMV_MAX_COLUMNS = {MMV_MAX_COLUMNS}");
+    println!("shapes: n = {n}, k = {ks:?}");
     println!(
         "\ncolumns: nmse_* = sum(err^2)/sum(ref^2) against the Q8_1-modelled \
          reference, the full-f32 reference, and the f32-activation KERNEL.\n\
@@ -2039,8 +2088,7 @@ fn mmvq_error_report() -> i32 {
         (TensorType::Q6K, "q6_K"),
     ] {
         let kind = quant_kind_of(ty);
-        for k in [512usize, 2048, 4096] {
-            let n = 257usize;
+        for k in ks.iter().copied() {
             let weights = quant_blocks(&mut rng, ty, k, n);
             let row_bytes = weights.len() / n;
             let rows: Vec<Vec<f32>> = (0..n)
