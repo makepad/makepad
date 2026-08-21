@@ -1605,7 +1605,7 @@ fn one_hot_logits(token: i32, vocab_size: usize) -> Result<Vec<f32>> {
 }
 
 /// Sampling knobs. Defaults match the fleet's chat settings.
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub struct LlamaSamplingParams {
     pub temperature: f32,
     pub top_p: f32,
