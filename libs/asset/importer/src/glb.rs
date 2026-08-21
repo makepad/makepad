@@ -94,10 +94,14 @@ pub fn inspect_glb(bytes: &[u8]) -> Result<GlbStats, String> {
     // the document's POSITION accessors.
     let model = StaticModel::parse_glb(bytes)?;
     let base_color = model.texture_png.clone().or_else(|| extract_base_color(bytes));
-    let (vertices, _) = measure_topology(bytes).ok_or("glb: unreadable document")?;
+    let (vertices, triangles) = measure_topology(bytes).ok_or("glb: unreadable document")?;
     Ok(GlbStats {
         skinned: false,
-        triangles: (model.indices.len() / 3).min(u32::MAX as usize) as u32,
+        // A generic driven rigid part (vehicle wheel, door-like mechanism)
+        // intentionally leaves StaticModel's flattened stream. Manifest
+        // metrics still describe the whole source asset, so count topology
+        // from the glTF document rather than only the static remainder.
+        triangles,
         vertices,
         joints: 0,
         clips: 0,

@@ -18,9 +18,13 @@ pub mod doom3_import;
 pub mod duke_import;
 pub mod quake2_import;
 pub mod quake3_import;
-pub mod stateful_billboard;
+// Published data formats moved to the leaf data crate so READERS (game,
+// vj, asset-ui) parse them without linking the importer. Re-exported here
+// so every existing `crate::stateful_billboard::` /
+// `makepad_asset_importer::stateful_billboard::` path keeps compiling.
+pub use makepad_asset_data::stateful_billboard;
 pub mod world_preview;
-pub mod world_place;
+pub use makepad_asset_data::world_place;
 pub mod world_nav;
 pub mod glb;
 pub mod glb_nodes;

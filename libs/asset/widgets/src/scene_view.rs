@@ -349,6 +349,7 @@ impl SceneView {
                     transform: trs_yaw(vec3f(0.0, -min.y * scale, 0.0), 0.0, scale),
                     dynamic: false,
                     depth_order: 0.0,
+                    part_poses: Vec::new(),
                 });
                 self.status = format!("{tris} triangles");
             }
@@ -365,6 +366,7 @@ impl SceneView {
             transform: trs_yaw(vec3f(0.0, 0.0, 0.0), 0.0, 1.0),
             dynamic: false,
             depth_order: 0.0,
+            part_poses: Vec::new(),
         });
         // A level's door parts are animated nodes, NOT part of the static
         // collision mesh, so their cells are walkable in the graph and the
