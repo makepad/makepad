@@ -116,6 +116,7 @@ impl AssetServer {
             chat: Some(chat_handle.clone()),
             chat_event_waiters: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             profiles: std::sync::Arc::new(super::profiles::ProfileRegistry::new()),
+            rooms: std::sync::Arc::new(super::rooms::RoomRegistry::new()),
         };
 
         // One acceptor per plane; each connection gets its own thread up to

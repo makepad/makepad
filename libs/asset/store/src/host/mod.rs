@@ -30,6 +30,7 @@ pub mod discovery;
 pub mod http;
 pub mod json;
 pub mod profiles;
+pub mod rooms;
 pub mod server;
 pub mod util;
 
@@ -40,6 +41,7 @@ pub(crate) mod routes;
 pub(crate) mod routes_control;
 pub(crate) mod routes_data;
 pub(crate) mod routes_chat;
+pub(crate) mod routes_rooms;
 pub(crate) mod derive_recipes;
 pub(crate) mod routes_import;
 pub(crate) mod routes_operations;

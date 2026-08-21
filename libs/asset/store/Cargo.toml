@@ -72,6 +72,10 @@ name = "http_operations_http"
 path = "tests/http/operations_http.rs"
 
 [[test]]
+name = "http_rooms_http"
+path = "tests/http/rooms_http.rs"
+
+[[test]]
 name = "http_security"
 path = "tests/http/security.rs"
 
