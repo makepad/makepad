@@ -47,10 +47,25 @@ pub const LM_MESH_SCALE: f32 = 0.5;
 /// and terrain tiles are by far the largest regions in the atlas.
 pub const LM_PLANAR_TEXELS_PER_UNIT: f32 = 4.0;
 
-/// Signed-distance band, in texels, encoded into A. ±band maps to 0..255
-/// around 128. Wider survives more smoothing in the shader; narrower resolves
-/// finer double edges. 4 texels is 25cm on models, 1m on terrain.
-pub const LM_SDF_BAND: f32 = 4.0;
+/// Signed-distance band encoded into A, as a WORLD half-width: ±band maps to
+/// 0..255 around 128. World-sized on purpose — the band used to be 4 TEXELS
+/// of the owning region, so a shadow edge crossing from a city tile's chart
+/// (~4 texels/unit) onto the ground region (~12/unit) changed penumbra
+/// softness threefold at the boundary. Every region now encodes the same
+/// world band ([`GpuLightmapBaker`] converts per region via its measured
+/// chart density); 0.35 is the town ground region's old 4-texel look, the
+/// width the whole game was tuned against.
+pub const LM_SUN_BAND_WORLD: f32 = 0.35;
+
+/// Floor on a mesh chart's texel density, in texels per world unit. Region
+/// size follows the model's AO layout, which is MODEL-relative: an 8m city
+/// tile and a 0.4m lantern both landed ~64-texel regions, leaving the tile's
+/// top face ~4 texels/unit — a street lamp's pool rendered on it as visibly
+/// straight-edged bilinear facets (the user's "triangular wedge"), while the
+/// same pool on the ~12/unit ground region was round. [`plan_atlas`] upsizes
+/// a starved chart to this floor (never shrinks a dense one); the shelf pack
+/// still owns fitting the result.
+pub const LM_MESH_MIN_TPU: f32 = 8.0;
 
 /// Hard ceiling on the atlas. 2048² RGBA8 is 16MB — the single biggest GPU
 /// object in the game, but it replaces every shadow triangle there was.
@@ -68,17 +83,22 @@ const LM_PAD: usize = 1;
 /// the accumulation target is RGBA8, so every doubling of the ceiling halves
 /// the steps the pool's falloff has to work with.
 ///
-/// 0.5 puts a street lamp's ~0.3 pool at byte 153 — the same encode
-/// resolution the old ×2.0 ceiling gave the (four times too bright) pool it
-/// was tuned around.
-pub const LM_LAMP_CEIL: f32 = 0.5;
+/// 0.9 puts the night street lamp's 0.72 pool at byte 204 — 25% encode
+/// headroom over the brightest fixture, at 283 byte-levels per light unit
+/// (the composite's world-hash dither hides the banding a magnified 8-bit
+/// gradient would otherwise show).
+pub const LM_LAMP_CEIL: f32 = 0.9;
 
 /// What a street lamp lays on the ground straight below it, in the shader's
 /// light units (the noon sun's DIRECT term is 0.72, its ambient 0.28, so a
-/// fully sunlit ground reads 1.0). A few hundred lumens over a pool metres
-/// across is a FRACTION of daylight; the old bake put 0.87 here — brighter
-/// than noon — which is the white pool this constant exists to prevent.
-pub const LM_LAMP_GROUND_PEAK: f32 = 0.30;
+/// fully sunlit ground reads 1.0). At REAL night the lamp is the street's
+/// anchor light: 0.72 — the direct sun's own term — is the user-graded
+/// presence ("a LOT brighter"; 0.30 read as a dim ~2m puddle, its 8m rim
+/// under the visibility floor). Never a white disc: [`lamp_daylight_scale`]
+/// rails the DELIVERED pool to `min(peak, 1 - daylight)` — daylight looks
+/// keep their old pools bit-for-bit wherever the sky has spent the range —
+/// and the encode ceiling holds 25% headroom over the full peak.
+pub const LM_LAMP_GROUND_PEAK: f32 = 0.72;
 
 /// The pool a street lamp is meant to lay ACROSS THE GROUND, measured from
 /// the pole's foot. Together with the mount height this is the whole
@@ -87,12 +107,19 @@ pub const LM_LAMP_GROUND_PEAK: f32 = 0.30;
 /// (The ground is lit slightly further than this — `sqrt(P² + 2·mount·P)` —
 /// but by then the falloff has spent all but a few percent of the peak; a
 /// taller lamp throwing a little further is what a taller lamp does.)
-pub const LM_LAMP_POOL_RADIUS: f32 = 8.0;
+/// 12: at the night peak the att² falloff over an 8-unit reach spent the
+/// pool by ~4 units (the user's "dim ~2m puddle"); the wider reach carries
+/// a visible mid-pool to ~6 units and a whisper to ~8, and every consumer
+/// — bake gathers, the frame's analytic lights, shadow anchors — reads the
+/// same `radius` off the light, so they agree by construction.
+pub const LM_LAMP_POOL_RADIUS: f32 = 12.0;
 
 /// Ceiling on a lamp's source strength, for fixtures mounted so high that
-/// normalising the pool would ask for more than any bulb emits. Past ~10 m of
-/// mount the pool dims instead of the source growing without bound.
-pub const LM_LAMP_MAX_STRENGTH: f32 = 1.5;
+/// normalising the pool would ask for more than any bulb emits. Past ~7 m of
+/// mount the pool dims instead of the source growing without bound. 3.6 is
+/// the old 1.5 scaled with the peak's 0.30 -> 0.72 night raise, so the
+/// mount at which a tall lamp starts dimming is unchanged.
+pub const LM_LAMP_MAX_STRENGTH: f32 = 3.6;
 
 /// The most lightmap texels ONE lamp may drive to the atlas ceiling.
 ///
@@ -304,6 +331,11 @@ pub fn lamp_ground_texels_over(
     texels_per_unit: f32,
     ceiling: f32,
 ) -> f32 {
+    // One display byte of tolerance: the frame is 8-bit, so a texel within
+    // 1/255 of the clip point cannot READ as clipped — and the daylight
+    // rail delivers a peak of exactly `1 - daylight`, which lands a float
+    // ULP either side of the ceiling depending on the peak constant.
+    let ceiling = ceiling + 1.0 / 255.0;
     if lamp_ground_light(mount, 0.0, radius, strength, spot) <= ceiling {
         return 0.0;
     }
@@ -536,7 +568,8 @@ impl LmRect {
 /// encode conventions even though the pixels now live only on the GPU:
 ///
 /// * `pixels` is RGBA8 row-major, A = the sun-visibility SDF byte
-///   (`128 + sd / LM_SDF_BAND * 127`), RGB = lamp light ÷ [`LM_LAMP_CEIL`].
+///   (`128 + sd / band * 127`, band = [`LM_SUN_BAND_WORLD`] in the region's
+///   texels), RGB = lamp light ÷ [`LM_LAMP_CEIL`].
 /// * `top_pixels` is the shadow-top height plane, one byte per atlas texel
 ///   (same layout, planar regions only): for a SHADOWED ground-field texel,
 ///   the ABSOLUTE world height at which its sun ray was blocked, encoded
@@ -557,6 +590,46 @@ pub struct LmBaked {
     pub planar_rects: Vec<LmRect>,
 }
 
+/// The measured texel density of one placed chart: how many atlas texels a
+/// world unit of this instance's SURFACE gets, if its chart lands in a
+/// `rect_w` x `rect_h` region. The chart's uv parameterisation is the
+/// authority — a region's rect-vs-AABB ratio lies (a city tile's chart puts
+/// its 8m top face across ~half the uv span, so the surface bakes at HALF
+/// the rect's nominal density). Area-weighted over every triangle:
+/// sqrt(chart texel area / world surface area).
+pub fn chart_density(m: &LmMeshInstance, rect_w: usize, rect_h: usize) -> f32 {
+    let src = &m.source;
+    let (mut uv_area, mut w_area) = (0.0f64, 0.0f64);
+    for t in 0..src.caster.tri_count() as u32 {
+        let [i0, i1, i2] = src.caster.triangle_verts(t);
+        let (a, b, c) = src.caster.triangle(t);
+        let wp = |p: Vec3f| {
+            let q = m.transform.transform_vec4(Vec4f { x: p.x, y: p.y, z: p.z, w: 1.0 });
+            Vec3f { x: q.x, y: q.y, z: q.z }
+        };
+        let (wa, wb, wc) = (wp(a), wp(b), wp(c));
+        let e1 = wb - wa;
+        let e2 = wc - wa;
+        let cx = e1.y * e2.z - e1.z * e2.y;
+        let cy = e1.z * e2.x - e1.x * e2.z;
+        let cz = e1.x * e2.y - e1.y * e2.x;
+        w_area += 0.5 * ((cx * cx + cy * cy + cz * cz) as f64).sqrt();
+        let ua = src.ao_uv[i0 as usize];
+        let ub = src.ao_uv[i1 as usize];
+        let uc = src.ao_uv[i2 as usize];
+        let du1 = ((ub[0] - ua[0]) * rect_w as f32, (ub[1] - ua[1]) * rect_h as f32);
+        let du2 = ((uc[0] - ua[0]) * rect_w as f32, (uc[1] - ua[1]) * rect_h as f32);
+        uv_area += 0.5 * ((du1.0 * du2.1 - du1.1 * du2.0) as f64).abs();
+    }
+    if w_area <= 1e-9 || uv_area <= 1e-9 {
+        // A degenerate chart: fall back to the rect-vs-AABB nominal.
+        let (lo, hi) = m.world_bounds();
+        let span = (hi.x - lo.x).max(hi.z - lo.z).max(0.001);
+        return rect_w.max(rect_h) as f32 / span;
+    }
+    (uv_area / w_area).sqrt() as f32
+}
+
 /// Region sizing + shelf packing for a scene — the single source of truth
 /// for the atlas LAYOUT. Rects come back in scene order: meshes first, then
 /// planars. Deterministic: same scene, same layout.
@@ -567,8 +640,18 @@ pub fn plan_atlas(scene: &LmScene) -> (usize, Vec<LmRect>) {
     // uniformly scaled.
     let mut want: Vec<(usize, usize)> = Vec::new();
     for m in &scene.meshes {
-        let w = ((m.source.ao_w as f32 * LM_MESH_SCALE).ceil() as usize).clamp(4, 512);
-        let h = ((m.source.ao_h as f32 * LM_MESH_SCALE).ceil() as usize).clamp(4, 512);
+        let w0 = ((m.source.ao_w as f32 * LM_MESH_SCALE).ceil() as usize).clamp(4, 512);
+        let h0 = ((m.source.ao_h as f32 * LM_MESH_SCALE).ceil() as usize).clamp(4, 512);
+        // World-density floor: the AO layout is model-relative, so a big
+        // flat piece can land a chart too coarse to draw a lamp pool
+        // without visible bilinear facets. Upsize (never shrink) so the
+        // measured chart density reaches LM_MESH_MIN_TPU; x4 cap keeps a
+        // pathological chart from eating the atlas, and the shelf pack's
+        // global shrink loop still has the last word.
+        let tpu = chart_density(m, w0, h0);
+        let s = if tpu > 0.0001 { (LM_MESH_MIN_TPU / tpu).clamp(1.0, 4.0) } else { 1.0 };
+        let w = ((w0 as f32 * s).ceil() as usize).clamp(4, 512);
+        let h = ((h0 as f32 * s).ceil() as usize).clamp(4, 512);
         want.push((w, h));
     }
     for p in &scene.planars {
@@ -701,8 +784,12 @@ mod tests {
     fn pool_peak_stays_below_the_sun_and_the_encode_ceiling() {
         let (radius, strength) = lamp_photometry(2.74);
         let peak = lamp_ground_light(2.74, 0.0, radius, strength, 1.0);
-        assert!(peak < 0.72 * 0.5, "pool peak {peak} rivals the noon sun");
-        assert!(peak < LM_LAMP_CEIL, "pool peak {peak} clips the atlas");
+        // The user-graded night presence: the lamp may MATCH the direct
+        // sun's 0.72 term — at real night it IS the street's sun — but
+        // never exceed it, and the atlas ceiling keeps 25% encode
+        // headroom over the full peak.
+        assert!(peak <= 0.72 + 1e-4, "pool peak {peak} outshines the noon sun");
+        assert!(peak < LM_LAMP_CEIL * 0.85, "pool peak {peak} crowds the atlas ceiling");
         // Soft, not a disc: monotone all the way out, no plateau at the top.
         let mut last = f32::MAX;
         for i in 0..=32 {
@@ -735,15 +822,19 @@ mod tests {
             0.0
         );
 
+        // 4.0 flat: the pre-fix white pool, rescaled to stay a white pool
+        // against the raised encode ceiling (the historical 2.0 on an 8 m
+        // reach peaks at 0.86 — under the new 0.9, it no longer saturates
+        // the ATLAS at all; the frame rail is what bounds it now).
         let mut blown = LmLight {
             pos: Vec3f { x: 0.0, y: mount, z: 0.0 },
-            color: Vec3f { x: 2.0, y: 1.55, z: 0.95 },
+            color: Vec3f { x: 4.0, y: 3.1, z: 1.9 },
             radius: 8.0,
             dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
             spot: 1.0,
         };
         assert!(
-            lamp_saturated_ground_texels(mount, 8.0, 2.0, 1.0, tpu) > LM_LAMP_SAT_TEXELS,
+            lamp_saturated_ground_texels(mount, 8.0, 4.0, 1.0, tpu) > LM_LAMP_SAT_TEXELS,
             "the reported white pool should be over budget"
         );
         let k = cap_lamp_pool(&mut blown, mount, tpu);
@@ -796,7 +887,7 @@ mod tests {
     fn the_headroom_rail_only_bites_where_the_sky_left_no_room() {
         // Below the crossover the scale is exactly 1 — bit-for-bit the old
         // behaviour.
-        for daylight in [0.0f32, 0.1, 0.35, 0.5, 0.69, 1.0 - LM_LAMP_GROUND_PEAK] {
+        for daylight in [0.0f32, 0.05, 0.1, 0.2, 1.0 - LM_LAMP_GROUND_PEAK] {
             assert_eq!(
                 lamp_daylight_scale(daylight),
                 1.0,
@@ -807,7 +898,8 @@ mod tests {
         // cycle, ever.
         let mut prev = 1.0f32;
         for i in 0..=100 {
-            let daylight = 0.70 + 0.30 * i as f32 / 100.0;
+            let daylight = (1.0 - LM_LAMP_GROUND_PEAK)
+                + LM_LAMP_GROUND_PEAK * i as f32 / 100.0;
             let s = lamp_daylight_scale(daylight);
             assert!(s <= prev + 1e-6, "scale rose at daylight {daylight}");
             assert!((0.0..=1.0).contains(&s));
@@ -823,19 +915,20 @@ mod tests {
             (0.80..0.90).contains(&daylight),
             "the authored noon moved: daylight {daylight}"
         );
+        // The DELIVERED noon pool is the same 14% whatever the peak
+        // constant reads — the scale is just that headroom over the peak.
+        let noon_pool = lamp_daylight_scale(daylight) * LM_LAMP_GROUND_PEAK;
         assert!(
-            (0.40..0.55).contains(&lamp_daylight_scale(daylight)),
-            "noon lamp scale moved: {}",
-            lamp_daylight_scale(daylight)
+            ((1.0 - daylight) - noon_pool).abs() < 1e-3,
+            "noon delivered pool {noon_pool} is not the sky's headroom"
         );
-        // And the dusk the shadow-fill lane verified against still runs its
-        // lamps at full strength.
+        // And the dusk the shadow-fill lane verified against delivers AT
+        // LEAST the pool it was signed off with (the night peak raise can
+        // only add light where the sky leaves room).
         let dusk = crate::sun::SunLight::from_time_of_day(17.6, 52.0);
-        assert_eq!(
-            lamp_daylight_scale(daylight_on_ground(dusk.dir, dusk.color, dusk.sky)),
-            1.0,
-            "the verified dusk pool got dimmed"
-        );
+        let dusk_pool = lamp_daylight_scale(daylight_on_ground(dusk.dir, dusk.color, dusk.sky))
+            * LM_LAMP_GROUND_PEAK;
+        assert!(dusk_pool >= 0.2999, "the verified dusk pool got dimmed: {dusk_pool}");
     }
 
     /// The reported bug, as arithmetic: the pre-rail pool clipped the plaza
@@ -1086,6 +1179,98 @@ mod tests {
             true,
             "the smooth pass stopped consulting coverage"
         );
+        // The ALPHA channel's twin repairs: the chamfer seed takes a
+        // chart-edge texel's lit fraction from its fully-covered ring, and
+        // the encode's sub-texel nudge only trusts fully-covered fractions.
+        let chamfer = {
+            let start = src.find("mod.draw.DrawLmChamfer").expect("chamfer shader");
+            let end = src[start..].find("mod.draw.DrawLmLampGatherMesh").expect("gather follows");
+            &src[start..start + end]
+        };
+        assert!(
+            chamfer.contains("cvf: fn(off: vec2) -> vec2")
+                && chamfer.matches("s.y > 0.996").count() == 8,
+            "the chamfer seed stopped distrusting chart-edge lit fractions"
+        );
+        let encode = {
+            let start = src.find("mod.draw.DrawLmEncode").expect("encode shader");
+            let end = src[start..].find("mod.draw.DrawLmTop").expect("top follows");
+            &src[start..start + end]
+        };
+        for needle in [
+            // world-band decode: the baker's per-region band rides misc_a.z
+            "var band = self.misc_a.z",
+            "sd * (127.0 / band)",
+            // the nudge's full-coverage gate
+            "if cov.y > 0.996 {",
+        ] {
+            assert!(
+                encode.contains(needle),
+                "DrawLmEncode lost its world-band/trust piece: {needle}"
+            );
+        }
+    }
+
+    /// The sun penumbra is a WORLD width. A region's chart density converts
+    /// it to texels at encode time; the density itself must come from the
+    /// chart's uv-vs-world areas — the rect-vs-AABB nominal LIES about any
+    /// chart that does not fill its region (a city tile's top face takes
+    /// half the uv span, so its surface bakes at half the nominal density,
+    /// which is exactly how the tile got wedge-shaped lamp pools).
+    #[test]
+    fn chart_density_measures_the_chart_not_the_rect() {
+        // An 8x8 world quad whose chart occupies HALF the uv span of a
+        // 64-texel region: 32 texels over 8 units = 4 texels/unit, where
+        // the nominal rect/span claims 8.
+        let positions = vec![
+            Vec3f { x: 0.0, y: 0.0, z: 0.0 },
+            Vec3f { x: 8.0, y: 0.0, z: 0.0 },
+            Vec3f { x: 8.0, y: 0.0, z: 8.0 },
+            Vec3f { x: 0.0, y: 0.0, z: 8.0 },
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        let source = std::sync::Arc::new(LmMeshSource {
+            caster: crate::ao::MeshRaycaster::new(
+                positions,
+                indices,
+                Vec3f { x: 0.0, y: 0.0, z: 0.0 },
+                Vec3f { x: 8.0, y: 0.0, z: 8.0 },
+            ),
+            ao_uv: vec![[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]],
+            albedo: Vec::new(),
+            ao_w: 128,
+            ao_h: 128,
+        });
+        let inst = LmMeshInstance { source, transform: Mat4f::identity() };
+        let d = chart_density(&inst, 64, 64);
+        assert!((d - 4.0).abs() < 0.05, "density {d}, expected 4.0");
+        // A x2-scaled placement spreads the same chart over twice the
+        // world: half the density. The floor in plan_atlas exists for
+        // exactly this — placed scale starves charts the model thought
+        // were fine.
+        let mut t = Mat4f::identity();
+        t.v[0] = 2.0;
+        t.v[5] = 2.0;
+        t.v[10] = 2.0;
+        let inst2 = LmMeshInstance { source: inst.source.clone(), transform: t };
+        let d2 = chart_density(&inst2, 64, 64);
+        assert!((d2 - 2.0).abs() < 0.05, "scaled density {d2}, expected 2.0");
+        // And plan_atlas lifts the starved chart to the floor: the region
+        // it asks for is scaled by LM_MESH_MIN_TPU / density (capped x4).
+        let scene = LmScene {
+            meshes: vec![inst2],
+            planars: Vec::new(),
+            boxes: Vec::new(),
+            lights: Vec::new(),
+            sun_dir: Vec3f { x: 0.0, y: 1.0, z: 0.0 },
+            sun_color: Vec3f { x: 1.0, y: 1.0, z: 1.0 },
+            sun_sky: Vec3f { x: 0.2, y: 0.2, z: 0.2 },
+            bounce: false,
+        };
+        let (_, rects) = plan_atlas(&scene);
+        // ao 128 * LM_MESH_SCALE = 64 nominal; density 2.0 wants x4 to
+        // reach LM_MESH_MIN_TPU=8 -> 256.
+        assert_eq!(rects[0].w, 256, "the density floor did not lift the region");
     }
 
     #[test]
