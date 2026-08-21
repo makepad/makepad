@@ -562,7 +562,7 @@ mod llama_worker {
     use super::ExpandJob;
     use crate::backend::CancelToken;
     use makepad_ai_llm::{
-        LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
+        LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
     };
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -801,6 +801,15 @@ mod llama_worker {
             seed: job.seed,
         };
         const CHUNK: usize = 24;
+        // ONE RNG stream for the whole reply. `continue_sampled` seeds from
+        // `params.seed` per call, so the chunk loop below used to restart the
+        // sampler every 24 tokens: token 24 drew the same uniform as token 0,
+        // token 25 the same as token 1, and so on for the whole generation. On
+        // a repetitive tail (where consecutive logit rows are near-identical)
+        // that is a 24-token loop the sampler cannot escape. Seeding once and
+        // carrying the state makes a chunked decode produce exactly what one
+        // unchunked call would.
+        let mut sampler = LlamaSamplerState::new(job.seed);
         let mut token_ids: Vec<i32> = Vec::new();
         let mut streamed = String::new();
         loop {
@@ -812,7 +821,7 @@ mod llama_worker {
                 break;
             }
             let generated = session
-                .continue_sampled(want, sampling)
+                .continue_sampled_with(want, sampling, &mut sampler)
                 .map_err(|e| format!("decode: {e:?}"))?;
             token_ids.extend_from_slice(&generated.token_ids);
             let _ = events.send(WorkerEvent::Token(token_ids.len() as u32, max as u32));
