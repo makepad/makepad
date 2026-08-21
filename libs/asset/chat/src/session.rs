@@ -258,6 +258,17 @@ impl Session {
         matches!(self.phase, Phase::Idle)
     }
 
+    /// The cooperative cancel flag this session hands to running tools.
+    ///
+    /// An owner that drives the session from a worker thread may raise this
+    /// from ANOTHER thread to interrupt a long tool (`operation.wait` runs
+    /// up to two minutes) immediately, instead of waiting for its `cancel`
+    /// command to reach the worker's queue. `send` resets the flag at the
+    /// start of every turn, so a raise on an idle session is harmless.
+    pub fn cancel_flag(&self) -> CancelFlag {
+        self.cancel.clone()
+    }
+
     pub fn is_sealed(&self) -> bool {
         self.sealed.is_some()
     }
