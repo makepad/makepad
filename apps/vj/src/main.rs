@@ -8198,10 +8198,22 @@ impl App {
 
     fn rebuild_gen_rows(&mut self, cx: &mut Cx) {
         let now = now_ms();
-        let rows = self
-            .gen
-            .jobs()
-            .map(|job| JobRowEntry::from_job(job, now))
+        // Queue position: pending rows count everyone pending who was
+        // submitted before them (jobs() iterates newest first).
+        let jobs: Vec<&crate::gen::GenJob> = self.gen.jobs().collect();
+        let rows = jobs
+            .iter()
+            .map(|job| {
+                let ahead = matches!(job.state, crate::gen::GenJobState::Pending).then(|| {
+                    jobs.iter()
+                        .filter(|other| {
+                            matches!(other.state, crate::gen::GenJobState::Pending)
+                                && other.tag < job.tag
+                        })
+                        .count()
+                });
+                JobRowEntry::from_job(job, now, ahead)
+            })
             .collect();
         let widget = self.ui.widget(cx, ids!(gen_jobs));
         let borrow = widget.borrow_mut::<VjJobList>();
