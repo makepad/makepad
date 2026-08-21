@@ -690,7 +690,12 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             name: "world.set_source",
             api_name: "world_set_source",
             description: "Replace the running game's splash source with a COMPLETE new \
-                          version (level authoring). The game evaluates it and hot-reloads; \
+                          version (level authoring). This ERASES whatever the new text \
+                          does not restate — every spawn, addon and runtime thing the \
+                          user already has. NEVER for adding content ('add X', 'make me \
+                          a forest' = world.spawn / world.add_addon, which add without \
+                          erasing); only for NEW levels and GAME-LOGIC edits, built on \
+                          world.get_source's text. The game evaluates it and hot-reloads; \
                           on an eval error the previous world keeps running and the error \
                           comes back so you can fix the source and retry. Reference store \
                           content by alias via game.model(\"<canon_alias>\", ...). Keep the \
