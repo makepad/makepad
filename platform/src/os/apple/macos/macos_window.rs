@@ -154,6 +154,40 @@ impl MacosWindow {
         }
     }
 
+    /// Swap the AppKit titlebar container's class for the makepad subclass
+    /// whose hitTest keeps only NSButtons (the traffic lights): with a
+    /// transparent titlebar the container otherwise eats every DRAG in the
+    /// top strip — moving the window while the app's own control (a slider
+    /// in a custom top bar) never sees the mouse. Defensive on every step:
+    /// if AppKit's private view tree ever changes shape, the window keeps
+    /// stock behavior instead of breaking.
+    unsafe fn defang_titlebar_container(&mut self) {
+        let subclass = get_macos_class_global().titlebar_container;
+        if subclass.is_null() {
+            return;
+        }
+        // 0 = NSWindowCloseButton; its superview chain is
+        // NSTitlebarView -> NSTitlebarContainerView.
+        let close: ObjcId = msg_send![self.window, standardWindowButton: 0u64];
+        if close == nil {
+            return;
+        }
+        let titlebar: ObjcId = msg_send![close, superview];
+        if titlebar == nil {
+            return;
+        }
+        let container: ObjcId = msg_send![titlebar, superview];
+        if container == nil {
+            return;
+        }
+        let is_container: bool =
+            msg_send![container, isKindOfClass: Class::get("NSTitlebarContainerView").unwrap()];
+        if !is_container {
+            return;
+        }
+        object_setClass(container, subclass as ObjcId);
+    }
+
     pub fn set_window_level(&mut self, level: MacosWindowLevel) {
         unsafe {
             let () = msg_send![self.window, setLevel: Self::level_to_native(level)];
@@ -237,6 +271,11 @@ impl MacosWindow {
             let () = msg_send![self.window, setTitle: title];
             let () = msg_send![self.window, setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden];
             let () = msg_send![self.window, setTitlebarAppearsTransparent: YES];
+            // The transparent titlebar still EATS DRAGS in the top ~28pt (a
+            // slider drawn there moves the window instead); swap the
+            // container's class so only AppKit's own buttons stay hittable
+            // and the app's WindowDragQuery alone decides window drags.
+            self.defang_titlebar_container();
             let () = msg_send![
                 self.window,
                 setCollectionBehavior: Self::collection_behavior_for_config(self.macos_config)

@@ -71,6 +71,13 @@ extern "C" {
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
 
+#[link(name = "objc")]
+extern "C" {
+    /// libobjc: replace an instance's class at runtime (isa swizzle).
+    /// Returns the previous class.
+    pub fn object_setClass(obj: ObjcId, cls: ObjcId) -> ObjcId;
+}
+
 #[cfg(target_os = "ios")]
 #[link(name = "UIKit", kind = "framework")]
 extern "C" {

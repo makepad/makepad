@@ -1256,6 +1256,7 @@ script_mod! {
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
                                     gen_profile := DropDown{labels: ["…"]}
+                                    gen_len := DropDown{labels: ["…"]}
                                     gen_go := ChromeButton{text: "Queue"}
                                     // Keep the queue topped up from the same
                                     // prompt for as long as it is checked.
@@ -7774,6 +7775,11 @@ impl App {
             self.ui
                 .drop_down(cx, ids!(gen_profile))
                 .set_selected_item(cx, self.gen.selected);
+            let lengths = crate::gen::GenModel::video_length_labels();
+            self.ui.drop_down(cx, ids!(gen_len)).set_labels(cx, lengths);
+            self.ui
+                .drop_down(cx, ids!(gen_len))
+                .set_selected_item(cx, crate::gen::VIDEO_LENGTHS.len() - 1);
         }
     }
 
@@ -10588,6 +10594,9 @@ impl MatchEvent for App {
         if let Some(index) = self.ui.drop_down(cx, ids!(gen_profile)).selected(actions) {
             self.gen.select_profile(index);
         }
+        if let Some(index) = self.ui.drop_down(cx, ids!(gen_len)).selected(actions) {
+            self.gen.set_video_length(index);
+        }
         if let Some(text) = self.ui.text_input(cx, ids!(gen_prompt)).changed(actions) {
             self.gen.set_prompt(text);
         }
@@ -11091,9 +11100,29 @@ impl AppMain for App {
         if let Event::WindowDragQuery(dq) = event {
             let main_id = self.ui.window(cx, ids!(main_window)).window_id();
             if Some(dq.window_id) == main_id {
-                let handle = self.ui.label(cx, ids!(status_label)).area();
-                if handle.is_valid(cx) && handle.rect(cx).contains(dq.abs) {
-                    dq.response.set(WindowDragQueryResponse::Caption);
+                // The whole top bar's BACKGROUND drags the window; its
+                // controls do not. (The platform no longer window-drags the
+                // transparent-titlebar strip on its own — the master slider
+                // used to lose every drag to it — so this answer is the one
+                // place that decides.)
+                let bar = self.ui.view(cx, ids!(status_bar)).area();
+                if bar.is_valid(cx) && bar.rect(cx).contains(dq.abs) {
+                    let controls = [
+                        self.ui.widget(cx, ids!(mode_vj)).area(),
+                        self.ui.widget(cx, ids!(mode_dj)).area(),
+                        self.ui.widget(cx, ids!(mode_sfx)).area(),
+                        self.ui.widget(cx, ids!(master_slider)).area(),
+                        self.ui.widget(cx, ids!(karaoke_enable)).area(),
+                        self.ui.widget(cx, ids!(karaoke_word_hops)).area(),
+                        self.ui.widget(cx, ids!(open_output)).area(),
+                        self.ui.widget(cx, ids!(beat_block)).area(),
+                    ];
+                    let over_control = controls
+                        .iter()
+                        .any(|a| a.is_valid(cx) && a.rect(cx).contains(dq.abs));
+                    if !over_control {
+                        dq.response.set(WindowDragQueryResponse::Caption);
+                    }
                 }
             }
         }

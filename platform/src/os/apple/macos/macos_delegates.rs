@@ -25,6 +25,41 @@ use {
     std::{ffi::CStr, os::raw::c_void, sync::Arc, sync::Mutex},
 };
 
+/// AppKit's transparent-titlebar container still owns the top ~28pt of a
+/// caption-less window: clicks fall through to the app, but DRAGS move the
+/// window — so a slider the app draws in its own top bar loses every drag
+/// to AppKit. Swapped onto the container after window creation, this
+/// subclass keeps only AppKit's own controls hittable (the traffic lights
+/// are NSButtons); everything else falls through to the makepad view, and
+/// window dragging is decided solely by the app's WindowDragQuery answer.
+pub fn define_titlebar_container_class() -> *const Class {
+    let Some(container_class) = Class::get("NSTitlebarContainerView") else {
+        return std::ptr::null();
+    };
+    extern "C" fn hit_test(this: &Object, _: Sel, point: NSPoint) -> ObjcId {
+        unsafe {
+            let hit: ObjcId = msg_send![super(this, superclass(this)), hitTest: point];
+            let mut view = hit;
+            while view != nil {
+                let is_button: bool = msg_send![view, isKindOfClass: class!(NSButton)];
+                if is_button {
+                    return hit;
+                }
+                view = msg_send![view, superview];
+            }
+            nil
+        }
+    }
+    let mut decl = ClassDecl::new("MakepadTitlebarContainerView", container_class).unwrap();
+    unsafe {
+        decl.add_method(
+            sel!(hitTest:),
+            hit_test as extern "C" fn(&Object, Sel, NSPoint) -> ObjcId,
+        );
+    }
+    decl.register()
+}
+
 pub fn define_macos_timer_delegate() -> *const Class {
     extern "C" fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
         MacosApp::send_timer_received(nstimer);
