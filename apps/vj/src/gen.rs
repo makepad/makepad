@@ -19,11 +19,16 @@ use makepad_asset_data::AssetId;
 pub type GenTag = u64;
 
 /// Most job rows kept; beyond it the oldest TERMINAL row is dropped.
-pub const MAX_JOBS: usize = 16;
+/// Sized for fleet-wide spam: a six-box fleet cycling ~40 s loops turns
+/// rows over fast, and a burst of manual Queue presses must not eat the
+/// rows of jobs still running.
+pub const MAX_JOBS: usize = 32;
 /// Poll cadence per active job.
 pub const POLL_MS: u64 = 1_500;
 /// Most status polls issued per tick (bounds catalog-runtime queueing).
-pub const MAX_POLLS_PER_TICK: usize = 4;
+/// Must cover the whole in-flight fleet depth per cadence window or rows
+/// go stale exactly when the fleet is busiest.
+pub const MAX_POLLS_PER_TICK: usize = 8;
 /// Longest prompt accepted.
 pub const MAX_PROMPT_BYTES: usize = 2_000;
 
