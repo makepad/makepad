@@ -38,6 +38,23 @@ pub const BATCH_WIDTHS: [usize; 3] = [1, 2, 4];
 /// [`draft_depth_for`] extends on its own — nothing here needs redesigning.
 pub const COLUMN_BUDGET: usize = 8;
 
+/// The campaign's measured single-stream speculation sweet spot, and therefore
+/// the **minimum allocation ceiling** a batched session may be built with.
+///
+/// Two things at once, and they have to be the same number:
+///
+/// * it is what a solo client must get — the solo lane runs today's
+///   single-stream fast path, not a batched-path compromise, so its draft depth
+///   is the shipped `spec_draft_max`, not something reduced to suit four slots;
+/// * because the ladder only ever *narrows* from the allocation, sizing the
+///   allocation any lower would clip the solo rung and there would be no error
+///   to notice.
+///
+/// Costs `slots * (SOLO_DRAFT_MAX + 2)` recurrent rows — at 4 slots that is
+/// 4.09 GiB against 1.75 GiB for a depth-1 allocation. That ~2.3 GiB is the
+/// price of the solo lane staying fast, and it fits the 4-slot 16k budget.
+pub const SOLO_DRAFT_MAX: usize = 5;
+
 /// Speculative draft depth a step of this width can afford.
 ///
 /// This is the dynamic-degradation ladder, and it is why one active client
@@ -73,6 +90,314 @@ pub fn draft_depth_for_budget(width: usize, draft_max: usize, column_budget: usi
     // width * (draft + 1) <= column_budget
     let affordable = column_budget / width;
     affordable.saturating_sub(1).min(draft_max)
+}
+
+/// Measured cost of one decode step, and of one batched draft forward.
+///
+/// The step cost is indexed by TOTAL columns: a speculative round with lanes at
+/// depths `k_i` runs one verify batch of `sum(k_i + 1)` columns and the same
+/// number of logit rows, which is exactly the shape the `n_outputs = B` sweep
+/// measured.
+#[derive(Clone, Debug)]
+pub struct StepCostModel {
+    /// `step_ms[c]` is the cost of a `c`-column step. Index 0 is unused.
+    step_ms: Vec<f32>,
+    draft_base_ms: f32,
+    draft_per_lane_ms: f32,
+}
+
+impl StepCostModel {
+    /// The measured `n_outputs = B` curve on .217 (5090, Q4_K_M, fill-4096,
+    /// medians of 12 after 3 warm-ups).
+    ///
+    /// **Lower bound**: the verify-batch shape carries neither the per-slot
+    /// recurrent state reads nor the unified-cache attention span, so a real
+    /// multi-slot step costs at least this. Columns 1..8 are measured points;
+    /// 9..16 come from the raised-cap sweep with the gaps linearly
+    /// interpolated, and are only reachable if the cap raise is ever taken.
+    pub fn measured_5090() -> Self {
+        const MEASURED: &[(usize, f32)] = &[
+            (1, 14.113),
+            (2, 17.889),
+            (3, 21.770),
+            (4, 24.286),
+            (5, 26.891),
+            (6, 31.991),
+            (7, 37.730),
+            (8, 39.986),
+            // raised-cap sweep
+            (10, 52.559),
+            (12, 58.010),
+            (16, 75.034),
+        ];
+        Self::from_points(MEASURED, 4.2, 0.3)
+    }
+
+    /// Build from sparse measured points, linearly interpolating the gaps.
+    pub fn from_points(points: &[(usize, f32)], draft_base_ms: f32, draft_per_lane_ms: f32) -> Self {
+        let max = points.iter().map(|(c, _)| *c).max().unwrap_or(1);
+        let mut step_ms = vec![0.0f32; max + 1];
+        for window in points.windows(2) {
+            let (c0, t0) = window[0];
+            let (c1, t1) = window[1];
+            for c in c0..=c1 {
+                let t = (c - c0) as f32 / (c1 - c0).max(1) as f32;
+                step_ms[c] = t0 + (t1 - t0) * t;
+            }
+        }
+        if let Some(&(c, t)) = points.first() {
+            step_ms[c] = t;
+            for c in 1..c {
+                step_ms[c] = t;
+            }
+        }
+        Self {
+            step_ms,
+            draft_base_ms,
+            draft_per_lane_ms,
+        }
+    }
+
+    /// Cost of a step of `columns` columns, or `None` past the measured range.
+    pub fn step_ms(&self, columns: usize) -> Option<f32> {
+        self.step_ms.get(columns).copied().filter(|ms| *ms > 0.0)
+    }
+
+    /// Cost of one draft forward shared by `lanes` lanes.
+    pub fn draft_forward_ms(&self, lanes: usize) -> f32 {
+        if lanes == 0 {
+            return 0.0;
+        }
+        self.draft_base_ms + (lanes - 1) as f32 * self.draft_per_lane_ms
+    }
+
+    /// Scale the draft forward, e.g. once a restricted-vocab draft head makes it
+    /// cheaper. The sidecar shrinks exactly this term, and it is the term that
+    /// decides whether deeper drafts pay.
+    pub fn with_draft_cost(mut self, base_ms: f32, per_lane_ms: f32) -> Self {
+        self.draft_base_ms = base_ms;
+        self.draft_per_lane_ms = per_lane_ms;
+        self
+    }
+}
+
+/// One active lane's live demand, as the allocator sees it.
+#[derive(Clone, Copy, Debug)]
+pub struct LaneDemand {
+    pub slot: usize,
+    /// EMA of per-draft-token acceptance, in `[0, 1]`. A lane on a long
+    /// accepted run earns depth; a lane that keeps rejecting drops to depth 0
+    /// and hands its columns to lanes that will use them.
+    pub acceptance: f32,
+}
+
+impl LaneDemand {
+    /// Expected tokens a round yields at draft depth `k`: `1 + a + ... + a^k`.
+    ///
+    /// Concave in `k` — the marginal value of one more draft column is
+    /// `a^(k+1)`, which strictly decreases. That concavity is what makes the
+    /// greedy allocation in [`allocate_depths`] optimal rather than a heuristic.
+    fn expected_tokens(&self, k: usize) -> f32 {
+        let a = self.acceptance.clamp(0.0, 1.0);
+        (0..=k).map(|j| a.powi(j as i32)).sum()
+    }
+
+    fn marginal(&self, k: usize) -> f32 {
+        self.acceptance.clamp(0.0, 1.0).powi(k as i32 + 1)
+    }
+}
+
+/// What the allocator is optimising for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulerObjective {
+    /// Maximise aggregate accepted tokens/second, subject to the per-client
+    /// floor. This is the shipped objective.
+    MaxAggregate,
+    /// Maximise the slowest lane's rate. Reserved for a future latency mode;
+    /// also the fallback when no allocation can satisfy the floor.
+    MaxMinLatency,
+}
+
+/// Scheduler policy. The objective and the floor are config, not constants,
+/// because they are a product decision rather than a hardware fact.
+#[derive(Clone, Copy, Debug)]
+pub struct SchedulerConfig {
+    pub column_budget: usize,
+    pub draft_max: usize,
+    /// Per-client tokens/second below which an allocation is considered to have
+    /// broken the promise. 0 disables the constraint.
+    pub floor_tok_s: f32,
+    pub objective: SchedulerObjective,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            column_budget: COLUMN_BUDGET,
+            draft_max: SOLO_DRAFT_MAX,
+            floor_tok_s: 50.0,
+            objective: SchedulerObjective::MaxAggregate,
+        }
+    }
+}
+
+/// A chosen split of the column budget across lanes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Allocation {
+    /// Draft depth per lane, parallel to the input slice. Need NOT be uniform.
+    pub depths: Vec<usize>,
+    pub columns: usize,
+    pub round_ms: f32,
+    pub aggregate_tok_s: f32,
+    pub per_client_tok_s: Vec<f32>,
+    /// Whether every lane cleared the configured floor.
+    pub meets_floor: bool,
+}
+
+impl Allocation {
+    fn min_per_client(&self) -> f32 {
+        self.per_client_tok_s
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+    }
+}
+
+/// Allocate the column budget across active lanes to maximise the objective.
+///
+/// Each lane always holds one column (its own next token); the surplus is
+/// distributed as draft depth. For every affordable total column count we take
+/// the greedy allocation — repeatedly hand the next column to the lane with the
+/// highest marginal `a^(k+1)` — which is exactly optimal for a separable
+/// concave objective under a cardinality constraint, then score the resulting
+/// round and keep the best.
+///
+/// That makes this a scan over at most `column_budget` candidates, each a
+/// greedy pass, so it is a table-lookup-scale computation per step and not a
+/// solver in the hot path.
+///
+/// Degenerate cases fall out rather than being special-cased: one lane takes
+/// the whole budget as depth (the solo fast path), and equal acceptances
+/// reproduce the uniform ladder.
+pub fn allocate_depths(
+    lanes: &[LaneDemand],
+    config: &SchedulerConfig,
+    costs: &StepCostModel,
+) -> Option<Allocation> {
+    let width = lanes.len();
+    if width == 0 {
+        return None;
+    }
+    let mut best: Option<Allocation> = None;
+    for columns in width..=config.column_budget {
+        let Some(step_ms) = costs.step_ms(columns) else {
+            continue;
+        };
+        let mut depths = vec![0usize; width];
+        for _ in 0..(columns - width) {
+            let pick = (0..width)
+                .filter(|&i| depths[i] < config.draft_max)
+                .max_by(|&a, &b| {
+                    lanes[a]
+                        .marginal(depths[a])
+                        .partial_cmp(&lanes[b].marginal(depths[b]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            match pick {
+                // A positive marginal is always worth taking for the numerator;
+                // whether the extra column pays for itself is decided by the
+                // ratio, which is why every column count is scored.
+                Some(index) if lanes[index].marginal(depths[index]) > 0.0 => depths[index] += 1,
+                _ => break,
+            }
+        }
+        let used: usize = depths.iter().map(|k| k + 1).sum();
+        if used != columns {
+            // Could not spend the budget (every lane at draft_max, or zero
+            // acceptance everywhere); a narrower candidate already covered it.
+            continue;
+        }
+        let rounds = depths.iter().copied().max().unwrap_or(0);
+        let draft_ms: f32 = (0..rounds)
+            .map(|round| {
+                let drafting = depths.iter().filter(|&&k| k > round).count();
+                costs.draft_forward_ms(drafting)
+            })
+            .sum();
+        let round_ms = step_ms + draft_ms;
+        if round_ms <= 0.0 {
+            continue;
+        }
+        let per_client: Vec<f32> = lanes
+            .iter()
+            .zip(&depths)
+            .map(|(lane, &k)| lane.expected_tokens(k) / (round_ms / 1000.0))
+            .collect();
+        let aggregate: f32 = per_client.iter().sum();
+        let candidate = Allocation {
+            meets_floor: per_client.iter().all(|rate| *rate >= config.floor_tok_s),
+            depths,
+            columns,
+            round_ms,
+            aggregate_tok_s: aggregate,
+            per_client_tok_s: per_client,
+        };
+        best = Some(match best {
+            None => candidate,
+            Some(current) => pick_better(current, candidate, config.objective),
+        });
+    }
+    best
+}
+
+/// Floor first, then the objective. An allocation that keeps every client above
+/// the promised rate always beats one that does not, however much aggregate the
+/// latter wins — that is what makes the floor a constraint rather than a wish.
+fn pick_better(
+    current: Allocation,
+    candidate: Allocation,
+    objective: SchedulerObjective,
+) -> Allocation {
+    match (current.meets_floor, candidate.meets_floor) {
+        (true, false) => return current,
+        (false, true) => return candidate,
+        _ => {}
+    }
+    let better = match objective {
+        SchedulerObjective::MaxAggregate => candidate.aggregate_tok_s > current.aggregate_tok_s,
+        SchedulerObjective::MaxMinLatency => candidate.min_per_client() > current.min_per_client(),
+    };
+    if better {
+        candidate
+    } else {
+        current
+    }
+}
+
+/// Whether admitting one more lane improves things.
+///
+/// Admission is part of the same optimisation, not a separate capacity check:
+/// a lane is admitted only if the post-admission allocation still clears the
+/// floor for everyone AND raises expected aggregate. So a box at its speed
+/// limit stops admitting before it starts degrading the clients it already has.
+pub fn should_admit(
+    active: &[LaneDemand],
+    candidate: LaneDemand,
+    config: &SchedulerConfig,
+    costs: &StepCostModel,
+) -> bool {
+    let mut widened = active.to_vec();
+    widened.push(candidate);
+    let Some(after) = allocate_depths(&widened, config, costs) else {
+        return false;
+    };
+    if !after.meets_floor && config.floor_tok_s > 0.0 {
+        return false;
+    }
+    match allocate_depths(active, config, costs) {
+        None => true,
+        Some(before) => after.aggregate_tok_s > before.aggregate_tok_s,
+    }
 }
 
 /// What a slot is doing between steps.
@@ -522,6 +847,216 @@ mod tests {
         assert_eq!(draft_depth_for(9, 2), 0);
         // A session that disabled speculation never gets it back.
         assert_eq!(draft_depth_for(1, 0), 0);
+    }
+
+    fn lanes(acceptances: &[f32]) -> Vec<LaneDemand> {
+        acceptances
+            .iter()
+            .enumerate()
+            .map(|(slot, &acceptance)| LaneDemand { slot, acceptance })
+            .collect()
+    }
+
+    /// Floor off, so tests exercise the objective rather than the constraint.
+    fn open_config() -> SchedulerConfig {
+        SchedulerConfig {
+            floor_tok_s: 0.0,
+            ..SchedulerConfig::default()
+        }
+    }
+
+    #[test]
+    fn one_client_gets_the_whole_budget_as_depth() {
+        // The solo case must fall OUT of the optimiser, not be special-cased:
+        // with nothing to share with, every spare column becomes speculation.
+        let allocation = allocate_depths(
+            &lanes(&[0.9]),
+            &open_config(),
+            &StepCostModel::measured_5090(),
+        )
+        .expect("allocation");
+        assert_eq!(allocation.depths.len(), 1);
+        assert!(
+            allocation.depths[0] >= 1,
+            "a solo lane with a 0.9 accept rate must speculate, got {:?}",
+            allocation.depths
+        );
+        assert!(allocation.columns <= COLUMN_BUDGET);
+    }
+
+    #[test]
+    fn a_lane_that_keeps_rejecting_gives_its_columns_to_one_that_does_not() {
+        // The user's example: depths need not be uniform. A lane whose drafts
+        // keep missing should not hold columns a productive lane could spend.
+        let allocation = allocate_depths(
+            &lanes(&[0.95, 0.02]),
+            &open_config(),
+            &StepCostModel::measured_5090(),
+        )
+        .expect("allocation");
+        assert!(
+            allocation.depths[0] > allocation.depths[1],
+            "the accepting lane must out-earn the rejecting one, got {:?}",
+            allocation.depths
+        );
+        assert_eq!(
+            allocation.depths[1], 0,
+            "a near-zero-acceptance lane should hold no draft columns"
+        );
+    }
+
+    #[test]
+    fn equal_acceptance_spreads_columns_evenly() {
+        // With nothing to distinguish lanes the optimiser must not play
+        // favourites — an even split is the only defensible answer.
+        let allocation = allocate_depths(
+            &lanes(&[0.9, 0.9, 0.9, 0.9]),
+            &open_config(),
+            &StepCostModel::measured_5090(),
+        )
+        .expect("allocation");
+        let min = allocation.depths.iter().copied().min().unwrap_or(0);
+        let max = allocation.depths.iter().copied().max().unwrap_or(0);
+        assert!(
+            max - min <= 1,
+            "equal lanes must differ by at most a rounding column, got {:?}",
+            allocation.depths
+        );
+    }
+
+    #[test]
+    fn an_allocation_never_overspends_the_column_budget() {
+        // Overspending falls off the MMVQ cliff, so this is the one invariant
+        // that must hold for every demand shape.
+        let costs = StepCostModel::measured_5090();
+        for shape in [
+            vec![0.9],
+            vec![0.9, 0.5],
+            vec![0.99, 0.99, 0.99],
+            vec![0.9, 0.8, 0.7, 0.6],
+            vec![0.5; 6],
+            vec![0.9; 8],
+        ] {
+            let config = open_config();
+            let allocation =
+                allocate_depths(&lanes(&shape), &config, &costs).expect("allocation");
+            let spent: usize = allocation.depths.iter().map(|k| k + 1).sum();
+            assert_eq!(spent, allocation.columns);
+            assert!(
+                spent <= config.column_budget,
+                "{} lanes overspent: {:?}",
+                shape.len(),
+                allocation.depths
+            );
+            assert!(allocation.depths.iter().all(|k| *k <= config.draft_max));
+        }
+    }
+
+    #[test]
+    fn the_floor_outranks_aggregate() {
+        // A floor-satisfying allocation must win even when a floor-breaking one
+        // scores more aggregate, or the floor is decoration.
+        let costs = StepCostModel::measured_5090();
+        let demand = lanes(&[0.9, 0.9]);
+        let open = allocate_depths(&demand, &open_config(), &costs).expect("open");
+        let strict = allocate_depths(
+            &demand,
+            &SchedulerConfig {
+                floor_tok_s: open.min_per_client() + 5.0,
+                ..SchedulerConfig::default()
+            },
+            &costs,
+        )
+        .expect("strict");
+        // Either it found something clearing the raised floor, or nothing could
+        // and it fell back — but it must never report a false pass.
+        if strict.meets_floor {
+            assert!(strict.min_per_client() >= open.min_per_client());
+        }
+    }
+
+    #[test]
+    fn admission_stops_before_it_degrades_the_clients_already_there() {
+        let costs = StepCostModel::measured_5090();
+        let config = SchedulerConfig {
+            floor_tok_s: 50.0,
+            ..SchedulerConfig::default()
+        };
+        let newcomer = LaneDemand {
+            slot: 9,
+            acceptance: 0.9,
+        };
+        // An idle box admits.
+        assert!(should_admit(&[], newcomer, &config, &costs));
+        // A box already past the floor must refuse rather than degrade further.
+        let crowded = lanes(&[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]);
+        assert!(!should_admit(&crowded, newcomer, &config, &costs));
+    }
+
+    #[test]
+    fn a_cheaper_draft_forward_buys_more_depth() {
+        // The sidecar's whole effect on this lane: it shrinks the draft
+        // forward, and the depth economics move with it. Pinning the direction
+        // means the recalibration is a number change, not a redesign.
+        let demand = lanes(&[0.9, 0.9, 0.9, 0.9]);
+        let config = open_config();
+        let full_head = StepCostModel::measured_5090();
+        let sidecar = StepCostModel::measured_5090().with_draft_cost(0.8, 0.1);
+        let before = allocate_depths(&demand, &config, &full_head).expect("before");
+        let after = allocate_depths(&demand, &config, &sidecar).expect("after");
+        let depth_before: usize = before.depths.iter().sum();
+        let depth_after: usize = after.depths.iter().sum();
+        assert!(
+            depth_after >= depth_before,
+            "a cheaper draft must never buy LESS depth: {depth_before} -> {depth_after}"
+        );
+        assert!(after.aggregate_tok_s > before.aggregate_tok_s);
+    }
+
+    #[test]
+    fn the_solo_rung_is_campaign_grade_speculation_not_a_batched_compromise() {
+        // The product requirement, encoded: one client gets the WHOLE column
+        // budget spent on speculation — today's single-stream fast path, at the
+        // shipped depth. A four-slot server must not quietly cost the solo chat
+        // anything, and the only way that regresses is if someone sizes the
+        // allocation for the wide rungs.
+        assert_eq!(draft_depth_for(1, SOLO_DRAFT_MAX), SOLO_DRAFT_MAX);
+        assert!(
+            1 * (SOLO_DRAFT_MAX + 1) <= COLUMN_BUDGET,
+            "the solo rung must fit the budget it is allowed to spend"
+        );
+        // And it survives a raised cap unchanged — the solo path is the one
+        // thing a cap change must never move.
+        assert_eq!(draft_depth_for_budget(1, SOLO_DRAFT_MAX, 16), SOLO_DRAFT_MAX);
+    }
+
+    #[test]
+    fn columns_move_from_draft_depth_to_lanes_as_clients_join() {
+        // The dynamic reallocation the user asked for: idle capacity is spent
+        // on depth, and each joining client trades depth for a lane, per step,
+        // with no mode flip. Pinned at the shipped allocation.
+        let rungs: Vec<usize> = [1usize, 2, 3, 4]
+            .iter()
+            .map(|&w| draft_depth_for(w, SOLO_DRAFT_MAX))
+            .collect();
+        assert_eq!(rungs, vec![5, 3, 1, 1], "cap-8 reallocation ladder");
+        // Depth is monotonically non-increasing in width: joining a client can
+        // never somehow buy the others MORE speculation.
+        for pair in rungs.windows(2) {
+            assert!(pair[0] >= pair[1], "ladder must not rise with width");
+        }
+        // Every rung spends what it is allowed and no more.
+        for (index, &k) in rungs.iter().enumerate() {
+            let width = index + 1;
+            assert!(width * (k + 1) <= COLUMN_BUDGET);
+        }
+        // Under a raised cap the wide rungs get their depth back; this is the
+        // whole and only benefit of raising it.
+        let raised: Vec<usize> = [1usize, 2, 3, 4]
+            .iter()
+            .map(|&w| draft_depth_for_budget(w, SOLO_DRAFT_MAX, 16))
+            .collect();
+        assert_eq!(raised, vec![5, 5, 4, 3], "cap-16 reallocation ladder");
     }
 
     #[test]

@@ -70,8 +70,9 @@ pub use qwen35moe_runtime::{
     qwen35moe_token_logits_probe_spec, Qwen35MoeDims,
 };
 pub use slots::{
-    draft_depth_for, draft_depth_for_budget, pad_batch_width, Slot, SlotPhase, SlotStep, SlotTable, StepPlan,
-    BATCH_WIDTHS, COLUMN_BUDGET,
+    allocate_depths, draft_depth_for, draft_depth_for_budget, pad_batch_width, should_admit,
+    Allocation, LaneDemand, SchedulerConfig, SchedulerObjective, Slot, SlotPhase, SlotStep,
+    SlotTable, StepCostModel, StepPlan, BATCH_WIDTHS, COLUMN_BUDGET, SOLO_DRAFT_MAX,
 };
 pub use runtime::{
     allocate_hybrid_shared_cache_tensors, build_attention_block_graph,
