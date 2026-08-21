@@ -14,7 +14,7 @@
 //! linear (or step) samplers. Unskinned primitives (hand props) are counted
 //! and skipped. Materials are ignored — the caller binds its own texture.
 
-use makepad_draw::makepad_math::{Mat4f, Quat, Vec3f};
+use makepad_draw::makepad_math::{Mat3f, Mat4f, Quat, Vec3f};
 
 // ------------------------------------------------------------------- JSON
 
@@ -660,6 +660,44 @@ fn linear_size(m: &Mat4f) -> f32 {
     (column(0) + column(1) + column(2)) / 3.0
 }
 
+/// The turn in a matrix' linear part, with any size divided out first so a
+/// scaled bone cannot leak its size into the quaternion. A degenerate column
+/// answers "no turn" rather than a NaN.
+fn quat_of_linear(m: &Mat4f) -> Quat {
+    let column = |c: usize| {
+        let v = &m.v;
+        (v[c * 4] * v[c * 4] + v[c * 4 + 1] * v[c * 4 + 1] + v[c * 4 + 2] * v[c * 4 + 2]).sqrt()
+    };
+    let (sx, sy, sz) = (column(0), column(1), column(2));
+    if !(sx > 1.0e-9 && sy > 1.0e-9 && sz > 1.0e-9) {
+        return Quat::default();
+    }
+    let r = |c: usize, row: usize, s: f32| m.v[c * 4 + row] / s;
+    let (m00, m10, m20) = (r(0, 0, sx), r(0, 1, sx), r(0, 2, sx));
+    let (m01, m11, m21) = (r(1, 0, sy), r(1, 1, sy), r(1, 2, sy));
+    let (m02, m12, m22) = (r(2, 0, sz), r(2, 1, sz), r(2, 2, sz));
+    let trace = m00 + m11 + m22;
+    let q = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        Quat { x: (m21 - m12) / s, y: (m02 - m20) / s, z: (m10 - m01) / s, w: 0.25 * s }
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        Quat { x: 0.25 * s, y: (m01 + m10) / s, z: (m02 + m20) / s, w: (m21 - m12) / s }
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        Quat { x: (m01 + m10) / s, y: 0.25 * s, z: (m12 + m21) / s, w: (m02 - m20) / s }
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        Quat { x: (m02 + m20) / s, y: (m12 + m21) / s, z: 0.25 * s, w: (m10 - m01) / s }
+    };
+    let length = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
+    if length > 1.0e-9 {
+        Quat { x: q.x / length, y: q.y / length, z: q.z / length, w: q.w / length }
+    } else {
+        Quat::default()
+    }
+}
+
 /// `m` with its rotation and translation kept and its linear size replaced by
 /// `scale`. A degenerate column leaves the matrix alone rather than dividing
 /// by zero.
@@ -1274,19 +1312,45 @@ impl SkinnedModel {
     /// palette) is cross-faded from `from` (the palette frozen at the last
     /// ragdoll frame), with `weight` the share of the physical pose left.
     ///
-    /// Lane-by-lane interpolation alone would shrink the character mid-fade:
-    /// the straight line between two rotations passes through the middle of
-    /// the sphere, so a limb 90° from where it lands loses a third of its
-    /// length halfway through getting up. Each bone's size is put back after
-    /// the blend, which keeps the fade about POSE and never about size.
+    /// The fade turns each bone along the short way round and interpolates
+    /// its size and position separately, because a bone's matrix is not a
+    /// number to average. Interpolating the sixteen lanes instead walks the
+    /// straight line between two rotations — through the inside of the
+    /// sphere — so a limb 90° from where it lands loses a third of its
+    /// length halfway through getting up, and a limb near 180° from it (a
+    /// villager face-down under a car, about to stand) collapses to nothing
+    /// at the midpoint and springs out the other side inverted. Both were
+    /// visible on every knockdown, as a squash and as a scale flip.
     pub fn blend_palette(from: &[Mat4f], into: &mut [Mat4f], weight: f32) {
         let weight = weight.clamp(0.0, 1.0);
         for (bone, previous) in into.iter_mut().zip(from) {
             let size = linear_size(bone) * (1.0 - weight) + linear_size(previous) * weight;
-            for lane in 0..16 {
-                bone.v[lane] = previous.v[lane] * weight + bone.v[lane] * (1.0 - weight);
-            }
-            *bone = with_linear_scale(bone, size);
+            let turn = Mat3f::from_quat(nlerp(
+                quat_of_linear(bone),
+                quat_of_linear(previous),
+                weight,
+            ));
+            let at = |lane: usize| bone.v[lane] * (1.0 - weight) + previous.v[lane] * weight;
+            *bone = Mat4f {
+                v: [
+                    turn.c0.x * size,
+                    turn.c0.y * size,
+                    turn.c0.z * size,
+                    at(3),
+                    turn.c1.x * size,
+                    turn.c1.y * size,
+                    turn.c1.z * size,
+                    at(7),
+                    turn.c2.x * size,
+                    turn.c2.y * size,
+                    turn.c2.z * size,
+                    at(11),
+                    at(12),
+                    at(13),
+                    at(14),
+                    at(15),
+                ],
+            };
         }
     }
 
@@ -3122,29 +3186,63 @@ mod tests {
     /// length halfway through standing up.
     #[test]
     fn getting_up_is_a_change_of_pose_not_of_size() {
-        let quarter = std::f32::consts::FRAC_PI_4;
-        let turned = Mat4f::mul(
-            &trs_to_mat4(&NodeTrs {
+        // 90 degrees squashed the limb; 179 degrees — a villager face-down
+        // under a car, about to stand — collapsed it to nothing at the
+        // midpoint and sprang it out inverted.
+        let turned_by = |angle: f32| {
+            let half = angle * 0.5;
+            trs_to_mat4(&NodeTrs {
                 t: Vec3f { x: 0.4, y: 0.1, z: -0.2 },
-                r: Quat { x: 0.0, y: 0.0, z: quarter.sin(), w: quarter.cos() },
+                r: Quat { x: 0.0, y: 0.0, z: half.sin(), w: half.cos() },
                 s: Vec3f { x: 1.0, y: 1.0, z: 1.0 },
-            }),
-            &Mat4f::identity(),
-        );
-        let physical = vec![turned, Mat4f::identity()];
-        for step in 0..=20 {
-            let weight = step as f32 / 20.0;
-            let mut animated = vec![Mat4f::identity(); 2];
-            SkinnedModel::blend_palette(&physical, &mut animated, weight);
-            for (joint, bone) in animated.iter().enumerate() {
-                assert!(
-                    (linear_size(bone) - 1.0).abs() < 1.0e-4,
-                    "joint {joint} at weight {weight} is {}x its size",
-                    linear_size(bone)
-                );
+            })
+        };
+        let turned = turned_by(std::f32::consts::FRAC_PI_2);
+        for angle in [std::f32::consts::FRAC_PI_2, 179.0f32.to_radians()] {
+            let physical = vec![turned_by(angle), Mat4f::identity()];
+            let mut previous: Option<Vec<Mat4f>> = None;
+            for step in 0..=20 {
+                let weight = 1.0 - step as f32 / 20.0;
+                let mut animated = vec![Mat4f::identity(); 2];
+                SkinnedModel::blend_palette(&physical, &mut animated, weight);
+                for (joint, bone) in animated.iter().enumerate() {
+                    assert!(
+                        (linear_size(bone) - 1.0).abs() < 1.0e-4,
+                        "angle {angle} joint {joint} at weight {weight} is {}x its size",
+                        linear_size(bone)
+                    );
+                    // A right-handed bone must stay right-handed: a fade that
+                    // passes through zero comes out the far side mirrored.
+                    let v = &bone.v;
+                    let cross = [
+                        v[1] * v[6] - v[2] * v[5],
+                        v[2] * v[4] - v[0] * v[6],
+                        v[0] * v[5] - v[1] * v[4],
+                    ];
+                    let handedness = cross[0] * v[8] + cross[1] * v[9] + cross[2] * v[10];
+                    assert!(
+                        handedness > 0.5,
+                        "angle {angle} joint {joint} at weight {weight} turned inside out"
+                    );
+                }
+                // ...and it must get there smoothly: a lane-lerp through the
+                // middle of the sphere jumps most of the way in one frame.
+                if let Some(last) = &previous {
+                    for (joint, (bone, was)) in animated.iter().zip(last).enumerate() {
+                        let step_size: f32 = (0..12)
+                            .map(|lane| (bone.v[lane] - was.v[lane]).abs())
+                            .fold(0.0, f32::max);
+                        assert!(
+                            step_size < 0.25,
+                            "angle {angle} joint {joint} jumped {step_size} in one frame"
+                        );
+                    }
+                }
+                previous = Some(animated);
             }
         }
         // The endpoints are still exactly the two poses being faded between.
+        let physical = vec![turned, Mat4f::identity()];
         let mut animated = vec![Mat4f::identity(); 2];
         SkinnedModel::blend_palette(&physical, &mut animated, 1.0);
         for lane in 0..16 {
