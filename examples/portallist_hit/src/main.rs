@@ -52,10 +52,42 @@ script_mod! {
         }
     }
 
+    // A scrolling view whose OWN rect is partially clipped away by an
+    // ancestor: a 200px ScrollYView inside a 120px clipping view, so its
+    // unclipped rect covers an 80px band below the crop where other widgets
+    // really live. The scroll-gate repro: `ScrollBar::handle_scroll_event`
+    // contains() a wheel against the scroll area's rect, and a wheel in that
+    // band must not scroll this view. (PortalList wheels ride the hit
+    // system, which already tests the clipped rect — this is the ScrollBar
+    // path.)
+    mod.widgets.CroppedScroll = View{
+        width: Fill
+        height: 120
+        clip_x: true
+        clip_y: true
+        cropped_scroll := ScrollYView{
+            width: Fill
+            height: 200
+            flow: Down
+            Label{height: 30, text: "CropRow 0"}
+            Label{height: 30, text: "CropRow 1"}
+            Label{height: 30, text: "CropRow 2"}
+            Label{height: 30, text: "CropRow 3"}
+            Label{height: 30, text: "CropRow 4"}
+            Label{height: 30, text: "CropRow 5"}
+            Label{height: 30, text: "CropRow 6"}
+            Label{height: 30, text: "CropRow 7"}
+            Label{height: 30, text: "CropRow 8"}
+            Label{height: 30, text: "CropRow 9"}
+            Label{height: 30, text: "CropRow 10"}
+            Label{height: 30, text: "CropRow 11"}
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.inner_size: vec2(420, 400)
+                window.inner_size: vec2(420, 560)
                 body +: {
                     View{
                         width: Fill
@@ -70,6 +102,11 @@ script_mod! {
                         outside_button := Button{
                             width: Fill
                             text: "Outside"
+                        }
+                        crop := mod.widgets.CroppedScroll{}
+                        under_crop_button := Button{
+                            width: Fill
+                            text: "UnderCrop"
                         }
                         View{
                             width: Fill
