@@ -37,8 +37,9 @@ const PREROLL_AUDIO_LEAD_SECS: f64 = 0.25;
 /// cue armed forever: expose that degraded readiness honestly after this bound.
 const PREROLL_AUDIO_TIMEOUT: Duration = Duration::from_millis(1_500);
 static DECODER_ALIAS_ID: AtomicU64 = AtomicU64::new(0);
-/// Longest fully decoded track (music deck), frames: 15 min at 48 kHz.
-pub const MAX_TRACK_FRAMES: usize = 48_000 * 60 * 15;
+/// Longest fully decoded track (music deck), frames: 60 min at 48 kHz.
+/// YouTube DJ mixes land here; two hours would be ~1.3 GiB PCM per deck.
+pub const MAX_TRACK_FRAMES: usize = 48_000 * 60 * 60;
 /// Longest fully decoded SFX sample, frames: 30 s at 48 kHz.
 pub const MAX_PAD_FRAMES: usize = 48_000 * 30;
 /// Waveform resolution (min/max columns) computed at decode time.
@@ -790,6 +791,16 @@ fn cache_playback(shared: &Arc<SlotShared>, cache: &[Frame]) {
         if mode == PlayMode::Loop {
             forward = true;
             idx = (idx + 1) % n;
+            // REAL clip pts, wrapping each pass: the pacer's rebase absorbs
+            // the backward jump instantly (the frames are already decoded,
+            // so unlike the old reopen there is no starvation gap), and the
+            // beat-sync/loop-fit machinery keeps a sane position phase
+            // instead of a clip that grows older forever.
+            shared.frames.lock().unwrap().push_back(Frame {
+                pts_100ns: cache[idx].pts_100ns,
+                bgra: cache[idx].bgra.clone(),
+            });
+            continue;
         } else if forward {
             if idx + 1 >= n {
                 forward = false;
@@ -897,8 +908,10 @@ pub fn decode_audio_clip(
             parse_wav(&bytes, max_frames)
         }
         MediaType::Mp4 => {
-            let path_str = path.to_str().ok_or("non-utf8 path")?;
-            let mut decoder = VideoFileDecoder::open(path_str).map_err(|e| e.to_string())?;
+            // Cache objects are digest-only names; AVURLAsset keys off the
+            // extension. Lease a typed hard link the same way video slots do.
+            let input = DecoderInput::prepare(path, MediaType::Mp4)?;
+            let mut decoder = VideoFileDecoder::open(&input.path).map_err(|e| e.to_string())?;
             if !decoder.info().has_audio {
                 return Err("mp4 has no audio track".into());
             }
