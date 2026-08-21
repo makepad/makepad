@@ -12,9 +12,11 @@
 //!   softness is a runtime knob and the bake stores only WHERE the edge is.
 //!   Storing distance rather than coverage is what lets a coarse texel grid
 //!   draw a clean anti-aliased shadow line — the "soft outlined iso line".
-//! * **RGB** — incident light from placed lamps, encoded ×127.5 so 1.0 sits
-//!   at half range and lamps can go 2× overbright, exactly the Quake
-//!   convention.
+//! * **RGB** — incident light from placed lamps, encoded so atlas 1.0 decodes
+//!   to [`LM_LAMP_CEIL`] of light. The range is deliberately SMALL: a lamp
+//!   pool is a fraction of the noon sun's 0.72 direct term, and an 8-bit
+//!   channel stretched over 2× overbright spent 4/5 of its steps on light no
+//!   fixture emits while the pool itself banded in the remaining fifth.
 //!
 //! Sunlight itself is NOT stored in RGB: the shader already computes the
 //! analytic `sun_color × N·L` term per pixel, so the map only needs to gate
@@ -58,11 +60,187 @@ pub const LM_ATLAS_MAX: usize = 2048;
 /// reads this region's dilated values and never a neighbour's.
 const LM_PAD: usize = 1;
 
+/// Atlas RGB decode: atlas 1.0 is this much light, and the material shaders
+/// multiply by exactly this (`shaders.rs`, four `lm.xyz * (0.5 * has_lm)`
+/// sites) after the bake gathers divided by it (`shaders.rs`, two
+/// `s * 2.0` sites). It is the CEILING a baked lamp can reach, so it must sit
+/// above what a fixture actually lays on the ground and not much further:
+/// the accumulation target is RGBA8, so every doubling of the ceiling halves
+/// the steps the pool's falloff has to work with.
+///
+/// 0.5 puts a street lamp's ~0.3 pool at byte 153 — the same encode
+/// resolution the old ×2.0 ceiling gave the (four times too bright) pool it
+/// was tuned around.
+pub const LM_LAMP_CEIL: f32 = 0.5;
+
+/// What a street lamp lays on the ground straight below it, in the shader's
+/// light units (the noon sun's DIRECT term is 0.72, its ambient 0.28, so a
+/// fully sunlit ground reads 1.0). A few hundred lumens over a pool metres
+/// across is a FRACTION of daylight; the old bake put 0.87 here — brighter
+/// than noon — which is the white pool this constant exists to prevent.
+pub const LM_LAMP_GROUND_PEAK: f32 = 0.30;
+
+/// The pool a street lamp is meant to lay ACROSS THE GROUND, measured from
+/// the pole's foot. Together with the mount height this is the whole
+/// photometry: the light's `radius` is `mount + LM_LAMP_POOL_RADIUS`, which
+/// puts the fixture's reach one pool past its own bulb however high it hangs.
+/// (The ground is lit slightly further than this — `sqrt(P² + 2·mount·P)` —
+/// but by then the falloff has spent all but a few percent of the peak; a
+/// taller lamp throwing a little further is what a taller lamp does.)
+pub const LM_LAMP_POOL_RADIUS: f32 = 8.0;
+
+/// Ceiling on a lamp's source strength, for fixtures mounted so high that
+/// normalising the pool would ask for more than any bulb emits. Past ~10 m of
+/// mount the pool dims instead of the source growing without bound.
+pub const LM_LAMP_MAX_STRENGTH: f32 = 1.5;
+
+/// The most lightmap texels ONE lamp may drive to the atlas ceiling.
+///
+/// Sized off the pool, not off taste: 1024 texels at
+/// [`LM_LAMP_SAT_DENSITY`] is a disc of radius 1.13 m — 2% of the area of an
+/// 8 m pool. A fixture is allowed to blow out its own collar; it is not
+/// allowed to blow out the street. [`cap_lamp_pool`] enforces it.
+pub const LM_LAMP_SAT_TEXELS: f32 = 1024.0;
+
+/// Texel density the saturation budget is measured at: the FINEST a planar
+/// region ever packs ([`plan_atlas`] clamps planar density to 4×
+/// [`LM_PLANAR_TEXELS_PER_UNIT`]). Fixed on purpose — a lamp must not change
+/// brightness because the world grew and its ground region coarsened.
+pub const LM_LAMP_SAT_DENSITY: f32 = 4.0 * LM_PLANAR_TEXELS_PER_UNIT;
+
+/// A downlight's finite reach and source strength, from the fixture's
+/// geometry rather than from whatever scale its mesh was placed at.
+///
+/// `mount` is the height of the emitter above the ground it lights — the one
+/// thing about a lamp that legitimately follows the placement transform,
+/// because the bulb really does sit where the scaled mesh puts it. Reach and
+/// strength do NOT: the reach is `mount + LM_LAMP_POOL_RADIUS` so the pool on
+/// the street stays the same size, and the strength is solved so the ground
+/// straight below reads exactly [`LM_LAMP_GROUND_PEAK`]. A lamp kit placed at
+/// ×1, ×2 and ×8 then lights the same street; only the pole gets taller.
+///
+/// The inversion is exact for the gather's falloff (`att = 1 - d/radius`,
+/// squared, with N·L = 1 and the spot cone = 1 straight below the bulb).
+pub fn lamp_photometry(mount: f32) -> (f32, f32) {
+    let mount = mount.max(0.05);
+    let radius = mount + LM_LAMP_POOL_RADIUS;
+    // att at the nadir: 1 - mount/radius, which is exactly pool/radius.
+    let att = LM_LAMP_POOL_RADIUS / radius;
+    let strength = (LM_LAMP_GROUND_PEAK / (att * att)).min(LM_LAMP_MAX_STRENGTH);
+    (radius, strength)
+}
+
+/// How close to a bulb the bake stops believing occluders, as the lamp depth
+/// pass's near plane. Bounds for [`lamp_clearance`]; the low end is the value
+/// the pass used before it learned to scale.
+pub const LM_LAMP_CLEARANCE_MIN: f32 = 0.25;
+pub const LM_LAMP_CLEARANCE_MAX: f32 = 1.5;
+
+/// The near plane for one lamp's shadow cube — how close to the bulb the bake
+/// stops believing occluders.
+///
+/// A fixture's own housing is the one thing guaranteed to sit between its bulb
+/// and the street, so the pass clips it with a near plane. A FIXED plane is a
+/// scale trap, and the mirror image of the overbright pool — same
+/// constant-in-world-units bug, opposite symptom: a Kenney lantern's housing
+/// floor sits 6% of the pole below its bulb, which clears a 0.25 m plane at
+/// ×1 and hides 0.66 m INSIDE it at ×8, where the lamp then shadows itself
+/// and lights nothing at all. Scaling the plane with the fixture keeps a lamp
+/// lighting its street at any placed scale, while a wall metres away still
+/// casts.
+pub fn lamp_clearance(light: &LmLight) -> f32 {
+    let mount = (light.radius - LM_LAMP_POOL_RADIUS).max(0.0);
+    (mount * 0.12).clamp(LM_LAMP_CLEARANCE_MIN, LM_LAMP_CLEARANCE_MAX)
+}
+
+/// Light this downlight lays on the ground `rho` metres out from the pole —
+/// the bake gather's term (`shaders.rs` `lamp_term`) evaluated on a flat
+/// plane `mount` below the bulb. The bake's authority stays the shader; this
+/// is the same arithmetic on the CPU, for sizing and for tests.
+pub fn lamp_ground_light(mount: f32, rho: f32, radius: f32, strength: f32, spot: f32) -> f32 {
+    let d = (rho * rho + mount * mount).sqrt();
+    if d >= radius || d < 1e-4 {
+        return 0.0;
+    }
+    let att = 1.0 - d / radius;
+    let ndl = mount / d;
+    let cone = ((ndl + 0.35) / 1.35).clamp(0.0, 1.0);
+    strength * ndl * att * att * (cone * cone * spot + (1.0 - spot))
+}
+
+/// Ground texels one lamp drives to the atlas ceiling, at `texels_per_unit`.
+/// Zero for any fixture whose pool peak stays under [`LM_LAMP_CEIL`].
+pub fn lamp_saturated_ground_texels(
+    mount: f32,
+    radius: f32,
+    strength: f32,
+    spot: f32,
+    texels_per_unit: f32,
+) -> f32 {
+    if lamp_ground_light(mount, 0.0, radius, strength, spot) <= LM_LAMP_CEIL {
+        return 0.0;
+    }
+    // Monotone in rho below the bulb: bisect for the crossing.
+    let (mut lo, mut hi) = (0.0f32, radius);
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if lamp_ground_light(mount, mid, radius, strength, spot) > LM_LAMP_CEIL {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    std::f32::consts::PI * lo * lo * texels_per_unit * texels_per_unit
+}
+
+/// The sanity rail on one baked lamp: if its pool would clip the atlas over
+/// more than [`LM_LAMP_SAT_TEXELS`] ground texels, dim it until it does not.
+/// Returns the factor applied — 1.0 when the lamp was already sane, which is
+/// every lamp [`lamp_photometry`] sized.
+///
+/// [`lamp_photometry`] normalises the pool peak to a third of the ceiling, so
+/// this never fires for a harvested fixture. It is the rail under
+/// hand-authored static lights and under any future emitter class: one lamp
+/// can no longer paint a plaza white, whatever it asks for.
+pub fn cap_lamp_pool(light: &mut LmLight, mount: f32, texels_per_unit: f32) -> f32 {
+    if texels_per_unit <= 0.0 || light.radius <= 0.0 {
+        return 1.0;
+    }
+    let cmax = light.color.x.max(light.color.y).max(light.color.z);
+    if cmax <= 0.0 {
+        return 1.0;
+    }
+    let over = |k: f32| {
+        lamp_saturated_ground_texels(mount, light.radius, cmax * k, light.spot, texels_per_unit)
+            > LM_LAMP_SAT_TEXELS
+    };
+    if !over(1.0) {
+        return 1.0;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if over(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    light.color = light.color * lo;
+    lo
+}
+
 /// A placed static light. `radius` is where its contribution reaches zero —
 /// finite on purpose, it is the bound that keeps lamp cost local.
 #[derive(Clone, Debug)]
 pub struct LmLight {
     pub pos: Vec3f,
+    /// Source strength × tint, in the shader's light units — NOT a 0..1
+    /// colour. What lands on a surface is this times the falloff, and the
+    /// atlas clips it at [`LM_LAMP_CEIL`]. Size it with [`lamp_photometry`]
+    /// rather than by eye: a lamp's job is a pool of a given brightness on
+    /// the ground, and the strength that delivers it depends on how high the
+    /// fixture hangs.
     pub color: Vec3f,
     pub radius: f32,
     /// Emission axis for a spot-shaped light (street lamps point DOWN — an
@@ -184,7 +362,7 @@ impl LmRect {
 /// encode conventions even though the pixels now live only on the GPU:
 ///
 /// * `pixels` is RGBA8 row-major, A = the sun-visibility SDF byte
-///   (`128 + sd / LM_SDF_BAND * 127`), RGB = lamp light ×127.5.
+///   (`128 + sd / LM_SDF_BAND * 127`), RGB = lamp light ÷ [`LM_LAMP_CEIL`].
 /// * `top_pixels` is the shadow-top height plane, one byte per atlas texel
 ///   (same layout, planar regions only): for a SHADOWED ground-field texel,
 ///   the ABSOLUTE world height at which its sun ray was blocked, encoded
@@ -313,6 +491,140 @@ pub fn world_bounds(t: &Mat4f, (min, max): (Vec3f, Vec3f)) -> (Vec3f, Vec3f) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of deriving photometry from the fixture instead of
+    /// from the mesh: the same lamp asset placed at ×1, ×2 and ×8 puts the
+    /// SAME pool on the street. Only the pole gets taller.
+    #[test]
+    fn pool_brightness_is_independent_of_mesh_scale() {
+        // A 1.56 m Kenney lantern at scale 1, 2, 3.5 and 5 — bulbs from
+        // 1.37 m to 6.8 m up.
+        for scale in [1.0f32, 2.0, 3.5, 5.0] {
+            let mount = 1.369 * scale;
+            let (radius, strength) = lamp_photometry(mount);
+            let peak = lamp_ground_light(mount, 0.0, radius, strength, 1.0);
+            assert!(
+                (peak - LM_LAMP_GROUND_PEAK).abs() < 1e-4,
+                "scale {scale}: pool peak {peak} drifted from {LM_LAMP_GROUND_PEAK}"
+            );
+            // And the pool is a pool: all but spent by the class's reach,
+            // gone entirely not far past it — never a lit floor to the
+            // horizon, whatever the mesh was scaled to.
+            let edge = lamp_ground_light(mount, LM_LAMP_POOL_RADIUS, radius, strength, 1.0);
+            assert!(
+                edge < peak * 0.15,
+                "scale {scale}: {edge} still on the ground at the pool radius"
+            );
+            let out = lamp_ground_light(mount, LM_LAMP_POOL_RADIUS * 2.0, radius, strength, 1.0);
+            assert_eq!(out, 0.0, "scale {scale}: pool reaches past twice its radius");
+        }
+    }
+
+    /// A lamp is a lamp, not a second sun: its pool must stay well under the
+    /// noon sun's 0.72 direct term and well under the atlas ceiling, so the
+    /// ground texture inside the pool survives.
+    #[test]
+    fn pool_peak_stays_below_the_sun_and_the_encode_ceiling() {
+        let (radius, strength) = lamp_photometry(2.74);
+        let peak = lamp_ground_light(2.74, 0.0, radius, strength, 1.0);
+        assert!(peak < 0.72 * 0.5, "pool peak {peak} rivals the noon sun");
+        assert!(peak < LM_LAMP_CEIL, "pool peak {peak} clips the atlas");
+        // Soft, not a disc: monotone all the way out, no plateau at the top.
+        let mut last = f32::MAX;
+        for i in 0..=32 {
+            let rho = i as f32 * 0.25;
+            let v = lamp_ground_light(2.74, rho, radius, strength, 1.0);
+            assert!(v < last, "pool flat at rho {rho}");
+            last = v;
+        }
+    }
+
+    /// The rail, both ways: the photometry above never trips it, and the
+    /// pre-fix constants (a flat 2.0 source on a fixed 8 m reach — the white
+    /// plaza the user reported) do.
+    #[test]
+    fn saturation_cap_catches_the_white_pool_and_leaves_sane_lamps_alone() {
+        // A town-sized ground region packs at ~12 texels/unit.
+        let tpu = 12.3;
+        let mount = 2.74;
+        let (radius, strength) = lamp_photometry(mount);
+        let mut sane = LmLight {
+            pos: Vec3f { x: 0.0, y: mount, z: 0.0 },
+            color: Vec3f { x: strength, y: strength * 0.775, z: strength * 0.475 },
+            radius,
+            dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
+            spot: 1.0,
+        };
+        assert_eq!(cap_lamp_pool(&mut sane, mount, tpu), 1.0);
+        assert_eq!(
+            lamp_saturated_ground_texels(mount, radius, strength, 1.0, tpu),
+            0.0
+        );
+
+        let mut blown = LmLight {
+            pos: Vec3f { x: 0.0, y: mount, z: 0.0 },
+            color: Vec3f { x: 2.0, y: 1.55, z: 0.95 },
+            radius: 8.0,
+            dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
+            spot: 1.0,
+        };
+        assert!(
+            lamp_saturated_ground_texels(mount, 8.0, 2.0, 1.0, tpu) > LM_LAMP_SAT_TEXELS,
+            "the reported white pool should be over budget"
+        );
+        let k = cap_lamp_pool(&mut blown, mount, tpu);
+        assert!(k < 1.0, "cap did not fire on the white pool");
+        assert!(
+            lamp_saturated_ground_texels(mount, 8.0, blown.color.x, 1.0, tpu)
+                <= LM_LAMP_SAT_TEXELS * 1.001,
+            "cap left the pool over budget"
+        );
+    }
+
+    /// The other half of "a lamp lights its street at any scale": the near
+    /// plane must clear the fixture's OWN housing however big the mesh is.
+    /// Measured against the real asset that broke — Kenney's fantasy-town
+    /// lantern, whose housing floor sits 0.083 of 1.369 model units below its
+    /// bulb (6.1% of the pole). A fixed 0.25 m plane clears that at ×1 and
+    /// ×2, and buries it 0.66 m deep at ×8, where the lamp shadowed itself
+    /// and lit nothing.
+    #[test]
+    fn the_near_plane_clears_the_fixtures_own_housing_at_every_scale() {
+        const HOUSING_FRACTION: f32 = 0.083 / 1.369;
+        for scale in [1.0f32, 2.0, 3.0, 5.0, 8.0, 12.0] {
+            let mount = 1.369 * scale;
+            let (radius, _) = lamp_photometry(mount);
+            let light = LmLight {
+                pos: Vec3f { x: 0.0, y: mount, z: 0.0 },
+                color: Vec3f { x: 1.0, y: 1.0, z: 1.0 },
+                radius,
+                dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 },
+                spot: 1.0,
+            };
+            let housing = mount * HOUSING_FRACTION;
+            assert!(
+                lamp_clearance(&light) > housing,
+                "scale {scale}: near plane {} does not clear a housing {housing} below the bulb",
+                lamp_clearance(&light)
+            );
+        }
+        // And it never grows into a plane that swallows real occluders.
+        let far = LmLight::omni(Vec3f { x: 0.0, y: 0.0, z: 0.0 }, Vec3f { x: 1.0, y: 1.0, z: 1.0 }, 4000.0);
+        assert_eq!(lamp_clearance(&far), LM_LAMP_CLEARANCE_MAX);
+    }
+
+    /// A fixture hung absurdly high does not ask for an infinite bulb.
+    #[test]
+    fn strength_is_bounded_for_tall_mounts() {
+        for mount in [0.0f32, 1.0, 12.0, 60.0, 400.0] {
+            let (radius, strength) = lamp_photometry(mount);
+            assert!(radius > mount, "mount {mount}: reach never touches the ground");
+            assert!(
+                strength > 0.0 && strength <= LM_LAMP_MAX_STRENGTH,
+                "mount {mount}: strength {strength} out of range"
+            );
+        }
+    }
 
     #[test]
     fn regions_never_overlap() {
