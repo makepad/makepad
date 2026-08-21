@@ -987,7 +987,28 @@ mod llama_worker {
             token_ids: Vec<i32>,
             streamed: String,
             max_tokens: usize,
+            /// What the session's KV will hold if this turn completes on the
+            /// solo path: prompt + reply + suffix. `None` for a turn that did
+            /// not take that path, and therefore left the session untouched.
+            commit_as: Option<(super::PrefixOwner, String, String)>,
         }
+
+        // Prefix reuse for the SOLO path, which is the common case and the one
+        // the user measures.
+        //
+        // The lane worker shipped without this, re-ingesting the whole
+        // conversation on every turn ("phase 1 always re-ingests"). On a long
+        // chat that is thousands of tokens of pure rework per turn — the
+        // runbook prices it at ~2.6 s at 8k — and it lands inside the number a
+        // client reads as tok/s. The pre-lanes worker never paid it.
+        //
+        // It is deliberately SOLO-only. The cache describes the session's own
+        // single-sequence state, which only the session-native path uses; a
+        // turn that decodes through a slot leaves that state untouched but
+        // changes nothing about it, so the entry stays valid. What does
+        // invalidate it is the solo path itself running with a reset, or a
+        // turn failing part-way, and both are handled below.
+        let mut prefix = super::PrefixCache::default();
 
         let lanes = lane_count();
         let table = match session.new_slot_table() {
@@ -1019,8 +1040,18 @@ mod llama_worker {
         loop {
             // Take new work. Block only when there is genuinely nothing to do,
             // so an idle box costs no CPU and a busy one never stalls.
+            //
+            // DRAIN FIRST, SUBMIT AFTER. The prefix hit below is only valid
+            // for a turn that will decode ALONE, and a second message arriving
+            // later in the same drain would take that away from a turn already
+            // submitted with only its delta — which would then prefill the
+            // delta at position 0 of a slot holding none of the history, and
+            // answer a question it never saw. Knowing the whole drain before
+            // deciding makes that unrepresentable.
+            let was_idle = exec.is_idle();
+            let mut arrivals: Vec<(ExpandJob, CancelToken, mpsc::Sender<WorkerEvent>)> = Vec::new();
             loop {
-                let msg = if exec.is_idle() {
+                let msg = if exec.is_idle() && arrivals.is_empty() {
                     match rx.recv() {
                         Ok(msg) => Some(msg),
                         Err(_) => return,
@@ -1035,6 +1066,15 @@ mod llama_worker {
                 let Some(WorkerMsg::Expand(job, cancel, events)) = msg else {
                     break;
                 };
+                arrivals.push((job, cancel, events));
+            }
+            // A turn is alone only if the box had nothing and this drain
+            // brought exactly one thing. Then `next_step` admits that one job
+            // into slot 0 with an empty queue, which is precisely the
+            // condition the executor tests for the session-native path.
+            let alone = was_idle && arrivals.len() == 1;
+            for (job, cancel, events) in arrivals {
+                {
                 let tokens = match exec.session().vocab().tokenize(&job.prompt_text, true, true) {
                     Ok(mut tokens) => {
                         // ChatML already ends the turn; a gguf with
@@ -1051,15 +1091,63 @@ mod llama_worker {
                 };
                 let id = next_job;
                 next_job += 1;
+                // A hit means this prompt literally EXTENDS the text the
+                // session's KV already holds, so only the delta needs
+                // ingesting. Anything else re-ingests: reusing state a
+                // DIFFERENT conversation left behind is the one thing worse
+                // than paying for the prefill.
+                //
+                // Only offered when the lane is free and unqueued, because
+                // only then will the executor take the session-native path
+                // that this cache describes. Deciding it here, at submit,
+                // matches how the executor decides it at the step boundary:
+                // both ask whether this turn is alone.
+                let (outcome, owner) = prefix.classify(&job.kind, &job.prompt_text);
+                let hit = alone && outcome == super::PrefixOutcome::Hit;
+                let (tokens, reset_first) = if hit {
+                    let committed = prefix.committed().len();
+                    match exec.session().vocab().tokenize(
+                        &job.prompt_text[committed..],
+                        false,
+                        true,
+                    ) {
+                        Ok(delta) if !delta.is_empty() => (delta, false),
+                        // An empty or unusable delta is not a hit worth having:
+                        // a lane must ingest at least one token to have a
+                        // token to decode from.
+                        _ => (tokens, true),
+                    }
+                } else {
+                    (tokens, true)
+                };
+                if reset_first {
+                    prefix.invalidate();
+                }
+                // Keep the classifier's memory current so a returning
+                // conversation reads as Interleaved rather than Cold. The
+                // elapsed argument is zero because this worker does not time
+                // the prefill separately — it happens inside a scheduler step
+                // — so the waste report's SECONDS are not attributed here; its
+                // token counts still are.
+                prefix.record(outcome, &owner, tokens.len(), std::time::Duration::ZERO);
+                eprintln!(
+                    "[llm-worker] turn {id}: prefix={outcome:?} alone={alone} ingest={} tok \
+                     (of {} in the prompt)",
+                    tokens.len(),
+                    job.prompt_text.len() / 4,
+                );
+                let committed_text = {
+                    let mut text = String::with_capacity(
+                        job.prompt_text.len() + job.commit_suffix.len() + 64,
+                    );
+                    text.push_str(&job.prompt_text);
+                    text
+                };
                 let request = LaneRequest {
                     job: id,
                     session: job.kind.clone(),
                     prompt_tokens: tokens,
-                    // Phase 1 always re-ingests. Prefix reuse across lanes is
-                    // phase 2 work, and reusing state a DIFFERENT conversation
-                    // left in the lane is the one thing worse than paying for
-                    // the prefill.
-                    reset_first: true,
+                    reset_first,
                     max_new: job.max_tokens.max(1) as usize,
                     sampling: LlamaSamplingParams {
                         temperature: job.temperature.max(0.0),
@@ -1084,8 +1172,16 @@ mod llama_worker {
                         token_ids: Vec::new(),
                         streamed: String::new(),
                         max_tokens: job.max_tokens.max(1) as usize,
+                        // Only a turn that went in ALONE can leave the
+                        // session's own state describing it. One that joined a
+                        // batch decodes through a slot and leaves that state
+                        // where it was, so it must not claim it.
+                        commit_as: alone.then(|| {
+                            (owner, committed_text, job.commit_suffix.clone())
+                        }),
                     },
                 );
+                }
             }
 
             // Cancellations are honoured at the boundary, never mid-step.
@@ -1105,6 +1201,9 @@ mod llama_worker {
                     // shared, so every lane in flight hears about it rather
                     // than hanging on a reply that will never come.
                     eprintln!("[llm-worker] step: {err}");
+                    // Whatever the session's state was, it is not what the
+                    // committed text says any more.
+                    prefix.invalidate();
                     for (_, lane) in jobs.drain() {
                         let _ = lane.events.send(WorkerEvent::Done(Err(err.clone())));
                     }
@@ -1145,6 +1244,21 @@ mod llama_worker {
                                 .decode_tokens(&lane.token_ids)
                                 .map_err(|e| format!("detokenize: {e:?}")),
                         };
+                        // The session's KV now holds prompt + reply + suffix,
+                        // so the NEXT turn of this conversation is a delta
+                        // prefill instead of the whole history again. Only for
+                        // a turn that ran alone and completed: a cancelled or
+                        // failed turn leaves the KV somewhere the committed
+                        // text does not describe, and claiming it would hand
+                        // the next turn a prefix that is not there.
+                        match (&result, lane.commit_as) {
+                            (Ok(text), Some((owner, mut committed, suffix))) => {
+                                committed.push_str(text);
+                                committed.push_str(&suffix);
+                                prefix.commit(&owner, committed);
+                            }
+                            _ => prefix.invalidate(),
+                        }
                         let _ = lane.events.send(WorkerEvent::Done(result));
                     }
                 }
