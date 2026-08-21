@@ -139,7 +139,7 @@ pub use runtime::{
 pub use draft_vocab::DraftVocab;
 pub use session::{
     LlamaGeneration, LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig,
-    LlamaStopReason, SpeculativeStats,
+    LlamaStopReason, SpecLane, SpecRoundOutcome, SpeculativeStats,
 };
 pub use vision::{
     calc_size_preserved_ratio, preprocess_rgb8, vision_rope_positions, PreparedImage,
