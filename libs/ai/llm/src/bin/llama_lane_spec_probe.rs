@@ -214,6 +214,7 @@ fn neighbour_invariance(
     per_slot_context: u32,
     spec: usize,
     width: usize,
+    depth: usize,
 ) -> Result<(), String> {
     if spec == 0 {
         return Err(
@@ -222,6 +223,14 @@ fn neighbour_invariance(
                 .to_string(),
         );
     }
+    // FORCE the depth rather than letting the allocator choose it.
+    //
+    // On measured costs the allocator chooses 0 at every batched width — a
+    // fused verify batch costs 2.5x per column, so no acceptance rate pays for
+    // it — and at depth 0 the executor takes the plain step. A gate that let
+    // the allocator decide would therefore stop exercising the round it exists
+    // to gate, and would report that by passing.
+    std::env::set_var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH", depth.to_string());
     let mut a_prompts = vec![lane_prompt(0)];
     let mut b_prompts = vec![lane_prompt(0)];
     for index in 1..width {
@@ -337,8 +346,22 @@ fn measure(
         } else {
             makepad_ai_llm::slots::draft_depth_for(width, spec)
         };
-        for depth in 0..=ladder {
+        // Depth 0 twice at width > 1: once through the plain decode graph (what
+        // the executor runs there) and once through the fused round forced on.
+        // Same tokens, same columns, different GRAPH — which is the experiment
+        // that says whether a verify batch is expensive because it checkpoints
+        // or because it carries several tokens per sequence.
+        let arms: Vec<(usize, bool)> = (0..=ladder)
+            .map(|depth| (depth, false))
+            .chain((width > 1).then_some((0usize, true)))
+            .collect();
+        for (depth, forced_round) in arms {
             std::env::set_var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH", depth.to_string());
+            if forced_round {
+                std::env::set_var("MAKEPAD_LLAMA_BATCH_FORCE_ROUND", "1");
+            } else {
+                std::env::remove_var("MAKEPAD_LLAMA_BATCH_FORCE_ROUND");
+            }
             // The solo path decodes a whole chunk per step, so it needs far
             // fewer steps to time honestly than a batched one does.
             let want = if width == 1 { steps.min(8) } else { steps };
@@ -357,10 +380,17 @@ fn measure(
                     run.width_held_for
                 ));
             }
-            if width > 1 && depth > 0 && run.spec_rounds == 0 {
+            if width > 1 && (depth > 0 || forced_round) && run.spec_rounds == 0 {
                 return Err(format!(
                     "the {width}-lane run at depth {depth} ran no batched speculative round, so \n  \
                      this row is the unspeculated rate wearing a depth label"
+                ));
+            }
+            if width > 1 && !forced_round && depth == 0 && run.spec_rounds != 0 {
+                return Err(format!(
+                    "the {width}-lane depth-0 row ran {} fused rounds; it is supposed to be the \n  \
+                     PLAIN step, and comparing a path against itself measures nothing",
+                    run.spec_rounds
                 ));
             }
             let aggregate = run.decode_tokens as f64 / run.decode_seconds;
@@ -369,6 +399,8 @@ fn measure(
                 width,
                 if width == 1 {
                     format!("solo {spec}")
+                } else if forced_round {
+                    "0 round".to_string()
                 } else {
                     depth.to_string()
                 },
@@ -388,7 +420,7 @@ fn main() {
     let path = args.next().unwrap_or_else(|| {
         eprintln!(
             "usage: llama-lane-spec-probe <model.gguf> [--lanes N] [--spec N] [--context N] \
-             [--steps N] [--measure]"
+             [--steps N] [--depth N] [--measure]"
         );
         std::process::exit(2);
     });
@@ -397,6 +429,7 @@ fn main() {
     let mut spec = 3usize;
     let mut context = 8192u32;
     let mut steps = 48usize;
+    let mut gate_depth = 1usize;
     let mut measure_only = false;
     let rest: Vec<String> = args.collect();
     let mut index = 0;
@@ -420,6 +453,10 @@ fn main() {
             }
             "--steps" => {
                 steps = rest[index + 1].parse().unwrap_or(steps);
+                index += 2;
+            }
+            "--depth" => {
+                gate_depth = rest[index + 1].parse().unwrap_or(gate_depth);
                 index += 2;
             }
             "--measure" => {
@@ -450,8 +487,10 @@ fn main() {
         return;
     }
 
-    eprintln!("gate: {width} of {lanes} lanes, {context} context each, --spec {spec}");
-    match neighbour_invariance(&model, &vocab, lanes, context, spec, width) {
+    eprintln!(
+        "gate: {width} of {lanes} lanes, {context} context each, --spec {spec}, forced depth {gate_depth}"
+    );
+    match neighbour_invariance(&model, &vocab, lanes, context, spec, width, gate_depth) {
         Ok(()) => println!("PASS: every lane speculated, and none of them heard its neighbour"),
         Err(e) => {
             eprintln!("FAIL (batched speculation): {e}");
