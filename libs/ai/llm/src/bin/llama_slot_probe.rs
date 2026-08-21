@@ -13,7 +13,7 @@
 //!
 //! Usage: `llama-slot-probe <model.gguf> [--tokens N] [--slots N]`
 
-use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab};
+use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab, SlotTable};
 
 /// First index of the maximum, tie-broken low — llama.cpp's greedy ordering.
 fn argmax_token_id(logits: &[f32]) -> Option<i32> {
@@ -172,6 +172,185 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    // Third gate: BATCHED INTERLEAVE. Everything above runs at n_seqs == 1.
+    // This one decodes several lanes IN ONE STEP and demands each lane produce
+    // exactly what it produced when stepped alone. If any lane's state or KV
+    // leaks into another, a stream changes — and cross-lane bleed is the
+    // failure that reads as a model-quality problem rather than an error.
+    // CUDA only: Metal refuses n_seqs > 1 by design.
+    match batched_interleave(&model, &vocab, slots, max_new, PER_SLOT_CONTEXT) {
+        Ok(lanes) => println!("PASS: {lanes} lanes batched in one step, no cross-lane bleed"),
+        Err(e) => {
+            eprintln!("FAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Distinct prompts, deliberately of DIFFERENT lengths, so lanes sit at
+/// different fills and the per-lane position and key-span handling is exercised
+/// rather than every lane moving in lockstep.
+const LANE_PROMPTS: &[&str] = &[
+    "List three primary colours.",
+    "Explain in one sentence what a KV cache is and why decoding needs one.",
+    "Name a river in France.",
+    "Write a short definition of throughput as distinct from latency, then give one example of a system that optimises for each.",
+    "What is 17 plus 4?",
+    "Describe what a memory-bound kernel is.",
+    "Give one reason batching helps GPU inference.",
+    "Say hello.",
+];
+
+fn build_session(
+    model: &LlamaModel,
+    slots: u32,
+    per_slot_context: u32,
+) -> Result<LlamaSession, String> {
+    LlamaSession::from_model(
+        model,
+        LlamaSessionConfig {
+            max_context: Some(per_slot_context),
+            max_sequences: slots,
+            ..LlamaSessionConfig::default()
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Decode `lane` alone, one token per step at n_seqs == 1 — the already-gated
+/// path, used here as the reference the batched run must reproduce.
+fn decode_lane_alone(
+    session: &mut LlamaSession,
+    table: &SlotTable,
+    lane: usize,
+    prompt: &[i32],
+    max_new: usize,
+) -> Result<Vec<i32>, String> {
+    let slot = table
+        .slot(lane)
+        .ok_or_else(|| format!("slot {lane} missing"))?;
+    let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
+    let mut logits = session
+        .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+        .map_err(|e| format!("lane {lane} prefill: {e}"))?;
+    let mut produced = Vec::new();
+    let mut fill = prompt.len();
+    for _ in 0..max_new {
+        let token = argmax_token_id(&logits).ok_or_else(|| format!("lane {lane}: no argmax"))?;
+        produced.push(token);
+        logits = session
+            .prefill_slot_chunk(kv_base, state_row, fill, &[token])
+            .map_err(|e| format!("lane {lane} decode: {e}"))?;
+        fill += 1;
+    }
+    Ok(produced)
+}
+
+fn batched_interleave(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    max_new: usize,
+    per_slot_context: u32,
+) -> Result<usize, String> {
+    let lanes = (slots as usize).min(LANE_PROMPTS.len());
+    if lanes < 2 {
+        return Err("batched interleave needs at least 2 lanes".to_string());
+    }
+    let prompts: Vec<Vec<i32>> = LANE_PROMPTS
+        .iter()
+        .take(lanes)
+        .map(|text| vocab.tokenize(text, true, true).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    for (lane, prompt) in prompts.iter().enumerate() {
+        println!("  lane {lane}: {} prompt tokens", prompt.len());
+    }
+
+    // Reference pass: each lane stepped ALONE in its own slot.
+    let mut session = build_session(model, slots, per_slot_context)?;
+    let table = session.new_slot_table().map_err(|e| e.to_string())?;
+    let mut reference = Vec::new();
+    for (lane, prompt) in prompts.iter().enumerate() {
+        reference.push(decode_lane_alone(&mut session, &table, lane, prompt, max_new)?);
+    }
+
+    // Batched pass: a fresh session so no state carries over, all lanes
+    // prefilled, then decoded TOGETHER one step at a time.
+    let mut session = build_session(model, slots, per_slot_context)?;
+    let mut table = session.new_slot_table().map_err(|e| e.to_string())?;
+    let mut next_token = Vec::with_capacity(lanes);
+    for (lane, prompt) in prompts.iter().enumerate() {
+        let claimed = table.admit().ok_or_else(|| "slot table full".to_string())?;
+        if claimed != lane {
+            return Err(format!("expected to claim slot {lane}, got {claimed}"));
+        }
+        let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
+        let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
+        let logits = session
+            .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+            .map_err(|e| format!("lane {lane} batched prefill: {e}"))?;
+        table
+            .advance(lane, prompt.len())
+            .map_err(|e| e.to_string())?;
+        table.begin_decoding(lane).map_err(|e| e.to_string())?;
+        next_token.push(argmax_token_id(&logits).ok_or_else(|| "no argmax".to_string())?);
+    }
+
+    let mut produced: Vec<Vec<i32>> = vec![Vec::new(); lanes];
+    for step in 0..max_new {
+        let plan = table
+            .plan_step()
+            .ok_or_else(|| format!("step {step}: nothing to plan"))?;
+        if plan.slots.len() != lanes {
+            return Err(format!(
+                "step {step}: expected {lanes} lanes in the batch, got {}",
+                plan.slots.len()
+            ));
+        }
+        let tokens: Vec<i32> = plan.slots.iter().map(|s| next_token[s.slot]).collect();
+        let rows = session
+            .step_slots(&plan, &tokens)
+            .map_err(|e| format!("step {step}: {e}"))?;
+        if rows.len() != lanes {
+            return Err(format!(
+                "step {step}: expected {lanes} logit rows, got {}",
+                rows.len()
+            ));
+        }
+        for (row, step_slot) in rows.iter().zip(&plan.slots) {
+            let lane = step_slot.slot;
+            produced[lane].push(next_token[lane]);
+            next_token[lane] =
+                argmax_token_id(row).ok_or_else(|| format!("lane {lane}: no argmax"))?;
+            table.advance(lane, 1).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let mut failures = Vec::new();
+    for lane in 0..lanes {
+        let expected = &reference[lane][..produced[lane].len()];
+        if expected != produced[lane].as_slice() {
+            let at = expected
+                .iter()
+                .zip(&produced[lane])
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            failures.push(format!(
+                "lane {lane} diverges at index {at}\n    alone:   {expected:?}\n    batched: {:?}",
+                produced[lane]
+            ));
+        } else {
+            println!("  lane {lane}: batched stream identical to stepped-alone");
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "cross-lane bleed in a {lanes}-lane batch:\n  {}",
+            failures.join("\n  ")
+        ));
+    }
+    Ok(lanes)
 }
 
 /// Prefill the same prompt into each slot in turn and greedily decode it there,
