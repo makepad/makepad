@@ -68,7 +68,13 @@ const COMPILED_ARCH: &str = match option_env!("MAKEPAD_LLAMA_CUDA_ARCH") {
 };
 /// Mat-vec kernels handle this many activation columns; larger M takes the
 /// slab-dequant cuBLAS GEMM path (prefill).
-const MMV_MAX_COLUMNS: usize = 8;
+///
+/// Public because it is a *numerical* boundary as well as a performance one:
+/// at or below it the K-quants run the official `mul_mat_vec_q`, which
+/// quantizes the activations to Q8_1, and above it they run a bf16 slab GEMM.
+/// The canary has to know where that line is to place its cases on both sides
+/// of it, and it must read the line rather than keep a second copy that drifts.
+pub const MMV_MAX_COLUMNS: usize = 8;
 /// Transient bf16 weight-slab bound for the GEMM path.
 const GEMM_SLAB_BYTES: usize = 256 << 20;
 /// Stable scratch reserved before CUDA-graph capture so `cudaMalloc`
