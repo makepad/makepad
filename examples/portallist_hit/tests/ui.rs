@@ -116,6 +116,30 @@ fn portallist_rows_stay_addressable_after_scrolling(app: TestApp) {
     app.locator(Selector::id("last_played")).wait_text("outside");
 }
 
+/// The scroll-gate half of the clipped-rect family: `cropped_scroll` is a
+/// 200px ScrollYView inside a 120px clipping view, so its UNCLIPPED rect
+/// covers an 80px band below the crop where `under_crop_button` really is.
+/// `ScrollBar::handle_scroll_event` gates a wheel by containment in the
+/// scroll area's rect — it must use the clipped rect, or a wheel over the
+/// invisible band scrolls a view the user cannot see at that spot.
+/// (PortalList wheels ride the hit system, which already tests the clipped
+/// rect — this covers the ScrollBar path.)
+#[makepad_test]
+fn wheel_over_a_scrollviews_clipped_away_part_does_not_scroll_it(app: TestApp) {
+    app.locator(Selector::all().text_exact("CropRow 0")).wait_visible();
+    app.locator(Selector::id("under_crop_button")).wait_visible();
+
+    // Wheel in the clipped-away band: the view must not move.
+    app.locator(Selector::id("under_crop_button")).scroll(0.0, 80.0);
+    app.locator(Selector::all().text_exact("CropRow 0")).wait_visible();
+
+    // Positive control — the same wheel over the VISIBLE part scrolls it.
+    // (If the band wheel above wrongly scrolled the view, "CropRow 0" is
+    // already gone and this locator's resolution is the failure.)
+    app.locator(Selector::all().text_exact("CropRow 0")).scroll(0.0, 80.0);
+    app.locator(Selector::all().text_exact("CropRow 0")).wait_count(0);
+}
+
 #[makepad_test]
 fn portallist_partially_clipped_row_is_still_clickable(app: TestApp) {
     app.locator(Selector::all().text_exact("Play 0")).wait_visible();
