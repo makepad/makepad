@@ -484,7 +484,7 @@ fn expand_with(
             let worker = worker.as_ref().ok_or_else(|| {
                 AssetAiError::Backend("llm backend used before ensure_loaded".to_string())
             })?;
-            expand_through(worker, job, cancel, on_token, on_stage, on_text)
+            expand_through(worker, job, cancel, on_token, on_stage, on_text, &mut |_| {})
         }
     }
 }
@@ -500,9 +500,10 @@ fn expand_through(
     on_token: &mut dyn FnMut(u32, u32),
     on_stage: &mut dyn FnMut(&str),
     on_text: &mut dyn FnMut(&str),
+    on_serving: crate::backend::ServingSink,
 ) -> Result<String, AssetAiError> {
     worker
-        .expand(job.clone(), cancel.clone(), on_token, on_stage, on_text)
+        .expand(job.clone(), cancel.clone(), on_token, on_stage, on_text, on_serving)
         .map_err(|e| {
             if e == "cancelled" {
                 AssetAiError::Cancelled
@@ -655,13 +656,23 @@ impl crate::backend::ConcurrentBackend for LlmConcurrent {
         params: &GenerateParams,
         progress: ProgressSink,
         on_text: &mut dyn FnMut(&str),
+        serving: crate::backend::ServingSink,
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        let serving = std::cell::RefCell::new(serving);
         llm_generate_streamed(
             &self.model_id,
             self.prompts_dir.as_deref(),
             &mut |job, cancel, on_token, on_stage, on_text| {
-                expand_through(&self.worker, job, cancel, on_token, on_stage, on_text)
+                expand_through(
+                    &self.worker,
+                    job,
+                    cancel,
+                    on_token,
+                    on_stage,
+                    on_text,
+                    &mut |update| (serving.borrow_mut())(update),
+                )
             },
             params,
             progress,
@@ -1313,6 +1324,12 @@ mod llama_worker {
                         );
                         if let Some(lane) = jobs.get_mut(&job) {
                             lane.warm = Some((ingested, resumed));
+                            let _ = lane.events.send(WorkerEvent::Serving(
+                                crate::backend::ServingUpdate::Prefill {
+                                    tokens: ingested,
+                                    resumed,
+                                },
+                            ));
                         }
                     }
                     LaneEvent::Token { job, token, produced } => {
@@ -1396,6 +1413,17 @@ mod llama_worker {
                 if lane.think_tokens.is_none() && decoded.contains("</think>") {
                     lane.think_tokens = Some(lane.token_ids.len());
                 }
+                // Reported every step, open block or not: a client showing
+                // "thinking, N" needs N to move, and it needs to learn the
+                // moment it stops.
+                let _ = lane.events.send(WorkerEvent::Serving(
+                    crate::backend::ServingUpdate::Think {
+                        think: lane.think_tokens.unwrap_or(lane.token_ids.len()),
+                        visible: lane
+                            .think_tokens
+                            .map(|think| lane.token_ids.len().saturating_sub(think)),
+                    },
+                ));
                 if let Some(snapshot) = super::next_stream_snapshot(&lane.streamed, &decoded) {
                     lane.streamed = snapshot.clone();
                     let _ = lane.events.send(WorkerEvent::Text(snapshot));
@@ -1409,6 +1437,9 @@ mod llama_worker {
     enum WorkerEvent {
         Stage(String),
         Token(u32, u32),
+        /// Chat serving facts as they become known — warmth at prefill, the
+        /// think split as the reply grows.
+        Serving(crate::backend::ServingUpdate),
         /// Full assistant text so far — a monotonically growing,
         /// prefix-stable snapshot (never a delta), emitted once per decode
         /// chunk. Receivers replace, not append.
@@ -1527,6 +1558,7 @@ mod llama_worker {
         /// into `on_token`. Cancellation: the shared token is checked on the
         /// session thread between generated tokens; the run then reports
         /// Err("cancelled").
+        #[allow(clippy::too_many_arguments)]
         pub fn expand(
             &self,
             job: ExpandJob,
@@ -1534,6 +1566,7 @@ mod llama_worker {
             on_token: &mut dyn FnMut(u32, u32),
             on_stage: &mut dyn FnMut(&str),
             on_text: &mut dyn FnMut(&str),
+            on_serving: crate::backend::ServingSink,
         ) -> Result<String, String> {
             let (event_tx, event_rx) = mpsc::channel();
             self.tx
@@ -1544,6 +1577,7 @@ mod llama_worker {
                     Ok(WorkerEvent::Stage(name)) => on_stage(&name),
                     Ok(WorkerEvent::Token(k, max)) => on_token(k, max),
                     Ok(WorkerEvent::Text(text)) => on_text(&text),
+                    Ok(WorkerEvent::Serving(update)) => on_serving(update),
                     Ok(WorkerEvent::Done(result)) => return result,
                     Err(_) => return Err("llm worker dropped the reply".to_string()),
                 }

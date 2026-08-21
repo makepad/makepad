@@ -1300,16 +1300,40 @@ fn execute_job(
                     .jobs
                     .with(|store| store.set_partial_text(&text_job, text));
             };
+            // Chat serving facts land on the job as they become known, so a
+            // poller sees warmth and the think phase while the turn is still
+            // running rather than after it.
+            let serving_shared = shared.clone();
+            let serving_job = job_id.to_string();
+            let mut serving_sink = move |update: crate::backend::ServingUpdate| {
+                serving_shared.jobs.with(|store| {
+                    store.update_serving(&serving_job, |serving| match update {
+                        crate::backend::ServingUpdate::Prefill { tokens, resumed } => {
+                            serving.prefix_ingested = Some(tokens as u64);
+                            serving.prefix_resumed = Some(resumed);
+                        }
+                        crate::backend::ServingUpdate::Think { think, visible } => {
+                            serving.think_tokens = Some(think as u64);
+                            serving.visible_tokens = visible.map(|v| v as u64);
+                        }
+                    })
+                });
+            };
             match &concurrent {
-                Some(handle) => {
-                    handle.generate_streamed(&params, &mut progress_sink, &mut text_sink, &cancel)
-                }
+                Some(handle) => handle.generate_streamed(
+                    &params,
+                    &mut progress_sink,
+                    &mut text_sink,
+                    &mut serving_sink,
+                    &cancel,
+                ),
                 None => with_backends(shared, |backends| {
                     let backend = backends.get_mut(&spec.id).unwrap();
-                    backend.generate_streamed(
+                    backend.generate_streamed_serving(
                         &params,
                         &mut progress_sink,
                         &mut text_sink,
+                        &mut serving_sink,
                         &cancel,
                     )
                 }),

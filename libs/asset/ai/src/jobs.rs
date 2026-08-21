@@ -131,6 +131,9 @@ pub struct JobRecord {
     pub finished_ms: Option<u64>,
     /// Assistant text for chat/LLM jobs; surfaced as `JobStatusJson.partial_text`.
     pub partial_text: Option<String>,
+    /// Chat serving facts (warmth, think/visible split), surfaced as
+    /// `JobStatusJson.serving`. Set by the backend as the turn runs.
+    pub serving: Option<crate::protocol::ServingStatusJson>,
     /// Bounded stage-transition log, oldest first (see [`LOG_CAP`]).
     log: Vec<String>,
     /// Non-numeric prefix of the last logged stage (throttling key).
@@ -308,6 +311,7 @@ impl JobStore {
                 started_ms: None,
                 finished_ms: None,
                 partial_text: None,
+                serving: None,
                 log: Vec::new(),
                 log_phase: String::new(),
                 log_at_ms: 0,
@@ -472,6 +476,29 @@ impl JobStore {
         }
     }
 
+    /// Merge chat serving facts. Fields arrive at different moments — warmth
+    /// at prefill, the think split as the reply grows — so each update fills
+    /// only what it knows and leaves the rest alone. Overwriting wholesale
+    /// would blank the warmth the moment the first token lands.
+    pub fn update_serving(
+        &mut self,
+        id: &str,
+        update: impl FnOnce(&mut crate::protocol::ServingStatusJson),
+    ) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            let mut serving = job.serving.take().unwrap_or(
+                crate::protocol::ServingStatusJson {
+                    prefix_ingested: None,
+                    prefix_resumed: None,
+                    think_tokens: None,
+                    visible_tokens: None,
+                },
+            );
+            update(&mut serving);
+            job.serving = Some(serving);
+        }
+    }
+
     pub fn set_progress(&mut self, id: &str, stage: &str, progress: f64) {
         if let Some(job) = self.jobs.get_mut(id) {
             if matches!(job.state, JobState::Running { .. }) {
@@ -616,6 +643,7 @@ impl JobStore {
             },
             partial_text: job.partial_text.clone(),
             live: None,
+            serving: job.serving.clone(),
         };
         match &job.state {
             JobState::Queued => {

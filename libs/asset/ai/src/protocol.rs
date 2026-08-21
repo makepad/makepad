@@ -549,6 +549,43 @@ pub struct JobStatusJson {
     /// websocket message uses for the per-frame timing detail this doesn't
     /// carry).
     pub live: Option<LiveStatusJson>,
+    /// Chat serving facts: conversation warmth and the think/visible split.
+    ///
+    /// Additive and optional, same compatibility law as every other block
+    /// here: a client that does not know it ignores it, and a service that
+    /// does not fill it is simply an older service. Absent on non-chat jobs.
+    pub serving: Option<ServingStatusJson>,
+}
+
+/// What a chat turn is actually doing, for a client that would otherwise have
+/// to infer it from latency.
+///
+/// Two questions a chat UI cannot answer on its own, and both of them look
+/// like "the box is slow" when they go unanswered:
+///
+/// **Is my conversation warm?** `prefix_resumed` says the lane kept this
+/// conversation's cache and `prefix_ingested` says how few tokens the turn
+/// actually had to put in. A cold turn re-ingests thousands; a warm one
+/// ingests a handful, and the difference is seconds the user feels but cannot
+/// attribute.
+///
+/// **Is it thinking?** Qwen3.8 runs an open think block, so a turn generates
+/// its reasoning BEFORE any visible text. Counted rather than flagged, because
+/// counts give a client both answers: `think_tokens` with no
+/// `visible_tokens` means the block is still open (show "thinking · N"), and
+/// afterwards the two together are the rate the user actually perceives
+/// against the rate the box achieved.
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct ServingStatusJson {
+    /// Tokens this turn ingested at prefill — the DELTA when resumed.
+    pub prefix_ingested: Option<u64>,
+    /// True when the lane kept this conversation's cache and appended.
+    pub prefix_resumed: Option<bool>,
+    /// Tokens generated inside the think block. Rises while it is open.
+    pub think_tokens: Option<u64>,
+    /// Tokens generated after it closed — what the user can actually read.
+    /// Absent while the block is still open.
+    pub visible_tokens: Option<u64>,
 }
 
 /// Live-session counters mirrored on `GET /job/<id>` (see

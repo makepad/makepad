@@ -1040,6 +1040,24 @@ impl<'a> BackendCtx<'a> {
     }
 }
 
+/// A chat serving fact, as it becomes known.
+///
+/// Separate variants rather than one struct because they arrive at different
+/// moments — warmth at prefill, the think split as the reply grows — and a
+/// whole-struct update would blank whichever half it did not know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServingUpdate {
+    /// The turn ingested `tokens` at prefill; `resumed` when that was only the
+    /// delta because the lane kept this conversation's cache.
+    Prefill { tokens: usize, resumed: bool },
+    /// Tokens generated so far inside the think block, and after it. `visible`
+    /// is `None` while the block is still open.
+    Think { think: usize, visible: Option<usize> },
+}
+
+/// Sink for [`ServingUpdate`]s. `&mut dyn FnMut` like every other sink here.
+pub type ServingSink<'a> = &'a mut dyn FnMut(ServingUpdate);
+
 /// Generation that does not need the backend registry.
 ///
 /// Handed out by [`ContentBackend::concurrent`] under the registry lock and
@@ -1056,6 +1074,7 @@ pub trait ConcurrentBackend: Send {
         params: &GenerateParams,
         progress: ProgressSink,
         on_text: &mut dyn FnMut(&str),
+        serving: ServingSink,
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError>;
 }
@@ -1124,6 +1143,23 @@ pub trait ContentBackend: Send {
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
         let _ = on_text;
         self.generate(params, progress, cancel)
+    }
+
+    /// Generation that can also report chat serving facts.
+    ///
+    /// Defaults to [`Self::generate_streamed`] and drops them, which is the
+    /// honest answer for every backend that has none: warmth and think blocks
+    /// are properties of a chat turn, not of image or mesh generation.
+    fn generate_streamed_serving(
+        &mut self,
+        params: &GenerateParams,
+        progress: ProgressSink,
+        on_text: &mut dyn FnMut(&str),
+        serving: ServingSink,
+        cancel: &CancelToken,
+    ) -> Result<Vec<ArtifactData>, AssetAiError> {
+        let _ = serving;
+        self.generate_streamed(params, progress, on_text, cancel)
     }
 
     /// A handle that can run this backend's generation **without holding the
