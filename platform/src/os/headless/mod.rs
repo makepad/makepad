@@ -76,6 +76,11 @@ pub struct CxOs {
     /// sample the child's last contents, and reusing the buffers keeps a
     /// window-sized 3D pass to one allocation instead of one per frame.
     pub(crate) render_targets: crate::os::headless::raster::HeadlessRenderTargets,
+    /// One framebuffer per window, kept across frames. Re-mapping tens of
+    /// megabytes of colour and depth every frame costs more in first-touch page
+    /// faults than the clear that follows it.
+    pub(crate) window_framebuffers:
+        std::collections::HashMap<usize, crate::os::headless::virtual_gpu::Framebuffer>,
 }
 
 impl Default for CxOs {
@@ -90,6 +95,7 @@ impl Default for CxOs {
             draw_cycles: None,
             texture_conversions: Default::default(),
             render_targets: Default::default(),
+            window_framebuffers: Default::default(),
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::{
     draw_shader::{CxDrawShaderCode, CxDrawShaderMapping, DrawShaderColorFormat},
     makepad_live_id::*,
     makepad_math::*,
-    texture::TextureFormat,
+    texture::{TextureFormat, TextureUpdated},
 };
 use makepad_zune_png::{
     makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
@@ -65,13 +65,47 @@ fn configured_parallel_min_tris(default_min: usize) -> usize {
         .unwrap_or(default_min)
 }
 
+/// Per-frame raster knobs, read from the environment once instead of on every
+/// draw list. `headless_render_view` recurses per sub-list, so the three
+/// `getenv` calls it used to make ran hundreds of times a frame.
+#[derive(Clone)]
+struct RenderOptions {
+    threads: usize,
+    /// Minimum triangles in a draw call before it is worth splitting.
+    parallel_min_tris: usize,
+    /// Minimum estimated covered pixels before it is worth splitting.
+    parallel_min_pixels: usize,
+    /// `MAKEPAD_HEADLESS_ONLY_SHADER` — draw only the named shader class.
+    only_shader: Option<String>,
+    /// `MAKEPAD_HEADLESS_DEBUG_TEXT` — dump per-fragment text shader state.
+    debug_text: bool,
+}
+
+impl RenderOptions {
+    fn from_env(threads: usize) -> Self {
+        Self {
+            threads,
+            parallel_min_tris: configured_parallel_min_tris(1),
+            parallel_min_pixels: parallel_min_pixels(),
+            only_shader: std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok(),
+            debug_text: std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok(),
+        }
+    }
+}
+
 /// Rows a band must have before splitting one off is worth a thread hand-off.
 const MIN_BAND_ROWS: usize = 8;
 
 /// Estimated covered pixels below which a draw call stays on the calling
 /// thread. Spinning threads up for a button-sized quad costs more than the
 /// quad does, and a UI frame is mostly button-sized quads.
-const PARALLEL_MIN_PIXELS: usize = 32 * 1024;
+fn parallel_min_pixels() -> usize {
+    const DEFAULT: usize = 2048;
+    std::env::var("MAKEPAD_HEADLESS_PARALLEL_MIN_PIXELS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT)
+}
 
 /// Split the rows a draw call actually touches into bands for the workers.
 ///
@@ -84,15 +118,20 @@ fn compute_row_bands(
     band_hi: usize,
     threads: usize,
     covered_px: usize,
+    min_pixels: usize,
 ) -> Vec<(usize, usize)> {
     let total_rows = band_hi.saturating_sub(band_lo);
     if total_rows == 0 {
         return Vec::new();
     }
-    if threads <= 1 || covered_px < PARALLEL_MIN_PIXELS || total_rows < MIN_BAND_ROWS * 2 {
+    if threads <= 1 || covered_px < min_pixels || total_rows < MIN_BAND_ROWS * 2 {
         return vec![(band_lo, band_hi)];
     }
-    let want = (threads * 4).max(1);
+    // Scale the split with the work: handing a four-thousand-pixel quad to
+    // sixteen threads spends more on starting them than they save. One thread
+    // per `min_pixels` of estimated coverage, capped at the pool size.
+    let useful_threads = (covered_px / min_pixels.max(1)).clamp(1, threads);
+    let want = (useful_threads * 4).max(1);
     let max_bands = (total_rows / MIN_BAND_ROWS).max(1);
     let count = want.min(max_bands);
     let base = total_rows / count;
@@ -288,6 +327,96 @@ fn headless_texture_info(
     }
 }
 
+/// Re-convert one axis-aligned region of a texture into its RGBA-f32 mirror.
+fn convert_rect<T: Copy>(
+    dst: &mut [f32],
+    src: &[T],
+    width: usize,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    texel: &impl Fn(T) -> [f32; 4],
+) {
+    for y in y0..y1 {
+        let row = y * width;
+        let (Some(src_row), Some(dst_row)) = (
+            src.get(row + x0..row + x1),
+            dst.get_mut((row + x0) * 4..(row + x1) * 4),
+        ) else {
+            continue;
+        };
+        for (out, &pixel) in dst_row.chunks_exact_mut(4).zip(src_row) {
+            out.copy_from_slice(&texel(pixel));
+        }
+    }
+}
+
+/// Keep a texture's RGBA-f32 mirror up to date and hand the sampler a view of it.
+///
+/// Only the region the texture reports as dirty is re-converted. A glyph atlas
+/// is several megabytes and grows by one glyph at a time; re-expanding the whole
+/// thing on every update cost more than rasterizing the frame that needed the
+/// glyph. `count` is how many texels of `src` the mirror covers — the whole
+/// buffer for a mip chain (so the levels are converted once), the base image
+/// otherwise.
+fn cached_conversion<T: Copy>(
+    cache: &mut TextureConversionCache,
+    texture_index: usize,
+    sig: TextureConversionSignature,
+    width: usize,
+    height: usize,
+    count: usize,
+    src: &[T],
+    updated: &TextureUpdated,
+    texel: impl Fn(T) -> [f32; 4],
+) -> Option<[usize; 4]> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let entry = cache
+        .entry(texture_index)
+        .or_insert_with(|| CachedTextureConversion {
+            signature: sig,
+            rgba: Vec::new(),
+        });
+
+    // A different buffer, a different size, or a full invalidation means the
+    // mirror has to be rebuilt end to end; anything else is a patch.
+    let stale = entry.signature != sig || entry.rgba.len() != count * 4;
+    if stale || matches!(updated, TextureUpdated::Full) {
+        entry.signature = sig;
+        entry.rgba.clear();
+        entry.rgba.resize(count * 4, 0.0);
+        let rows = count / width.max(1);
+        convert_rect(&mut entry.rgba, src, width, 0, 0, width, rows, &texel);
+    } else if let TextureUpdated::Partial(rect) = updated {
+        let x0 = rect.origin.x.min(width);
+        let y0 = rect.origin.y.min(height);
+        let x1 = rect.origin.x.saturating_add(rect.size.width).min(width);
+        let y1 = rect.origin.y.saturating_add(rect.size.height).min(height);
+        convert_rect(&mut entry.rgba, src, width, x0, y0, x1, y1, &texel);
+    }
+
+    Some([
+        entry.rgba.as_ptr() as usize,
+        entry.rgba.len(),
+        width,
+        height,
+    ])
+}
+
+#[inline]
+fn bgra_u32_to_rgba(pixel: u32) -> [f32; 4] {
+    const INV: f32 = 1.0 / 255.0;
+    [
+        ((pixel >> 16) & 0xFF) as f32 * INV,
+        ((pixel >> 8) & 0xFF) as f32 * INV,
+        (pixel & 0xFF) as f32 * INV,
+        ((pixel >> 24) & 0xFF) as f32 * INV,
+    ]
+}
+
 fn headless_vec_texture_info(
     texture_index: usize,
     cxtexture: &crate::texture::CxTexture,
@@ -318,162 +447,93 @@ fn headless_vec_texture_info(
             data: Some(data),
             updated,
             ..
-        } => {
-            let sig = TextureConversionSignature {
+        } => cached_conversion(
+            cache,
+            texture_index,
+            TextureConversionSignature {
                 kind: 1,
                 width: *width,
                 height: *height,
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
-            };
-            let entry = cache
-                .entry(texture_index)
-                .or_insert_with(|| CachedTextureConversion {
-                    signature: sig,
-                    rgba: Vec::new(),
-                });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
-                entry.signature = sig;
-                entry.rgba.clear();
-                entry.rgba.reserve(data.len() * 4);
-                for &pixel in data {
-                    let b = (pixel & 0xFF) as f32 / 255.0;
-                    let g = ((pixel >> 8) & 0xFF) as f32 / 255.0;
-                    let r = ((pixel >> 16) & 0xFF) as f32 / 255.0;
-                    let a = ((pixel >> 24) & 0xFF) as f32 / 255.0;
-                    entry.rgba.push(r);
-                    entry.rgba.push(g);
-                    entry.rgba.push(b);
-                    entry.rgba.push(a);
-                }
-            }
-            Some([
-                entry.rgba.as_ptr() as usize,
-                entry.rgba.len(),
-                *width,
-                *height,
-            ])
-        }
+            },
+            *width,
+            *height,
+            data.len(),
+            data,
+            updated,
+            bgra_u32_to_rgba,
+        ),
         TextureFormat::VecCubeBGRAu8_32 {
             width,
             height,
             data: Some(data),
             updated,
-        } => {
-            let expected = width.saturating_mul(*height).saturating_mul(6);
-            let sig = TextureConversionSignature {
+        } => cached_conversion(
+            cache,
+            texture_index,
+            TextureConversionSignature {
                 kind: 4,
                 width: *width,
                 height: *height,
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
-            };
-            let entry = cache
-                .entry(texture_index)
-                .or_insert_with(|| CachedTextureConversion {
-                    signature: sig,
-                    rgba: Vec::new(),
-                });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
-                entry.signature = sig;
-                entry.rgba.clear();
-                entry.rgba.reserve(expected.saturating_mul(4));
-                for &pixel in data.iter().take(expected) {
-                    let b = (pixel & 0xFF) as f32 / 255.0;
-                    let g = ((pixel >> 8) & 0xFF) as f32 / 255.0;
-                    let r = ((pixel >> 16) & 0xFF) as f32 / 255.0;
-                    let a = ((pixel >> 24) & 0xFF) as f32 / 255.0;
-                    entry.rgba.push(r);
-                    entry.rgba.push(g);
-                    entry.rgba.push(b);
-                    entry.rgba.push(a);
-                }
-            }
-            Some([
-                entry.rgba.as_ptr() as usize,
-                entry.rgba.len(),
-                *width,
-                *height,
-            ])
-        }
+            },
+            *width,
+            *height,
+            width.saturating_mul(*height).saturating_mul(6).min(data.len()),
+            data,
+            updated,
+            bgra_u32_to_rgba,
+        ),
         TextureFormat::VecRu8 {
             width,
             height,
             data: Some(data),
             updated,
             ..
-        } => {
-            let expected = width.saturating_mul(*height);
-            let sig = TextureConversionSignature {
+        } => cached_conversion(
+            cache,
+            texture_index,
+            TextureConversionSignature {
                 kind: 2,
                 width: *width,
                 height: *height,
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
-            };
-            let entry = cache
-                .entry(texture_index)
-                .or_insert_with(|| CachedTextureConversion {
-                    signature: sig,
-                    rgba: Vec::new(),
-                });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
-                entry.signature = sig;
-                entry.rgba.clear();
-                entry.rgba.reserve(expected * 4);
-                for &byte in data.iter().take(expected) {
-                    let v = byte as f32 / 255.0;
-                    entry.rgba.push(v);
-                    entry.rgba.push(v);
-                    entry.rgba.push(v);
-                    entry.rgba.push(v);
-                }
-            }
-            Some([
-                entry.rgba.as_ptr() as usize,
-                entry.rgba.len(),
-                *width,
-                *height,
-            ])
-        }
+            },
+            *width,
+            *height,
+            width.saturating_mul(*height).min(data.len()),
+            data,
+            updated,
+            |byte: u8| {
+                let v = byte as f32 / 255.0;
+                [v, v, v, v]
+            },
+        ),
         TextureFormat::VecRf32 {
             width,
             height,
             data: Some(data),
             updated,
-        } => {
-            let expected = width.saturating_mul(*height);
-            let sig = TextureConversionSignature {
+        } => cached_conversion(
+            cache,
+            texture_index,
+            TextureConversionSignature {
                 kind: 3,
                 width: *width,
                 height: *height,
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
-            };
-            let entry = cache
-                .entry(texture_index)
-                .or_insert_with(|| CachedTextureConversion {
-                    signature: sig,
-                    rgba: Vec::new(),
-                });
-            if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
-                entry.signature = sig;
-                entry.rgba.clear();
-                entry.rgba.reserve(expected * 4);
-                for &v in data.iter().take(expected) {
-                    entry.rgba.push(v);
-                    entry.rgba.push(v);
-                    entry.rgba.push(v);
-                    entry.rgba.push(v);
-                }
-            }
-            Some([
-                entry.rgba.as_ptr() as usize,
-                entry.rgba.len(),
-                *width,
-                *height,
-            ])
-        }
+            },
+            *width,
+            *height,
+            width.saturating_mul(*height).min(data.len()),
+            data,
+            updated,
+            |v: f32| [v, v, v, v],
+        ),
         _ => None,
     }
 }
@@ -725,17 +785,22 @@ impl Cx {
         configured_render_threads(cpu_threads.max(1))
     }
 
-    /// Render all dirty passes and return framebuffers keyed by window_id.
-    pub(crate) fn headless_render_all_passes(&mut self, time: f64) -> Vec<(usize, Framebuffer)> {
+    /// Render all dirty passes; returns the window ids whose framebuffer was
+    /// repainted. The pixels stay in `os.window_framebuffers`, which the caller
+    /// reads — a 2400x1520 window is 73 MB of colour plus depth, and building
+    /// that mapping fresh every frame cost more in page faults than clearing it
+    /// does.
+    pub(crate) fn headless_render_all_passes(&mut self, time: f64) -> Vec<usize> {
         let frame_start = std::time::Instant::now();
         let profile_enabled = std::env::var("MAKEPAD_HEADLESS_PROFILE").is_ok();
-        let parallel_min_tris = configured_parallel_min_tris(1);
+
         let mut profile = RenderProfile::default();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
-        let render_threads = self.headless_render_thread_count();
+        let options = RenderOptions::from_env(self.headless_render_thread_count());
 
         let mut results = Vec::new();
+        let mut window_framebuffers = std::mem::take(&mut self.os.window_framebuffers);
         let mut texture_cache = std::mem::take(&mut self.os.texture_conversions);
         // Taken out of `self.os` so a pass can hold `&mut` its own framebuffer
         // while the sampler reads its already-rendered siblings.
@@ -762,14 +827,17 @@ impl Cx {
                     self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
                     self.passes[*draw_pass_id].set_time(time as f32);
 
-                    let mut fb = Framebuffer::new(width, height);
+                    let mut fb = window_framebuffers
+                        .remove(&window_id.id())
+                        .unwrap_or_else(|| Framebuffer::new(width, height));
+                    fb.resize(width, height);
+                    fb.set_has_depth(true);
                     let clear = self.passes[*draw_pass_id].clear_color;
                     fb.clear([clear.x, clear.y, clear.z, clear.w], 1.0);
 
                     self.headless_draw_pass(
                         *draw_pass_id,
-                        render_threads,
-                        parallel_min_tris,
+                        &options,
                         &mut fb,
                         PassRaster {
                             viewport: (width, height),
@@ -785,7 +853,8 @@ impl Cx {
                             None
                         },
                     );
-                    results.push((window_id.id(), fb));
+                    window_framebuffers.insert(window_id.id(), fb);
+                    results.push(window_id.id());
                 }
                 // Render-to-texture. `CxDrawPassParent::None` is a texture pass
                 // too (the GPU backends treat both the same way): it just has no
@@ -794,8 +863,7 @@ impl Cx {
                     self.headless_draw_pass_to_texture(
                         *draw_pass_id,
                         time,
-                        render_threads,
-                        parallel_min_tris,
+                        &options,
                         &mut texture_cache,
                         &mut render_targets,
                         if profile_enabled {
@@ -809,8 +877,9 @@ impl Cx {
             }
         }
 
-        // Hand the conversions back for the next frame to reuse.
+        // Hand the conversions and window buffers back for the next frame.
         self.os.texture_conversions = texture_cache;
+        self.os.window_framebuffers = window_framebuffers;
         self.headless_prune_render_targets(&mut render_targets, profile_enabled);
         self.os.render_targets = render_targets;
 
@@ -909,8 +978,7 @@ impl Cx {
         &mut self,
         draw_pass_id: DrawPassId,
         time: f64,
-        render_threads: usize,
-        parallel_min_tris: usize,
+        options: &RenderOptions,
         texture_cache: &mut TextureConversionCache,
         render_targets: &mut HeadlessRenderTargets,
         profile: Option<&mut RenderProfile>,
@@ -1016,8 +1084,7 @@ impl Cx {
 
         self.headless_draw_pass(
             draw_pass_id,
-            render_threads,
-            parallel_min_tris,
+            options,
             &mut fb,
             pass_raster,
             texture_cache,
@@ -1033,8 +1100,7 @@ impl Cx {
     fn headless_draw_pass(
         &mut self,
         draw_pass_id: DrawPassId,
-        render_threads: usize,
-        parallel_min_tris: usize,
+        options: &RenderOptions,
         fb: &mut Framebuffer,
         pass_raster: PassRaster,
         texture_cache: &mut TextureConversionCache,
@@ -1054,8 +1120,7 @@ impl Cx {
             draw_list_id,
             &mut zbias,
             zbias_step,
-            render_threads,
-            parallel_min_tris,
+            options,
             fb,
             pass_raster,
             texture_cache,
@@ -1071,16 +1136,13 @@ impl Cx {
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
-        render_threads: usize,
-        parallel_min_tris: usize,
+        options: &RenderOptions,
         fb: &mut Framebuffer,
         pass_raster: PassRaster,
         texture_cache: &mut TextureConversionCache,
         render_targets: &HeadlessRenderTargets,
         mut profile: Option<&mut RenderProfile>,
     ) {
-        let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
-        let debug_text = std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok();
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
 
         for order_index in 0..draw_order_len {
@@ -1107,8 +1169,7 @@ impl Cx {
                         zbias
                     },
                     zbias_step,
-                    render_threads,
-                    parallel_min_tris,
+                    options,
                     fb,
                     pass_raster,
                     texture_cache,
@@ -1148,7 +1209,7 @@ impl Cx {
                     fragment.contains("sample_text_pixel")
                 }
             };
-            if let Some(only) = &only_shader {
+            if let Some(only) = &options.only_shader {
                 let keep = match only.as_str() {
                     "draw_text" => is_draw_text_shader,
                     _ => true,
@@ -1480,14 +1541,20 @@ impl Cx {
                 rcx_frag_offset,
                 uses_derivatives,
                 fragment_fn,
-                debug_text,
+                debug_text: options.debug_text,
                 is_draw_text_shader,
             };
 
             let width = fb.width;
-            let bands = compute_row_bands(band_lo, band_hi, render_threads, covered_px);
+            let bands = compute_row_bands(
+                band_lo,
+                band_hi,
+                options.threads,
+                covered_px,
+                options.parallel_min_pixels,
+            );
             let use_parallel = bands.len() > 1
-                && tri_count.saturating_mul(instance_count) >= parallel_min_tris;
+                && tri_count.saturating_mul(instance_count) >= options.parallel_min_tris;
             if let Some(p) = profile.as_deref_mut() {
                 if use_parallel {
                     p.parallel_draw_calls += 1;
@@ -1503,7 +1570,7 @@ impl Cx {
                 // to argue about. Workers pull bands off a shared queue instead
                 // of owning a fixed share, because a draw call's cost is spread
                 // very unevenly over the rows it touches.
-                let threads = render_threads.min(bands.len());
+                let threads = options.threads.min(bands.len());
                 let queue = std::sync::Mutex::new(split_bands(fb, band_lo, &bands));
                 std::thread::scope(|scope| {
                     for _ in 0..threads {
