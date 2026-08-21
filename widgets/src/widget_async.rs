@@ -378,7 +378,7 @@ impl CxSplashVmExt for Cx {
             .find(|(_, v)| **v == vm_id)
             .map(|(k, _)| *k);
         let Some(heap_key) = heap_key else { return };
-        let cap = crate::splash_limits::limits_for_heap(heap_key).max_inflight_http as usize;
+        let cap = crate::splash_limits::limits_for_heap(heap_key).http_max as usize;
         if let Some(iso) = self.global::<CxWidgetAsync>().isolated_vms.vms.get_mut(&vm_id) {
             iso.std.data.max_inflight_http = Some(cap);
         }
@@ -1348,8 +1348,17 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                     // catches an app growing a retained structure forever,
                     // where every individual step is well inside every
                     // per-entry budget.
+                    // `check_heap` applies the pressure ladder itself: an
+                    // isolate over its share of a FULL system is collected
+                    // again here, and only a third failure to come back down
+                    // (or its own absolute backstop) condemns it.
                     if !crate::splash_limits::check_heap(bx.heap.heap_key(), bx.heap.live_slots()) {
                         over_ceiling = Some(SplashVmId(next));
+                    } else if crate::splash_limits::under_memory_pressure(bx.heap.heap_key()) {
+                        // Reclaim harder while it is over: collecting the same
+                        // isolate again next pump is the pressure.
+                        bx.heap.mark(&bx.threads, &bx.code);
+                        bx.heap.sweep(false);
                     }
                 }
             }
