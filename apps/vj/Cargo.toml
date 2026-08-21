@@ -27,6 +27,10 @@ makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
 makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }
 makepad-asset-widgets = { path = "../../libs/asset/widgets" }
 makepad-asset-client = { path = "../../libs/asset/client" }
+# The chat pane itself — ONE component, shared with the asset UI and the
+# game sandbox: the session on the server's chat broker, the worker thread,
+# the transcript with tool chips and the rate meter.
+makepad-asset-chat-ui = { path = "../../libs/asset/chat_ui" }
 # 3D program lane: skinned-GLB playback via the renderer.
 makepad-render = { path = "../../libs/render" }
 makepad-show-control = { path = "../../libs/show_control" }

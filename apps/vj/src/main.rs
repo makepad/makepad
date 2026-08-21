@@ -24,6 +24,7 @@ mod apc40;
 mod beat_sync;
 mod billboard;
 mod catalog;
+mod chat;
 mod cue;
 mod decks;
 mod fx;
@@ -89,6 +90,7 @@ use crate::mixer::{
     Mixer, TrackPcm, VideoTransitionError, VideoTransitionId, VideoTransitionPhase,
 };
 use crate::pads::{PadCmd, PadEngine, PadItem};
+use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
 use makepad_widgets::splitter::{Splitter, SplitterAlign};
 use makepad_widgets::widget_tree::WidgetTreeStats;
@@ -1261,6 +1263,43 @@ script_mod! {
                                 }
                                 gen_status := PanelLabel{text: ""}
                                 gen_jobs := VjJobList{}
+                                // Say it in words instead: the same broker
+                                // chat the asset UI runs (session on the
+                                // server, tool chips, rate meter), opened
+                                // with the VJ profile. It shares the drawer
+                                // with the queue above.
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0, y: 0.5}
+                                    Label{
+                                        text: "CHAT"
+                                        draw_text.color: #x3ee0b0
+                                        draw_text.text_style: theme.font_bold{font_size: 11}
+                                    }
+                                    View{width: Fill height: 1}
+                                    chat_cancel_btn := ChromeButton{text: "Stop" visible: false}
+                                    chat_clear_btn := ChromeButton{text: "Clear"}
+                                }
+                                chat_status := PanelLabel{
+                                    width: Fill
+                                    text: "Waiting for the asset server…"
+                                }
+                                chat_list := AssetChatList{}
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{y: 1.0}
+                                    chat_input := TextInput{
+                                        width: Fill
+                                        empty_text: "find me 20s of dark techno…"
+                                    }
+                                    chat_send_btn := ChromeButton{text: "Send"}
+                                }
                             }
                         }
                         // Live show control stays visible on every surface. The
@@ -3404,6 +3443,9 @@ pub struct App {
     session_loss_since: Option<Instant>,
     #[rust]
     up: Option<SessionHandles>,
+    /// The GEN drawer's broker chat (shared component; VJ profile).
+    #[rust]
+    chat: ChatBridge,
     #[rust]
     status_text: String,
     #[rust]
@@ -6527,6 +6569,7 @@ impl App {
         self.publish_lighting_controls();
         self.pump_apc40(cx);
         self.pump_session(cx);
+        self.pump_chat(cx);
         self.pump_subscriber(cx);
         self.pump_catalog_runtime(cx);
         self.pump_media_lanes(cx);
@@ -6621,6 +6664,69 @@ impl App {
             }
         }
         let _ = cx;
+    }
+
+    /// The chat lives on the STORE's chat broker — the server picks the
+    /// serving box and executes the catalog/operation tools itself — so all
+    /// this app has to do is hand over the session once it is up.
+    fn pump_chat(&mut self, cx: &mut Cx) {
+        if !self.chat.is_linked() {
+            if let Some(up) = &self.up {
+                let cache = service::session_config_from_env()
+                    .cache_parent
+                    .join("cache-chat");
+                self.chat.connect(up.endpoints, up.token.clone(), cache);
+                // The pane says "waiting for the asset server" until
+                // something redraws it, and the feed only marks itself
+                // dirty once a turn runs — so the line would sit there
+                // lying until the operator typed.
+                self.refresh_chat_ui(cx);
+            }
+        }
+        if self.chat.take_dirty() {
+            self.refresh_chat_ui(cx);
+            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+        }
+    }
+
+    fn refresh_chat_ui(&mut self, cx: &mut Cx) {
+        let mut status = ChatData::status();
+        let activity = ChatData::activity();
+        if !activity.is_empty() && !status.contains(&activity) {
+            if status.is_empty() {
+                status = activity;
+            } else {
+                status = format!("{status} · {activity}");
+            }
+        }
+        // The live number has ONE home while a reply streams: this strip.
+        // (The landed message keeps its own average as a footnote.) It is
+        // the serving box's real generation rate, `· thinking` included.
+        if let Some(rate) = ChatData::live_rate_label() {
+            status = if status.is_empty() { rate } else { format!("{status} · {rate}") };
+        }
+        self.ui.label(cx, ids!(chat_status)).set_text(cx, &status);
+        let streaming = ChatData::is_streaming();
+        self.ui
+            .button(cx, ids!(chat_cancel_btn))
+            .set_visible(cx, streaming);
+        self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+    }
+
+    fn send_chat(&mut self, cx: &mut Cx) {
+        let text = self
+            .ui
+            .text_input(cx, ids!(chat_input))
+            .text()
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.ui.text_input(cx, ids!(chat_input)).set_text(cx, "");
+        self.chat.send(text, Vec::new());
+        self.refresh_chat_ui(cx);
+        self.ui.redraw(cx);
     }
 
     fn pump_subscriber(&mut self, cx: &mut Cx) {
@@ -7089,6 +7195,9 @@ impl App {
         }
         self.video_plan = LatestWins::video();
         self.mesh_plan = LatestWins::mesh();
+        // The chat's session died with the server; a fresh one opens when
+        // the reconnect lands (the transcript on screen survives).
+        self.chat.disconnect();
         self.status_text = "asset server lost — rediscovering…".to_string();
         match SessionConnector::start(service::session_config_from_env()) {
             Ok(connector) => self.connector = Some(connector),
@@ -10421,6 +10530,28 @@ impl MatchEvent for App {
             self.run_gen_cmds(cmds);
             self.grids_dirty = true;
         }
+        // ---- chat (same flow as the asset UI: shared feed + broker) ----
+        if self.ui.button(cx, ids!(chat_send_btn)).clicked(actions) {
+            self.send_chat(cx);
+        }
+        if self.ui.text_input(cx, ids!(chat_input)).returned(actions).is_some() {
+            self.send_chat(cx);
+        }
+        if self.ui.button(cx, ids!(chat_cancel_btn)).clicked(actions) {
+            self.chat.cancel();
+            self.refresh_chat_ui(cx);
+        }
+        if self.ui.button(cx, ids!(chat_clear_btn)).clicked(actions) {
+            // Wipe the transcript AND retire the session: the next message
+            // starts a conversation the model has no memory of.
+            self.chat.clear();
+            self.refresh_chat_ui(cx);
+        }
+        // Tool chips in the chat expand/collapse on click.
+        self.ui
+            .widget(cx, ids!(chat_list))
+            .borrow_mut::<makepad_asset_chat_ui::AssetChatList>()
+            .map(|mut list| list.handle_actions(cx, actions));
         if self.ui.button(cx, ids!(gen_clear)).clicked(actions) {
             // Clearing the queue also disarms the loop: otherwise the next
             // tick refills what the operator just emptied.
@@ -10849,6 +10980,7 @@ impl AppMain for App {
         makepad_render::script_mod(vm);
         makepad_xr::script_mod(vm);
         makepad_asset_widgets::script_mod(vm);
+        makepad_asset_chat_ui::script_mod(vm);
         crate::views::script_mod(vm);
         crate::mesh_view::script_mod(vm);
         crate::music_view::script_mod(vm);
