@@ -191,6 +191,7 @@ impl CudaExecRuntime {
         n_tokens: usize,
         n_outputs: usize,
         attention_key_count: usize,
+        n_seqs: usize,
     ) -> Result<CompiledHybridDecodeCuda> {
         Ok(CompiledHybridDecodeCuda {
             imp: self.imp.compile_hybrid_decode(
@@ -201,6 +202,7 @@ impl CudaExecRuntime {
                 n_tokens,
                 n_outputs,
                 attention_key_count,
+                n_seqs,
             )?,
         })
     }

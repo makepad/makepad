@@ -38,8 +38,12 @@ pub const BATCH_WIDTHS: [usize; 3] = [1, 2, 4];
 /// [`draft_depth_for`] extends on its own — nothing here needs redesigning.
 pub const COLUMN_BUDGET: usize = 8;
 
-/// The campaign's measured single-stream speculation sweet spot, and therefore
-/// the **minimum allocation ceiling** a batched session may be built with.
+/// The **measured** single-stream speculation sweet spot, and therefore the
+/// **minimum allocation ceiling** a batched session may be built with.
+///
+/// Measured on warm chat: n3 beats n5 both with the full draft head (106.3 vs
+/// 101.3 tok/s) and with the restricted sidecar head (121.6 vs 119.8), so the
+/// solo service runs depth 3 and the dynamic ladder degrades from there.
 ///
 /// Two things at once, and they have to be the same number:
 ///
@@ -53,7 +57,7 @@ pub const COLUMN_BUDGET: usize = 8;
 /// Costs `slots * (SOLO_DRAFT_MAX + 2)` recurrent rows — at 4 slots that is
 /// 4.09 GiB against 1.75 GiB for a depth-1 allocation. That ~2.3 GiB is the
 /// price of the solo lane staying fast, and it fits the 4-slot 16k budget.
-pub const SOLO_DRAFT_MAX: usize = 5;
+pub const SOLO_DRAFT_MAX: usize = 3;
 
 /// Speculative draft depth a step of this width can afford.
 ///
@@ -130,7 +134,10 @@ impl StepCostModel {
             (12, 58.010),
             (16, 75.034),
         ];
-        Self::from_points(MEASURED, 4.2, 0.3)
+        // Measured draft-forward cost per DRAFTED token with the full
+        // 248,320-row draft head: 1.72-1.87 ms. Verify dominates a round; the
+        // draft chain is comparatively cheap.
+        Self::from_points(MEASURED, 1.80, 0.30)
     }
 
     /// Build from sparse measured points, linearly interpolating the gaps.
@@ -179,7 +186,29 @@ impl StepCostModel {
         self.draft_per_lane_ms = per_lane_ms;
         self
     }
+
+    /// The restricted-vocabulary (`.draftvocab`) draft head.
+    ///
+    /// Measured at ~0.52 ms per drafted token against 1.72-1.87 ms for the full
+    /// head — 3.3x cheaper — and **acceptance is identical** (0.7647, same
+    /// counts) because the restricted set covers 99.8 % of chat output tokens.
+    /// So it models as a pure draft-cost reduction with no acceptance penalty,
+    /// and nothing in the allocator's demand side changes.
+    pub fn with_restricted_draft_head(self) -> Self {
+        self.with_draft_cost(0.52, 0.10)
+    }
 }
+
+/// Measured per-draft-token acceptance on warm chat, full or restricted head
+/// alike. The allocator's default assumption before a lane has an EMA of its
+/// own.
+pub const MEASURED_CHAT_ACCEPTANCE: f32 = 0.7647;
+
+/// Measured acceptance on expander-prose prompts, where speculation LOSES
+/// outright (0.66x greedy at depth 5). Kept as a named constant because it is
+/// the case the allocator has to get right: a lane like this must fall to depth
+/// 0 on its own and hand its columns to lanes that will spend them.
+pub const MEASURED_EXPANDER_ACCEPTANCE: f32 = 0.219;
 
 /// One active lane's live demand, as the allocator sees it.
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +382,13 @@ pub fn allocate_depths(
 /// Floor first, then the objective. An allocation that keeps every client above
 /// the promised rate always beats one that does not, however much aggregate the
 /// latter wins — that is what makes the floor a constraint rather than a wish.
+///
+/// **When NO allocation can meet the floor, the objective switches to
+/// max-min.** Chasing aggregate through an unmeetable floor picks winners among
+/// identical clients: at 4 lanes on measured costs, max-aggregate prefers
+/// `[0,0,0,1]` over `[1,1,1,1]` for **0.4 % more aggregate and a 1.76x spread
+/// between clients doing the same thing**. Once the promise is already broken,
+/// breaking it evenly is the only defensible degradation.
 fn pick_better(
     current: Allocation,
     candidate: Allocation,
@@ -361,7 +397,14 @@ fn pick_better(
     match (current.meets_floor, candidate.meets_floor) {
         (true, false) => return current,
         (false, true) => return candidate,
-        _ => {}
+        (false, false) => {
+            return if candidate.min_per_client() > current.min_per_client() {
+                candidate
+            } else {
+                current
+            }
+        }
+        (true, true) => {}
     }
     let better = match objective {
         SchedulerObjective::MaxAggregate => candidate.aggregate_tok_s > current.aggregate_tok_s,
@@ -994,6 +1037,66 @@ mod tests {
     }
 
     #[test]
+    fn a_lane_that_loses_under_speculation_switches_itself_off() {
+        // Measured: expander-prose accepts 0.219 and speculation makes it
+        // SLOWER (0.66x greedy at depth 5). The allocator has to reach depth 0
+        // for that lane on its own — per-class policy falling out of measured
+        // demand, with no prompt-class special case anywhere in the planner.
+        let costs = StepCostModel::measured_5090();
+        let solo_expander = allocate_depths(
+            &lanes(&[MEASURED_EXPANDER_ACCEPTANCE]),
+            &open_config(),
+            &costs,
+        )
+        .expect("allocation");
+        assert_eq!(
+            solo_expander.depths,
+            vec![0],
+            "a lane that loses under speculation must not speculate"
+        );
+
+        // And mixed with a healthy chat lane, the chat lane takes the columns.
+        let mixed = allocate_depths(
+            &lanes(&[MEASURED_CHAT_ACCEPTANCE, MEASURED_EXPANDER_ACCEPTANCE]),
+            &open_config(),
+            &costs,
+        )
+        .expect("allocation");
+        assert!(mixed.depths[0] > 0, "chat lane should speculate");
+        assert_eq!(mixed.depths[1], 0, "expander lane should not");
+    }
+
+    #[test]
+    fn an_unmeetable_floor_degrades_everyone_evenly() {
+        // Once the promise is already broken, chasing aggregate picks winners
+        // among identical clients. On measured costs at 4 lanes, max-aggregate
+        // prefers [0,0,0,1] over [1,1,1,1] for 0.4% more aggregate and a 1.76x
+        // spread between clients doing the exact same thing. Refuse that trade.
+        let costs = StepCostModel::measured_5090();
+        let demand = lanes(&[MEASURED_CHAT_ACCEPTANCE; 4]);
+        let config = SchedulerConfig {
+            floor_tok_s: 50.0,
+            ..SchedulerConfig::default()
+        };
+        let allocation = allocate_depths(&demand, &config, &costs).expect("allocation");
+        assert!(
+            !allocation.meets_floor,
+            "this fixture is meant to exercise the unmeetable-floor path"
+        );
+        let min = allocation.min_per_client();
+        let max = allocation
+            .per_client_tok_s
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max);
+        assert!(
+            max / min < 1.2,
+            "identical clients must degrade together, got {:?}",
+            allocation.per_client_tok_s
+        );
+    }
+
+    #[test]
     fn a_cheaper_draft_forward_buys_more_depth() {
         // The sidecar's whole effect on this lane: it shrinks the draft
         // forward, and the depth economics move with it. Pinning the direction
@@ -1035,11 +1138,15 @@ mod tests {
         // The dynamic reallocation the user asked for: idle capacity is spent
         // on depth, and each joining client trades depth for a lane, per step,
         // with no mode flip. Pinned at the shipped allocation.
+        //
+        // This is the affordability CEILING, not the chosen depth — the
+        // allocator narrows further when measurement says a shallower draft
+        // scores better, which at 2 lanes on the measured curve it does.
         let rungs: Vec<usize> = [1usize, 2, 3, 4]
             .iter()
             .map(|&w| draft_depth_for(w, SOLO_DRAFT_MAX))
             .collect();
-        assert_eq!(rungs, vec![5, 3, 1, 1], "cap-8 reallocation ladder");
+        assert_eq!(rungs, vec![3, 3, 1, 1], "cap-8 affordability ladder");
         // Depth is monotonically non-increasing in width: joining a client can
         // never somehow buy the others MORE speculation.
         for pair in rungs.windows(2) {
@@ -1056,7 +1163,7 @@ mod tests {
             .iter()
             .map(|&w| draft_depth_for_budget(w, SOLO_DRAFT_MAX, 16))
             .collect();
-        assert_eq!(raised, vec![5, 5, 4, 3], "cap-16 reallocation ladder");
+        assert_eq!(raised, vec![3, 3, 3, 3], "cap-16 affordability ladder");
     }
 
     #[test]
