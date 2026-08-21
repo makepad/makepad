@@ -1089,7 +1089,9 @@ mod llama_worker {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(8);
-        let scheduler = LaneScheduler::new(table, queue_max);
+        // The scheduler chunks prefill with the same batch the session uses,
+        // so the two cannot drift into a graph neither of them sized for.
+        let scheduler = LaneScheduler::new(table, queue_max).with_prefill_chunk(PREFILL_BATCH);
         let advert_model = model_id.clone();
         let mut exec = LaneExecutor::new(session, scheduler, LlamaSamplingParams::default())
             .on_counts(move |counts| {
