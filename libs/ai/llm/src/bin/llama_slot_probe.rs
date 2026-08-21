@@ -876,6 +876,31 @@ fn solo_speed_floor(
     let accepted =
         after.map(|a| a.accepted).unwrap_or(0) - before.map(|b| b.accepted).unwrap_or(0);
     let drafted = after.map(|a| a.drafted).unwrap_or(0) - before.map(|b| b.drafted).unwrap_or(0);
+    // Where the round actually goes. Without this a low tok/s is just a low
+    // tok/s: draft-heavy says the draft head is the cost (a restricted-vocab
+    // sidecar is the lever), verify-heavy says the batch is, and catch-up
+    // heavy says the draft head is re-ingesting committed tokens every round
+    // (`MKLLM_MTP_REUSE_DRAFT_KV`). Three different fixes, one number without
+    // this line.
+    let per_round = |a: u64, b: u64| -> f64 {
+        if rounds > 0 {
+            (a.saturating_sub(b)) as f64 / rounds as f64 / 1e6
+        } else {
+            0.0
+        }
+    };
+    let draft_ms = per_round(
+        after.map(|a| a.draft_nanos).unwrap_or(0),
+        before.map(|b| b.draft_nanos).unwrap_or(0),
+    );
+    let verify_ms = per_round(
+        after.map(|a| a.verify_nanos).unwrap_or(0),
+        before.map(|b| b.verify_nanos).unwrap_or(0),
+    );
+    let catchup_ms = per_round(
+        after.map(|a| a.catchup_nanos).unwrap_or(0),
+        before.map(|b| b.catchup_nanos).unwrap_or(0),
+    );
     println!(
         "  session-native: {:.1} tok/s over {} tokens ({} rounds, {:.2} tok/round, \
          acceptance {:.2})",
@@ -892,6 +917,11 @@ fn solo_speed_floor(
         } else {
             0.0
         }
+    );
+    println!(
+        "    per round: draft {draft_ms:.1} ms + verify {verify_ms:.1} ms + catch-up \
+         {catchup_ms:.1} ms = {:.1} ms",
+        draft_ms + verify_ms + catchup_ms
     );
     drop(session);
 
