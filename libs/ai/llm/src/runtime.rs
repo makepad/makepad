@@ -220,13 +220,94 @@ fn causal_mask_f32_bytes_with_window(n_tokens: usize, causal_window: Option<usiz
     bytes
 }
 
+/// The inclusive absolute cache-row span one batch token may attend over.
+///
+/// `upper` is the row the token itself occupies; `start` is the first row it
+/// is allowed to see, which is `lower` (the base of its slot's region) pushed
+/// forward by any sliding-window limit. Everything outside `start..=upper` is
+/// `-inf` in the mask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MaskRowSpan {
+    start: usize,
+    upper: usize,
+}
+
+/// Resolve one batch token's mask span from its absolute cache rows.
+///
+/// With a single sequence `lower` is 0 and this reduces to "attend to
+/// `0..=position`", which is the whole behaviour this function used to have.
+/// With a unified multi-slot arena, `lower` is the slot's `kv_base`, so the
+/// window arithmetic still runs in WITHIN-SLOT coordinates (`upper - lower`)
+/// and the result is shifted back into absolute rows. That shift is what
+/// makes the mask block-diagonal without any tensor-shape change.
+fn mask_row_span(
+    upper: i32,
+    lower: i32,
+    key_count: usize,
+    causal_window: Option<usize>,
+) -> Result<MaskRowSpan> {
+    let upper = usize::try_from(upper)
+        .map_err(|_| LlamaError::format(format!("negative attention position {}", upper)))?;
+    let lower = usize::try_from(lower).map_err(|_| {
+        LlamaError::format(format!("negative attention key lower bound {}", lower))
+    })?;
+    if upper >= key_count {
+        return Err(LlamaError::format(format!(
+            "attention position {} exceeds key_count {}",
+            upper, key_count
+        )));
+    }
+    if lower > upper {
+        return Err(LlamaError::format(format!(
+            "attention key lower bound {} exceeds its position {}",
+            lower, upper
+        )));
+    }
+    Ok(MaskRowSpan {
+        start: lower + causal_window_key_start(upper - lower, causal_window),
+        upper,
+    })
+}
+
+/// Per-token mask spans for a whole batch.
+///
+/// `upper_rows` are the absolute cache rows the batch's tokens occupy.
+/// `lower_rows`, when present, are the per-token slot bases; when absent every
+/// token may see from row 0, which is the single-sequence behaviour.
+fn mask_row_spans(
+    key_count: usize,
+    upper_rows: &[i32],
+    lower_rows: Option<&[i32]>,
+    causal_window: Option<usize>,
+) -> Result<Vec<MaskRowSpan>> {
+    if let Some(lower_rows) = lower_rows {
+        if lower_rows.len() != upper_rows.len() {
+            return Err(LlamaError::format(format!(
+                "attention mask needs {} key lower bounds, got {}",
+                upper_rows.len(),
+                lower_rows.len()
+            )));
+        }
+    }
+    upper_rows
+        .iter()
+        .enumerate()
+        .map(|(index, &upper)| {
+            let lower = lower_rows.map(|rows| rows[index]).unwrap_or(0);
+            mask_row_span(upper, lower, key_count, causal_window)
+        })
+        .collect()
+}
+
 fn position_causal_mask_f16_bytes_with_window(
     key_count: usize,
-    positions: &[i32],
+    upper_rows: &[i32],
+    lower_rows: Option<&[i32]>,
     causal_window: Option<usize>,
 ) -> Result<Vec<u8>> {
+    let spans = mask_row_spans(key_count, upper_rows, lower_rows, causal_window)?;
     let mut bytes = Vec::with_capacity(
-        positions
+        spans
             .len()
             .checked_mul(key_count)
             .and_then(|v| v.checked_mul(std::mem::size_of::<u16>()))
@@ -234,18 +315,9 @@ fn position_causal_mask_f16_bytes_with_window(
     );
     let zero = f32_to_f16(0.0);
     let neg_inf = f32_to_f16(f32::NEG_INFINITY);
-    for &position in positions {
-        let position = usize::try_from(position)
-            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
-        if position >= key_count {
-            return Err(LlamaError::format(format!(
-                "attention position {} exceeds key_count {}",
-                position, key_count
-            )));
-        }
-        let key_start = causal_window_key_start(position, causal_window);
+    for span in spans {
         for key in 0..key_count {
-            let value = if key > position || key < key_start {
+            let value = if key > span.upper || key < span.start {
                 neg_inf
             } else {
                 zero
@@ -258,28 +330,21 @@ fn position_causal_mask_f16_bytes_with_window(
 
 fn position_causal_mask_f32_bytes_with_window(
     key_count: usize,
-    positions: &[i32],
+    upper_rows: &[i32],
+    lower_rows: Option<&[i32]>,
     causal_window: Option<usize>,
 ) -> Result<Vec<u8>> {
+    let spans = mask_row_spans(key_count, upper_rows, lower_rows, causal_window)?;
     let mut bytes = Vec::with_capacity(
-        positions
+        spans
             .len()
             .checked_mul(key_count)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
     );
-    for &position in positions {
-        let position = usize::try_from(position)
-            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
-        if position >= key_count {
-            return Err(LlamaError::format(format!(
-                "attention position {} exceeds key_count {}",
-                position, key_count
-            )));
-        }
-        let key_start = causal_window_key_start(position, causal_window);
+    for span in spans {
         for key in 0..key_count {
-            let value = if key > position || key < key_start {
+            let value = if key > span.upper || key < span.start {
                 f32::NEG_INFINITY
             } else {
                 0.0
@@ -346,17 +411,24 @@ fn position_attention_mask_bytes_for_tensor(
     ctx: &Context,
     tensor_id: TensorId,
     key_count: usize,
-    positions: &[i32],
+    upper_rows: &[i32],
+    lower_rows: Option<&[i32]>,
     causal_window: Option<usize>,
 ) -> Result<Vec<u8>> {
     let tensor = require_tensor(ctx, tensor_id)?;
     match tensor.desc.ty {
-        TensorType::F16 => {
-            position_causal_mask_f16_bytes_with_window(key_count, positions, causal_window)
-        }
-        TensorType::F32 => {
-            position_causal_mask_f32_bytes_with_window(key_count, positions, causal_window)
-        }
+        TensorType::F16 => position_causal_mask_f16_bytes_with_window(
+            key_count,
+            upper_rows,
+            lower_rows,
+            causal_window,
+        ),
+        TensorType::F32 => position_causal_mask_f32_bytes_with_window(
+            key_count,
+            upper_rows,
+            lower_rows,
+            causal_window,
+        ),
         other => Err(LlamaError::unsupported(format!(
             "unsupported attention decode mask tensor type {}",
             other.name()
@@ -824,6 +896,17 @@ pub struct HybridDecodeBatchLayout {
     /// `hidden_carry` set). Row `i` receives the post-final-norm hidden of
     /// batch token `i`.
     pub hidden_write_rows: Vec<i32>,
+    /// First absolute cache row each token is allowed to attend to, one per
+    /// token. Empty means "row 0" for every token, which is the
+    /// single-sequence behaviour.
+    ///
+    /// This is the whole of the multi-slot attention contract. Slots share one
+    /// flat KV arena; slot `s` owns rows `[kv_base(s), kv_base(s) + cap)` and
+    /// writes at `kv_base(s) + position`. Setting the lower bound to
+    /// `kv_base(s)` makes the mask block-diagonal, so a slot sees its own
+    /// history and nothing else — with no change to any tensor shape, and so
+    /// no change to any CUDA kernel.
+    pub attention_key_lower_bounds: Vec<i32>,
 }
 
 impl HybridDecodeBatchLayout {
@@ -878,7 +961,14 @@ impl HybridDecodeBatchLayout {
             rope_positions: None,
             hidden_read_rows: Vec::new(),
             hidden_write_rows: Vec::new(),
+            attention_key_lower_bounds: Vec::new(),
         })
+    }
+
+    /// Per-token attention lower bounds, or `None` when every token may attend
+    /// from row 0 (the single-sequence case).
+    pub(crate) fn attention_key_lower_bounds(&self) -> Option<&[i32]> {
+        (!self.attention_key_lower_bounds.is_empty()).then_some(&self.attention_key_lower_bounds)
     }
 
     fn validate(&self) -> Result<()> {
@@ -898,6 +988,25 @@ impl HybridDecodeBatchLayout {
             return Err(LlamaError::format(
                 "hybrid decode batch layout requires attention_key_count >= 1",
             ));
+        }
+        if !self.attention_key_lower_bounds.is_empty()
+            && self.attention_key_lower_bounds.len() != self.positions.len()
+        {
+            return Err(LlamaError::format(format!(
+                "hybrid decode batch layout needs {} attention key lower bounds, got {}",
+                self.positions.len(),
+                self.attention_key_lower_bounds.len()
+            )));
+        }
+        for (index, &lower) in self.attention_key_lower_bounds.iter().enumerate() {
+            let upper = self.attention_write_indices[index];
+            if lower < 0 || lower > upper {
+                return Err(LlamaError::format(format!(
+                    "hybrid decode batch layout attention key lower bound {} for token {} is not \
+                     within [0, {}]",
+                    lower, index, upper
+                )));
+            }
         }
         if self.output_ids.is_empty() {
             return Err(LlamaError::format(
@@ -3139,6 +3248,7 @@ fn execute_prepared_attention_decode_metal_no_readback_inner(
                 input_mask,
                 key_count,
                 positions,
+                None,
                 spec.block
                     .causal_window
                     .map(|window| usize::try_from(window).unwrap_or(usize::MAX)),
@@ -3462,6 +3572,7 @@ pub fn execute_prepared_attention_decode_metal(
                 input_mask,
                 key_count,
                 positions,
+                None,
                 spec.block
                     .causal_window
                     .map(|window| usize::try_from(window).unwrap_or(usize::MAX)),
@@ -8017,11 +8128,18 @@ pub(crate) fn build_hybrid_decode_writes(
                 continue;
             }
             let key_count = attention_mask_write_key_count(ctx, input_mask)?;
+            // The mask is indexed by ABSOLUTE cache row, so its upper bound is
+            // the row each token writes, not the token's within-slot position.
+            // For a single sequence the two are equal (`attention_write_indices`
+            // is `positions` verbatim), so this is byte-identical to keying off
+            // `positions`; for a unified multi-slot arena the write index is
+            // `kv_base + position` and only the write index is correct.
             let bytes = position_attention_mask_bytes_for_tensor(
                 ctx,
                 input_mask,
                 key_count,
-                positions,
+                &layout.attention_write_indices,
+                layout.attention_key_lower_bounds(),
                 cache_view.causal_window,
             )?;
             writes.push((input_mask, bytes));
@@ -8808,6 +8926,210 @@ fn tensor_bytes_to_f32_vec(bytes: &[u8], ty: TensorType) -> Result<Vec<f32>> {
 mod tests {
     use super::*;
     use crate::core::InitParams;
+
+    /// The single-sequence mask exactly as it was built before slot lower
+    /// bounds existed. Kept verbatim as an independent reference so the
+    /// "unslotted output is unchanged" gate cannot drift with the code it
+    /// guards.
+    fn reference_single_sequence_mask_f32(
+        key_count: usize,
+        positions: &[i32],
+        causal_window: Option<usize>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for &position in positions {
+            let position = usize::try_from(position).expect("non-negative position");
+            let key_start = causal_window_key_start(position, causal_window);
+            for key in 0..key_count {
+                let value = if key > position || key < key_start {
+                    f32::NEG_INFINITY
+                } else {
+                    0.0
+                };
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    /// Absolute key rows token `token` is allowed to attend to, read back out
+    /// of an f32 mask blob.
+    fn allowed_keys_f32(bytes: &[u8], key_count: usize, token: usize) -> Vec<usize> {
+        (0..key_count)
+            .filter(|key| {
+                let at = (token * key_count + key) * std::mem::size_of::<f32>();
+                let value = f32::from_le_bytes(bytes[at..at + 4].try_into().expect("f32 slice"));
+                value == 0.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unslotted_mask_is_byte_identical_to_the_single_sequence_mask() {
+        // The solo lane's determinism gate rests on this: with no lower
+        // bounds the batched code path must emit the same bytes the
+        // single-sequence path always did, for both mask types and with or
+        // without a sliding window.
+        for causal_window in [None, Some(4), Some(1)] {
+            for positions in [
+                vec![0i32],
+                vec![7i32],
+                vec![0i32, 1, 2, 3],
+                vec![5i32, 6, 7],
+            ] {
+                let key_count = 16;
+                let f32_bytes = position_causal_mask_f32_bytes_with_window(
+                    key_count,
+                    &positions,
+                    None,
+                    causal_window,
+                )
+                .expect("f32 mask");
+                assert_eq!(
+                    f32_bytes,
+                    reference_single_sequence_mask_f32(key_count, &positions, causal_window),
+                    "f32 mask changed for positions {positions:?} window {causal_window:?}"
+                );
+
+                // The f16 blob must agree cell for cell with the f32 one.
+                let f16_bytes = position_causal_mask_f16_bytes_with_window(
+                    key_count,
+                    &positions,
+                    None,
+                    causal_window,
+                )
+                .expect("f16 mask");
+                assert_eq!(f16_bytes.len(), positions.len() * key_count * 2);
+                let zero = f32_to_f16(0.0).to_le_bytes();
+                for token in 0..positions.len() {
+                    let allowed = allowed_keys_f32(&f32_bytes, key_count, token);
+                    for key in 0..key_count {
+                        let at = (token * key_count + key) * 2;
+                        let is_zero = f16_bytes[at..at + 2] == zero;
+                        assert_eq!(
+                            is_zero,
+                            allowed.contains(&key),
+                            "f16/f32 disagree at token {token} key {key}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn slot_lower_bounds_make_the_mask_block_diagonal() {
+        // Two slots in one flat arena of 8 rows each. Slot 0 is 3 tokens in,
+        // slot 1 is 2 tokens in; each decodes its next token.
+        const CAP: i32 = 8;
+        let upper_rows = vec![0 * CAP + 3, 1 * CAP + 2];
+        let lower_rows = vec![0 * CAP, 1 * CAP];
+        let key_count = 16;
+        let bytes = position_causal_mask_f32_bytes_with_window(
+            key_count,
+            &upper_rows,
+            Some(&lower_rows),
+            None,
+        )
+        .expect("mask");
+
+        // Slot 0 sees its own rows 0..=3 and nothing of slot 1.
+        assert_eq!(allowed_keys_f32(&bytes, key_count, 0), vec![0, 1, 2, 3]);
+        // Slot 1 sees only its own region, rows 8..=10.
+        assert_eq!(allowed_keys_f32(&bytes, key_count, 1), vec![8, 9, 10]);
+    }
+
+    #[test]
+    fn slot_zero_sees_exactly_what_a_solo_session_sees() {
+        // The load-bearing property behind "1 client runs at today's speed
+        // with today's output": a slot-0 token in a batched mask has the same
+        // allowed set as the same token decoded alone.
+        const CAP: i32 = 32;
+        let key_count = 64;
+        let batched = position_causal_mask_f32_bytes_with_window(
+            key_count,
+            &[5, CAP + 9],
+            Some(&[0, CAP]),
+            None,
+        )
+        .expect("batched mask");
+        let solo = position_causal_mask_f32_bytes_with_window(key_count, &[5], None, None)
+            .expect("solo mask");
+        assert_eq!(
+            allowed_keys_f32(&batched, key_count, 0),
+            allowed_keys_f32(&solo, key_count, 0)
+        );
+        // And a zero base really is the same bytes, not merely the same set.
+        let zero_based =
+            position_causal_mask_f32_bytes_with_window(key_count, &[5], Some(&[0]), None)
+                .expect("zero-based mask");
+        assert_eq!(zero_based, solo);
+    }
+
+    #[test]
+    fn the_causal_window_is_measured_inside_the_slot() {
+        // A window of 3 on a token at within-slot position 5 must reach back
+        // to within-slot 3, i.e. absolute 11 — never across the slot base
+        // into another slot's history.
+        const CAP: i32 = 8;
+        let key_count = 24;
+        let bytes = position_causal_mask_f32_bytes_with_window(
+            key_count,
+            &[CAP + 5],
+            Some(&[CAP]),
+            Some(3),
+        )
+        .expect("mask");
+        let allowed = allowed_keys_f32(&bytes, key_count, 0);
+        assert_eq!(allowed.iter().copied().min(), Some(11));
+        assert_eq!(allowed.iter().copied().max(), Some(13));
+        assert!(
+            allowed.iter().all(|&key| key >= CAP as usize),
+            "window reached below the slot base: {allowed:?}"
+        );
+    }
+
+    #[test]
+    fn mask_rejects_bounds_it_cannot_honour() {
+        // Lower above upper would silently produce an all -inf row, and a row
+        // with no visible key makes attention emit zeros rather than fail.
+        assert!(
+            position_causal_mask_f32_bytes_with_window(16, &[3], Some(&[9]), None).is_err(),
+            "lower bound above the position must be refused"
+        );
+        assert!(
+            position_causal_mask_f32_bytes_with_window(16, &[3, 4], Some(&[0]), None).is_err(),
+            "a short lower-bound list must be refused"
+        );
+        assert!(
+            position_causal_mask_f32_bytes_with_window(4, &[9], None, None).is_err(),
+            "a position past key_count must be refused"
+        );
+    }
+
+    #[test]
+    fn layout_validates_slot_lower_bounds() {
+        let mut layout =
+            HybridDecodeBatchLayout::from_contiguous_positions(&[0, 1], 8).expect("layout");
+        assert!(layout.attention_key_lower_bounds().is_none());
+        layout.validate().expect("unslotted layout is valid");
+
+        layout.attention_key_lower_bounds = vec![0];
+        assert!(
+            layout.validate().is_err(),
+            "one lower bound for two tokens must be refused"
+        );
+
+        layout.attention_key_lower_bounds = vec![0, 5];
+        assert!(
+            layout.validate().is_err(),
+            "a lower bound above the token's own row must be refused"
+        );
+
+        layout.attention_key_lower_bounds = vec![0, 1];
+        layout.validate().expect("in-range lower bounds are valid");
+        assert_eq!(layout.attention_key_lower_bounds(), Some(&[0, 1][..]));
+    }
 
     #[test]
     fn hybrid_cache_template_materializes_types_and_shape() {
