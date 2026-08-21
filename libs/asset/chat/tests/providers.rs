@@ -11,7 +11,9 @@ use makepad_asset_chat::responses::{
     DEFAULT_GROK_TIMEOUT, MAX_RESPONSES_BODY,
 };
 use makepad_asset_chat::wire::{MAX_DELTA_BYTES, MAX_MESSAGE_BYTES, MAX_MESSAGES};
-use makepad_asset_chat::wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind};
+use makepad_asset_chat::wire::{
+    ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ServingFacts,
+};
 use makepad_asset_client::json::{self, Value};
 use makepad_network::blocking_http::CancelToken;
 use std::cell::RefCell;
@@ -163,6 +165,107 @@ fn qwen_does_not_let_later_preferred_overwrite_qwen38() {
         }
         other => panic!("expected 3.8, got {other:?}"),
     }
+}
+
+/// The box counts the tokens; the broker only forwards the count. A delta
+/// is a `partial_text` DIFF at poll cadence, so its size says nothing about
+/// how many tokens produced it — this is what makes an honest tok/s
+/// readout possible downstream.
+#[test]
+fn qwen_forwards_the_decode_token_count_and_lane_contention() {
+    let mut t = ScriptedFleet::default();
+    let mut h = health(&["chat"]);
+    if let Value::Obj(pairs) = &mut h {
+        pairs.push((
+            "lanes".to_string(),
+            json::obj(vec![
+                ("model", json::s("qwen3.8-27b")),
+                ("slots_total", Value::Int(4)),
+                ("slots_claimed", Value::Int(3)),
+                ("slots_free", Value::Int(1)),
+                ("lanes_active", Value::Int(2)),
+                ("context_per_slot", Value::Int(16384)),
+                ("queue_depth", Value::Int(0)),
+                ("queue_max", Value::Int(8)),
+            ]),
+        ));
+    }
+    t.on_get("http://n1:8765/health", Ok(h));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-tok"))]));
+    t.on_get(
+        "http://n1:8765/job/j-tok",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 12/3072")),
+            ("partial_text", json::s("Hel")),
+        ])),
+    );
+    t.on_get(
+        "http://n1:8765/job/j-tok",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 40/3072")),
+            ("partial_text", json::s("Hello there")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    let facts = |gen| ServingFacts {
+        gen_tokens: gen,
+        lanes_active: Some(2),
+        slots_total: Some(4),
+    };
+    // Facts precede the delta they describe.
+    assert_eq!(
+        p.poll(),
+        vec![ProviderEvent::Serving(facts(12)), ProviderEvent::Delta("Hel".into())]
+    );
+    assert_eq!(
+        p.poll(),
+        vec![ProviderEvent::Serving(facts(40)), ProviderEvent::Delta("lo there".into())]
+    );
+    // An unchanged count says nothing twice.
+    assert!(p.poll().is_empty());
+}
+
+/// A box that advertises no lanes means ONE lane — never "unknown", and
+/// never a fabricated "1/1" on a readout.
+#[test]
+fn qwen_says_nothing_about_lanes_when_the_box_advertises_none() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get(
+        "http://n1:8765/models",
+        Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])),
+    );
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-nolanes"))]));
+    t.on_get(
+        "http://n1:8765/job/j-nolanes",
+        Ok(json::obj(vec![
+            ("state", json::s("running")),
+            ("stage", json::s("decode 5/3072")),
+            ("partial_text", json::s("Hi")),
+        ])),
+    );
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    p.begin_turn(&TurnInput::new("SYS", vec![ChatMessage::new(ChatRole::User, "hi")]))
+        .unwrap();
+    assert_eq!(
+        p.poll(),
+        vec![
+            ProviderEvent::Serving(ServingFacts {
+                gen_tokens: 5,
+                lanes_active: None,
+                slots_total: None
+            }),
+            ProviderEvent::Delta("Hi".into())
+        ]
+    );
 }
 
 #[test]

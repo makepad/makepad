@@ -743,7 +743,7 @@ fn drain_session(session: &mut Session, dirty: &AtomicBool) {
     }
     for ev in events {
         match ev.body {
-            ChatEventBody::Delta { text } => {
+            ChatEventBody::Delta { text, .. } => {
                 if !CHAT.read().map(|d| d.is_streaming).unwrap_or(false) {
                     ChatData::begin_stream();
                 }

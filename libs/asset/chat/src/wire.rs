@@ -438,10 +438,78 @@ pub struct ChatEvent {
     pub body: ChatEventBody,
 }
 
+/// PRESENTATION-ONLY serving facts observed while a turn streams, ADDITIVE
+/// on the `delta` event: a client that predates this field ignores it and
+/// behaves exactly as before, which is why this rides on `delta` rather
+/// than arriving as a new event tag (unknown tags are refusals here).
+///
+/// `gen_tokens` counts tokens the SERVING box has generated in the current
+/// provider round — it restarts at 0 every round (each tool round is a new
+/// job) and a consumer must treat a decrease as a restart, not a gap. It is
+/// what makes an honest tok/s readout possible at all: deltas are
+/// `partial_text` diffs at the broker's poll cadence, so their count and
+/// their byte length say nothing about how many TOKENS were produced.
+///
+/// The lane pair is the serving box's decode-lane contention as its
+/// `/health` advertised it at probe time (see `LanesJson` in asset-ai):
+/// stale by construction, a preference/context signal, never a reservation.
+/// Absent when the box advertises no lanes — which, per that protocol,
+/// means one lane; a consumer shows nothing rather than inventing "1/1".
+///
+/// Nothing here is a security boundary or a budget: decoding CLAMPS
+/// implausible values and drops malformed ones instead of failing the page,
+/// because a cosmetic counter must never be able to kill a live turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServingFacts {
+    /// Cumulative tokens generated in the current provider round.
+    pub gen_tokens: u32,
+    /// Lanes generating on the serving box at probe time.
+    pub lanes_active: Option<u32>,
+    /// Lanes the serving box is configured for.
+    pub slots_total: Option<u32>,
+}
+
+/// Sanity ceilings for the presentation counters (clamped, never refused).
+const MAX_GEN_TOKENS: u64 = 10_000_000;
+const MAX_LANES: u64 = 1024;
+
+impl ServingFacts {
+    pub fn encode(&self) -> Value {
+        let mut pairs: Vec<(&str, Value)> =
+            vec![("gen_tokens", Value::Int(self.gen_tokens as i64))];
+        if let Some(active) = self.lanes_active {
+            pairs.push(("lanes_active", Value::Int(active as i64)));
+        }
+        if let Some(total) = self.slots_total {
+            pairs.push(("slots_total", Value::Int(total as i64)));
+        }
+        json::obj(pairs)
+    }
+
+    /// Lenient by design (see the type doc): anything unreadable decodes to
+    /// `None` and the stream carries on without a rate readout.
+    pub fn decode(v: &Value) -> Option<ServingFacts> {
+        if !matches!(v, Value::Obj(_)) {
+            return None;
+        }
+        let lane = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_u64)
+                .map(|n| n.min(MAX_LANES) as u32)
+        };
+        Some(ServingFacts {
+            gen_tokens: v.get("gen_tokens").and_then(Value::as_u64)?.min(MAX_GEN_TOKENS) as u32,
+            lanes_active: lane("lanes_active"),
+            slots_total: lane("slots_total"),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEventBody {
-    /// Streaming assistant text.
-    Delta { text: String },
+    /// Streaming assistant text, with the optional serving facts observed
+    /// as it was produced (see [`ServingFacts`]).
+    Delta { text: String, serving: Option<ServingFacts> },
     /// The assistant invoked a tool; `args` is the raw argument object.
     ToolCall { id: String, name: String, args: Value },
     /// Bounded progress of a running tool (mirrors job heartbeats).
@@ -458,9 +526,14 @@ impl ChatEvent {
         let mut pairs: Vec<(&str, Value)> =
             vec![("seq", Value::Int(self.seq.min(i64::MAX as u64) as i64))];
         match &self.body {
-            ChatEventBody::Delta { text } => {
+            ChatEventBody::Delta { text, serving } => {
                 pairs.push(("type", json::s("delta")));
                 pairs.push(("text", json::s(text.clone())));
+                // Absent when unknown: the old shape byte-for-byte, so a
+                // golden delta stays golden.
+                if let Some(serving) = serving {
+                    pairs.push(("serving", serving.encode()));
+                }
             }
             ChatEventBody::ToolCall { id, name, args } => {
                 pairs.push(("type", json::s("tool_call")));
@@ -493,7 +566,10 @@ impl ChatEvent {
     pub fn decode(v: &Value) -> Result<Self, &'static str> {
         let seq = v.get("seq").and_then(Value::as_u64).ok_or("event seq")?;
         let body = match v.get("type").and_then(Value::as_str) {
-            Some("delta") => ChatEventBody::Delta { text: str_field(v, "text", MAX_DELTA_BYTES)? },
+            Some("delta") => ChatEventBody::Delta {
+                text: str_field(v, "text", MAX_DELTA_BYTES)?,
+                serving: v.get("serving").and_then(ServingFacts::decode),
+            },
             Some("tool_call") => {
                 let args = v.get("args").cloned().ok_or("tool args")?;
                 if !matches!(args, Value::Obj(_)) {

@@ -7,8 +7,9 @@ use makepad_asset_chat::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_asset_chat::session::{CancelFlag, ExecCtx, SendRefusal, Session, ToolExecutor};
 use makepad_asset_chat::tools::ContentToolCall;
 use makepad_asset_chat::wire::{
-    AttachmentBinding, ChatEventBody, ProviderAvailability, ProviderKind, ToolOutcome,
-    MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_JSON_BYTES, MAX_TOOL_ROUNDS,
+    AttachmentBinding, ChatEventBody, ProviderAvailability, ProviderKind, ServingFacts,
+    ToolOutcome, MAX_DELTA_BYTES, MAX_MESSAGE_BYTES, MAX_PROGRESS_EVENTS, MAX_TOOL_JSON_BYTES,
+    MAX_TOOL_ROUNDS,
 };
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_data::AssetRevisionId;
@@ -132,6 +133,37 @@ fn tool_line(name: &str, args: Value) -> String {
     )
 }
 
+/// Serving facts ride out on the delta they describe — and on the LAST
+/// chunk of a split, because they describe the END of that text.
+#[test]
+fn serving_facts_ride_on_the_delta_they_describe() {
+    let facts = ServingFacts { gen_tokens: 64, lanes_active: Some(1), slots_total: Some(4) };
+    let big = "a".repeat(MAX_DELTA_BYTES + 16);
+    let provider = Scripted::new(vec![vec![
+        ProviderEvent::Delta("before".into()),
+        ProviderEvent::Serving(facts),
+        ProviderEvent::Delta(big.clone()),
+        ProviderEvent::Done { text: format!("before{big}") },
+    ]]);
+    let mut exec = Recorder::new(ToolOutcome::Ok { value: Value::Obj(vec![]) });
+    let mut session = Session::new("prin_test", Box::new(provider));
+    session.send("hi", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+
+    let carried: Vec<Option<ServingFacts>> = session
+        .drain_events()
+        .iter()
+        .filter_map(|e| match &e.body {
+            ChatEventBody::Delta { serving, .. } => Some(*serving),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carried.len(), 3, "one delta, then a split one: {carried:?}");
+    assert_eq!(carried[0], None, "facts that had not arrived yet are not invented");
+    assert_eq!(carried[1], None, "the middle of a split says nothing");
+    assert_eq!(carried[2], Some(facts));
+}
+
 #[test]
 fn plain_turn_streams_and_completes_in_order() {
     let provider = Scripted::new(vec![vec![
@@ -150,8 +182,8 @@ fn plain_turn_streams_and_completes_in_order() {
     // seq is monotonic from 0 and the order is delta, delta, done.
     let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
     assert_eq!(seqs, vec![0, 1, 2]);
-    assert!(matches!(&events[0].body, ChatEventBody::Delta { text } if text == "Hel"));
-    assert!(matches!(&events[1].body, ChatEventBody::Delta { text } if text == "lo"));
+    assert!(matches!(&events[0].body, ChatEventBody::Delta { text, .. } if text == "Hel"));
+    assert!(matches!(&events[1].body, ChatEventBody::Delta { text, .. } if text == "lo"));
     assert!(matches!(events[2].body, ChatEventBody::Done));
     assert!(session.is_idle());
 
