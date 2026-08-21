@@ -50,6 +50,7 @@ workspace.members = [
     "examples/cad",
     "examples/box3d",
     "examples/hello_world",
+    "examples/render_to_texture",
     # === xr app ===
     "xr",
     # === studio ===
