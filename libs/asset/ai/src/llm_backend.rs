@@ -1362,6 +1362,22 @@ mod llama_worker {
                                 .decode_tokens(&lane.token_ids)
                                 .map_err(|e| format!("detokenize: {e:?}")),
                         };
+                        // The final counts, once. The per-step updates stop at
+                        // the last step, and a reply that ends in the same
+                        // chunk its think block closed in would leave a client
+                        // showing "0 visible" for a turn that had several.
+                        // Sent before Done, which the receiver returns on, so
+                        // channel order is what makes this arrive at all.
+                        {
+                            let total = lane.token_ids.len();
+                            let think = lane.think_tokens.unwrap_or(0);
+                            let _ = lane.events.send(WorkerEvent::Serving(
+                                crate::backend::ServingUpdate::Think {
+                                    think,
+                                    visible: Some(total.saturating_sub(think)),
+                                },
+                            ));
+                        }
                         if let Some(think) = lane.think_tokens {
                             let total = lane.token_ids.len();
                             eprintln!(
