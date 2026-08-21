@@ -137,7 +137,7 @@ fn tool_line(name: &str, args: Value) -> String {
 /// chunk of a split, because they describe the END of that text.
 #[test]
 fn serving_facts_ride_on_the_delta_they_describe() {
-    let facts = ServingFacts { gen_tokens: 64, lanes_active: Some(1), slots_total: Some(4) };
+    let facts = ServingFacts { gen_tokens: 64, lanes_active: Some(1), slots_total: Some(4), ..Default::default() };
     let big = "a".repeat(MAX_DELTA_BYTES + 16);
     let provider = Scripted::new(vec![vec![
         ProviderEvent::Delta("before".into()),

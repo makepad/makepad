@@ -218,8 +218,7 @@ fn qwen_forwards_the_decode_token_count_and_lane_contention() {
     let facts = |gen| ServingFacts {
         gen_tokens: gen,
         lanes_active: Some(2),
-        slots_total: Some(4),
-    };
+        slots_total: Some(4), ..Default::default() };
     // Facts precede the delta they describe.
     assert_eq!(
         p.poll(),
@@ -261,8 +260,7 @@ fn qwen_says_nothing_about_lanes_when_the_box_advertises_none() {
             ProviderEvent::Serving(ServingFacts {
                 gen_tokens: 5,
                 lanes_active: None,
-                slots_total: None
-            }),
+                slots_total: None, ..Default::default() }),
             ProviderEvent::Delta("Hi".into())
         ]
     );
