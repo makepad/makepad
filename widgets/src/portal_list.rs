@@ -1643,6 +1643,26 @@ impl PortalList {
             self.first_scroll += delta;
         }
 
+        // One huge downward wheel delta (a fast coast) used to leave the whole
+        // travel as negative first_scroll backlog: the draw loop then
+        // instantiates and draws every row between the old viewport and the
+        // new one (dy=8000 drew ~200 live rows down to y=-7391), only for
+        // end() to renormalise afterwards. Convert any beyond-a-viewport
+        // backlog into a first_id jump through the height tree first — the
+        // same mapping a scroll-bar drag lands by — so the draw only ever
+        // walks the rows around the viewport.
+        if extent > 0.0 && self.first_scroll < -extent {
+            if let Some(tree) = self.height_tree.as_ref() {
+                let first_idx = self.first_id.saturating_sub(self.range_start);
+                let height_before =
+                    if first_idx > 0 { tree.prefix_sum(first_idx - 1) } else { 0.0 };
+                let target = (height_before - self.first_scroll).max(0.0);
+                let (item_idx, offset) = tree.find_position(target);
+                self.first_id = self.range_start + item_idx;
+                self.first_scroll = -offset;
+            }
+        }
+
         if self.first_id == self.range_start {
             if !self.bounce_at_start {
                 self.first_scroll = self.first_scroll.min(0.0);
