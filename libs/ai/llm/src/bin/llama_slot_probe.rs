@@ -180,12 +180,156 @@ fn main() {
     // failure that reads as a model-quality problem rather than an error.
     // CUDA only: Metal refuses n_seqs > 1 by design.
     match batched_interleave(&model, &vocab, slots, max_new, PER_SLOT_CONTEXT) {
-        Ok(lanes) => println!("PASS: {lanes} lanes batched in one step, no cross-lane bleed"),
+        Ok(lanes) => println!("PASS: {lanes} lanes batched, streams match stepped-alone"),
         Err(e) => {
-            eprintln!("FAIL: {e}");
+            eprintln!("FAIL (cross-width): {e}");
+            eprintln!(
+                "  NOTE: this gate compares width B against width 1, and the shipped Q8_1 mmvq\n                   route is NOT bit-identical across widths. Re-run with MKLLM_DISABLE_Q81_MMVQ=1\n                   BEFORE concluding cross-lane bleed. If it passes there, this is the width\n                   finding, not batching. Gate 4 below is width-invariant and does not have\n                   this ambiguity."
+            );
             std::process::exit(1);
         }
     }
+
+    // Fourth gate: WIDTH-INVARIANT BLEED. Gate 3 compares a lane at batch
+    // width B against the same lane at width 1, so a divergence there can come
+    // from cross-width kernel numerics rather than from batching. This one
+    // holds the width CONSTANT and changes only WHO the neighbours are: lane 0
+    // runs the same prompt in two B-wide batches whose other lanes carry
+    // different work. Same width, same kernel path, same reduction order — so
+    // any difference in lane 0's stream is neighbour influence and nothing
+    // else. This is the gate that actually defines cross-lane bleed.
+    match neighbour_invariance(&model, &vocab, slots, max_new, PER_SLOT_CONTEXT) {
+        Ok(lanes) => println!("PASS: lane 0 unchanged by its {lanes} neighbours (width-invariant)"),
+        Err(e) => {
+            eprintln!("FAIL (cross-lane bleed): {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// A second, disjoint set of neighbour prompts. Different lengths AND different
+/// content from `LANE_PROMPTS`, so swapping them changes every neighbour's fill
+/// and token stream.
+const ALT_PROMPTS: &[&str] = &[
+    "Recite the first four prime numbers.",
+    "In one long paragraph, describe how a garden changes across the four seasons, mentioning at least one plant per season and the weather that drives the change.",
+    "Translate to French: good morning.",
+    "What colour is the sky at noon on a clear day, and why?",
+    "Count backwards from ten to one.",
+    "Give the capital of Japan.",
+    "Explain gravity to a six year old.",
+    "Name two kinds of cloud.",
+];
+
+/// Decode `lanes` lanes together for `max_new` steps and return every lane's
+/// stream. Lane 0 always gets `LANE_PROMPTS[0]`; the others come from `others`.
+fn run_batch_with_neighbours(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    lanes: usize,
+    max_new: usize,
+    per_slot_context: u32,
+    others: &[&str],
+) -> Result<Vec<Vec<i32>>, String> {
+    let mut prompts = vec![vocab
+        .tokenize(LANE_PROMPTS[0], true, true)
+        .map_err(|e| e.to_string())?];
+    for text in others.iter().take(lanes - 1) {
+        prompts.push(vocab.tokenize(text, true, true).map_err(|e| e.to_string())?);
+    }
+
+    let mut session = build_session(model, slots, per_slot_context)?;
+    let mut table = session.new_slot_table().map_err(|e| e.to_string())?;
+    let mut next_token = Vec::with_capacity(lanes);
+    for (lane, prompt) in prompts.iter().enumerate() {
+        let claimed = table.admit().ok_or_else(|| "slot table full".to_string())?;
+        if claimed != lane {
+            return Err(format!("expected slot {lane}, got {claimed}"));
+        }
+        let slot = table.slot(lane).ok_or_else(|| "slot missing".to_string())?;
+        let (kv_base, state_row) = (slot.kv_base(), slot.live_state_row());
+        let logits = session
+            .prefill_slot_chunk(kv_base, state_row, 0, prompt)
+            .map_err(|e| format!("lane {lane} prefill: {e}"))?;
+        table
+            .advance(lane, prompt.len())
+            .map_err(|e| e.to_string())?;
+        table.begin_decoding(lane).map_err(|e| e.to_string())?;
+        next_token.push(argmax_token_id(&logits).ok_or_else(|| "no argmax".to_string())?);
+    }
+
+    let mut produced: Vec<Vec<i32>> = vec![Vec::new(); lanes];
+    for step in 0..max_new {
+        let plan = table
+            .plan_step()
+            .ok_or_else(|| format!("step {step}: nothing to plan"))?;
+        let tokens: Vec<i32> = plan.slots.iter().map(|s| next_token[s.slot]).collect();
+        let rows = session
+            .step_slots(&plan, &tokens)
+            .map_err(|e| format!("step {step}: {e}"))?;
+        for (row, step_slot) in rows.iter().zip(&plan.slots) {
+            let lane = step_slot.slot;
+            produced[lane].push(next_token[lane]);
+            next_token[lane] =
+                argmax_token_id(row).ok_or_else(|| format!("lane {lane}: no argmax"))?;
+            table.advance(lane, 1).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(produced)
+}
+
+fn neighbour_invariance(
+    model: &LlamaModel,
+    vocab: &LlamaVocab,
+    slots: u32,
+    max_new: usize,
+    per_slot_context: u32,
+) -> Result<usize, String> {
+    let lanes = (slots as usize).min(LANE_PROMPTS.len()).min(ALT_PROMPTS.len());
+    if lanes < 2 {
+        return Err("neighbour invariance needs at least 2 lanes".to_string());
+    }
+    let with_a = run_batch_with_neighbours(
+        model,
+        vocab,
+        slots,
+        lanes,
+        max_new,
+        per_slot_context,
+        &LANE_PROMPTS[1..],
+    )?;
+    let with_b = run_batch_with_neighbours(
+        model,
+        vocab,
+        slots,
+        lanes,
+        max_new,
+        per_slot_context,
+        ALT_PROMPTS,
+    )?;
+
+    if with_a[0] != with_b[0] {
+        let at = with_a[0]
+            .iter()
+            .zip(&with_b[0])
+            .position(|(x, y)| x != y)
+            .unwrap_or(0);
+        return Err(format!(
+            "lane 0 changed when only its NEIGHBOURS changed, at index {at}\n               neighbours A: {:?}\n  neighbours B: {:?}\n               same batch width, same kernels — this is neighbour influence",
+            with_a[0], with_b[0]
+        ));
+    }
+    // Sanity: the neighbours really did diverge, or the test proved nothing.
+    if lanes > 1 && with_a[1] == with_b[1] {
+        return Err(format!(
+            "neighbour lane 1 produced the SAME stream for both prompt sets, so the \n               experiment did not actually vary anything: {:?}",
+            with_a[1]
+        ));
+    }
+    println!("  lane 0 stream stable across two different neighbour sets");
+    println!("  lane 1 confirmed to differ between sets (experiment is live)");
+    Ok(lanes - 1)
 }
 
 /// Distinct prompts, deliberately of DIFFERENT lengths, so lanes sit at
