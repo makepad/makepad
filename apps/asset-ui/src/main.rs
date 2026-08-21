@@ -4018,13 +4018,6 @@ impl App {
         // already on disk when the watcher's first poll reads index.json.
         self.store.start(PathBuf::from(repo_path("local/ai_content_library")));
         self.asset_store_timer = cx.start_interval(0.2);
-        ChatData::push(
-            ChatRole::System,
-            "Qwen on the GPU fleet. Ask for an image, an image turned into a \
-             3D mesh, what models/sizes exist, or to change the default \
-             model / resolution / steps. It works through tool calls — it \
-             will not invent a finished image.",
-        );
         // Opening stays metadata-only; every missing preview is queued here
         // and regenerated a bounded slice at a time once frames are flowing.
         self.thumbnail_backfill = self
