@@ -398,6 +398,46 @@ impl SessionGraphSet {
     }
 }
 
+/// Byte range of rows `first .. first + rows` of a 2-D state tensor.
+///
+/// Row-addressed because that is how `get_rows`/`set_rows` address these
+/// caches: dimension 1 is the row and `nb[1]` is its stride. Every bound is
+/// checked — a range computed one row wide of where it should be would clear
+/// the neighbouring slot's state, which is the exact failure this is meant to
+/// prevent, arrived at from the other side.
+fn state_row_range(
+    ctx: &crate::Context,
+    tensor_id: crate::TensorId,
+    first: usize,
+    rows: usize,
+) -> Result<(usize, usize)> {
+    let tensor = ctx
+        .tensor(tensor_id)
+        .ok_or_else(|| LlamaError::format(format!("invalid state tensor id {tensor_id}")))?;
+    let total = usize::try_from(tensor.ne[1]).unwrap_or(0);
+    if tensor.ne[2] != 1 || tensor.ne[3] != 1 {
+        return Err(LlamaError::format(format!(
+            "state tensor {tensor_id} is not row-addressed: shape {:?}",
+            tensor.ne
+        )));
+    }
+    if first + rows > total {
+        return Err(LlamaError::format(format!(
+            "rows {first}..{} are outside the {total}-row state tensor {tensor_id}",
+            first + rows
+        )));
+    }
+    let stride = tensor.nb[1];
+    let offset = tensor
+        .data_offset
+        .ok_or_else(|| {
+            LlamaError::format(format!("state tensor {tensor_id} has no allocated data"))
+        })?
+        .checked_add(first * stride)
+        .ok_or_else(|| LlamaError::format("overflow computing a state row offset"))?;
+    Ok((offset, rows * stride))
+}
+
 fn shared_cache_ranges(
     ctx: &crate::Context,
     cache: &HybridSharedCacheTensorIds,
@@ -618,6 +658,58 @@ impl LlamaSession {
             self.max_context,
             state_rows_per_slot,
             draft_max,
+        )
+    }
+
+    /// Zero one slot's recurrent state and hidden-carry block.
+    ///
+    /// The counterpart to admission, and NOT the same thing as
+    /// [`reset`](Self::reset): that one clears the whole device state and
+    /// therefore every other conversation's caches too.
+    ///
+    /// A slot's stale ATTENTION rows are harmless — they sit above the new
+    /// fill and the mask's lower/upper span excludes them exactly, which is why
+    /// admission can hand out a slot without touching the KV. The recurrent
+    /// state is the opposite: the delta-net scan RESUMES from the row it is
+    /// given, so a fresh conversation handed a used slot starts its scan from
+    /// the previous occupant's running state. Nothing errors. The reply is
+    /// fluent and is conditioned on a conversation this client never had.
+    ///
+    /// Cheap: the recurrent rows of one slot plus its carry block, not the
+    /// whole arena.
+    pub fn clear_slot_state(&mut self, lane: usize) -> Result<()> {
+        if lane >= self.slot_count() {
+            return Err(LlamaError::format(format!(
+                "slot {lane} is outside the session's {} slots",
+                self.slot_count()
+            )));
+        }
+        let rows_per_slot = self.state_rows_per_slot();
+        let first = lane * rows_per_slot;
+        let mut ranges = Vec::new();
+        for ids in self.graphs.shared_cache.recurrent.values() {
+            for tensor in [ids.r_cache, ids.s_cache] {
+                ranges.push(state_row_range(&self.weights.ctx, tensor, first, rows_per_slot)?);
+            }
+        }
+        if let (Some(carry), Some(mtp)) = (self.graphs.hidden_carry, self.mtp) {
+            // Ring, scratch row and the never-written zero row: a lane's whole
+            // block, because the zero row is load-bearing precisely by being
+            // zero and the previous occupant's scratch row is not this lane's.
+            let block = mtp.carry_ring + 2;
+            ranges.push(state_row_range(
+                &self.weights.ctx,
+                carry,
+                lane * block,
+                block,
+            )?);
+        }
+        ranges.sort_unstable();
+        ranges.dedup();
+        self.graphs.shared_runtime.clear_state_ranges(
+            &mut self.weights.ctx,
+            &self.graphs.shared_buffers,
+            &ranges,
         )
     }
 
@@ -1958,6 +2050,41 @@ impl LlamaSession {
     /// True when this session runs speculative decoding.
     pub fn speculative_enabled(&self) -> bool {
         self.mtp.is_some()
+    }
+
+    /// True when the draft head reads a restricted `.draftvocab` LM head.
+    ///
+    /// It is a ~3.3x cheaper draft forward at identical acceptance, which is
+    /// the term that decides whether a deeper batched round pays — so the
+    /// allocator has to be told which head it is costing, not assume the
+    /// expensive one.
+    pub fn has_restricted_draft_head(&self) -> bool {
+        self.draft_vocab.is_some()
+    }
+
+    /// Offset inside slot 0's recurrent block that the session's own
+    /// single-sequence state currently lives at.
+    ///
+    /// The session-native speculative path MOVES this every round — it commits
+    /// by choosing which checkpoint plane the next scan resumes from. Slot 0's
+    /// copy of the same fact does not move on its own, so anything that hands a
+    /// solo lane over to the batched path has to carry this across; see
+    /// [`crate::LaneExecutor`]. Without it the batched step resumes lane 0 from
+    /// a checkpoint belonging to a different number of committed tokens, and
+    /// the output is fluent and wrong.
+    pub fn live_state_offset(&self) -> usize {
+        usize::try_from(self.live_state_row()).unwrap_or(0)
+    }
+
+    /// Tokens of the session's own history the DRAFT head's KV holds.
+    ///
+    /// Lags the model's fill until a catch-up runs. Carried across the same
+    /// handover as [`live_state_offset`](Self::live_state_offset): a slot that
+    /// under-reports it makes the draft head re-ingest the whole conversation,
+    /// and one that over-reports it leaves the draft head conditioned on tokens
+    /// it never read.
+    pub fn draft_head_fill(&self) -> usize {
+        self.mtp.map(|mtp| mtp.mtp_filled).unwrap_or(0)
     }
 
     /// Sample `max_new_tokens` tokens as ONE self-contained generation: the
