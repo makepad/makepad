@@ -347,6 +347,11 @@ pub struct GenModel {
     /// Host clock before which the loop must not submit again (error
     /// backoff). Never blocks a manual GENERATE.
     continuous_hold_ms: u64,
+    /// Assets the catalog event stream has already named, bounded. A fast
+    /// job publishes BEFORE the next status poll learns which asset it
+    /// produced — without this memory that event matched no row and was
+    /// gone, and the row said "being added to the catalog" forever.
+    published_assets: Vec<AssetId>,
 }
 
 impl Default for ProfilesState {
@@ -604,6 +609,7 @@ impl GenModel {
     /// Timestamped status completion. The caller supplies its local clock;
     /// `status.created_ms` remains remote metadata and never drives elapsed.
     pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) {
+        let already_published = self.published_assets.clone();
         let Some(row) = self.job_by_id(status.job) else { return };
         if row.state.is_terminal() {
             return; // late duplicate
@@ -634,6 +640,13 @@ impl GenModel {
             }
             JobStateDto::Succeeded => {
                 row.produced = status.result_asset;
+                // The publish event may have come and gone while this row
+                // still had no produced asset to match it against.
+                if let Some(asset) = status.result_asset {
+                    if already_published.contains(&asset) {
+                        row.published = true;
+                    }
+                }
                 row.last_progress_permille = 1000;
                 row.finished_ms = Some(now_ms);
                 // Success proves that a worker ran even if polling happened
@@ -732,6 +745,12 @@ impl GenModel {
     /// is now visibly published (the tile itself arrives via the surface
     /// refresh the same event triggered).
     pub fn catalog_published(&mut self, asset: AssetId) {
+        if !self.published_assets.contains(&asset) {
+            if self.published_assets.len() >= 32 {
+                self.published_assets.remove(0);
+            }
+            self.published_assets.push(asset);
+        }
         for row in self.jobs.iter_mut() {
             if row.produced == Some(asset) {
                 row.published = true;
@@ -1030,6 +1049,27 @@ mod tests {
         // A late duplicate status cannot resurrect a terminal row.
         m.status_arrived(&status(job_id(7), JobStateDto::Running));
         assert_eq!(m.jobs().next().unwrap().state, GenJobState::Succeeded);
+    }
+
+    /// A fast job publishes BEFORE the next status poll learns the produced
+    /// asset: the event must not be lost, or the row reads "being added to
+    /// the catalog" forever (seen live with 2.5-second image jobs).
+    #[test]
+    fn a_publish_event_that_beats_the_status_poll_still_lands() {
+        let mut m = GenModel::new();
+        m.set_prompt("a jumping rabbit".into());
+        let tag = enqueue_tag(&m.generate(0));
+        assert!(m.queued(tag, job_id(7)).is_empty());
+        let asset = AssetId::from_bytes([6; 16]);
+        // Event first — no row knows its produced asset yet.
+        m.catalog_published(asset);
+        // Status later names the asset; the remembered event must flip it.
+        let mut done = status(job_id(7), JobStateDto::Succeeded);
+        done.result_asset = Some(asset);
+        m.status_arrived(&done);
+        let row = m.jobs().next().unwrap();
+        assert_eq!(row.state, GenJobState::Succeeded);
+        assert!(row.published, "the early publish event was lost");
     }
 
     #[test]
