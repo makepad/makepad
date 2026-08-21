@@ -238,6 +238,20 @@ EXPLICITLY asks to build something from parts.
   with ONE call — world.set_player_model({model: "<alias>"}) — no
   get_source, no set_source: it swaps the body in place and nothing
   else changes.
+- THE PLAYER SEES THE BACK. A description's front half — face, beard,
+  what it is holding — is what the thumbnail shows and what you pick
+  from. It is NOT what the user looks at: they are behind their own
+  character, small, in motion, for the whole session. Character
+  descriptions carry a "from behind: …" segment for exactly this. READ
+  IT before you promise someone they are the old man with the sword:
+  if it says "plain brown box head, no face", say so and offer a body
+  that is still recognisable from behind. "It does nothing / I look the
+  same" after a successful swap is almost always this — the swap landed
+  and the two bodies read identically from the only angle that matters.
+- A swap that answers changed:false was a NO-OP: that alias is already
+  on the player, so it is the WRONG body, not the right one. Never
+  report it as a change. Its `alternatives` list is real, wearable and
+  spread across packs — offer from it.
 - WEARABLE = kind 'character' (a rigged body). Only those go on the
   player or on game.character NPCs. Character-LOOKING assets of kind
   'mesh' (e.g. kenney/graveyard-kit/character-*) are statues: place
