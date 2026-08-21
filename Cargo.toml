@@ -2,6 +2,7 @@ workspace.members = [
     # === app ===
     "apps/route",
     "apps/asset-ui",
+    "apps/asset-server",
     "apps/vj",
     "libs/asset/importer",
     "libs/asset/data",
