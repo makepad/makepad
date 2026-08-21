@@ -543,6 +543,25 @@ impl LlamaSession {
         self.attention_arena_rows
     }
 
+    /// Bytes the attention K/V caches occupy for this session's geometry.
+    ///
+    /// Reported rather than estimated because per-token KV cost is a property
+    /// of the model's attention shape — how many layers actually have
+    /// attention, their head dims, the cache types — and a hybrid model's is
+    /// nothing like a full-attention model's. Sizing a box from a guess is how
+    /// a context knob turns into an out-of-memory at load, on the box, after a
+    /// swap.
+    pub fn attention_cache_bytes(&self) -> Result<usize> {
+        attention_cache_bytes_from_spec(&self.spec)
+    }
+
+    /// Bytes one more token of context costs, per lane.
+    ///
+    /// The number to multiply when answering "what would 128k cost?".
+    pub fn attention_cache_bytes_per_token(&self) -> Result<usize> {
+        Ok(self.attention_cache_bytes()? / self.attention_arena_rows.max(1))
+    }
+
     /// A slot table matching this session's cache geometry exactly.
     ///
     /// Built here rather than by the caller so the table's bases and the
