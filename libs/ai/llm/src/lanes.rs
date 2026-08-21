@@ -1251,11 +1251,20 @@ impl LaneExecutor {
                 tokens,
                 resumed,
                 last,
-            } if lane == SOLO_LANE && self.scheduler.is_solo(lane) => {
-                let _ = resumed;
+            } if lane == SOLO_LANE
+                && self.scheduler.is_solo(lane)
+                && (resumed || self.session.token_count() == start) =>
+            {
                 // Session-native ingest, so the speculative loop can run
-                // against it. `reset_first` is the worker's prefix decision.
-                if self.scheduler.reset_requested(lane) {
+                // against it. `reset_first` is the worker's prefix decision —
+                // but it is a PER-TURN decision, and this arm runs once per
+                // CHUNK: resetting on every chunk of a cold multi-chunk
+                // prefill wiped the whole session (KV, delta-net state,
+                // carry) 512 tokens at a time, leaving the model holding
+                // only the last chunk — fluent, and amnesiac about
+                // everything before it. Only a chunk that is NOT a resume
+                // of the previous one (i.e. the first) may reset.
+                if !resumed && self.scheduler.reset_requested(lane) {
                     // A reset clears the whole device cache, not this lane's
                     // share of it, so every parked conversation's rows become
                     // zeros. Say so before it happens: a parked lane that is
