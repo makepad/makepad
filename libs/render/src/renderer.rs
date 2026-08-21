@@ -2094,6 +2094,105 @@ impl Default for Renderer {
     }
 }
 
+/// One settled bake's atlas signature, and — for every bake after the
+/// first — its DIFF against that first one. Re-baking a world nothing has
+/// edited must land on the same bytes; a bake that only ever grows the lit
+/// set is an accumulator that was not cleared (gpu_lightmap.rs, section 1,
+/// carries the measurement this instrument produced).
+///
+/// Driven by MAKEPAD_GPU_LM_REBAKE. macOS only: it needs a texture readback.
+#[cfg(target_os = "macos")]
+fn lm_probe_report(
+    k: usize,
+    w: usize,
+    h: usize,
+    regions: usize,
+    lamps: usize,
+    bytes: &[u8],
+    rects: &[(crate::lightmap::LmRect, bool)],
+) {
+    thread_local! {
+        static REFERENCE: std::cell::RefCell<Option<Vec<u8>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut sum = [0u64; 4];
+    let mut mx = [0u8; 4];
+    for px in bytes.chunks_exact(4) {
+        for c in 0..4 {
+            hash = (hash ^ px[c] as u64).wrapping_mul(0x100000001b3);
+            sum[c] += px[c] as u64;
+            mx[c] = mx[c].max(px[c]);
+        }
+    }
+    let px_count = (bytes.len() / 4).max(1) as f64;
+    log!(
+        "lm probe: bake {k} — {w}x{h}, {regions} regions, {lamps} lamp(s), hash {hash:016x}, \
+         mean BGRA {:.3} {:.3} {:.3} {:.1}, max {:?}",
+        sum[0] as f64 / px_count,
+        sum[1] as f64 / px_count,
+        sum[2] as f64 / px_count,
+        sum[3] as f64 / px_count,
+        mx
+    );
+    REFERENCE.with(|r| {
+        let mut r = r.borrow_mut();
+        let Some(prev) = r.as_ref() else {
+            *r = Some(bytes.to_vec());
+            return;
+        };
+        if prev.len() != bytes.len() {
+            log!("lm probe: bake {k} — atlas resized, no diff against bake 0");
+            return;
+        }
+        let (mut diff, mut up, mut down) = (0u64, 0u64, 0u64);
+        let mut worst = 0i32;
+        let mut worst_at = (0usize, 0usize, 0usize);
+        let mut sum_delta = 0i64;
+        for (i, (a, b)) in prev.chunks_exact(4).zip(bytes.chunks_exact(4)).enumerate() {
+            let mut any = false;
+            for c in 0..4 {
+                let d = b[c] as i32 - a[c] as i32;
+                if d != 0 {
+                    any = true;
+                    sum_delta += d as i64;
+                    if d.abs() > worst.abs() {
+                        worst = d;
+                        worst_at = (i % w, i / w, c);
+                    }
+                }
+            }
+            if any {
+                diff += 1;
+                let sa: i32 = a[..3].iter().map(|v| *v as i32).sum();
+                let sb: i32 = b[..3].iter().map(|v| *v as i32).sum();
+                if sb > sa {
+                    up += 1;
+                } else if sb < sa {
+                    down += 1;
+                }
+            }
+        }
+        let owner = rects
+            .iter()
+            .position(|(rc, _)| {
+                worst_at.0 >= rc.x
+                    && worst_at.0 < rc.x + rc.w
+                    && worst_at.1 >= rc.y
+                    && worst_at.1 < rc.y + rc.h
+            })
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        log!(
+            "lm probe: bake {k} vs 0 — {diff} texels differ (rgb up {up}, down {down}), \
+             worst delta {worst} at ({},{}) chan {} region {owner}, sum delta {sum_delta}",
+            worst_at.0,
+            worst_at.1,
+            worst_at.2
+        );
+    });
+}
+
 impl Renderer {
     /// Begin rendering a different realm into this view.
     ///
@@ -4313,6 +4412,63 @@ impl Renderer {
             }
         }
         let sun = crate::sun::resolve_sun(&world.sun);
+        // The re-bake idempotence probe (macOS readback): with
+        // MAKEPAD_GPU_LM_REBAKE set, every settled bake reports its atlas
+        // signature, and each bake after the first reports its DIFF against
+        // the first — the instrument that measured the accumulator leak
+        // (gpu_lightmap.rs, section 1). `=<n>` also re-bakes the same world n
+        // times by itself: MODE=redirty re-bakes the realized layout into its
+        // own targets, anything else re-kicks the whole job. MIN_REGIONS /
+        // MIN_LAMPS hold the probe until the streamed world has arrived.
+        #[cfg(target_os = "macos")]
+        if let Some(n) = std::env::var("MAKEPAD_GPU_LM_REBAKE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static SETTLED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+            static BAKES: AtomicUsize = AtomicUsize::new(0);
+            let env_usize = |k: &str| {
+                std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0)
+            };
+            let (regions, lamps) = self.gpu_baker.debug_scene_size();
+            if self.gpu_baker.is_idle()
+                && regions >= env_usize("MAKEPAD_GPU_LM_REBAKE_MIN_REGIONS")
+                && lamps >= env_usize("MAKEPAD_GPU_LM_REBAKE_MIN_LAMPS")
+            {
+                // Edge-triggered: one report per bake, not one per idle
+                // frame — the readback and the diff are not free.
+                if SETTLED_FRAMES.fetch_add(1, Ordering::Relaxed) == 2 {
+                    let k = BAKES.fetch_add(1, Ordering::Relaxed);
+                    if let Some(atlas) = self.lightmap.clone() {
+                        if let Some((w, h, bytes)) = cx.cx.debug_read_render_texture(&atlas) {
+                            lm_probe_report(
+                                k,
+                                w,
+                                h,
+                                regions,
+                                lamps,
+                                &bytes,
+                                &self.gpu_baker.debug_region_rects(),
+                            );
+                        }
+                    }
+                    if k < n {
+                        if std::env::var("MAKEPAD_GPU_LM_REBAKE_MODE").as_deref() == Ok("redirty") {
+                            self.gpu_baker.debug_redirty();
+                        } else {
+                            self.kick_lightmap_bake(
+                                world,
+                                &sun,
+                                crate::gpu_lightmap::BakeTrigger::WorldEdit,
+                            );
+                        }
+                    }
+                }
+            } else {
+                SETTLED_FRAMES.store(0, Ordering::Relaxed);
+            }
+        }
         if let Some(d) = self.gpu_baker.run_frame(cx, sun.dir, movers, csm_view, eye) {
             self.lightmap = Some(d.atlas);
             self.lm_remaps = vec![Vec4f::default(); self.placed_models.len()];

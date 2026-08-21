@@ -17,10 +17,14 @@
 //! 4. distance transform at 1x as iterated 3/4-chamfer relaxation over the
 //!    coverage majority (see below for why not seed-JFA), rect-clamped so
 //!    regions never bleed.
-//! 5. lamps: per lamp a 6-face tiled depth render + one additive gather
-//!    over every receiving region in radius (N.L x (1-d/r)^2 x cone^2 with
-//!    SPILL = 0.35, mirroring the CPU lamp loop), then the two-ring rim
-//!    dilation + 4/2/1 smooth.
+//! 5. lamps: the accumulator is first HARD-ZEROED over this batch's write
+//!    footprint (each region's rect + pad ring — [`batch_zero_rects`]),
+//!    because it loads and a batch owns only its own regions; then per lamp
+//!    a 6-face tiled depth render + one additive gather over every receiving
+//!    region in radius (N.L x (1-d/r)^2 x cone^2 with SPILL = 0.35,
+//!    mirroring the CPU lamp loop), then the two-ring rim dilation + 4/2/1
+//!    smooth. Re-baking an unedited world must land on the same bytes;
+//!    MAKEPAD_GPU_LM_REBAKE (renderer.rs) measures that end to end.
 //! 6. encode: A from the signed distance blended toward measured coverage
 //!    at mixed texels (the CPU's thin-feature guard), RGB from the lamp
 //!    accumulation. Region quads are expanded one texel so the pad ring
@@ -438,6 +442,7 @@ struct BakeState {
 /// All the baker's draw shaders, lazily constructed from their script
 /// type defaults.
 struct LmDraws {
+    zero: DrawLmZero,
     sun_depth: DrawLmSunDepth,
     sun_depth_skinned: DrawLmSunDepthSkinned,
     lamp_depth: DrawLmLampDepth,
@@ -452,6 +457,30 @@ struct LmDraws {
     encode: DrawLmEncode,
     top: DrawLmTop,
     top_dilate: DrawLmTopDilate,
+}
+
+/// THE ZERO FOOTPRINT of one batch: every region it is about to bake, each
+/// over the rect the bake actually writes ([`LmRect::padded`] — the chart
+/// rect plus the pad ring the encode stamps and the dilate reads).
+///
+/// Exactly the batch, and nothing else: a region this batch does NOT bake
+/// keeps its content, which is what makes the amortized kick (24 regions a
+/// frame) and any partial re-bake correct — and the pack's gutter
+/// (`lightmap::LM_PAD`) guarantees a padded rect can never reach into a
+/// neighbouring region's texels.
+fn batch_zero_rects(regions: &[Region], batch: &[usize], size: usize) -> Vec<LmRect> {
+    batch.iter().map(|ri| regions[*ri].rect.padded(size)).collect()
+}
+
+/// Hard-zero one footprint rect in the pass that is currently open.
+/// Blending is off in `DrawLmZero`, so this is a real clear, not another
+/// accumulation.
+fn zero_rect(cx: &mut CxDraw, d: &mut DrawLmZero, rect: LmRect, size: usize, fill: Vec4f) {
+    d.quad_a = rect.uv_remap(size);
+    d.fill_a = fill;
+    if d.draw_vars.can_instance() {
+        cx.add_instance(&d.draw_vars);
+    }
 }
 
 /// Grow `pool` to `n` reusable passes. A free function rather than a method
@@ -1121,6 +1150,40 @@ impl GpuLightmapBaker {
         self.rt_us = 0;
     }
 
+    /// DEBUG (idempotence probe): re-bake every region of the CURRENT
+    /// layout into the CURRENT targets — no re-plan, no fresh textures.
+    /// This is the exact path the accumulator invariant is about.
+    pub fn debug_redirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// DEBUG: `(regions, lamps)` of the realized layout — the probe waits
+    /// for the streamed-in world before it starts measuring.
+    pub fn debug_scene_size(&self) -> (usize, usize) {
+        match &self.state {
+            Some(s) => (s.regions.len(), s.lights.len()),
+            None => (0, 0),
+        }
+    }
+
+    /// DEBUG: each region's atlas rect + whether a lamp reaches it.
+    pub fn debug_region_rects(&self) -> Vec<(LmRect, bool)> {
+        let Some(state) = &self.state else {
+            return Vec::new();
+        };
+        state
+            .regions
+            .iter()
+            .map(|r| {
+                let lit = state
+                    .lights
+                    .iter()
+                    .any(|l| sphere_touches_box(l.pos, l.radius, r.min, r.max));
+                (r.rect, lit)
+            })
+            .collect()
+    }
+
     /// Live mode switch. No re-bake either way: the atlas is static-only
     /// and byte-identical in both modes — the switch only changes which
     /// tier the dynamics cast through and where the materials read sun
@@ -1447,6 +1510,7 @@ impl GpuLightmapBaker {
         }
         let draws = cx.try_with_vm(|vm| {
             Box::new(LmDraws {
+                zero: DrawLmZero::script_new_with_default(vm),
                 sun_depth: DrawLmSunDepth::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
                 lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
@@ -1676,8 +1740,16 @@ impl GpuLightmapBaker {
         let clear0 = DrawPassClearColor::ClearWith(Vec4f::default());
         let load = |c: Vec4f| DrawPassClearColor::InitWith(c);
 
-        // ---- 1. Lamp coverage prepass: batch regions rasterized at 1x,
-        // (0,0,0,1) marks "holds light" and zeroes the accumulator.
+        // ---- 1. Lamp accumulator zero + coverage prepass. The accumulator
+        // LOADS (a batch owns only its own regions, and an amortized kick
+        // spreads the atlas over frames), so this batch's regions are hard-
+        // zeroed over their full write footprint FIRST — rect plus pad ring.
+        // Only then does the chart rasterize (0,0,0,1) over the texels that
+        // hold light. Zeroing by coverage alone leaves every rim texel the
+        // chart misses holding the PREVIOUS bake's light, and the dilate
+        // spreads it one ring further out on every re-bake (measured: 13142
+        // -> 31775 texels, all brighter, over five re-bakes of one settled
+        // town).
         if !batch.is_empty() {
             let idx = seq.open(
                 cx,
@@ -1687,6 +1759,9 @@ impl GpuLightmapBaker {
                 load(Vec4f::default()),
                 None
             );
+            for rect in batch_zero_rects(&state.regions, batch, state.size) {
+                zero_rect(cx, &mut draws.zero, rect, state.size, Vec4f::default());
+            }
             for ri in batch {
                 let r = &state.regions[*ri];
                 match r.kind {
@@ -1884,7 +1959,10 @@ impl GpuLightmapBaker {
                 }
                 seq.close(cx, idx);
             }
-            // 2d. downsample mask_b -> coverage atlas (persistent, loads)
+            // 2d. downsample mask_b -> coverage atlas (persistent, loads).
+            // The downsample covers the rect; the pad ring around it is read
+            // by the encode and the dilate's `covf`, so it is zeroed here
+            // rather than left holding whatever the last bake wrote.
             {
                 let idx = seq.open(
                     cx,
@@ -1894,6 +1972,9 @@ impl GpuLightmapBaker {
                     load(Vec4f::default()),
                     None
                 );
+                for rect in batch_zero_rects(&state.regions, &[*ri], state.size) {
+                    zero_rect(cx, &mut draws.zero, rect, state.size, Vec4f::default());
+                }
                 let d = &mut draws.downsample;
                 d.quad_a = r.rect.uv_remap(state.size);
                 d.src_a = Vec4f {
@@ -2048,7 +2129,10 @@ impl GpuLightmapBaker {
         }
 
         // ---- 4. Lamp dilate x2 + smooth: lamp_a -> lamp_b -> lamp_a ->
-        // lamp_b; encode reads lamp_b.
+        // lamp_b; encode reads lamp_b. Each destination is zeroed over this
+        // batch's footprint first: the dilate itself writes the rect, while
+        // the encode reads the rect PLUS the pad ring, and a loading target
+        // would hand that ring the previous bake's light.
         for mode in 0..lamp_dilate_passes {
             let (src, dst) = match mode {
                 0 => (&state.tex.lamp_a, &state.tex.lamp_b),
@@ -2056,6 +2140,9 @@ impl GpuLightmapBaker {
                 _ => (&state.tex.lamp_a, &state.tex.lamp_b),
             };
             let idx = seq.open(cx, state.size, state.size, dst, load(Vec4f::default()), None);
+            for rect in batch_zero_rects(&state.regions, batch, state.size) {
+                zero_rect(cx, &mut draws.zero, rect, state.size, Vec4f::default());
+            }
             for ri in batch {
                 let r = &state.regions[*ri];
                 let d = &mut draws.lamp_dilate;
@@ -2151,12 +2238,10 @@ impl GpuLightmapBaker {
             );
             for ri in batch {
                 let r = &state.regions[*ri];
-                let ex = LmRect {
-                    x: r.rect.x.saturating_sub(1),
-                    y: r.rect.y.saturating_sub(1),
-                    w: (r.rect.w + 2).min(state.size - r.rect.x.saturating_sub(1)),
-                    h: (r.rect.h + 2).min(state.size - r.rect.y.saturating_sub(1)),
-                };
+                // The same footprint the accumulator was zeroed over — the
+                // encode's pad ring may only ever read texels this bake
+                // itself defined.
+                let ex = r.rect.padded(state.size);
                 let d = &mut draws.encode;
                 d.quad_a = ex.uv_remap(state.size);
                 d.rect_px = Vec4f {
@@ -2707,6 +2792,69 @@ mod tests {
             min,
             max,
             tpu: px as f32 / (max.x - min.x).max(0.001),
+        }
+    }
+
+    /// RE-BAKE IDEMPOTENCE, at the layer a CPU test can hold: a batch zeroes
+    /// exactly what it writes — every region it bakes, over the full
+    /// footprint (chart rect + pad ring) the splat, the dilate and the
+    /// encode reach — and NOTHING a region outside the batch owns.
+    ///
+    /// Both halves are load-bearing and both were violated in one direction
+    /// or the other:
+    /// * too little zero (the shipped bug): the accumulator loads, so a rim
+    ///   texel the coverage rasterization missed kept the previous bake's
+    ///   light and the dilate carried it one ring further out on every
+    ///   re-bake. Measured on a settled 98-region town re-baked into its own
+    ///   targets: 13142 -> 20777 -> 25669 -> 29019 -> 31775 texels changed,
+    ///   all brighter, none dimmer.
+    /// * too much zero: an amortized kick bakes 24 regions a frame, so
+    ///   zeroing a region this batch is not baking would blank light that is
+    ///   already correct.
+    ///
+    /// The end-to-end counterpart is MAKEPAD_GPU_LM_REBAKE (renderer.rs),
+    /// which re-bakes a live world and diffs the atlas bytes.
+    #[test]
+    fn a_batch_zeroes_exactly_the_regions_it_bakes() {
+        // A packed strip: 10px regions on the pack's 1-texel gutter.
+        let size = 64;
+        let regions: Vec<Region> = [(1, 1), (13, 1), (1, 13), (13, 13)]
+            .iter()
+            .map(|(x, y)| Region {
+                rect: LmRect { x: *x, y: *y, w: 10, h: 10 },
+                kind: RegionKind::Ground,
+                min: v3(0.0, 0.0, 0.0),
+                max: v3(1.0, 1.0, 1.0),
+                tpu: 10.0,
+            })
+            .collect();
+        let batch = vec![0usize, 2];
+        let zeros = batch_zero_rects(&regions, &batch, size);
+
+        assert_eq!(zeros.len(), batch.len(), "one footprint per region baked");
+        for (slot, ri) in batch.iter().enumerate() {
+            let r = regions[*ri].rect;
+            let z = zeros[slot];
+            // Covers the chart rect...
+            assert!(
+                z.x <= r.x && z.y <= r.y && z.x + z.w >= r.x + r.w && z.y + z.h >= r.y + r.h,
+                "region {ri}: zero {z:?} does not cover its chart {r:?}"
+            );
+            // ...and exactly the ring the encode stamps around it.
+            assert_eq!(z, r.padded(size), "region {ri}: zero is not the write footprint");
+        }
+        // Regions this batch does not bake keep every texel they own.
+        for (ri, region) in regions.iter().enumerate() {
+            if batch.contains(&ri) {
+                continue;
+            }
+            for z in &zeros {
+                assert!(
+                    !z.intersects(&region.rect),
+                    "a batch zero {z:?} blanks region {ri} {:?}, which it never re-bakes",
+                    region.rect
+                );
+            }
         }
     }
 
