@@ -358,7 +358,15 @@ impl Default for ProfilesState {
 impl GenModel {
     pub fn new() -> GenModel {
         GenModel {
-            selected: 2,
+            // This drawer is the VIDEO surface: the pipe an operator gets
+            // without touching the dropdown must make a video. Found by
+            // shape, not index, so reordering the pipe list cannot silently
+            // flip the default back to image (which is how "gimme a jumping
+            // rabbit" once came back as a picture).
+            selected: GEN_PIPES
+                .iter()
+                .position(|p| p.kind == "video.generate" && !p.loop_video)
+                .unwrap_or(0),
             ..GenModel::default()
         }
     }
