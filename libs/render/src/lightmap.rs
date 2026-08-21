@@ -549,6 +549,40 @@ pub struct LmRect {
 }
 
 impl LmRect {
+    /// This region's rect PLUS the pad ring [`pack_regions`] reserves around
+    /// it, clamped to the atlas.
+    ///
+    /// THE BAKE'S WRITE FOOTPRINT. Every bake-side write that reaches past
+    /// the chart uses exactly this rect — the encode's "fully lit, no lamps"
+    /// default ring and the lamp accumulator's zero — and the pack keeps
+    /// [`LM_PAD`] between regions, so it can never touch a neighbour's.
+    ///
+    /// The zero and the writes MUST be the same rect. When the zero was
+    /// chart-shaped (a rasterized coverage prepass) while the dilate and the
+    /// encode were rect-shaped, re-baking a settled 98-region town into its
+    /// own targets grew the lit set 13142 -> 31775 texels over five bakes,
+    /// every one of them brighter and none dimmer: the rim texels the chart
+    /// never covers kept the previous bake's light, and each dilate spread
+    /// it one ring further out.
+    pub fn padded(&self, atlas: usize) -> LmRect {
+        let x = self.x.saturating_sub(LM_PAD);
+        let y = self.y.saturating_sub(LM_PAD);
+        LmRect {
+            x,
+            y,
+            w: (self.w + (self.x - x) + LM_PAD).min(atlas.saturating_sub(x)),
+            h: (self.h + (self.y - y) + LM_PAD).min(atlas.saturating_sub(y)),
+        }
+    }
+
+    /// Do these two rects share a texel?
+    pub fn intersects(&self, other: &LmRect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+
     /// The shader-side remap: `atlas_uv = offset + local_uv * scale`, as
     /// (offset_u, offset_v, scale_u, scale_v) normalized by atlas size.
     pub fn uv_remap(&self, atlas: usize) -> Vec4f {
@@ -1271,6 +1305,47 @@ mod tests {
         // ao 128 * LM_MESH_SCALE = 64 nominal; density 2.0 wants x4 to
         // reach LM_MESH_MIN_TPU=8 -> 256.
         assert_eq!(rects[0].w, 256, "the density floor did not lift the region");
+    }
+
+    /// The bake writes — and therefore must zero — one texel MORE than a
+    /// region's chart on every side: the encode stamps that ring with the
+    /// region's own default and the lamp dilate reads it. So the ring has to
+    /// be this region's alone, and `padded` has to stay inside the atlas.
+    ///
+    /// (The bug this pins: the lamp accumulator was zeroed by rasterizing
+    /// the CHART while the dilate and the encode wrote the RECT. Re-baking a
+    /// settled 98-region town into its own targets then grew the lit set
+    /// 13142 -> 20777 -> 25669 -> 29019 -> 31775 texels over five bakes,
+    /// every differing texel brighter and none dimmer.)
+    #[test]
+    fn a_regions_pad_ring_is_its_own_and_stays_in_the_atlas() {
+        let want = vec![(64, 32), (128, 128), (4, 4), (500, 20), (20, 500), (77, 33)];
+        let (size, rects) = pack_regions(&want);
+        for (i, a) in rects.iter().enumerate() {
+            let pad = a.padded(size);
+            assert!(
+                pad.x <= a.x
+                    && pad.y <= a.y
+                    && pad.x + pad.w >= a.x + a.w
+                    && pad.y + pad.h >= a.y + a.h,
+                "the zero footprint {pad:?} does not cover region {i} {a:?}"
+            );
+            assert!(
+                pad.x + pad.w <= size && pad.y + pad.h <= size,
+                "region {i}'s footprint {pad:?} leaves the {size}px atlas"
+            );
+            for (j, b) in rects.iter().enumerate() {
+                if i != j {
+                    assert!(
+                        !pad.intersects(b),
+                        "region {i}'s pad ring {pad:?} reaches into region {j} {b:?}"
+                    );
+                }
+            }
+        }
+        // A region hard against the atlas origin clamps instead of wrapping.
+        let corner = LmRect { x: 0, y: 0, w: 8, h: 8 }.padded(16);
+        assert_eq!(corner, LmRect { x: 0, y: 0, w: 9, h: 9 });
     }
 
     #[test]
