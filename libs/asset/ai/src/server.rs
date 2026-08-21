@@ -715,6 +715,22 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         vram_reserve_mb: Some(shared.residency.reserve_mb),
         queue_limit: Some(queue_limit),
         fleet: Some(shared.fleet.clone()),
+        // Absent whenever no LLM is resident: a box with nothing loaded has no
+        // lanes to describe, and "0 of 4 free" would read as busy rather than
+        // as not serving this at all.
+        lanes: crate::lane_advert::snapshot().map(|facts| crate::protocol::LanesJson {
+            slots_free: facts.slots_free(),
+            model: facts.model,
+            slots_total: facts.slots_total,
+            slots_claimed: facts.slots_claimed,
+            lanes_active: facts.lanes_active,
+            context_per_slot: facts.context_per_slot,
+            // Queue facts come from the JobStore, which is what actually
+            // refuses work — advertising anything else would describe a queue
+            // nobody is standing in.
+            queue_depth: jobs_pending,
+            queue_max: queue_limit,
+        }),
     }
 }
 

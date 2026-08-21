@@ -523,7 +523,11 @@ impl ContentBackend for LlmBackend {
                     // Loads weights on the worker thread; blocks until the
                     // session reports in so load errors surface here.
                     *worker = Some(
-                        llama_worker::LlamaWorker::spawn(gguf.clone(), ctx.progress)
+                        llama_worker::LlamaWorker::spawn(
+                            gguf.clone(),
+                            self.model_id.clone(),
+                            ctx.progress,
+                        )
                             .map_err(|e| AssetAiError::Backend(format!("llm load: {e}")))?,
                     );
                     self.gguf_path = Some(gguf);
@@ -806,6 +810,7 @@ mod llama_worker {
     impl LlamaWorker {
         pub fn spawn(
             gguf: PathBuf,
+            model_id: String,
             progress: &mut dyn FnMut(&str, f64),
         ) -> Result<Self, String> {
             enum BootEvt {
@@ -820,15 +825,17 @@ mod llama_worker {
                     let config = LlamaSessionConfig {
                         max_context: Some(MAX_CONTEXT),
                         prefill_batch_size: PREFILL_BATCH,
-                        // MTP speculative decoding (nextn draft head). 5 is
-                        // the measured sweet spot — 8 crosses the MMVQ
-                        // column cliff (see qwen38-mtp campaign). Models
-                        // without an MTP block load exactly as before
+                        // MTP speculative decoding (nextn draft head). 3 is
+                        // the measured sweet spot on served chat (Blackwell
+                        // A/B: n3 106.3 vs n5 101.3 tok/s full head, 121.6
+                        // vs 119.8 restricted) and shortens the losing
+                        // chains on low-acceptance expander prose; 8 crosses
+                        // the MMVQ column cliff (see qwen38-mtp campaign).
+                        // Models without an MTP block load exactly as before
                         // (draft head only loads when the gguf carries one),
                         // and the .draftvocab sidecar is picked up when it
-                        // sits beside the gguf (full head otherwise — still
-                        // a ~1.7-2x decode win, sidecar makes it 2.25x).
-                        spec_draft_max: 5,
+                        // sits beside the gguf (full head otherwise).
+                        spec_draft_max: 3,
                         ..LlamaSessionConfig::default()
                     };
                     let mut session = match LlamaSession::load_with_progress(
@@ -847,11 +854,28 @@ mod llama_worker {
                             return;
                         }
                     };
+                    // Advertise this box's decode capacity now the weights are
+                    // resident. One lane today: `max_sequences` defaults to 1,
+                    // so anything larger would be advertising capacity that
+                    // does not exist. The number moves when the batched worker
+                    // lands; the CONTRACT does not, which is the point of
+                    // shipping the protocol once rather than in stages.
+                    crate::lane_advert::publish(crate::lane_advert::LaneFacts::idle(
+                        model_id.clone(),
+                        1,
+                        u64::from(MAX_CONTEXT),
+                    ));
                     let mut prefix = super::PrefixCache::default();
                     while let Ok(WorkerMsg::Expand(job, cancel, events)) = rx.recv() {
+                        // A turn occupies its lane for its duration. Claimed
+                        // survives the turn — the conversation's KV stays
+                        // resident and its next turn should come back here.
+                        crate::lane_advert::lane_entered();
                         let result = run_expand(&mut session, &mut prefix, &job, &cancel, &events);
+                        crate::lane_advert::lane_left();
                         let _ = events.send(WorkerEvent::Done(result));
                     }
+                    crate::lane_advert::clear();
                     // Sender dropped -> backend dropped: session unloads here.
                 })
                 .map_err(|e| format!("spawn llm worker: {e}"))?;

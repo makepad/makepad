@@ -49,6 +49,54 @@ pub struct HealthJson {
     /// Partition this process belongs to (`--fleet` / `MAKEPAD_ASSET_AI_FLEET`).
     /// Missing on services predating the field; clients treat that as `default`.
     pub fleet: Option<String>,
+    /// Concurrent-decode lane facts for the resident LLM.
+    ///
+    /// **Absence means one lane, no queue, unknown context ceiling** — which is
+    /// exactly how every service predating this field behaves, so a mixed fleet
+    /// needs no flag day. Present only when an LLM is actually resident;
+    /// a box that has not loaded one has no lanes to describe.
+    pub lanes: Option<LanesJson>,
+}
+
+/// What a box advertises about its concurrent decode capacity.
+///
+/// Read through the broker's shared `/health` probe, which caches for ~20 s, so
+/// **these numbers are stale by construction and are a PREFERENCE signal, not a
+/// reservation**. Whether work actually runs is answered only by the response
+/// to the real request: accepted, or honest backpressure. A dispatcher that
+/// treats `slots_free` as a guarantee will oversubscribe a box.
+///
+/// Deliberately absent, and not an oversight: **no tok/s and no predicted
+/// latency** (a number that looks authoritative on a health endpoint gets
+/// trusted long after it stops being true), and **no speculative draft depth**
+/// (internal, changes every step, changes no consumer decision — `lanes_active`
+/// already carries the honest contention signal).
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct LanesJson {
+    /// Which resident model these facts describe. Lane capacity belongs to the
+    /// model, not the box, so a future multi-resident box can report per model.
+    pub model: String,
+    /// Lanes this service is configured for.
+    pub slots_total: u64,
+    /// Lanes currently holding a conversation's KV, whether or not that
+    /// conversation is generating right now. A claimed-but-idle lane costs no
+    /// SPEED — that is the whole dynamic-degradation property — but it does
+    /// hold context, which is why this is separate from `lanes_active`.
+    pub slots_claimed: u64,
+    /// Lanes that could be claimed right now. `slots_total - slots_claimed`.
+    pub slots_free: u64,
+    /// Lanes generating at this instant. The contention signal: how much a new
+    /// conversation would slow the ones already here, and what a scheduler
+    /// should prefer the lowest of when choosing between boxes with free lanes.
+    pub lanes_active: u64,
+    /// Hard per-conversation token ceiling. With N lanes the arena is divided N
+    /// ways, so a 4-lane box at 16k **cannot** accept a 32k prompt at all — this
+    /// is a constraint to check before dispatching, not a hint.
+    pub context_per_slot: u64,
+    /// Requests waiting for a lane right now.
+    pub queue_depth: u64,
+    /// Queue depth beyond which the box refuses rather than queues.
+    pub queue_max: u64,
 }
 
 // ---------------------------------------------------------------------------

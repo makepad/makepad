@@ -600,6 +600,7 @@ mod tests {
                 vram_reserve_mb: None,
                 queue_limit: None,
                 fleet: None,
+                lanes: None,
             }),
             models,
         }
