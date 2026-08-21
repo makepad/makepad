@@ -66,6 +66,14 @@ struct Lane {
     /// Next token this lane will decode, from its prefill or its last step.
     next_token: Option<i32>,
     phase: LanePhase,
+    /// This lane's own history: the prompt it ingested plus everything it has
+    /// generated, in order.
+    ///
+    /// Kept because the draft head has to be caught up over the tokens the
+    /// model consumed but it has not, and those tokens are the LANE'S — there
+    /// is no session-wide token list once more than one conversation is
+    /// resident. Bounded by the per-slot context, so ~64 KB at 16k.
+    tokens: Vec<i32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,12 +123,36 @@ pub enum LaneEvent {
     },
 }
 
+/// What a parked slot still holds: whose conversation it was, and the exact
+/// tokens its caches describe.
+///
+/// Survives retirement on purpose. Nothing on the device is erased when a lane
+/// retires — only counters are reset — so a conversation coming back can decode
+/// straight on from where it left off instead of re-ingesting itself.
+#[derive(Clone, Debug)]
+struct Parked {
+    session: String,
+    tokens: Vec<i32>,
+}
+
 /// Admission, stepping and retirement across N lanes.
 pub struct LaneScheduler {
     table: SlotTable,
     lanes: Vec<Option<Lane>>,
     pending: VecDeque<LaneRequest>,
     queue_max: usize,
+    /// Per slot, what its caches still describe after its lane retired.
+    ///
+    /// PER SLOT, which is the whole point. One shared prefix cache belongs to
+    /// whoever spoke last, so a second conversation interleaving with a first
+    /// takes the first's append away — the user reads that as "it was fast,
+    /// now it is slow, for no reason". A conversation that owns its own lane's
+    /// history cannot have it stolen.
+    parked: Vec<Option<Parked>>,
+    /// Lanes whose prompt extended their parked history, so their caches were
+    /// kept and the prefill is a delta. Reported through
+    /// [`Self::reset_requested`], which the executor already consults.
+    resumed: Vec<bool>,
     /// Tokens that END a turn. A property of the model, so every lane on one
     /// session shares them.
     ///
@@ -134,12 +166,15 @@ pub struct LaneScheduler {
 
 impl LaneScheduler {
     pub fn new(table: SlotTable, queue_max: usize) -> Self {
-        let lanes = vec![None; table.len()];
+        let slots = table.len();
+        let lanes = vec![None; slots];
         Self {
             table,
             lanes,
             pending: VecDeque::new(),
             queue_max,
+            parked: vec![None; slots],
+            resumed: vec![false; slots],
             stop_tokens: Vec::new(),
         }
     }
@@ -204,17 +239,91 @@ impl LaneScheduler {
     /// is what makes joining cheap and bounded by [`CHUNK_TOKENS`].
     pub fn admit_pending(&mut self) {
         while !self.pending.is_empty() {
-            let Some(index) = self.table.admit() else {
+            let Some(request) = self.pending.front() else { break };
+            // Sticky first: a slot still holding THIS conversation's tokens,
+            // whose new prompt extends all of them, lets the turn append.
+            let resume = self.resumable_slot(request);
+            let Some(index) = resume.or_else(|| self.free_slot()) else {
                 break;
             };
-            let request = self.pending.pop_front().expect("non-empty");
+            let mut request = self.pending.pop_front().expect("non-empty");
+            let history = match resume {
+                Some(_) => {
+                    // Keep the caches and prefill only what is new. Everything
+                    // up to `fill` is already correct — including the recurrent
+                    // state, which is why this is only ever offered for a
+                    // prompt that extends the WHOLE history.
+                    let parked = self.parked[index].take().expect("resumable slot is parked");
+                    let delta = request.prompt_tokens[parked.tokens.len()..].to_vec();
+                    request.prompt_tokens = delta;
+                    let _ = self.table.resume(index);
+                    self.resumed[index] = true;
+                    parked.tokens
+                }
+                None => {
+                    let _ = self.table.retire(index);
+                    self.parked[index] = None;
+                    self.resumed[index] = false;
+                    let _ = self.table.admit_at(index);
+                    Vec::new()
+                }
+            };
             self.lanes[index] = Some(Lane {
                 request,
                 produced: 0,
                 next_token: None,
                 phase: LanePhase::NeedsPrefill,
+                tokens: history,
             });
         }
+    }
+
+    /// A slot for a conversation that cannot resume one.
+    ///
+    /// Unparked slots first, lowest index — so a lone conversation lands on
+    /// slot 0, whose `kv_base` is 0 and which is therefore the only lane that
+    /// can run the session-native speculative path.
+    ///
+    /// A PARKED slot is taken only when nothing else is free, and taking it
+    /// destroys an append somebody else was going to get. Preferring the
+    /// unparked ones is what stops a passing conversation from evicting a
+    /// player mid-session on a box with lanes to spare.
+    fn free_slot(&self) -> Option<usize> {
+        let unparked = (0..self.lanes.len())
+            .find(|index| self.lanes[*index].is_none() && self.parked[*index].is_none());
+        unparked.or_else(|| (0..self.lanes.len()).find(|index| self.lanes[*index].is_none()))
+    }
+
+    /// A parked slot this request may resume: same conversation, and a prompt
+    /// that extends every token the slot's caches describe.
+    ///
+    /// The extension has to be TOTAL. Attention rows could be truncated to any
+    /// prefix, but the delta-net state is a running scan and cannot be rewound
+    /// — resuming at anything short of the full history would decode against a
+    /// recurrent state belonging to tokens the prompt no longer contains, which
+    /// is fluent output built on a conversation that did not happen.
+    ///
+    /// A prompt EQUAL to the history is refused too: a lane must ingest at
+    /// least one token to have something to decode from.
+    fn resumable_slot(&self, request: &LaneRequest) -> Option<usize> {
+        if !self.can_resume(request) {
+            return None;
+        }
+        (0..self.lanes.len()).find(|index| {
+            self.lanes[*index].is_none()
+                && self.parked[*index].as_ref().is_some_and(|parked| {
+                    parked.session == request.session
+                        && !parked.tokens.is_empty()
+                        && request.prompt_tokens.len() > parked.tokens.len()
+                        && request.prompt_tokens.starts_with(&parked.tokens)
+                })
+        })
+    }
+
+    /// A caller can still demand a clean slate; `reset_first` is its way of
+    /// saying the resident state must not be trusted.
+    fn can_resume(&self, request: &LaneRequest) -> bool {
+        !request.reset_first
     }
 
     /// Mark a lane's work cancelled. It retires at the next boundary rather
@@ -277,6 +386,12 @@ impl LaneScheduler {
         let _ = self.table.begin_decoding(lane);
         let stops = self.stop_tokens.contains(&first_token);
         if let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) {
+            // The prompt is now this lane's history. `count` rather than the
+            // request's own length, because a prefix hit ingests only a delta
+            // and the lane holds exactly what went in.
+            let ingested = slot.request.prompt_tokens.len().min(count);
+            let prompt: Vec<i32> = slot.request.prompt_tokens[..ingested].to_vec();
+            slot.tokens.extend_from_slice(&prompt);
             slot.next_token = Some(first_token);
             slot.phase = if stops {
                 LanePhase::Done(LaneOutcome::Complete)
@@ -320,6 +435,7 @@ impl LaneScheduler {
                 continue;
             }
             lane.produced += 1;
+            lane.tokens.push(emitted);
             lane.next_token = Some(next);
             let _ = table.advance(index, 1);
             events.push(LaneEvent::Token {
@@ -364,6 +480,7 @@ impl LaneScheduler {
                 break;
             }
             slot.produced += 1;
+            slot.tokens.push(token);
             events.push(LaneEvent::Token {
                 job: slot.request.job,
                 token,
@@ -407,11 +524,10 @@ impl LaneScheduler {
     /// prompt is ingested. False only for a solo-lane prefix hit, where the
     /// prompt tokens are the delta on top of state already resident.
     pub fn reset_requested(&self, lane: usize) -> bool {
-        self.lanes
-            .get(lane)
-            .and_then(|l| l.as_ref())
-            .map(|slot| slot.request.reset_first)
-            .unwrap_or(true)
+        // The SCHEDULER decides this, not the request. It is the only thing
+        // that knows what the slot still holds and whether the prompt extends
+        // it, and a request's own `reset_first` is only ever a veto.
+        !self.resumed.get(lane).copied().unwrap_or(false)
     }
 
     /// Sampling settings for whoever holds `lane`.
@@ -443,8 +559,24 @@ impl LaneScheduler {
                 .as_ref()
                 .map(|lane| lane.request.job)
                 .unwrap_or_default();
+            // Park, do not clear: the rows are still there and the
+            // conversation may come straight back. A cancelled turn parks too
+            // — its tokens are as real as any other's.
+            let held = self.lanes[index]
+                .as_ref()
+                .map(|lane| (lane.request.session.clone(), lane.tokens.clone()));
             self.lanes[index] = None;
-            let _ = self.table.retire(index);
+            self.resumed[index] = false;
+            match held {
+                Some((session, tokens)) if !tokens.is_empty() => {
+                    let _ = self.table.park(index);
+                    self.parked[index] = Some(Parked { session, tokens });
+                }
+                _ => {
+                    let _ = self.table.retire(index);
+                    self.parked[index] = None;
+                }
+            }
             events.push(LaneEvent::Finished {
                 job,
                 lane: index,
@@ -1212,19 +1344,156 @@ mod tests {
     }
 
     #[test]
-    fn a_prefix_hit_asks_the_session_not_to_reset() {
+    fn a_lane_with_nothing_parked_resets_whatever_the_caller_asked_for() {
+        // `reset_first: false` is a VETO, not an instruction. A caller cannot
+        // know what a lane is holding — only the scheduler does — and honouring
+        // "do not reset" over an empty or foreign lane decodes on top of
+        // whatever was left behind.
         let mut sched = scheduler(2, 4);
         let mut hit = request(9, &[7, 8], 4);
         hit.reset_first = false;
         sched.submit(hit).expect("submit");
         sched.admit_pending();
         assert!(
-            !sched.reset_requested(0),
-            "a prefix hit must not clear the state it is reusing"
+            sched.reset_requested(0),
+            "nothing was parked, so there is nothing to resume"
         );
-        // An unclaimed lane defaults to resetting: safer to re-ingest than to
-        // decode on top of whatever a previous conversation left behind.
-        assert!(sched.reset_requested(1));
+        assert!(sched.reset_requested(1), "and an unclaimed lane always resets");
+    }
+
+    /// Park a lane by running its turn to completion, then bring the same
+    /// conversation back with a longer prompt.
+    fn park_then_return(
+        sched: &mut LaneScheduler,
+        session: &str,
+        first: &[i32],
+        second: &[i32],
+    ) -> LaneStep {
+        let mut a = request(1, first, 1);
+        a.session = session.to_string();
+        sched.submit(a).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        sched.on_decoded(&plan, &[101]);
+        sched.reap();
+
+        let mut b = request(2, second, 4);
+        b.session = session.to_string();
+        b.reset_first = false;
+        sched.submit(b).expect("submit");
+        sched.next_step()
+    }
+
+    #[test]
+    fn a_conversation_that_comes_back_appends_instead_of_re_ingesting() {
+        // The user's own words: "the first message is slow cause of the
+        // context load but then it should just be an append."
+        let mut sched = scheduler(2, 4);
+        // The lane ends up holding [7, 8] (the prompt) + [100] (the token it
+        // emitted). The next prompt extends all three.
+        let step = park_then_return(&mut sched, "player-1", &[7, 8], &[7, 8, 100, 55, 66]);
+        match step {
+            LaneStep::Prefill { lane, start, tokens, kv_base, .. } => {
+                assert_eq!(lane, 0, "it comes back to the lane that holds its tokens");
+                assert_eq!(kv_base, 0);
+                assert_eq!(start, 3, "and resumes at the position it left off");
+                assert_eq!(tokens, vec![55, 66], "ingesting ONLY what is new");
+            }
+            other => panic!("expected a resumed prefill, got {other:?}"),
+        }
+        assert!(
+            !sched.reset_requested(0),
+            "resuming must not clear the state it is resuming from"
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_does_not_extend_the_history_gets_a_clean_lane() {
+        // Attention rows could be truncated to any prefix. The delta-net state
+        // cannot — it is a running scan — so resuming at anything short of the
+        // full history would decode against a recurrent state belonging to
+        // tokens the prompt no longer contains. Fluent output, conversation
+        // that never happened.
+        let mut sched = scheduler(2, 4);
+        let step = park_then_return(&mut sched, "player-1", &[7, 8], &[7, 9, 100, 55]);
+        match step {
+            LaneStep::Prefill { start, tokens, .. } => {
+                assert_eq!(start, 0, "a diverging prompt starts over");
+                assert_eq!(tokens, vec![7, 9, 100, 55], "and re-ingests everything");
+            }
+            other => panic!("expected a cold prefill, got {other:?}"),
+        }
+        assert!(sched.reset_requested(0));
+    }
+
+    #[test]
+    fn a_prompt_equal_to_its_history_still_ingests_a_token() {
+        // A lane must ingest at least one token to have something to decode
+        // from. A zero-length delta would be admitted and then stall.
+        let mut sched = scheduler(2, 4);
+        let step = park_then_return(&mut sched, "player-1", &[7, 8], &[7, 8, 100]);
+        match step {
+            LaneStep::Prefill { start, tokens, .. } => {
+                assert_eq!(start, 0);
+                assert_eq!(tokens, vec![7, 8, 100]);
+            }
+            other => panic!("expected a cold prefill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn another_conversation_cannot_steal_a_parked_append() {
+        // THE reason this is per lane. One shared prefix belongs to whoever
+        // spoke last, so a second conversation interleaving with a first takes
+        // the first's append away — and the user reads that as "it was fast,
+        // now it is slow, for no reason".
+        let mut sched = scheduler(2, 4);
+        let mut a = request(1, &[7, 8], 1);
+        a.session = "player-1".to_string();
+        sched.submit(a).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        sched.on_prefilled(lane, tokens.len(), 100);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        sched.on_decoded(&plan, &[101]);
+        sched.reap();
+
+        // Somebody else runs a whole turn in between.
+        let mut b = request(2, &[40, 41], 1);
+        b.session = "player-2".to_string();
+        sched.submit(b).expect("submit");
+        let LaneStep::Prefill { lane, tokens, .. } = sched.next_step() else {
+            panic!("expected prefill");
+        };
+        assert_ne!(lane, 0, "a new conversation must not take lane 0's parked tokens");
+        sched.on_prefilled(lane, tokens.len(), 200);
+        let LaneStep::Decode { plan, .. } = sched.next_step() else {
+            panic!("expected decode");
+        };
+        sched.on_decoded(&plan, &[201]);
+        sched.reap();
+
+        // Player 1 returns and STILL appends.
+        let mut back = request(3, &[7, 8, 100, 55], 4);
+        back.session = "player-1".to_string();
+        back.reset_first = false;
+        sched.submit(back).expect("submit");
+        match sched.next_step() {
+            LaneStep::Prefill { lane, start, tokens, .. } => {
+                assert_eq!(lane, 0);
+                assert_eq!(start, 3);
+                assert_eq!(tokens, vec![55], "the interleaved turn took nothing away");
+            }
+            other => panic!("expected a resumed prefill, got {other:?}"),
+        }
     }
 
     #[test]
